@@ -244,50 +244,7 @@ export function autoGenerateCombos(opts: {
     }
   }
 
-  // Primary pass: spec range combos
   pickFromPool(allRaw);
-
-  // Fallback pass: if still short, expand to the union of all risk ranges (0.20–0.80)
-  // using only unused markets — ensures all 4 combos are non-overlapping.
-  if (selected.length < count) {
-    const FALLBACK_MIN = 0.20;
-    const FALLBACK_MAX = 0.80;
-    const fallbackLegs: ScoredLeg[] = [];
-    const fallbackSeen = new Set<string>();
-    for (const market of markets) {
-      for (const position of ["yes", "no"] as const) {
-        const odds = position === "yes" ? market.yesOdds : market.noOdds;
-        if (odds < FALLBACK_MIN || odds > FALLBACK_MAX) continue;
-        const mk = `${market.platform}:${market.id}`;
-        if (usedMarkets.has(mk) || fallbackSeen.has(mk)) continue; // skip already-used
-        const interest = 1 - Math.abs(odds - 0.5) * 2;
-        const legScore = (market.volume ?? 0) * interest;
-        fallbackLegs.push({
-          marketId: market.id,
-          platform: market.platform,
-          marketTitle: market.title,
-          position,
-          odds,
-          impliedProb: odds,
-          legScore,
-        });
-        fallbackSeen.add(mk);
-      }
-    }
-    fallbackLegs.sort((a, b) => b.legScore - a.legScore);
-    const fallbackTop = fallbackLegs.slice(0, 50);
-    const fallbackRaw: RawCombo[] = [];
-    for (let size = 2; size <= 4; size++) {
-      for (const legs of combinations(fallbackTop, size)) {
-        const jointProb = legs.reduce((acc, l) => acc * l.impliedProb, 1);
-        if (jointProb < 0.001) continue;
-        const multiplier = 1 / jointProb;
-        fallbackRaw.push({ legs, score: multiplier * Math.sqrt(jointProb), jointProb, multiplier });
-      }
-    }
-    fallbackRaw.sort((a, b) => b.score - a.score);
-    pickFromPool(fallbackRaw);
-  }
 
   return selected;
 }
