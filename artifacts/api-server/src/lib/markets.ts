@@ -16,6 +16,20 @@ export interface Market {
    * Null for Polymarket, whose questions are already self-contained YES/NO.
    */
   yesSubtitle?: string | null;
+  /**
+   * Kalshi `event_ticker` (the underlying market, e.g. "KXWCTOTAL-26JUN27COLPOR").
+   * Every outcome/threshold of one market shares it — used to block parlaying two
+   * outcomes of the same market. Null for Polymarket (no event grouping in feed).
+   */
+  eventTicker?: string | null;
+  /**
+   * Stable id for the physical GAME a market belongs to (date + teams, e.g.
+   * "26JUN27COLPOR"), shared across a game's different Kalshi series (winner,
+   * totals, spread, corners, player props). This is what lets us build Kalshi's
+   * native same-game combos. Null for non-game markets (outrights, futures,
+   * economic thresholds) and all Polymarket markets.
+   */
+  gameKey?: string | null;
 }
 
 interface CacheEntry {
@@ -266,6 +280,24 @@ function kalshiCategory(ticker: string, seriesTicker: string): string | null {
   return null;
 }
 
+/**
+ * Derive the physical-game id from a Kalshi event ticker by stripping the
+ * series prefix. Only dated game tickers (e.g. series "KXWCTOTAL", event
+ * "KXWCTOTAL-26JUN27COLPOR" → "26JUN27COLPOR") qualify; outrights, futures and
+ * awards have no date-coded suffix and return null so they're never treated as
+ * a comboable game leg.
+ */
+function kalshiGameKey(
+  eventTicker: string | undefined,
+  seriesTicker: string | undefined,
+): string | null {
+  if (!eventTicker || !seriesTicker) return null;
+  const prefix = `${seriesTicker}-`;
+  if (!eventTicker.startsWith(prefix)) return null;
+  const suffix = eventTicker.slice(prefix.length);
+  return /^\d{2}[A-Z]{3}\d{2}/.test(suffix) ? suffix : null;
+}
+
 async function fetchKalshiSeries(
   seriesTicker: string,
   attempt = 0,
@@ -333,6 +365,8 @@ async function fetchKalshiSeries(
             m.title ?? m.ticker,
             kalshiCategory(m.ticker, m.series_ticker ?? seriesTicker),
           ),
+          eventTicker: m.event_ticker ?? null,
+          gameKey: kalshiGameKey(m.event_ticker, m.series_ticker ?? seriesTicker),
         };
       })
       .filter((m): m is NonNullable<typeof m> => m !== null);

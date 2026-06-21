@@ -26,6 +26,11 @@ export interface ComboLegResult {
   // win" / "Not Senegal" (Kalshi) or "Yes" / "No" (Polymarket). Disambiguates
   // markets that share a title across multiple outcome contracts.
   selection?: string;
+  // Kalshi grouping (null for Polymarket): eventTicker = the underlying market
+  // (every outcome/threshold shares it); gameKey = the physical game, shared by a
+  // game's different prop series (winner/total/spread/corners/player props).
+  eventTicker?: string | null;
+  gameKey?: string | null;
 }
 
 /**
@@ -40,12 +45,17 @@ function sideLabel(
 ): string {
   const sub = yesSubtitle?.trim();
   if (sub) {
-    // Head-to-head markets ("Senegal vs Iraq Winner?") read naturally as
-    // "<team> to win". Threshold/other markets (e.g. yes_sub_title "Above 3.75%")
-    // must stay verbatim — appending "to win" there reads wrong.
+    // Head-to-head WINNER markets ("Senegal vs Iraq Winner?") read naturally as
+    // "<team> to win". Threshold and same-game PROP markets must stay verbatim —
+    // appending "to win" to "Over 2.5 goals scored" or "Above 3.75%" reads wrong.
+    // A prop subtitle is a full phrase (digits or stat words), not a bare team.
     const isMatch = /\bvs\.?\b/i.test(title);
     const isTie = /^tie$/i.test(sub);
-    const yesText = isMatch && !isTie ? `${sub} to win` : sub;
+    const isProp =
+      /\d|\bover\b|\bunder\b|goals?|corners?|points?|assists?|rebounds?|\bscore\b|wins? by|both teams|spread|total|handicap|margin/i.test(
+        sub,
+      );
+    const yesText = isMatch && !isTie && !isProp ? `${sub} to win` : sub;
     return position === "yes" ? yesText : `Not ${sub}`;
   }
   return position === "yes" ? "Yes" : "No";
@@ -127,23 +137,23 @@ function kalshiCompetitionGroup(ticker: string): string {
   return prefix;
 }
 
-/** A single head-to-head match ("A vs B"), as opposed to a season/tournament
- * outright or a threshold market. Used to allow parlaying several INDEPENDENT
- * matches of the same competition while still blocking outright winners (which
- * correlate with every game) and same-event outcomes. */
-function isMatchMarket(title: string): boolean {
-  return /\bvs\.?\b|\bversus\b/i.test(title);
-}
-
 interface LegCorrelation {
-  /** Groups outcomes of the SAME underlying event (e.g. both sides of one
-   * match, or every candidate in one election). */
+  /** Groups outcomes of the SAME underlying market (every team in one winner
+   * market, every threshold of one totals ladder). Two legs sharing it can never
+   * be parlayed. */
   eventKey: string;
+  /** The physical GAME (Kalshi gameKey), shared across a game's different prop
+   * series (winner/total/spread/corners/player props). Legs sharing it but with
+   * different eventKeys are a legitimate Kalshi same-game combo. Null for
+   * non-game markets (outrights, futures, economic thresholds) and Polymarket. */
+  gameKey: string | null;
   /** Canonical competition/tournament, or null if the market isn't part of a
    * recognised competition. */
   competition: string | null;
-  /** True for a single head-to-head match (independent of other matches). */
-  isMatch: boolean;
+  /** A market tied to a whole competition rather than one game — a tournament/
+   * season outright, award, or threshold ladder. Correlates with every game and
+   * every other outright in its competition, so it can never share a combo. */
+  isOutright: boolean;
   /** Normalised title family — catches the same market at different thresholds. */
   family: string;
 }
@@ -152,6 +162,8 @@ function legCorrelation(leg: {
   platform: string;
   marketId: string;
   marketTitle: string;
+  eventTicker?: string | null;
+  gameKey?: string | null;
 }): LegCorrelation {
   let competition: string | null = null;
   for (const [re, key] of COMPETITION_TITLE_PATTERNS) {
@@ -166,22 +178,33 @@ function legCorrelation(leg: {
     competition = kalshiCompetitionGroup(leg.marketId);
   }
 
-  // Event key. Kalshi tickers are "<series>-<event>-<outcome>" — dropping the
-  // outcome segment groups every outcome of one event together. Polymarket
-  // exposes no event grouping in our data, so each market stands alone.
+  // Event key = the underlying market. Prefer Kalshi's authoritative event_ticker
+  // (every outcome AND every threshold of one market share it, even multi-segment
+  // player props). Fall back to dropping the outcome segment, then the id itself.
+  // Polymarket exposes no event grouping, so each market stands alone.
   let eventKey: string;
   if (leg.platform === "kalshi") {
-    const parts = leg.marketId.split("-");
-    eventKey =
-      parts.length > 2 ? parts.slice(0, -1).join("-") : leg.marketId;
+    if (leg.eventTicker) {
+      eventKey = leg.eventTicker;
+    } else {
+      const parts = leg.marketId.split("-");
+      eventKey = parts.length > 2 ? parts.slice(0, -1).join("-") : leg.marketId;
+    }
   } else {
     eventKey = leg.marketId;
   }
 
+  const gameKey = leg.gameKey ?? null;
+  // An outright correlates with its whole competition. It's any competition
+  // market that ISN'T a specific dated game: tournament/season winners, awards,
+  // and threshold ladders (S&P levels, CPI). Game props all carry a gameKey.
+  const isOutright = competition !== null && gameKey === null;
+
   return {
     eventKey: `${leg.platform}:${eventKey}`,
+    gameKey: gameKey === null ? null : `${leg.platform}:${gameKey}`,
     competition,
-    isMatch: isMatchMarket(leg.marketTitle),
+    isOutright,
     family: marketFamilyKey(leg.marketTitle),
   };
 }
@@ -201,14 +224,24 @@ function legCorrelation(leg: {
  */
 function legsAreCorrelated(legs: LegCorrelation[]): boolean {
   const events = new Set<string>();
-  const families = new Set<string>();
+  const nonGameFamilies = new Set<string>();
   const byCompetition = new Map<string, LegCorrelation[]>();
 
   for (const leg of legs) {
+    // (1) Two legs of the SAME underlying market — two winner outcomes, or two
+    // thresholds of one totals ladder — can never be parlayed.
     if (events.has(leg.eventKey)) return true;
     events.add(leg.eventKey);
-    if (families.has(leg.family)) return true;
-    families.add(leg.family);
+
+    // (3) Title-family guard, but ONLY for non-game markets (economic/crypto
+    // thresholds, futures). Dated game props legitimately share families across
+    // different games — every game has a "total goals" market — and Kalshi lets
+    // you parlay them, so the family guard must not block multi-game prop combos.
+    if (!leg.gameKey) {
+      if (nonGameFamilies.has(leg.family)) return true;
+      nonGameFamilies.add(leg.family);
+    }
+
     if (leg.competition !== null) {
       const arr = byCompetition.get(leg.competition) ?? [];
       arr.push(leg);
@@ -216,10 +249,14 @@ function legsAreCorrelated(legs: LegCorrelation[]): boolean {
     }
   }
 
+  // (2) Within one competition, an OUTRIGHT (tournament/season winner, award, or
+  // threshold ladder) correlates with every game and every other outright, so it
+  // can never share a combo. Game legs — whether the SAME game (a same-game prop
+  // combo: winner + total + spread + corners…) or DIFFERENT games (a multi-game
+  // parlay) — are independent enough to parlay; same-market dupes are already
+  // caught by the event guard above.
   for (const arr of byCompetition.values()) {
-    // Multiple legs in one competition are only OK when every one is an
-    // independent match; any outright/threshold leg makes them correlated.
-    if (arr.length > 1 && !arr.every((l) => l.isMatch)) return true;
+    if (arr.length > 1 && arr.some((l) => l.isOutright)) return true;
   }
 
   return false;
@@ -255,6 +292,8 @@ export function optimizeCombos(opts: {
         position: leg.position,
         odds: impliedProb,
         impliedProb,
+        eventTicker: market.eventTicker ?? null,
+        gameKey: market.gameKey ?? null,
       };
     })
     .filter(Boolean) as ComboLegResult[];
@@ -456,6 +495,8 @@ export function autoGenerateCombos(opts: {
         category: market.category ?? "Other",
         position: s.position,
         selection: sideLabel(market.title, market.yesSubtitle, s.position),
+        eventTicker: market.eventTicker ?? null,
+        gameKey: market.gameKey ?? null,
         odds: s.price,
         impliedProb: s.price,
         trueProbability: s.trueProb,
@@ -519,12 +560,19 @@ export function autoGenerateCombos(opts: {
     // probability), so this slice keeps the highest-quality legs per group while
     // bounding enumeration (2^n subsets) to a tractable size.
     const pool = groupLegs.slice(0, TOP_LEGS_CAP);
-    if (pool.length < minLegs) continue;
+    // Polymarket combos aren't reliably placeable — the Gamma feed exposes no
+    // event grouping or combo pricing — so we surface Polymarket as the best
+    // SINGLE bets (one leg each) instead of parlays. Kalshi keeps multi-leg
+    // combos, including same-game prop combos (winner + total + spread + …).
+    const isPolymarket = pool[0]?.platform === "polymarket";
+    const groupMin = isPolymarket ? 1 : minLegs;
+    const groupMax = isPolymarket ? 1 : pool.length;
+    if (pool.length < groupMin) continue;
 
     // Sizes from the requested minimum up to the group size — legCount is a
     // MINIMUM, so there is no artificial leg ceiling; the geometric probability
     // floor below naturally bounds how many legs a surfaced combo can have.
-    for (let size = minLegs; size <= pool.length; size++) {
+    for (let size = groupMin; size <= groupMax; size++) {
       for (const legs of combinations(pool, size)) {
         // Correlation guard: reject combos whose legs aren't independent — same
         // event (both sides of one match), same competition with an outright/
@@ -608,7 +656,19 @@ export function autoGenerateCombos(opts: {
         ? `+${(topLeg.edge * 100).toFixed(0)} pts edge`
         : `${(topLeg.trueProbability * 100).toFixed(0)}% likely`;
     const topLegPick = topLeg.selection ?? topLeg.position.toUpperCase();
-    const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${composition} — strongest: ${topLeg.marketTitle} (${topLegPick}, ${topLegNote}).`;
+    // Flag pure same-game combos: every leg backs the same physical game across
+    // different prop markets (winner + total + spread + …). These legs are
+    // positively correlated, so Kalshi prices the parlay as one combo — our
+    // figures assume independent legs and are an approximation.
+    const gameKeys = candidate.legs.map((l) => l.gameKey).filter(Boolean);
+    const sameGameCombo =
+      candidate.legs.length > 1 &&
+      gameKeys.length === candidate.legs.length &&
+      new Set(gameKeys).size === 1;
+    const sameGameNote = sameGameCombo
+      ? " Same-game combo — legs are correlated, so figures assume independent legs (Kalshi prices the parlay)."
+      : "";
+    const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${composition} — strongest: ${topLeg.marketTitle} (${topLegPick}, ${topLegNote}).${sameGameNote}`;
 
     selected.push({
       legs: candidate.legs.map((l) => ({
@@ -625,6 +685,8 @@ export function autoGenerateCombos(opts: {
         aiReasoning: l.aiReasoning,
         aiConfidence: l.aiConfidence,
         closeTime: l.closeTime,
+        eventTicker: l.eventTicker ?? null,
+        gameKey: l.gameKey ?? null,
       })),
       jointProbability: candidate.jointTrueProb,
       payoutMultiplier: candidate.multiplier,

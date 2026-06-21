@@ -152,6 +152,36 @@ router.post("/combos/smart-picks", async (req, res) => {
       }
     }
 
+    // Same-game expansion (Kalshi only). The balanced pool above picks markets by
+    // volume, which favours headline winner markets and starves the lower-volume
+    // PROP markets (totals, spreads, corners, BTTS, player props) that share a
+    // game. Without those props in the pool, the optimizer can't build Kalshi's
+    // native same-game combos. So for every Kalshi game already chosen, pull in
+    // its sibling prop markets (same gameKey, any prop type) from the full liquid
+    // set, highest-volume first, up to an expanded cap that keeps AI cost bounded.
+    if (platform !== "polymarket") {
+      const EXPANDED_CAP = 90;
+      const have = new Set(candidates.map((m) => `${m.platform}:${m.id}`));
+      const gameKeys = new Set(
+        candidates
+          .filter((m) => m.platform === "kalshi" && m.gameKey)
+          .map((m) => m.gameKey),
+      );
+      if (gameKeys.size > 0) {
+        const siblings = liquid
+          .filter(
+            (m) =>
+              m.platform === "kalshi" &&
+              m.gameKey != null &&
+              gameKeys.has(m.gameKey) &&
+              !have.has(`${m.platform}:${m.id}`),
+          )
+          .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
+          .slice(0, Math.max(0, EXPANDED_CAP - candidates.length));
+        candidates = [...candidates, ...siblings];
+      }
+    }
+
     // AI estimates the TRUE probability of each candidate market.
     const analyses = await analyzeMarkets(candidates);
 

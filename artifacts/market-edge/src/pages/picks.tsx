@@ -202,7 +202,9 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
       <div className="bg-card px-5 py-4 border-b border-border/50 flex items-center justify-between gap-3">
         <div>
           <p className="text-xs text-muted-foreground uppercase tracking-wider mb-0.5">
-            Combo {index + 1} · {combo.legs.length} legs
+            {combo.legs.length === 1
+              ? `Single bet ${index + 1}`
+              : `Combo ${index + 1} · ${combo.legs.length} legs`}
           </p>
           <div className="text-2xl font-bold font-mono text-primary">
             {formatMult(combo.payoutMultiplier)}
@@ -548,9 +550,10 @@ export default function SmartPicks() {
             <h1 className="text-xl font-bold">Smart Picks</h1>
           </div>
           <p className="text-sm text-muted-foreground mb-6">
-            Claude analyzes live markets and estimates the true odds, then builds combos from mispriced{" "}
+            Claude analyzes live markets and estimates the true odds, then surfaces mispriced{" "}
             <span className="text-emerald-400 font-medium">value</span> bets plus high-probability{" "}
-            <span className="text-sky-400 font-medium">safe</span> favorites it's confident in — each leg is labelled so you know which is which.
+            <span className="text-sky-400 font-medium">safe</span> favorites it's confident in. Kalshi picks include
+            same-game combos (winner + total + spread + props); Polymarket shows the best single bets.
           </p>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-5 items-start">

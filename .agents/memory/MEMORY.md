@@ -1,2 +1,2 @@
 - [Kalshi API migration](kalshi-api.md) — trading-api.kalshi.com moved to api.elections.kalshi.com; price fields changed to *_dollars format
-- [MarketEdge Smart Picks](marketedge-smart-picks.md) — keep parlays honest: no synthetic odds, confidence shrinkage, correlation guard; graceful AI degradation.
+- [MarketEdge Smart Picks](marketedge-smart-picks.md) — eventTicker/gameKey grouping enables Kalshi same-game prop combos; Polymarket = singles; correlation guard; honest odds.

@@ -41,17 +41,24 @@ EV ranking (max Π trueProb/price) systematically prefers the cheapest qualifyin
 ## Result field name
 The combo's win probability field is `jointProbability` (NOT `combinedProbability`). Reading the wrong name yields NaN.
 
-## Correlation guard — never parlay correlated legs
-`autoGenerateCombos` rejects a combo if any two legs are correlated (see `legsAreCorrelated` / `legCorrelation` in `optimizer.ts`). A combo is rejected when:
-1. Two legs share an **event** (both sides of one match, or two outcomes of one mutually-exclusive race). Kalshi tickers are `<series>-<event>-<outcome>`; dropping the last segment yields the event key. Polymarket has no event grouping in our data, so each market stands alone.
-2. Two legs share a **competition** and at least one is NOT an independent match — an outright winner ("Will Morocco win the 2026 World Cup?") correlates with every game and with other teams' outrights; threshold markets (two S&P/CPI levels, same Kalshi series) move together. **Two DIFFERENT matches of the same competition ARE allowed** (normal multi-game sports parlay).
-3. Two legs share a title **family** (same market, different threshold).
+## Correlation guard + SAME-GAME combos (Kalshi native-combo parity)
+`autoGenerateCombos` controls which legs may parlay together via `legsAreCorrelated` / `legCorrelation` in `optimizer.ts`. The model has THREE grouping levels for a Kalshi market, derived from its `event_ticker`:
+- **eventTicker** = the underlying market (every YES/NO outcome and every threshold of one contract share it). Two legs with the same eventTicker are ALWAYS blocked (both sides of one match, two rungs of one ladder).
+- **gameKey** = the physical GAME, shared by all of a game's prop markets (winner KXWCGAME, total KXWCTOTAL, spread KXWCSPREAD, BTTS, corners, player props). Derived by stripping the series prefix from event_ticker and keeping only dated games matching `/^\d{2}[A-Z]{3}\d{2}/`. Outrights/futures have NO gameKey.
+- **competition** = the tournament (from `COMPETITION_TITLE_PATTERNS` + `kalshiCompetitionGroup` prefix).
 
-Competition is derived from title patterns (`COMPETITION_TITLE_PATTERNS` — the cross-platform bridge, e.g. Polymarket WC outright ↔ Kalshi WC match both map to `fifa-world-cup`) and, for Kalshi, the ticker series prefix (`kalshiCompetitionGroup`). `isMatch` = title contains "vs"/"versus".
+A combo is rejected when: (1) two legs share an eventTicker; (2) an **outright** (`isOutright = competition != null && gameKey == null`, e.g. "Will Brazil win the World Cup?") shares a competition with ANY other leg — outrights correlate with every game and every other team's outright; (3) two NON-game markets share a title family/competition (threshold ladders like S&P/CPI move together). The family guard is applied ONLY to markets without a gameKey.
 
-**Why:** Users reported Smart Picks proposing combos that can't be placed on the platform (e.g. a World Cup match + "Will Morocco win the World Cup?", or two mutually-exclusive "Will X win the Cup?" outrights). Those legs are correlated, so multiplying their probabilities as independent is also statistically invalid. The old guard only used `marketFamilyKey`, which caught same-market-different-threshold but missed cross-platform same-tournament and mutually-exclusive outrights (different team names → different family keys).
+**What is now ALLOWED (the headline change):** multiple PROP markets of the SAME game (winner + total + spread + …, different eventTickers, one gameKey) — this is a same-game combo, mirroring Kalshi's native combo builder. Also still allowed: two DIFFERENT games of one competition (ordinary multi-game parlay).
 
-**How to apply:** When adding a competition that has both outright winners AND individual games (so titles differ but they're correlated), add a `COMPETITION_TITLE_PATTERNS` entry and/or a `kalshiCompetitionGroup` prefix mapping. Test independent-match parlays still pass while outright+match is rejected.
+**Why:** Users wanted Kalshi same-game prop combos. The previous guard blocked everything sharing a competition unless it was a "vs"-titled match, which prevented winner+total+spread of one game from ever combining. The new gameKey concept lets game props combine while still blocking the genuinely-correlated outrights and threshold ladders.
+
+**Caveat (statistical):** same-game prop legs ARE positively correlated, so our independent-leg probability/payout math is an approximation — combos carrying a same-game subset get a rationale note saying so (Kalshi prices the real parlay). `eventTicker`/`gameKey` are surfaced on each output leg so the UI/tests can detect grouping.
+
+**How to apply:** A new sport works automatically IF its Kalshi event_ticker dated suffix matches the gameKey regex AND its prop series are fetched. When adding a competition with both outrights AND games, add a `COMPETITION_TITLE_PATTERNS` / `kalshiCompetitionGroup` mapping so outright-vs-game is still rejected. Live same-game combos are AI/edge-gated and come and go with the schedule — empty live results are not proof the logic is broken; verify the logic with a synthetic optimizer harness instead (Node 24 `node --experimental-strip-types` can import optimizer.ts directly since its Market import is type-only).
+
+## Polymarket = single best bets, never parlays
+Polymarket groups in `autoGenerateCombos` are forced to size 1 (`groupMin/groupMax = 1`) → each surfaces as a standalone single bet. `combos.ts` sibling-expansion is Kalshi-only. Frontend labels 1-leg results "Single bet N". **Why:** Polymarket markets lack the event/game grouping metadata Kalshi has, and the product decision is Polymarket → best singles, Kalshi → same-game combos.
 
 ## Categories
 `listCategories` returns `{name, count, volume}` sorted by volume desc. `kalshiCategory` maps Kalshi series prefixes to specific sports (Basketball/Baseball/Football/Hockey/Soccer/Golf/Motorsport/Tennis/Combat Sports/Cricket) instead of a generic "Sports". Frontend uses top-N by volume as trending chips + a searchable combobox over all categories.
