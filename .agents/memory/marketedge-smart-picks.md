@@ -35,6 +35,9 @@ A Kalshi head-to-head match is THREE separate contracts (Team A / Team B / Tie) 
 ## High payout ≠ wrong math — it's the cheap side the optimizer picked
 EV ranking (max Π trueProb/price) systematically prefers the cheapest qualifying side per market (low price → high payout AND often high edge ratio), so favorites get passed over for underdogs/ties unless `riskLevel=conservative` (higher `safeMinTrue` floor favors high-probability sides). A surprising 1000x+ multiplier is usually the optimizer backing longshots, not a bug. Conservative risk is the lever to bias toward favorites.
 
+## Kalshi fetch must be concurrency-bounded + retried, never cached partial
+"No combos found" for a category that clearly has live markets (e.g. Soccer during the World Cup) is usually NOT a combo-logic bug — it's the market-data fetch silently dropping a whole series. Kalshi rate-limits aggressively: firing all ~18 seed series PLUS the discovery probes at once (wide Promise.allSettled) trips the limiter, the slow series times out, `fetchKalshiSeries` returns `[]`, and that incomplete snapshot gets cached for the 60s TTL → the category vanishes until the cache expires. **Why:** a user picked Kalshi+Soccer and got nothing while raw `KXWCGAME` had 100 open markets. **How to apply:** keep upstream fan-out bounded (`mapWithConcurrency`, limit ~6) in BOTH `fetchAllKalshiSeries` and the discovery-probe loop, and retry `fetchKalshiSeries` on 429/5xx/timeout (exp backoff) before giving up. The cold path is slow (~24–32s, dominated by one-time 24h-cached discovery) but reliability beats caching a soccer-less pool. Category filter in the smart-picks route is case-insensitive — keep it that way so a typed "soccer" matches "Soccer".
+
 ## Result field name
 The combo's win probability field is `jointProbability` (NOT `combinedProbability`). Reading the wrong name yields NaN.
 

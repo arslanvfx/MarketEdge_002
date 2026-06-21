@@ -67,7 +67,7 @@ router.post("/combos/smart-picks", async (req, res) => {
       legCount === "auto" ? "auto" : (Number(legCount) as 2 | 3 | 4 | 5);
     const categoryFilter =
       typeof category === "string" && category && category !== "all"
-        ? category
+        ? category.toLowerCase()
         : null;
     const stake = Math.max(1, Math.min(100, Number(stakeAmount) || 10));
     const n = Math.max(1, Math.min(4, Number(count) || 4));
@@ -81,7 +81,10 @@ router.post("/combos/smart-picks", async (req, res) => {
     const liquid = markets.filter((m) => {
       if (!(m.yesOdds > 0.02 && m.yesOdds < 0.98)) return false;
       if (!((m.volume ?? 0) > 0)) return false;
-      if (categoryFilter !== null && (m.category ?? "Other") !== categoryFilter)
+      if (
+        categoryFilter !== null &&
+        (m.category ?? "Other").toLowerCase() !== categoryFilter
+      )
         return false;
       // Resolution-horizon filter: only markets that settle within the chosen
       // window. Markets with no known close time are excluded once a horizon is

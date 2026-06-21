@@ -30,6 +30,35 @@ function isFresh(entry: CacheEntry): boolean {
   return Date.now() - entry.fetchedAt < CACHE_TTL_MS;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Map over items with a bounded number of in-flight promises. Firing dozens of
+ * upstream requests at once trips Kalshi's rate limiter, which surfaces as
+ * timeouts that silently drop whole series (e.g. the World Cup) from the pool.
+ * Capping concurrency keeps every series fetch reliable.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx]);
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 // ─── Kalshi ────────────────────────────────────────────────────────────────
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
@@ -129,21 +158,21 @@ async function discoverKalshiSeries(): Promise<string[]> {
     // Network error or timeout — return whatever was accumulated
   }
 
-  // Probe each candidate: only keep series that have ≥1 real non-provisional market
+  // Probe each candidate: only keep series that have ≥1 real non-provisional
+  // market. Bounded concurrency here matters too — probing dozens of candidates
+  // at once is itself what trips the rate limiter and makes the seed series
+  // (incl. the World Cup) time out moments later.
   const candidates = [...found];
-  const probeResults = await Promise.allSettled(
-    candidates.map(async (ticker) => {
+  const probeResults = await mapWithConcurrency(
+    candidates,
+    KALSHI_FETCH_CONCURRENCY,
+    async (ticker) => {
       const markets = await fetchKalshiSeries(ticker);
       return markets.length > 0 ? ticker : null;
-    }),
+    },
   );
 
-  const confirmed = probeResults
-    .filter(
-      (r): r is PromiseFulfilledResult<string> =>
-        r.status === "fulfilled" && r.value !== null,
-    )
-    .map((r) => r.value);
+  const confirmed = probeResults.filter((t): t is string => t !== null);
 
   discoveredSeriesCache = { series: confirmed, fetchedAt: Date.now() };
   return confirmed;
@@ -237,7 +266,11 @@ function kalshiCategory(ticker: string, seriesTicker: string): string | null {
   return null;
 }
 
-async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
+async function fetchKalshiSeries(
+  seriesTicker: string,
+  attempt = 0,
+): Promise<Market[]> {
+  const MAX_ATTEMPTS = 3;
   try {
     const params = new URLSearchParams({ limit: "100", status: "open", series_ticker: seriesTicker });
     const url = `${KALSHI_BASE}/markets?${params}`;
@@ -246,7 +279,15 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
       signal: AbortSignal.timeout(8000),
     });
 
-    if (!res.ok) return [];
+    if (!res.ok) {
+      // Retry rate-limits (429) and transient server errors with backoff so a
+      // momentary throttle doesn't drop the whole series from the pool.
+      if ((res.status === 429 || res.status >= 500) && attempt < MAX_ATTEMPTS - 1) {
+        await sleep(300 * 2 ** attempt);
+        return fetchKalshiSeries(seriesTicker, attempt + 1);
+      }
+      return [];
+    }
     const data = await res.json() as { markets?: KalshiMarket[] };
     const markets = data.markets ?? [];
 
@@ -296,6 +337,12 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
       })
       .filter((m): m is NonNullable<typeof m> => m !== null);
   } catch {
+    // Network error or timeout (AbortError) — retry with backoff before giving
+    // up, so a single slow response doesn't silently drop the series.
+    if (attempt < MAX_ATTEMPTS - 1) {
+      await sleep(300 * 2 ** attempt);
+      return fetchKalshiSeries(seriesTicker, attempt + 1);
+    }
     return [];
   }
 }
@@ -304,6 +351,9 @@ async function fetchKalshiMarkets(): Promise<Market[]> {
   return fetchAllKalshiSeries();
 }
 
+// Cap simultaneous Kalshi requests — see mapWithConcurrency.
+const KALSHI_FETCH_CONCURRENCY = 6;
+
 async function fetchAllKalshiSeries(): Promise<Market[]> {
   // Merge hardcoded seed list with auto-discovered series (cached 24 h).
   // discoverKalshiSeries() pages /events?status=open, probes candidates,
@@ -311,11 +361,13 @@ async function fetchAllKalshiSeries(): Promise<Market[]> {
   const discovered = await discoverKalshiSeries();
   const allSeries = [...new Set([...KALSHI_SERIES, ...discovered])];
 
-  const results = await Promise.allSettled(allSeries.map(fetchKalshiSeries));
+  const results = await mapWithConcurrency(
+    allSeries,
+    KALSHI_FETCH_CONCURRENCY,
+    fetchKalshiSeries,
+  );
   const all: Market[] = [];
-  for (const r of results) {
-    if (r.status === "fulfilled") all.push(...r.value);
-  }
+  for (const r of results) all.push(...r);
   // Deduplicate by id
   const seen = new Set<string>();
   return all.filter((m) => {
