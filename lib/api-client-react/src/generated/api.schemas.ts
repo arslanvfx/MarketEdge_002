@@ -95,6 +95,8 @@ export interface ComboLeg {
   aiReasoning?: string;
   /** AI confidence in its probability estimate. Present on Smart Picks legs. */
   aiConfidence?: ComboLegAiConfidence;
+  /** ISO timestamp when this market resolves (null if unknown). Present on Smart Picks legs. */
+  closeTime?: string | null;
 }
 
 export interface ComboSuggestion {
@@ -141,6 +143,20 @@ export const SmartPicksInputLegCount = {
   NUMBER_4: '4',
 } as const;
 
+/**
+ * Only include markets that resolve within this window ("any" = no limit). Keeps all legs in a combo resolving on a similar timeframe.
+ */
+export type SmartPicksInputHorizon = typeof SmartPicksInputHorizon[keyof typeof SmartPicksInputHorizon];
+
+
+export const SmartPicksInputHorizon = {
+  any: 'any',
+  week: 'week',
+  month: 'month',
+  quarter: 'quarter',
+  year: 'year',
+} as const;
+
 export interface SmartPicksInput {
   riskLevel?: SmartPicksInputRiskLevel;
   /**
@@ -159,6 +175,8 @@ export interface SmartPicksInput {
   category?: string;
   /** Number of legs per combo, or "auto" to consider 2-4 legs */
   legCount?: SmartPicksInputLegCount;
+  /** Only include markets that resolve within this window ("any" = no limit). Keeps all legs in a combo resolving on a similar timeframe. */
+  horizon?: SmartPicksInputHorizon;
 }
 
 export type SmartPickResultRiskLevel = typeof SmartPickResultRiskLevel[keyof typeof SmartPickResultRiskLevel];

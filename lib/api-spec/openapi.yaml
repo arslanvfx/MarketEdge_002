@@ -436,6 +436,10 @@ components:
           type: string
           enum: [low, medium, high]
           description: AI confidence in its probability estimate. Present on Smart Picks legs.
+        closeTime:
+          type: string
+          nullable: true
+          description: ISO timestamp when this market resolves (null if unknown). Present on Smart Picks legs.
       required:
         - marketId
         - platform
@@ -497,6 +501,11 @@ components:
           enum: [auto, "2", "3", "4"]
           default: auto
           description: Number of legs per combo, or "auto" to consider 2-4 legs
+        horizon:
+          type: string
+          enum: [any, week, month, quarter, year]
+          default: any
+          description: Only include markets that resolve within this window ("any" = no limit). Keeps all legs in a combo resolving on a similar timeframe.
       required: []
 
     SmartPickResult:

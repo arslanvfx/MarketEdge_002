@@ -48,6 +48,20 @@ returns nothing. Use a GEOMETRIC floor: reject when jointTrueProb < minGeoMean^l
 so 2-leg behavior ≈ the old fixed floors). This keeps each leg high-quality while
 letting users opt into more legs for a bigger payout.
 
+# Resolution-horizon filter (keep combo legs on a similar timeframe)
+Prediction markets resolve on wildly different dates — a near-term sports market
+(days) can get parlayed with a "recession by 2027" market that won't settle until
+~2050. Users hated mixed-timeframe combos. smart-picks accepts horizon
+(any|week|month|quarter|year, default any → days 7/31/92/366). Applied at the SAME
+pre-AI candidate-filter stage as category/platform so it composes cleanly and
+doesn't disturb probability-first ranking. When horizon != any, EXCLUDE markets
+whose closeTime is null/unparsable (can't promise a settle date) or beyond the
+cutoff. Validate the enum with Object.hasOwn (NOT `in`) — `in` walks the prototype
+chain so "constructor" would pass and yield a NaN cutoff. Legs carry closeTime so
+the UI shows each leg's resolve date. Narrow windows (e.g. month) legitimately
+return 0 — few near-term markets have positive edge; surface a context-aware empty
+state.
+
 # Platform & category awareness
 ComboLeg carries platform (kalshi|polymarket). smart-picks accepts platform
 (kalshi|polymarket|both, default both) and category (default "all") and legCount

@@ -30,6 +30,7 @@ router.post("/combos/smart-picks", async (req, res) => {
       platform = "both",
       category = "all",
       legCount = "auto",
+      horizon = "any",
     } = req.body ?? {};
 
     const validRisk = ["conservative", "balanced", "aggressive"];
@@ -44,6 +45,23 @@ router.post("/combos/smart-picks", async (req, res) => {
     if (!validLegCount.includes(legCount)) {
       return res.status(400).json({ error: "Invalid legCount" });
     }
+    const HORIZON_DAYS: Record<string, number> = {
+      week: 7,
+      month: 31,
+      quarter: 92,
+      year: 366,
+    };
+    if (
+      horizon !== "any" &&
+      !(typeof horizon === "string" && Object.hasOwn(HORIZON_DAYS, horizon))
+    ) {
+      return res.status(400).json({ error: "Invalid horizon" });
+    }
+    // Latest acceptable resolution time (null = no limit).
+    const horizonCutoff =
+      horizon !== "any"
+        ? Date.now() + HORIZON_DAYS[horizon] * 24 * 60 * 60 * 1000
+        : null;
     const legs: "auto" | 2 | 3 | 4 =
       legCount === "auto" ? "auto" : (Number(legCount) as 2 | 3 | 4);
     const categoryFilter =
@@ -59,13 +77,23 @@ router.post("/combos/smart-picks", async (req, res) => {
     // Pre-filter to liquid, genuinely-priced candidates before the AI pass.
     // Caps the number of markets Claude analyzes (cost/latency) while keeping
     // the markets most likely to contain real value.
-    const liquid = markets.filter(
-      (m) =>
-        m.yesOdds > 0.02 &&
-        m.yesOdds < 0.98 &&
-        (m.volume ?? 0) > 0 &&
-        (categoryFilter === null || (m.category ?? "Other") === categoryFilter),
-    );
+    const liquid = markets.filter((m) => {
+      if (!(m.yesOdds > 0.02 && m.yesOdds < 0.98)) return false;
+      if (!((m.volume ?? 0) > 0)) return false;
+      if (categoryFilter !== null && (m.category ?? "Other") !== categoryFilter)
+        return false;
+      // Resolution-horizon filter: only markets that settle within the chosen
+      // window. Markets with no known close time are excluded once a horizon is
+      // set, since we can't promise when they resolve. Keeps every leg of a
+      // combo on a similar timeframe instead of mixing a 1-week bet with one
+      // that won't settle for a year.
+      if (horizonCutoff !== null) {
+        if (!m.closeTime) return false;
+        const t = Date.parse(m.closeTime);
+        if (Number.isNaN(t) || t > horizonCutoff) return false;
+      }
+      return true;
+    });
 
     // Take the highest-volume markets for a platform. When generating for BOTH
     // platforms we balance the pool (top N each) instead of sorting by raw

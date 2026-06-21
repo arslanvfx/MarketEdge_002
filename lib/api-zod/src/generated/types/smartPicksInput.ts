@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { SmartPicksInputHorizon } from './smartPicksInputHorizon';
 import type { SmartPicksInputLegCount } from './smartPicksInputLegCount';
 import type { SmartPicksInputPlatform } from './smartPicksInputPlatform';
 import type { SmartPicksInputRiskLevel } from './smartPicksInputRiskLevel';
@@ -27,4 +28,6 @@ export interface SmartPicksInput {
   category?: string;
   /** Number of legs per combo, or "auto" to consider 2-4 legs */
   legCount?: SmartPicksInputLegCount;
+  /** Only include markets that resolve within this window ("any" = no limit). Keeps all legs in a combo resolving on a similar timeframe. */
+  horizon?: SmartPicksInputHorizon;
 }

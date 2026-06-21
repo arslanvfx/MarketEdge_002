@@ -6,7 +6,7 @@ import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info, Brain, TrendingUp } from "lucide-react";
+import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info, Brain, TrendingUp, Clock } from "lucide-react";
 import {
   useGenerateSmartPicks,
   useSaveCombo,
@@ -15,6 +15,7 @@ import {
   SmartPicksInputRiskLevel,
   SmartPicksInputPlatform,
   SmartPicksInputLegCount,
+  SmartPicksInputHorizon,
   getListCombosQueryKey,
 } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
@@ -75,6 +76,29 @@ const LEG_COUNT_OPTIONS: { value: LegCount; label: string }[] = [
   { value: "3", label: "3 legs" },
   { value: "4", label: "4 legs" },
 ];
+
+type Horizon = SmartPicksInputHorizon;
+
+const HORIZON_OPTIONS: { value: Horizon; label: string }[] = [
+  { value: "any", label: "Any" },
+  { value: "week", label: "1 week" },
+  { value: "month", label: "1 month" },
+  { value: "quarter", label: "3 months" },
+  { value: "year", label: "1 year" },
+];
+
+function formatResolveDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const days = Math.round((t - Date.now()) / (24 * 60 * 60 * 1000));
+  const date = new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  if (days <= 0) return `resolves ${date}`;
+  if (days < 1) return `resolves today`;
+  if (days <= 31) return `resolves in ${days}d · ${date}`;
+  const months = Math.round(days / 30);
+  return `resolves in ~${months}mo · ${date}`;
+}
 
 function formatProb(p: number) {
   return `${(p * 100).toFixed(1)}%`;
@@ -230,6 +254,12 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
                     </span>
                   </div>
                 )}
+                {formatResolveDate(leg.closeTime) && (
+                  <div className="flex items-center gap-1 mt-1 text-[11px] leading-snug text-muted-foreground">
+                    <Clock className="w-3 h-3 shrink-0 text-muted-foreground/60" />
+                    <span>{formatResolveDate(leg.closeTime)}</span>
+                  </div>
+                )}
               </div>
               <div className="text-right shrink-0 space-y-0.5">
                 {typeof leg.edge === "number" && (
@@ -328,6 +358,7 @@ export default function SmartPicks() {
   const [platform, setPlatform] = useState<PlatformFilter>("both");
   const [category, setCategory] = useState<string>("all");
   const [legCount, setLegCount] = useState<LegCount>("auto");
+  const [horizon, setHorizon] = useState<Horizon>("any");
   const [stake, setStake] = useState(10);
   const [results, setResults] = useState<SmartPickResult[] | null>(null);
   const generateMutation = useGenerateSmartPicks();
@@ -336,7 +367,7 @@ export default function SmartPicks() {
 
   const handleGenerate = () => {
     generateMutation.mutate(
-      { data: { riskLevel, stakeAmount: stake, count: 4, platform, category, legCount } },
+      { data: { riskLevel, stakeAmount: stake, count: 4, platform, category, legCount, horizon } },
       {
         onSuccess: (data) => {
           setResults(data.combos);
@@ -344,12 +375,16 @@ export default function SmartPicks() {
             const hints: string[] = [];
             if (category !== "all") hints.push(`the "${category}" category`);
             if (legCount !== "auto") hints.push(`${legCount}-leg combos`);
+            if (horizon !== "any") {
+              const label = HORIZON_OPTIONS.find((h) => h.value === horizon)?.label ?? horizon;
+              hints.push(`a ${label} resolution window`);
+            }
             const scope = hints.length
               ? `No value bets right now for ${hints.join(" with ")}.`
               : "Not enough markets matched your settings right now.";
             toast({
               title: "No combos found",
-              description: `${scope} Try "All" categories, fewer legs, or a different risk level.`,
+              description: `${scope} Try "Any" timeframe, "All" categories, fewer legs, or a different risk level.`,
               variant: "destructive",
             });
           }
@@ -475,6 +510,31 @@ export default function SmartPicks() {
                 })}
               </div>
               <p className="text-xs text-muted-foreground">More legs = bigger payout, lower odds</p>
+            </div>
+
+            {/* Resolution horizon */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Resolves within</label>
+              <div className="flex gap-2 flex-wrap">
+                {HORIZON_OPTIONS.map((opt) => {
+                  const active = horizon === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      onClick={() => setHorizon(opt.value)}
+                      data-testid={`horizon-${opt.value}`}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                        active
+                          ? "border-primary/40 bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">Only bets that settle within this window</p>
             </div>
 
             {/* Category */}

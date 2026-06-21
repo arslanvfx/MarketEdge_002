@@ -24,4 +24,6 @@ export interface ComboLeg {
   aiReasoning?: string;
   /** AI confidence in its probability estimate. Present on Smart Picks legs. */
   aiConfidence?: ComboLegAiConfidence;
+  /** ISO timestamp when this market resolves (null if unknown). Present on Smart Picks legs. */
+  closeTime?: string | null;
 }

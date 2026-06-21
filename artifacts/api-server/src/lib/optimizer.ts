@@ -18,6 +18,7 @@ export interface ComboLegResult {
   edge?: number; // trueProbability - odds for the chosen side (positive = value)
   aiReasoning?: string;
   aiConfidence?: "low" | "medium" | "high";
+  closeTime?: string | null; // ISO resolution time of the market (Smart Picks legs)
 }
 
 export interface ComboSuggestion {
@@ -259,6 +260,7 @@ export function autoGenerateCombos(opts: {
         edgeRatio,
         aiReasoning: analysis.reasoning,
         aiConfidence: analysis.confidence,
+        closeTime: market.closeTime,
       };
       if (!best || leg.edge > best.edge) best = leg;
     }
@@ -353,6 +355,7 @@ export function autoGenerateCombos(opts: {
         edge: l.edge,
         aiReasoning: l.aiReasoning,
         aiConfidence: l.aiConfidence,
+        closeTime: l.closeTime,
       })),
       jointProbability: candidate.jointTrueProb,
       payoutMultiplier: candidate.multiplier,
