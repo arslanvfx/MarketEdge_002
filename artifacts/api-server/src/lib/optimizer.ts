@@ -391,8 +391,15 @@ export function autoGenerateCombos(opts: {
    * permits large combos (10, 20+ legs) when enough quality legs are available.
    */
   legCount?: "auto" | 1 | 2 | 3 | 4 | 5;
+  /**
+   * "edge" (default) — rank by expected value (Π trueProb/price).
+   * "returns" — rank by payout multiplier (1/jointPrice) with a hard ≥50%
+   * per-leg probability floor, so every suggested leg wins more often than it
+   * loses regardless of the risk-level setting.
+   */
+  optimizeFor?: "edge" | "returns";
 }): SmartPickResult[] {
-  const { markets, analyses, riskLevel, stakeAmount, count = 4, legCount = "auto" } = opts;
+  const { markets, analyses, riskLevel, stakeAmount, count = 4, legCount = "auto", optimizeFor = "edge" } = opts;
 
   const EDGE_THRESHOLD = 0.05; // require ≥5 percentage points of value to be a "value" bet
   // Hard cap on the candidate-leg pool fed into combination enumeration. With N
@@ -421,7 +428,15 @@ export function autoGenerateCombos(opts: {
     balanced:     { minLegTrue: 0.45, minGeoMean: 0.55, safeMinTrue: 0.7, minJointProb: 0.12, maxAutoLegs: 4 },
     aggressive:   { minLegTrue: 0.3, minGeoMean: 0.39, safeMinTrue: 0.6, minJointProb: 0.06, maxAutoLegs: 4 },
   };
-  const { minLegTrue: minTrue, minGeoMean, safeMinTrue, minJointProb, maxAutoLegs } = RISK_TUNING[riskLevel];
+  const tuning = RISK_TUNING[riskLevel];
+  // "returns" mode clamps per-leg floors to ≥50% so every suggested leg wins
+  // more than it loses, regardless of the chosen risk level. The user trades
+  // some expected-value precision for higher raw payouts.
+  let minTrue    = optimizeFor === "returns" ? Math.max(0.50, tuning.minLegTrue)  : tuning.minLegTrue;
+  let minGeoMean = optimizeFor === "returns" ? Math.max(0.50, tuning.minGeoMean)  : tuning.minGeoMean;
+  const safeMinTrue  = tuning.safeMinTrue;
+  const minJointProb = tuning.minJointProb;
+  const maxAutoLegs  = tuning.maxAutoLegs;
 
   // Combo sizes — new semantics (the user asked to LIMIT legs, not set a minimum):
   //  "auto" → system decides, starting from 2-leg combos up to maxAutoLegs.
@@ -625,14 +640,23 @@ export function autoGenerateCombos(opts: {
     }
   }
 
-  // Rank by EXPECTED RETURN per $1 staked = jointTrueProb × payoutMultiplier
-  // (equivalently Π(trueProb / price), the combined edge ratio). This single
-  // number is exactly what the user asked to optimise: a higher win probability
-  // AND a higher payout both push it up, while a longshot whose payout doesn't
-  // justify its small chance ranks low. The per-risk probability floors above
-  // keep the pool sane, so the best risk-adjusted combos surface first. Ties
-  // break toward the more likely (and therefore typically smaller) combo.
+  // Rank combos according to the chosen optimisation signal.
+  //
+  // "edge" (default): rank by EV-multiplier = Π(trueProb/price). This is
+  //   expected return per $1 staked and reflects both probability AND pricing
+  //   advantage. Ties break toward the higher-probability (typically smaller)
+  //   combo.
+  //
+  // "returns": rank by raw payout multiplier (1/jointImpliedProb). Users who
+  //   chose this mode accept that they're not necessarily getting the best
+  //   market price; they want the biggest absolute payout on bets the AI still
+  //   believes will hit (≥50% per leg, enforced by the raised floors above).
+  //   Ties break by EV-multiplier so genuine value bets beat pure lottery picks.
   allRaw.sort((a, b) => {
+    if (optimizeFor === "returns") {
+      if (b.multiplier !== a.multiplier) return b.multiplier - a.multiplier;
+      return b.evMultiplier - a.evMultiplier;
+    }
     if (b.evMultiplier !== a.evMultiplier) return b.evMultiplier - a.evMultiplier;
     return b.jointTrueProb - a.jointTrueProb;
   });

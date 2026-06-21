@@ -27,6 +27,7 @@ import {
   SmartPicksInputPlatform,
   SmartPicksInputLegCount,
   SmartPicksInputHorizon,
+  SmartPicksInputOptimizeFor,
   getListCombosQueryKey,
 } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
@@ -508,6 +509,7 @@ export default function SmartPicks() {
   const [category, setCategory] = useState<string>("all");
   const [legCount, setLegCount] = useState<LegCount>("auto");
   const [horizon, setHorizon] = useState<Horizon>("any");
+  const [optimizeFor, setOptimizeFor] = useState<SmartPicksInputOptimizeFor>("edge");
   const [stake, setStake] = useState(10);
   const [results, setResults] = useState<SmartPickResult[] | null>(null);
   const generateMutation = useGenerateSmartPicks();
@@ -516,7 +518,7 @@ export default function SmartPicks() {
 
   const handleGenerate = () => {
     generateMutation.mutate(
-      { data: { riskLevel, stakeAmount: stake, count: 4, platform, category, legCount, horizon } },
+      { data: { riskLevel, stakeAmount: stake, count: 4, platform, category, legCount, horizon, optimizeFor } },
       {
         onSuccess: (data) => {
           setResults(data.combos);
@@ -637,6 +639,38 @@ export default function SmartPicks() {
                 </div>
                 <p className="text-xs text-muted-foreground">Markets differ per platform</p>
               </div>
+            </div>
+
+            {/* Optimize for */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Optimize for</label>
+              <div className="flex flex-wrap gap-2">
+                <FilterChip
+                  active={optimizeFor === "edge"}
+                  onClick={() => setOptimizeFor("edge")}
+                  testId="optimize-edge"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    Best edge
+                  </span>
+                </FilterChip>
+                <FilterChip
+                  active={optimizeFor === "returns"}
+                  onClick={() => setOptimizeFor("returns")}
+                  testId="optimize-returns"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5" />
+                    Best returns
+                  </span>
+                </FilterChip>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {optimizeFor === "edge"
+                  ? "Highest expected value — best price relative to true probability"
+                  : "Highest payout multiplier — every leg still wins >50% of the time"}
+              </p>
             </div>
 
             {/* Legs + Horizon */}

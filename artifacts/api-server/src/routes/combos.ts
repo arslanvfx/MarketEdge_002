@@ -31,6 +31,7 @@ router.post("/combos/smart-picks", async (req, res) => {
       category = "all",
       legCount = "auto",
       horizon = "any",
+      optimizeFor = "edge",
     } = req.body ?? {};
 
     const validRisk = ["conservative", "balanced", "aggressive"];
@@ -44,6 +45,10 @@ router.post("/combos/smart-picks", async (req, res) => {
     const validLegCount = ["auto", "1", "2", "3", "4", "5", 1, 2, 3, 4, 5];
     if (!validLegCount.includes(legCount)) {
       return res.status(400).json({ error: "Invalid legCount" });
+    }
+    const validOptimizeFor = ["edge", "returns"];
+    if (!validOptimizeFor.includes(optimizeFor)) {
+      return res.status(400).json({ error: "Invalid optimizeFor" });
     }
     const HORIZON_DAYS: Record<string, number> = {
       week: 7,
@@ -205,6 +210,7 @@ router.post("/combos/smart-picks", async (req, res) => {
       stakeAmount: stake,
       count: n,
       legCount: legs,
+      optimizeFor: optimizeFor as "edge" | "returns",
     });
 
     return res.json({ combos, generatedAt: new Date().toISOString() });

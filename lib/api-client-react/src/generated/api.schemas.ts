@@ -174,6 +174,17 @@ export const SmartPicksInputHorizon = {
   year: 'year',
 } as const;
 
+/**
+ * Ranking signal for combos — "edge" ranks by expected value; "returns" ranks by payout multiplier with a hard 50% per-leg probability floor.
+ */
+export type SmartPicksInputOptimizeFor = typeof SmartPicksInputOptimizeFor[keyof typeof SmartPicksInputOptimizeFor];
+
+
+export const SmartPicksInputOptimizeFor = {
+  edge: 'edge',
+  returns: 'returns',
+} as const;
+
 export interface SmartPicksInput {
   riskLevel?: SmartPicksInputRiskLevel;
   /**
@@ -194,6 +205,8 @@ export interface SmartPicksInput {
   legCount?: SmartPicksInputLegCount;
   /** Only include markets that resolve within this window ("any" = no limit). Keeps all legs in a combo resolving on a similar timeframe. */
   horizon?: SmartPicksInputHorizon;
+  /** Ranking signal — "edge" = EV-first; "returns" = payout-first with ≥50% per-leg floor. */
+  optimizeFor?: SmartPicksInputOptimizeFor;
 }
 
 export type SmartPickResultRiskLevel = typeof SmartPickResultRiskLevel[keyof typeof SmartPickResultRiskLevel];
