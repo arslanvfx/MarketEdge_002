@@ -210,7 +210,23 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
 
       {/* Legs */}
       <div className="flex-1 divide-y divide-border/30">
-        {combo.legs.map((leg, i) => (
+        {combo.legs.map((leg, i) => {
+          // For same-game prop legs (e.g. total goals), the marketTitle may not mention
+          // which match — try to pull the game name from a sibling winner leg in this combo
+          // that shares the same gameKey and contains "vs" in its title.
+          const legGameKey = (leg as any).gameKey;
+          const isWinnerLeg = leg.marketTitle.toLowerCase().includes(" vs ");
+          const gameContext =
+            legGameKey && !isWinnerLeg
+              ? combo.legs.find(
+                  (other) =>
+                    other !== leg &&
+                    (other as any).gameKey === legGameKey &&
+                    other.marketTitle.toLowerCase().includes(" vs "),
+                )?.marketTitle ?? null
+              : null;
+
+          return (
           <div key={i} className="px-4 py-3">
             <div className="flex items-start gap-3">
               <Badge
@@ -224,9 +240,15 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
                 {leg.position.toUpperCase()}
               </Badge>
               <div className="flex-1 min-w-0">
-                <div className="text-[11px] leading-snug text-muted-foreground">{leg.marketTitle}</div>
+                {/* Game context — show the matchup for prop legs that don't have "vs" in title */}
+                {gameContext && (
+                  <div className="text-[10px] font-medium text-primary/70 uppercase tracking-wide mb-0.5">
+                    {gameContext}
+                  </div>
+                )}
+                <div className="text-xs leading-snug text-muted-foreground/90">{leg.marketTitle}</div>
                 {leg.selection && (
-                  <div className="font-semibold text-xs leading-snug mt-0.5">Pick: {leg.selection}</div>
+                  <div className="font-semibold text-sm leading-snug mt-0.5">Pick: {leg.selection}</div>
                 )}
                 <div className="flex items-center gap-1 mt-1 flex-wrap">
                   {PLATFORM_BADGE[leg.platform] && (
@@ -278,7 +300,8 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Footer */}

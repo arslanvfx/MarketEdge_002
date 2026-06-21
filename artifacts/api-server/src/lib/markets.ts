@@ -94,14 +94,24 @@ const KALSHI_SERIES = [
   "KXRECSSNBER",     // NBER recession call
 
   // ── Sports ──────────────────────────────────────────────────
-  "KXNBA",           // NBA basketball season / playoffs
+  // NBA — game props across all series (winner / spread / total / pts leader)
+  "KXNBA",           // NBA game winner
+  "KXNBASPREAD",     // NBA point spread
+  "KXNBATOTAL",      // NBA game totals (over/under)
+  "KXNBAPTS",        // NBA leading scorer (player props)
+  // MLB
   "KXMLB",           // MLB baseball (regular season & playoffs)
+  // NFL awards / futures
   "KXNFLMVP",        // NFL Most Valuable Player award
   "KXNFLCOTY",       // NFL Coach of the Year award
   "KXNFLRETIRE",     // NFL player retirement predictions
   "KXNBARETIRE",     // NBA player retirement predictions
-  "KXWCGAME",        // FIFA World Cup game results
-  "KXWCTOTAL",       // FIFA World Cup totals (goals, corners…)
+  // FIFA 2026 World Cup — all game-level prop series for same-game combos
+  "KXWCGAME",        // FIFA World Cup game winner
+  "KXWCTOTAL",       // FIFA World Cup total goals
+  "KXWCSPREAD",      // FIFA World Cup goal spread
+  "KXWCBTTS",        // FIFA World Cup both teams to score
+  "KXWCCORNERS",     // FIFA World Cup corners market
 
   // ── Elections / Politics ─────────────────────────────────────
   "KXMIDTERMVOTETURN", // 2026 midterm election voter turnout

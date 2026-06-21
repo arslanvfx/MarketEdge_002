@@ -402,35 +402,31 @@ export function autoGenerateCombos(opts: {
   const TOP_LEGS_CAP = 16;
 
   // Per-risk tuning:
-  //  • minLegTrue — minimum true probability of the CHOSEN side for a leg.
-  //  • minJoint   — minimum probability the WHOLE parlay actually hits. Stops
-  //    low-probability lottery combos from surfacing at all.
-  //  (Ranking is by EXPECTED RETURN — see the sort below — not a probability
-  //  tier, so there is no band here; the floors in this block keep each combo's
-  //  win probability sane for the chosen risk level.)
-  //  • minGeoMean — minimum acceptable per-leg average win probability. The
-  //    whole-parlay floor is minGeoMean^n, so it scales with the number of legs:
-  //    a fixed joint floor would unfairly reject every multi-leg combo (joint
-  //    probability shrinks as legs are added), which would make the 3/4-leg
-  //    options return nothing. A geometric floor keeps each leg high-quality
-  //    while still letting users opt into more legs for a bigger payout.
-  //  • safeMinTrue — minimum true probability for a "safe favorite": a leg the AI
-  //    is confident in that the market prices fairly (edge ≥ 0 but < threshold).
-  //    These fill out larger combos when genuine value bets are scarce.
+  //  • minLegTrue   — minimum true probability of the CHOSEN side for a leg.
+  //  • minGeoMean   — per-leg geometric floor (whole-parlay floor = minGeoMean^n),
+  //    keeps each leg high-quality while scaling with leg count.
+  //  • safeMinTrue  — minimum true probability for "safe favorite" legs.
+  //  • minJointProb — hard absolute floor on the whole parlay's win probability.
+  //    Prevents low-probability lottery combos (e.g. 5% chance, 1900x) regardless
+  //    of how many legs are added. The geometric floor alone can't do this because
+  //    minGeoMean^n → 0 as n grows.
+  //  • maxAutoLegs  — hard upper bound on combo leg count when legCount="auto".
+  //    Stops the EV ranking from surfacing absurd 8-leg parlays; explicit legCount
+  //    values let the user consciously opt into more legs.
   const RISK_TUNING: Record<
     RiskLevel,
-    { minLegTrue: number; minGeoMean: number; safeMinTrue: number }
+    { minLegTrue: number; minGeoMean: number; safeMinTrue: number; minJointProb: number; maxAutoLegs: number }
   > = {
-    conservative: { minLegTrue: 0.6, minGeoMean: 0.67, safeMinTrue: 0.8 },
-    balanced: { minLegTrue: 0.45, minGeoMean: 0.55, safeMinTrue: 0.7 },
-    aggressive: { minLegTrue: 0.3, minGeoMean: 0.39, safeMinTrue: 0.6 },
+    conservative: { minLegTrue: 0.6, minGeoMean: 0.67, safeMinTrue: 0.8, minJointProb: 0.25, maxAutoLegs: 3 },
+    balanced:     { minLegTrue: 0.45, minGeoMean: 0.55, safeMinTrue: 0.7, minJointProb: 0.12, maxAutoLegs: 4 },
+    aggressive:   { minLegTrue: 0.3, minGeoMean: 0.39, safeMinTrue: 0.6, minJointProb: 0.06, maxAutoLegs: 4 },
   };
-  const { minLegTrue: minTrue, minGeoMean, safeMinTrue } = RISK_TUNING[riskLevel];
+  const { minLegTrue: minTrue, minGeoMean, safeMinTrue, minJointProb, maxAutoLegs } = RISK_TUNING[riskLevel];
 
-  // Combo sizes to generate. legCount is now a MINIMUM: "auto" means 2+, while a
-  // number N means "N or more legs". The upper bound is however many quality legs
-  // exist (capped at TOP_LEGS_CAP) — no artificial 4-leg ceiling. The geometric
-  // floor + probability-first ranking naturally bound runaway leg counts.
+  // Combo sizes: legCount is a MINIMUM (2, 3, 4, 5 or "auto" = 2+).
+  // Auto mode is capped at maxAutoLegs so EV-ranking doesn't surface 8-leg lottery
+  // parlays the user never asked for. Explicit leg counts let the user consciously
+  // opt into larger combos.
   const minLegs = legCount === "auto" ? 2 : Math.max(2, legCount);
 
   // ── Build value-bet legs (one best side per market) ───────────────────────
@@ -566,12 +562,13 @@ export function autoGenerateCombos(opts: {
     // combos, including same-game prop combos (winner + total + spread + …).
     const isPolymarket = pool[0]?.platform === "polymarket";
     const groupMin = isPolymarket ? 1 : minLegs;
-    const groupMax = isPolymarket ? 1 : pool.length;
+    // For "auto" mode, cap at maxAutoLegs to prevent EV-ranking from surfacing
+    // lottery parlays (e.g. 8-leg combos with 5% win probability). Users who
+    // explicitly set a higher leg count consciously accept more legs.
+    const autoMax = legCount === "auto" ? maxAutoLegs : pool.length;
+    const groupMax = isPolymarket ? 1 : Math.min(pool.length, autoMax);
     if (pool.length < groupMin) continue;
 
-    // Sizes from the requested minimum up to the group size — legCount is a
-    // MINIMUM, so there is no artificial leg ceiling; the geometric probability
-    // floor below naturally bounds how many legs a surfaced combo can have.
     for (let size = groupMin; size <= groupMax; size++) {
       for (const legs of combinations(pool, size)) {
         // Correlation guard: reject combos whose legs aren't independent — same
@@ -590,10 +587,13 @@ export function autoGenerateCombos(opts: {
         // combined multiplier ≥ 1 is guaranteed; safe-favorite-only parlays
         // (≈1.0) are kept, genuinely-bad parlays (< 1, float drift) are dropped.
         if (evMultiplier < 1) continue;
-        // Leg-count-aware floor: require the parlay's per-leg average win
-        // probability to clear minGeoMean (floor = minGeoMean^legs). Keeps each
-        // leg high-quality while scaling sensibly as legs are added.
+        // Per-leg geometric floor: each leg's average win probability must clear
+        // minGeoMean. Scales sensibly as legs are added.
         if (jointTrueProb < Math.pow(minGeoMean, legs.length)) continue;
+        // Absolute joint probability floor: the whole parlay must have at least
+        // minJointProb chance to hit — prevents lottery combos that pass the
+        // geometric floor only because they have many mediocre legs.
+        if (jointTrueProb < minJointProb) continue;
 
         allRaw.push({ legs, jointTrueProb, multiplier, evMultiplier });
       }

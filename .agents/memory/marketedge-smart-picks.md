@@ -15,6 +15,11 @@ Each combo leg is classified `legType: "value" | "safe"` (see `optimizer.ts`).
 
 Risk tuning (`RISK_TUNING` in optimizer): conservative `safeMinTrue 0.8`, balanced `0.7`, aggressive `0.6`.
 
+## Prop series must be in the hardcoded seed list for reliable same-game combos
+The auto-discovery mechanism (pages /events?status=open) has a 24h TTL cache — on first boot, prop series like KXWCSPREAD/KXWCBTTS/KXWCCORNERS/KXNBASPREAD/KXNBATOTAL will be missing until discovery runs. Add them explicitly to `KALSHI_SERIES` so they're fetched unconditionally. `fetchKalshiSeries` returns [] silently if a ticker has no open markets, so listing a non-existent series causes no harm.
+
+**How to apply:** Whenever a new sport or prop category launches on Kalshi, add all its prop series (winner, spread, total, BTTS, corners, player props) to the hardcoded list alongside the main series. Don't rely on discovery alone for series needed for same-game combos.
+
 ## legCount is a MINIMUM, not exact
 `legCount` ("auto"|2|3|4|5) means "this many legs or more". `"auto"` = 2+. The optimizer enumerates sizes from `minLegs` up to `min(pool, TOP_LEGS_CAP=16)` — there is NO 4-leg cap. `"5"` allows large combos (up to the cap).
 
@@ -40,6 +45,18 @@ EV ranking (max Π trueProb/price) systematically prefers the cheapest qualifyin
 
 ## Result field name
 The combo's win probability field is `jointProbability` (NOT `combinedProbability`). Reading the wrong name yields NaN.
+
+## AI prompt must include yesSubtitle — the YES-side identity bug
+The analyzeMarkets prompt MUST include `[YES = "<yesSubtitle>"]` on every market line. Without it, Claude infers which side YES pays on from the title alone and gets it wrong for winner markets: seeing "France vs Iraq Winner?" at 4%, Claude estimates France's probability (82%) but assigns it to the Iraq YES contract — creating a massive false edge (+78 pts) and surfacing Iraq as a "value" bet. The explicit label ("France vs Iraq Winner?" [YES = "Iraq"]) plus a rule in the prompt ("estimate the probability of THAT specific outcome") prevents this. The 30-min analysis cache persists stale wrong values — server restart is needed after prompt changes.
+
+**How to apply:** Any time yesSubtitle is available, include it in the market line. For markets without a subtitle (some Polymarket markets), omit it; Claude uses the title alone, which is usually unambiguous for yes/no questions.
+
+## Lottery combo guard — two floors needed, not one
+The geometric floor `minGeoMean^n` alone cannot prevent many-leg lottery combos because it approaches 0 as n grows. An 8-leg combo at aggressive minGeoMean 0.39 needs only 0.39^8 ≈ 0.01% joint probability — essentially unconstrained. Two additional guards are needed:
+- **maxAutoLegs** (per risk level): hard cap on leg count when legCount="auto" (conservative: 3, balanced: 4, aggressive: 4). Users who explicitly set a leg count consciously accept larger combos.
+- **minJointProb** (per risk level): absolute floor on the full parlay's win probability (conservative: 25%, balanced: 12%, aggressive: 6%). Applied after the geometric floor check in the enumeration loop.
+
+**How to apply:** Add both fields to RISK_TUNING whenever changing risk parameters. The cap is on auto-mode only (`legCount === "auto" ? maxAutoLegs : pool.length`).
 
 ## Correlation guard + SAME-GAME combos (Kalshi native-combo parity)
 `autoGenerateCombos` controls which legs may parlay together via `legsAreCorrelated` / `legCorrelation` in `optimizer.ts`. The model has THREE grouping levels for a Kalshi market, derived from its `event_ticker`:

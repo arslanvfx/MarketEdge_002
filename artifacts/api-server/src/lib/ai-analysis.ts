@@ -69,20 +69,25 @@ async function analyzeChunk(markets: Market[]): Promise<MarketAnalysis[]> {
   const marketLines = markets
     .map((m, i) => {
       const close = m.closeTime ? m.closeTime.slice(0, 10) : "unknown";
-      return `${i}. "${m.title}" | current YES market price: ${(m.yesOdds * 100).toFixed(0)}% | closes: ${close} | category: ${m.category ?? "n/a"}`;
+      // Always include yesSubtitle so Claude knows EXACTLY what outcome YES pays on.
+      // Without it, Claude guesses from title alone and can confuse e.g. "Iraq" vs
+      // "France" in a winner contract — leading to a completely wrong trueProbabilityYes.
+      const yesMeaning = m.yesSubtitle ? ` [YES = "${m.yesSubtitle}"]` : "";
+      return `${i}. "${m.title}"${yesMeaning} | YES price: ${(m.yesOdds * 100).toFixed(0)}% | closes: ${close} | category: ${m.category ?? "n/a"}`;
     })
     .join("\n");
 
   const prompt = `You are a sharp, skeptical prediction-market analyst. Today's date is ${today}.
 
-For each market below, estimate the TRUE probability (0.0 to 1.0) that the YES outcome actually occurs, using real-world knowledge and reasoning. Do NOT just echo the market price — your job is to find where the crowd is WRONG.
+For each market, estimate the TRUE probability (0.0–1.0) that the YES outcome actually occurs, using real-world knowledge. Do NOT echo the market price — find where the crowd is WRONG.
 
 Critical rules:
-- Be skeptical of novelty, joke, or "X before GTA VI / before [event]" markets. Joke markets pairing unrelated events (e.g. "Will China invade Taiwan before GTA VI?") are usually priced near 50% by the crowd but have a true probability far from that. Estimate the REAL probability of the literal event in the timeframe.
-- If a market is nonsensical, unresolvable, ambiguous, or you cannot reason about it, set "plausible": false.
+- IMPORTANT: Each market line has a "[YES = ...]" label — that is the EXACT outcome YES pays on. Estimate the probability of THAT specific outcome, not the opposite team or any other interpretation. Example: "France vs Iraq Winner?" [YES = "Iraq"] means YES pays only if Iraq wins — estimate Iraq's win probability (~0.04), NOT France's.
+- Be skeptical of novelty or joke markets. Estimate the REAL probability of the literal event in the timeframe.
+- If a market is nonsensical, unresolvable, or you cannot reason about it, set "plausible": false.
 - Consider the close date — a low-probability event has even less chance in a short window.
-- confidence reflects how sure you are of your estimate: "high" for well-understood events, "low" for genuinely uncertain ones.
-- reasoning: ONE short sentence (max ~20 words), plain language, explaining your estimate. User-facing.
+- confidence: "high" for well-understood events, "low" for genuinely uncertain ones.
+- reasoning: ONE sentence (max ~20 words), plain language, explaining your estimate. User-facing.
 
 Markets:
 ${marketLines}
