@@ -69,6 +69,44 @@ export const GetMarketResponse = zod.object({
 
 
 /**
+ * @summary Auto-generate 4 non-overlapping Smart Pick combos
+ */
+export const generateSmartPicksBodyRiskLevelDefault = `balanced`;
+export const generateSmartPicksBodyStakeAmountDefault = 10;
+export const generateSmartPicksBodyStakeAmountMax = 10000;
+
+export const generateSmartPicksBodyCountDefault = 4;
+export const generateSmartPicksBodyCountMax = 4;
+
+
+
+export const GenerateSmartPicksBody = zod.object({
+  "riskLevel": zod.enum(['conservative', 'balanced', 'aggressive']).default(generateSmartPicksBodyRiskLevelDefault),
+  "stakeAmount": zod.number().min(1).max(generateSmartPicksBodyStakeAmountMax).default(generateSmartPicksBodyStakeAmountDefault),
+  "count": zod.number().min(1).max(generateSmartPicksBodyCountMax).default(generateSmartPicksBodyCountDefault)
+})
+
+export const GenerateSmartPicksResponse = zod.object({
+  "combos": zod.array(zod.object({
+  "legs": zod.array(zod.object({
+  "marketId": zod.string(),
+  "platform": zod.enum(['kalshi', 'polymarket']),
+  "marketTitle": zod.string(),
+  "position": zod.enum(['yes', 'no']),
+  "odds": zod.number(),
+  "impliedProb": zod.number()
+})),
+  "jointProbability": zod.number(),
+  "payoutMultiplier": zod.number(),
+  "riskLevel": zod.enum(['conservative', 'balanced', 'aggressive']),
+  "riskScore": zod.enum(['low', 'medium', 'high']),
+  "estimatedPayout": zod.number()
+})),
+  "generatedAt": zod.string()
+})
+
+
+/**
  * @summary Generate ranked combo suggestions from selected markets
  */
 export const optimizeCombosBodyLegsMin = 2;

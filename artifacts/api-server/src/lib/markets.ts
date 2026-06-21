@@ -391,6 +391,35 @@ export async function fetchMarkets(opts: {
   return { markets, total, hasMore: offset + limit < total, ...(apiUnavailable ? { apiUnavailable: true } : {}) };
 }
 
+/**
+ * Returns the complete cached market pool (both platforms) — no slicing.
+ * Used internally by the smart-picks generator which needs the full pool.
+ */
+export async function fetchAllMarkets(): Promise<Market[]> {
+  const cacheKey = "all";
+  const cached = cache.get(cacheKey);
+  if (cached && isFresh(cached)) return cached.data;
+
+  const [kalshiResult, polyResult] = await Promise.allSettled([
+    fetchKalshiMarkets(),
+    fetchPolymarketMarkets(),
+  ]);
+
+  const kalshi = kalshiResult.status === "fulfilled" ? kalshiResult.value : [];
+  const poly = polyResult.status === "fulfilled" ? polyResult.value : [];
+  const all = [...kalshi, ...poly].sort((a, b) => {
+    const aVol = a.volume ?? -1;
+    const bVol = b.volume ?? -1;
+    if (aVol !== bVol) return bVol - aVol;
+    const aUncertainty = 1 - Math.abs(a.yesOdds - 0.5) * 2;
+    const bUncertainty = 1 - Math.abs(b.yesOdds - 0.5) * 2;
+    return bUncertainty - aUncertainty;
+  });
+
+  cache.set(cacheKey, { data: all, fetchedAt: Date.now() });
+  return all;
+}
+
 export async function fetchMarketsForLegs(
   legs: Array<{ platform: string; marketId: string }>,
 ): Promise<{ markets: Market[] }> {

@@ -75,6 +75,61 @@ export interface ComboSuggestion {
   diversificationWarning: boolean;
 }
 
+export type SmartPicksInputRiskLevel = typeof SmartPicksInputRiskLevel[keyof typeof SmartPicksInputRiskLevel];
+
+
+export const SmartPicksInputRiskLevel = {
+  conservative: 'conservative',
+  balanced: 'balanced',
+  aggressive: 'aggressive',
+} as const;
+
+export interface SmartPicksInput {
+  riskLevel?: SmartPicksInputRiskLevel;
+  /**
+     * @minimum 1
+     * @maximum 10000
+     */
+  stakeAmount?: number;
+  /**
+     * @minimum 1
+     * @maximum 4
+     */
+  count?: number;
+}
+
+export type SmartPickResultRiskLevel = typeof SmartPickResultRiskLevel[keyof typeof SmartPickResultRiskLevel];
+
+
+export const SmartPickResultRiskLevel = {
+  conservative: 'conservative',
+  balanced: 'balanced',
+  aggressive: 'aggressive',
+} as const;
+
+export type SmartPickResultRiskScore = typeof SmartPickResultRiskScore[keyof typeof SmartPickResultRiskScore];
+
+
+export const SmartPickResultRiskScore = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+} as const;
+
+export interface SmartPickResult {
+  legs: ComboLeg[];
+  jointProbability: number;
+  payoutMultiplier: number;
+  riskLevel: SmartPickResultRiskLevel;
+  riskScore: SmartPickResultRiskScore;
+  estimatedPayout: number;
+}
+
+export interface SmartPicksResponse {
+  combos: SmartPickResult[];
+  generatedAt: string;
+}
+
 export type OptimizeLegInputPlatform = typeof OptimizeLegInputPlatform[keyof typeof OptimizeLegInputPlatform];
 
 

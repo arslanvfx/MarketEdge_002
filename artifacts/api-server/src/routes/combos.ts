@@ -4,8 +4,8 @@ import { getAuth } from "@clerk/express";
 import { db } from "@workspace/db";
 import { savedCombosTable, comboLegsTable } from "@workspace/db";
 import { eq, and, inArray } from "drizzle-orm";
-import { fetchMarkets, fetchMarketsForLegs } from "../lib/markets";
-import { optimizeCombos, detectPortfolioOverlap } from "../lib/optimizer";
+import { fetchMarkets, fetchMarketsForLegs, fetchAllMarkets } from "../lib/markets";
+import { optimizeCombos, detectPortfolioOverlap, autoGenerateCombos, RiskLevel } from "../lib/optimizer";
 
 const router = Router();
 
@@ -18,6 +18,39 @@ function requireAuth(req: any, res: any, next: any) {
   req.userId = userId;
   next();
 }
+
+// POST /combos/smart-picks — no auth required
+router.post("/combos/smart-picks", async (req, res) => {
+  try {
+    const {
+      riskLevel = "balanced",
+      stakeAmount = 10,
+      count = 4,
+    } = req.body ?? {};
+
+    const validRisk = ["conservative", "balanced", "aggressive"];
+    if (!validRisk.includes(riskLevel)) {
+      return res.status(400).json({ error: "Invalid riskLevel" });
+    }
+    const stake = Math.max(1, Math.min(10000, Number(stakeAmount) || 10));
+    const n = Math.max(1, Math.min(4, Number(count) || 4));
+
+    // Fetch the FULL live market pool — bypasses the 100-item user-facing cap
+    const markets = await fetchAllMarkets();
+
+    const combos = autoGenerateCombos({
+      markets,
+      riskLevel: riskLevel as RiskLevel,
+      stakeAmount: stake,
+      count: n,
+    });
+
+    return res.json({ combos, generatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("[smart-picks]", err);
+    return res.status(500).json({ error: "Generation failed" });
+  }
+});
 
 // POST /combos/optimize — no auth required
 router.post("/combos/optimize", async (req, res) => {

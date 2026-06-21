@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useUser, useClerk, Show } from "@clerk/react";
-import { Activity, LayoutDashboard, LineChart, Target, LogOut } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -10,6 +10,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const navigation = [
     { name: "Markets", href: "/markets", icon: LineChart },
+    { name: "Smart Picks", href: "/picks", icon: Sparkles },
     { name: "Combo Builder", href: "/builder", icon: Target },
     { name: "Portfolio", href: "/portfolio", icon: LayoutDashboard },
   ];

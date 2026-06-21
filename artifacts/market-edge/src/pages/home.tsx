@@ -1,6 +1,6 @@
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
-import { Activity, Zap, Shield, LineChart } from "lucide-react";
+import { Activity, Zap, Shield, LineChart, Sparkles } from "lucide-react";
 import { useListMarkets } from "@workspace/api-client-react";
 
 export default function Home() {
@@ -60,6 +60,30 @@ export default function Home() {
           <h3 className="text-xl font-semibold">Risk Analysis</h3>
           <p className="text-muted-foreground">Automatically detect overlapping exposures and diversification warnings in your portfolio.</p>
         </div>
+      </section>
+
+      {/* Smart Picks CTA */}
+      <section className="w-full max-w-6xl px-6 pb-24">
+        <Link href="/picks">
+          <div className="group relative overflow-hidden rounded-2xl border border-primary/20 bg-gradient-to-r from-primary/5 to-blue-500/5 p-8 cursor-pointer hover:border-primary/40 transition-colors">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                  <Sparkles className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Smart Picks →</h3>
+                  <p className="text-muted-foreground text-sm max-w-md">
+                    One click — get 4 perfectly diversified, non-overlapping combo parlays tailored to your risk appetite. No browsing required.
+                  </p>
+                </div>
+              </div>
+              <Button size="lg" className="shrink-0" data-testid="button-try-smart-picks">
+                Try Smart Picks
+              </Button>
+            </div>
+          </div>
+        </Link>
       </section>
     </div>
   );

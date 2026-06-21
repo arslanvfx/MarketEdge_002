@@ -93,6 +93,29 @@ paths:
         "404":
           description: Not found
 
+  /combos/smart-picks:
+    post:
+      operationId: generateSmartPicks
+      tags: [combos]
+      summary: Auto-generate 4 non-overlapping Smart Pick combos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SmartPicksInput"
+      responses:
+        "200":
+          description: Four non-overlapping combos optimised for the requested risk level
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmartPicksResponse"
+        "400":
+          description: Bad request
+        "500":
+          description: Generation failed
+
   /combos/optimize:
     post:
       operationId: optimizeCombos
@@ -363,6 +386,65 @@ components:
         - jointProbability
         - payoutMultiplier
         - diversificationWarning
+
+    SmartPicksInput:
+      type: object
+      properties:
+        riskLevel:
+          type: string
+          enum: [conservative, balanced, aggressive]
+          default: balanced
+        stakeAmount:
+          type: number
+          minimum: 1
+          maximum: 10000
+          default: 10
+        count:
+          type: integer
+          minimum: 1
+          maximum: 4
+          default: 4
+      required: []
+
+    SmartPickResult:
+      type: object
+      properties:
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboLeg"
+        jointProbability:
+          type: number
+        payoutMultiplier:
+          type: number
+        riskLevel:
+          type: string
+          enum: [conservative, balanced, aggressive]
+        riskScore:
+          type: string
+          enum: [low, medium, high]
+        estimatedPayout:
+          type: number
+      required:
+        - legs
+        - jointProbability
+        - payoutMultiplier
+        - riskLevel
+        - riskScore
+        - estimatedPayout
+
+    SmartPicksResponse:
+      type: object
+      properties:
+        combos:
+          type: array
+          items:
+            $ref: "#/components/schemas/SmartPickResult"
+        generatedAt:
+          type: string
+      required:
+        - combos
+        - generatedAt
 
     OptimizeLegInput:
       type: object

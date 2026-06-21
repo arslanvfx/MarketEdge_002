@@ -31,7 +31,9 @@ import type {
   OptimizeInput,
   OptimizeResponse,
   PriceAlert,
-  SavedCombo
+  SavedCombo,
+  SmartPicksInput,
+  SmartPicksResponse
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -289,6 +291,77 @@ export function useGetMarket<TData = Awaited<ReturnType<typeof getMarket>>, TErr
 
 
 
+
+export const getGenerateSmartPicksUrl = () => {
+
+
+
+
+  return `/api/combos/smart-picks`
+}
+
+/**
+ * @summary Auto-generate 4 non-overlapping Smart Pick combos
+ */
+export const generateSmartPicks = async (smartPicksInput: SmartPicksInput, options?: RequestInit): Promise<SmartPicksResponse> => {
+
+  return customFetch<SmartPicksResponse>(getGenerateSmartPicksUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      smartPicksInput,)
+  }
+);}
+
+
+
+
+export const getGenerateSmartPicksMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof generateSmartPicks>>, TError,{data: BodyType<SmartPicksInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof generateSmartPicks>>, TError,{data: BodyType<SmartPicksInput>}, TContext> => {
+
+const mutationKey = ['generateSmartPicks'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof generateSmartPicks>>, {data: BodyType<SmartPicksInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  generateSmartPicks(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type GenerateSmartPicksMutationResult = NonNullable<Awaited<ReturnType<typeof generateSmartPicks>>>
+    export type GenerateSmartPicksMutationBody = BodyType<SmartPicksInput>
+    export type GenerateSmartPicksMutationError = ErrorType<void>
+
+    /**
+ * @summary Auto-generate 4 non-overlapping Smart Pick combos
+ */
+export const useGenerateSmartPicks = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof generateSmartPicks>>, TError,{data: BodyType<SmartPicksInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof generateSmartPicks>>,
+        TError,
+        {data: BodyType<SmartPicksInput>},
+        TContext
+      > => {
+      return useMutation(getGenerateSmartPicksMutationOptions(options));
+    }
 
 export const getOptimizeCombosUrl = () => {
 
