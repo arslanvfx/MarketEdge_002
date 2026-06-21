@@ -1,3 +1,4 @@
 - [Same-game combo architecture](same-game-combos.md) — how gameKey/eventTicker flow from markets.ts through optimizer to picks UI
 - [Polymarket single-bet mode](polymarket-single-bet.md) — Polymarket always emits size-1; Kalshi non-sport categories also forced single
 - [sideLabel prop NO side](sidelabel-props.md) — Over→Under flip logic for NO side of prop market subtitles
+- [Smart Picks architecture](smart-picks-arch.md) — Polymarket=single bets always; Kalshi sports=multi-leg; Kalshi non-sport=single; same-game props need sibling expansion in combos.ts

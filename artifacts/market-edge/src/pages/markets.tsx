@@ -500,15 +500,17 @@ export default function Markets() {
 
                     {/* ── Recommended pick — the focal point of each card ── */}
                     <div className={`flex items-center justify-between px-3 py-2.5 rounded-lg border mb-3 shadow-sm ${pickBg}`}>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-semibold uppercase tracking-widest opacity-60">
+                      {/* Left: label stacked above the pick value so long selections wrap cleanly */}
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className="text-[10px] font-semibold uppercase tracking-widest opacity-60 leading-none">
                           Suggested pick
                         </span>
-                        <span className="text-base font-extrabold tracking-wide">
+                        <span className="text-xl font-extrabold tracking-wide leading-tight">
                           {side}
                         </span>
                       </div>
-                      <div className="text-right">
+                      {/* Right: probability */}
+                      <div className="text-right shrink-0 pl-3">
                         <div className="text-lg font-black tabular-nums leading-none">{formatProb(prob)}</div>
                         <div className="text-[10px] opacity-60 mt-0.5">win probability</div>
                       </div>
