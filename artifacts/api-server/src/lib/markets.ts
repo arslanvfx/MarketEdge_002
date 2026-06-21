@@ -57,6 +57,90 @@ const KALSHI_SERIES = [
   "KXMIDTERMMOV",      // 2026 midterm election margin of victory
 ];
 
+interface KalshiEvent {
+  series_ticker?: string;
+}
+
+interface DiscoveredSeriesCache {
+  series: string[];
+  fetchedAt: number;
+}
+
+/** 24-hour TTL for the auto-discovered series list — checked once per day. */
+const SERIES_DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
+
+let discoveredSeriesCache: DiscoveredSeriesCache | null = null;
+
+/**
+ * Page through /events?status=open and extract every unique series_ticker.
+ * Only series not already in the hardcoded KALSHI_SERIES are returned —
+ * those are then probed in fetchAllKalshiSeries() before being used.
+ *
+ * Result is cached for 24 hours so discovery only runs once per day.
+ */
+async function discoverKalshiSeries(): Promise<string[]> {
+  if (
+    discoveredSeriesCache &&
+    Date.now() - discoveredSeriesCache.fetchedAt < SERIES_DISCOVERY_TTL_MS
+  ) {
+    return discoveredSeriesCache.series;
+  }
+
+  const knownSeries = new Set(KALSHI_SERIES);
+  const found = new Set<string>();
+  let cursor: string | undefined;
+
+  try {
+    do {
+      const params = new URLSearchParams({ limit: "200", status: "open" });
+      if (cursor) params.set("cursor", cursor);
+
+      const res = await fetch(`${KALSHI_BASE}/events?${params}`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (!res.ok) break;
+
+      const data = (await res.json()) as {
+        events?: KalshiEvent[];
+        cursor?: string;
+      };
+      const events = data.events ?? [];
+
+      for (const event of events) {
+        if (event.series_ticker && !knownSeries.has(event.series_ticker)) {
+          found.add(event.series_ticker);
+        }
+      }
+
+      // The API returns an empty cursor or omits it when done
+      cursor = events.length > 0 ? data.cursor : undefined;
+    } while (cursor);
+  } catch {
+    // Network error or timeout — return whatever was accumulated
+  }
+
+  // Probe each candidate: only keep series that have ≥1 real non-provisional market
+  const candidates = [...found];
+  const probeResults = await Promise.allSettled(
+    candidates.map(async (ticker) => {
+      const markets = await fetchKalshiSeries(ticker);
+      return markets.length > 0 ? ticker : null;
+    }),
+  );
+
+  const confirmed = probeResults
+    .filter(
+      (r): r is PromiseFulfilledResult<string> =>
+        r.status === "fulfilled" && r.value !== null,
+    )
+    .map((r) => r.value);
+
+  discoveredSeriesCache = { series: confirmed, fetchedAt: Date.now() };
+  return confirmed;
+}
+
 interface KalshiMarket {
   ticker: string;
   title?: string;
@@ -146,7 +230,13 @@ async function fetchKalshiMarkets(): Promise<Market[]> {
 }
 
 async function fetchAllKalshiSeries(): Promise<Market[]> {
-  const results = await Promise.allSettled(KALSHI_SERIES.map(fetchKalshiSeries));
+  // Merge hardcoded seed list with auto-discovered series (cached 24 h).
+  // discoverKalshiSeries() pages /events?status=open, probes candidates,
+  // and returns only series with live non-provisional markets.
+  const discovered = await discoverKalshiSeries();
+  const allSeries = [...new Set([...KALSHI_SERIES, ...discovered])];
+
+  const results = await Promise.allSettled(allSeries.map(fetchKalshiSeries));
   const all: Market[] = [];
   for (const r of results) {
     if (r.status === "fulfilled") all.push(...r.value);
