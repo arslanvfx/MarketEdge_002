@@ -65,10 +65,17 @@ router.post("/combos/smart-picks", async (req, res) => {
     // legCount now means MAX legs (1/2/3/4) or "5+" minimum, or "auto".
     const legs: "auto" | 1 | 2 | 3 | 4 | 5 =
       legCount === "auto" ? "auto" : (Number(legCount) as 1 | 2 | 3 | 4 | 5);
+    // Sports meta-category: "sports" matches all sport subcategories so the user
+    // can say "show me any sport" without having to pick Soccer vs Basketball etc.
+    const SPORTS_CATEGORIES = new Set([
+      "soccer", "basketball", "baseball", "football", "hockey",
+      "tennis", "golf", "mma", "boxing", "cricket", "rugby",
+    ]);
     const categoryFilter =
       typeof category === "string" && category && category !== "all"
         ? category.toLowerCase()
         : null;
+    const isSportsFilter = categoryFilter === "sports";
     const stake = Math.max(1, Math.min(100, Number(stakeAmount) || 10));
     const n = Math.max(1, Math.min(4, Number(count) || 4));
 
@@ -81,11 +88,11 @@ router.post("/combos/smart-picks", async (req, res) => {
     const liquid = markets.filter((m) => {
       if (!(m.yesOdds > 0.02 && m.yesOdds < 0.98)) return false;
       if (!((m.volume ?? 0) > 0)) return false;
-      if (
-        categoryFilter !== null &&
-        (m.category ?? "Other").toLowerCase() !== categoryFilter
-      )
-        return false;
+      if (categoryFilter !== null) {
+        const mCat = (m.category ?? "Other").toLowerCase();
+        if (isSportsFilter ? !SPORTS_CATEGORIES.has(mCat) : mCat !== categoryFilter)
+          return false;
+      }
       // Resolution-horizon filter: only markets that settle within the chosen
       // window. Markets with no known close time are excluded once a horizon is
       // set — EXCEPT Kalshi game-prop markets (corners, totals, BTTS, spreads…).

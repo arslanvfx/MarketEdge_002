@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/command";
 import {
   Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info,
-  Brain, TrendingUp, Clock, Search, Check, ChevronsUpDown,
+  Brain, TrendingUp, Clock, Search, Check, ChevronsUpDown, Trophy,
 } from "lucide-react";
 import {
   useGenerateSmartPicks,
@@ -421,6 +421,19 @@ function CategoryPicker({
         >
           All
         </button>
+        <button
+          type="button"
+          onClick={() => onChange("Sports")}
+          data-testid="category-sports"
+          className={`flex items-center gap-1 px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
+            value === "Sports"
+              ? "border-primary/40 bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground"
+          }`}
+        >
+          <Trophy className="w-3 h-3" />
+          Sports
+        </button>
         {trending.map((cat) => {
           const active = value === cat.name;
           return (
@@ -467,6 +480,11 @@ function CategoryPicker({
                 <CommandItem value="All categories" onSelect={() => { onChange("all"); setOpen(false); }} data-testid="category-option-all">
                   <Check className={`mr-2 h-4 w-4 ${value === "all" ? "opacity-100" : "opacity-0"}`} />
                   All categories
+                </CommandItem>
+                <CommandItem value="All Sports" onSelect={() => { onChange("Sports"); setOpen(false); }} data-testid="category-option-sports">
+                  <Check className={`mr-2 h-4 w-4 ${value === "Sports" ? "opacity-100" : "opacity-0"}`} />
+                  <Trophy className="mr-1 h-3.5 w-3.5 opacity-60" />
+                  All Sports
                 </CommandItem>
                 {categories.map((cat) => (
                   <CommandItem key={cat.name} value={cat.name} onSelect={() => { onChange(cat.name); setOpen(false); }} data-testid={`category-option-${cat.name}`}>

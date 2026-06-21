@@ -558,6 +558,14 @@ export function autoGenerateCombos(opts: {
   };
   const allRaw: RawCombo[] = [];
 
+  // Kalshi's combo builder only covers sports markets. Politics, economics,
+  // climate, finance, etc. are traded individually — the platform doesn't let
+  // you parlay them, so we surface them as single bets only (like Polymarket).
+  const KALSHI_SPORTS = new Set([
+    "Soccer", "Basketball", "Baseball", "Football", "Hockey", "Tennis",
+    "Golf", "MMA", "Boxing", "Cricket", "Rugby",
+  ]);
+
   for (const groupLegs of groups.values()) {
     // valueLegs is pre-sorted (value bets by edge, then safe favorites by
     // probability), so this slice keeps the highest-quality legs per group while
@@ -568,13 +576,6 @@ export function autoGenerateCombos(opts: {
     // SINGLE bets (one leg each) instead of parlays. Kalshi keeps multi-leg
     // combos, including same-game prop combos (winner + total + spread + …).
     const isPolymarket = pool[0]?.platform === "polymarket";
-    // Kalshi's combo builder only covers sports markets. Politics, economics,
-    // climate, finance, etc. are traded individually on Kalshi — the platform
-    // doesn't let you parlay them, so we surface them as single bets only.
-    const KALSHI_SPORTS = new Set([
-      "Soccer", "Basketball", "Baseball", "Football", "Hockey", "Tennis",
-      "Golf", "MMA", "Boxing", "Cricket", "Rugby",
-    ]);
     const isKalshiNonSport =
       pool[0]?.platform === "kalshi" &&
       !KALSHI_SPORTS.has(pool[0]?.category ?? "");
