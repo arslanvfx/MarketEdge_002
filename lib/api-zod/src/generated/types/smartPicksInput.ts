@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { SmartPicksInputPlatform } from './smartPicksInputPlatform';
 import type { SmartPicksInputRiskLevel } from './smartPicksInputRiskLevel';
 
 export interface SmartPicksInput {
@@ -19,4 +20,6 @@ export interface SmartPicksInput {
      * @maximum 4
      */
   count?: number;
+  /** Which platform(s) to draw candidate markets from */
+  platform?: SmartPicksInputPlatform;
 }

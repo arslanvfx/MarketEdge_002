@@ -45,5 +45,6 @@ export * from './smartPickResult';
 export * from './smartPickResultRiskLevel';
 export * from './smartPickResultRiskScore';
 export * from './smartPicksInput';
+export * from './smartPicksInputPlatform';
 export * from './smartPicksInputRiskLevel';
 export * from './smartPicksResponse';

@@ -27,11 +27,16 @@ router.post("/combos/smart-picks", async (req, res) => {
       riskLevel = "balanced",
       stakeAmount = 10,
       count = 4,
+      platform = "both",
     } = req.body ?? {};
 
     const validRisk = ["conservative", "balanced", "aggressive"];
     if (!validRisk.includes(riskLevel)) {
       return res.status(400).json({ error: "Invalid riskLevel" });
+    }
+    const validPlatform = ["kalshi", "polymarket", "both"];
+    if (!validPlatform.includes(platform)) {
+      return res.status(400).json({ error: "Invalid platform" });
     }
     const stake = Math.max(1, Math.min(100, Number(stakeAmount) || 10));
     const n = Math.max(1, Math.min(4, Number(count) || 4));
@@ -42,15 +47,39 @@ router.post("/combos/smart-picks", async (req, res) => {
     // Pre-filter to liquid, genuinely-priced candidates before the AI pass.
     // Caps the number of markets Claude analyzes (cost/latency) while keeping
     // the markets most likely to contain real value.
-    const candidates = markets
-      .filter(
-        (m) =>
-          m.yesOdds > 0.02 &&
-          m.yesOdds < 0.98 &&
-          (m.volume ?? 0) > 0,
-      )
-      .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
-      .slice(0, 48);
+    const liquid = markets.filter(
+      (m) => m.yesOdds > 0.02 && m.yesOdds < 0.98 && (m.volume ?? 0) > 0,
+    );
+
+    // Take the highest-volume markets for a platform. When generating for BOTH
+    // platforms we balance the pool (top N each) instead of sorting by raw
+    // volume — Kalshi and Polymarket measure volume on different scales, so a
+    // naive global sort would let one platform crowd the other out entirely.
+    const pickTop = (plat: "kalshi" | "polymarket", limit: number) =>
+      liquid
+        .filter((m) => m.platform === plat)
+        .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
+        .slice(0, limit);
+
+    const POOL_CAP = 48;
+    let candidates: typeof liquid;
+    if (platform === "kalshi") {
+      candidates = pickTop("kalshi", POOL_CAP);
+    } else if (platform === "polymarket") {
+      candidates = pickTop("polymarket", POOL_CAP);
+    } else {
+      candidates = [...pickTop("kalshi", 24), ...pickTop("polymarket", 24)];
+      // If one platform is thin, backfill from the other (by volume) so we still
+      // analyze a full pool instead of returning fewer combos than possible.
+      if (candidates.length < POOL_CAP) {
+        const have = new Set(candidates.map((m) => `${m.platform}:${m.id}`));
+        const backfill = liquid
+          .filter((m) => !have.has(`${m.platform}:${m.id}`))
+          .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
+          .slice(0, POOL_CAP - candidates.length);
+        candidates = [...candidates, ...backfill];
+      }
+    }
 
     // AI estimates the TRUE probability of each candidate market.
     const analyses = await analyzeMarkets(candidates);

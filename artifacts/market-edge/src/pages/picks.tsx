@@ -12,6 +12,7 @@ import {
   useSaveCombo,
   SmartPickResult,
   SmartPicksInputRiskLevel,
+  SmartPicksInputPlatform,
   getListCombosQueryKey,
 } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
@@ -39,7 +40,7 @@ const RISK_OPTIONS: { value: RiskLevel; label: string; description: string; icon
   {
     value: "aggressive",
     label: "Aggressive",
-    description: "Long shots with high multipliers",
+    description: "Lower-probability legs, bigger upside",
     icon: Flame,
     color: "text-orange-400 border-orange-500/40 bg-orange-500/10",
   },
@@ -49,6 +50,19 @@ const RISK_SCORE_BADGE: Record<SmartPickResult["riskScore"], { label: string; cl
   low:    { label: "Low Risk",    className: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" },
   medium: { label: "Med Risk",    className: "bg-amber-500/10 text-amber-400 border-amber-500/20" },
   high:   { label: "High Risk",   className: "bg-red-500/10 text-red-400 border-red-500/20" },
+};
+
+type PlatformFilter = SmartPicksInputPlatform;
+
+const PLATFORM_OPTIONS: { value: PlatformFilter; label: string }[] = [
+  { value: "both", label: "Both" },
+  { value: "polymarket", label: "Polymarket" },
+  { value: "kalshi", label: "Kalshi" },
+];
+
+const PLATFORM_BADGE: Record<string, { label: string; className: string }> = {
+  polymarket: { label: "Polymarket", className: "bg-violet-500/10 text-violet-400 border-violet-500/20" },
+  kalshi:     { label: "Kalshi",     className: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20" },
 };
 
 function formatProb(p: number) {
@@ -186,6 +200,14 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
               </Badge>
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-xs leading-snug">{leg.marketTitle}</div>
+                {PLATFORM_BADGE[leg.platform] && (
+                  <Badge
+                    variant="outline"
+                    className={`mt-1 text-[9px] px-1.5 py-0 font-medium ${PLATFORM_BADGE[leg.platform].className}`}
+                  >
+                    {PLATFORM_BADGE[leg.platform].label}
+                  </Badge>
+                )}
                 {leg.aiReasoning && (
                   <div className="flex items-start gap-1 mt-1 text-[11px] leading-snug text-muted-foreground">
                     <Brain className="w-3 h-3 mt-px shrink-0 text-primary/60" />
@@ -292,6 +314,7 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
 
 export default function SmartPicks() {
   const [riskLevel, setRiskLevel] = useState<RiskLevel>("balanced");
+  const [platform, setPlatform] = useState<PlatformFilter>("both");
   const [stake, setStake] = useState(10);
   const [results, setResults] = useState<SmartPickResult[] | null>(null);
   const generateMutation = useGenerateSmartPicks();
@@ -299,7 +322,7 @@ export default function SmartPicks() {
 
   const handleGenerate = () => {
     generateMutation.mutate(
-      { data: { riskLevel, stakeAmount: stake, count: 4 } },
+      { data: { riskLevel, stakeAmount: stake, count: 4, platform } },
       {
         onSuccess: (data) => {
           setResults(data.combos);
@@ -382,6 +405,31 @@ export default function SmartPicks() {
                 })}
               </div>
               <p className="text-xs text-muted-foreground">{selectedRiskOption.description}</p>
+            </div>
+
+            {/* Platform filter */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Platform</label>
+              <div className="flex gap-2 flex-wrap">
+                {PLATFORM_OPTIONS.map((opt) => {
+                  const active = platform === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      onClick={() => setPlatform(opt.value)}
+                      data-testid={`platform-${opt.value}`}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                        active
+                          ? "border-primary/40 bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">Markets differ per platform</p>
             </div>
 
             {/* Generate button */}

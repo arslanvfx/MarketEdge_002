@@ -116,6 +116,18 @@ export const SmartPicksInputRiskLevel = {
   aggressive: 'aggressive',
 } as const;
 
+/**
+ * Which platform(s) to draw candidate markets from
+ */
+export type SmartPicksInputPlatform = typeof SmartPicksInputPlatform[keyof typeof SmartPicksInputPlatform];
+
+
+export const SmartPicksInputPlatform = {
+  kalshi: 'kalshi',
+  polymarket: 'polymarket',
+  both: 'both',
+} as const;
+
 export interface SmartPicksInput {
   riskLevel?: SmartPicksInputRiskLevel;
   /**
@@ -128,6 +140,8 @@ export interface SmartPicksInput {
      * @maximum 4
      */
   count?: number;
+  /** Which platform(s) to draw candidate markets from */
+  platform?: SmartPicksInputPlatform;
 }
 
 export type SmartPickResultRiskLevel = typeof SmartPickResultRiskLevel[keyof typeof SmartPickResultRiskLevel];

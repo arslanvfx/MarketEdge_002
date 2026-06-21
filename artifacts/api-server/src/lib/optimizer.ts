@@ -178,15 +178,24 @@ export function autoGenerateCombos(opts: {
 
   const EDGE_THRESHOLD = 0.05; // require ≥5 percentage points of value
 
-  // Minimum true probability of the CHOSEN side per risk level. Conservative
-  // bettors want legs that are individually likely; aggressive bettors tolerate
-  // longer shots (bigger payout) as long as there is still positive edge.
-  const MIN_TRUE_PROB: Record<RiskLevel, number> = {
-    conservative: 0.6,
-    balanced: 0.45,
-    aggressive: 0.3,
+  // Per-risk tuning:
+  //  • minLegTrue — minimum true probability of the CHOSEN side for a leg.
+  //  • minJoint   — minimum probability the WHOLE parlay actually hits. Stops
+  //    low-probability lottery combos from surfacing at all.
+  //  • probBand   — width of the win-probability tier used for ranking. Combos
+  //    are ranked PROBABILITY-FIRST (highest win-probability tier wins); within
+  //    a tier the highest payout wins. A wider band lets return matter across a
+  //    larger probability range (aggressive), a tighter band keeps it strictly
+  //    probability-first (conservative).
+  const RISK_TUNING: Record<
+    RiskLevel,
+    { minLegTrue: number; minJoint: number; probBand: number }
+  > = {
+    conservative: { minLegTrue: 0.6, minJoint: 0.45, probBand: 0.08 },
+    balanced: { minLegTrue: 0.45, minJoint: 0.3, probBand: 0.12 },
+    aggressive: { minLegTrue: 0.3, minJoint: 0.15, probBand: 0.2 },
   };
-  const minTrue = MIN_TRUE_PROB[riskLevel];
+  const { minLegTrue: minTrue, minJoint, probBand } = RISK_TUNING[riskLevel];
 
   // ── Build value-bet legs (one best side per market) ───────────────────────
   type ScoredLeg = ComboLegResult & {
@@ -275,12 +284,24 @@ export function autoGenerateCombos(opts: {
       const multiplier = 1 / jointPrice;
       const evMultiplier = legs.reduce((acc, l) => acc * l.edgeRatio, 1);
       if (evMultiplier <= 1) continue; // only positive-EV parlays
+      if (jointTrueProb < minJoint) continue; // must be genuinely likely to hit
+
       allRaw.push({ legs, jointTrueProb, multiplier, evMultiplier });
     }
   }
 
-  // Highest expected value first.
-  allRaw.sort((a, b) => b.evMultiplier - a.evMultiplier);
+  // Rank PROBABILITY-FIRST: bucket combos into win-probability tiers (band width
+  // depends on risk) and order the highest-probability tier first. Within a tier
+  // (where win odds are comparable) the highest payout wins. This guarantees the
+  // safest bets surface first while still rewarding the best return available at
+  // that probability — no longshot can leapfrog a likelier combo on payout alone.
+  const tierOf = (p: number) => Math.floor(p / probBand);
+  allRaw.sort((a, b) => {
+    const tierA = tierOf(a.jointTrueProb);
+    const tierB = tierOf(b.jointTrueProb);
+    if (tierA !== tierB) return tierB - tierA; // higher win-probability tier first
+    return b.multiplier - a.multiplier; // within tier, best return first
+  });
 
   // ── Greedy non-overlapping selection ─────────────────────────────────────
   const usedMarkets = new Set<string>();
@@ -303,7 +324,7 @@ export function autoGenerateCombos(opts: {
       stakeAmount * (candidate.jointTrueProb * candidate.multiplier - 1);
 
     const topLeg = [...candidate.legs].sort((a, b) => b.edge - a.edge)[0];
-    const rationale = `+${edgePercent.toFixed(0)}% combined edge across ${candidate.legs.length} value bets — strongest: ${topLeg.marketTitle} (${topLeg.position.toUpperCase()}, +${(topLeg.edge * 100).toFixed(0)} pts).`;
+    const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${candidate.legs.length} value bets — strongest: ${topLeg.marketTitle} (${topLeg.position.toUpperCase()}, +${(topLeg.edge * 100).toFixed(0)} pts).`;
 
     selected.push({
       legs: candidate.legs.map((l) => ({

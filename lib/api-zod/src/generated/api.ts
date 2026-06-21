@@ -94,12 +94,13 @@ export const generateSmartPicksBodyStakeAmountMax = 100;
 export const generateSmartPicksBodyCountDefault = 4;
 export const generateSmartPicksBodyCountMax = 4;
 
-
+export const generateSmartPicksBodyPlatformDefault = `both`;
 
 export const GenerateSmartPicksBody = zod.object({
   "riskLevel": zod.enum(['conservative', 'balanced', 'aggressive']).default(generateSmartPicksBodyRiskLevelDefault),
   "stakeAmount": zod.number().min(1).max(generateSmartPicksBodyStakeAmountMax).default(generateSmartPicksBodyStakeAmountDefault),
-  "count": zod.number().min(1).max(generateSmartPicksBodyCountMax).default(generateSmartPicksBodyCountDefault)
+  "count": zod.number().min(1).max(generateSmartPicksBodyCountMax).default(generateSmartPicksBodyCountDefault),
+  "platform": zod.enum(['kalshi', 'polymarket', 'both']).default(generateSmartPicksBodyPlatformDefault).describe('Which platform(s) to draw candidate markets from')
 })
 
 export const GenerateSmartPicksResponse = zod.object({
