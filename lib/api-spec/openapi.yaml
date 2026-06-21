@@ -10,6 +10,10 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: markets
+    description: Market data from Kalshi and Polymarket
+  - name: combos
+    description: Combo optimization and saved combos
 paths:
   /healthz:
     get:
@@ -24,7 +28,175 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /markets:
+    get:
+      operationId: listMarkets
+      tags: [markets]
+      summary: List markets from Kalshi and Polymarket
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: Search query
+        - name: platform
+          in: query
+          schema:
+            type: string
+            enum: [kalshi, polymarket, all]
+          description: Filter by platform
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of markets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketsResponse"
+
+  /markets/{platform}/{marketId}:
+    get:
+      operationId: getMarket
+      tags: [markets]
+      summary: Get a single market with live odds
+      parameters:
+        - name: platform
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [kalshi, polymarket]
+        - name: marketId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Market detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Market"
+        "404":
+          description: Not found
+
+  /combos/optimize:
+    post:
+      operationId: optimizeCombos
+      tags: [combos]
+      summary: Generate ranked combo suggestions from selected markets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OptimizeInput"
+      responses:
+        "200":
+          description: Ranked combo suggestions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OptimizeResponse"
+
+  /combos:
+    get:
+      operationId: listCombos
+      tags: [combos]
+      summary: List current user's saved combos (auth required)
+      security:
+        - clerkAuth: []
+      responses:
+        "200":
+          description: Saved combos with overlap info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CombosListResponse"
+        "401":
+          description: Unauthorized
+    post:
+      operationId: saveCombo
+      tags: [combos]
+      summary: Save a combo (auth required)
+      security:
+        - clerkAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ComboInput"
+      responses:
+        "201":
+          description: Saved combo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedCombo"
+        "401":
+          description: Unauthorized
+
+  /combos/{comboId}:
+    get:
+      operationId: getCombo
+      tags: [combos]
+      summary: Get a saved combo with overlap status (auth required)
+      security:
+        - clerkAuth: []
+      parameters:
+        - name: comboId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Combo detail with overlap warning
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedCombo"
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteCombo
+      tags: [combos]
+      summary: Delete a saved combo (auth required)
+      security:
+        - clerkAuth: []
+      parameters:
+        - name: comboId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not found
+
 components:
+  securitySchemes:
+    clerkAuth:
+      type: http
+      scheme: bearer
   schemas:
     HealthStatus:
       type: object
@@ -34,3 +206,276 @@ components:
       required:
         - status
 
+    Market:
+      type: object
+      properties:
+        id:
+          type: string
+        platform:
+          type: string
+          enum: [kalshi, polymarket]
+        title:
+          type: string
+        yesOdds:
+          type: number
+          description: Probability of YES (0-1)
+        noOdds:
+          type: number
+          description: Probability of NO (0-1)
+        volume:
+          type: ["number", "null"]
+        closeTime:
+          type: ["string", "null"]
+        url:
+          type: string
+        category:
+          type: ["string", "null"]
+      required:
+        - id
+        - platform
+        - title
+        - yesOdds
+        - noOdds
+        - url
+
+    MarketsResponse:
+      type: object
+      properties:
+        markets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Market"
+        total:
+          type: integer
+        hasMore:
+          type: boolean
+      required:
+        - markets
+        - total
+        - hasMore
+
+    ComboLeg:
+      type: object
+      properties:
+        marketId:
+          type: string
+        platform:
+          type: string
+          enum: [kalshi, polymarket]
+        marketTitle:
+          type: string
+        position:
+          type: string
+          enum: [yes, no]
+        odds:
+          type: number
+        impliedProb:
+          type: number
+      required:
+        - marketId
+        - platform
+        - marketTitle
+        - position
+        - odds
+        - impliedProb
+
+    ComboSuggestion:
+      type: object
+      properties:
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboLeg"
+        jointProbability:
+          type: number
+          description: Combined implied probability of all legs hitting
+        payoutMultiplier:
+          type: number
+          description: Implied payout multiplier (1 / jointProbability)
+        diversificationWarning:
+          type: boolean
+          description: True if this combo shares all leg outcomes with another combo in the result set
+      required:
+        - legs
+        - jointProbability
+        - payoutMultiplier
+        - diversificationWarning
+
+    OptimizeLegInput:
+      type: object
+      properties:
+        marketId:
+          type: string
+        platform:
+          type: string
+          enum: [kalshi, polymarket]
+        position:
+          type: string
+          enum: [yes, no]
+      required:
+        - marketId
+        - platform
+        - position
+
+    OptimizeInput:
+      type: object
+      properties:
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/OptimizeLegInput"
+          minItems: 2
+          maxItems: 20
+        maxComboSize:
+          type: integer
+          default: 4
+          minimum: 2
+          maximum: 5
+        topN:
+          type: integer
+          default: 10
+          minimum: 1
+          maximum: 50
+      required:
+        - legs
+
+    OptimizeResponse:
+      type: object
+      properties:
+        combos:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboSuggestion"
+      required:
+        - combos
+
+    ComboLegInput:
+      type: object
+      properties:
+        marketId:
+          type: string
+        platform:
+          type: string
+          enum: [kalshi, polymarket]
+        marketTitle:
+          type: string
+        position:
+          type: string
+          enum: [yes, no]
+        oddsAtSave:
+          type: number
+        impliedProbAtSave:
+          type: number
+      required:
+        - marketId
+        - platform
+        - marketTitle
+        - position
+        - oddsAtSave
+        - impliedProbAtSave
+
+    ComboInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        note:
+          type: ["string", "null"]
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboLegInput"
+          minItems: 2
+      required:
+        - name
+        - legs
+
+    SavedComboLeg:
+      type: object
+      properties:
+        id:
+          type: string
+        marketId:
+          type: string
+        platform:
+          type: string
+          enum: [kalshi, polymarket]
+        marketTitle:
+          type: string
+        position:
+          type: string
+          enum: [yes, no]
+        oddsAtSave:
+          type: number
+        impliedProbAtSave:
+          type: number
+      required:
+        - id
+        - marketId
+        - platform
+        - marketTitle
+        - position
+        - oddsAtSave
+        - impliedProbAtSave
+
+    SavedCombo:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        note:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SavedComboLeg"
+        jointProbabilityAtSave:
+          type: number
+        payoutMultiplierAtSave:
+          type: number
+        portfolioOverlapWarning:
+          type: boolean
+          description: True if a single outcome appears in every one of the user's saved combos
+      required:
+        - id
+        - name
+        - createdAt
+        - legs
+        - jointProbabilityAtSave
+        - payoutMultiplierAtSave
+        - portfolioOverlapWarning
+
+    CombosListResponse:
+      type: object
+      properties:
+        combos:
+          type: array
+          items:
+            $ref: "#/components/schemas/SavedCombo"
+        portfolioOverlapWarnings:
+          type: array
+          items:
+            type: object
+            properties:
+              marketId:
+                type: string
+              platform:
+                type: string
+              marketTitle:
+                type: string
+              position:
+                type: string
+            required:
+              - marketId
+              - platform
+              - marketTitle
+              - position
+      required:
+        - combos
+        - portfolioOverlapWarnings
