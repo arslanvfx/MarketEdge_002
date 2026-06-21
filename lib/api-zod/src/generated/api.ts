@@ -199,3 +199,46 @@ export const DeleteComboParams = zod.object({
 })
 
 
+/**
+ * @summary List current user's price alerts (auth required); also checks live odds and fires matched alerts
+ */
+export const ListAlertsResponse = zod.object({
+  "alerts": zod.array(zod.object({
+  "id": zod.string(),
+  "platform": zod.enum(['kalshi', 'polymarket']),
+  "marketId": zod.string(),
+  "marketTitle": zod.string(),
+  "condition": zod.enum(['above', 'below']),
+  "threshold": zod.number().describe('Probability threshold (0-1)'),
+  "isTriggered": zod.boolean(),
+  "triggeredAt": zod.string().nullish(),
+  "createdAt": zod.string()
+}))
+})
+
+
+/**
+ * @summary Create a price alert (auth required)
+ */
+export const createAlertBodyThresholdMin = 0;
+export const createAlertBodyThresholdMax = 1;
+
+
+
+export const CreateAlertBody = zod.object({
+  "platform": zod.enum(['kalshi', 'polymarket']),
+  "marketId": zod.string(),
+  "marketTitle": zod.string(),
+  "condition": zod.enum(['above', 'below']),
+  "threshold": zod.number().min(createAlertBodyThresholdMin).max(createAlertBodyThresholdMax).describe('Probability threshold (0-1)')
+})
+
+
+/**
+ * @summary Delete a price alert (auth required)
+ */
+export const DeleteAlertParams = zod.object({
+  "alertId": zod.coerce.string()
+})
+
+

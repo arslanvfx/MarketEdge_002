@@ -14,6 +14,8 @@ tags:
     description: Market data from Kalshi and Polymarket
   - name: combos
     description: Combo optimization and saved combos
+  - name: alerts
+    description: Price-movement alerts for markets
 paths:
   /healthz:
     get:
@@ -180,6 +182,67 @@ paths:
         - clerkAuth: []
       parameters:
         - name: comboId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not found
+
+  /alerts:
+    get:
+      operationId: listAlerts
+      tags: [alerts]
+      summary: List current user's price alerts (auth required); also checks live odds and fires matched alerts
+      security:
+        - clerkAuth: []
+      responses:
+        "200":
+          description: List of price alerts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertsListResponse"
+        "401":
+          description: Unauthorized
+    post:
+      operationId: createAlert
+      tags: [alerts]
+      summary: Create a price alert (auth required)
+      security:
+        - clerkAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAlertInput"
+      responses:
+        "201":
+          description: Created alert
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriceAlert"
+        "400":
+          description: Bad request
+        "401":
+          description: Unauthorized
+
+  /alerts/{alertId}:
+    delete:
+      operationId: deleteAlert
+      tags: [alerts]
+      summary: Delete a price alert (auth required)
+      security:
+        - clerkAuth: []
+      parameters:
+        - name: alertId
           in: path
           required: true
           schema:
@@ -479,3 +542,72 @@ components:
       required:
         - combos
         - portfolioOverlapWarnings
+
+    PriceAlert:
+      type: object
+      properties:
+        id:
+          type: string
+        platform:
+          type: string
+          enum: [kalshi, polymarket]
+        marketId:
+          type: string
+        marketTitle:
+          type: string
+        condition:
+          type: string
+          enum: [above, below]
+        threshold:
+          type: number
+          description: Probability threshold (0-1)
+        isTriggered:
+          type: boolean
+        triggeredAt:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+      required:
+        - id
+        - platform
+        - marketId
+        - marketTitle
+        - condition
+        - threshold
+        - isTriggered
+        - createdAt
+
+    AlertsListResponse:
+      type: object
+      properties:
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PriceAlert"
+      required:
+        - alerts
+
+    CreateAlertInput:
+      type: object
+      properties:
+        platform:
+          type: string
+          enum: [kalshi, polymarket]
+        marketId:
+          type: string
+        marketTitle:
+          type: string
+        condition:
+          type: string
+          enum: [above, below]
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Probability threshold (0-1)
+      required:
+        - platform
+        - marketId
+        - marketTitle
+        - condition
+        - threshold

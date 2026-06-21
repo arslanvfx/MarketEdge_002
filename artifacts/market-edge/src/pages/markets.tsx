@@ -9,6 +9,7 @@ import { Search, Plus, ExternalLink, Filter, TrendingUp } from "lucide-react";
 import { useBuilder } from "@/lib/builder-context";
 import { useToast } from "@/hooks/use-toast";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { SetAlertDialog } from "@/components/set-alert-dialog";
 
 function formatOdds(odds: number) {
   return (odds * 100).toFixed(1) + "%";
@@ -93,9 +94,12 @@ export default function Markets() {
                       {market.platform === "polymarket" && <TrendingUp className="w-3 h-3 mr-1 inline" />}
                       {market.platform}
                     </Badge>
-                    <a href={market.url} target="_blank" rel="noopener noreferrer" className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-primary" data-testid={`link-market-${market.id}`}>
-                      <ExternalLink className="w-4 h-4" />
-                    </a>
+                    <div className="flex items-center gap-1">
+                      <SetAlertDialog market={market} />
+                      <a href={market.url} target="_blank" rel="noopener noreferrer" className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-primary" data-testid={`link-market-${market.id}`}>
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                    </div>
                   </div>
                   
                   <h3 className="font-semibold leading-tight line-clamp-3 mb-4 flex-1">

@@ -207,6 +207,69 @@ export interface CombosListResponse {
   portfolioOverlapWarnings: CombosListResponsePortfolioOverlapWarningsItem[];
 }
 
+export type PriceAlertPlatform = typeof PriceAlertPlatform[keyof typeof PriceAlertPlatform];
+
+
+export const PriceAlertPlatform = {
+  kalshi: 'kalshi',
+  polymarket: 'polymarket',
+} as const;
+
+export type PriceAlertCondition = typeof PriceAlertCondition[keyof typeof PriceAlertCondition];
+
+
+export const PriceAlertCondition = {
+  above: 'above',
+  below: 'below',
+} as const;
+
+export interface PriceAlert {
+  id: string;
+  platform: PriceAlertPlatform;
+  marketId: string;
+  marketTitle: string;
+  condition: PriceAlertCondition;
+  /** Probability threshold (0-1) */
+  threshold: number;
+  isTriggered: boolean;
+  /** @nullable */
+  triggeredAt?: string | null;
+  createdAt: string;
+}
+
+export interface AlertsListResponse {
+  alerts: PriceAlert[];
+}
+
+export type CreateAlertInputPlatform = typeof CreateAlertInputPlatform[keyof typeof CreateAlertInputPlatform];
+
+
+export const CreateAlertInputPlatform = {
+  kalshi: 'kalshi',
+  polymarket: 'polymarket',
+} as const;
+
+export type CreateAlertInputCondition = typeof CreateAlertInputCondition[keyof typeof CreateAlertInputCondition];
+
+
+export const CreateAlertInputCondition = {
+  above: 'above',
+  below: 'below',
+} as const;
+
+export interface CreateAlertInput {
+  platform: CreateAlertInputPlatform;
+  marketId: string;
+  marketTitle: string;
+  condition: CreateAlertInputCondition;
+  /**
+     * Probability threshold (0-1)
+     * @minimum 0
+     * @maximum 1
+     */
+  threshold: number;
+}
+
 export type ListMarketsParams = {
 /**
  * Search query

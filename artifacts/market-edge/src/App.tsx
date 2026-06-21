@@ -14,6 +14,7 @@ import Portfolio from "./pages/portfolio";
 import ComboDetail from "./pages/combo-detail";
 import { Layout } from "./components/layout";
 import { BuilderProvider } from "./lib/builder-context";
+import { AlertsNotifier } from "./components/alerts-notifier";
 
 const queryClient = new QueryClient();
 const clerkPubKey = publishableKeyFromHost(window.location.hostname, import.meta.env.VITE_CLERK_PUBLISHABLE_KEY);
@@ -122,6 +123,7 @@ function ClerkProviderWithRoutes() {
     >
       <QueryClientProvider client={queryClient}>
         <ClerkQueryClientCacheInvalidator />
+        <AlertsNotifier />
         <BuilderProvider>
           <Switch>
             <Route path="/" component={HomeRedirect} />

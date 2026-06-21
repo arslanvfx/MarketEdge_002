@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './alertsListResponse';
 export * from './comboInput';
 export * from './comboLeg';
 export * from './comboLegInput';
@@ -16,6 +17,9 @@ export * from './comboLegPosition';
 export * from './combosListResponse';
 export * from './combosListResponsePortfolioOverlapWarningsItem';
 export * from './comboSuggestion';
+export * from './createAlertInput';
+export * from './createAlertInputCondition';
+export * from './createAlertInputPlatform';
 export * from './healthStatus';
 export * from './listMarketsParams';
 export * from './listMarketsPlatform';
@@ -27,6 +31,9 @@ export * from './optimizeLegInput';
 export * from './optimizeLegInputPlatform';
 export * from './optimizeLegInputPosition';
 export * from './optimizeResponse';
+export * from './priceAlert';
+export * from './priceAlertCondition';
+export * from './priceAlertPlatform';
 export * from './savedCombo';
 export * from './savedComboLeg';
 export * from './savedComboLegPlatform';

@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, numeric, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, numeric, integer, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -24,10 +24,26 @@ export const comboLegsTable = pgTable("combo_legs", {
   sortOrder: integer("sort_order").notNull().default(0),
 });
 
+export const priceAlertsTable = pgTable("price_alerts", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  platform: text("platform").notNull(),
+  marketId: text("market_id").notNull(),
+  marketTitle: text("market_title").notNull(),
+  condition: text("condition").notNull(),
+  threshold: numeric("threshold", { precision: 10, scale: 8 }).notNull(),
+  isTriggered: boolean("is_triggered").notNull().default(false),
+  triggeredAt: timestamp("triggered_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
 export const insertSavedComboSchema = createInsertSchema(savedCombosTable).omit({ createdAt: true });
 export const insertComboLegSchema = createInsertSchema(comboLegsTable);
+export const insertPriceAlertSchema = createInsertSchema(priceAlertsTable).omit({ createdAt: true, isTriggered: true, triggeredAt: true });
 
 export type InsertSavedCombo = z.infer<typeof insertSavedComboSchema>;
 export type SavedCombo = typeof savedCombosTable.$inferSelect;
 export type InsertComboLeg = z.infer<typeof insertComboLegSchema>;
 export type ComboLeg = typeof comboLegsTable.$inferSelect;
+export type InsertPriceAlert = z.infer<typeof insertPriceAlertSchema>;
+export type PriceAlert = typeof priceAlertsTable.$inferSelect;
