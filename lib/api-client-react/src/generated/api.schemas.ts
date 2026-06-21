@@ -112,6 +112,8 @@ export interface ComboLeg {
   aiConfidence?: ComboLegAiConfidence;
   /** ISO timestamp when this market resolves (null if unknown). Present on Smart Picks legs. */
   closeTime?: string | null;
+  /** Direct link to the market page on the platform (Polymarket event URL or Kalshi market page). Present on Smart Picks legs. */
+  marketUrl?: string | null;
 }
 
 export interface ComboSuggestion {

@@ -90,7 +90,7 @@ Critical rules:
 - NOVELTY / MEME MARKETS: Set "plausible": false for any market whose resolution is tied to a pop-culture milestone with an unknown or perpetually-delayed date — e.g. "before GTA VI", "before Half-Life 3", "before [any video game release]", "before [album release]", or any market that is clearly a joke or internet meme ("Will Jesus Christ return…", "Will aliens land…", "Will [celebrity] die…"). These may be real markets with real volume but they are unsuitable for serious value analysis. Mark plausible: false so they are excluded from picks.
 - If a market is nonsensical, unresolvable, or you cannot reason about it, set "plausible": false.
 - Consider the close date — a low-probability event has even less chance in a short window.
-- confidence: "high" for well-understood events, "low" for genuinely uncertain ones.
+- confidence: "high" for well-understood events, "low" for genuinely uncertain ones. For game-specific props (totals, goal spread, both-teams-to-score, corners) — these are concrete events with a clear resolution window. Default to "medium" confidence when you can reason about the game; only use "low" if the match itself is highly unpredictable.
 - reasoning: ONE sentence (max ~20 words), plain language, explaining your estimate. User-facing.
 
 Markets:

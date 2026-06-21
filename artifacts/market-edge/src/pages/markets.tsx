@@ -485,7 +485,8 @@ export default function Markets() {
                           href={market.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-primary"
+                          title={`View on ${market.platform === "kalshi" ? "Kalshi" : "Polymarket"}`}
+                          className="opacity-40 hover:opacity-100 transition-opacity text-muted-foreground hover:text-primary"
                           data-testid={`link-market-${market.id}`}
                         >
                           <ExternalLink className="w-4 h-4" />

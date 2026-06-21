@@ -31,6 +31,10 @@ export interface ComboLegResult {
   // game's different prop series (winner/total/spread/corners/player props).
   eventTicker?: string | null;
   gameKey?: string | null;
+  /** Direct link to the market page on the platform — Polymarket event URL or
+   * Kalshi market page. Present on Smart Picks legs so users can navigate there
+   * without searching. */
+  marketUrl?: string | null;
 }
 
 /**
@@ -510,11 +514,16 @@ export function autoGenerateCombos(opts: {
       // Safe favorite: not (yet) a value bet, but a confident high-probability
       // favorite the market isn't underpricing against us (edge ≥ 0). Low-
       // confidence estimates are excluded so we never pad combos with guesses.
+      // Game props (corners, totals, spreads, BTTS) are concrete dated events
+      // with a clear resolution window. The AI sometimes hedges to "low"
+      // confidence on these simply because they're hard to predict, not because
+      // the probability estimate is wrong. Allow low-confidence safe picks for
+      // game props — the trueProb ≥ safeMinTrue floor already gates quality.
       const isSafe =
         !isValue &&
         edge >= 0 &&
         s.trueProb >= safeMinTrue &&
-        analysis.confidence !== "low";
+        (analysis.confidence !== "low" || market.gameKey !== null);
 
       if (!isValue && !isSafe) continue;
 
@@ -527,6 +536,7 @@ export function autoGenerateCombos(opts: {
         selection: sideLabel(market.title, market.yesSubtitle, s.position),
         eventTicker: market.eventTicker ?? null,
         gameKey: market.gameKey ?? null,
+        marketUrl: market.url ?? null,
         odds: s.price,
         impliedProb: s.price,
         trueProbability: s.trueProb,
@@ -652,6 +662,114 @@ export function autoGenerateCombos(opts: {
     }
   }
 
+  // ── Same-game companion combos (Kalshi only) ──────────────────────────────
+  // The main enumeration above builds combos only from valueLegs (quality legs
+  // that independently pass value/safe thresholds). For Kalshi same-game combos
+  // (winner + total + spread + BTTS + corners + player props from ONE match) the
+  // non-winner series often have only borderline legs that fail the safe threshold
+  // alone — but are perfectly valid pairing with an anchor leg.
+  //
+  // This pass: for each game that already has ≥1 quality anchor in valueLegs,
+  // build a companion pool with relaxed thresholds (≥52% true prob, small
+  // negative edge OK) and enumerate 2-4 leg same-game combos, requiring at least
+  // one anchor leg. These combos are added to allRaw and compete in Pass 0.
+  {
+    const COMP_MIN_TRUE = Math.max(0.52, safeMinTrue * 0.78);
+    // Games that already have a quality leg — companions are only valid here
+    const qualityGameSet = new Set(
+      valueLegs.filter((l) => l.gameKey).map((l) => `${l.platform}:${l.gameKey}`),
+    );
+    const qualityLegKeys = new Set(
+      valueLegs.map((l) => `${l.marketId}:${l.position}`),
+    );
+
+    if (qualityGameSet.size > 0) {
+      // Build companion legs (relaxed thresholds, game props only)
+      const compLegs: ScoredLeg[] = [];
+      for (const market of markets) {
+        if (!market.gameKey) continue;
+        const gk = `${market.platform}:${market.gameKey}`;
+        if (!qualityGameSet.has(gk)) continue;
+        const analysis = analyses.get(`${market.platform}:${market.id}`);
+        if (!analysis || !analysis.plausible) continue;
+        const w = CONF_WEIGHT[analysis.confidence] ?? 0.65;
+        const trueYes = w * analysis.trueProbabilityYes + (1 - w) * market.yesOdds;
+        for (const s of [
+          { position: "yes" as const, price: market.yesOdds, trueProb: trueYes },
+          { position: "no" as const, price: market.noOdds, trueProb: 1 - trueYes },
+        ]) {
+          if (s.price <= 0 || s.price >= 1) continue;
+          const edge = s.trueProb - s.price;
+          if (s.trueProb < COMP_MIN_TRUE || edge < -0.05) continue;
+          if (qualityLegKeys.has(`${market.id}:${s.position}`)) continue; // already in pool
+          const edgeRatio = s.trueProb / s.price;
+          compLegs.push({
+            marketId: market.id,
+            platform: market.platform,
+            marketTitle: market.title,
+            category: market.category ?? "Other",
+            position: s.position,
+            selection: sideLabel(market.title, market.yesSubtitle, s.position),
+            eventTicker: market.eventTicker ?? null,
+            gameKey: market.gameKey ?? null,
+            marketUrl: market.url ?? null,
+            odds: s.price,
+            impliedProb: s.price,
+            trueProbability: s.trueProb,
+            edge,
+            edgeRatio,
+            legType: edge >= EDGE_THRESHOLD && s.trueProb >= minTrue ? "value" : "safe",
+            aiReasoning: analysis.reasoning,
+            aiConfidence: analysis.confidence,
+            closeTime: market.closeTime,
+          });
+        }
+      }
+
+      if (compLegs.length > 0) {
+        // Group by game: anchors (quality) + companions
+        const byGameAnchors = new Map<string, ScoredLeg[]>();
+        for (const leg of valueLegs.filter((l) => l.gameKey)) {
+          const gk = `${leg.platform}:${leg.gameKey}`;
+          const arr = byGameAnchors.get(gk) ?? [];
+          arr.push(leg);
+          byGameAnchors.set(gk, arr);
+        }
+        const byGameComps = new Map<string, ScoredLeg[]>();
+        for (const leg of compLegs) {
+          const gk = `${leg.platform}:${leg.gameKey}`;
+          const arr = byGameComps.get(gk) ?? [];
+          arr.push(leg);
+          byGameComps.set(gk, arr);
+        }
+
+        for (const [gk, anchors] of byGameAnchors) {
+          const comps = byGameComps.get(gk) ?? [];
+          if (comps.length === 0) continue;
+          // Pool: anchors first (so at least one always appears), then companions
+          const pool = [...anchors, ...comps].slice(0, 8);
+          const anchorSet = new Set(anchors.map((l) => `${l.marketId}:${l.position}`));
+          for (let size = 2; size <= Math.min(4, pool.length); size++) {
+            for (const combo of combinations(pool, size)) {
+              // Must include at least one quality anchor
+              if (!combo.some((l) => anchorSet.has(`${l.marketId}:${l.position}`))) continue;
+              if (legsAreCorrelated(combo.map((l) => legCorrelation(l)))) continue;
+              const jointTrueProb = combo.reduce((acc, l) => acc * l.trueProbability, 1);
+              const jointPrice = combo.reduce((acc, l) => acc * l.impliedProb, 1);
+              if (jointPrice < 0.0005) continue;
+              const multiplier = 1 / jointPrice;
+              const evMultiplier = combo.reduce((acc, l) => acc * l.edgeRatio, 1);
+              // Relaxed EV floor for same-game combos (0.85 vs 1.0 for multi-game)
+              if (evMultiplier < 0.85) continue;
+              if (jointTrueProb < minJointProb * 0.5) continue;
+              allRaw.push({ legs: combo, jointTrueProb, multiplier, evMultiplier });
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Minimum payout multiplier floor — only enforced in "returns" mode.
   // Drop any combo that doesn't clear the user's requested floor before ranking
   // so the greedy selection step never surfaces under-threshold results.
@@ -750,6 +868,7 @@ export function autoGenerateCombos(opts: {
         closeTime: l.closeTime,
         eventTicker: l.eventTicker ?? null,
         gameKey: l.gameKey ?? null,
+        marketUrl: l.marketUrl ?? null,
       })),
       jointProbability: candidate.jointTrueProb,
       payoutMultiplier: candidate.multiplier,
@@ -772,6 +891,24 @@ export function autoGenerateCombos(opts: {
     selected.push(buildResult(candidate));
     return true;
   };
+
+  // Pass 0: guarantee same-game Kalshi combos surface when available.
+  // Without this pass, their multi-leg EV is often beaten by single-market
+  // non-sport picks (which have huge AI edges). We guarantee up to ⌈count/2⌉
+  // same-game combos so the marquee Kalshi feature always appears.
+  {
+    const sameGameCandidates = allRaw.filter((c) => {
+      if (c.legs.length < 2) return false;
+      const gks = c.legs.map((l) => l.gameKey).filter(Boolean);
+      return gks.length === c.legs.length && new Set(gks).size === 1;
+    });
+    const sgLimit = Math.max(1, Math.ceil(count / 2));
+    let sgAdded = 0;
+    for (const candidate of sameGameCandidates) {
+      if (sgAdded >= sgLimit || selected.length >= count) break;
+      if (tryAccept(candidate, true)) sgAdded++;
+    }
+  }
 
   // Pass 1: diversity-capped selection
   for (const candidate of allRaw) {

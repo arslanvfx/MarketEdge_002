@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/command";
 import {
   Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info,
-  Brain, TrendingUp, Clock, Search, Check, ChevronsUpDown, Trophy,
+  Brain, TrendingUp, Clock, Search, Check, ChevronsUpDown, Trophy, ExternalLink,
 } from "lucide-react";
 import {
   useGenerateSmartPicks,
@@ -321,6 +321,18 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
                 )}
               </div>
               <div className="text-right shrink-0 space-y-0.5">
+                {(leg as any).marketUrl && (
+                  <a
+                    href={(leg as any).marketUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`View on ${leg.platform === "kalshi" ? "Kalshi" : "Polymarket"}`}
+                    className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-primary transition-colors"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    View bet
+                  </a>
+                )}
                 {typeof leg.edge === "number" && leg.legType !== "safe" && (
                   <Badge variant="outline" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 text-[10px] font-mono">
                     {formatEdgePts(leg.edge)}
