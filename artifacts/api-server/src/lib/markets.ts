@@ -27,16 +27,34 @@ function isFresh(entry: CacheEntry): boolean {
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
 // Active series with real, liquid markets as of mid-2026
+// Verified by probing /trade-api/v2/markets for non-provisional open markets.
 const KALSHI_SERIES = [
-  "KXBTC",    // Bitcoin price
-  "KXETH",    // Ethereum price
-  "KXINX",    // S&P 500 / stock indices
-  "KXFED",    // Federal Reserve rate decisions
-  "KXCPI",    // Consumer Price Index / inflation
-  "KXGDP",    // GDP growth
-  "KXNBA",    // NBA basketball
-  "KXWCGAME", // FIFA World Cup games
-  "KXWCTOTAL",// FIFA World Cup totals
+  // ── Crypto ──────────────────────────────────────────────────
+  "KXBTC",           // Bitcoin price levels
+  "KXETH",           // Ethereum price levels
+  "KXBTCMAX100",     // Will Bitcoin hit $100k? (milestone)
+
+  // ── Financials / Macro ───────────────────────────────────────
+  "KXINX",           // S&P 500 / stock indices
+  "KXFED",           // Federal Reserve rate decisions
+  "KXCPI",           // Consumer Price Index / inflation
+  "KXGDP",           // GDP growth
+  "KXU3",            // US unemployment rate (U-3)
+  "KXRECSSNBER",     // NBER recession call
+
+  // ── Sports ──────────────────────────────────────────────────
+  "KXNBA",           // NBA basketball season / playoffs
+  "KXMLB",           // MLB baseball (regular season & playoffs)
+  "KXNFLMVP",        // NFL Most Valuable Player award
+  "KXNFLCOTY",       // NFL Coach of the Year award
+  "KXNFLRETIRE",     // NFL player retirement predictions
+  "KXNBARETIRE",     // NBA player retirement predictions
+  "KXWCGAME",        // FIFA World Cup game results
+  "KXWCTOTAL",       // FIFA World Cup totals (goals, corners…)
+
+  // ── Elections / Politics ─────────────────────────────────────
+  "KXMIDTERMVOTETURN", // 2026 midterm election voter turnout
+  "KXMIDTERMMOV",      // 2026 midterm election margin of victory
 ];
 
 interface KalshiMarket {
@@ -45,11 +63,27 @@ interface KalshiMarket {
   yes_ask_dollars?: string;
   yes_bid_dollars?: string;
   last_price_dollars?: string;
-  volume?: number;
+  /** Kalshi returns volume as a string decimal under volume_fp, not `volume` */
+  volume_fp?: string;
+  volume_24h_fp?: string;
   close_time?: string;
+  /** Not present on market objects — derived from series ticker below */
   category?: string;
   event_ticker?: string;
+  series_ticker?: string;
   is_provisional?: boolean;
+}
+
+/** Derive a human-readable category from the Kalshi series ticker prefix. */
+function kalshiCategory(ticker: string, seriesTicker: string): string | null {
+  const s = seriesTicker.toUpperCase();
+  if (s.startsWith("KXBTC") || s.startsWith("KXETH") || s.startsWith("KXXRP") || s.startsWith("KXAVAX") || s.startsWith("KXNEAR")) return "Crypto";
+  if (s.startsWith("KXINX") || s.startsWith("KXFED") || s.startsWith("KXCPI") || s.startsWith("KXGDP") || s === "KXU3" || s.startsWith("KXRECSSNBER") || s.startsWith("KXSAHM") || s.startsWith("KXRETAIL")) return "Economics";
+  if (s.startsWith("KXNBA") || s.startsWith("KXMLB") || s.startsWith("KXNFL") || s.startsWith("KXWCGAME") || s.startsWith("KXWCTOTAL") || s.startsWith("KXWNBA") || s.startsWith("KXPGA") || s.startsWith("KXF1")) return "Sports";
+  if (s.startsWith("KXMIDTERM") || s.startsWith("KXHOUSEPARTY") || s.startsWith("KXSENATE")) return "Elections";
+  if (s.startsWith("KXOSCARS") || s.startsWith("KXEMMY") || s.startsWith("KXGRAMMY") || s.startsWith("KXVMA")) return "Entertainment";
+  // Fall back to category on the ticker itself (usually absent) or null
+  return null;
 }
 
 async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
@@ -86,16 +120,20 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
 
         yesOdds = Math.min(Math.max(yesOdds, 0.01), 0.99);
 
+        // Kalshi returns volume as a string float under volume_fp, not `volume`
+        const volumeRaw = m.volume_fp ?? m.volume_24h_fp;
+        const volume = volumeRaw != null ? parseFloat(volumeRaw) : null;
+
         return {
           id: m.ticker,
           platform: "kalshi" as const,
           title: m.title ?? m.ticker,
           yesOdds,
           noOdds: Math.min(Math.max(1 - yesOdds, 0.01), 0.99),
-          volume: m.volume ?? null,
+          volume: volume != null && Number.isFinite(volume) ? volume : null,
           closeTime: m.close_time ?? null,
           url: `https://kalshi.com/markets/${m.ticker}`,
-          category: m.category ?? null,
+          category: kalshiCategory(m.ticker, m.series_ticker ?? seriesTicker),
         };
       });
   } catch {
