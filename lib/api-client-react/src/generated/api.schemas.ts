@@ -88,7 +88,7 @@ export interface SmartPicksInput {
   riskLevel?: SmartPicksInputRiskLevel;
   /**
      * @minimum 1
-     * @maximum 10000
+     * @maximum 100
      */
   stakeAmount?: number;
   /**
@@ -122,6 +122,7 @@ export interface SmartPickResult {
   payoutMultiplier: number;
   riskLevel: SmartPickResultRiskLevel;
   riskScore: SmartPickResultRiskScore;
+  stakeAmount: number;
   estimatedPayout: number;
 }
 

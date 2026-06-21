@@ -73,7 +73,7 @@ export const GetMarketResponse = zod.object({
  */
 export const generateSmartPicksBodyRiskLevelDefault = `balanced`;
 export const generateSmartPicksBodyStakeAmountDefault = 10;
-export const generateSmartPicksBodyStakeAmountMax = 10000;
+export const generateSmartPicksBodyStakeAmountMax = 100;
 
 export const generateSmartPicksBodyCountDefault = 4;
 export const generateSmartPicksBodyCountMax = 4;
@@ -100,6 +100,7 @@ export const GenerateSmartPicksResponse = zod.object({
   "payoutMultiplier": zod.number(),
   "riskLevel": zod.enum(['conservative', 'balanced', 'aggressive']),
   "riskScore": zod.enum(['low', 'medium', 'high']),
+  "stakeAmount": zod.number(),
   "estimatedPayout": zod.number()
 })),
   "generatedAt": zod.string()

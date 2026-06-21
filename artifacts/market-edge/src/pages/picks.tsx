@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info } from "lucide-react";
@@ -285,18 +285,25 @@ export default function SmartPicks() {
           </p>
 
           <div className="flex flex-col sm:flex-row gap-6 items-start sm:items-end">
-            {/* Stake input */}
-            <div className="space-y-1.5 w-full sm:w-48">
-              <label className="text-sm font-medium">Stake per combo ($)</label>
-              <Input
-                type="number"
+            {/* Stake slider */}
+            <div className="space-y-2 w-full sm:w-56">
+              <div className="flex justify-between items-center">
+                <label className="text-sm font-medium">Stake per combo</label>
+                <span className="text-sm font-mono font-semibold text-primary">${stake}</span>
+              </div>
+              <Slider
                 min={1}
-                max={10000}
-                value={stake}
-                onChange={(e) => setStake(Math.max(1, Number(e.target.value) || 1))}
-                className="font-mono"
-                data-testid="input-stake"
+                max={100}
+                step={1}
+                value={[stake]}
+                onValueChange={([v]) => setStake(v)}
+                className="w-full"
+                data-testid="slider-stake"
               />
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>$1</span>
+                <span>$100</span>
+              </div>
             </div>
 
             {/* Risk level */}

@@ -32,7 +32,7 @@ router.post("/combos/smart-picks", async (req, res) => {
     if (!validRisk.includes(riskLevel)) {
       return res.status(400).json({ error: "Invalid riskLevel" });
     }
-    const stake = Math.max(1, Math.min(10000, Number(stakeAmount) || 10));
+    const stake = Math.max(1, Math.min(100, Number(stakeAmount) || 10));
     const n = Math.max(1, Math.min(4, Number(count) || 4));
 
     // Fetch the FULL live market pool — bypasses the 100-item user-facing cap

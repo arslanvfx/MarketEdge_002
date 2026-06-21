@@ -15,5 +15,6 @@ export interface SmartPickResult {
   payoutMultiplier: number;
   riskLevel: SmartPickResultRiskLevel;
   riskScore: SmartPickResultRiskScore;
+  stakeAmount: number;
   estimatedPayout: number;
 }

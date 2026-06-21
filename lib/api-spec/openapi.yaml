@@ -397,7 +397,7 @@ components:
         stakeAmount:
           type: number
           minimum: 1
-          maximum: 10000
+          maximum: 100
           default: 10
         count:
           type: integer
@@ -423,6 +423,8 @@ components:
         riskScore:
           type: string
           enum: [low, medium, high]
+        stakeAmount:
+          type: number
         estimatedPayout:
           type: number
       required:
@@ -431,6 +433,7 @@ components:
         - payoutMultiplier
         - riskLevel
         - riskScore
+        - stakeAmount
         - estimatedPayout
 
     SmartPicksResponse:

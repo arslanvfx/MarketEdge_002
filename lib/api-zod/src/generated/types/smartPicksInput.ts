@@ -11,7 +11,7 @@ export interface SmartPicksInput {
   riskLevel?: SmartPicksInputRiskLevel;
   /**
      * @minimum 1
-     * @maximum 10000
+     * @maximum 100
      */
   stakeAmount?: number;
   /**

@@ -123,6 +123,7 @@ export interface SmartPickResult {
   payoutMultiplier: number;
   riskLevel: RiskLevel;
   riskScore: "low" | "medium" | "high";
+  stakeAmount: number;
   estimatedPayout: number;
 }
 
@@ -149,15 +150,14 @@ export function autoGenerateCombos(opts: {
 }): SmartPickResult[] {
   const { markets, riskLevel, stakeAmount, count = 4 } = opts;
 
-  // Odds range (per leg's chosen position) and scoring alpha per risk level.
-  // Ranges are intentionally generous so the pool stays large enough to form
-  // 4 non-overlapping combos across typical live market pools (~100–300 mkts).
-  const RISK_CONFIG: Record<RiskLevel, { min: number; max: number; alpha: number; maxSize: number }> = {
-    conservative: { min: 0.50, max: 0.92, alpha: 0.75, maxSize: 3 },
-    balanced:     { min: 0.28, max: 0.82, alpha: 0.50, maxSize: 3 },
-    aggressive:   { min: 0.12, max: 0.72, alpha: 0.25, maxSize: 4 },
+  // Odds range per risk level (applied to each leg's chosen position).
+  // Step (b) from spec: conservative 0.55–0.80, balanced 0.35–0.75, aggressive 0.20–0.65.
+  const RISK_ODDS: Record<RiskLevel, { min: number; max: number }> = {
+    conservative: { min: 0.55, max: 0.80 },
+    balanced:     { min: 0.35, max: 0.75 },
+    aggressive:   { min: 0.20, max: 0.65 },
   };
-  const { min, max, alpha, maxSize } = RISK_CONFIG[riskLevel];
+  const { min, max } = RISK_ODDS[riskLevel];
 
   // ── Step 1-3: candidate legs ──────────────────────────────────────────────
   type ScoredLeg = ComboLegResult & { legScore: number };
@@ -168,9 +168,9 @@ export function autoGenerateCombos(opts: {
       const odds = position === "yes" ? market.yesOdds : market.noOdds;
       if (odds < min || odds > max) continue;
       const vol = market.volume ?? 0;
-      // interest: 1 at 50%, 0 at 0%/100%
+      // Step (c): score = volume × (1 - |odds - 0.5| × 2)
       const interest = 1 - Math.abs(odds - 0.5) * 2;
-      const legScore = (Math.log1p(vol) + 1) * (interest + 0.1);
+      const legScore = vol * interest;
       candidateLegs.push({
         marketId: market.id,
         platform: market.platform,
@@ -183,7 +183,7 @@ export function autoGenerateCombos(opts: {
     }
   }
 
-  // ── Step 4: keep top-N, one entry per market (prefer the higher-scored position) ──
+  // ── Step 4: keep top-50, one entry per market (prefer the higher-scored position) ──
   candidateLegs.sort((a, b) => b.legScore - a.legScore);
   const seenMarkets = new Set<string>();
   const topLegs: ScoredLeg[] = [];
@@ -192,28 +192,24 @@ export function autoGenerateCombos(opts: {
     if (!seenMarkets.has(mk)) {
       seenMarkets.add(mk);
       topLegs.push(leg);
-      if (topLegs.length >= 80) break;
+      if (topLegs.length >= 50) break;  // Step (d): top 50
     }
   }
 
   if (topLegs.length < 2) return [];
 
-  // ── Step 5: enumerate combos ─────────────────────────────────────────────
-  const forSmall = topLegs.slice(0, 60);   // 2-3 legs  C(60,3)=34220 — fast
-  const forLarge = topLegs.slice(0, 25);   // 4 legs    C(25,4)=12650 — fast
-
+  // ── Step 5: generate all 2–4 leg combinations from top 50 ────────────────
+  // C(50,2)=1225  C(50,3)=19600  C(50,4)=230300  → total ~251K — fast
   type RawCombo = { legs: ScoredLeg[]; score: number; jointProb: number; multiplier: number };
   const allRaw: RawCombo[] = [];
 
-  for (let size = 2; size <= maxSize; size++) {
-    const source = size <= 3 ? forSmall : forLarge;
-    for (const legs of combinations(source, size)) {
+  for (let size = 2; size <= 4; size++) {
+    for (const legs of combinations(topLegs, size)) {
       const jointProb = legs.reduce((acc, l) => acc * l.impliedProb, 1);
-      if (jointProb < 0.005) continue; // Skip near-impossible combos
+      if (jointProb < 0.001) continue; // Skip near-impossible combos
       const multiplier = 1 / jointProb;
-      // score = multiplier × prob^alpha = (1/p) × p^alpha = p^(alpha-1)
-      // alpha < 1 → higher payout preferred but less aggressively as alpha→1
-      const score = multiplier * Math.pow(jointProb, alpha);
+      // Step (e): score = payoutMultiplier × sqrt(jointProbability)
+      const score = multiplier * Math.sqrt(jointProb);
       allRaw.push({ legs, score, jointProb, multiplier });
     }
   }
@@ -225,26 +221,72 @@ export function autoGenerateCombos(opts: {
   const usedMarkets = new Set<string>();
   const selected: SmartPickResult[] = [];
 
-  for (const candidate of allRaw) {
-    if (selected.length >= count) break;
-    const hasOverlap = candidate.legs.some(
-      (l) => usedMarkets.has(`${l.platform}:${l.marketId}`),
-    );
-    if (hasOverlap) continue;
-    for (const l of candidate.legs) usedMarkets.add(`${l.platform}:${l.marketId}`);
+  function pickFromPool(pool: RawCombo[]) {
+    for (const candidate of pool) {
+      if (selected.length >= count) break;
+      const hasOverlap = candidate.legs.some(
+        (l) => usedMarkets.has(`${l.platform}:${l.marketId}`),
+      );
+      if (hasOverlap) continue;
+      for (const l of candidate.legs) usedMarkets.add(`${l.platform}:${l.marketId}`);
+      const riskScore: SmartPickResult["riskScore"] =
+        candidate.jointProb >= 0.30 ? "low" :
+        candidate.jointProb >= 0.10 ? "medium" : "high";
+      selected.push({
+        legs: candidate.legs,
+        jointProbability: candidate.jointProb,
+        payoutMultiplier: candidate.multiplier,
+        riskLevel,
+        riskScore,
+        stakeAmount,
+        estimatedPayout: stakeAmount * candidate.multiplier,
+      });
+    }
+  }
 
-    const riskScore: SmartPickResult["riskScore"] =
-      candidate.jointProb >= 0.30 ? "low" :
-      candidate.jointProb >= 0.10 ? "medium" : "high";
+  // Primary pass: spec range combos
+  pickFromPool(allRaw);
 
-    selected.push({
-      legs: candidate.legs,
-      jointProbability: candidate.jointProb,
-      payoutMultiplier: candidate.multiplier,
-      riskLevel,
-      riskScore,
-      estimatedPayout: stakeAmount * candidate.multiplier,
-    });
+  // Fallback pass: if still short, expand to the union of all risk ranges (0.20–0.80)
+  // using only unused markets — ensures all 4 combos are non-overlapping.
+  if (selected.length < count) {
+    const FALLBACK_MIN = 0.20;
+    const FALLBACK_MAX = 0.80;
+    const fallbackLegs: ScoredLeg[] = [];
+    const fallbackSeen = new Set<string>();
+    for (const market of markets) {
+      for (const position of ["yes", "no"] as const) {
+        const odds = position === "yes" ? market.yesOdds : market.noOdds;
+        if (odds < FALLBACK_MIN || odds > FALLBACK_MAX) continue;
+        const mk = `${market.platform}:${market.id}`;
+        if (usedMarkets.has(mk) || fallbackSeen.has(mk)) continue; // skip already-used
+        const interest = 1 - Math.abs(odds - 0.5) * 2;
+        const legScore = (market.volume ?? 0) * interest;
+        fallbackLegs.push({
+          marketId: market.id,
+          platform: market.platform,
+          marketTitle: market.title,
+          position,
+          odds,
+          impliedProb: odds,
+          legScore,
+        });
+        fallbackSeen.add(mk);
+      }
+    }
+    fallbackLegs.sort((a, b) => b.legScore - a.legScore);
+    const fallbackTop = fallbackLegs.slice(0, 50);
+    const fallbackRaw: RawCombo[] = [];
+    for (let size = 2; size <= 4; size++) {
+      for (const legs of combinations(fallbackTop, size)) {
+        const jointProb = legs.reduce((acc, l) => acc * l.impliedProb, 1);
+        if (jointProb < 0.001) continue;
+        const multiplier = 1 / jointProb;
+        fallbackRaw.push({ legs, score: multiplier * Math.sqrt(jointProb), jointProb, multiplier });
+      }
+    }
+    fallbackRaw.sort((a, b) => b.score - a.score);
+    pickFromPool(fallbackRaw);
   }
 
   return selected;
