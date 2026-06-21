@@ -19,6 +19,9 @@ export interface ComboLegResult {
   aiReasoning?: string;
   aiConfidence?: "low" | "medium" | "high";
   closeTime?: string | null; // ISO resolution time of the market (Smart Picks legs)
+  // "value" = genuinely mispriced (edge ≥ threshold). "safe" = a high-probability
+  // favorite the AI is confident in but the market prices fairly (edge ≥ 0).
+  legType?: "value" | "safe";
 }
 
 export interface ComboSuggestion {
@@ -174,12 +177,22 @@ export function autoGenerateCombos(opts: {
   riskLevel: RiskLevel;
   stakeAmount: number;
   count?: number;
-  /** Exact number of legs per combo, or "auto" to consider 2–4 legs. */
-  legCount?: "auto" | 2 | 3 | 4;
+  /**
+   * MINIMUM number of legs per combo, or "auto" for no minimum (2+). A value of
+   * N means "N or more legs" — the optimizer considers every size from N up to
+   * however many quality legs exist, with no artificial cap. "5" therefore
+   * permits large combos (10, 20+ legs) when enough quality legs are available.
+   */
+  legCount?: "auto" | 1 | 2 | 3 | 4 | 5;
 }): SmartPickResult[] {
   const { markets, analyses, riskLevel, stakeAmount, count = 4, legCount = "auto" } = opts;
 
-  const EDGE_THRESHOLD = 0.05; // require ≥5 percentage points of value
+  const EDGE_THRESHOLD = 0.05; // require ≥5 percentage points of value to be a "value" bet
+  // Hard cap on the candidate-leg pool fed into combination enumeration. With N
+  // legs we may enumerate up to 2^N subsets across all sizes, so this MUST stay
+  // small enough to stay tractable (2^16 ≈ 65k). In practice the quality-leg pool
+  // is far smaller than this; the cap only guards pathological pools.
+  const TOP_LEGS_CAP = 16;
 
   // Per-risk tuning:
   //  • minLegTrue — minimum true probability of the CHOSEN side for a leg.
@@ -196,24 +209,31 @@ export function autoGenerateCombos(opts: {
   //    probability shrinks as legs are added), which would make the 3/4-leg
   //    options return nothing. A geometric floor keeps each leg high-quality
   //    while still letting users opt into more legs for a bigger payout.
+  //  • safeMinTrue — minimum true probability for a "safe favorite": a leg the AI
+  //    is confident in that the market prices fairly (edge ≥ 0 but < threshold).
+  //    These fill out larger combos when genuine value bets are scarce.
   const RISK_TUNING: Record<
     RiskLevel,
-    { minLegTrue: number; minGeoMean: number; probBand: number }
+    { minLegTrue: number; minGeoMean: number; probBand: number; safeMinTrue: number }
   > = {
-    conservative: { minLegTrue: 0.6, minGeoMean: 0.67, probBand: 0.08 },
-    balanced: { minLegTrue: 0.45, minGeoMean: 0.55, probBand: 0.12 },
-    aggressive: { minLegTrue: 0.3, minGeoMean: 0.39, probBand: 0.2 },
+    conservative: { minLegTrue: 0.6, minGeoMean: 0.67, probBand: 0.08, safeMinTrue: 0.8 },
+    balanced: { minLegTrue: 0.45, minGeoMean: 0.55, probBand: 0.12, safeMinTrue: 0.7 },
+    aggressive: { minLegTrue: 0.3, minGeoMean: 0.39, probBand: 0.2, safeMinTrue: 0.6 },
   };
-  const { minLegTrue: minTrue, minGeoMean, probBand } = RISK_TUNING[riskLevel];
+  const { minLegTrue: minTrue, minGeoMean, probBand, safeMinTrue } = RISK_TUNING[riskLevel];
 
-  // Sizes of combos to generate: a single exact size, or 2–4 in "auto" mode.
-  const sizes = legCount === "auto" ? [2, 3, 4] : [legCount];
+  // Combo sizes to generate. legCount is now a MINIMUM: "auto" means 2+, while a
+  // number N means "N or more legs". The upper bound is however many quality legs
+  // exist (capped at TOP_LEGS_CAP) — no artificial 4-leg ceiling. The geometric
+  // floor + probability-first ranking naturally bound runaway leg counts.
+  const minLegs = legCount === "auto" ? 2 : Math.max(2, legCount);
 
   // ── Build value-bet legs (one best side per market) ───────────────────────
   type ScoredLeg = ComboLegResult & {
     trueProbability: number;
     edge: number;
     edgeRatio: number; // trueProb / price
+    legType: "value" | "safe";
   };
   // Confidence-based shrinkage: blend the AI's raw estimate toward the live
   // market price. The market aggregates real money, so we only deviate from it
@@ -240,14 +260,28 @@ export function autoGenerateCombos(opts: {
       { position: "no" as const, price: market.noOdds, trueProb: 1 - trueYes },
     ];
 
-    // Pick the side with the larger positive edge.
+    // For each market pick a single best side, classifying it as either a
+    // genuine "value" bet (edge ≥ threshold AND clears the value floor) or, if no
+    // value side exists, a "safe favorite" (high-probability, fairly-priced,
+    // edge ≥ 0). Value always wins over safe; within a class the stronger leg wins.
     let best: ScoredLeg | null = null;
     for (const s of sides) {
       if (s.price <= 0 || s.price >= 1) continue;
       const edge = s.trueProb - s.price;
-      if (edge < EDGE_THRESHOLD) continue;
-      if (s.trueProb < minTrue) continue;
       const edgeRatio = s.trueProb / s.price;
+
+      const isValue = edge >= EDGE_THRESHOLD && s.trueProb >= minTrue;
+      // Safe favorite: not (yet) a value bet, but a confident high-probability
+      // favorite the market isn't underpricing against us (edge ≥ 0). Low-
+      // confidence estimates are excluded so we never pad combos with guesses.
+      const isSafe =
+        !isValue &&
+        edge >= 0 &&
+        s.trueProb >= safeMinTrue &&
+        analysis.confidence !== "low";
+
+      if (!isValue && !isSafe) continue;
+
       const leg: ScoredLeg = {
         marketId: market.id,
         platform: market.platform,
@@ -258,20 +292,39 @@ export function autoGenerateCombos(opts: {
         trueProbability: s.trueProb,
         edge,
         edgeRatio,
+        legType: isValue ? "value" : "safe",
         aiReasoning: analysis.reasoning,
         aiConfidence: analysis.confidence,
         closeTime: market.closeTime,
       };
-      if (!best || leg.edge > best.edge) best = leg;
+
+      if (!best) {
+        best = leg;
+      } else if (best.legType === leg.legType) {
+        // Same class: prefer the stronger leg (value → bigger edge, safe → higher prob).
+        const better =
+          leg.legType === "value"
+            ? leg.edge > best.edge
+            : leg.trueProbability > best.trueProbability;
+        if (better) best = leg;
+      } else if (leg.legType === "value") {
+        best = leg; // value always beats safe
+      }
     }
     if (best) valueLegs.push(best);
   }
 
-  // Sort by edge so the strongest value bets are preferred.
-  valueLegs.sort((a, b) => b.edge - a.edge);
-  const topLegs = valueLegs.slice(0, 50);
+  // Order the candidate pool: value bets first (sorted by edge), then safe
+  // favorites (sorted by win probability). Slicing keeps the highest-quality legs
+  // and enforces the enumeration cap.
+  valueLegs.sort((a, b) => {
+    if (a.legType !== b.legType) return a.legType === "value" ? -1 : 1;
+    if (a.legType === "value") return b.edge - a.edge;
+    return b.trueProbability - a.trueProbability;
+  });
+  const topLegs = valueLegs.slice(0, TOP_LEGS_CAP);
 
-  if (topLegs.length < 2) return [];
+  if (topLegs.length < minLegs) return [];
 
   // ── Generate 2–4 leg combos, scored by expected value ────────────────────
   type RawCombo = {
@@ -281,6 +334,11 @@ export function autoGenerateCombos(opts: {
     evMultiplier: number; // Π(trueProb / price)
   };
   const allRaw: RawCombo[] = [];
+
+  // Sizes to enumerate: from the requested minimum up to the full pool size (no
+  // artificial ceiling). Bounded above by TOP_LEGS_CAP via the pool slice.
+  const sizes: number[] = [];
+  for (let s = minLegs; s <= topLegs.length; s++) sizes.push(s);
 
   for (const size of sizes) {
     if (size > topLegs.length) continue;
@@ -297,7 +355,10 @@ export function autoGenerateCombos(opts: {
       if (jointPrice < 0.0005) continue; // skip near-impossible payouts
       const multiplier = 1 / jointPrice;
       const evMultiplier = legs.reduce((acc, l) => acc * l.edgeRatio, 1);
-      if (evMultiplier <= 1) continue; // only positive-EV parlays
+      // Never negative-EV. Every leg has edge ≥ 0 (edgeRatio ≥ 1), so a combined
+      // multiplier ≥ 1 is guaranteed; safe-favorite-only parlays (≈1.0) are kept,
+      // genuinely-bad parlays (< 1, only possible via float drift) are dropped.
+      if (evMultiplier < 1) continue;
       // Leg-count-aware floor: require the parlay's per-leg average win
       // probability to clear minGeoMean (floor = minGeoMean^legs). Keeps each
       // leg high-quality while scaling sensibly as legs are added.
@@ -312,12 +373,20 @@ export function autoGenerateCombos(opts: {
   // (where win odds are comparable) the highest payout wins. This guarantees the
   // safest bets surface first while still rewarding the best return available at
   // that probability — no longshot can leapfrog a likelier combo on payout alone.
+  // Within a probability tier we keep genuine value bets as the priority (more
+  // mispriced legs first), then reward the best return — so safe-favorite combos
+  // never crowd out real value at comparable win odds.
   const tierOf = (p: number) => Math.floor(p / probBand);
+  const valueCount = (c: RawCombo) =>
+    c.legs.reduce((n, l) => n + (l.legType === "value" ? 1 : 0), 0);
   allRaw.sort((a, b) => {
     const tierA = tierOf(a.jointTrueProb);
     const tierB = tierOf(b.jointTrueProb);
     if (tierA !== tierB) return tierB - tierA; // higher win-probability tier first
-    return b.multiplier - a.multiplier; // within tier, best return first
+    const vA = valueCount(a);
+    const vB = valueCount(b);
+    if (vA !== vB) return vB - vA; // value bets prioritized within the tier
+    return b.multiplier - a.multiplier; // then best return first
   });
 
   // ── Greedy non-overlapping selection ─────────────────────────────────────
@@ -340,8 +409,30 @@ export function autoGenerateCombos(opts: {
     const expectedValue =
       stakeAmount * (candidate.jointTrueProb * candidate.multiplier - 1);
 
-    const topLeg = [...candidate.legs].sort((a, b) => b.edge - a.edge)[0];
-    const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${candidate.legs.length} value bets — strongest: ${topLeg.marketTitle} (${topLeg.position.toUpperCase()}, +${(topLeg.edge * 100).toFixed(0)} pts).`;
+    const nValue = candidate.legs.filter((l) => l.legType === "value").length;
+    const nSafe = candidate.legs.length - nValue;
+    const composition =
+      nValue > 0 && nSafe > 0
+        ? `${nValue} value + ${nSafe} safe`
+        : nValue > 0
+          ? `${nValue} value bet${nValue > 1 ? "s" : ""}`
+          : `${nSafe} safe pick${nSafe > 1 ? "s" : ""}`;
+    // Highlight the strongest leg: the biggest-edge value bet if any, else the
+    // highest-probability safe favorite.
+    const topLeg = [...candidate.legs].sort((a, b) =>
+      a.legType !== b.legType
+        ? a.legType === "value"
+          ? -1
+          : 1
+        : a.legType === "value"
+          ? b.edge - a.edge
+          : b.trueProbability - a.trueProbability,
+    )[0];
+    const topLegNote =
+      topLeg.legType === "value"
+        ? `+${(topLeg.edge * 100).toFixed(0)} pts edge`
+        : `${(topLeg.trueProbability * 100).toFixed(0)}% likely`;
+    const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${composition} — strongest: ${topLeg.marketTitle} (${topLeg.position.toUpperCase()}, ${topLegNote}).`;
 
     selected.push({
       legs: candidate.legs.map((l) => ({
@@ -353,6 +444,7 @@ export function autoGenerateCombos(opts: {
         impliedProb: l.impliedProb,
         trueProbability: l.trueProbability,
         edge: l.edge,
+        legType: l.legType,
         aiReasoning: l.aiReasoning,
         aiConfidence: l.aiConfidence,
         closeTime: l.closeTime,

@@ -9,4 +9,6 @@
 export interface Category {
   name: string;
   count: number;
+  /** Total traded volume across the category's live markets (used to rank trending categories) */
+  volume: number;
 }

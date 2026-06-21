@@ -1,81 +1,30 @@
 ---
-name: MarketEdge Smart Picks value analysis
-description: How the AI-vetted Smart Picks parlay generator avoids nonsense/misleading combos
+name: MarketEdge Smart Picks optimizer
+description: How the Smart Picks parlay generator gates legs (value vs safe), sizes combos, and why kalshi-only can return empty.
 ---
 
-# Smart Picks must stay trustworthy
+# Smart Picks combo generation
 
-The original Smart Picks surfaced near-50% novelty combos ("X before GTA VI") as if
-they were good bets. Three properties keep it honest now — break any one and nonsense
-returns:
+## Two leg classes: value + safe
+Each combo leg is classified `legType: "value" | "safe"` (see `optimizer.ts`).
+- **value** = genuinely mispriced: `edge >= EDGE_THRESHOLD (0.05)` AND `trueProb >= minLegTrue`.
+- **safe** = confident favorite, not value: `edge >= 0` AND `trueProb >= safeMinTrue` AND `confidence !== "low"`.
+- Per market, one best side is chosen; value always beats safe; within a class the stronger leg wins (value→bigger edge, safe→higher prob).
 
-1. **No synthetic odds.** Market parsers MUST return null (and be filtered out) when no
-   real live price exists. Never default an odds field to 0.5 — that exact default was the
-   original "fake odds" bug.
-   **Why:** a 0.5 placeholder reads as a genuine coin-flip market and pollutes the pool.
+**Why:** Pure-value pools were too thin — picking a platform + a high leg count often yielded 0 combos because only ~2 value legs existed. Adding safe favorites (user-approved "value + safe favorites" direction) broadens the pool so multi-leg combos can form, while each leg is labelled so users see which is which.
 
-2. **Confidence shrinkage before computing edge.** Blend the AI's raw trueProbabilityYes
-   toward the live market price by a confidence weight (low~0.45 / med~0.65 / high~0.85)
-   BEFORE computing edge = trueProb - price.
-   **Why:** raw AI estimates are overconfident; multiplying several overconfident edges
-   into a parlay produced fantasy numbers (saw +42000% EV). Shrinkage keeps edges credible.
+Risk tuning (`RISK_TUNING` in optimizer): conservative `safeMinTrue 0.8`, balanced `0.7`, aggressive `0.6`.
 
-3. **Correlation guard inside a combo.** Reject any combo containing two legs from the same
-   market "family" (normalize the title by stripping numbers/percentages/months/years; legs
-   sharing a normalized key are treated as correlated, e.g. CPI threshold ladders).
-   **Why:** parlay math multiplies leg probabilities assuming independence; correlated legs
-   (multiple CPI-threshold markets for the same/adjacent months) violate that and inflate
-   edge. **How to apply:** in optimizer combo generation, dedupe legs by family key.
+## legCount is a MINIMUM, not exact
+`legCount` ("auto"|2|3|4|5) means "this many legs or more". `"auto"` = 2+. The optimizer enumerates sizes from `minLegs` up to `min(pool, TOP_LEGS_CAP=16)` — there is NO 4-leg cap. `"5"` allows large combos (up to the cap).
 
-# EV math (core scoring metric)
-A parlay is positive-EV iff Π(trueProb / price) > 1. edgePercent = (that product - 1)*100.
-expectedValue = stake * (jointTrueProb * payoutMultiplier - 1).
+**How to apply:** Ranking is probability-tier-first (`tierOf(jointTrueProb)` by `probBand`), then value-count desc, then payout multiplier — so the safest combo surfaces first but fewest-leg / highest-value is preferred at comparable odds. EV gate is `evMultiplier < 1` dropped (every leg has edge>=0 so multiplier>=1 is guaranteed).
 
-# Ranking must be probability-FIRST, not a probability×return blend
-Users want the HIGHEST win-probability combos that still pay well — not longshots.
-A weighted score (e.g. jointTrueProb * multiplier^w) lets a high-payout longshot
-leapfrog a likelier combo, which violates the intent. Instead bucket combos into
-win-probability TIERS (band width per risk: conservative ~0.08 / balanced ~0.12 /
-aggressive ~0.20), order the highest tier first, and only within a tier sort by
-payout. **Why:** prior blend ranked a 32%-win combo above a 57%-win one; tiering
-fixed it.
+## kalshi-only empty results are EXPECTED, not a bug
+With `platform=kalshi`, generation can still return 0 combos even at min2. Cause: the AI judges most kalshi markets as fairly-priced (no edge) or below `safeMinTrue` / low-confidence, so <2 legs qualify. The route DOES analyze up to `POOL_CAP=48` kalshi markets — pool size is not the limiter; the quality gate is. `both` platforms generates fine. Don't "fix" this by loosening thresholds without a reason.
 
-# Quality floor must be leg-count-aware (geometric, not fixed-joint)
-Do NOT use a fixed joint-probability floor — it rejects almost every 3/4-leg combo
-because joint probability shrinks as legs are added, so any "force N legs" feature
-returns nothing. Use a GEOMETRIC floor: reject when jointTrueProb < minGeoMean^legs
-(per-risk minGeoMean ~ conservative 0.67 / balanced 0.55 / aggressive 0.39, picked
-so 2-leg behavior ≈ the old fixed floors). This keeps each leg high-quality while
-letting users opt into more legs for a bigger payout.
+## Result field name
+The combo's win probability field is `jointProbability` (NOT `combinedProbability`). Reading the wrong name yields NaN.
 
-# Resolution-horizon filter (keep combo legs on a similar timeframe)
-Prediction markets resolve on wildly different dates — a near-term sports market
-(days) can get parlayed with a "recession by 2027" market that won't settle until
-~2050. Users hated mixed-timeframe combos. smart-picks accepts horizon
-(any|week|month|quarter|year, default any → days 7/31/92/366). Applied at the SAME
-pre-AI candidate-filter stage as category/platform so it composes cleanly and
-doesn't disturb probability-first ranking. When horizon != any, EXCLUDE markets
-whose closeTime is null/unparsable (can't promise a settle date) or beyond the
-cutoff. Validate the enum with Object.hasOwn (NOT `in`) — `in` walks the prototype
-chain so "constructor" would pass and yield a NaN cutoff. Legs carry closeTime so
-the UI shows each leg's resolve date. Narrow windows (e.g. month) legitimately
-return 0 — few near-term markets have positive edge; surface a context-aware empty
-state.
-
-# Platform & category awareness
-ComboLeg carries platform (kalshi|polymarket). smart-picks accepts platform
-(kalshi|polymarket|both, default both) and category (default "all") and legCount
-("auto"|2|3|4). For "both", balance the pool (top 24 each — the two platforms
-measure volume on different scales) and backfill from the other up to cap 48.
-Categories are UNRELIABLE from upstream (Polymarket Gamma returns none; Kalshi only
-a coarse series prefix) so derive them from the market TITLE via keyword matching
-(deriveCategory) for BOTH platforms. listCategories() exposes only categories with
->=2 live markets. Expect narrow categories (e.g. World-Cup-winner markets) to yield
-ZERO combos — they're mutually-exclusive outcomes with no independent positive-edge
-value legs; surface a context-aware empty state rather than treating it as a bug.
-
-# AI analysis reliability
-analyzeMarkets batches Claude per chunk. Per-chunk processor must let rate-limit errors
-propagate (so batchProcess retries) but degrade ALL other errors to fallback
-(plausible:false) analyses — otherwise one chunk failure 500s the whole endpoint and the
-user sees no picks.
+## Categories
+`listCategories` returns `{name, count, volume}` sorted by volume desc. `kalshiCategory` maps Kalshi series prefixes to specific sports (Basketball/Baseball/Football/Hockey/Soccer/Golf/Motorsport/Tennis/Combat Sports/Cricket) instead of a generic "Sports". Frontend uses top-N by volume as trending chips + a searchable combobox over all categories.

@@ -7,7 +7,7 @@
  */
 
 /**
- * Number of legs per combo, or "auto" to consider 2-4 legs
+ * MINIMUM legs per combo ("3" = 3 or more), or "auto" for no minimum (2+). "5" permits large combos (10, 20+ legs) when enough quality legs exist.
  */
 export type SmartPicksInputLegCount = typeof SmartPicksInputLegCount[keyof typeof SmartPicksInputLegCount];
 
@@ -17,4 +17,5 @@ export const SmartPicksInputLegCount = {
   NUMBER_2: '2',
   NUMBER_3: '3',
   NUMBER_4: '4',
+  NUMBER_5: '5',
 } as const;

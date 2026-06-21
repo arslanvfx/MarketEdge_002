@@ -6,7 +6,16 @@ import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info, Brain, TrendingUp, Clock } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info, Brain, TrendingUp, Clock, Search, Check, ChevronsUpDown } from "lucide-react";
 import {
   useGenerateSmartPicks,
   useSaveCombo,
@@ -72,9 +81,10 @@ type LegCount = SmartPicksInputLegCount;
 
 const LEG_COUNT_OPTIONS: { value: LegCount; label: string }[] = [
   { value: "auto", label: "Auto" },
-  { value: "2", label: "2 legs" },
-  { value: "3", label: "3 legs" },
-  { value: "4", label: "4 legs" },
+  { value: "2", label: "2+" },
+  { value: "3", label: "3+" },
+  { value: "4", label: "4+" },
+  { value: "5", label: "5+" },
 ];
 
 type Horizon = SmartPicksInputHorizon;
@@ -235,14 +245,28 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
               </Badge>
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-xs leading-snug">{leg.marketTitle}</div>
-                {PLATFORM_BADGE[leg.platform] && (
-                  <Badge
-                    variant="outline"
-                    className={`mt-1 text-[9px] px-1.5 py-0 font-medium ${PLATFORM_BADGE[leg.platform].className}`}
-                  >
-                    {PLATFORM_BADGE[leg.platform].label}
-                  </Badge>
-                )}
+                <div className="flex items-center gap-1 mt-1 flex-wrap">
+                  {PLATFORM_BADGE[leg.platform] && (
+                    <Badge
+                      variant="outline"
+                      className={`text-[9px] px-1.5 py-0 font-medium ${PLATFORM_BADGE[leg.platform].className}`}
+                    >
+                      {PLATFORM_BADGE[leg.platform].label}
+                    </Badge>
+                  )}
+                  {leg.legType && (
+                    <Badge
+                      variant="outline"
+                      className={`text-[9px] px-1.5 py-0 font-medium ${
+                        leg.legType === "value"
+                          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                          : "bg-sky-500/10 text-sky-400 border-sky-500/20"
+                      }`}
+                    >
+                      {leg.legType === "value" ? "Value" : "Safe pick"}
+                    </Badge>
+                  )}
+                </div>
                 {leg.aiReasoning && (
                   <div className="flex items-start gap-1 mt-1 text-[11px] leading-snug text-muted-foreground">
                     <Brain className="w-3 h-3 mt-px shrink-0 text-primary/60" />
@@ -262,7 +286,7 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
                 )}
               </div>
               <div className="text-right shrink-0 space-y-0.5">
-                {typeof leg.edge === "number" && (
+                {typeof leg.edge === "number" && leg.legType !== "safe" && (
                   <Badge
                     variant="outline"
                     className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 text-[10px] font-mono"
@@ -353,6 +377,116 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
   );
 }
 
+function CategoryPicker({
+  categories,
+  value,
+  onChange,
+}: {
+  categories: { name: string; count: number; volume: number }[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Categories arrive sorted by volume (hottest first) — surface the top few as quick chips.
+  const trending = categories.slice(0, 5);
+  const selectedLabel = value === "all" ? "All categories" : value;
+
+  return (
+    <div className="space-y-2">
+      {/* Trending quick-select chips */}
+      <div className="flex gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={() => onChange("all")}
+          data-testid="category-all"
+          className={`px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
+            value === "all"
+              ? "border-primary/40 bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+          }`}
+        >
+          All
+        </button>
+        {trending.map((cat) => {
+          const active = value === cat.name;
+          return (
+            <button
+              key={cat.name}
+              type="button"
+              onClick={() => onChange(cat.name)}
+              data-testid={`category-${cat.name}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
+                active
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+              }`}
+            >
+              <Flame className="w-3 h-3 text-orange-400" />
+              {cat.name}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Searchable combobox over every category */}
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="outline"
+            role="combobox"
+            aria-expanded={open}
+            data-testid="category-search-trigger"
+            className="w-full justify-between font-normal"
+          >
+            <span className="flex items-center gap-2 truncate">
+              <Search className="w-3.5 h-3.5 shrink-0 opacity-60" />
+              <span className="truncate">{selectedLabel}</span>
+            </span>
+            <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+          <Command>
+            <CommandInput placeholder="Search categories…" data-testid="input-category-search" />
+            <CommandList>
+              <CommandEmpty>No categories found.</CommandEmpty>
+              <CommandGroup>
+                <CommandItem
+                  value="All categories"
+                  onSelect={() => {
+                    onChange("all");
+                    setOpen(false);
+                  }}
+                  data-testid="category-option-all"
+                >
+                  <Check className={`mr-2 h-4 w-4 ${value === "all" ? "opacity-100" : "opacity-0"}`} />
+                  All categories
+                </CommandItem>
+                {categories.map((cat) => (
+                  <CommandItem
+                    key={cat.name}
+                    value={cat.name}
+                    onSelect={() => {
+                      onChange(cat.name);
+                      setOpen(false);
+                    }}
+                    data-testid={`category-option-${cat.name}`}
+                  >
+                    <Check className={`mr-2 h-4 w-4 ${value === cat.name ? "opacity-100" : "opacity-0"}`} />
+                    <span className="flex-1 truncate">{cat.name}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">{cat.count}</span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
 export default function SmartPicks() {
   const [riskLevel, setRiskLevel] = useState<RiskLevel>("balanced");
   const [platform, setPlatform] = useState<PlatformFilter>("both");
@@ -374,17 +508,17 @@ export default function SmartPicks() {
           if (data.combos.length === 0) {
             const hints: string[] = [];
             if (category !== "all") hints.push(`the "${category}" category`);
-            if (legCount !== "auto") hints.push(`${legCount}-leg combos`);
+            if (legCount !== "auto") hints.push(`${legCount}+ leg combos`);
             if (horizon !== "any") {
               const label = HORIZON_OPTIONS.find((h) => h.value === horizon)?.label ?? horizon;
               hints.push(`a ${label} resolution window`);
             }
             const scope = hints.length
-              ? `No value bets right now for ${hints.join(" with ")}.`
+              ? `Not enough qualifying legs right now for ${hints.join(" with ")}.`
               : "Not enough markets matched your settings right now.";
             toast({
               title: "No combos found",
-              description: `${scope} Try "Any" timeframe, "All" categories, fewer legs, or a different risk level.`,
+              description: `${scope} Try "Any" timeframe, "All" categories, a lower minimum leg count, or a different risk level.`,
               variant: "destructive",
             });
           }
@@ -409,13 +543,14 @@ export default function SmartPicks() {
             <h1 className="text-xl font-bold">Smart Picks</h1>
           </div>
           <p className="text-sm text-muted-foreground mb-6">
-            Claude analyzes live markets, estimates the true odds, and surfaces only combos where the
-            market price is genuinely mispriced in your favor — real value bets, not coin-flip novelties.
+            Claude analyzes live markets and estimates the true odds, then builds combos from mispriced{" "}
+            <span className="text-emerald-400 font-medium">value</span> bets plus high-probability{" "}
+            <span className="text-sky-400 font-medium">safe</span> favorites it's confident in — each leg is labelled so you know which is which.
           </p>
 
-          <div className="flex flex-col sm:flex-row gap-6 items-start sm:items-end">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-5 items-start">
             {/* Stake slider */}
-            <div className="space-y-2 w-full sm:w-56">
+            <div className="space-y-2">
               <div className="flex justify-between items-center">
                 <label className="text-sm font-medium">Stake per combo</label>
                 <span className="text-sm font-mono font-semibold text-primary">${stake}</span>
@@ -436,7 +571,7 @@ export default function SmartPicks() {
             </div>
 
             {/* Risk level */}
-            <div className="space-y-1.5 flex-1">
+            <div className="space-y-1.5">
               <label className="text-sm font-medium">Risk appetite</label>
               <div className="flex gap-2 flex-wrap">
                 {RISK_OPTIONS.map((opt) => {
@@ -489,7 +624,7 @@ export default function SmartPicks() {
 
             {/* Leg count */}
             <div className="space-y-1.5">
-              <label className="text-sm font-medium">Legs per combo</label>
+              <label className="text-sm font-medium">Minimum legs</label>
               <div className="flex gap-2 flex-wrap">
                 {LEG_COUNT_OPTIONS.map((opt) => {
                   const active = legCount === opt.value;
@@ -509,7 +644,7 @@ export default function SmartPicks() {
                   );
                 })}
               </div>
-              <p className="text-xs text-muted-foreground">More legs = bigger payout, lower odds</p>
+              <p className="text-xs text-muted-foreground">Fewest legs preferred; more = bigger payout, lower odds</p>
             </div>
 
             {/* Resolution horizon */}
@@ -540,44 +675,20 @@ export default function SmartPicks() {
             {/* Category */}
             <div className="space-y-1.5">
               <label className="text-sm font-medium">Category</label>
-              <div className="flex gap-2 flex-wrap">
-                <button
-                  onClick={() => setCategory("all")}
-                  data-testid="category-all"
-                  className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
-                    category === "all"
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
-                  }`}
-                >
-                  All
-                </button>
-                {(categoriesData?.categories ?? []).map((cat) => {
-                  const active = category === cat.name;
-                  return (
-                    <button
-                      key={cat.name}
-                      onClick={() => setCategory(cat.name)}
-                      data-testid={`category-${cat.name}`}
-                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
-                        active
-                          ? "border-primary/40 bg-primary/10 text-primary"
-                          : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
-                      }`}
-                    >
-                      {cat.name}
-                      <span className="ml-1.5 text-xs opacity-60">{cat.count}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-xs text-muted-foreground">Generate picks from a specific topic</p>
+              <CategoryPicker
+                categories={categoriesData?.categories ?? []}
+                value={category}
+                onChange={setCategory}
+              />
+              <p className="text-xs text-muted-foreground">Search any topic or tap a trending one</p>
             </div>
+          </div>
 
-            {/* Generate button */}
+          {/* Generate button */}
+          <div className="mt-6 flex justify-end">
             <Button
               size="lg"
-              className="h-11 px-8 flex-shrink-0"
+              className="h-11 px-8 w-full sm:w-auto"
               onClick={handleGenerate}
               disabled={isLoading}
               data-testid="button-generate-picks"
@@ -587,7 +698,7 @@ export default function SmartPicks() {
               ) : (
                 <Sparkles className="w-4 h-4 mr-2" />
               )}
-              {isLoading ? "Analyzing with AI…" : "Find Value Combos"}
+              {isLoading ? "Analyzing with AI…" : "Find Best Combos"}
             </Button>
           </div>
         </div>
@@ -601,7 +712,7 @@ export default function SmartPicks() {
             <>
               <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground py-2">
                 <Brain className="w-4 h-4 text-primary animate-pulse" />
-                <span>Claude is analyzing live markets for genuine mispricing…</span>
+                <span>Claude is analyzing live markets for value and safe favorites…</span>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {[0, 1, 2, 3].map((i) => <ComboCardSkeleton key={i} />)}
@@ -625,8 +736,8 @@ export default function SmartPicks() {
             <div className="flex flex-col items-center justify-center py-24 text-center text-muted-foreground space-y-4">
               <Sparkles className="w-14 h-14 opacity-20" />
               <div>
-                <p className="font-medium text-foreground">No genuine value found right now</p>
-                <p className="text-sm mt-1">AI found no markets meaningfully mispriced for this risk level. Try Aggressive, or check back as live odds move.</p>
+                <p className="font-medium text-foreground">No qualifying combos right now</p>
+                <p className="text-sm mt-1">AI found too few value bets or confident favorites for this risk level. Try Aggressive, a lower minimum leg count, or check back as live odds move.</p>
               </div>
             </div>
           )}

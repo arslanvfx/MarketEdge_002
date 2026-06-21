@@ -105,7 +105,7 @@ export const GenerateSmartPicksBody = zod.object({
   "count": zod.number().min(1).max(generateSmartPicksBodyCountMax).default(generateSmartPicksBodyCountDefault),
   "platform": zod.enum(['kalshi', 'polymarket', 'both']).default(generateSmartPicksBodyPlatformDefault).describe('Which platform(s) to draw candidate markets from'),
   "category": zod.string().default(generateSmartPicksBodyCategoryDefault).describe('Market category to draw candidates from (\"all\" for any)'),
-  "legCount": zod.enum(['auto', '2', '3', '4']).default(generateSmartPicksBodyLegCountDefault).describe('Number of legs per combo, or \"auto\" to consider 2-4 legs'),
+  "legCount": zod.enum(['auto', '2', '3', '4', '5']).default(generateSmartPicksBodyLegCountDefault).describe('MINIMUM legs per combo (\"3\" = 3 or more), or \"auto\" for no minimum (2+). \"5\" permits large combos (10, 20+ legs) when enough quality legs exist.'),
   "horizon": zod.enum(['any', 'week', 'month', 'quarter', 'year']).default(generateSmartPicksBodyHorizonDefault).describe('Only include markets that resolve within this window (\"any\" = no limit). Keeps all legs in a combo resolving on a similar timeframe.')
 })
 
@@ -120,6 +120,7 @@ export const GenerateSmartPicksResponse = zod.object({
   "impliedProb": zod.number(),
   "trueProbability": zod.number().optional().describe('AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs.'),
   "edge": zod.number().optional().describe('trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs.'),
+  "legType": zod.enum(['value', 'safe']).optional().describe('\"value\" = genuinely mispriced bet (edge >= threshold). \"safe\" = a high-probability favorite the AI is confident in but the market prices fairly. Present on Smart Picks legs.'),
   "aiReasoning": zod.string().optional().describe('Short AI explanation of the estimate. Present on Smart Picks legs.'),
   "aiConfidence": zod.enum(['low', 'medium', 'high']).optional().describe('AI confidence in its probability estimate. Present on Smart Picks legs.'),
   "closeTime": zod.string().nullish().describe('ISO timestamp when this market resolves (null if unknown). Present on Smart Picks legs.')
@@ -144,7 +145,8 @@ export const GenerateSmartPicksResponse = zod.object({
 export const ListSmartPickCategoriesResponse = zod.object({
   "categories": zod.array(zod.object({
   "name": zod.string(),
-  "count": zod.number()
+  "count": zod.number(),
+  "volume": zod.number().describe('Total traded volume across the category\'s live markets (used to rank trending categories)')
 }))
 })
 
@@ -185,6 +187,7 @@ export const OptimizeCombosResponse = zod.object({
   "impliedProb": zod.number(),
   "trueProbability": zod.number().optional().describe('AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs.'),
   "edge": zod.number().optional().describe('trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs.'),
+  "legType": zod.enum(['value', 'safe']).optional().describe('\"value\" = genuinely mispriced bet (edge >= threshold). \"safe\" = a high-probability favorite the AI is confident in but the market prices fairly. Present on Smart Picks legs.'),
   "aiReasoning": zod.string().optional().describe('Short AI explanation of the estimate. Present on Smart Picks legs.'),
   "aiConfidence": zod.enum(['low', 'medium', 'high']).optional().describe('AI confidence in its probability estimate. Present on Smart Picks legs.'),
   "closeTime": zod.string().nullish().describe('ISO timestamp when this market resolves (null if unknown). Present on Smart Picks legs.')

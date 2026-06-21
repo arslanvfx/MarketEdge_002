@@ -15,6 +15,7 @@ export * from './comboLegAiConfidence';
 export * from './comboLegInput';
 export * from './comboLegInputPlatform';
 export * from './comboLegInputPosition';
+export * from './comboLegLegType';
 export * from './comboLegPlatform';
 export * from './comboLegPosition';
 export * from './combosListResponse';

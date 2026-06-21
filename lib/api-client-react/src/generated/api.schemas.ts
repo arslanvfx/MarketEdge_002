@@ -69,6 +69,17 @@ export const ComboLegPosition = {
 } as const;
 
 /**
+ * "value" = genuinely mispriced bet (edge >= threshold). "safe" = a high-probability favorite the AI is confident in but the market prices fairly. Present on Smart Picks legs.
+ */
+export type ComboLegLegType = typeof ComboLegLegType[keyof typeof ComboLegLegType];
+
+
+export const ComboLegLegType = {
+  value: 'value',
+  safe: 'safe',
+} as const;
+
+/**
  * AI confidence in its probability estimate. Present on Smart Picks legs.
  */
 export type ComboLegAiConfidence = typeof ComboLegAiConfidence[keyof typeof ComboLegAiConfidence];
@@ -91,6 +102,8 @@ export interface ComboLeg {
   trueProbability?: number;
   /** trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs. */
   edge?: number;
+  /** "value" = genuinely mispriced bet (edge >= threshold). "safe" = a high-probability favorite the AI is confident in but the market prices fairly. Present on Smart Picks legs. */
+  legType?: ComboLegLegType;
   /** Short AI explanation of the estimate. Present on Smart Picks legs. */
   aiReasoning?: string;
   /** AI confidence in its probability estimate. Present on Smart Picks legs. */
@@ -131,7 +144,7 @@ export const SmartPicksInputPlatform = {
 } as const;
 
 /**
- * Number of legs per combo, or "auto" to consider 2-4 legs
+ * MINIMUM legs per combo ("3" = 3 or more), or "auto" for no minimum (2+). "5" permits large combos (10, 20+ legs) when enough quality legs exist.
  */
 export type SmartPicksInputLegCount = typeof SmartPicksInputLegCount[keyof typeof SmartPicksInputLegCount];
 
@@ -141,6 +154,7 @@ export const SmartPicksInputLegCount = {
   NUMBER_2: '2',
   NUMBER_3: '3',
   NUMBER_4: '4',
+  NUMBER_5: '5',
 } as const;
 
 /**
@@ -173,7 +187,7 @@ export interface SmartPicksInput {
   platform?: SmartPicksInputPlatform;
   /** Market category to draw candidates from ("all" for any) */
   category?: string;
-  /** Number of legs per combo, or "auto" to consider 2-4 legs */
+  /** MINIMUM legs per combo ("3" = 3 or more), or "auto" for no minimum (2+). "5" permits large combos (10, 20+ legs) when enough quality legs exist. */
   legCount?: SmartPicksInputLegCount;
   /** Only include markets that resolve within this window ("any" = no limit). Keeps all legs in a combo resolving on a similar timeframe. */
   horizon?: SmartPicksInputHorizon;
@@ -221,6 +235,8 @@ export interface SmartPicksResponse {
 export interface Category {
   name: string;
   count: number;
+  /** Total traded volume across the category's live markets (used to rank trending categories) */
+  volume: number;
 }
 
 export interface CategoriesResponse {

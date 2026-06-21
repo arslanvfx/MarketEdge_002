@@ -209,7 +209,18 @@ function kalshiCategory(ticker: string, seriesTicker: string): string | null {
   const s = seriesTicker.toUpperCase();
   if (s.startsWith("KXBTC") || s.startsWith("KXETH") || s.startsWith("KXXRP") || s.startsWith("KXAVAX") || s.startsWith("KXNEAR")) return "Crypto";
   if (s.startsWith("KXINX") || s.startsWith("KXFED") || s.startsWith("KXCPI") || s.startsWith("KXGDP") || s === "KXU3" || s.startsWith("KXRECSSNBER") || s.startsWith("KXSAHM") || s.startsWith("KXRETAIL")) return "Economics";
-  if (s.startsWith("KXNBA") || s.startsWith("KXMLB") || s.startsWith("KXNFL") || s.startsWith("KXWCGAME") || s.startsWith("KXWCTOTAL") || s.startsWith("KXWNBA") || s.startsWith("KXPGA") || s.startsWith("KXF1")) return "Sports";
+  // Specific sports by series prefix so they don't collapse into a generic
+  // "Sports" bucket (which otherwise swallows tennis, soccer, golf, etc.).
+  if (s.startsWith("KXNBA") || s.startsWith("KXWNBA")) return "Basketball";
+  if (s.startsWith("KXMLB")) return "Baseball";
+  if (s.startsWith("KXNFL")) return "Football";
+  if (s.startsWith("KXNHL")) return "Hockey";
+  if (s.startsWith("KXWC") || s.startsWith("KXEPL") || s.startsWith("KXUCL") || s.startsWith("KXMLS") || s.startsWith("KXLALIGA")) return "Soccer";
+  if (s.startsWith("KXPGA") || s.startsWith("KXGOLF") || s.startsWith("KXMASTERS")) return "Golf";
+  if (s.startsWith("KXF1") || s.startsWith("KXNASCAR") || s.startsWith("KXMOTOGP")) return "Motorsport";
+  if (s.startsWith("KXATP") || s.startsWith("KXWTA") || s.startsWith("KXTENNIS") || s.startsWith("KXWIMBLEDON") || s.startsWith("KXUSOPEN") || s.startsWith("KXAUSOPEN") || s.startsWith("KXFRENCHOPEN") || s.startsWith("KXROLANDGARROS")) return "Tennis";
+  if (s.startsWith("KXUFC") || s.startsWith("KXMMA") || s.startsWith("KXBOXING")) return "Combat Sports";
+  if (s.startsWith("KXCRICKET") || s.startsWith("KXIPL") || s.startsWith("KXT20")) return "Cricket";
   if (s.startsWith("KXMIDTERM") || s.startsWith("KXHOUSEPARTY") || s.startsWith("KXSENATE")) return "Elections";
   if (s.startsWith("KXOSCARS") || s.startsWith("KXEMMY") || s.startsWith("KXGRAMMY") || s.startsWith("KXVMA")) return "Entertainment";
   // Fall back to category on the ticker itself (usually absent) or null
@@ -517,24 +528,30 @@ export async function fetchAllMarkets(): Promise<Market[]> {
 
 /**
  * Returns the categories present in the live, genuinely-priced market pool along
- * with how many markets each has — used to populate the Smart Picks category
- * filter. Only categories with at least 2 markets are returned, since a combo
- * needs at least two legs. Sorted by count (most markets first).
+ * with how many markets each has and their total traded volume — used to
+ * populate the Smart Picks category filter (searchable list + trending chips).
+ * Only categories with at least 2 markets are returned, since a combo needs at
+ * least two legs. Sorted by total volume (hottest first).
  */
 export async function listCategories(): Promise<
-  Array<{ name: string; count: number }>
+  Array<{ name: string; count: number; volume: number }>
 > {
   const all = await fetchAllMarkets();
-  const counts = new Map<string, number>();
+  const stats = new Map<string, { count: number; volume: number }>();
   for (const m of all) {
     if (m.yesOdds <= 0.02 || m.yesOdds >= 0.98 || (m.volume ?? 0) <= 0) continue;
     const name = m.category ?? "Other";
-    counts.set(name, (counts.get(name) ?? 0) + 1);
+    const entry = stats.get(name) ?? { count: 0, volume: 0 };
+    entry.count += 1;
+    entry.volume += m.volume ?? 0;
+    stats.set(name, entry);
   }
-  return [...counts.entries()]
-    .filter(([, count]) => count >= 2)
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count);
+  // Only categories with at least 2 markets (a combo needs ≥2 legs). Sorted by
+  // total traded volume so the frontend can surface the hottest categories first.
+  return [...stats.entries()]
+    .filter(([, s]) => s.count >= 2)
+    .map(([name, s]) => ({ name, count: s.count, volume: Math.round(s.volume) }))
+    .sort((a, b) => b.volume - a.volume);
 }
 
 export async function fetchMarketsForLegs(

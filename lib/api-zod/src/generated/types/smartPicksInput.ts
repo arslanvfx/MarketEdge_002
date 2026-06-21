@@ -26,7 +26,7 @@ export interface SmartPicksInput {
   platform?: SmartPicksInputPlatform;
   /** Market category to draw candidates from ("all" for any) */
   category?: string;
-  /** Number of legs per combo, or "auto" to consider 2-4 legs */
+  /** MINIMUM legs per combo ("3" = 3 or more), or "auto" for no minimum (2+). "5" permits large combos (10, 20+ legs) when enough quality legs exist. */
   legCount?: SmartPicksInputLegCount;
   /** Only include markets that resolve within this window ("any" = no limit). Keeps all legs in a combo resolving on a similar timeframe. */
   horizon?: SmartPicksInputHorizon;
