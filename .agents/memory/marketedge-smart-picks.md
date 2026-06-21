@@ -26,5 +26,17 @@ With `platform=kalshi`, generation can still return 0 combos even at min2. Cause
 ## Result field name
 The combo's win probability field is `jointProbability` (NOT `combinedProbability`). Reading the wrong name yields NaN.
 
+## Correlation guard — never parlay correlated legs
+`autoGenerateCombos` rejects a combo if any two legs are correlated (see `legsAreCorrelated` / `legCorrelation` in `optimizer.ts`). A combo is rejected when:
+1. Two legs share an **event** (both sides of one match, or two outcomes of one mutually-exclusive race). Kalshi tickers are `<series>-<event>-<outcome>`; dropping the last segment yields the event key. Polymarket has no event grouping in our data, so each market stands alone.
+2. Two legs share a **competition** and at least one is NOT an independent match — an outright winner ("Will Morocco win the 2026 World Cup?") correlates with every game and with other teams' outrights; threshold markets (two S&P/CPI levels, same Kalshi series) move together. **Two DIFFERENT matches of the same competition ARE allowed** (normal multi-game sports parlay).
+3. Two legs share a title **family** (same market, different threshold).
+
+Competition is derived from title patterns (`COMPETITION_TITLE_PATTERNS` — the cross-platform bridge, e.g. Polymarket WC outright ↔ Kalshi WC match both map to `fifa-world-cup`) and, for Kalshi, the ticker series prefix (`kalshiCompetitionGroup`). `isMatch` = title contains "vs"/"versus".
+
+**Why:** Users reported Smart Picks proposing combos that can't be placed on the platform (e.g. a World Cup match + "Will Morocco win the World Cup?", or two mutually-exclusive "Will X win the Cup?" outrights). Those legs are correlated, so multiplying their probabilities as independent is also statistically invalid. The old guard only used `marketFamilyKey`, which caught same-market-different-threshold but missed cross-platform same-tournament and mutually-exclusive outrights (different team names → different family keys).
+
+**How to apply:** When adding a competition that has both outright winners AND individual games (so titles differ but they're correlated), add a `COMPETITION_TITLE_PATTERNS` entry and/or a `kalshiCompetitionGroup` prefix mapping. Test independent-match parlays still pass while outright+match is rejected.
+
 ## Categories
 `listCategories` returns `{name, count, volume}` sorted by volume desc. `kalshiCategory` maps Kalshi series prefixes to specific sports (Basketball/Baseball/Football/Hockey/Soccer/Golf/Motorsport/Tennis/Combat Sports/Cricket) instead of a generic "Sports". Frontend uses top-N by volume as trending chips + a searchable combobox over all categories.

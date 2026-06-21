@@ -57,6 +57,147 @@ function marketFamilyKey(title: string): string {
     .trim();
 }
 
+/**
+ * Title patterns that identify a shared competition/event across BOTH platforms.
+ * Two markets matching the same pattern are correlated (same tournament, or
+ * mutually-exclusive outcomes of one event) and must never share a combo — the
+ * platform won't let you parlay them, and multiplying their probabilities as if
+ * independent is statistically invalid. This is the cross-platform bridge: e.g.
+ * a Polymarket "Will Morocco win the 2026 FIFA World Cup?" outright and a Kalshi
+ * World Cup match both resolve to the same "fifa-world-cup" group.
+ */
+const COMPETITION_TITLE_PATTERNS: [RegExp, string][] = [
+  [/world cup|\bfifa\b/i, "fifa-world-cup"],
+  [/super bowl/i, "nfl-superbowl"],
+  [/champions league|\bucl\b/i, "uefa-champions-league"],
+  [/premier league|\bepl\b/i, "epl"],
+  [/\bla liga\b/i, "la-liga"],
+  [/stanley cup/i, "nhl-stanley-cup"],
+  [/\bnba\b (finals|championship)|nba finals/i, "nba-championship"],
+  [/world series/i, "mlb-world-series"],
+  [/\bnba\b (mvp|most valuable)/i, "nba-mvp"],
+  [/\bnfl\b (mvp|most valuable)/i, "nfl-mvp"],
+];
+
+/**
+ * Map a Kalshi series-ticker prefix (the part of the market id before the first
+ * "-") to a canonical competition group. Markets in the same competition (all
+ * World Cup games + totals, all of one election's candidates, all S&P levels…)
+ * collapse together so a combo never contains two correlated legs. Unmapped
+ * prefixes fall through to the prefix itself, which still groups same-series
+ * markets (e.g. two thresholds of the same CPI release).
+ */
+function kalshiCompetitionGroup(ticker: string): string {
+  const dash = ticker.indexOf("-");
+  const prefix = (dash === -1 ? ticker : ticker.slice(0, dash)).toUpperCase();
+  if (prefix.startsWith("KXWC")) return "fifa-world-cup";
+  if (prefix.startsWith("KXNBA")) return "nba";
+  if (prefix.startsWith("KXNFL")) return "nfl";
+  if (prefix.startsWith("KXMLB")) return "mlb";
+  if (prefix.startsWith("KXNHL")) return "nhl";
+  if (prefix.startsWith("KXEPL")) return "epl";
+  if (prefix.startsWith("KXUCL")) return "uefa-champions-league";
+  return prefix;
+}
+
+/** A single head-to-head match ("A vs B"), as opposed to a season/tournament
+ * outright or a threshold market. Used to allow parlaying several INDEPENDENT
+ * matches of the same competition while still blocking outright winners (which
+ * correlate with every game) and same-event outcomes. */
+function isMatchMarket(title: string): boolean {
+  return /\bvs\.?\b|\bversus\b/i.test(title);
+}
+
+interface LegCorrelation {
+  /** Groups outcomes of the SAME underlying event (e.g. both sides of one
+   * match, or every candidate in one election). */
+  eventKey: string;
+  /** Canonical competition/tournament, or null if the market isn't part of a
+   * recognised competition. */
+  competition: string | null;
+  /** True for a single head-to-head match (independent of other matches). */
+  isMatch: boolean;
+  /** Normalised title family — catches the same market at different thresholds. */
+  family: string;
+}
+
+function legCorrelation(leg: {
+  platform: string;
+  marketId: string;
+  marketTitle: string;
+}): LegCorrelation {
+  let competition: string | null = null;
+  for (const [re, key] of COMPETITION_TITLE_PATTERNS) {
+    if (re.test(leg.marketTitle)) {
+      competition = key;
+      break;
+    }
+  }
+  // Kalshi: the ticker prefix names the series/competition even when the title
+  // (e.g. "Tunisia vs Netherlands Winner?") doesn't mention the tournament.
+  if (competition === null && leg.platform === "kalshi") {
+    competition = kalshiCompetitionGroup(leg.marketId);
+  }
+
+  // Event key. Kalshi tickers are "<series>-<event>-<outcome>" — dropping the
+  // outcome segment groups every outcome of one event together. Polymarket
+  // exposes no event grouping in our data, so each market stands alone.
+  let eventKey: string;
+  if (leg.platform === "kalshi") {
+    const parts = leg.marketId.split("-");
+    eventKey =
+      parts.length > 2 ? parts.slice(0, -1).join("-") : leg.marketId;
+  } else {
+    eventKey = leg.marketId;
+  }
+
+  return {
+    eventKey: `${leg.platform}:${eventKey}`,
+    competition,
+    isMatch: isMatchMarket(leg.marketTitle),
+    family: marketFamilyKey(leg.marketTitle),
+  };
+}
+
+/**
+ * Decide whether a set of legs is safe to parlay together. Rejects when any two
+ * legs are correlated — i.e. the platform won't let you place the combo and
+ * multiplying their probabilities as if independent is statistically invalid:
+ *  1. Same underlying event (both sides of one match, or two candidates in one
+ *     mutually-exclusive race).
+ *  2. Same competition where at least one leg is NOT an independent match — an
+ *     outright winner ("Will Morocco win the World Cup?") correlates with every
+ *     game and with every other team's outright, and threshold markets (two S&P
+ *     or CPI levels) move together. Two DIFFERENT matches of the same
+ *     competition are allowed (a normal multi-game sports parlay).
+ *  3. Same title family (the same market quoted at different thresholds).
+ */
+function legsAreCorrelated(legs: LegCorrelation[]): boolean {
+  const events = new Set<string>();
+  const families = new Set<string>();
+  const byCompetition = new Map<string, LegCorrelation[]>();
+
+  for (const leg of legs) {
+    if (events.has(leg.eventKey)) return true;
+    events.add(leg.eventKey);
+    if (families.has(leg.family)) return true;
+    families.add(leg.family);
+    if (leg.competition !== null) {
+      const arr = byCompetition.get(leg.competition) ?? [];
+      arr.push(leg);
+      byCompetition.set(leg.competition, arr);
+    }
+  }
+
+  for (const arr of byCompetition.values()) {
+    // Multiple legs in one competition are only OK when every one is an
+    // independent match; any outright/threshold leg makes them correlated.
+    if (arr.length > 1 && !arr.every((l) => l.isMatch)) return true;
+  }
+
+  return false;
+}
+
 function comboKey(legs: ComboLegResult[]): string {
   return legs
     .map((l) => `${l.platform}:${l.marketId}:${l.position}`)
@@ -343,12 +484,14 @@ export function autoGenerateCombos(opts: {
   for (const size of sizes) {
     if (size > topLegs.length) continue;
     for (const legs of combinations(topLegs, size)) {
-      // Correlation guard: reject combos with two legs from the same market
-      // "family" (e.g. "CPI rise > 0.0% in June" and "CPI rise > 0.1% in June").
-      // Such legs are highly correlated, so multiplying their probabilities as
-      // if independent is statistically invalid and inflates the apparent edge.
-      const families = new Set(legs.map((l) => marketFamilyKey(l.marketTitle)));
-      if (families.size < legs.length) continue;
+      // Correlation guard: reject combos whose legs aren't independent — same
+      // event (both sides of one match), same competition with an outright/
+      // threshold leg (e.g. a World Cup match + "Will Morocco win the World
+      // Cup?", or two mutually-exclusive outright winners), or the same market
+      // at different thresholds. Independent matches of one competition are
+      // allowed. Multiplying correlated probabilities as if independent is
+      // statistically invalid AND the platform won't let you parlay them.
+      if (legsAreCorrelated(legs.map((l) => legCorrelation(l)))) continue;
 
       const jointTrueProb = legs.reduce((acc, l) => acc * l.trueProbability, 1);
       const jointPrice = legs.reduce((acc, l) => acc * l.impliedProb, 1);
