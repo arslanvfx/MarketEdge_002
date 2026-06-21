@@ -61,12 +61,13 @@ const PLATFORM_BADGE: Record<string, { label: string; className: string }> = {
 };
 
 type LegCount = SmartPicksInputLegCount;
-const LEG_COUNT_OPTIONS: { value: LegCount; label: string }[] = [
-  { value: "auto", label: "Auto" },
-  { value: "2",    label: "2+"   },
-  { value: "3",    label: "3+"   },
-  { value: "4",    label: "4+"   },
-  { value: "5",    label: "5+"   },
+const LEG_COUNT_OPTIONS: { value: LegCount; label: string; description: string }[] = [
+  { value: "auto", label: "Auto",   description: "Fewest legs for the best return" },
+  { value: "1",    label: "Single", description: "Single bets only"                },
+  { value: "2",    label: "≤2",     description: "At most 2 legs"                  },
+  { value: "3",    label: "≤3",     description: "At most 3 legs"                  },
+  { value: "4",    label: "≤4",     description: "At most 4 legs"                  },
+  { value: "5",    label: "5+",     description: "5 or more legs (riskier)"        },
 ];
 
 type Horizon = SmartPicksInputHorizon;
@@ -77,6 +78,25 @@ const HORIZON_OPTIONS: { value: Horizon; label: string }[] = [
   { value: "quarter", label: "3 months" },
   { value: "year",    label: "1 year"   },
 ];
+
+/**
+ * Parse a Kalshi gameKey (e.g. "26JUN27COLPOR") into a human-readable "COL vs POR"
+ * label shown above standalone prop legs (corners, totals, spreads) when there is
+ * no sibling winner leg in the same combo that already names the match.
+ *
+ * Format: DD{MON}{YY}{TEAM1 3-char}{TEAM2 3-char+}
+ * Examples: "26JUN27COLPOR" → "COL vs POR", "08JUL27URYCPV" → "URY vs CPV"
+ */
+function gameKeyToMatchLabel(gameKey: string | null | undefined): string | null {
+  if (!gameKey) return null;
+  const dateMatch = gameKey.match(/^\d{2}[A-Z]{3}\d{2}(.+)$/);
+  if (!dateMatch) return null;
+  const teams = dateMatch[1];
+  if (teams.length < 4) return null; // need at least 2 chars per team
+  const t1 = teams.slice(0, 3);
+  const t2 = teams.slice(3);
+  return t2 ? `${t1} vs ${t2}` : t1;
+}
 
 function formatResolveDate(iso: string | null | undefined): string | null {
   if (!iso) return null;
@@ -216,14 +236,18 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
           // that shares the same gameKey and contains "vs" in its title.
           const legGameKey = (leg as any).gameKey;
           const isWinnerLeg = leg.marketTitle.toLowerCase().includes(" vs ");
-          const gameContext =
-            legGameKey && !isWinnerLeg
-              ? combo.legs.find(
+          // For same-game prop legs (corners, totals, spreads), try to pull the
+          // matchup from a sibling winner leg in this combo with the same gameKey.
+          // If no sibling winner exists (prop is the only leg from that game),
+          // fall back to parsing the gameKey itself ("26JUN27COLPOR" → "COL vs POR").
+          const gameContext = isWinnerLeg ? null :
+            legGameKey
+              ? (combo.legs.find(
                   (other) =>
                     other !== leg &&
                     (other as any).gameKey === legGameKey &&
                     other.marketTitle.toLowerCase().includes(" vs "),
-                )?.marketTitle ?? null
+                )?.marketTitle ?? gameKeyToMatchLabel(legGameKey))
               : null;
 
           return (
@@ -597,7 +621,7 @@ export default function SmartPicks() {
             {/* Legs + Horizon */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Minimum legs</label>
+                <label className="text-sm font-medium">Max combo size</label>
                 <div className="flex flex-wrap gap-2">
                   {LEG_COUNT_OPTIONS.map((opt) => (
                     <FilterChip
@@ -610,7 +634,9 @@ export default function SmartPicks() {
                     </FilterChip>
                   ))}
                 </div>
-                <p className="text-xs text-muted-foreground">More legs = bigger payout, lower odds</p>
+                <p className="text-xs text-muted-foreground">
+                  {LEG_COUNT_OPTIONS.find((o) => o.value === legCount)?.description ?? "Fewest legs for the best return"}
+                </p>
               </div>
 
               <div className="space-y-2">

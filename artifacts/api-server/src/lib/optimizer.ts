@@ -423,11 +423,18 @@ export function autoGenerateCombos(opts: {
   };
   const { minLegTrue: minTrue, minGeoMean, safeMinTrue, minJointProb, maxAutoLegs } = RISK_TUNING[riskLevel];
 
-  // Combo sizes: legCount is a MINIMUM (2, 3, 4, 5 or "auto" = 2+).
-  // Auto mode is capped at maxAutoLegs so EV-ranking doesn't surface 8-leg lottery
-  // parlays the user never asked for. Explicit leg counts let the user consciously
-  // opt into larger combos.
-  const minLegs = legCount === "auto" ? 2 : Math.max(2, legCount);
+  // Combo sizes — new semantics (the user asked to LIMIT legs, not set a minimum):
+  //  "auto" → system decides, starting from 2-leg combos up to maxAutoLegs.
+  //            The EV ranking naturally prefers fewer legs for the same return.
+  //  1       → Single bets only (max 1 leg per result, both platforms).
+  //  2,3,4   → "at most N legs" — system finds the fewest legs up to this limit
+  //            that maximise EV. Lets users cap complexity without locking leg count.
+  //  5       → "5 or more" — user consciously wants larger multi-leg combos for
+  //            bigger potential payouts.
+  const minLegs =
+    legCount === "auto" ? 2 :
+    legCount === 5 ? 5 :
+    1; // for 1/2/3/4: min is 1 (single bets are valid if they have the best EV)
 
   // ── Build value-bet legs (one best side per market) ───────────────────────
   type ScoredLeg = ComboLegResult & {
@@ -561,12 +568,18 @@ export function autoGenerateCombos(opts: {
     // SINGLE bets (one leg each) instead of parlays. Kalshi keeps multi-leg
     // combos, including same-game prop combos (winner + total + spread + …).
     const isPolymarket = pool[0]?.platform === "polymarket";
-    const groupMin = isPolymarket ? 1 : minLegs;
-    // For "auto" mode, cap at maxAutoLegs to prevent EV-ranking from surfacing
-    // lottery parlays (e.g. 8-leg combos with 5% win probability). Users who
-    // explicitly set a higher leg count consciously accept more legs.
-    const autoMax = legCount === "auto" ? maxAutoLegs : pool.length;
-    const groupMax = isPolymarket ? 1 : Math.min(pool.length, autoMax);
+    // Single-bet mode (legCount=1) forces size-1 results on both platforms.
+    // Polymarket is always size-1 regardless (no reliable parlay pricing).
+    const forceSingle = isPolymarket || legCount === 1;
+    const groupMin = forceSingle ? 1 : minLegs;
+    // "auto"  → 2..maxAutoLegs (EV ranking naturally prefers fewer legs)
+    // 2,3,4   → "at most N" — min already set to 1 above, max = N
+    // 5       → "5+" — min already set to 5 above, no artificial ceiling
+    const groupMax = forceSingle ? 1 : (
+      legCount === "auto" ? Math.min(pool.length, maxAutoLegs) :
+      legCount === 5 ? pool.length :
+      Math.min(pool.length, legCount) // 2, 3, 4 → cap at chosen max
+    );
     if (pool.length < groupMin) continue;
 
     for (let size = groupMin; size <= groupMax; size++) {

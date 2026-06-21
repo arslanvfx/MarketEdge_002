@@ -41,7 +41,7 @@ router.post("/combos/smart-picks", async (req, res) => {
     if (!validPlatform.includes(platform)) {
       return res.status(400).json({ error: "Invalid platform" });
     }
-    const validLegCount = ["auto", "2", "3", "4", "5", 2, 3, 4, 5];
+    const validLegCount = ["auto", "1", "2", "3", "4", "5", 1, 2, 3, 4, 5];
     if (!validLegCount.includes(legCount)) {
       return res.status(400).json({ error: "Invalid legCount" });
     }
@@ -62,9 +62,9 @@ router.post("/combos/smart-picks", async (req, res) => {
       horizon !== "any"
         ? Date.now() + HORIZON_DAYS[horizon] * 24 * 60 * 60 * 1000
         : null;
-    // legCount is a MINIMUM ("3" = 3 or more legs); "auto" = no minimum (2+).
-    const legs: "auto" | 2 | 3 | 4 | 5 =
-      legCount === "auto" ? "auto" : (Number(legCount) as 2 | 3 | 4 | 5);
+    // legCount now means MAX legs (1/2/3/4) or "5+" minimum, or "auto".
+    const legs: "auto" | 1 | 2 | 3 | 4 | 5 =
+      legCount === "auto" ? "auto" : (Number(legCount) as 1 | 2 | 3 | 4 | 5);
     const categoryFilter =
       typeof category === "string" && category && category !== "all"
         ? category.toLowerCase()

@@ -146,13 +146,14 @@ export const SmartPicksInputPlatform = {
 } as const;
 
 /**
- * MINIMUM legs per combo ("3" = 3 or more), or "auto" for no minimum (2+). "5" permits large combos (10, 20+ legs) when enough quality legs exist.
+ * Maximum legs per combo — "1" = single bets only, "2"/"3"/"4" = at most N legs, "5" = 5+ legs (minimum), "auto" = system picks the fewest legs for the best return.
  */
 export type SmartPicksInputLegCount = typeof SmartPicksInputLegCount[keyof typeof SmartPicksInputLegCount];
 
 
 export const SmartPicksInputLegCount = {
   auto: 'auto',
+  NUMBER_1: '1',
   NUMBER_2: '2',
   NUMBER_3: '3',
   NUMBER_4: '4',

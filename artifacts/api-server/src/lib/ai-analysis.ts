@@ -73,7 +73,11 @@ async function analyzeChunk(markets: Market[]): Promise<MarketAnalysis[]> {
       // Without it, Claude guesses from title alone and can confuse e.g. "Iraq" vs
       // "France" in a winner contract — leading to a completely wrong trueProbabilityYes.
       const yesMeaning = m.yesSubtitle ? ` [YES = "${m.yesSubtitle}"]` : "";
-      return `${i}. "${m.title}"${yesMeaning} | YES price: ${(m.yesOdds * 100).toFixed(0)}% | closes: ${close} | category: ${m.category ?? "n/a"}`;
+      // For same-game prop markets (corners, totals, spreads) the title alone doesn't
+      // name the match. Include the gameKey so Claude can correctly assess and describe
+      // which game this prop applies to (e.g. "10+ corners? [game: 26JUN27COLPOR]").
+      const gameCtx = m.gameKey ? ` [game: ${m.gameKey}]` : "";
+      return `${i}. "${m.title}"${yesMeaning}${gameCtx} | YES price: ${(m.yesOdds * 100).toFixed(0)}% | closes: ${close} | category: ${m.category ?? "n/a"}`;
     })
     .join("\n");
 

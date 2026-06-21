@@ -105,7 +105,7 @@ export const GenerateSmartPicksBody = zod.object({
   "count": zod.number().min(1).max(generateSmartPicksBodyCountMax).default(generateSmartPicksBodyCountDefault),
   "platform": zod.enum(['kalshi', 'polymarket', 'both']).default(generateSmartPicksBodyPlatformDefault).describe('Which platform(s) to draw candidate markets from'),
   "category": zod.string().default(generateSmartPicksBodyCategoryDefault).describe('Market category to draw candidates from (\"all\" for any)'),
-  "legCount": zod.enum(['auto', '2', '3', '4', '5']).default(generateSmartPicksBodyLegCountDefault).describe('MINIMUM legs per combo (\"3\" = 3 or more), or \"auto\" for no minimum (2+). \"5\" permits large combos (10, 20+ legs) when enough quality legs exist.'),
+  "legCount": zod.enum(['auto', '1', '2', '3', '4', '5']).default(generateSmartPicksBodyLegCountDefault).describe('Max legs per combo — \"1\" = single bets, \"2\"/\"3\"/\"4\" = at most N legs, \"5\" = 5+ legs, \"auto\" = fewest legs for best return.'),
   "horizon": zod.enum(['any', 'week', 'month', 'quarter', 'year']).default(generateSmartPicksBodyHorizonDefault).describe('Only include markets that resolve within this window (\"any\" = no limit). Keeps all legs in a combo resolving on a similar timeframe.')
 })
 
