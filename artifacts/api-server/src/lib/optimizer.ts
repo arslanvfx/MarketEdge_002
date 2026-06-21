@@ -568,9 +568,20 @@ export function autoGenerateCombos(opts: {
     // SINGLE bets (one leg each) instead of parlays. Kalshi keeps multi-leg
     // combos, including same-game prop combos (winner + total + spread + …).
     const isPolymarket = pool[0]?.platform === "polymarket";
+    // Kalshi's combo builder only covers sports markets. Politics, economics,
+    // climate, finance, etc. are traded individually on Kalshi — the platform
+    // doesn't let you parlay them, so we surface them as single bets only.
+    const KALSHI_SPORTS = new Set([
+      "Soccer", "Basketball", "Baseball", "Football", "Hockey", "Tennis",
+      "Golf", "MMA", "Boxing", "Cricket", "Rugby",
+    ]);
+    const isKalshiNonSport =
+      pool[0]?.platform === "kalshi" &&
+      !KALSHI_SPORTS.has(pool[0]?.category ?? "");
     // Single-bet mode (legCount=1) forces size-1 results on both platforms.
-    // Polymarket is always size-1 regardless (no reliable parlay pricing).
-    const forceSingle = isPolymarket || legCount === 1;
+    // Polymarket is always size-1 (no reliable parlay pricing).
+    // Kalshi non-sport categories are single-bet only (platform restriction).
+    const forceSingle = isPolymarket || legCount === 1 || isKalshiNonSport;
     const groupMin = forceSingle ? 1 : minLegs;
     // "auto"  → 2..maxAutoLegs (EV ranking naturally prefers fewer legs)
     // 2,3,4   → "at most N" — min already set to 1 above, max = N
@@ -626,17 +637,17 @@ export function autoGenerateCombos(opts: {
   });
 
   // ── Greedy non-overlapping selection ─────────────────────────────────────
+  // Category diversity cap: at most ⌈count/2⌉ picks from any single category
+  // (default count=4 → cap=2). Prevents all 4 picks coming from Soccer when
+  // other sports/categories also have qualifying legs.
+  // Two-pass: pass 1 enforces the cap, pass 2 fills any remaining slots without
+  // it (fires only when the pool genuinely has too few categories to fill count).
+  const MAX_PER_CAT = Math.max(1, Math.ceil(count / 2));
   const usedMarkets = new Set<string>();
+  const categoryCounts = new Map<string, number>();
   const selected: SmartPickResult[] = [];
 
-  for (const candidate of allRaw) {
-    if (selected.length >= count) break;
-    const hasOverlap = candidate.legs.some(
-      (l) => usedMarkets.has(`${l.platform}:${l.marketId}`),
-    );
-    if (hasOverlap) continue;
-    for (const l of candidate.legs) usedMarkets.add(`${l.platform}:${l.marketId}`);
-
+  const buildResult = (candidate: RawCombo): SmartPickResult => {
     const riskScore: SmartPickResult["riskScore"] =
       candidate.jointTrueProb >= 0.3 ? "low" :
       candidate.jointTrueProb >= 0.1 ? "medium" : "high";
@@ -653,13 +664,9 @@ export function autoGenerateCombos(opts: {
         : nValue > 0
           ? `${nValue} value bet${nValue > 1 ? "s" : ""}`
           : `${nSafe} safe pick${nSafe > 1 ? "s" : ""}`;
-    // Highlight the strongest leg: the biggest-edge value bet if any, else the
-    // highest-probability safe favorite.
     const topLeg = [...candidate.legs].sort((a, b) =>
       a.legType !== b.legType
-        ? a.legType === "value"
-          ? -1
-          : 1
+        ? a.legType === "value" ? -1 : 1
         : a.legType === "value"
           ? b.edge - a.edge
           : b.trueProbability - a.trueProbability,
@@ -669,10 +676,6 @@ export function autoGenerateCombos(opts: {
         ? `+${(topLeg.edge * 100).toFixed(0)} pts edge`
         : `${(topLeg.trueProbability * 100).toFixed(0)}% likely`;
     const topLegPick = topLeg.selection ?? topLeg.position.toUpperCase();
-    // Flag pure same-game combos: every leg backs the same physical game across
-    // different prop markets (winner + total + spread + …). These legs are
-    // positively correlated, so Kalshi prices the parlay as one combo — our
-    // figures assume independent legs and are an approximation.
     const gameKeys = candidate.legs.map((l) => l.gameKey).filter(Boolean);
     const sameGameCombo =
       candidate.legs.length > 1 &&
@@ -683,7 +686,7 @@ export function autoGenerateCombos(opts: {
       : "";
     const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${composition} — strongest: ${topLeg.marketTitle} (${topLegPick}, ${topLegNote}).${sameGameNote}`;
 
-    selected.push({
+    return {
       legs: candidate.legs.map((l) => ({
         marketId: l.marketId,
         platform: l.platform,
@@ -710,7 +713,30 @@ export function autoGenerateCombos(opts: {
       expectedValue,
       edgePercent,
       rationale,
-    });
+    };
+  };
+
+  const tryAccept = (candidate: RawCombo, enforceCap: boolean): boolean => {
+    if (candidate.legs.some(l => usedMarkets.has(`${l.platform}:${l.marketId}`))) return false;
+    const cat = candidate.legs[0]?.category ?? "Other";
+    if (enforceCap && (categoryCounts.get(cat) ?? 0) >= MAX_PER_CAT) return false;
+    for (const l of candidate.legs) usedMarkets.add(`${l.platform}:${l.marketId}`);
+    categoryCounts.set(cat, (categoryCounts.get(cat) ?? 0) + 1);
+    selected.push(buildResult(candidate));
+    return true;
+  };
+
+  // Pass 1: diversity-capped selection
+  for (const candidate of allRaw) {
+    if (selected.length >= count) break;
+    tryAccept(candidate, true);
+  }
+  // Pass 2: fill any remaining slots without the cap (pool has too few categories)
+  if (selected.length < count) {
+    for (const candidate of allRaw) {
+      if (selected.length >= count) break;
+      tryAccept(candidate, false);
+    }
   }
 
   return selected;
