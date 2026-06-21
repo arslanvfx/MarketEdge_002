@@ -103,22 +103,7 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
   }
 }
 
-async function fetchKalshiMarkets(q?: string): Promise<Market[]> {
-  if (q) {
-    // If query looks like a series ticker, use it directly; otherwise fetch known series
-    const upperQ = q.toUpperCase();
-    const series = KALSHI_SERIES.find((s) => upperQ.startsWith(s) || s.startsWith(upperQ));
-    if (series) {
-      return fetchKalshiSeries(series);
-    }
-    // Fetch all known series and filter by title post-fetch
-    const all = await fetchAllKalshiSeries();
-    const lower = q.toLowerCase();
-    return all.filter(
-      (m) => m.title.toLowerCase().includes(lower) || m.id.toLowerCase().includes(lower),
-    );
-  }
-
+async function fetchKalshiMarkets(): Promise<Market[]> {
   return fetchAllKalshiSeries();
 }
 
@@ -153,14 +138,13 @@ interface PolymarketGammaMarket {
   category?: string;
 }
 
-async function fetchPolymarketMarkets(q?: string): Promise<Market[]> {
+async function fetchPolymarketMarkets(): Promise<Market[]> {
   try {
     const params = new URLSearchParams({
       limit: "100",
       active: "true",
       closed: "false",
     });
-    if (q) params.set("q", q);
 
     const url = `https://gamma-api.polymarket.com/markets?${params}`;
     const res = await fetch(url, {
@@ -184,12 +168,17 @@ async function fetchPolymarketMarkets(q?: string): Promise<Market[]> {
         }
       }
 
+      // Explicit numeric coercion — API may return strings for these fields
+      const lastTrade = Number(m.lastTradePrice);
+      const bid = Number(m.bestBid);
+      const ask = Number(m.bestAsk);
+
       // Use lastTradePrice as primary; midpoint of bestBid/bestAsk as secondary; outcomePrices as fallback
       let yesOdds: number;
-      if (m.lastTradePrice != null && m.lastTradePrice > 0 && m.lastTradePrice < 1) {
-        yesOdds = m.lastTradePrice;
-      } else if (m.bestBid != null && m.bestAsk != null && m.bestBid > 0 && m.bestAsk > 0) {
-        yesOdds = (m.bestBid + m.bestAsk) / 2;
+      if (Number.isFinite(lastTrade) && lastTrade > 0 && lastTrade < 1) {
+        yesOdds = lastTrade;
+      } else if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
+        yesOdds = (bid + ask) / 2;
       } else if (outcomePricesYes != null && outcomePricesYes > 0) {
         yesOdds = outcomePricesYes;
       } else {
@@ -229,7 +218,10 @@ export async function fetchMarkets(opts: {
   const offset = opts.offset ?? 0;
   const q = opts.q;
 
-  const cacheKey = `${platform}:${q ?? ""}`;
+  // Cache raw market snapshots by platform only — never include q in the key.
+  // Text filtering is applied in-memory after the cache lookup so repeated
+  // searches within the TTL window never trigger extra upstream fetches.
+  const cacheKey = platform;
   const cached = cache.get(cacheKey);
   let all: Market[];
 
@@ -237,13 +229,13 @@ export async function fetchMarkets(opts: {
     all = cached.data;
   } else {
     const [kalshiResult, polyResult] = await Promise.allSettled([
-      platform === "all" || platform === "kalshi" ? fetchKalshiMarkets(q) : Promise.resolve([]),
-      platform === "all" || platform === "polymarket" ? fetchPolymarketMarkets(q) : Promise.resolve([]),
+      platform === "all" || platform === "kalshi" ? fetchKalshiMarkets() : Promise.resolve([]),
+      platform === "all" || platform === "polymarket" ? fetchPolymarketMarkets() : Promise.resolve([]),
     ]);
 
     const kalshi = kalshiResult.status === "fulfilled" ? kalshiResult.value : [];
     const poly = polyResult.status === "fulfilled" ? polyResult.value : [];
-    // Sort by interest: high volume first, then by how close odds are to 50% (most uncertain = most interesting)
+    // Sort by interest: high volume first, then by closeness to 50% odds
     all = [...kalshi, ...poly].sort((a, b) => {
       const aVol = a.volume ?? -1;
       const bVol = b.volume ?? -1;
@@ -256,7 +248,7 @@ export async function fetchMarkets(opts: {
     cache.set(cacheKey, { data: all, fetchedAt: Date.now() });
   }
 
-  // Post-fetch text filter
+  // In-memory text filter — safe to run on every request with no upstream cost
   let filtered = all;
   if (q) {
     const lower = q.toLowerCase();
