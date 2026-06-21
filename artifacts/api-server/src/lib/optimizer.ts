@@ -22,6 +22,33 @@ export interface ComboLegResult {
   // "value" = genuinely mispriced (edge ≥ threshold). "safe" = a high-probability
   // favorite the AI is confident in but the market prices fairly (edge ≥ 0).
   legType?: "value" | "safe";
+  // Human-readable pick: which outcome to back on the platform, e.g. "Senegal to
+  // win" / "Not Senegal" (Kalshi) or "Yes" / "No" (Polymarket). Disambiguates
+  // markets that share a title across multiple outcome contracts.
+  selection?: string;
+}
+
+/**
+ * Build the human-readable pick label for a leg. On Kalshi, several contracts
+ * share one title (e.g. "Senegal vs Iraq Winner?" → Senegal / Iraq / Tie), so
+ * "YES" alone is ambiguous; we surface the specific side from yesSubtitle.
+ */
+function sideLabel(
+  title: string,
+  yesSubtitle: string | null | undefined,
+  position: "yes" | "no",
+): string {
+  const sub = yesSubtitle?.trim();
+  if (sub) {
+    // Head-to-head markets ("Senegal vs Iraq Winner?") read naturally as
+    // "<team> to win". Threshold/other markets (e.g. yes_sub_title "Above 3.75%")
+    // must stay verbatim — appending "to win" there reads wrong.
+    const isMatch = /\bvs\.?\b/i.test(title);
+    const isTie = /^tie$/i.test(sub);
+    const yesText = isMatch && !isTie ? `${sub} to win` : sub;
+    return position === "yes" ? yesText : `Not ${sub}`;
+  }
+  return position === "yes" ? "Yes" : "No";
 }
 
 export interface ComboSuggestion {
@@ -428,6 +455,7 @@ export function autoGenerateCombos(opts: {
         marketTitle: market.title,
         category: market.category ?? "Other",
         position: s.position,
+        selection: sideLabel(market.title, market.yesSubtitle, s.position),
         odds: s.price,
         impliedProb: s.price,
         trueProbability: s.trueProb,
@@ -579,7 +607,8 @@ export function autoGenerateCombos(opts: {
       topLeg.legType === "value"
         ? `+${(topLeg.edge * 100).toFixed(0)} pts edge`
         : `${(topLeg.trueProbability * 100).toFixed(0)}% likely`;
-    const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${composition} — strongest: ${topLeg.marketTitle} (${topLeg.position.toUpperCase()}, ${topLegNote}).`;
+    const topLegPick = topLeg.selection ?? topLeg.position.toUpperCase();
+    const rationale = `${(candidate.jointTrueProb * 100).toFixed(0)}% chance to hit · +${edgePercent.toFixed(0)}% edge across ${composition} — strongest: ${topLeg.marketTitle} (${topLegPick}, ${topLegNote}).`;
 
     selected.push({
       legs: candidate.legs.map((l) => ({
@@ -587,6 +616,7 @@ export function autoGenerateCombos(opts: {
         platform: l.platform,
         marketTitle: l.marketTitle,
         position: l.position,
+        selection: l.selection,
         odds: l.odds,
         impliedProb: l.impliedProb,
         trueProbability: l.trueProbability,

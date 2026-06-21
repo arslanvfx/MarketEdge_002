@@ -29,6 +29,12 @@ With `platform=kalshi`, generation can still return 0 combos. Two compounding ca
 ## Category-balanced candidate pool (route)
 `combos.ts` builds the AI-analysis pool with `pickBalanced` (round-robin highest-volume across categories per platform), NOT pure top-by-volume. **Why:** bulk series (dozens of CPI thresholds, BTC levels, outrights) would otherwise fill the whole `POOL_CAP=48` with mutually-correlated legs and starve the independent match markets that actually combo. `both` = `pickBalanced(kalshi,24)+pickBalanced(polymarket,24)` + volume backfill.
 
+## Each leg needs a `selection` label — title alone is ambiguous on Kalshi
+A Kalshi head-to-head match is THREE separate contracts (Team A / Team B / Tie) that ALL share one title ("Senegal vs Iraq Winner?"); the side the YES contract pays on lives in the API's `yes_sub_title`. So showing only the title + "YES" tells the user nothing about which side to back. We thread `yes_sub_title` → `Market.yesSubtitle` → leg `selection` via `sideLabel(title, yesSubtitle, position)` in optimizer.ts: head-to-head ("vs" in title) → "<team> to win" / "Not <team>" (Tie verbatim), threshold/other Kalshi markets verbatim ("Above 3.75%" — do NOT append "to win"), Polymarket → "Yes"/"No". **Why:** a user got a 1818x combo from the tool but placed 4.53x on Kalshi — they picked the favorites because "YES" didn't say the optimizer had actually chosen the cheap underdog/tie side. The payout math (1/Πprice) was correct; the bet was just unlabeled.
+
+## High payout ≠ wrong math — it's the cheap side the optimizer picked
+EV ranking (max Π trueProb/price) systematically prefers the cheapest qualifying side per market (low price → high payout AND often high edge ratio), so favorites get passed over for underdogs/ties unless `riskLevel=conservative` (higher `safeMinTrue` floor favors high-probability sides). A surprising 1000x+ multiplier is usually the optimizer backing longshots, not a bug. Conservative risk is the lever to bias toward favorites.
+
 ## Result field name
 The combo's win probability field is `jointProbability` (NOT `combinedProbability`). Reading the wrong name yields NaN.
 

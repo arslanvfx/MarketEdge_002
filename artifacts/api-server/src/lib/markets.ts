@@ -8,6 +8,14 @@ export interface Market {
   closeTime: string | null;
   url: string;
   category: string | null;
+  /**
+   * Human-readable label for what the YES contract pays on. On Kalshi, many
+   * markets share one title (e.g. "Senegal vs Iraq Winner?" has separate
+   * Senegal / Iraq / Tie contracts), so the title alone is ambiguous — this is
+   * the per-contract side (e.g. "Senegal", "Tie") from Kalshi's yes_sub_title.
+   * Null for Polymarket, whose questions are already self-contained YES/NO.
+   */
+  yesSubtitle?: string | null;
 }
 
 interface CacheEntry {
@@ -144,6 +152,8 @@ async function discoverKalshiSeries(): Promise<string[]> {
 interface KalshiMarket {
   ticker: string;
   title?: string;
+  /** The side the YES contract pays on, e.g. "Senegal" or "Tie". */
+  yes_sub_title?: string;
   yes_ask_dollars?: string;
   yes_bid_dollars?: string;
   last_price_dollars?: string;
@@ -272,6 +282,7 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
           id: m.ticker,
           platform: "kalshi" as const,
           title: m.title ?? m.ticker,
+          yesSubtitle: m.yes_sub_title?.trim() || null,
           yesOdds,
           noOdds: Math.min(Math.max(1 - yesOdds, 0.01), 0.99),
           volume: volume != null && Number.isFinite(volume) ? volume : null,

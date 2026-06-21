@@ -419,6 +419,9 @@ components:
         position:
           type: string
           enum: [yes, no]
+        selection:
+          type: string
+          description: Human-readable pick — which outcome to back on the platform, e.g. "Senegal to win" / "Not senegal" (Kalshi) or "Yes" / "No" (Polymarket). Disambiguates markets that share one title across several outcome contracts. Present on Smart Picks legs.
         odds:
           type: number
         impliedProb:

@@ -15,6 +15,8 @@ export interface ComboLeg {
   platform: ComboLegPlatform;
   marketTitle: string;
   position: ComboLegPosition;
+  /** Human-readable pick — which outcome to back on the platform, e.g. "Senegal to win" / "Not senegal" (Kalshi) or "Yes" / "No" (Polymarket). Disambiguates markets that share one title across several outcome contracts. Present on Smart Picks legs. */
+  selection?: string;
   odds: number;
   impliedProb: number;
   /** AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs. */

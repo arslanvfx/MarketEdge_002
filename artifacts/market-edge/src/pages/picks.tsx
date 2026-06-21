@@ -244,7 +244,12 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
                 {leg.position.toUpperCase()}
               </Badge>
               <div className="flex-1 min-w-0">
-                <div className="font-medium text-xs leading-snug">{leg.marketTitle}</div>
+                <div className="text-[11px] leading-snug text-muted-foreground">{leg.marketTitle}</div>
+                {leg.selection && (
+                  <div className="font-semibold text-xs leading-snug mt-0.5">
+                    Pick: {leg.selection}
+                  </div>
+                )}
                 <div className="flex items-center gap-1 mt-1 flex-wrap">
                   {PLATFORM_BADGE[leg.platform] && (
                     <Badge
