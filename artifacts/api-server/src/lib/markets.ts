@@ -38,7 +38,7 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 
 function isFresh(entry: CacheEntry): boolean {
   return Date.now() - entry.fetchedAt < CACHE_TTL_MS;

@@ -1,2 +1,3 @@
-- [Kalshi API migration](kalshi-api.md) — trading-api.kalshi.com moved to api.elections.kalshi.com; price fields changed to *_dollars format
-- [MarketEdge Smart Picks](marketedge-smart-picks.md) — eventTicker/gameKey grouping enables Kalshi same-game prop combos; Polymarket = singles; correlation guard; honest odds.
+- [Same-game combo architecture](same-game-combos.md) — how gameKey/eventTicker flow from markets.ts through optimizer to picks UI
+- [Polymarket single-bet mode](polymarket-single-bet.md) — Polymarket always emits size-1; Kalshi non-sport categories also forced single
+- [sideLabel prop NO side](sidelabel-props.md) — Over→Under flip logic for NO side of prop market subtitles

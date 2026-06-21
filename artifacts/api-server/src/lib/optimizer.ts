@@ -56,7 +56,13 @@ function sideLabel(
         sub,
       );
     const yesText = isMatch && !isTie && !isProp ? `${sub} to win` : sub;
-    return position === "yes" ? yesText : `Not ${sub}`;
+    if (position === "yes") return yesText;
+    // NO-side: flip Over/Under so labels read naturally ("Under 2.5" not "Not Over 2.5");
+    // winner markets get "Not <team> to win"; everything else gets "Not <sub>".
+    if (/^over\s+/i.test(sub)) return sub.replace(/^over\s+/i, "Under ");
+    if (/^under\s+/i.test(sub)) return sub.replace(/^under\s+/i, "Over ");
+    if (isMatch && !isTie && !isProp) return `Not ${sub} to win`;
+    return `Not ${sub}`;
   }
   return position === "yes" ? "Yes" : "No";
 }
