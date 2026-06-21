@@ -18,10 +18,16 @@ Risk tuning (`RISK_TUNING` in optimizer): conservative `safeMinTrue 0.8`, balanc
 ## legCount is a MINIMUM, not exact
 `legCount` ("auto"|2|3|4|5) means "this many legs or more". `"auto"` = 2+. The optimizer enumerates sizes from `minLegs` up to `min(pool, TOP_LEGS_CAP=16)` — there is NO 4-leg cap. `"5"` allows large combos (up to the cap).
 
-**How to apply:** Ranking is probability-tier-first (`tierOf(jointTrueProb)` by `probBand`), then value-count desc, then payout multiplier — so the safest combo surfaces first but fewest-leg / highest-value is preferred at comparable odds. EV gate is `evMultiplier < 1` dropped (every leg has edge>=0 so multiplier>=1 is guaranteed).
+**How to apply:** Ranking is by **expected return** = `evMultiplier` desc (= jointTrueProb × payoutMultiplier = Π(trueProb/price)), tiebreak `jointTrueProb` desc. The per-risk probability floors (`minGeoMean^n`) keep the pool sane, so highest-EV (likely AND high-paying) combos surface first; ties favor the more likely/smaller combo. EV gate `evMultiplier < 1` dropped. **There is no probability-tier/`probBand` logic anymore** — it was removed (user asked for "highest probabilities WITH highest returns = best", which expected return captures directly).
+
+## Every combo is single platform + single category (placeability)
+`autoGenerateCombos` groups qualifying legs by `${platform}::${category}` and enumerates combos **strictly within one group** — a parlay must be placeable as ONE slip on ONE site, and platforms won't let you combine unrelated categories (e.g. a World Cup match + a presidential market). So a combo never mixes platforms OR categories. **Why:** users reported Smart Picks proposing unplaceable combos that mixed Kalshi+Polymarket and mixed categories (sports + politics). `category` is threaded onto each `ScoredLeg` from `market.category`.
 
 ## kalshi-only empty results are EXPECTED, not a bug
-With `platform=kalshi`, generation can still return 0 combos even at min2. Cause: the AI judges most kalshi markets as fairly-priced (no edge) or below `safeMinTrue` / low-confidence, so <2 legs qualify. The route DOES analyze up to `POOL_CAP=48` kalshi markets — pool size is not the limiter; the quality gate is. `both` platforms generates fine. Don't "fix" this by loosening thresholds without a reason.
+With `platform=kalshi`, generation can still return 0 combos. Two compounding causes: (1) the AI judges most kalshi markets fairly-priced/low-confidence so few legs qualify; (2) **single-category grouping** means a combo needs ≥minLegs *independent* qualifying legs *in one category* — and Kalshi's live pool is often dominated by mutually-correlated series (S&P/CPI price brackets = same event, championship outrights = mutually exclusive) that block each other. Independent **match** markets (e.g. "X vs Y Winner?" WC/NFL games, category Soccer/Football) DO combo — but they come and go with the live schedule. Returning 0 when only correlated markets are live is **correct** (the old cross-category combos it used to return were unplaceable). Don't loosen thresholds to force combos.
+
+## Category-balanced candidate pool (route)
+`combos.ts` builds the AI-analysis pool with `pickBalanced` (round-robin highest-volume across categories per platform), NOT pure top-by-volume. **Why:** bulk series (dozens of CPI thresholds, BTC levels, outrights) would otherwise fill the whole `POOL_CAP=48` with mutually-correlated legs and starve the independent match markets that actually combo. `both` = `pickBalanced(kalshi,24)+pickBalanced(polymarket,24)` + volume backfill.
 
 ## Result field name
 The combo's win probability field is `jointProbability` (NOT `combinedProbability`). Reading the wrong name yields NaN.

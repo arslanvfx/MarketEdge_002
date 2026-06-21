@@ -96,24 +96,47 @@ router.post("/combos/smart-picks", async (req, res) => {
       return true;
     });
 
-    // Take the highest-volume markets for a platform. When generating for BOTH
-    // platforms we balance the pool (top N each) instead of sorting by raw
-    // volume — Kalshi and Polymarket measure volume on different scales, so a
-    // naive global sort would let one platform crowd the other out entirely.
-    const pickTop = (plat: "kalshi" | "polymarket", limit: number) =>
-      liquid
-        .filter((m) => m.platform === plat)
-        .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
-        .slice(0, limit);
+    // Build a category-BALANCED candidate pool per platform. Sorting purely by
+    // volume lets a few bulk series (dozens of CPI thresholds, Bitcoin price
+    // levels, championship outrights) fill the entire pool with mutually-
+    // correlated legs that can never form a diverse parlay — while starving the
+    // independent match markets (individual games) that actually combo well. We
+    // instead take the highest-volume markets ROUND-ROBIN across categories so
+    // every category gets fair representation in the pool the AI analyses.
+    const pickBalanced = (plat: "kalshi" | "polymarket", limit: number) => {
+      const byCat = new Map<string, typeof liquid>();
+      for (const m of liquid.filter((x) => x.platform === plat)) {
+        const c = m.category ?? "Other";
+        const arr = byCat.get(c) ?? [];
+        arr.push(m);
+        byCat.set(c, arr);
+      }
+      for (const arr of byCat.values())
+        arr.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+      const cats = [...byCat.values()];
+      const out: typeof liquid = [];
+      for (let i = 0; out.length < limit; i++) {
+        let added = false;
+        for (const arr of cats) {
+          if (arr[i]) {
+            out.push(arr[i]);
+            added = true;
+            if (out.length >= limit) break;
+          }
+        }
+        if (!added) break; // every category exhausted
+      }
+      return out;
+    };
 
     const POOL_CAP = 48;
     let candidates: typeof liquid;
     if (platform === "kalshi") {
-      candidates = pickTop("kalshi", POOL_CAP);
+      candidates = pickBalanced("kalshi", POOL_CAP);
     } else if (platform === "polymarket") {
-      candidates = pickTop("polymarket", POOL_CAP);
+      candidates = pickBalanced("polymarket", POOL_CAP);
     } else {
-      candidates = [...pickTop("kalshi", 24), ...pickTop("polymarket", 24)];
+      candidates = [...pickBalanced("kalshi", 24), ...pickBalanced("polymarket", 24)];
       // If one platform is thin, backfill from the other (by volume) so we still
       // analyze a full pool instead of returning fewer combos than possible.
       if (candidates.length < POOL_CAP) {

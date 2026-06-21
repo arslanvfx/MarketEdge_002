@@ -339,11 +339,9 @@ export function autoGenerateCombos(opts: {
   //  • minLegTrue — minimum true probability of the CHOSEN side for a leg.
   //  • minJoint   — minimum probability the WHOLE parlay actually hits. Stops
   //    low-probability lottery combos from surfacing at all.
-  //  • probBand   — width of the win-probability tier used for ranking. Combos
-  //    are ranked PROBABILITY-FIRST (highest win-probability tier wins); within
-  //    a tier the highest payout wins. A wider band lets return matter across a
-  //    larger probability range (aggressive), a tighter band keeps it strictly
-  //    probability-first (conservative).
+  //  (Ranking is by EXPECTED RETURN — see the sort below — not a probability
+  //  tier, so there is no band here; the floors in this block keep each combo's
+  //  win probability sane for the chosen risk level.)
   //  • minGeoMean — minimum acceptable per-leg average win probability. The
   //    whole-parlay floor is minGeoMean^n, so it scales with the number of legs:
   //    a fixed joint floor would unfairly reject every multi-leg combo (joint
@@ -355,13 +353,13 @@ export function autoGenerateCombos(opts: {
   //    These fill out larger combos when genuine value bets are scarce.
   const RISK_TUNING: Record<
     RiskLevel,
-    { minLegTrue: number; minGeoMean: number; probBand: number; safeMinTrue: number }
+    { minLegTrue: number; minGeoMean: number; safeMinTrue: number }
   > = {
-    conservative: { minLegTrue: 0.6, minGeoMean: 0.67, probBand: 0.08, safeMinTrue: 0.8 },
-    balanced: { minLegTrue: 0.45, minGeoMean: 0.55, probBand: 0.12, safeMinTrue: 0.7 },
-    aggressive: { minLegTrue: 0.3, minGeoMean: 0.39, probBand: 0.2, safeMinTrue: 0.6 },
+    conservative: { minLegTrue: 0.6, minGeoMean: 0.67, safeMinTrue: 0.8 },
+    balanced: { minLegTrue: 0.45, minGeoMean: 0.55, safeMinTrue: 0.7 },
+    aggressive: { minLegTrue: 0.3, minGeoMean: 0.39, safeMinTrue: 0.6 },
   };
-  const { minLegTrue: minTrue, minGeoMean, probBand, safeMinTrue } = RISK_TUNING[riskLevel];
+  const { minLegTrue: minTrue, minGeoMean, safeMinTrue } = RISK_TUNING[riskLevel];
 
   // Combo sizes to generate. legCount is now a MINIMUM: "auto" means 2+, while a
   // number N means "N or more legs". The upper bound is however many quality legs
@@ -375,6 +373,7 @@ export function autoGenerateCombos(opts: {
     edge: number;
     edgeRatio: number; // trueProb / price
     legType: "value" | "safe";
+    category: string; // used to keep every combo within one placeable category
   };
   // Confidence-based shrinkage: blend the AI's raw estimate toward the live
   // market price. The market aggregates real money, so we only deviate from it
@@ -427,6 +426,7 @@ export function autoGenerateCombos(opts: {
         marketId: market.id,
         platform: market.platform,
         marketTitle: market.title,
+        category: market.category ?? "Other",
         position: s.position,
         odds: s.price,
         impliedProb: s.price,
@@ -463,11 +463,21 @@ export function autoGenerateCombos(opts: {
     if (a.legType === "value") return b.edge - a.edge;
     return b.trueProbability - a.trueProbability;
   });
-  const topLegs = valueLegs.slice(0, TOP_LEGS_CAP);
+  // ── Group legs into single platform + category pools ──────────────────────
+  // A parlay must be PLACEABLE: every leg has to live on the same platform (you
+  // build one slip on one site) and in the same category (the platform won't let
+  // you combine, say, a World Cup match with a presidential market). So we never
+  // mix platforms or categories inside a combo — legs are grouped by
+  // platform+category and every combo is enumerated strictly within one group.
+  const groups = new Map<string, ScoredLeg[]>();
+  for (const leg of valueLegs) {
+    const key = `${leg.platform}::${leg.category}`;
+    const arr = groups.get(key) ?? [];
+    arr.push(leg);
+    groups.set(key, arr);
+  }
 
-  if (topLegs.length < minLegs) return [];
-
-  // ── Generate 2–4 leg combos, scored by expected value ────────────────────
+  // ── Enumerate combos within each group, scored by expected value ──────────
   type RawCombo = {
     legs: ScoredLeg[];
     jointTrueProb: number;
@@ -476,60 +486,54 @@ export function autoGenerateCombos(opts: {
   };
   const allRaw: RawCombo[] = [];
 
-  // Sizes to enumerate: from the requested minimum up to the full pool size (no
-  // artificial ceiling). Bounded above by TOP_LEGS_CAP via the pool slice.
-  const sizes: number[] = [];
-  for (let s = minLegs; s <= topLegs.length; s++) sizes.push(s);
+  for (const groupLegs of groups.values()) {
+    // valueLegs is pre-sorted (value bets by edge, then safe favorites by
+    // probability), so this slice keeps the highest-quality legs per group while
+    // bounding enumeration (2^n subsets) to a tractable size.
+    const pool = groupLegs.slice(0, TOP_LEGS_CAP);
+    if (pool.length < minLegs) continue;
 
-  for (const size of sizes) {
-    if (size > topLegs.length) continue;
-    for (const legs of combinations(topLegs, size)) {
-      // Correlation guard: reject combos whose legs aren't independent — same
-      // event (both sides of one match), same competition with an outright/
-      // threshold leg (e.g. a World Cup match + "Will Morocco win the World
-      // Cup?", or two mutually-exclusive outright winners), or the same market
-      // at different thresholds. Independent matches of one competition are
-      // allowed. Multiplying correlated probabilities as if independent is
-      // statistically invalid AND the platform won't let you parlay them.
-      if (legsAreCorrelated(legs.map((l) => legCorrelation(l)))) continue;
+    // Sizes from the requested minimum up to the group size — legCount is a
+    // MINIMUM, so there is no artificial leg ceiling; the geometric probability
+    // floor below naturally bounds how many legs a surfaced combo can have.
+    for (let size = minLegs; size <= pool.length; size++) {
+      for (const legs of combinations(pool, size)) {
+        // Correlation guard: reject combos whose legs aren't independent — same
+        // event (both sides of one match), same competition with an outright/
+        // threshold leg (a World Cup match + "Will Morocco win the World Cup?",
+        // or two mutually-exclusive outright winners), or the same market at
+        // different thresholds. Independent matches of one competition are kept.
+        if (legsAreCorrelated(legs.map((l) => legCorrelation(l)))) continue;
 
-      const jointTrueProb = legs.reduce((acc, l) => acc * l.trueProbability, 1);
-      const jointPrice = legs.reduce((acc, l) => acc * l.impliedProb, 1);
-      if (jointPrice < 0.0005) continue; // skip near-impossible payouts
-      const multiplier = 1 / jointPrice;
-      const evMultiplier = legs.reduce((acc, l) => acc * l.edgeRatio, 1);
-      // Never negative-EV. Every leg has edge ≥ 0 (edgeRatio ≥ 1), so a combined
-      // multiplier ≥ 1 is guaranteed; safe-favorite-only parlays (≈1.0) are kept,
-      // genuinely-bad parlays (< 1, only possible via float drift) are dropped.
-      if (evMultiplier < 1) continue;
-      // Leg-count-aware floor: require the parlay's per-leg average win
-      // probability to clear minGeoMean (floor = minGeoMean^legs). Keeps each
-      // leg high-quality while scaling sensibly as legs are added.
-      if (jointTrueProb < Math.pow(minGeoMean, legs.length)) continue;
+        const jointTrueProb = legs.reduce((acc, l) => acc * l.trueProbability, 1);
+        const jointPrice = legs.reduce((acc, l) => acc * l.impliedProb, 1);
+        if (jointPrice < 0.0005) continue; // skip near-impossible payouts
+        const multiplier = 1 / jointPrice;
+        const evMultiplier = legs.reduce((acc, l) => acc * l.edgeRatio, 1);
+        // Never negative-EV. Every leg has edge ≥ 0 (edgeRatio ≥ 1), so a
+        // combined multiplier ≥ 1 is guaranteed; safe-favorite-only parlays
+        // (≈1.0) are kept, genuinely-bad parlays (< 1, float drift) are dropped.
+        if (evMultiplier < 1) continue;
+        // Leg-count-aware floor: require the parlay's per-leg average win
+        // probability to clear minGeoMean (floor = minGeoMean^legs). Keeps each
+        // leg high-quality while scaling sensibly as legs are added.
+        if (jointTrueProb < Math.pow(minGeoMean, legs.length)) continue;
 
-      allRaw.push({ legs, jointTrueProb, multiplier, evMultiplier });
+        allRaw.push({ legs, jointTrueProb, multiplier, evMultiplier });
+      }
     }
   }
 
-  // Rank PROBABILITY-FIRST: bucket combos into win-probability tiers (band width
-  // depends on risk) and order the highest-probability tier first. Within a tier
-  // (where win odds are comparable) the highest payout wins. This guarantees the
-  // safest bets surface first while still rewarding the best return available at
-  // that probability — no longshot can leapfrog a likelier combo on payout alone.
-  // Within a probability tier we keep genuine value bets as the priority (more
-  // mispriced legs first), then reward the best return — so safe-favorite combos
-  // never crowd out real value at comparable win odds.
-  const tierOf = (p: number) => Math.floor(p / probBand);
-  const valueCount = (c: RawCombo) =>
-    c.legs.reduce((n, l) => n + (l.legType === "value" ? 1 : 0), 0);
+  // Rank by EXPECTED RETURN per $1 staked = jointTrueProb × payoutMultiplier
+  // (equivalently Π(trueProb / price), the combined edge ratio). This single
+  // number is exactly what the user asked to optimise: a higher win probability
+  // AND a higher payout both push it up, while a longshot whose payout doesn't
+  // justify its small chance ranks low. The per-risk probability floors above
+  // keep the pool sane, so the best risk-adjusted combos surface first. Ties
+  // break toward the more likely (and therefore typically smaller) combo.
   allRaw.sort((a, b) => {
-    const tierA = tierOf(a.jointTrueProb);
-    const tierB = tierOf(b.jointTrueProb);
-    if (tierA !== tierB) return tierB - tierA; // higher win-probability tier first
-    const vA = valueCount(a);
-    const vB = valueCount(b);
-    if (vA !== vB) return vB - vA; // value bets prioritized within the tier
-    return b.multiplier - a.multiplier; // then best return first
+    if (b.evMultiplier !== a.evMultiplier) return b.evMultiplier - a.evMultiplier;
+    return b.jointTrueProb - a.jointTrueProb;
   });
 
   // ── Greedy non-overlapping selection ─────────────────────────────────────
