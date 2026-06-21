@@ -1,0 +1,1 @@
+- [Kalshi API migration](kalshi-api.md) — trading-api.kalshi.com moved to api.elections.kalshi.com; price fields changed to *_dollars format
