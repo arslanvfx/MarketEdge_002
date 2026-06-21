@@ -1,18 +1,15 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useMemo } from "react";
 import { useListMarkets, Market } from "@workspace/api-client-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Popover, PopoverContent, PopoverTrigger,
-} from "@/components/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Search, Plus, ExternalLink, Filter,
   TrendingUp, ArrowUpDown, ShieldCheck, Zap, Flame,
-  Clock, DollarSign, ChevronDown, Loader2, ChevronRight, X,
+  Clock, DollarSign, ChevronDown, ChevronRight, X,
 } from "lucide-react";
 import { useBuilder } from "@/lib/builder-context";
 import { useToast } from "@/hooks/use-toast";
@@ -72,35 +69,30 @@ const CATEGORY_COLORS: Record<string, string> = {
 };
 
 const CATEGORY_EMOJI: Record<string, string> = {
-  Soccer: "⚽",
-  Basketball: "🏀",
-  Baseball: "⚾",
-  Football: "🏈",
-  Hockey: "🏒",
-  Tennis: "🎾",
-  Golf: "⛳",
-  Crypto: "₿",
-  Economics: "📊",
-  Politics: "🗳️",
-  Elections: "🗳️",
+  Soccer:        "⚽",
+  Basketball:    "🏀",
+  Baseball:      "⚾",
+  Football:      "🏈",
+  Hockey:        "🏒",
+  Tennis:        "🎾",
+  Golf:          "⛳",
+  Crypto:        "₿",
+  Economics:     "📊",
+  Politics:      "🗳️",
+  Elections:     "🗳️",
   Entertainment: "🎬",
-  Tech: "💻",
-  Stocks: "📈",
-  Weather: "🌡️",
+  Tech:          "💻",
+  Stocks:        "📈",
+  Weather:       "🌡️",
   "Combat Sports": "🥊",
-  Motorsport: "🏎️",
-  Cricket: "🏏",
-  Esports: "🎮",
-  Other: "•",
+  Motorsport:    "🏎️",
+  Cricket:       "🏏",
+  Esports:       "🎮",
+  Other:         "•",
 };
 
-function formatPayout(payout: number) {
-  return payout.toFixed(2) + "×";
-}
-
-function formatProb(prob: number) {
-  return (prob * 100).toFixed(1) + "%";
-}
+function formatPayout(p: number) { return p.toFixed(2) + "×"; }
+function formatProb(p: number)   { return (p * 100).toFixed(1) + "%"; }
 
 function formatVolume(vol: number | null | undefined): string | null {
   if (!vol || vol <= 0) return null;
@@ -114,7 +106,7 @@ function formatClose(iso: string | null | undefined): string | null {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return null;
   const days = Math.round((t - Date.now()) / 86_400_000);
-  if (days < 0)  return null;
+  if (days < 0)   return null;
   if (days === 0) return "Closes today";
   if (days === 1) return "Tomorrow";
   if (days <= 30) return `${days}d left`;
@@ -122,8 +114,8 @@ function formatClose(iso: string | null | undefined): string | null {
 }
 
 /**
- * Round-robin across categories so each category gets equal representation
- * rather than a handful of high-volume series monopolising the list.
+ * Round-robin across categories so every category gets equal initial
+ * representation rather than one high-volume series dominating the first page.
  * Within each category markets are already volume-sorted by the backend.
  */
 function balancedSort(markets: AugmentedMarket[]): AugmentedMarket[] {
@@ -145,9 +137,21 @@ function balancedSort(markets: AugmentedMarket[]): AugmentedMarket[] {
   return result;
 }
 
+function buildCategoryList(markets: Market[]) {
+  const counts = new Map<string, { count: number; volume: number }>();
+  for (const m of markets) {
+    const c = m.category ?? "Other";
+    const cur = counts.get(c) ?? { count: 0, volume: 0 };
+    counts.set(c, { count: cur.count + 1, volume: cur.volume + (m.volume ?? 0) });
+  }
+  return [...counts.entries()]
+    .map(([name, { count, volume }]) => ({ name, count, volume }))
+    .sort((a, b) => b.volume - a.volume);
+}
+
 const PLATFORM_TABS = [
-  { value: "all" as const,        label: "Both" },
-  { value: "kalshi" as const,     label: "Kalshi" },
+  { value: "all" as const,        label: "Both"       },
+  { value: "kalshi" as const,     label: "Kalshi"     },
   { value: "polymarket" as const, label: "Polymarket" },
 ];
 
@@ -156,78 +160,56 @@ const TOP_CAT_COUNT = 7;
 type AugmentedMarket = Market & { _best: ReturnType<typeof getBestSide> };
 
 export default function Markets() {
-  const [search, setSearch]               = useState("");
-  const [platform, setPlatform]           = useState<"all" | "kalshi" | "polymarket">("all");
-  const [sortBy, setSortBy]               = useState<SortKey>("volume");
+  const [search, setSearch]                     = useState("");
+  const [platform, setPlatform]                 = useState<"all" | "kalshi" | "polymarket">("all");
+  const [sortBy, setSortBy]                     = useState<SortKey>("volume");
   const [selectedCategory, setSelectedCategory] = useState<string>("");
-  const [displayCount, setDisplayCount]   = useState(DISPLAY_PAGE);
-  const [allMarkets, setAllMarkets]       = useState<Market[]>([]);
-  const [catSearch, setCatSearch]         = useState("");
-  const [moreOpen, setMoreOpen]           = useState(false);
+  const [displayCount, setDisplayCount]         = useState(DISPLAY_PAGE);
+  const [catSearch, setCatSearch]               = useState("");
+  const [moreOpen, setMoreOpen]                 = useState(false);
 
   const { addLeg, selectedLegs } = useBuilder();
   const { toast } = useToast();
 
-  // Fetch all markets in one shot (cached on server, ~5ms after warm-up).
-  // Category + text filtering run in-memory on the server, no extra RTTs.
+  const platformParam = platform === "all" ? undefined : platform;
+
+  // ── Main query: filtered by all active params ─────────────────────────────
+  // allMarkets is derived DIRECTLY from data — no intermediate useState.
+  // This guarantees the grid always reflects the current query immediately;
+  // stale state from a previous platform/category selection cannot linger.
   const { data, isLoading } = useListMarkets({
-    q: search || undefined,
-    platform: platform === "all" ? undefined : platform,
+    q:        search || undefined,
+    platform: platformParam,
     category: selectedCategory || undefined,
-    limit: 1000,
-    offset: 0,
+    limit:    1000,
+    offset:   0,
   });
 
-  // Replace markets whenever the query result changes
-  useEffect(() => {
-    if (data) setAllMarkets(data.markets);
-  }, [data]);
-
-  // Reset display count when any filter changes
-  useEffect(() => {
-    setDisplayCount(DISPLAY_PAGE);
-  }, [search, platform, selectedCategory, sortBy]);
-
-  // Derive category list from loaded markets, sorted by volume desc
-  const categoryList = useMemo(() => {
-    const counts = new Map<string, { count: number; volume: number }>();
-    for (const m of allMarkets) {
-      const c = m.category ?? "Other";
-      const cur = counts.get(c) ?? { count: 0, volume: 0 };
-      counts.set(c, { count: cur.count + 1, volume: cur.volume + (m.volume ?? 0) });
-    }
-    return [...counts.entries()]
-      .map(([name, { count, volume }]) => ({ name, count, volume }))
-      .sort((a, b) => b.volume - a.volume);
-  }, [allMarkets]);
-
-  // When category is active but allMarkets is empty (first load with category param),
-  // also derive from a full-fetch so chips are populated. Keep a stable ref.
-  const { data: fullData } = useListMarkets({
-    platform: platform === "all" ? undefined : platform,
-    limit: 1000,
-    offset: 0,
+  // ── Full-platform query: not filtered by category, drives chip counts ──────
+  // When selectedCategory is empty this shares a React Query cache key with the
+  // main query above, so it costs zero extra requests.
+  const { data: allPlatformData } = useListMarkets({
+    platform: platformParam,
+    limit:    1000,
+    offset:   0,
   });
-  const allCategoryList = useMemo(() => {
-    const src = fullData?.markets ?? [];
-    const counts = new Map<string, { count: number; volume: number }>();
-    for (const m of src) {
-      const c = m.category ?? "Other";
-      const cur = counts.get(c) ?? { count: 0, volume: 0 };
-      counts.set(c, { count: cur.count + 1, volume: cur.volume + (m.volume ?? 0) });
-    }
-    return [...counts.entries()]
-      .map(([name, { count, volume }]) => ({ name, count, volume }))
-      .sort((a, b) => b.volume - a.volume);
-  }, [fullData]);
 
-  const chipCategories = allCategoryList.length > 0 ? allCategoryList : categoryList;
-  const trendingCats = chipCategories.slice(0, TOP_CAT_COUNT);
-  const moreCats = chipCategories.slice(TOP_CAT_COUNT);
-  const filteredMoreCats = catSearch
+  // Markets always reflect the current query — no stale data possible.
+  const allMarkets = useMemo(() => data?.markets ?? [], [data]);
+
+  // Category chip counts come from the unfiltered platform data so they remain
+  // stable while the user drills into a specific category.
+  const chipCategories = useMemo(
+    () => buildCategoryList(allPlatformData?.markets ?? allMarkets),
+    [allPlatformData, allMarkets],
+  );
+  const trendingCats  = chipCategories.slice(0, TOP_CAT_COUNT);
+  const moreCats      = chipCategories.slice(TOP_CAT_COUNT);
+  const filteredMore  = catSearch
     ? moreCats.filter((c) => c.name.toLowerCase().includes(catSearch.toLowerCase()))
     : moreCats;
 
+  // ── Sorted / balanced view ─────────────────────────────────────────────────
   const sorted: AugmentedMarket[] = useMemo(() => {
     const enriched = allMarkets.map((m) => ({ ...m, _best: getBestSide(m) }));
     if (sortBy === "volume" && !selectedCategory && !search) {
@@ -240,6 +222,8 @@ export default function Markets() {
     }
   }, [allMarkets, sortBy, selectedCategory, search]);
 
+  // Reset display count whenever any filter changes
+  const filterKey = `${search}|${platform}|${selectedCategory}|${sortBy}`;
   const displayed = sorted.slice(0, displayCount);
   const clientHasMore = displayCount < sorted.length;
   const isInitialLoad = isLoading && allMarkets.length === 0;
@@ -249,18 +233,17 @@ export default function Markets() {
     toast({ title: "Added to Builder", description: `"${m.title}" added.` });
   };
 
-  const clearCategory = () => {
-    setSelectedCategory("");
-    setMoreOpen(false);
-  };
+  const clearCategory = () => { setSelectedCategory(""); setMoreOpen(false); };
 
   const subtitleParts: string[] = [];
   if (sorted.length > 0) {
     subtitleParts.push(`${sorted.length} markets`);
     if (selectedCategory) subtitleParts.push(`in ${selectedCategory}`);
-    if (search) subtitleParts.push(`matching "${search}"`);
-    if (!selectedCategory && !search && sortBy === "volume") subtitleParts.push("balanced across all categories");
-    else subtitleParts.push(`sorted by ${SORT_OPTIONS.find(o => o.value === sortBy)?.label.toLowerCase()}`);
+    if (search)           subtitleParts.push(`matching "${search}"`);
+    if (!selectedCategory && !search && sortBy === "volume")
+      subtitleParts.push("balanced across all categories");
+    else
+      subtitleParts.push(`sorted by ${SORT_OPTIONS.find(o => o.value === sortBy)?.label.toLowerCase()}`);
   }
 
   return (
@@ -268,33 +251,31 @@ export default function Markets() {
       {/* Header */}
       <div className="mb-5">
         <h1 className="text-3xl font-bold tracking-tight">Best Single Bets</h1>
-        <p className="text-muted-foreground mt-1 text-sm">
+        <p className="text-sm text-muted-foreground mt-1">
           {subtitleParts.length > 0
             ? subtitleParts.join(" — ")
             : "Live odds from Kalshi & Polymarket — risk, payout, and probability at a glance."}
         </p>
       </div>
 
-      {/* Search + Platform + Sort row */}
+      {/* Search + Platform + Sort */}
       <div className="flex flex-col sm:flex-row gap-3 mb-4 flex-wrap">
-        {/* Search */}
         <div className="relative flex-1 min-w-[180px] max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <Input
             placeholder="Search markets…"
             className="pl-9 bg-card"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => { setSearch(e.target.value); setDisplayCount(DISPLAY_PAGE); }}
             data-testid="input-search-markets"
           />
         </div>
 
-        {/* Platform */}
         <div className="flex rounded-lg border border-border overflow-hidden bg-card" data-testid="toggle-platform-filter">
           {PLATFORM_TABS.map((tab) => (
             <button
               key={tab.value}
-              onClick={() => { setPlatform(tab.value); setSelectedCategory(""); }}
+              onClick={() => { setPlatform(tab.value); setSelectedCategory(""); setDisplayCount(DISPLAY_PAGE); }}
               data-testid={`platform-tab-${tab.value}`}
               className={[
                 "px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap",
@@ -308,12 +289,11 @@ export default function Markets() {
           ))}
         </div>
 
-        {/* Sort */}
         <div className="flex rounded-lg border border-border overflow-hidden bg-card">
           {SORT_OPTIONS.map((opt) => (
             <button
               key={opt.value}
-              onClick={() => setSortBy(opt.value)}
+              onClick={() => { setSortBy(opt.value); setDisplayCount(DISPLAY_PAGE); }}
               data-testid={`sort-${opt.value}`}
               className={[
                 "px-3 py-2 text-sm font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap",
@@ -331,7 +311,6 @@ export default function Markets() {
 
       {/* Category chips */}
       <div className="flex flex-wrap items-center gap-2 mb-5">
-        {/* "All" chip */}
         <button
           onClick={clearCategory}
           className={[
@@ -344,14 +323,13 @@ export default function Markets() {
           All
         </button>
 
-        {/* Trending category chips */}
         {trendingCats.map((cat) => {
           const isActive = selectedCategory === cat.name;
           const colorsClass = CATEGORY_COLORS[cat.name] ?? "bg-muted/50 text-muted-foreground border-border";
           return (
             <button
               key={cat.name}
-              onClick={() => setSelectedCategory(isActive ? "" : cat.name)}
+              onClick={() => { setSelectedCategory(isActive ? "" : cat.name); setDisplayCount(DISPLAY_PAGE); }}
               data-testid={`category-chip-${cat.name.toLowerCase()}`}
               className={[
                 "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
@@ -367,7 +345,6 @@ export default function Markets() {
           );
         })}
 
-        {/* "More" popover for remaining categories */}
         {moreCats.length > 0 && (
           <Popover open={moreOpen} onOpenChange={setMoreOpen}>
             <PopoverTrigger asChild>
@@ -380,12 +357,8 @@ export default function Markets() {
                 ].join(" ")}
               >
                 {moreCats.some((c) => c.name === selectedCategory)
-                  ? <>
-                      {CATEGORY_EMOJI[selectedCategory] ?? "•"} {selectedCategory}
-                      <X className="w-3 h-3 ml-0.5" />
-                    </>
-                  : <>More <ChevronRight className="w-3 h-3" /></>
-                }
+                  ? <>{CATEGORY_EMOJI[selectedCategory] ?? "•"} {selectedCategory} <X className="w-3 h-3 ml-0.5" /></>
+                  : <>More <ChevronRight className="w-3 h-3" /></>}
               </button>
             </PopoverTrigger>
             <PopoverContent className="w-56 p-2" align="start">
@@ -397,12 +370,12 @@ export default function Markets() {
               />
               <ScrollArea className="h-48">
                 <div className="space-y-0.5">
-                  {filteredMoreCats.map((cat) => {
+                  {filteredMore.map((cat) => {
                     const isActive = selectedCategory === cat.name;
                     return (
                       <button
                         key={cat.name}
-                        onClick={() => { setSelectedCategory(isActive ? "" : cat.name); setMoreOpen(false); setCatSearch(""); }}
+                        onClick={() => { setSelectedCategory(isActive ? "" : cat.name); setMoreOpen(false); setCatSearch(""); setDisplayCount(DISPLAY_PAGE); }}
                         className={[
                           "w-full flex items-center justify-between px-2 py-1.5 rounded text-xs transition-colors",
                           isActive
@@ -410,14 +383,12 @@ export default function Markets() {
                             : "hover:bg-muted/50 text-muted-foreground hover:text-foreground",
                         ].join(" ")}
                       >
-                        <span className="flex items-center gap-1.5">
-                          {CATEGORY_EMOJI[cat.name] ?? "•"} {cat.name}
-                        </span>
+                        <span className="flex items-center gap-1.5">{CATEGORY_EMOJI[cat.name] ?? "•"} {cat.name}</span>
                         <span className="opacity-50">{cat.count}</span>
                       </button>
                     );
                   })}
-                  {filteredMoreCats.length === 0 && (
+                  {filteredMore.length === 0 && (
                     <p className="text-xs text-muted-foreground text-center py-4">No categories found</p>
                   )}
                 </div>
@@ -426,7 +397,6 @@ export default function Markets() {
           </Popover>
         )}
 
-        {/* Active category clear pill */}
         {selectedCategory && (
           <button
             onClick={clearCategory}
@@ -438,7 +408,7 @@ export default function Markets() {
       </div>
 
       {/* Market grid */}
-      <div className="flex-1 overflow-auto pb-8">
+      <div className="flex-1 overflow-auto pb-8" key={filterKey}>
         {isInitialLoad ? (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {Array.from({ length: 9 }).map((_, i) => (
@@ -449,6 +419,7 @@ export default function Markets() {
                 </div>
                 <Skeleton className="h-4 w-full" />
                 <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-8 w-24 rounded-lg" />
                 <Skeleton className="h-1.5 w-full rounded-full" />
                 <div className="flex justify-between pt-3 border-t border-border">
                   <Skeleton className="h-5 w-28" />
@@ -461,7 +432,7 @@ export default function Markets() {
           <div className="flex flex-col items-center justify-center h-64 text-center bg-card rounded-lg border border-border border-dashed">
             <Filter className="w-12 h-12 text-muted-foreground mb-4" />
             <h3 className="text-lg font-medium">No markets found</h3>
-            <p className="text-muted-foreground text-sm">
+            <p className="text-sm text-muted-foreground">
               {selectedCategory
                 ? `No ${selectedCategory} markets right now. Try another category.`
                 : "Try adjusting your search or platform filter."}
@@ -477,25 +448,31 @@ export default function Markets() {
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {displayed.map((market) => {
                 const { side, prob, payout } = market._best;
-                const risk = getRisk(prob);
-                const RiskIcon = RISK_CONFIG[risk].icon;
-                const platformCfg = PLATFORM_CONFIG[market.platform] ?? { label: market.platform, className: "bg-muted text-muted-foreground border-border" };
-                const catClass = CATEGORY_COLORS[market.category ?? ""] ?? "bg-muted/50 text-muted-foreground border-border";
-                const isAdded = selectedLegs.some((leg) => leg.market.id === market.id);
-                const volStr = formatVolume(market.volume);
-                const closeStr = formatClose(market.closeTime);
+                const risk      = getRisk(prob);
+                const RiskIcon  = RISK_CONFIG[risk].icon;
+                const platCfg   = PLATFORM_CONFIG[market.platform] ?? { label: market.platform, className: "bg-muted text-muted-foreground border-border" };
+                const catClass  = CATEGORY_COLORS[market.category ?? ""] ?? "bg-muted/50 text-muted-foreground border-border";
+                const isAdded   = selectedLegs.some((l) => l.market.id === market.id);
+                const volStr    = formatVolume(market.volume);
+                const closeStr  = formatClose(market.closeTime);
+
+                // Pick badge colours: YES = emerald, NO = rose
+                const pickBg    = side === "YES"
+                  ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40 shadow-emerald-500/10"
+                  : "bg-rose-500/15 text-rose-300 border-rose-500/40 shadow-rose-500/10";
+                const barColor  = side === "YES" ? "bg-emerald-500" : (risk === "medium" ? "bg-amber-500" : risk === "low" ? "bg-emerald-500" : "bg-red-500");
 
                 return (
                   <Card key={market.id} className="p-5 flex flex-col group hover:border-primary/40 transition-colors bg-card/50">
-                    {/* Top: platform + category + actions */}
+                    {/* Top: platform + category badges */}
                     <div className="flex items-start justify-between mb-3 gap-2">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider border ${platformCfg.className}`}>
-                          {platformCfg.label}
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider border ${platCfg.className}`}>
+                          {platCfg.label}
                         </span>
                         {market.category && (
                           <button
-                            onClick={() => setSelectedCategory(market.category!)}
+                            onClick={() => { setSelectedCategory(market.category!); setDisplayCount(DISPLAY_PAGE); }}
                             className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border transition-opacity hover:opacity-80 ${catClass}`}
                           >
                             {market.category}
@@ -517,25 +494,32 @@ export default function Markets() {
                     </div>
 
                     {/* Title */}
-                    <h3 className="font-semibold leading-snug line-clamp-2 mb-4 flex-1 text-sm">
+                    <h3 className="font-semibold leading-snug line-clamp-2 mb-3 flex-1 text-sm">
                       {market.title}
                     </h3>
 
+                    {/* ── Recommended pick — the focal point of each card ── */}
+                    <div className={`flex items-center justify-between px-3 py-2.5 rounded-lg border mb-3 shadow-sm ${pickBg}`}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-semibold uppercase tracking-widest opacity-60">
+                          Suggested pick
+                        </span>
+                        <span className="text-base font-extrabold tracking-wide">
+                          {side}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-lg font-black tabular-nums leading-none">{formatProb(prob)}</div>
+                        <div className="text-[10px] opacity-60 mt-0.5">win probability</div>
+                      </div>
+                    </div>
+
                     {/* Probability bar */}
-                    <div className="mb-4">
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-xs text-muted-foreground">{side} probability</span>
-                        <span className="text-xs font-semibold tabular-nums">{formatProb(prob)}</span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                        <div
-                          className={`h-full rounded-full ${
-                            risk === "low" ? "bg-emerald-500" :
-                            risk === "medium" ? "bg-amber-500" : "bg-red-500"
-                          }`}
-                          style={{ width: `${Math.round(prob * 100)}%` }}
-                        />
-                      </div>
+                    <div className="h-1.5 rounded-full bg-muted overflow-hidden mb-3">
+                      <div
+                        className={`h-full rounded-full transition-all ${barColor}`}
+                        style={{ width: `${Math.round(prob * 100)}%` }}
+                      />
                     </div>
 
                     {/* Stats: payout + risk + volume */}
@@ -545,12 +529,10 @@ export default function Markets() {
                         <span className="text-sm font-bold tabular-nums text-primary">{formatPayout(payout)}</span>
                         <span className="text-xs text-muted-foreground">payout</span>
                       </div>
-
                       <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${RISK_CONFIG[risk].className}`}>
                         <RiskIcon className="w-3 h-3" />
                         {RISK_CONFIG[risk].label}
                       </span>
-
                       {volStr && (
                         <span className="flex items-center gap-1 text-xs text-muted-foreground ml-auto">
                           <DollarSign className="w-3 h-3" />
@@ -559,7 +541,7 @@ export default function Markets() {
                       )}
                     </div>
 
-                    {/* Footer: close date + add button */}
+                    {/* Footer */}
                     <div className="flex items-center justify-between pt-3 border-t border-border mt-auto gap-2">
                       <span className="text-xs text-muted-foreground flex items-center gap-1 truncate">
                         {closeStr
@@ -582,7 +564,6 @@ export default function Markets() {
               })}
             </div>
 
-            {/* Show more */}
             {clientHasMore && (
               <div className="flex justify-center mt-8">
                 <Button
