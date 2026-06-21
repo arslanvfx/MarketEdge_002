@@ -25,9 +25,9 @@ router.get("/markets/:platform/:marketId", async (req, res) => {
     }
     const market = await fetchMarketById(platform, marketId);
     if (!market) return res.status(404).json({ error: "Market not found" });
-    res.json(market);
+    return res.json(market);
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch market" });
+    return res.status(500).json({ error: "Failed to fetch market" });
   }
 });
 

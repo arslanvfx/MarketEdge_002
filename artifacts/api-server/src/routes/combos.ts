@@ -4,7 +4,7 @@ import { getAuth } from "@clerk/express";
 import { db } from "@workspace/db";
 import { savedCombosTable, comboLegsTable } from "@workspace/db";
 import { eq, and, inArray } from "drizzle-orm";
-import { fetchMarkets } from "../lib/markets";
+import { fetchMarkets, fetchMarketsForLegs } from "../lib/markets";
 import { optimizeCombos, detectPortfolioOverlap } from "../lib/optimizer";
 
 const router = Router();
@@ -36,12 +36,8 @@ router.post("/combos/optimize", async (req, res) => {
       platformGroups.set(leg.platform, list);
     }
 
-    // Fetch all markets to resolve odds
-    const { markets: allMarkets } = await fetchMarkets({
-      platform: "all",
-      limit: 200,
-      offset: 0,
-    });
+    // Fetch markets needed for the selected legs (by platform, unbounded)
+    const { markets: allMarkets } = await fetchMarketsForLegs(legs);
 
     const combos = optimizeCombos({
       selectedLegs: legs,
@@ -50,9 +46,9 @@ router.post("/combos/optimize", async (req, res) => {
       topN: Math.min(topN, 50),
     });
 
-    res.json({ combos });
+    return res.json({ combos });
   } catch (err) {
-    res.status(500).json({ error: "Optimization failed" });
+    return res.status(500).json({ error: "Optimization failed" });
   }
 });
 
@@ -129,9 +125,9 @@ router.get("/combos", requireAuth, async (req: any, res) => {
       };
     });
 
-    res.json({ combos, portfolioOverlapWarnings });
+    return res.json({ combos, portfolioOverlapWarnings });
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch combos" });
+    return res.status(500).json({ error: "Failed to fetch combos" });
   }
 });
 
@@ -189,7 +185,7 @@ router.post("/combos", requireAuth, async (req: any, res) => {
       .where(eq(comboLegsTable.comboId, comboId))
       .orderBy(comboLegsTable.sortOrder);
 
-    res.status(201).json({
+    return res.status(201).json({
       id: saved.id,
       name: saved.name,
       note: saved.note,
@@ -208,7 +204,7 @@ router.post("/combos", requireAuth, async (req: any, res) => {
       portfolioOverlapWarning: false,
     });
   } catch (err) {
-    res.status(500).json({ error: "Failed to save combo" });
+    return res.status(500).json({ error: "Failed to save combo" });
   }
 });
 
@@ -264,7 +260,7 @@ router.get("/combos/:comboId", requireAuth, async (req: any, res) => {
       overlapKeys.has(`${l.platform}:${l.marketId}:${l.position}`),
     );
 
-    res.json({
+    return res.json({
       id: combo.id,
       name: combo.name,
       note: combo.note,
@@ -283,7 +279,7 @@ router.get("/combos/:comboId", requireAuth, async (req: any, res) => {
       portfolioOverlapWarning: hasOverlap,
     });
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch combo" });
+    return res.status(500).json({ error: "Failed to fetch combo" });
   }
 });
 
@@ -304,9 +300,9 @@ router.delete("/combos/:comboId", requireAuth, async (req: any, res) => {
       .delete(savedCombosTable)
       .where(and(eq(savedCombosTable.id, comboId), eq(savedCombosTable.userId, userId)));
 
-    res.status(204).send();
+    return res.status(204).send();
   } catch (err) {
-    res.status(500).json({ error: "Failed to delete combo" });
+    return res.status(500).json({ error: "Failed to delete combo" });
   }
 });
 
