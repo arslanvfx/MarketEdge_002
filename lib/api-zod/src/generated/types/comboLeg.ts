@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { ComboLegAiConfidence } from './comboLegAiConfidence';
 import type { ComboLegPlatform } from './comboLegPlatform';
 import type { ComboLegPosition } from './comboLegPosition';
 
@@ -15,4 +16,12 @@ export interface ComboLeg {
   position: ComboLegPosition;
   odds: number;
   impliedProb: number;
+  /** AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs. */
+  trueProbability?: number;
+  /** trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs. */
+  edge?: number;
+  /** Short AI explanation of the estimate. Present on Smart Picks legs. */
+  aiReasoning?: string;
+  /** AI confidence in its probability estimate. Present on Smart Picks legs. */
+  aiConfidence?: ComboLegAiConfidence;
 }

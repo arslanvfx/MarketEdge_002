@@ -6,7 +6,7 @@ import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info } from "lucide-react";
+import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info, Brain, TrendingUp } from "lucide-react";
 import {
   useGenerateSmartPicks,
   useSaveCombo,
@@ -62,6 +62,15 @@ function formatPayout(n: number) {
     ? `$${(n / 1000).toFixed(1)}k`
     : `$${n.toFixed(2)}`;
 }
+function formatEdgePts(edge: number) {
+  return `+${(edge * 100).toFixed(0)} pts`;
+}
+
+const CONFIDENCE_LABEL: Record<string, string> = {
+  low: "Low confidence",
+  medium: "Medium confidence",
+  high: "High confidence",
+};
 
 function ComboCardSkeleton() {
   return (
@@ -144,46 +153,86 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
           <Badge variant="outline" className={`text-xs ${badge.className}`}>
             {badge.label}
           </Badge>
+          <div className="flex items-center justify-end gap-1.5 text-xs font-semibold text-emerald-400">
+            <TrendingUp className="w-3.5 h-3.5" />
+            +{combo.edgePercent.toFixed(0)}% edge
+          </div>
           <div className="text-xs text-muted-foreground">
-            {formatProb(combo.jointProbability)} prob
+            {formatProb(combo.jointProbability)} true win prob
           </div>
         </div>
       </div>
 
-      {/* Legs table */}
-      <div className="flex-1">
-        <table className="w-full text-sm">
-          <tbody className="divide-y divide-border/30">
-            {combo.legs.map((leg, i) => (
-              <tr key={i} className="hover:bg-muted/20">
-                <td className="px-4 py-3">
+      {/* AI rationale */}
+      <div className="px-5 py-3 bg-primary/[0.04] border-b border-border/50 flex items-start gap-2">
+        <Brain className="w-4 h-4 mt-0.5 shrink-0 text-primary/80" />
+        <p className="text-xs leading-snug text-muted-foreground">{combo.rationale}</p>
+      </div>
+
+      {/* Legs */}
+      <div className="flex-1 divide-y divide-border/30">
+        {combo.legs.map((leg, i) => (
+          <div key={i} className="px-4 py-3 hover:bg-muted/20">
+            <div className="flex items-start gap-3">
+              <Badge
+                variant="outline"
+                className={
+                  leg.position === "yes"
+                    ? "bg-primary/10 text-primary border-primary/20 text-[10px] mt-0.5 shrink-0"
+                    : "bg-destructive/10 text-destructive border-destructive/20 text-[10px] mt-0.5 shrink-0"
+                }
+              >
+                {leg.position.toUpperCase()}
+              </Badge>
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-xs leading-snug">{leg.marketTitle}</div>
+                {leg.aiReasoning && (
+                  <div className="flex items-start gap-1 mt-1 text-[11px] leading-snug text-muted-foreground">
+                    <Brain className="w-3 h-3 mt-px shrink-0 text-primary/60" />
+                    <span>
+                      {leg.aiReasoning}
+                      {leg.aiConfidence && (
+                        <span className="opacity-60"> · {CONFIDENCE_LABEL[leg.aiConfidence] ?? leg.aiConfidence}</span>
+                      )}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="text-right shrink-0 space-y-0.5">
+                {typeof leg.edge === "number" && (
                   <Badge
                     variant="outline"
-                    className={
-                      leg.position === "yes"
-                        ? "bg-primary/10 text-primary border-primary/20 text-[10px]"
-                        : "bg-destructive/10 text-destructive border-destructive/20 text-[10px]"
-                    }
+                    className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 text-[10px] font-mono"
                   >
-                    {leg.position.toUpperCase()}
+                    {formatEdgePts(leg.edge)}
                   </Badge>
-                </td>
-                <td className="px-3 py-3 font-medium text-xs leading-snug">{leg.marketTitle}</td>
-                <td className="px-4 py-3 text-right font-mono text-xs text-muted-foreground whitespace-nowrap">
-                  {formatProb(leg.impliedProb)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                )}
+                <div className="font-mono text-[11px] text-muted-foreground whitespace-nowrap">
+                  mkt {formatProb(leg.impliedProb)}
+                  {typeof leg.trueProbability === "number" && (
+                    <> · AI {formatProb(leg.trueProbability)}</>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Footer */}
       <div className="px-5 py-4 border-t border-border/50 bg-muted/20 flex items-center justify-between gap-3">
         <div className="text-sm">
-          <span className="text-muted-foreground">Est. payout </span>
-          <span className="font-semibold text-primary font-mono">{formatPayout(estimatedPayout)}</span>
-          <span className="text-muted-foreground text-xs"> on ${stake}</span>
+          <div>
+            <span className="text-muted-foreground">Est. payout </span>
+            <span className="font-semibold text-primary font-mono">{formatPayout(estimatedPayout)}</span>
+            <span className="text-muted-foreground text-xs"> on ${stake}</span>
+          </div>
+          <div className="text-xs mt-0.5">
+            <span className="text-muted-foreground">Expected value </span>
+            <span className={`font-mono font-semibold ${combo.expectedValue >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {combo.expectedValue >= 0 ? "+" : ""}{formatPayout(combo.expectedValue)}
+            </span>
+          </div>
         </div>
 
         <Show when="signed-in">
@@ -282,7 +331,8 @@ export default function SmartPicks() {
             <h1 className="text-xl font-bold">Smart Picks</h1>
           </div>
           <p className="text-sm text-muted-foreground mb-6">
-            Auto-generate 4 non-overlapping combo parlays — one click, zero manual browsing.
+            Claude analyzes live markets, estimates the true odds, and surfaces only combos where the
+            market price is genuinely mispriced in your favor — real value bets, not coin-flip novelties.
           </p>
 
           <div className="flex flex-col sm:flex-row gap-6 items-start sm:items-end">
@@ -347,7 +397,7 @@ export default function SmartPicks() {
               ) : (
                 <Sparkles className="w-4 h-4 mr-2" />
               )}
-              Generate 4 Best Combos
+              {isLoading ? "Analyzing with AI…" : "Find Value Combos"}
             </Button>
           </div>
         </div>
@@ -358,9 +408,15 @@ export default function SmartPicks() {
         <div className="max-w-4xl mx-auto space-y-6">
           {/* Skeleton loaders */}
           {isLoading && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {[0, 1, 2, 3].map((i) => <ComboCardSkeleton key={i} />)}
-            </div>
+            <>
+              <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground py-2">
+                <Brain className="w-4 h-4 text-primary animate-pulse" />
+                <span>Claude is analyzing live markets for genuine mispricing…</span>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {[0, 1, 2, 3].map((i) => <ComboCardSkeleton key={i} />)}
+              </div>
+            </>
           )}
 
           {/* Empty state (before first generate) */}
@@ -369,7 +425,7 @@ export default function SmartPicks() {
               <Sparkles className="w-14 h-14 opacity-20" />
               <div>
                 <p className="font-medium text-foreground">No picks generated yet</p>
-                <p className="text-sm mt-1">Choose your stake and risk level, then click "Generate 4 Best Combos".</p>
+                <p className="text-sm mt-1">Choose your stake and risk level, then click "Find Value Combos".</p>
               </div>
             </div>
           )}
@@ -379,8 +435,8 @@ export default function SmartPicks() {
             <div className="flex flex-col items-center justify-center py-24 text-center text-muted-foreground space-y-4">
               <Sparkles className="w-14 h-14 opacity-20" />
               <div>
-                <p className="font-medium text-foreground">Not enough markets for this risk level</p>
-                <p className="text-sm mt-1">Try switching to Balanced or Aggressive — more markets will match.</p>
+                <p className="font-medium text-foreground">No genuine value found right now</p>
+                <p className="text-sm mt-1">AI found no markets meaningfully mispriced for this risk level. Try Aggressive, or check back as live odds move.</p>
               </div>
             </div>
           )}

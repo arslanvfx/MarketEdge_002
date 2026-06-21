@@ -13,6 +13,11 @@ export interface ComboLegResult {
   position: "yes" | "no";
   odds: number;
   impliedProb: number;
+  // AI value-analysis fields (present on Smart Picks legs only)
+  trueProbability?: number; // AI true probability of the chosen side (0..1)
+  edge?: number; // trueProbability - odds for the chosen side (positive = value)
+  aiReasoning?: string;
+  aiConfidence?: "low" | "medium" | "high";
 }
 
 export interface ComboSuggestion {
@@ -29,6 +34,23 @@ function combinations<T>(arr: T[], k: number): T[][] {
   const withFirst = combinations(rest, k - 1).map((c) => [first, ...c]);
   const withoutFirst = combinations(rest, k);
   return [...withFirst, ...withoutFirst];
+}
+
+/**
+ * Normalize a market title into a "family" key so highly-correlated markets
+ * collapse together. Strips numbers, percentages, months, and years so that
+ * e.g. "Will CPI rise more than 0.0% in June 2026?" and "...more than 0.1% in
+ * July 2026?" map to the same key, while distinct events stay separate.
+ */
+function marketFamilyKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/g, "")
+    .replace(/\b(19|20)\d{2}\b/g, "")
+    .replace(/\d+(\.\d+)?%?/g, "")
+    .replace(/[^a-z ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function comboKey(legs: ComboLegResult[]): string {
@@ -119,132 +141,194 @@ export type RiskLevel = "conservative" | "balanced" | "aggressive";
 
 export interface SmartPickResult {
   legs: ComboLegResult[];
-  jointProbability: number;
+  jointProbability: number; // AI-estimated true probability the whole parlay hits
   payoutMultiplier: number;
   riskLevel: RiskLevel;
   riskScore: "low" | "medium" | "high";
   stakeAmount: number;
-  estimatedPayout: number;
+  estimatedPayout: number; // stake × multiplier (if it wins)
+  expectedValue: number; // EV in $ at stake: stake × (jointTrueProb × multiplier − 1)
+  edgePercent: number; // (Π edgeRatio − 1) × 100 — combined value of the parlay
+  rationale: string; // combo-level summary of why these picks have value
 }
 
 /**
  * Automatically generate `count` diversified, non-overlapping parlay combos
- * from the full live market pool.
+ * made up ONLY of AI-vetted positive-edge bets.
  *
- * Algorithm:
- *  1. Expand each market into YES and NO candidate legs.
- *  2. Filter to legs whose odds fall within the risk-level range.
- *  3. Score each leg by volume × interest (closeness to 50%).
- *  4. Take the top-N unique-market legs.
- *  5. Generate all 2-leg and 3-leg (+ 4-leg for aggressive) combos.
- *  6. Score each combo: payoutMultiplier × jointProbability^alpha
- *     (alpha varies by risk level — higher = prefer safer combos).
- *  7. Greedy non-overlapping selection: pick the top-scoring combo, mark its
- *     markets as used, repeat until `count` combos are collected.
+ * For every market we have an AI estimate of the true probability of YES. For
+ * each side (YES / NO) we compute the live market price and the edge
+ * (trueProb − price). A side is a "value bet" only when:
+ *   • the market is AI-plausible, and
+ *   • edge ≥ EDGE_THRESHOLD (the live price is genuinely cheaper than reality), and
+ *   • the chosen side's true probability clears the risk-level floor.
+ *
+ * Combos are scored by expected value: for a parlay, EV-multiplier = Π(trueProb/price),
+ * and positive EV requires the product of edge-ratios > 1. We greedily select the
+ * highest-EV non-overlapping combos.
  */
 export function autoGenerateCombos(opts: {
   markets: Market[];
+  analyses: Map<string, { trueProbabilityYes: number; plausible: boolean; confidence: "low" | "medium" | "high"; reasoning: string }>;
   riskLevel: RiskLevel;
   stakeAmount: number;
   count?: number;
 }): SmartPickResult[] {
-  const { markets, riskLevel, stakeAmount, count = 4 } = opts;
+  const { markets, analyses, riskLevel, stakeAmount, count = 4 } = opts;
 
-  // Odds range per risk level (applied to each leg's chosen position).
-  // Step (b) from spec: conservative 0.55–0.80, balanced 0.35–0.75, aggressive 0.20–0.65.
-  const RISK_ODDS: Record<RiskLevel, { min: number; max: number }> = {
-    conservative: { min: 0.55, max: 0.80 },
-    balanced:     { min: 0.35, max: 0.75 },
-    aggressive:   { min: 0.20, max: 0.65 },
+  const EDGE_THRESHOLD = 0.05; // require ≥5 percentage points of value
+
+  // Minimum true probability of the CHOSEN side per risk level. Conservative
+  // bettors want legs that are individually likely; aggressive bettors tolerate
+  // longer shots (bigger payout) as long as there is still positive edge.
+  const MIN_TRUE_PROB: Record<RiskLevel, number> = {
+    conservative: 0.6,
+    balanced: 0.45,
+    aggressive: 0.3,
   };
-  const { min, max } = RISK_ODDS[riskLevel];
+  const minTrue = MIN_TRUE_PROB[riskLevel];
 
-  // ── Step 1-3: candidate legs ──────────────────────────────────────────────
-  type ScoredLeg = ComboLegResult & { legScore: number };
-  const candidateLegs: ScoredLeg[] = [];
+  // ── Build value-bet legs (one best side per market) ───────────────────────
+  type ScoredLeg = ComboLegResult & {
+    trueProbability: number;
+    edge: number;
+    edgeRatio: number; // trueProb / price
+  };
+  // Confidence-based shrinkage: blend the AI's raw estimate toward the live
+  // market price. The market aggregates real money, so we only deviate from it
+  // in proportion to the AI's confidence. This keeps edges credible and stops
+  // overconfident estimates from compounding into fantasy parlay payouts.
+  const CONF_WEIGHT: Record<"low" | "medium" | "high", number> = {
+    low: 0.45,
+    medium: 0.65,
+    high: 0.85,
+  };
+
+  const valueLegs: ScoredLeg[] = [];
 
   for (const market of markets) {
-    for (const position of ["yes", "no"] as const) {
-      const odds = position === "yes" ? market.yesOdds : market.noOdds;
-      if (odds < min || odds > max) continue;
-      const vol = market.volume ?? 0;
-      // Step (c): score = volume × (1 - |odds - 0.5| × 2)
-      const interest = 1 - Math.abs(odds - 0.5) * 2;
-      const legScore = vol * interest;
-      candidateLegs.push({
+    const analysis = analyses.get(`${market.platform}:${market.id}`);
+    if (!analysis || !analysis.plausible) continue;
+
+    const w = CONF_WEIGHT[analysis.confidence] ?? 0.65;
+    // Shrunk true probability of YES, used consistently for both sides.
+    const trueYes = w * analysis.trueProbabilityYes + (1 - w) * market.yesOdds;
+
+    const sides = [
+      { position: "yes" as const, price: market.yesOdds, trueProb: trueYes },
+      { position: "no" as const, price: market.noOdds, trueProb: 1 - trueYes },
+    ];
+
+    // Pick the side with the larger positive edge.
+    let best: ScoredLeg | null = null;
+    for (const s of sides) {
+      if (s.price <= 0 || s.price >= 1) continue;
+      const edge = s.trueProb - s.price;
+      if (edge < EDGE_THRESHOLD) continue;
+      if (s.trueProb < minTrue) continue;
+      const edgeRatio = s.trueProb / s.price;
+      const leg: ScoredLeg = {
         marketId: market.id,
         platform: market.platform,
         marketTitle: market.title,
-        position,
-        odds,
-        impliedProb: odds,
-        legScore,
-      });
+        position: s.position,
+        odds: s.price,
+        impliedProb: s.price,
+        trueProbability: s.trueProb,
+        edge,
+        edgeRatio,
+        aiReasoning: analysis.reasoning,
+        aiConfidence: analysis.confidence,
+      };
+      if (!best || leg.edge > best.edge) best = leg;
     }
+    if (best) valueLegs.push(best);
   }
 
-  // ── Step 4: keep top-50, one entry per market (prefer the higher-scored position) ──
-  candidateLegs.sort((a, b) => b.legScore - a.legScore);
-  const seenMarkets = new Set<string>();
-  const topLegs: ScoredLeg[] = [];
-  for (const leg of candidateLegs) {
-    const mk = `${leg.platform}:${leg.marketId}`;
-    if (!seenMarkets.has(mk)) {
-      seenMarkets.add(mk);
-      topLegs.push(leg);
-      if (topLegs.length >= 50) break;  // Step (d): top 50
-    }
-  }
+  // Sort by edge so the strongest value bets are preferred.
+  valueLegs.sort((a, b) => b.edge - a.edge);
+  const topLegs = valueLegs.slice(0, 50);
 
   if (topLegs.length < 2) return [];
 
-  // ── Step 5: generate all 2–4 leg combinations from top 50 ────────────────
-  // C(50,2)=1225  C(50,3)=19600  C(50,4)=230300  → total ~251K — fast
-  type RawCombo = { legs: ScoredLeg[]; score: number; jointProb: number; multiplier: number };
+  // ── Generate 2–4 leg combos, scored by expected value ────────────────────
+  type RawCombo = {
+    legs: ScoredLeg[];
+    jointTrueProb: number;
+    multiplier: number;
+    evMultiplier: number; // Π(trueProb / price)
+  };
   const allRaw: RawCombo[] = [];
 
   for (let size = 2; size <= 4; size++) {
     for (const legs of combinations(topLegs, size)) {
-      const jointProb = legs.reduce((acc, l) => acc * l.impliedProb, 1);
-      if (jointProb < 0.001) continue; // Skip near-impossible combos
-      const multiplier = 1 / jointProb;
-      // Step (e): score = payoutMultiplier × sqrt(jointProbability)
-      const score = multiplier * Math.sqrt(jointProb);
-      allRaw.push({ legs, score, jointProb, multiplier });
+      // Correlation guard: reject combos with two legs from the same market
+      // "family" (e.g. "CPI rise > 0.0% in June" and "CPI rise > 0.1% in June").
+      // Such legs are highly correlated, so multiplying their probabilities as
+      // if independent is statistically invalid and inflates the apparent edge.
+      const families = new Set(legs.map((l) => marketFamilyKey(l.marketTitle)));
+      if (families.size < legs.length) continue;
+
+      const jointTrueProb = legs.reduce((acc, l) => acc * l.trueProbability, 1);
+      const jointPrice = legs.reduce((acc, l) => acc * l.impliedProb, 1);
+      if (jointPrice < 0.0005) continue; // skip near-impossible payouts
+      const multiplier = 1 / jointPrice;
+      const evMultiplier = legs.reduce((acc, l) => acc * l.edgeRatio, 1);
+      if (evMultiplier <= 1) continue; // only positive-EV parlays
+      allRaw.push({ legs, jointTrueProb, multiplier, evMultiplier });
     }
   }
 
-  // ── Step 6: sort by score ─────────────────────────────────────────────────
-  allRaw.sort((a, b) => b.score - a.score);
+  // Highest expected value first.
+  allRaw.sort((a, b) => b.evMultiplier - a.evMultiplier);
 
-  // ── Step 7: greedy non-overlapping selection ─────────────────────────────
+  // ── Greedy non-overlapping selection ─────────────────────────────────────
   const usedMarkets = new Set<string>();
   const selected: SmartPickResult[] = [];
 
-  function pickFromPool(pool: RawCombo[]) {
-    for (const candidate of pool) {
-      if (selected.length >= count) break;
-      const hasOverlap = candidate.legs.some(
-        (l) => usedMarkets.has(`${l.platform}:${l.marketId}`),
-      );
-      if (hasOverlap) continue;
-      for (const l of candidate.legs) usedMarkets.add(`${l.platform}:${l.marketId}`);
-      const riskScore: SmartPickResult["riskScore"] =
-        candidate.jointProb >= 0.30 ? "low" :
-        candidate.jointProb >= 0.10 ? "medium" : "high";
-      selected.push({
-        legs: candidate.legs,
-        jointProbability: candidate.jointProb,
-        payoutMultiplier: candidate.multiplier,
-        riskLevel,
-        riskScore,
-        stakeAmount,
-        estimatedPayout: stakeAmount * candidate.multiplier,
-      });
-    }
-  }
+  for (const candidate of allRaw) {
+    if (selected.length >= count) break;
+    const hasOverlap = candidate.legs.some(
+      (l) => usedMarkets.has(`${l.platform}:${l.marketId}`),
+    );
+    if (hasOverlap) continue;
+    for (const l of candidate.legs) usedMarkets.add(`${l.platform}:${l.marketId}`);
 
-  pickFromPool(allRaw);
+    const riskScore: SmartPickResult["riskScore"] =
+      candidate.jointTrueProb >= 0.3 ? "low" :
+      candidate.jointTrueProb >= 0.1 ? "medium" : "high";
+
+    const edgePercent = (candidate.evMultiplier - 1) * 100;
+    const expectedValue =
+      stakeAmount * (candidate.jointTrueProb * candidate.multiplier - 1);
+
+    const topLeg = [...candidate.legs].sort((a, b) => b.edge - a.edge)[0];
+    const rationale = `+${edgePercent.toFixed(0)}% combined edge across ${candidate.legs.length} value bets — strongest: ${topLeg.marketTitle} (${topLeg.position.toUpperCase()}, +${(topLeg.edge * 100).toFixed(0)} pts).`;
+
+    selected.push({
+      legs: candidate.legs.map((l) => ({
+        marketId: l.marketId,
+        platform: l.platform,
+        marketTitle: l.marketTitle,
+        position: l.position,
+        odds: l.odds,
+        impliedProb: l.impliedProb,
+        trueProbability: l.trueProbability,
+        edge: l.edge,
+        aiReasoning: l.aiReasoning,
+        aiConfidence: l.aiConfidence,
+      })),
+      jointProbability: candidate.jointTrueProb,
+      payoutMultiplier: candidate.multiplier,
+      riskLevel,
+      riskScore,
+      stakeAmount,
+      estimatedPayout: stakeAmount * candidate.multiplier,
+      expectedValue,
+      edgePercent,
+      rationale,
+    });
+  }
 
   return selected;
 }

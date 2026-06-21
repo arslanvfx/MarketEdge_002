@@ -1,0 +1,190 @@
+import { anthropic } from "@workspace/integrations-anthropic-ai";
+import {
+  batchProcess,
+  isRateLimitError,
+} from "@workspace/integrations-anthropic-ai/batch";
+import type { Market } from "./markets";
+
+/**
+ * AI analysis of a single market. We ask Claude for the TRUE probability that
+ * the YES outcome occurs — independent of the current market price — so we can
+ * later compute the edge (where the market disagrees with reality).
+ *
+ * trueProbabilityYes is cached per market id (it reflects real-world reasoning,
+ * not live odds), while edge is always recomputed against fresh live odds.
+ */
+export interface MarketAnalysis {
+  marketId: string;
+  platform: string;
+  trueProbabilityYes: number; // 0..1 — AI estimate that YES happens
+  plausible: boolean; // false for nonsensical / unresolvable / joke markets
+  confidence: "low" | "medium" | "high";
+  reasoning: string; // one or two sentences, user-facing
+}
+
+interface CacheEntry {
+  analysis: MarketAnalysis;
+  fetchedAt: number;
+}
+
+const ANALYSIS_TTL_MS = 30 * 60 * 1000; // 30 min — real-world assessment is slow-moving
+const cache = new Map<string, CacheEntry>();
+
+const MODEL = "claude-sonnet-4-6";
+const CHUNK_SIZE = 12; // markets analyzed per Claude call
+
+function cacheKey(m: { platform: string; id: string }): string {
+  return `${m.platform}:${m.id}`;
+}
+
+function stripJsonFences(text: string): string {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) return fenced[1].trim();
+  return trimmed;
+}
+
+interface RawAnalysis {
+  index: number;
+  trueProbabilityYes: number;
+  plausible: boolean;
+  confidence: "low" | "medium" | "high";
+  reasoning: string;
+}
+
+function fallbackAnalyses(markets: Market[]): MarketAnalysis[] {
+  return markets.map((m) => ({
+    marketId: m.id,
+    platform: m.platform,
+    trueProbabilityYes: m.yesOdds,
+    plausible: false,
+    confidence: "low" as const,
+    reasoning: "AI analysis unavailable for this market.",
+  }));
+}
+
+async function analyzeChunk(markets: Market[]): Promise<MarketAnalysis[]> {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const marketLines = markets
+    .map((m, i) => {
+      const close = m.closeTime ? m.closeTime.slice(0, 10) : "unknown";
+      return `${i}. "${m.title}" | current YES market price: ${(m.yesOdds * 100).toFixed(0)}% | closes: ${close} | category: ${m.category ?? "n/a"}`;
+    })
+    .join("\n");
+
+  const prompt = `You are a sharp, skeptical prediction-market analyst. Today's date is ${today}.
+
+For each market below, estimate the TRUE probability (0.0 to 1.0) that the YES outcome actually occurs, using real-world knowledge and reasoning. Do NOT just echo the market price — your job is to find where the crowd is WRONG.
+
+Critical rules:
+- Be skeptical of novelty, joke, or "X before GTA VI / before [event]" markets. Joke markets pairing unrelated events (e.g. "Will China invade Taiwan before GTA VI?") are usually priced near 50% by the crowd but have a true probability far from that. Estimate the REAL probability of the literal event in the timeframe.
+- If a market is nonsensical, unresolvable, ambiguous, or you cannot reason about it, set "plausible": false.
+- Consider the close date — a low-probability event has even less chance in a short window.
+- confidence reflects how sure you are of your estimate: "high" for well-understood events, "low" for genuinely uncertain ones.
+- reasoning: ONE short sentence (max ~20 words), plain language, explaining your estimate. User-facing.
+
+Markets:
+${marketLines}
+
+Respond with ONLY a JSON array, one object per market, in this exact shape:
+[{"index": 0, "trueProbabilityYes": 0.03, "plausible": true, "confidence": "high", "reasoning": "..."}]
+No prose, no markdown fences.`;
+
+  const message = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 8192,
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  const block = message.content[0];
+  const text = block && block.type === "text" ? block.text : "";
+  let parsed: RawAnalysis[];
+  try {
+    parsed = JSON.parse(stripJsonFences(text));
+    if (!Array.isArray(parsed)) throw new Error("not an array");
+  } catch {
+    // If parsing fails, treat the whole chunk as unanalyzable (excluded downstream)
+    return fallbackAnalyses(markets);
+  }
+
+  const byIndex = new Map(parsed.map((p) => [p.index, p]));
+  return markets.map((m, i) => {
+    const p = byIndex.get(i);
+    if (!p || typeof p.trueProbabilityYes !== "number") {
+      return {
+        marketId: m.id,
+        platform: m.platform,
+        trueProbabilityYes: m.yesOdds,
+        plausible: false,
+        confidence: "low" as const,
+        reasoning: "AI analysis unavailable for this market.",
+      };
+    }
+    const trueProb = Math.min(Math.max(p.trueProbabilityYes, 0.005), 0.995);
+    return {
+      marketId: m.id,
+      platform: m.platform,
+      trueProbabilityYes: trueProb,
+      plausible: p.plausible !== false,
+      confidence: p.confidence ?? "medium",
+      reasoning: typeof p.reasoning === "string" ? p.reasoning : "",
+    };
+  });
+}
+
+/**
+ * Analyze a set of markets, returning a map keyed by `${platform}:${id}`.
+ * Cached results (within TTL) are reused; only uncached markets hit Claude.
+ */
+export async function analyzeMarkets(
+  markets: Market[],
+): Promise<Map<string, MarketAnalysis>> {
+  const result = new Map<string, MarketAnalysis>();
+  const now = Date.now();
+  const toAnalyze: Market[] = [];
+
+  for (const m of markets) {
+    const key = cacheKey(m);
+    const cached = cache.get(key);
+    if (cached && now - cached.fetchedAt < ANALYSIS_TTL_MS) {
+      result.set(key, cached.analysis);
+    } else {
+      toAnalyze.push(m);
+    }
+  }
+
+  if (toAnalyze.length === 0) return result;
+
+  // Chunk the markets, then process chunks with limited concurrency + retries.
+  const chunks: Market[][] = [];
+  for (let i = 0; i < toAnalyze.length; i += CHUNK_SIZE) {
+    chunks.push(toAnalyze.slice(i, i + CHUNK_SIZE));
+  }
+
+  const chunkResults = await batchProcess(
+    chunks,
+    async (chunk) => {
+      try {
+        return await analyzeChunk(chunk);
+      } catch (err) {
+        // Let rate-limit errors propagate so batchProcess can retry them.
+        // For any other failure, degrade this chunk gracefully (mark its
+        // markets unanalyzable) instead of failing the whole request.
+        if (isRateLimitError(err)) throw err;
+        return fallbackAnalyses(chunk);
+      }
+    },
+    { concurrency: 3, retries: 4 },
+  );
+
+  for (const analyses of chunkResults) {
+    for (const a of analyses) {
+      const key = `${a.platform}:${a.marketId}`;
+      cache.set(key, { analysis: a, fetchedAt: now });
+      result.set(key, a);
+    }
+  }
+
+  return result;
+}

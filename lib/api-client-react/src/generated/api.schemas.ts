@@ -68,6 +68,18 @@ export const ComboLegPosition = {
   no: 'no',
 } as const;
 
+/**
+ * AI confidence in its probability estimate. Present on Smart Picks legs.
+ */
+export type ComboLegAiConfidence = typeof ComboLegAiConfidence[keyof typeof ComboLegAiConfidence];
+
+
+export const ComboLegAiConfidence = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+} as const;
+
 export interface ComboLeg {
   marketId: string;
   platform: ComboLegPlatform;
@@ -75,6 +87,14 @@ export interface ComboLeg {
   position: ComboLegPosition;
   odds: number;
   impliedProb: number;
+  /** AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs. */
+  trueProbability?: number;
+  /** trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs. */
+  edge?: number;
+  /** Short AI explanation of the estimate. Present on Smart Picks legs. */
+  aiReasoning?: string;
+  /** AI confidence in its probability estimate. Present on Smart Picks legs. */
+  aiConfidence?: ComboLegAiConfidence;
 }
 
 export interface ComboSuggestion {
@@ -136,6 +156,12 @@ export interface SmartPickResult {
   riskScore: SmartPickResultRiskScore;
   stakeAmount: number;
   estimatedPayout: number;
+  /** Expected value in dollars at the given stake (positive = profitable on average) */
+  expectedValue: number;
+  /** Combined edge of the parlay as a percentage (product of edge ratios minus 1) */
+  edgePercent: number;
+  /** Combo-level summary of why these picks have value */
+  rationale: string;
 }
 
 export interface SmartPicksResponse {

@@ -110,14 +110,21 @@ export const GenerateSmartPicksResponse = zod.object({
   "marketTitle": zod.string(),
   "position": zod.enum(['yes', 'no']),
   "odds": zod.number(),
-  "impliedProb": zod.number()
+  "impliedProb": zod.number(),
+  "trueProbability": zod.number().optional().describe('AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs.'),
+  "edge": zod.number().optional().describe('trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs.'),
+  "aiReasoning": zod.string().optional().describe('Short AI explanation of the estimate. Present on Smart Picks legs.'),
+  "aiConfidence": zod.enum(['low', 'medium', 'high']).optional().describe('AI confidence in its probability estimate. Present on Smart Picks legs.')
 })),
   "jointProbability": zod.number(),
   "payoutMultiplier": zod.number(),
   "riskLevel": zod.enum(['conservative', 'balanced', 'aggressive']),
   "riskScore": zod.enum(['low', 'medium', 'high']),
   "stakeAmount": zod.number(),
-  "estimatedPayout": zod.number()
+  "estimatedPayout": zod.number(),
+  "expectedValue": zod.number().describe('Expected value in dollars at the given stake (positive = profitable on average)'),
+  "edgePercent": zod.number().describe('Combined edge of the parlay as a percentage (product of edge ratios minus 1)'),
+  "rationale": zod.string().describe('Combo-level summary of why these picks have value')
 })),
   "generatedAt": zod.string()
 })
@@ -156,7 +163,11 @@ export const OptimizeCombosResponse = zod.object({
   "marketTitle": zod.string(),
   "position": zod.enum(['yes', 'no']),
   "odds": zod.number(),
-  "impliedProb": zod.number()
+  "impliedProb": zod.number(),
+  "trueProbability": zod.number().optional().describe('AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs.'),
+  "edge": zod.number().optional().describe('trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs.'),
+  "aiReasoning": zod.string().optional().describe('Short AI explanation of the estimate. Present on Smart Picks legs.'),
+  "aiConfidence": zod.enum(['low', 'medium', 'high']).optional().describe('AI confidence in its probability estimate. Present on Smart Picks legs.')
 })),
   "jointProbability": zod.number().describe('Combined implied probability of all legs hitting'),
   "payoutMultiplier": zod.number().describe('Implied payout multiplier (1 \/ jointProbability)'),

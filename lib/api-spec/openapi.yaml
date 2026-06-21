@@ -408,6 +408,19 @@ components:
           type: number
         impliedProb:
           type: number
+        trueProbability:
+          type: number
+          description: AI-estimated true probability of the chosen side (0..1). Present on Smart Picks legs.
+        edge:
+          type: number
+          description: trueProbability minus odds for the chosen side (positive = value). Present on Smart Picks legs.
+        aiReasoning:
+          type: string
+          description: Short AI explanation of the estimate. Present on Smart Picks legs.
+        aiConfidence:
+          type: string
+          enum: [low, medium, high]
+          description: AI confidence in its probability estimate. Present on Smart Picks legs.
       required:
         - marketId
         - platform
@@ -478,6 +491,15 @@ components:
           type: number
         estimatedPayout:
           type: number
+        expectedValue:
+          type: number
+          description: Expected value in dollars at the given stake (positive = profitable on average)
+        edgePercent:
+          type: number
+          description: Combined edge of the parlay as a percentage (product of edge ratios minus 1)
+        rationale:
+          type: string
+          description: Combo-level summary of why these picks have value
       required:
         - legs
         - jointProbability
@@ -486,6 +508,9 @@ components:
         - riskScore
         - stakeAmount
         - estimatedPayout
+        - expectedValue
+        - edgePercent
+        - rationale
 
     SmartPicksResponse:
       type: object

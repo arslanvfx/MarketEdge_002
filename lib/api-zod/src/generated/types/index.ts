@@ -9,6 +9,7 @@
 export * from './alertsListResponse';
 export * from './comboInput';
 export * from './comboLeg';
+export * from './comboLegAiConfidence';
 export * from './comboLegInput';
 export * from './comboLegInputPlatform';
 export * from './comboLegInputPosition';

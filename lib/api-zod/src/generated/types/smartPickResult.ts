@@ -17,4 +17,10 @@ export interface SmartPickResult {
   riskScore: SmartPickResultRiskScore;
   stakeAmount: number;
   estimatedPayout: number;
+  /** Expected value in dollars at the given stake (positive = profitable on average) */
+  expectedValue: number;
+  /** Combined edge of the parlay as a percentage (product of edge ratios minus 1) */
+  edgePercent: number;
+  /** Combo-level summary of why these picks have value */
+  rationale: string;
 }

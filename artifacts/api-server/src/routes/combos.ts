@@ -6,6 +6,7 @@ import { savedCombosTable, comboLegsTable } from "@workspace/db";
 import { eq, and, inArray } from "drizzle-orm";
 import { fetchMarkets, fetchMarketsForLegs, fetchAllMarkets } from "../lib/markets";
 import { optimizeCombos, detectPortfolioOverlap, autoGenerateCombos, RiskLevel } from "../lib/optimizer";
+import { analyzeMarkets } from "../lib/ai-analysis";
 
 const router = Router();
 
@@ -38,8 +39,25 @@ router.post("/combos/smart-picks", async (req, res) => {
     // Fetch the FULL live market pool — bypasses the 100-item user-facing cap
     const markets = await fetchAllMarkets();
 
+    // Pre-filter to liquid, genuinely-priced candidates before the AI pass.
+    // Caps the number of markets Claude analyzes (cost/latency) while keeping
+    // the markets most likely to contain real value.
+    const candidates = markets
+      .filter(
+        (m) =>
+          m.yesOdds > 0.02 &&
+          m.yesOdds < 0.98 &&
+          (m.volume ?? 0) > 0,
+      )
+      .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
+      .slice(0, 48);
+
+    // AI estimates the TRUE probability of each candidate market.
+    const analyses = await analyzeMarkets(candidates);
+
     const combos = autoGenerateCombos({
-      markets,
+      markets: candidates,
+      analyses,
       riskLevel: riskLevel as RiskLevel,
       stakeAmount: stake,
       count: n,

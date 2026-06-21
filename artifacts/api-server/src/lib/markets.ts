@@ -190,8 +190,10 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
         const bidDollars = parseFloat(m.yes_bid_dollars ?? "0");
         const lastDollars = parseFloat(m.last_price_dollars ?? "0");
 
-        // Use last trade price if available; otherwise midpoint of ask/bid; else ask alone
-        let yesOdds: number;
+        // Use last trade price if available; otherwise midpoint of ask/bid; else ask alone.
+        // If NONE of these yield a real price, the market has no live odds — we
+        // exclude it rather than fabricating a 50/50 price.
+        let yesOdds: number | null;
         if (lastDollars > 0 && lastDollars < 1) {
           yesOdds = lastDollars;
         } else if (askDollars > 0 && bidDollars > 0) {
@@ -199,9 +201,10 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
         } else if (askDollars > 0 && askDollars < 1) {
           yesOdds = askDollars;
         } else {
-          yesOdds = 0.5;
+          yesOdds = null;
         }
 
+        if (yesOdds === null) return null;
         yesOdds = Math.min(Math.max(yesOdds, 0.01), 0.99);
 
         // Kalshi returns volume as a string float under volume_fp, not `volume`
@@ -219,7 +222,8 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
           url: `https://kalshi.com/markets/${m.ticker}`,
           category: kalshiCategory(m.ticker, m.series_ticker ?? seriesTicker),
         };
-      });
+      })
+      .filter((m): m is NonNullable<typeof m> => m !== null);
   } catch {
     return [];
   }
@@ -318,19 +322,22 @@ async function fetchPolymarketMarkets(): Promise<Market[]> {
       const bid = Number(m.bestBid);
       const ask = Number(m.bestAsk);
 
-      // Use lastTradePrice as primary; midpoint of bestBid/bestAsk as secondary; outcomePrices as fallback
-      let yesOdds: number;
+      // Use lastTradePrice as primary; midpoint of bestBid/bestAsk as secondary;
+      // outcomePrices as fallback. If none yield a real price the market has no
+      // live odds — exclude it rather than fabricating a 50/50 price.
+      let yesOddsRaw: number | null;
       if (Number.isFinite(lastTrade) && lastTrade > 0 && lastTrade < 1) {
-        yesOdds = lastTrade;
+        yesOddsRaw = lastTrade;
       } else if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
-        yesOdds = (bid + ask) / 2;
+        yesOddsRaw = (bid + ask) / 2;
       } else if (outcomePricesYes != null && outcomePricesYes > 0) {
-        yesOdds = outcomePricesYes;
+        yesOddsRaw = outcomePricesYes;
       } else {
-        yesOdds = 0.5;
+        yesOddsRaw = null;
       }
 
-      yesOdds = Math.min(Math.max(yesOdds, 0.01), 0.99);
+      if (yesOddsRaw === null) return null;
+      const yesOdds = Math.min(Math.max(yesOddsRaw, 0.01), 0.99);
 
       // The Gamma API returns the condition ID as `conditionId` (camelCase).
       // The interface also maps `condition_id` for any snake_case proxies.
@@ -365,7 +372,8 @@ async function fetchPolymarketMarkets(): Promise<Market[]> {
         url: `https://polymarket.com/event/${id}`,
         category: m.category ?? null,
       };
-    });
+    })
+    .filter((m): m is NonNullable<typeof m> => m !== null);
   } catch {
     return [];
   }
