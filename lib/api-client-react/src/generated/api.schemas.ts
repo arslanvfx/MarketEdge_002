@@ -469,6 +469,10 @@ q?: string;
  * Filter by platform
  */
 platform?: ListMarketsPlatform;
+/**
+ * Filter by category (e.g. "Soccer", "Crypto", "Politics")
+ */
+category?: string;
 limit?: number;
 offset?: number;
 };

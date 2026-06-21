@@ -551,17 +551,19 @@ async function fetchPolymarketMarkets(): Promise<Market[]> {
 export async function fetchMarkets(opts: {
   platform?: "kalshi" | "polymarket" | "all";
   q?: string;
+  category?: string;
   limit?: number;
   offset?: number;
 }): Promise<{ markets: Market[]; total: number; hasMore: boolean; apiUnavailable?: boolean }> {
   const platform = opts.platform ?? "all";
-  const limit = Math.min(opts.limit ?? 20, 100);
+  const limit = Math.min(opts.limit ?? 20, 1000);
   const offset = opts.offset ?? 0;
   const q = opts.q;
+  const category = opts.category;
 
-  // Cache raw market snapshots by platform only — never include q in the key.
-  // Text filtering is applied in-memory after the cache lookup so repeated
-  // searches within the TTL window never trigger extra upstream fetches.
+  // Cache raw market snapshots by platform only — never include q/category in the key.
+  // Text and category filtering are applied in-memory after the cache lookup so
+  // repeated searches within the TTL window never trigger extra upstream fetches.
   const cacheKey = platform;
   const cached = cache.get(cacheKey);
   let all: Market[];
@@ -589,13 +591,16 @@ export async function fetchMarkets(opts: {
     cache.set(cacheKey, { data: all, fetchedAt: Date.now() });
   }
 
-  // In-memory text filter — safe to run on every request with no upstream cost
+  // In-memory filters — safe to run on every request with no upstream cost
   let filtered = all;
   if (q) {
     const lower = q.toLowerCase();
-    filtered = all.filter(
+    filtered = filtered.filter(
       (m) => m.title.toLowerCase().includes(lower) || m.id.toLowerCase().includes(lower),
     );
+  }
+  if (category) {
+    filtered = filtered.filter((m) => m.category === category);
   }
 
   const total = filtered.length;

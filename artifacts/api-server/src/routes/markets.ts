@@ -7,10 +7,11 @@ router.get("/markets", async (req, res) => {
   try {
     const q = req.query.q as string | undefined;
     const platform = req.query.platform as "kalshi" | "polymarket" | "all" | undefined;
+    const category = req.query.category as string | undefined;
     const limit = req.query.limit ? Number(req.query.limit) : 20;
     const offset = req.query.offset ? Number(req.query.offset) : 0;
 
-    const result = await fetchMarkets({ q, platform, limit, offset });
+    const result = await fetchMarkets({ q, platform, category, limit, offset });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch markets" });
