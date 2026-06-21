@@ -88,13 +88,19 @@ router.post("/combos/smart-picks", async (req, res) => {
         return false;
       // Resolution-horizon filter: only markets that settle within the chosen
       // window. Markets with no known close time are excluded once a horizon is
-      // set, since we can't promise when they resolve. Keeps every leg of a
-      // combo on a similar timeframe instead of mixing a 1-week bet with one
-      // that won't settle for a year.
+      // set — EXCEPT Kalshi game-prop markets (corners, totals, BTTS, spreads…).
+      // Those carry a gameKey (tied to a specific match) but Kalshi often omits
+      // closeTime in the API even for same-day games. They will clearly resolve
+      // when the match ends, which is at most a day or two away, so we allow
+      // them through for any horizon rather than silently dropping them.
       if (horizonCutoff !== null) {
-        if (!m.closeTime) return false;
-        const t = Date.parse(m.closeTime);
-        if (Number.isNaN(t) || t > horizonCutoff) return false;
+        if (!m.closeTime) {
+          // Allow Kalshi game-specific props through even without a close time.
+          if (!(m.platform === "kalshi" && m.gameKey)) return false;
+        } else {
+          const t = Date.parse(m.closeTime);
+          if (Number.isNaN(t) || t > horizonCutoff) return false;
+        }
       }
       return true;
     });

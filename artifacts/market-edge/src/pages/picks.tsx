@@ -505,7 +505,10 @@ export default function SmartPicks() {
           if (data.combos.length === 0) {
             const hints: string[] = [];
             if (category !== "all") hints.push(`the "${category}" category`);
-            if (legCount !== "auto") hints.push(`${legCount}+ leg combos`);
+            if (legCount !== "auto") {
+              const legOpt = LEG_COUNT_OPTIONS.find((o) => o.value === legCount);
+              if (legOpt) hints.push(`"${legOpt.label}" combo size`);
+            }
             if (horizon !== "any") {
               const label = HORIZON_OPTIONS.find((h) => h.value === horizon)?.label ?? horizon;
               hints.push(`a ${label} resolution window`);
@@ -515,7 +518,7 @@ export default function SmartPicks() {
               : "Not enough markets matched your settings right now.";
             toast({
               title: "No combos found",
-              description: `${scope} Try "Any" timeframe, "All" categories, a lower minimum leg count, or a different risk level.`,
+              description: `${scope} Try "Any" timeframe, "All" categories, "Auto" combo size, or a different risk level.`,
               variant: "destructive",
             });
           }
