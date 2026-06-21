@@ -398,8 +398,14 @@ export function autoGenerateCombos(opts: {
    * loses regardless of the risk-level setting.
    */
   optimizeFor?: "edge" | "returns";
+  /**
+   * Minimum payout multiplier floor (only applied when optimizeFor="returns").
+   * Combos whose multiplier is below this threshold are dropped before ranking.
+   * A value of 1 (or undefined) means no floor.
+   */
+  minPayoutMultiplier?: number;
 }): SmartPickResult[] {
-  const { markets, analyses, riskLevel, stakeAmount, count = 4, legCount = "auto", optimizeFor = "edge" } = opts;
+  const { markets, analyses, riskLevel, stakeAmount, count = 4, legCount = "auto", optimizeFor = "edge", minPayoutMultiplier } = opts;
 
   const EDGE_THRESHOLD = 0.05; // require ≥5 percentage points of value to be a "value" bet
   // Hard cap on the candidate-leg pool fed into combination enumeration. With N
@@ -637,6 +643,16 @@ export function autoGenerateCombos(opts: {
 
         allRaw.push({ legs, jointTrueProb, multiplier, evMultiplier });
       }
+    }
+  }
+
+  // Minimum payout multiplier floor — only enforced in "returns" mode.
+  // Drop any combo that doesn't clear the user's requested floor before ranking
+  // so the greedy selection step never surfaces under-threshold results.
+  if (optimizeFor === "returns" && minPayoutMultiplier != null && minPayoutMultiplier > 1) {
+    const floor = minPayoutMultiplier;
+    for (let i = allRaw.length - 1; i >= 0; i--) {
+      if (allRaw[i].multiplier < floor) allRaw.splice(i, 1);
     }
   }
 

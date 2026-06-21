@@ -107,7 +107,8 @@ export const GenerateSmartPicksBody = zod.object({
   "category": zod.string().default(generateSmartPicksBodyCategoryDefault).describe('Market category to draw candidates from (\"all\" for any)'),
   "legCount": zod.enum(['auto', '1', '2', '3', '4', '5']).default(generateSmartPicksBodyLegCountDefault).describe('Max legs per combo — \"1\" = single bets, \"2\"/\"3\"/\"4\" = at most N legs, \"5\" = 5+ legs, \"auto\" = fewest legs for best return.'),
   "horizon": zod.enum(['any', 'week', 'month', 'quarter', 'year']).default(generateSmartPicksBodyHorizonDefault).describe('Only include markets that resolve within this window (\"any\" = no limit). Keeps all legs in a combo resolving on a similar timeframe.'),
-  "optimizeFor": zod.enum(['edge', 'returns']).default('edge').describe('Ranking signal for combos — \"edge\" (default) ranks by expected value; \"returns\" ranks by payout multiplier with a hard 50% per-leg probability floor.')
+  "optimizeFor": zod.enum(['edge', 'returns']).default('edge').describe('Ranking signal for combos — \"edge\" (default) ranks by expected value; \"returns\" ranks by payout multiplier with a hard 50% per-leg probability floor.'),
+  "minPayoutMultiplier": zod.number().min(1).optional().describe('Minimum payout multiplier floor (e.g. 2 = only surface combos that pay at least 2×). Only applied when optimizeFor=\"returns\"; ignored in \"edge\" mode.')
 })
 
 export const GenerateSmartPicksResponse = zod.object({

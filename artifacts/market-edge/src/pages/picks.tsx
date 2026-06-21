@@ -61,6 +61,14 @@ const PLATFORM_BADGE: Record<string, { label: string; className: string }> = {
   kalshi:     { label: "Kalshi",     className: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20"       },
 };
 
+const MIN_PAYOUT_OPTIONS: { value: number; label: string }[] = [
+  { value: 1,  label: "None" },
+  { value: 2,  label: "2×"   },
+  { value: 3,  label: "3×"   },
+  { value: 5,  label: "5×"   },
+  { value: 10, label: "10×"  },
+];
+
 type LegCount = SmartPicksInputLegCount;
 const LEG_COUNT_OPTIONS: { value: LegCount; label: string; description: string }[] = [
   { value: "auto", label: "Auto",   description: "Fewest legs for the best return" },
@@ -510,6 +518,7 @@ export default function SmartPicks() {
   const [legCount, setLegCount] = useState<LegCount>("auto");
   const [horizon, setHorizon] = useState<Horizon>("any");
   const [optimizeFor, setOptimizeFor] = useState<SmartPicksInputOptimizeFor>("edge");
+  const [minPayoutMultiplier, setMinPayoutMultiplier] = useState<number>(1);
   const [stake, setStake] = useState(10);
   const [results, setResults] = useState<SmartPickResult[] | null>(null);
   const generateMutation = useGenerateSmartPicks();
@@ -518,7 +527,7 @@ export default function SmartPicks() {
 
   const handleGenerate = () => {
     generateMutation.mutate(
-      { data: { riskLevel, stakeAmount: stake, count: 4, platform, category, legCount, horizon, optimizeFor } },
+      { data: { riskLevel, stakeAmount: stake, count: 4, platform, category, legCount, horizon, optimizeFor, ...(optimizeFor === "returns" && minPayoutMultiplier > 1 ? { minPayoutMultiplier } : {}) } },
       {
         onSuccess: (data) => {
           setResults(data.combos);
@@ -533,12 +542,18 @@ export default function SmartPicks() {
               const label = HORIZON_OPTIONS.find((h) => h.value === horizon)?.label ?? horizon;
               hints.push(`a ${label} resolution window`);
             }
+            if (optimizeFor === "returns" && minPayoutMultiplier > 1) {
+              hints.push(`a ${minPayoutMultiplier}× minimum payout`);
+            }
             const scope = hints.length
               ? `Not enough qualifying legs right now for ${hints.join(" with ")}.`
               : "Not enough markets matched your settings right now.";
+            const suggestion = optimizeFor === "returns" && minPayoutMultiplier > 1
+              ? `${scope} Try lowering the min payout, "Any" timeframe, or "All" categories.`
+              : `${scope} Try "Any" timeframe, "All" categories, "Auto" combo size, or a different risk level.`;
             toast({
               title: "No combos found",
-              description: `${scope} Try "Any" timeframe, "All" categories, "Auto" combo size, or a different risk level.`,
+              description: suggestion,
               variant: "destructive",
             });
           }
@@ -647,7 +662,7 @@ export default function SmartPicks() {
               <div className="flex flex-wrap gap-2">
                 <FilterChip
                   active={optimizeFor === "edge"}
-                  onClick={() => setOptimizeFor("edge")}
+                  onClick={() => { setOptimizeFor("edge"); setMinPayoutMultiplier(1); }}
                   testId="optimize-edge"
                 >
                   <span className="flex items-center gap-1.5">
@@ -672,6 +687,30 @@ export default function SmartPicks() {
                   : "Highest payout multiplier — every leg still wins >50% of the time"}
               </p>
             </div>
+
+            {/* Min payout — only relevant in "Best returns" mode */}
+            {optimizeFor === "returns" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Min payout</label>
+                <div className="flex flex-wrap gap-2">
+                  {MIN_PAYOUT_OPTIONS.map((opt) => (
+                    <FilterChip
+                      key={opt.value}
+                      active={minPayoutMultiplier === opt.value}
+                      onClick={() => setMinPayoutMultiplier(opt.value)}
+                      testId={`minpayout-${opt.value}`}
+                    >
+                      {opt.label}
+                    </FilterChip>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {minPayoutMultiplier <= 1
+                    ? "No floor — surface all qualifying combos"
+                    : `Only show combos that pay at least ${minPayoutMultiplier}×`}
+                </p>
+              </div>
+            )}
 
             {/* Legs + Horizon */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">

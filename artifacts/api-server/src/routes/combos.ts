@@ -32,6 +32,7 @@ router.post("/combos/smart-picks", async (req, res) => {
       legCount = "auto",
       horizon = "any",
       optimizeFor = "edge",
+      minPayoutMultiplier,
     } = req.body ?? {};
 
     const validRisk = ["conservative", "balanced", "aggressive"];
@@ -49,6 +50,13 @@ router.post("/combos/smart-picks", async (req, res) => {
     const validOptimizeFor = ["edge", "returns"];
     if (!validOptimizeFor.includes(optimizeFor)) {
       return res.status(400).json({ error: "Invalid optimizeFor" });
+    }
+    const minMult =
+      minPayoutMultiplier != null
+        ? Number(minPayoutMultiplier)
+        : undefined;
+    if (minMult !== undefined && (Number.isNaN(minMult) || minMult < 1)) {
+      return res.status(400).json({ error: "Invalid minPayoutMultiplier: must be a number ≥ 1" });
     }
     const HORIZON_DAYS: Record<string, number> = {
       week: 7,
@@ -211,6 +219,7 @@ router.post("/combos/smart-picks", async (req, res) => {
       count: n,
       legCount: legs,
       optimizeFor: optimizeFor as "edge" | "returns",
+      minPayoutMultiplier: minMult,
     });
 
     return res.json({ combos, generatedAt: new Date().toISOString() });

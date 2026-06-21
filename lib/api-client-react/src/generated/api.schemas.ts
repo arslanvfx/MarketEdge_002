@@ -207,6 +207,12 @@ export interface SmartPicksInput {
   horizon?: SmartPicksInputHorizon;
   /** Ranking signal — "edge" = EV-first; "returns" = payout-first with ≥50% per-leg floor. */
   optimizeFor?: SmartPicksInputOptimizeFor;
+  /**
+   * Minimum payout multiplier floor (e.g. 2 = only surface combos that pay at least 2×).
+   * Only applied when optimizeFor="returns"; ignored in "edge" mode.
+   * @minimum 1
+   */
+  minPayoutMultiplier?: number;
 }
 
 export type SmartPickResultRiskLevel = typeof SmartPickResultRiskLevel[keyof typeof SmartPickResultRiskLevel];
