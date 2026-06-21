@@ -21,6 +21,7 @@ import type {
 
 import type {
   AlertsListResponse,
+  CategoriesResponse,
   ComboInput,
   CombosListResponse,
   CreateAlertInput,
@@ -445,6 +446,83 @@ export const useGenerateSmartPicks = <TError = ErrorType<void>,
       > => {
       return useMutation(getGenerateSmartPicksMutationOptions(options));
     }
+
+export const getListSmartPickCategoriesUrl = () => {
+
+
+
+
+  return `/api/combos/categories`
+}
+
+/**
+ * @summary List market categories available in the live pool
+ */
+export const listSmartPickCategories = async ( options?: RequestInit): Promise<CategoriesResponse> => {
+
+  return customFetch<CategoriesResponse>(getListSmartPickCategoriesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListSmartPickCategoriesQueryKey = () => {
+    return [
+    `/api/combos/categories`
+    ] as const;
+    }
+
+
+export const getListSmartPickCategoriesQueryOptions = <TData = Awaited<ReturnType<typeof listSmartPickCategories>>, TError = ErrorType<void>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listSmartPickCategories>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListSmartPickCategoriesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listSmartPickCategories>>> = ({ signal }) => listSmartPickCategories({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listSmartPickCategories>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListSmartPickCategoriesQueryResult = NonNullable<Awaited<ReturnType<typeof listSmartPickCategories>>>
+export type ListSmartPickCategoriesQueryError = ErrorType<void>
+
+
+/**
+ * @summary List market categories available in the live pool
+ */
+
+export function useListSmartPickCategories<TData = Awaited<ReturnType<typeof listSmartPickCategories>>, TError = ErrorType<void>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listSmartPickCategories>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListSmartPickCategoriesQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
 
 export const getOptimizeCombosUrl = () => {
 

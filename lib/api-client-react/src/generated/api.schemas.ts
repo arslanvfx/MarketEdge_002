@@ -128,6 +128,19 @@ export const SmartPicksInputPlatform = {
   both: 'both',
 } as const;
 
+/**
+ * Number of legs per combo, or "auto" to consider 2-4 legs
+ */
+export type SmartPicksInputLegCount = typeof SmartPicksInputLegCount[keyof typeof SmartPicksInputLegCount];
+
+
+export const SmartPicksInputLegCount = {
+  auto: 'auto',
+  NUMBER_2: '2',
+  NUMBER_3: '3',
+  NUMBER_4: '4',
+} as const;
+
 export interface SmartPicksInput {
   riskLevel?: SmartPicksInputRiskLevel;
   /**
@@ -142,6 +155,10 @@ export interface SmartPicksInput {
   count?: number;
   /** Which platform(s) to draw candidate markets from */
   platform?: SmartPicksInputPlatform;
+  /** Market category to draw candidates from ("all" for any) */
+  category?: string;
+  /** Number of legs per combo, or "auto" to consider 2-4 legs */
+  legCount?: SmartPicksInputLegCount;
 }
 
 export type SmartPickResultRiskLevel = typeof SmartPickResultRiskLevel[keyof typeof SmartPickResultRiskLevel];
@@ -181,6 +198,15 @@ export interface SmartPickResult {
 export interface SmartPicksResponse {
   combos: SmartPickResult[];
   generatedAt: string;
+}
+
+export interface Category {
+  name: string;
+  count: number;
+}
+
+export interface CategoriesResponse {
+  categories: Category[];
 }
 
 export type OptimizeLegInputPlatform = typeof OptimizeLegInputPlatform[keyof typeof OptimizeLegInputPlatform];

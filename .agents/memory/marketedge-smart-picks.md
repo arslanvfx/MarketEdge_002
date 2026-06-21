@@ -37,15 +37,28 @@ A weighted score (e.g. jointTrueProb * multiplier^w) lets a high-payout longshot
 leapfrog a likelier combo, which violates the intent. Instead bucket combos into
 win-probability TIERS (band width per risk: conservative ~0.08 / balanced ~0.12 /
 aggressive ~0.20), order the highest tier first, and only within a tier sort by
-payout. A separate minJoint floor removes very-low-probability combos entirely.
-**Why:** prior blend ranked a 32%-win combo above a 57%-win one; tiering fixed it.
+payout. **Why:** prior blend ranked a 32%-win combo above a 57%-win one; tiering
+fixed it.
 
-# Platform awareness
-ComboLeg already carries platform (kalshi|polymarket). smart-picks accepts a
-platform param (kalshi|polymarket|both, default both). For "both", balance the
-candidate pool (top 24 each) because Kalshi/Polymarket volume scales differ and a
-global volume sort lets one crowd the other out; backfill from the other platform
-up to the pool cap (48) when one side is thin.
+# Quality floor must be leg-count-aware (geometric, not fixed-joint)
+Do NOT use a fixed joint-probability floor — it rejects almost every 3/4-leg combo
+because joint probability shrinks as legs are added, so any "force N legs" feature
+returns nothing. Use a GEOMETRIC floor: reject when jointTrueProb < minGeoMean^legs
+(per-risk minGeoMean ~ conservative 0.67 / balanced 0.55 / aggressive 0.39, picked
+so 2-leg behavior ≈ the old fixed floors). This keeps each leg high-quality while
+letting users opt into more legs for a bigger payout.
+
+# Platform & category awareness
+ComboLeg carries platform (kalshi|polymarket). smart-picks accepts platform
+(kalshi|polymarket|both, default both) and category (default "all") and legCount
+("auto"|2|3|4). For "both", balance the pool (top 24 each — the two platforms
+measure volume on different scales) and backfill from the other up to cap 48.
+Categories are UNRELIABLE from upstream (Polymarket Gamma returns none; Kalshi only
+a coarse series prefix) so derive them from the market TITLE via keyword matching
+(deriveCategory) for BOTH platforms. listCategories() exposes only categories with
+>=2 live markets. Expect narrow categories (e.g. World-Cup-winner markets) to yield
+ZERO combos — they're mutually-exclusive outcomes with no independent positive-edge
+value legs; surface a context-aware empty state rather than treating it as a bug.
 
 # AI analysis reliability
 analyzeMarkets batches Claude per chunk. Per-chunk processor must let rate-limit errors

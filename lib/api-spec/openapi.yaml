@@ -143,6 +143,21 @@ paths:
         "500":
           description: Generation failed
 
+  /combos/categories:
+    get:
+      operationId: listSmartPickCategories
+      tags: [combos]
+      summary: List market categories available in the live pool
+      responses:
+        "200":
+          description: Categories with at least two live markets each
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoriesResponse"
+        "500":
+          description: Failed to load categories
+
   /combos/optimize:
     post:
       operationId: optimizeCombos
@@ -473,6 +488,15 @@ components:
           enum: [kalshi, polymarket, both]
           default: both
           description: Which platform(s) to draw candidate markets from
+        category:
+          type: string
+          default: all
+          description: Market category to draw candidates from ("all" for any)
+        legCount:
+          type: string
+          enum: [auto, "2", "3", "4"]
+          default: auto
+          description: Number of legs per combo, or "auto" to consider 2-4 legs
       required: []
 
     SmartPickResult:
@@ -529,6 +553,27 @@ components:
       required:
         - combos
         - generatedAt
+
+    Category:
+      type: object
+      properties:
+        name:
+          type: string
+        count:
+          type: integer
+      required:
+        - name
+        - count
+
+    CategoriesResponse:
+      type: object
+      properties:
+        categories:
+          type: array
+          items:
+            $ref: "#/components/schemas/Category"
+      required:
+        - categories
 
     OptimizeLegInput:
       type: object

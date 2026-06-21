@@ -7,6 +7,8 @@
  */
 
 export * from './alertsListResponse';
+export * from './categoriesResponse';
+export * from './category';
 export * from './comboInput';
 export * from './comboLeg';
 export * from './comboLegAiConfidence';
@@ -45,6 +47,7 @@ export * from './smartPickResult';
 export * from './smartPickResultRiskLevel';
 export * from './smartPickResultRiskScore';
 export * from './smartPicksInput';
+export * from './smartPicksInputLegCount';
 export * from './smartPicksInputPlatform';
 export * from './smartPicksInputRiskLevel';
 export * from './smartPicksResponse';

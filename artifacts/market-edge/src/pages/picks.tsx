@@ -10,9 +10,11 @@ import { Sparkles, Loader2, Save, ShieldCheck, Zap, Flame, Info, Brain, Trending
 import {
   useGenerateSmartPicks,
   useSaveCombo,
+  useListSmartPickCategories,
   SmartPickResult,
   SmartPicksInputRiskLevel,
   SmartPicksInputPlatform,
+  SmartPicksInputLegCount,
   getListCombosQueryKey,
 } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
@@ -64,6 +66,15 @@ const PLATFORM_BADGE: Record<string, { label: string; className: string }> = {
   polymarket: { label: "Polymarket", className: "bg-violet-500/10 text-violet-400 border-violet-500/20" },
   kalshi:     { label: "Kalshi",     className: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20" },
 };
+
+type LegCount = SmartPicksInputLegCount;
+
+const LEG_COUNT_OPTIONS: { value: LegCount; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "2", label: "2 legs" },
+  { value: "3", label: "3 legs" },
+  { value: "4", label: "4 legs" },
+];
 
 function formatProb(p: number) {
   return `${(p * 100).toFixed(1)}%`;
@@ -315,21 +326,30 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
 export default function SmartPicks() {
   const [riskLevel, setRiskLevel] = useState<RiskLevel>("balanced");
   const [platform, setPlatform] = useState<PlatformFilter>("both");
+  const [category, setCategory] = useState<string>("all");
+  const [legCount, setLegCount] = useState<LegCount>("auto");
   const [stake, setStake] = useState(10);
   const [results, setResults] = useState<SmartPickResult[] | null>(null);
   const generateMutation = useGenerateSmartPicks();
+  const { data: categoriesData } = useListSmartPickCategories();
   const { toast } = useToast();
 
   const handleGenerate = () => {
     generateMutation.mutate(
-      { data: { riskLevel, stakeAmount: stake, count: 4, platform } },
+      { data: { riskLevel, stakeAmount: stake, count: 4, platform, category, legCount } },
       {
         onSuccess: (data) => {
           setResults(data.combos);
           if (data.combos.length === 0) {
+            const hints: string[] = [];
+            if (category !== "all") hints.push(`the "${category}" category`);
+            if (legCount !== "auto") hints.push(`${legCount}-leg combos`);
+            const scope = hints.length
+              ? `No value bets right now for ${hints.join(" with ")}.`
+              : "Not enough markets matched your settings right now.";
             toast({
               title: "No combos found",
-              description: "Not enough markets matched your risk level. Try a different setting.",
+              description: `${scope} Try "All" categories, fewer legs, or a different risk level.`,
               variant: "destructive",
             });
           }
@@ -430,6 +450,68 @@ export default function SmartPicks() {
                 })}
               </div>
               <p className="text-xs text-muted-foreground">Markets differ per platform</p>
+            </div>
+
+            {/* Leg count */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Legs per combo</label>
+              <div className="flex gap-2 flex-wrap">
+                {LEG_COUNT_OPTIONS.map((opt) => {
+                  const active = legCount === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      onClick={() => setLegCount(opt.value)}
+                      data-testid={`legcount-${opt.value}`}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                        active
+                          ? "border-primary/40 bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">More legs = bigger payout, lower odds</p>
+            </div>
+
+            {/* Category */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Category</label>
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={() => setCategory("all")}
+                  data-testid="category-all"
+                  className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                    category === "all"
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+                  }`}
+                >
+                  All
+                </button>
+                {(categoriesData?.categories ?? []).map((cat) => {
+                  const active = category === cat.name;
+                  return (
+                    <button
+                      key={cat.name}
+                      onClick={() => setCategory(cat.name)}
+                      data-testid={`category-${cat.name}`}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                        active
+                          ? "border-primary/40 bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+                      }`}
+                    >
+                      {cat.name}
+                      <span className="ml-1.5 text-xs opacity-60">{cat.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">Generate picks from a specific topic</p>
             </div>
 
             {/* Generate button */}

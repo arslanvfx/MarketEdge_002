@@ -95,12 +95,16 @@ export const generateSmartPicksBodyCountDefault = 4;
 export const generateSmartPicksBodyCountMax = 4;
 
 export const generateSmartPicksBodyPlatformDefault = `both`;
+export const generateSmartPicksBodyCategoryDefault = `all`;
+export const generateSmartPicksBodyLegCountDefault = `auto`;
 
 export const GenerateSmartPicksBody = zod.object({
   "riskLevel": zod.enum(['conservative', 'balanced', 'aggressive']).default(generateSmartPicksBodyRiskLevelDefault),
   "stakeAmount": zod.number().min(1).max(generateSmartPicksBodyStakeAmountMax).default(generateSmartPicksBodyStakeAmountDefault),
   "count": zod.number().min(1).max(generateSmartPicksBodyCountMax).default(generateSmartPicksBodyCountDefault),
-  "platform": zod.enum(['kalshi', 'polymarket', 'both']).default(generateSmartPicksBodyPlatformDefault).describe('Which platform(s) to draw candidate markets from')
+  "platform": zod.enum(['kalshi', 'polymarket', 'both']).default(generateSmartPicksBodyPlatformDefault).describe('Which platform(s) to draw candidate markets from'),
+  "category": zod.string().default(generateSmartPicksBodyCategoryDefault).describe('Market category to draw candidates from (\"all\" for any)'),
+  "legCount": zod.enum(['auto', '2', '3', '4']).default(generateSmartPicksBodyLegCountDefault).describe('Number of legs per combo, or \"auto\" to consider 2-4 legs')
 })
 
 export const GenerateSmartPicksResponse = zod.object({
@@ -128,6 +132,17 @@ export const GenerateSmartPicksResponse = zod.object({
   "rationale": zod.string().describe('Combo-level summary of why these picks have value')
 })),
   "generatedAt": zod.string()
+})
+
+
+/**
+ * @summary List market categories available in the live pool
+ */
+export const ListSmartPickCategoriesResponse = zod.object({
+  "categories": zod.array(zod.object({
+  "name": zod.string(),
+  "count": zod.number()
+}))
 })
 
 

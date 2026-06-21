@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { SmartPicksInputLegCount } from './smartPicksInputLegCount';
 import type { SmartPicksInputPlatform } from './smartPicksInputPlatform';
 import type { SmartPicksInputRiskLevel } from './smartPicksInputRiskLevel';
 
@@ -22,4 +23,8 @@ export interface SmartPicksInput {
   count?: number;
   /** Which platform(s) to draw candidate markets from */
   platform?: SmartPicksInputPlatform;
+  /** Market category to draw candidates from ("all" for any) */
+  category?: string;
+  /** Number of legs per combo, or "auto" to consider 2-4 legs */
+  legCount?: SmartPicksInputLegCount;
 }

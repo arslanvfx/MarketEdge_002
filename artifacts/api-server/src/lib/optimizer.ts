@@ -173,8 +173,10 @@ export function autoGenerateCombos(opts: {
   riskLevel: RiskLevel;
   stakeAmount: number;
   count?: number;
+  /** Exact number of legs per combo, or "auto" to consider 2–4 legs. */
+  legCount?: "auto" | 2 | 3 | 4;
 }): SmartPickResult[] {
-  const { markets, analyses, riskLevel, stakeAmount, count = 4 } = opts;
+  const { markets, analyses, riskLevel, stakeAmount, count = 4, legCount = "auto" } = opts;
 
   const EDGE_THRESHOLD = 0.05; // require ≥5 percentage points of value
 
@@ -187,15 +189,24 @@ export function autoGenerateCombos(opts: {
   //    a tier the highest payout wins. A wider band lets return matter across a
   //    larger probability range (aggressive), a tighter band keeps it strictly
   //    probability-first (conservative).
+  //  • minGeoMean — minimum acceptable per-leg average win probability. The
+  //    whole-parlay floor is minGeoMean^n, so it scales with the number of legs:
+  //    a fixed joint floor would unfairly reject every multi-leg combo (joint
+  //    probability shrinks as legs are added), which would make the 3/4-leg
+  //    options return nothing. A geometric floor keeps each leg high-quality
+  //    while still letting users opt into more legs for a bigger payout.
   const RISK_TUNING: Record<
     RiskLevel,
-    { minLegTrue: number; minJoint: number; probBand: number }
+    { minLegTrue: number; minGeoMean: number; probBand: number }
   > = {
-    conservative: { minLegTrue: 0.6, minJoint: 0.45, probBand: 0.08 },
-    balanced: { minLegTrue: 0.45, minJoint: 0.3, probBand: 0.12 },
-    aggressive: { minLegTrue: 0.3, minJoint: 0.15, probBand: 0.2 },
+    conservative: { minLegTrue: 0.6, minGeoMean: 0.67, probBand: 0.08 },
+    balanced: { minLegTrue: 0.45, minGeoMean: 0.55, probBand: 0.12 },
+    aggressive: { minLegTrue: 0.3, minGeoMean: 0.39, probBand: 0.2 },
   };
-  const { minLegTrue: minTrue, minJoint, probBand } = RISK_TUNING[riskLevel];
+  const { minLegTrue: minTrue, minGeoMean, probBand } = RISK_TUNING[riskLevel];
+
+  // Sizes of combos to generate: a single exact size, or 2–4 in "auto" mode.
+  const sizes = legCount === "auto" ? [2, 3, 4] : [legCount];
 
   // ── Build value-bet legs (one best side per market) ───────────────────────
   type ScoredLeg = ComboLegResult & {
@@ -269,7 +280,8 @@ export function autoGenerateCombos(opts: {
   };
   const allRaw: RawCombo[] = [];
 
-  for (let size = 2; size <= 4; size++) {
+  for (const size of sizes) {
+    if (size > topLegs.length) continue;
     for (const legs of combinations(topLegs, size)) {
       // Correlation guard: reject combos with two legs from the same market
       // "family" (e.g. "CPI rise > 0.0% in June" and "CPI rise > 0.1% in June").
@@ -284,7 +296,10 @@ export function autoGenerateCombos(opts: {
       const multiplier = 1 / jointPrice;
       const evMultiplier = legs.reduce((acc, l) => acc * l.edgeRatio, 1);
       if (evMultiplier <= 1) continue; // only positive-EV parlays
-      if (jointTrueProb < minJoint) continue; // must be genuinely likely to hit
+      // Leg-count-aware floor: require the parlay's per-leg average win
+      // probability to clear minGeoMean (floor = minGeoMean^legs). Keeps each
+      // leg high-quality while scaling sensibly as legs are added.
+      if (jointTrueProb < Math.pow(minGeoMean, legs.length)) continue;
 
       allRaw.push({ legs, jointTrueProb, multiplier, evMultiplier });
     }

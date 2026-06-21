@@ -4,7 +4,7 @@ import { getAuth } from "@clerk/express";
 import { db } from "@workspace/db";
 import { savedCombosTable, comboLegsTable } from "@workspace/db";
 import { eq, and, inArray } from "drizzle-orm";
-import { fetchMarkets, fetchMarketsForLegs, fetchAllMarkets } from "../lib/markets";
+import { fetchMarkets, fetchMarketsForLegs, fetchAllMarkets, listCategories } from "../lib/markets";
 import { optimizeCombos, detectPortfolioOverlap, autoGenerateCombos, RiskLevel } from "../lib/optimizer";
 import { analyzeMarkets } from "../lib/ai-analysis";
 
@@ -28,6 +28,8 @@ router.post("/combos/smart-picks", async (req, res) => {
       stakeAmount = 10,
       count = 4,
       platform = "both",
+      category = "all",
+      legCount = "auto",
     } = req.body ?? {};
 
     const validRisk = ["conservative", "balanced", "aggressive"];
@@ -38,6 +40,16 @@ router.post("/combos/smart-picks", async (req, res) => {
     if (!validPlatform.includes(platform)) {
       return res.status(400).json({ error: "Invalid platform" });
     }
+    const validLegCount = ["auto", "2", "3", "4", 2, 3, 4];
+    if (!validLegCount.includes(legCount)) {
+      return res.status(400).json({ error: "Invalid legCount" });
+    }
+    const legs: "auto" | 2 | 3 | 4 =
+      legCount === "auto" ? "auto" : (Number(legCount) as 2 | 3 | 4);
+    const categoryFilter =
+      typeof category === "string" && category && category !== "all"
+        ? category
+        : null;
     const stake = Math.max(1, Math.min(100, Number(stakeAmount) || 10));
     const n = Math.max(1, Math.min(4, Number(count) || 4));
 
@@ -48,7 +60,11 @@ router.post("/combos/smart-picks", async (req, res) => {
     // Caps the number of markets Claude analyzes (cost/latency) while keeping
     // the markets most likely to contain real value.
     const liquid = markets.filter(
-      (m) => m.yesOdds > 0.02 && m.yesOdds < 0.98 && (m.volume ?? 0) > 0,
+      (m) =>
+        m.yesOdds > 0.02 &&
+        m.yesOdds < 0.98 &&
+        (m.volume ?? 0) > 0 &&
+        (categoryFilter === null || (m.category ?? "Other") === categoryFilter),
     );
 
     // Take the highest-volume markets for a platform. When generating for BOTH
@@ -90,12 +106,24 @@ router.post("/combos/smart-picks", async (req, res) => {
       riskLevel: riskLevel as RiskLevel,
       stakeAmount: stake,
       count: n,
+      legCount: legs,
     });
 
     return res.json({ combos, generatedAt: new Date().toISOString() });
   } catch (err) {
     console.error("[smart-picks]", err);
     return res.status(500).json({ error: "Generation failed" });
+  }
+});
+
+// GET /combos/categories — categories present in the live pool (for the filter)
+router.get("/combos/categories", async (_req, res) => {
+  try {
+    const categories = await listCategories();
+    return res.json({ categories });
+  } catch (err) {
+    console.error("[categories]", err);
+    return res.status(500).json({ error: "Failed to load categories" });
   }
 });
 

@@ -158,6 +158,52 @@ interface KalshiMarket {
   is_provisional?: boolean;
 }
 
+/**
+ * Classify a market into a granular, user-facing category from its TITLE.
+ * The upstream APIs are unreliable here — Polymarket's Gamma feed returns no
+ * category at all and Kalshi only exposes a coarse series prefix — so we infer
+ * from the question text, which is descriptive on both platforms. `existing` is
+ * any category the API did supply and is used only as a fallback.
+ */
+export function deriveCategory(title: string, existing: string | null): string {
+  const t = title.toLowerCase();
+
+  // ── Sports (specific) ──
+  if (/world cup|fifa|premier league|la liga|uefa|champions league|\bmls\b|bundesliga|serie a|ballon d'or|\bsoccer\b/.test(t)) return "Soccer";
+  if (/\bnba\b|\bwnba\b|basketball/.test(t)) return "Basketball";
+  if (/\bnfl\b|super bowl|quarterback|\btouchdown/.test(t)) return "Football";
+  if (/\bmlb\b|baseball|world series/.test(t)) return "Baseball";
+  if (/\bnhl\b|hockey|stanley cup/.test(t)) return "Hockey";
+  if (/tennis|wimbledon|roland garros|\batp\b|\bwta\b|grand slam/.test(t)) return "Tennis";
+  if (/cricket|\bipl\b|test match|\bodi\b|\bt20\b/.test(t)) return "Cricket";
+  if (/\bf1\b|formula 1|grand prix|nascar|motogp/.test(t)) return "Motorsport";
+  if (/\bgolf\b|\bpga\b|ryder cup|the masters/.test(t)) return "Golf";
+  if (/\bufc\b|\bmma\b|boxing|heavyweight|title fight/.test(t)) return "Combat Sports";
+
+  // ── Gaming & esports ──
+  if (/esports|league of legends|\bcs2\b|counter-strike|valorant|\bdota\b|overwatch|the international/.test(t)) return "Esports";
+  if (/\bgta\b|video game|game award|nintendo|playstation|\bxbox\b|elden ring|call of duty|grand theft auto/.test(t)) return "Gaming";
+
+  // ── Markets / money ──
+  if (/bitcoin|\bbtc\b|ethereum|\beth\b|crypto|solana|\bxrp\b|dogecoin|\bnft\b|\bavax\b/.test(t)) return "Crypto";
+  if (/\bcpi\b|inflation|interest rate|\bfed\b|\bgdp\b|unemployment|recession|jobs report|treasury|rate cut/.test(t)) return "Economics";
+  if (/\bs&p\b|nasdaq|dow jones|stock market|\bipo\b|earnings/.test(t)) return "Stocks";
+
+  // ── Politics ──
+  if (/election|president|senate|congress|midterm|parliament|prime minister|governor|democrat|republican|\bgop\b|nominee|impeach|cabinet/.test(t)) return "Politics";
+
+  // ── Tech ──
+  if (/\bai\b|openai|chatgpt|\bgpt-|tesla|spacex|\bapple\b|google|nvidia|\bllm\b|gemini|anthropic/.test(t)) return "Tech";
+
+  // ── Entertainment ──
+  if (/oscar|grammy|emmy|box office|rotten tomatoes|spotify|billboard|album|taylor swift|movie|netflix/.test(t)) return "Entertainment";
+
+  // ── Weather / climate ──
+  if (/temperature|hurricane|\bweather\b|snowfall|rainfall|heat record/.test(t)) return "Weather";
+
+  return existing ?? "Other";
+}
+
 /** Derive a human-readable category from the Kalshi series ticker prefix. */
 function kalshiCategory(ticker: string, seriesTicker: string): string | null {
   const s = seriesTicker.toUpperCase();
@@ -220,7 +266,10 @@ async function fetchKalshiSeries(seriesTicker: string): Promise<Market[]> {
           volume: volume != null && Number.isFinite(volume) ? volume : null,
           closeTime: m.close_time ?? null,
           url: `https://kalshi.com/markets/${m.ticker}`,
-          category: kalshiCategory(m.ticker, m.series_ticker ?? seriesTicker),
+          category: deriveCategory(
+            m.title ?? m.ticker,
+            kalshiCategory(m.ticker, m.series_ticker ?? seriesTicker),
+          ),
         };
       })
       .filter((m): m is NonNullable<typeof m> => m !== null);
@@ -370,7 +419,7 @@ async function fetchPolymarketMarkets(): Promise<Market[]> {
         volume: m.volume != null ? Number(m.volume) : null,
         closeTime: m.endDateIso ?? m.end_date_iso ?? null,
         url: `https://polymarket.com/event/${id}`,
-        category: m.category ?? null,
+        category: deriveCategory(m.question ?? id, m.category ?? null),
       };
     })
     .filter((m): m is NonNullable<typeof m> => m !== null);
@@ -464,6 +513,28 @@ export async function fetchAllMarkets(): Promise<Market[]> {
 
   cache.set(cacheKey, { data: all, fetchedAt: Date.now() });
   return all;
+}
+
+/**
+ * Returns the categories present in the live, genuinely-priced market pool along
+ * with how many markets each has — used to populate the Smart Picks category
+ * filter. Only categories with at least 2 markets are returned, since a combo
+ * needs at least two legs. Sorted by count (most markets first).
+ */
+export async function listCategories(): Promise<
+  Array<{ name: string; count: number }>
+> {
+  const all = await fetchAllMarkets();
+  const counts = new Map<string, number>();
+  for (const m of all) {
+    if (m.yesOdds <= 0.02 || m.yesOdds >= 0.98 || (m.volume ?? 0) <= 0) continue;
+    const name = m.category ?? "Other";
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
 }
 
 export async function fetchMarketsForLegs(
