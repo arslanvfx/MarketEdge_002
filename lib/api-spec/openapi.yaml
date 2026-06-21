@@ -93,6 +93,33 @@ paths:
         "404":
           description: Not found
 
+  /markets/{platform}/{marketId}/history:
+    get:
+      operationId: getMarketHistory
+      tags: [markets]
+      summary: Get YES odds history for a market (last 7 days, cached 1 hr)
+      parameters:
+        - name: platform
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [kalshi, polymarket]
+        - name: marketId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Historical YES odds data points
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketHistoryResponse"
+        "404":
+          description: Not found
+
   /combos/smart-picks:
     post:
       operationId: generateSmartPicks
@@ -291,6 +318,30 @@ components:
           type: string
       required:
         - status
+
+    MarketHistoryPoint:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          description: ISO 8601 timestamp
+        yesOdds:
+          type: number
+          description: YES probability at this point (0-1)
+      required:
+        - timestamp
+        - yesOdds
+
+    MarketHistoryResponse:
+      type: object
+      properties:
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/MarketHistoryPoint"
+          description: Chronologically ordered history points
+      required:
+        - points
 
     Market:
       type: object

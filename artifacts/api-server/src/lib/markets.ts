@@ -253,8 +253,18 @@ async function fetchAllKalshiSeries(): Promise<Market[]> {
 // ─── Polymarket ─────────────────────────────────────────────────────────────
 
 interface PolymarketGammaMarket {
+  /** Numeric Gamma market ID (e.g. "540817") — always present */
   id?: string;
+  /**
+   * Hex condition ID (e.g. "0x1fad72…").
+   * The Gamma API returns this as `conditionId` (camelCase).
+   * Typed under both names so the runtime value is captured whichever
+   * serialisation the proxy happens to use.
+   */
+  conditionId?: string;
   condition_id?: string;
+  /** JSON-encoded array of CLOB token IDs; index 0 = YES, index 1 = NO */
+  clobTokenIds?: string;
   question?: string;
   bestAsk?: number;
   bestBid?: number;
@@ -265,6 +275,13 @@ interface PolymarketGammaMarket {
   end_date_iso?: string;
   category?: string;
 }
+
+/**
+ * Maps any Polymarket market ID (numeric Gamma ID or hex conditionId) → CLOB YES token ID.
+ * Populated eagerly during fetchPolymarketMarkets() so history lookups require no extra
+ * round-trips to the Gamma API.
+ */
+const polymarketClobTokenCache = new Map<string, string>();
 
 async function fetchPolymarketMarkets(): Promise<Market[]> {
   try {
@@ -314,7 +331,28 @@ async function fetchPolymarketMarkets(): Promise<Market[]> {
       }
 
       yesOdds = Math.min(Math.max(yesOdds, 0.01), 0.99);
-      const id = m.condition_id ?? m.id ?? String(Math.random());
+
+      // The Gamma API returns the condition ID as `conditionId` (camelCase).
+      // The interface also maps `condition_id` for any snake_case proxies.
+      // Fall back to the numeric `id` only when neither is available.
+      const id = m.conditionId ?? m.condition_id ?? m.id ?? String(Math.random());
+
+      // Pre-populate the CLOB token cache while we have the data in hand.
+      // clobTokenIds is a JSON string like '["<yesToken>","<noToken>"]'.
+      if (m.clobTokenIds) {
+        try {
+          const tokens: string[] = JSON.parse(m.clobTokenIds);
+          const yesToken = tokens[0];
+          if (yesToken) {
+            // Register under every known alias so history resolution always hits.
+            polymarketClobTokenCache.set(id, yesToken);
+            if (m.id && m.id !== id) polymarketClobTokenCache.set(m.id, yesToken);
+            if (m.conditionId && m.conditionId !== id) polymarketClobTokenCache.set(m.conditionId, yesToken);
+          }
+        } catch {
+          // ignore malformed clobTokenIds
+        }
+      }
 
       return {
         id,
@@ -447,4 +485,168 @@ export async function fetchMarketById(
 ): Promise<Market | null> {
   const { markets } = await fetchMarketsForLegs([{ platform, marketId }]);
   return markets[0] ?? null;
+}
+
+// ─── History ─────────────────────────────────────────────────────────────────
+
+export interface HistoryPoint {
+  timestamp: string;
+  yesOdds: number;
+}
+
+interface HistoryCacheEntry {
+  data: HistoryPoint[];
+  fetchedAt: number;
+}
+
+const historyCache = new Map<string, HistoryCacheEntry>();
+const HISTORY_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function isHistoryFresh(entry: HistoryCacheEntry): boolean {
+  return Date.now() - entry.fetchedAt < HISTORY_CACHE_TTL_MS;
+}
+
+interface KalshiHistoryCandle {
+  end_period_ts?: number;
+  yes_price_dollars?: string;
+  yes_ask_dollars?: string;
+}
+
+async function fetchKalshiHistory(marketId: string): Promise<HistoryPoint[]> {
+  try {
+    // 7 days of hourly candles
+    const sevenDaysAgo = Math.floor((Date.now() - 7 * 24 * 60 * 60 * 1000) / 1000);
+    const params = new URLSearchParams({
+      min_ts: String(sevenDaysAgo),
+      period_interval: "60", // 1-hour candles
+    });
+    const url = `${KALSHI_BASE}/markets/${encodeURIComponent(marketId)}/history?${params}`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { history?: KalshiHistoryCandle[] };
+    const history = data.history ?? [];
+
+    return history
+      .filter((c) => c.end_period_ts != null)
+      .map((c) => {
+        const priceDollars = parseFloat(c.yes_price_dollars ?? c.yes_ask_dollars ?? "0");
+        const yesOdds = Math.min(Math.max(priceDollars > 0 ? priceDollars : 0.5, 0.01), 0.99);
+        return {
+          timestamp: new Date((c.end_period_ts as number) * 1000).toISOString(),
+          yesOdds,
+        };
+      })
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  } catch {
+    return [];
+  }
+}
+
+interface PolymarketPricePoint {
+  t?: number;
+  p?: number;
+}
+
+/**
+ * Resolves the Polymarket CLOB YES token ID for a given market ID.
+ *
+ * Resolution order:
+ *  1. In-process cache populated during fetchPolymarketMarkets() — no extra HTTP call needed.
+ *  2. Gamma API detail endpoint by numeric ID (e.g. "540817").
+ *  3. Gamma API search by conditionId query param for hex IDs (e.g. "0x1fad72…").
+ */
+async function resolvePolymarketClobTokenId(marketId: string): Promise<string | null> {
+  // 1. Fast path: cache hit (populated eagerly when markets list was fetched)
+  const cached = polymarketClobTokenCache.get(marketId);
+  if (cached) return cached;
+
+  try {
+    let clobTokenIdsJson: string | undefined;
+
+    // 2. Numeric Gamma ID — direct detail endpoint
+    if (/^\d+$/.test(marketId)) {
+      const res = await fetch(`https://gamma-api.polymarket.com/markets/${marketId}`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (res.ok) {
+        const data = await res.json() as { clobTokenIds?: string };
+        clobTokenIdsJson = data.clobTokenIds;
+      }
+    } else {
+      // 3. Hex conditionId — search via query param
+      const params = new URLSearchParams({ conditionId: marketId, limit: "1" });
+      const res = await fetch(`https://gamma-api.polymarket.com/markets?${params}`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (res.ok) {
+        const data = await res.json() as Array<{ clobTokenIds?: string }>;
+        clobTokenIdsJson = Array.isArray(data) ? data[0]?.clobTokenIds : undefined;
+      }
+    }
+
+    if (!clobTokenIdsJson) return null;
+    const tokens: string[] = JSON.parse(clobTokenIdsJson);
+    const yesToken = tokens[0] ?? null;
+    if (yesToken) polymarketClobTokenCache.set(marketId, yesToken);
+    return yesToken;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchPolymarketHistory(marketId: string): Promise<HistoryPoint[]> {
+  try {
+    // The CLOB prices-history endpoint requires a CLOB token ID (not the market/condition ID).
+    // resolvePolymarketClobTokenId handles all ID formats with a pre-populated cache.
+    const tokenId = await resolvePolymarketClobTokenId(marketId);
+    if (!tokenId) return [];
+
+    const params = new URLSearchParams({
+      market: tokenId,
+      interval: "1w",
+      fidelity: "60", // hourly resolution
+    });
+    const url = `https://clob.polymarket.com/prices-history?${params}`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { history?: PolymarketPricePoint[] };
+    const history = data.history ?? [];
+
+    return history
+      .filter((p) => p.t != null && p.p != null)
+      .map((p) => ({
+        timestamp: new Date((p.t as number) * 1000).toISOString(),
+        yesOdds: Math.min(Math.max(p.p as number, 0.01), 0.99),
+      }))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchMarketHistory(
+  platform: "kalshi" | "polymarket",
+  marketId: string,
+): Promise<HistoryPoint[]> {
+  const cacheKey = `${platform}:${marketId}`;
+  const cached = historyCache.get(cacheKey);
+  if (cached && isHistoryFresh(cached)) {
+    return cached.data;
+  }
+
+  const points =
+    platform === "kalshi"
+      ? await fetchKalshiHistory(marketId)
+      : await fetchPolymarketHistory(marketId);
+
+  historyCache.set(cacheKey, { data: points, fetchedAt: Date.now() });
+  return points;
 }

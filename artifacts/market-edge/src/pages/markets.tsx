@@ -10,6 +10,7 @@ import { useBuilder } from "@/lib/builder-context";
 import { useToast } from "@/hooks/use-toast";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { SetAlertDialog } from "@/components/set-alert-dialog";
+import { MarketSparkline } from "@/components/market-sparkline";
 
 const PAGE_SIZE = 20;
 
@@ -210,6 +211,14 @@ export default function Markets() {
                       {market.title}
                     </h3>
                     
+                    <div className="mb-3">
+                      <MarketSparkline
+                        platform={market.platform as "kalshi" | "polymarket"}
+                        marketId={market.id}
+                        currentOdds={market.yesOdds}
+                      />
+                    </div>
+
                     <div className="flex items-end justify-between pt-4 border-t border-border mt-auto">
                       <div>
                         <p className="text-xs text-muted-foreground mb-1">Live YES Odds</p>

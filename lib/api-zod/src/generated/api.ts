@@ -69,6 +69,22 @@ export const GetMarketResponse = zod.object({
 
 
 /**
+ * @summary Get YES odds history for a market (last 7 days, cached 1 hr)
+ */
+export const GetMarketHistoryParams = zod.object({
+  "platform": zod.enum(['kalshi', 'polymarket']),
+  "marketId": zod.coerce.string()
+})
+
+export const GetMarketHistoryResponse = zod.object({
+  "points": zod.array(zod.object({
+  "timestamp": zod.string().describe('ISO 8601 timestamp'),
+  "yesOdds": zod.number().describe('YES probability at this point (0-1)')
+})).describe('Chronologically ordered history points')
+})
+
+
+/**
  * @summary Auto-generate 4 non-overlapping Smart Pick combos
  */
 export const generateSmartPicksBodyRiskLevelDefault = `balanced`;

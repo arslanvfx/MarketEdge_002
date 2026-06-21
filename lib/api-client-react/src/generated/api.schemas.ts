@@ -9,6 +9,18 @@ export interface HealthStatus {
   status: string;
 }
 
+export interface MarketHistoryPoint {
+  /** ISO 8601 timestamp */
+  timestamp: string;
+  /** YES probability at this point (0-1) */
+  yesOdds: number;
+}
+
+export interface MarketHistoryResponse {
+  /** Chronologically ordered history points */
+  points: MarketHistoryPoint[];
+}
+
 export type MarketPlatform = typeof MarketPlatform[keyof typeof MarketPlatform];
 
 

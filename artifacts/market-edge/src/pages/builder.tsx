@@ -12,6 +12,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Skeleton } from "@/components/ui/skeleton";
+import { MarketSparkline } from "@/components/market-sparkline";
 
 function formatMultiplier(mult: number) {
   return `${mult.toFixed(2)}x`;
@@ -138,7 +139,15 @@ export default function Builder() {
                 </Button>
                 
                 <Badge variant="outline" className="mb-2 uppercase text-[10px]">{leg.market.platform}</Badge>
-                <h4 className="font-medium text-sm leading-tight pr-6 mb-4">{leg.market.title}</h4>
+                <h4 className="font-medium text-sm leading-tight pr-6 mb-3">{leg.market.title}</h4>
+
+                <div className="mb-3">
+                  <MarketSparkline
+                    platform={leg.market.platform as "kalshi" | "polymarket"}
+                    marketId={leg.market.id}
+                    currentOdds={leg.market.yesOdds}
+                  />
+                </div>
                 
                 <div className="flex items-center justify-between">
                   <div className="text-sm">

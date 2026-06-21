@@ -24,6 +24,8 @@ export * from './healthStatus';
 export * from './listMarketsParams';
 export * from './listMarketsPlatform';
 export * from './market';
+export * from './marketHistoryPoint';
+export * from './marketHistoryResponse';
 export * from './marketPlatform';
 export * from './marketsResponse';
 export * from './optimizeInput';

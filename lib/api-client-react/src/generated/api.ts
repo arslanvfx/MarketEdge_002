@@ -27,6 +27,7 @@ import type {
   HealthStatus,
   ListMarketsParams,
   Market,
+  MarketHistoryResponse,
   MarketsResponse,
   OptimizeInput,
   OptimizeResponse,
@@ -280,6 +281,88 @@ export function useGetMarket<TData = Awaited<ReturnType<typeof getMarket>>, TErr
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetMarketQueryOptions(platform,marketId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getGetMarketHistoryUrl = (platform: 'kalshi' | 'polymarket',
+    marketId: string,) => {
+
+
+
+
+  return `/api/markets/${platform}/${marketId}/history`
+}
+
+/**
+ * @summary Get YES odds history for a market (last 7 days, cached 1 hr)
+ */
+export const getMarketHistory = async (platform: 'kalshi' | 'polymarket',
+    marketId: string, options?: RequestInit): Promise<MarketHistoryResponse> => {
+
+  return customFetch<MarketHistoryResponse>(getGetMarketHistoryUrl(platform,marketId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetMarketHistoryQueryKey = (platform: 'kalshi' | 'polymarket',
+    marketId: string,) => {
+    return [
+    `/api/markets/${platform}/${marketId}/history`
+    ] as const;
+    }
+
+
+export const getGetMarketHistoryQueryOptions = <TData = Awaited<ReturnType<typeof getMarketHistory>>, TError = ErrorType<void>>(platform: 'kalshi' | 'polymarket',
+    marketId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getMarketHistory>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetMarketHistoryQueryKey(platform,marketId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getMarketHistory>>> = ({ signal }) => getMarketHistory(platform,marketId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(platform && marketId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getMarketHistory>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetMarketHistoryQueryResult = NonNullable<Awaited<ReturnType<typeof getMarketHistory>>>
+export type GetMarketHistoryQueryError = ErrorType<void>
+
+
+/**
+ * @summary Get YES odds history for a market (last 7 days, cached 1 hr)
+ */
+
+export function useGetMarketHistory<TData = Awaited<ReturnType<typeof getMarketHistory>>, TError = ErrorType<void>>(
+ platform: 'kalshi' | 'polymarket',
+    marketId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getMarketHistory>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetMarketHistoryQueryOptions(platform,marketId,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

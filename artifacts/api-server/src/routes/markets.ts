@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { fetchMarkets, fetchMarketById } from "../lib/markets";
+import { fetchMarkets, fetchMarketById, fetchMarketHistory } from "../lib/markets";
 
 const router = Router();
 
@@ -14,6 +14,19 @@ router.get("/markets", async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch markets" });
+  }
+});
+
+router.get("/markets/:platform/:marketId/history", async (req, res) => {
+  try {
+    const { platform, marketId } = req.params;
+    if (platform !== "kalshi" && platform !== "polymarket") {
+      return res.status(400).json({ error: "Invalid platform" });
+    }
+    const points = await fetchMarketHistory(platform, marketId);
+    return res.json({ points });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch market history" });
   }
 });
 
