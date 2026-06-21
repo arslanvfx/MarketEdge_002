@@ -437,6 +437,12 @@ interface PolymarketGammaMarket {
   /** JSON-encoded array of CLOB token IDs; index 0 = YES, index 1 = NO */
   clobTokenIds?: string;
   question?: string;
+  /**
+   * URL-friendly slug from the Gamma API (e.g. "new-rhianna-album-before-gta-vi-926").
+   * Used to build the canonical Polymarket event URL so users can navigate directly
+   * to the market page. The conditionId is a hex string that produces broken URLs.
+   */
+  slug?: string;
   bestAsk?: number;
   bestBid?: number;
   lastTradePrice?: number;
@@ -528,6 +534,13 @@ async function fetchPolymarketMarkets(): Promise<Market[]> {
         }
       }
 
+      // Build the canonical market URL. The Gamma API provides a human-readable
+      // slug (e.g. "new-rhianna-album-before-gta-vi-926") that maps to a real
+      // Polymarket page. The conditionId (0x…) produces broken 404 URLs.
+      const marketUrl = m.slug
+        ? `https://polymarket.com/event/${m.slug}`
+        : `https://polymarket.com/event/${id}`;
+
       return {
         id,
         platform: "polymarket" as const,
@@ -536,7 +549,7 @@ async function fetchPolymarketMarkets(): Promise<Market[]> {
         noOdds: Math.min(Math.max(1 - yesOdds, 0.01), 0.99),
         volume: m.volume != null ? Number(m.volume) : null,
         closeTime: m.endDateIso ?? m.end_date_iso ?? null,
-        url: `https://polymarket.com/event/${id}`,
+        url: marketUrl,
         category: deriveCategory(m.question ?? id, m.category ?? null),
       };
     })

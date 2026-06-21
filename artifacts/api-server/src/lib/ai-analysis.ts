@@ -87,7 +87,7 @@ For each market, estimate the TRUE probability (0.0–1.0) that the YES outcome 
 
 Critical rules:
 - IMPORTANT: Each market line has a "[YES = ...]" label — that is the EXACT outcome YES pays on. Estimate the probability of THAT specific outcome, not the opposite team or any other interpretation. Example: "France vs Iraq Winner?" [YES = "Iraq"] means YES pays only if Iraq wins — estimate Iraq's win probability (~0.04), NOT France's.
-- Be skeptical of novelty or joke markets. Estimate the REAL probability of the literal event in the timeframe.
+- NOVELTY / MEME MARKETS: Set "plausible": false for any market whose resolution is tied to a pop-culture milestone with an unknown or perpetually-delayed date — e.g. "before GTA VI", "before Half-Life 3", "before [any video game release]", "before [album release]", or any market that is clearly a joke or internet meme ("Will Jesus Christ return…", "Will aliens land…", "Will [celebrity] die…"). These may be real markets with real volume but they are unsuitable for serious value analysis. Mark plausible: false so they are excluded from picks.
 - If a market is nonsensical, unresolvable, or you cannot reason about it, set "plausible": false.
 - Consider the close date — a low-probability event has even less chance in a short window.
 - confidence: "high" for well-understood events, "low" for genuinely uncertain ones.

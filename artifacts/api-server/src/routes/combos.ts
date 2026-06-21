@@ -98,9 +98,27 @@ router.post("/combos/smart-picks", async (req, res) => {
     // Pre-filter to liquid, genuinely-priced candidates before the AI pass.
     // Caps the number of markets Claude analyzes (cost/latency) while keeping
     // the markets most likely to contain real value.
+
+    // Novelty / meme market blocklist — strip these before they reach the AI.
+    // "Before GTA VI / Half-Life 3 / [game release]" markets are real Polymarket
+    // markets with genuine volume but an open-ended resolution window (tied to a
+    // perpetually-delayed release). They produce nonsensical Smart Picks and
+    // confuse the probability model. Block by title pattern.
+    const NOVELTY_PATTERNS = [
+      /before\s+gta\s+vi?\b/i,
+      /before\s+half[\s-]?life\s+3\b/i,
+      /before\s+(the\s+)?(next\s+)?(grand\s+theft|gta)\b/i,
+      /before\s+[a-z0-9 ]+\s+(album|ep|mixtape)\b/i, // "before [artist] album"
+      /\bjesus\s+christ\s+return\b/i,
+      /\baliens?\s+(land|invade|contact)\b/i,
+    ];
+    const isNovelty = (title: string) =>
+      NOVELTY_PATTERNS.some((re) => re.test(title));
+
     const liquid = markets.filter((m) => {
       if (!(m.yesOdds > 0.02 && m.yesOdds < 0.98)) return false;
       if (!((m.volume ?? 0) > 0)) return false;
+      if (isNovelty(m.title)) return false;
       if (categoryFilter !== null) {
         const mCat = (m.category ?? "Other").toLowerCase();
         if (isSportsFilter ? !SPORTS_CATEGORIES.has(mCat) : mCat !== categoryFilter)
