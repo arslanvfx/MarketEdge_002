@@ -370,7 +370,7 @@ async function fetchKalshiSeries(
           noOdds: Math.min(Math.max(1 - yesOdds, 0.01), 0.99),
           volume: volume != null && Number.isFinite(volume) ? volume : null,
           closeTime: m.close_time ?? null,
-          url: `https://kalshi.com/markets/${m.ticker}`,
+          url: `https://kalshi.com/markets/${m.event_ticker ?? m.ticker}`,
           category: deriveCategory(
             m.title ?? m.ticker,
             kalshiCategory(m.ticker, m.series_ticker ?? seriesTicker),
