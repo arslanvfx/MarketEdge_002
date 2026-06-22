@@ -319,20 +319,20 @@ function SmartPickCard({ combo, index, stake }: SmartPickCardProps) {
                     <span>{formatResolveDate(leg.closeTime)}</span>
                   </div>
                 )}
-              </div>
-              <div className="text-right shrink-0 space-y-0.5">
                 {(leg as any).marketUrl && (
                   <a
                     href={(leg as any).marketUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     title={`View on ${leg.platform === "kalshi" ? "Kalshi" : "Polymarket"}`}
-                    className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-primary transition-colors"
+                    className="inline-flex items-center gap-1 mt-1.5 text-[10px] font-medium text-primary/60 hover:text-primary transition-colors"
                   >
                     <ExternalLink className="w-3 h-3" />
-                    View bet
+                    View on {leg.platform === "kalshi" ? "Kalshi" : "Polymarket"}
                   </a>
                 )}
+              </div>
+              <div className="text-right shrink-0 space-y-0.5">
                 {typeof leg.edge === "number" && leg.legType !== "safe" && (
                   <Badge variant="outline" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 text-[10px] font-mono">
                     {formatEdgePts(leg.edge)}
