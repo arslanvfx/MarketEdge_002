@@ -1,15 +1,29 @@
 // Real-time crypto price predictor.
 //
-// Data source: Coinbase Exchange public API (no key, US-friendly).
-//   candles: /products/{id}/candles?granularity=60  → [time,low,high,open,close,vol] newest-first
-//   stats:   /products/{id}/stats  → { open(24h), high, low, last, volume }
+// Price sources:
+//   CoinGecko (primary) — free, no key, aggregates across all major exchanges.
+//     /simple/price?ids=...&vs_currencies=usd&include_24hr_change=true
+//   Coinbase Exchange (candles + 24h stats fallback) — no key, US-friendly.
+//     candles: /products/{id}/candles?granularity=60  → [time,low,high,open,close,vol] newest-first
+//     stats:   /products/{id}/stats  → { open(24h), high, low, last, volume }
 //
 // We pull recent 1-minute candles, compute a set of technical indicators, then
 // project the price forward to the next quarter-hour boundaries (:00/:15/:30/:45).
 // All predictions are model-based estimates derived from recent chart behaviour.
 
 const COINBASE = "https://api.exchange.coinbase.com";
+const COINGECKO = "https://api.coingecko.com/api/v3";
 const UA = "MarketEdge/1.0 (crypto-predictor)";
+
+// CoinGecko IDs for each symbol.
+const GECKO_ID: Record<string, string> = {
+  BTC: "bitcoin",
+  ETH: "ethereum",
+  SOL: "solana",
+  XRP: "ripple",
+  LINK: "chainlink",
+  DOGE: "dogecoin",
+};
 
 export interface CoinDef {
   symbol: string;
@@ -103,6 +117,25 @@ const candleCache = new Map<string, CacheEntry<Candle[]>>();
 const statsCache = new Map<string, CacheEntry<CoinStats>>();
 const CANDLE_TTL = 8_000;
 const STATS_TTL = 4_000;
+
+// CoinGecko — single batched request for all coins.
+interface GeckoEntry {
+  usd: number;
+  usd_24h_change: number;
+}
+type GeckoPrices = Record<string, GeckoEntry>;
+let geckoCache: CacheEntry<GeckoPrices> | null = null;
+const GECKO_TTL = 8_000;
+
+async function getGeckoPrices(): Promise<GeckoPrices> {
+  if (geckoCache && Date.now() - geckoCache.at < GECKO_TTL) return geckoCache.value;
+  const ids = Object.values(GECKO_ID).join(",");
+  const data = await fetchJson<GeckoPrices>(
+    `${COINGECKO}/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`,
+  );
+  geckoCache = { at: Date.now(), value: data };
+  return data;
+}
 
 interface CoinStats {
   open: number;
@@ -254,9 +287,11 @@ function analyzeCoin(
   candles: Candle[],
   stats: CoinStats,
   now: Date,
+  geckoPrice?: number,
 ): CoinPrediction {
   const closes = candles.map((c) => c.c);
-  const price = stats.last > 0 ? stats.last : closes[closes.length - 1] ?? 0;
+  // Prefer CoinGecko (aggregated across exchanges) → Coinbase last → latest candle.
+  const price = geckoPrice ?? (stats.last > 0 ? stats.last : closes[closes.length - 1] ?? 0);
 
   // Per-minute log returns over the recent window.
   const rets: number[] = [];
@@ -364,6 +399,9 @@ export async function fetchCryptoPredictions(): Promise<{
   coins: CoinPrediction[];
 }> {
   const now = new Date();
+  // Fetch CoinGecko aggregated prices for all coins in one request (best effort).
+  const gecko = await getGeckoPrices().catch(() => ({} as GeckoPrices));
+
   const coins = await Promise.all(
     CRYPTO_COINS.map(async (coin) => {
       try {
@@ -371,7 +409,9 @@ export async function fetchCryptoPredictions(): Promise<{
           getCandles(coin.product),
           getStats(coin.product),
         ]);
-        return analyzeCoin(coin, candles, stats, now);
+        const geckoEntry = gecko[GECKO_ID[coin.symbol] ?? ""];
+        const geckoPrice = geckoEntry?.usd && geckoEntry.usd > 0 ? geckoEntry.usd : undefined;
+        return analyzeCoin(coin, candles, stats, now, geckoPrice);
       } catch {
         return null;
       }
@@ -388,9 +428,24 @@ export async function fetchCryptoPrices(): Promise<{
   prices: CoinPrice[];
 }> {
   const now = new Date();
+  // Primary: CoinGecko aggregated price (single batched request).
+  // Fallback: Coinbase stats per coin.
+  const gecko = await getGeckoPrices().catch(() => ({} as GeckoPrices));
+
   const prices = await Promise.all(
     CRYPTO_COINS.map(async (coin) => {
       try {
+        const geckoEntry = gecko[GECKO_ID[coin.symbol] ?? ""];
+        if (geckoEntry?.usd && geckoEntry.usd > 0) {
+          return {
+            symbol: coin.symbol,
+            product: coin.product,
+            name: coin.name,
+            price: geckoEntry.usd,
+            change24hPct: geckoEntry.usd_24h_change ?? 0,
+          };
+        }
+        // Fallback to Coinbase.
         const stats = await getStats(coin.product);
         const change24hPct =
           stats.open > 0 ? ((stats.last - stats.open) / stats.open) * 100 : 0;
