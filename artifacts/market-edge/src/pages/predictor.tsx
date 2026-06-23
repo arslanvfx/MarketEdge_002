@@ -502,10 +502,10 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
       ) : (
         <>
           {/* ── Column labels ── */}
-          <div className="grid grid-cols-[96px_1fr_72px_44px_32px] gap-x-3 pl-5 pr-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+          <div className="grid grid-cols-[96px_1fr_64px_44px_32px] gap-x-3 pl-5 pr-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
             <span>Target</span>
             <span>Predicted → Actual</span>
-            <span className="text-right">{hasKalshiData ? "K Target" : "Error"}</span>
+            <span className="text-right">Error</span>
             <span className="text-right">Conf</span>
             <span />
           </div>
@@ -520,10 +520,15 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
               const predictedAbove = hasTarget && rec.predictedPrice >= rec.kalshiTarget!;
               const actualAbove    = hasTarget && rec.actualPrice !== null && rec.actualPrice >= rec.kalshiTarget!;
 
+              // Compact Kalshi target label e.g. "K $62,247"
+              const kLabel = hasTarget
+                ? `K $${rec.kalshiTarget!.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+                : null;
+
               return (
                 <div
                   key={rec.targetTime}
-                  className={`grid grid-cols-[96px_1fr_72px_44px_32px] gap-x-3 items-center
+                  className={`grid grid-cols-[96px_1fr_64px_44px_32px] gap-x-3 items-center
                     border-l-4 ${accentClass(rec)} rounded-r-lg pl-3 pr-3 py-2.5
                     bg-card/40 hover:bg-card/70 transition-colors`}
                 >
@@ -533,9 +538,9 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                     <div className="text-[10px] text-muted-foreground">{tz}</div>
                   </div>
 
-                  {/* Predicted → Actual (+ Kalshi verdict for BTC rows) */}
+                  {/* Predicted → Actual (Kalshi context shown inline as sub-line) */}
                   <div className="tabular-nums text-xs min-w-0">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-muted-foreground">${formatPrice(rec.predictedPrice)}</span>
                       {isPending ? (
                         <span className="inline-flex items-center gap-1 text-amber-400/80 text-[10px]">
@@ -549,35 +554,31 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                         </>
                       )}
                     </div>
-                    {/* Kalshi side-of-target verdict */}
-                    {hasTarget && !isPending && (
-                      <div className="flex items-center gap-2 mt-0.5 text-[10px]">
+                    {/* Kalshi sub-line: K $62,247 · pred ↑ · actual ↑ */}
+                    {kLabel && !isPending && (
+                      <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-muted-foreground/70">
+                        <span>{kLabel}</span>
+                        <span className="text-muted-foreground/30">·</span>
                         <span className={predictedAbove ? "text-emerald-400" : "text-red-400"}>
-                          pred {predictedAbove ? "↑" : "↓"} target
+                          pred {predictedAbove ? "↑" : "↓"}
                         </span>
-                        <span className="text-muted-foreground/40">·</span>
+                        <span className="text-muted-foreground/30">·</span>
                         <span className={actualAbove ? "text-emerald-400" : "text-red-400"}>
-                          actual {actualAbove ? "↑" : "↓"} target
+                          actual {actualAbove ? "↑" : "↓"}
                         </span>
                       </div>
                     )}
-                    {hasTarget && isPending && (
+                    {kLabel && isPending && (
                       <div className="text-[10px] text-muted-foreground/50 mt-0.5">
-                        pred {predictedAbove ? "↑" : "↓"} K target
+                        {kLabel} · pred {predictedAbove ? "↑" : "↓"}
                       </div>
                     )}
                   </div>
 
-                  {/* Kalshi target OR error % */}
+                  {/* Error % — always shown */}
                   <div className="text-right tabular-nums text-xs">
                     {isPending ? (
                       <span className="text-muted-foreground/30">—</span>
-                    ) : hasTarget ? (
-                      <span className="text-muted-foreground">
-                        ${rec.kalshiTarget! >= 1000
-                          ? rec.kalshiTarget!.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-                          : formatPrice(rec.kalshiTarget!)}
-                      </span>
                     ) : (
                       <span
                         className={
