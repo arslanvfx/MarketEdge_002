@@ -867,18 +867,16 @@ function CoinDetail({
   const kalshiAvailable = coin.symbol === "BTC" && ktd?.available === true;
   const kalshiTarget = kalshiAvailable ? (ktd?.targetPrice ?? null) : null;
   const kalshiIsLive = ktd?.isLive === true;
-  const kalshiEventTicker = ktd?.eventTicker;
-  const kalshiCallQuery = useQuery({
-    queryKey: ["kalshi-btc-call", kalshiEventTicker],
-    queryFn: () =>
-      fetchJson<KalshiBtcCall>(
-        `/crypto/kalshi-btc-call?eventTicker=${encodeURIComponent(kalshiEventTicker!)}&target=${kalshiTarget}`,
-      ),
-    enabled: kalshiAvailable && !!kalshiEventTicker && kalshiTarget !== null,
-    staleTime: Infinity,
-    retry: 2,
-  });
-  const kalshiCall = kalshiCallQuery.data;
+  // Derive Claude's call from the AI forecast — same data as the cards, never contradicts.
+  // Use the first (nearest) quarter-hour AI prediction vs the Kalshi strike.
+  const claudeAiPred0 = aiEntry?.preds[0] ?? null;
+  const claudeAbove: boolean | null =
+    kalshiTarget !== null && claudeAiPred0 !== null
+      ? claudeAiPred0.predictedPrice >= kalshiTarget
+      : null;
+  const claudePredPrice: number | null = claudeAiPred0?.predictedPrice ?? null;
+  const claudeConfidence: number | null = claudeAiPred0?.confidence ?? null;
+
   const toET = (iso: string) =>
     new Date(iso).toLocaleTimeString("en-US", {
       hour: "2-digit", minute: "2-digit", timeZone: "America/New_York", hour12: true,
@@ -1118,32 +1116,34 @@ function CoinDetail({
                 </div>
               </div>
             )}
-            {/* Claude's call */}
+            {/* Claude's call — derived from the same AI forecast shown in the cards */}
             <div className="px-5 py-4 col-span-2 sm:col-span-1">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Claude's Call</div>
               {kalshiTarget === null ? (
                 <div className="text-sm text-muted-foreground">Awaiting target price…</div>
-              ) : kalshiCallQuery.isFetching ? (
+              ) : aiLoading ? (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing…
                 </div>
-              ) : kalshiCall ? (
+              ) : claudeAbove !== null ? (
                 <>
-                  <div className={`flex items-center gap-1.5 text-xl font-black ${kalshiCall.above ? "text-emerald-400" : "text-red-400"}`}>
-                    {kalshiCall.above ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
-                    {kalshiCall.above ? "ABOVE" : "BELOW"}
+                  <div className={`flex items-center gap-1.5 text-xl font-black ${claudeAbove ? "text-emerald-400" : "text-red-400"}`}>
+                    {claudeAbove ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
+                    {claudeAbove ? "ABOVE" : "BELOW"}
                   </div>
                   <div className="text-[11px] text-muted-foreground mt-0.5">
-                    ${formatPrice(kalshiCall.predictedPrice)} · {kalshiCall.confidence}% conf.
+                    ${formatPrice(claudePredPrice!)} · {claudeConfidence}% conf.
                   </div>
                   {kalshiIsLive && (
-                    <div className={`mt-1.5 text-xs font-bold ${kalshiCall.above ? "text-emerald-400" : "text-red-400"}`}>
-                      → Bet {kalshiCall.above ? "YES" : "NO"} on Kalshi
+                    <div className={`mt-1.5 text-xs font-bold ${claudeAbove ? "text-emerald-400" : "text-red-400"}`}>
+                      → Bet {claudeAbove ? "YES" : "NO"} on Kalshi
                     </div>
                   )}
                 </>
               ) : (
-                <div className="text-sm text-muted-foreground/60">Awaiting analysis…</div>
+                <div className="text-[11px] text-muted-foreground/70 leading-snug">
+                  Click "Enhance with AI"<br />to see Claude's call
+                </div>
               )}
             </div>
           </div>
