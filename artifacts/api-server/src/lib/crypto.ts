@@ -131,6 +131,10 @@ const tickerCache = new Map<string, CacheEntry<number>>();
 const CANDLE_TTL = 8_000;
 const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
+// Full coin analysis cache: predictions are stable for 3.5 min (no need to
+// recompute the statistical model on every 3-second price tick).
+const PRED_TTL = 210_000; // 3.5 minutes
+const predCache = new Map<string, CacheEntry<CoinPrediction>>();
 
 // CoinGecko — single batched request for all coins (24h change reference).
 interface GeckoEntry {
@@ -582,6 +586,125 @@ Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same ord
 }
 
 // ---------------------------------------------------------------------------
+// Prediction History Tracker
+// Snaps predictions at each 15-min boundary, evaluates accuracy once the
+// window closes. Keeps up to 8 entries per coin (= 2 hours of history).
+// ---------------------------------------------------------------------------
+
+export interface PredictionRecord {
+  symbol: string;
+  snappedAt: string;              // ISO — when snapshot was taken
+  targetTime: string;             // ISO — the 15-min boundary being predicted
+  targetLabel: string;            // "10:15 AM" in ET
+  priceAtSnapshot: number;        // live price when snapshot was captured
+  predictedPrice: number;         // model's price target for targetTime
+  predictedDirection: "up" | "down" | "flat";
+  confidence: number;
+  actualPrice: number | null;     // filled in after targetTime passes
+  errorPct: number | null;        // abs % difference from predicted
+  correct: boolean | null;        // direction prediction was right
+  evaluatedAt: string | null;
+  status: "pending" | "evaluated";
+}
+
+const QUARTER_MS = 15 * 60 * 1000;
+const MAX_HISTORY = 8; // 2 hours at 15-min intervals
+const historyStore = new Map<string, PredictionRecord[]>(); // symbol → records
+
+export function getPredictionHistory(symbol: string): PredictionRecord[] {
+  return (historyStore.get(symbol.toUpperCase()) ?? []).slice().reverse(); // newest first
+}
+
+export function startPredictionTracker(): void {
+  const tick = async () => {
+    const nowMs = Date.now();
+    const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
+
+    await Promise.all(
+      CRYPTO_COINS.map(async (coin) => {
+        const sym = coin.symbol;
+        if (!historyStore.has(sym)) historyStore.set(sym, []);
+        const records = historyStore.get(sym)!;
+
+        // 1. Evaluate pending records whose target time has passed.
+        for (const rec of records) {
+          if (rec.status === "pending" && new Date(rec.targetTime).getTime() <= nowMs) {
+            try {
+              const actual = await getTicker(coin.product);
+              const snapshotPrice = rec.priceAtSnapshot;
+              const actualDir: "up" | "down" | "flat" =
+                actual > snapshotPrice * 1.0002 ? "up"
+                : actual < snapshotPrice * 0.9998 ? "down"
+                : "flat";
+              // Direction correct if both non-flat and matching, or both flat-ish
+              const correct =
+                rec.predictedDirection === "flat"
+                  ? actualDir === "flat"
+                  : rec.predictedDirection === actualDir;
+              rec.actualPrice = actual;
+              rec.errorPct =
+                Math.abs((actual - rec.predictedPrice) / rec.predictedPrice) * 100;
+              rec.correct = correct;
+              rec.evaluatedAt = new Date().toISOString();
+              rec.status = "evaluated";
+            } catch {
+              // retry on next tick
+            }
+          }
+        }
+
+        // 2. Snapshot a new prediction for the next boundary if not already done.
+        const targetISO = nextBoundary.toISOString();
+        const timeToNext = nextBoundary.getTime() - nowMs;
+        const alreadySnapped = records.some((r) => r.targetTime === targetISO);
+
+        // Only snapshot when there's at least 60s left (avoid capturing a
+        // stale prediction right before the boundary flips).
+        if (!alreadySnapped && timeToNext > 60_000) {
+          try {
+            const [candles, stats, tickerPrice] = await Promise.all([
+              getCandles(coin.product),
+              getStats(coin.product),
+              getTicker(coin.product).catch(() => 0),
+            ]);
+            const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
+            const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice);
+            const pred =
+              analysis.predictions.find((p) => p.target === targetISO) ??
+              analysis.predictions[0];
+            if (pred) {
+              records.push({
+                symbol: sym,
+                snappedAt: new Date(nowMs).toISOString(),
+                targetTime: targetISO,
+                targetLabel: pred.label,
+                priceAtSnapshot: analysis.price,
+                predictedPrice: pred.predictedPrice,
+                predictedDirection: pred.direction,
+                confidence: pred.confidence,
+                actualPrice: null,
+                errorPct: null,
+                correct: null,
+                evaluatedAt: null,
+                status: "pending",
+              });
+              if (records.length > MAX_HISTORY)
+                records.splice(0, records.length - MAX_HISTORY);
+            }
+          } catch {
+            // non-fatal — will retry next tick
+          }
+        }
+      }),
+    );
+  };
+
+  // Run immediately on startup, then every 60 seconds.
+  tick().catch(() => {});
+  setInterval(() => tick().catch(() => {}), 60_000);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -593,13 +716,19 @@ export async function fetchCryptoPredictions(): Promise<{
   const coins = await Promise.all(
     CRYPTO_COINS.map(async (coin) => {
       try {
+        // Return cached analysis if within the 3.5-min stable window.
+        const hit = predCache.get(coin.symbol);
+        if (hit && Date.now() - hit.at < PRED_TTL) return hit.value;
+
         const [candles, stats, tickerPrice] = await Promise.all([
           getCandles(coin.product),
           getStats(coin.product),
           getTicker(coin.product).catch(() => 0),
         ]);
         const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-        return analyzeCoin(coin, candles, stats, now, livePrice);
+        const result = analyzeCoin(coin, candles, stats, now, livePrice);
+        predCache.set(coin.symbol, { at: Date.now(), value: result });
+        return result;
       } catch {
         return null;
       }

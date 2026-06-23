@@ -1,9 +1,13 @@
 import { Router } from "express";
-import { fetchCryptoPredictions, fetchCryptoPrices, fetchAIPredictions } from "../lib/crypto";
+import {
+  fetchCryptoPredictions,
+  fetchCryptoPrices,
+  fetchAIPredictions,
+  getPredictionHistory,
+} from "../lib/crypto";
 
 const router = Router();
 
-// Full analysis: candles, indicators, and quarter-hour predictions for all coins.
 router.get("/crypto/predictions", async (_req, res) => {
   try {
     const result = await fetchCryptoPredictions();
@@ -12,12 +16,11 @@ router.get("/crypto/predictions", async (_req, res) => {
       return;
     }
     res.json(result);
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Failed to fetch crypto predictions" });
   }
 });
 
-// Lightweight current prices for fast real-time polling.
 router.get("/crypto/prices", async (_req, res) => {
   try {
     const result = await fetchCryptoPrices();
@@ -26,12 +29,11 @@ router.get("/crypto/prices", async (_req, res) => {
       return;
     }
     res.json(result);
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Failed to fetch crypto prices" });
   }
 });
 
-// On-demand AI-enhanced price predictions for a single coin (user-triggered).
 router.get("/crypto/ai-predict", async (req, res) => {
   const symbol =
     typeof req.query.symbol === "string" ? req.query.symbol.toUpperCase() : "";
@@ -46,6 +48,16 @@ router.get("/crypto/ai-predict", async (req, res) => {
     const msg = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: `AI prediction failed: ${msg}` });
   }
+});
+
+router.get("/crypto/prediction-history", (req, res) => {
+  const symbol =
+    typeof req.query.symbol === "string" ? req.query.symbol.toUpperCase() : "";
+  if (!symbol) {
+    res.status(400).json({ error: "symbol query param required" });
+    return;
+  }
+  res.json({ symbol, history: getPredictionHistory(symbol) });
 });
 
 export default router;

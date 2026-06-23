@@ -21,6 +21,10 @@ import {
   Waves,
   Sparkles,
   Loader2,
+  ClipboardList,
+  CheckCircle2,
+  XCircle,
+  Clock,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -48,6 +52,23 @@ interface Prediction {
   direction: "up" | "down" | "flat";
   confidence: number;
   changePct: number;
+}
+
+// Shape returned by the prediction history endpoint
+interface PredictionRecord {
+  symbol: string;
+  snappedAt: string;
+  targetTime: string;
+  targetLabel: string;
+  priceAtSnapshot: number;
+  predictedPrice: number;
+  predictedDirection: "up" | "down" | "flat";
+  confidence: number;
+  actualPrice: number | null;
+  errorPct: number | null;
+  correct: boolean | null;
+  evaluatedAt: string | null;
+  status: "pending" | "evaluated";
 }
 
 // Shape returned by the on-demand AI endpoint
@@ -203,6 +224,189 @@ function LivePrice({ price, className }: { price: number; className?: string }) 
     >
       ${formatPrice(price)}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Prediction Accuracy Log — tracks 15-min boundary predictions vs actual
+// ---------------------------------------------------------------------------
+
+function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
+  const query = useQuery({
+    queryKey: ["pred-history", symbol],
+    queryFn: () =>
+      fetchJson<{ symbol: string; history: PredictionRecord[] }>(
+        `/crypto/prediction-history?symbol=${symbol}`,
+      ),
+    refetchInterval: 30_000,
+  });
+
+  const history = query.data?.history ?? [];
+  const evaluated = history.filter((r) => r.status === "evaluated");
+  const correct = evaluated.filter((r) => r.correct === true).length;
+  const accuracyPct =
+    evaluated.length > 0 ? Math.round((correct / evaluated.length) * 100) : null;
+
+  const dirIcon = (d: "up" | "down" | "flat") => {
+    if (d === "up") return <TrendingUp className="w-3 h-3 inline" />;
+    if (d === "down") return <TrendingDown className="w-3 h-3 inline" />;
+    return <Minus className="w-3 h-3 inline" />;
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold flex items-center gap-1.5">
+          <ClipboardList className="w-4 h-4 text-primary" />
+          Prediction Accuracy Log
+          <span className="text-xs font-normal text-muted-foreground">
+            — last 2 h · auto-updates every 30 s
+          </span>
+        </h3>
+        {accuracyPct !== null && (
+          <span
+            className={`text-xs font-bold px-2 py-0.5 rounded-full border ${
+              accuracyPct >= 60
+                ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+                : accuracyPct >= 40
+                  ? "text-amber-400 border-amber-500/30 bg-amber-500/10"
+                  : "text-red-400 border-red-500/30 bg-red-500/10"
+            }`}
+          >
+            {correct}/{evaluated.length} correct · {accuracyPct}%
+          </span>
+        )}
+      </div>
+
+      {history.length === 0 ? (
+        <Card className="p-5 bg-card/50 text-center">
+          <Clock className="w-8 h-8 text-muted-foreground mx-auto mb-2 opacity-40" />
+          <p className="text-sm text-muted-foreground">
+            Waiting for the next 15-minute mark to record the first prediction…
+          </p>
+          <p className="text-xs text-muted-foreground mt-1 opacity-60">
+            Records are captured at :00, :15, :30, and :45 of each hour ({tz})
+          </p>
+        </Card>
+      ) : (
+        <div className="rounded-xl border border-border overflow-hidden">
+          <div className="grid grid-cols-[1fr_1fr_1fr_72px_72px_60px] gap-0 bg-muted/30 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <span>Target</span>
+            <span>Predicted</span>
+            <span>Actual</span>
+            <span className="text-right">Error</span>
+            <span className="text-center">Direction</span>
+            <span className="text-right">Conf</span>
+          </div>
+
+          {history.map((rec, i) => {
+            const isPending = rec.status === "pending";
+            const rowBg =
+              isPending
+                ? "bg-card/30"
+                : rec.correct
+                  ? "bg-emerald-500/5"
+                  : "bg-red-500/5";
+            const borderColor =
+              isPending
+                ? "border-border/30"
+                : rec.correct
+                  ? "border-emerald-500/20"
+                  : "border-red-500/20";
+
+            return (
+              <div
+                key={rec.targetTime + rec.snappedAt}
+                className={`grid grid-cols-[1fr_1fr_1fr_72px_72px_60px] gap-0 px-4 py-3 text-sm border-t ${borderColor} ${rowBg} ${
+                  i === 0 ? "border-t-0" : ""
+                }`}
+              >
+                <div>
+                  <div className="font-semibold tabular-nums text-xs">
+                    {rec.targetLabel} {tz}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">
+                    snapped{" "}
+                    {new Date(rec.snappedAt).toLocaleTimeString("en-US", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      timeZone: "America/New_York",
+                      hour12: true,
+                    })}
+                  </div>
+                </div>
+
+                <div className="tabular-nums">
+                  <div className="font-semibold text-xs">
+                    ${formatPrice(rec.predictedPrice)}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">
+                    from ${formatPrice(rec.priceAtSnapshot)}
+                  </div>
+                </div>
+
+                <div className="tabular-nums">
+                  {isPending ? (
+                    <div className="flex items-center gap-1 text-muted-foreground text-xs">
+                      <span className="inline-flex h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                      Pending…
+                    </div>
+                  ) : (
+                    <div className="font-semibold text-xs">
+                      ${formatPrice(rec.actualPrice!)}
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-right tabular-nums text-xs">
+                  {isPending ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <span
+                      className={
+                        rec.errorPct! < 0.2
+                          ? "text-emerald-400"
+                          : rec.errorPct! < 0.5
+                            ? "text-amber-400"
+                            : "text-red-400"
+                      }
+                    >
+                      {rec.errorPct!.toFixed(2)}%
+                    </span>
+                  )}
+                </div>
+
+                <div className="text-center">
+                  {isPending ? (
+                    <span className="text-muted-foreground text-xs flex items-center justify-center gap-0.5">
+                      {dirIcon(rec.predictedDirection)}
+                    </span>
+                  ) : rec.correct ? (
+                    <span className="inline-flex items-center gap-1 text-emerald-400 text-xs">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-red-400 text-xs">
+                      <XCircle className="w-3.5 h-3.5" />
+                    </span>
+                  )}
+                </div>
+
+                <div className="text-right text-xs text-muted-foreground tabular-nums">
+                  {rec.confidence}%
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed">
+        Predictions are snapped at each :00/:15/:30/:45 mark and compared to the actual price
+        once that window closes. Direction = model predicted up/down correctly. Error = abs % off
+        the predicted price. History resets on server restart.
+      </p>
+    </div>
   );
 }
 
@@ -378,6 +582,8 @@ export default function Predictor() {
             <Skeleton className="h-80 rounded-xl" />
           </div>
         )}
+
+        <PredictionHistory symbol={selected} tz={tz} />
       </div>
     </div>
   );

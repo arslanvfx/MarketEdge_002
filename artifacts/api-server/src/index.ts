@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { fetchAllMarkets } from "./lib/markets";
+import { startPredictionTracker } from "./lib/crypto";
 
 const rawPort = process.env["PORT"];
 
@@ -25,10 +26,12 @@ app.listen(port, (err) => {
   logger.info({ port }, "Server listening");
 
   // Pre-warm the market cache so the first user request is instant.
-  // Fire-and-forget — failures are non-fatal (requests will fall back to
-  // live fetches). The cache TTL is 5 minutes so this one warm-up covers
-  // many requests without hammering external APIs.
   fetchAllMarkets()
     .then((markets) => logger.info({ count: markets.length }, "Market cache warmed"))
     .catch((err) => logger.warn({ err }, "Market cache warm-up failed (non-fatal)"));
+
+  // Start the prediction accuracy tracker: snaps model predictions at each
+  // 15-min boundary and evaluates them against actual prices once the window closes.
+  startPredictionTracker();
+  logger.info("Prediction tracker started");
 });
