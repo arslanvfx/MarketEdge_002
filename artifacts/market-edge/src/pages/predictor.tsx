@@ -458,38 +458,34 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
     return <Minus className="w-3 h-3 text-muted-foreground" />;
   };
 
+  const fmtPrice = (n: number) =>
+    n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
   return (
     <div>
       {/* ── Header ── */}
-      <div className="flex items-start justify-between mb-4">
+      <div className="flex items-center justify-between mb-5">
         <div>
           <h3 className="text-sm font-semibold flex items-center gap-1.5">
             <ClipboardList className="w-4 h-4 text-primary" />
             Prediction Accuracy Log
           </h3>
           <p className="text-[11px] text-muted-foreground mt-0.5">
-            {hasKalshiData
-              ? <>BTC hit = Claude called the correct Kalshi YES/NO (above/below target) &nbsp;·&nbsp; last 30 &nbsp;·&nbsp; 30 s refresh</>
-              : <>Hit = direction correct &amp; price within {ACCURACY_THRESHOLD}% of actual &nbsp;·&nbsp; last 30 &nbsp;·&nbsp; 30 s refresh</>
-            }
+            {hasKalshiData ? "Above/below Kalshi target" : "Direction + within 1% of actual"} · last 30 · 30 s refresh
           </p>
         </div>
 
         {accuracyPct !== null && (
           <div className="text-right shrink-0 ml-4">
             <div
-              className={`text-2xl font-bold leading-none ${
-                accuracyPct >= 60
-                  ? "text-emerald-400"
-                  : accuracyPct >= 40
-                    ? "text-amber-400"
-                    : "text-red-400"
+              className={`text-3xl font-black leading-none tabular-nums ${
+                accuracyPct >= 60 ? "text-emerald-400" : accuracyPct >= 40 ? "text-amber-400" : "text-red-400"
               }`}
             >
               {accuracyPct}%
             </div>
-            <div className="text-[11px] text-muted-foreground mt-0.5">
-              {hits}/{evaluated.length} hits
+            <div className="text-[11px] text-muted-foreground mt-1">
+              {hits} / {evaluated.length} correct
             </div>
           </div>
         )}
@@ -497,139 +493,157 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
 
       {/* ── Empty state ── */}
       {history.length === 0 ? (
-        <Card className="p-6 bg-card/50 text-center">
-          <Clock className="w-8 h-8 text-muted-foreground mx-auto mb-2 opacity-40" />
-          <p className="text-sm text-muted-foreground">
-            Waiting for the next 15-minute mark…
-          </p>
+        <Card className="p-8 bg-card/50 text-center">
+          <Clock className="w-8 h-8 text-muted-foreground mx-auto mb-3 opacity-40" />
+          <p className="text-sm text-muted-foreground">Waiting for the next 15-minute mark…</p>
           <p className="text-xs text-muted-foreground mt-1 opacity-60">
             Records snap at :00, :15, :30, :45 each hour ({tz})
           </p>
         </Card>
       ) : (
-        <>
-          {/* ── Column labels ── */}
-          <div className="grid grid-cols-[96px_1fr_64px_44px_32px] gap-x-3 pl-5 pr-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
-            <span>Target</span>
-            <span>Predicted → Actual</span>
-            <span className="text-right">Error</span>
-            <span className="text-right">Conf</span>
-            <span />
-          </div>
+        <div className="space-y-3">
+          {history.map((rec) => {
+            const isPending = rec.status === "pending";
+            const hasTarget = rec.kalshiTarget !== null && rec.kalshiTarget !== undefined;
+            const predictedAbove = hasTarget && rec.predictedPrice >= rec.kalshiTarget!;
+            const actualAbove    = hasTarget && rec.actualPrice !== null && rec.actualPrice >= rec.kalshiTarget!;
 
-          {/* ── Rows ── */}
-          <div className="space-y-1">
-            {history.map((rec) => {
-              const isPending = rec.status === "pending";
-              const hasTarget = rec.kalshiTarget !== null && rec.kalshiTarget !== undefined;
+            const borderColor = isPending
+              ? "border-l-amber-400/70"
+              : rec.correct
+              ? "border-l-emerald-500"
+              : "border-l-red-500";
 
-              // For Kalshi-evaluated rows: show which side of target the prediction landed
-              const predictedAbove = hasTarget && rec.predictedPrice >= rec.kalshiTarget!;
-              const actualAbove    = hasTarget && rec.actualPrice !== null && rec.actualPrice >= rec.kalshiTarget!;
+            const statusBadge = isPending ? (
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-400 bg-amber-400/10 border border-amber-400/25 rounded-full px-2.5 py-0.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                Pending
+              </span>
+            ) : rec.correct ? (
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-400 bg-emerald-400/10 border border-emerald-500/25 rounded-full px-2.5 py-0.5">
+                <CheckCircle2 className="w-3 h-3" /> Hit
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-red-400 bg-red-400/10 border border-red-500/25 rounded-full px-2.5 py-0.5">
+                <XCircle className="w-3 h-3" /> Miss
+              </span>
+            );
 
-              // Compact Kalshi target label e.g. "K $62,247"
-              const kLabel = hasTarget
-                ? `K $${rec.kalshiTarget!.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
-                : null;
+            const sideLabel = (above: boolean) => (
+              <span className={`font-bold ${above ? "text-emerald-400" : "text-red-400"}`}>
+                {above ? "↑ Above" : "↓ Below"} target
+              </span>
+            );
 
-              return (
-                <div
-                  key={rec.targetTime}
-                  className={`grid grid-cols-[96px_1fr_64px_44px_32px] gap-x-3 items-center
-                    border-l-4 ${accentClass(rec)} rounded-r-lg pl-3 pr-3 py-2.5
-                    bg-card/40 hover:bg-card/70 transition-colors`}
-                >
-                  {/* Target time */}
-                  <div className="tabular-nums">
-                    <div className="text-xs font-semibold">{rec.targetLabel}</div>
-                    <div className="text-[10px] text-muted-foreground">{tz}</div>
+            return (
+              <div
+                key={rec.targetTime}
+                className={`border-l-4 ${borderColor} rounded-r-xl bg-card/50 hover:bg-card/80 transition-colors overflow-hidden`}
+              >
+                {/* Card header — time + status badge */}
+                <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-border/40">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-sm font-bold tabular-nums">{rec.targetLabel}</span>
+                    <span className="text-[11px] text-muted-foreground">{tz}</span>
                   </div>
+                  {statusBadge}
+                </div>
 
-                  {/* Predicted → Actual (Kalshi context shown inline as sub-line) */}
-                  <div className="tabular-nums text-xs min-w-0">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-muted-foreground">${formatPrice(rec.predictedPrice)}</span>
-                      {isPending ? (
-                        <span className="inline-flex items-center gap-1 text-amber-400/80 text-[10px]">
-                          <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                          pending
-                        </span>
-                      ) : (
+                {/* Card body */}
+                <div className="px-4 py-3 space-y-3">
+
+                  {/* Kalshi layout: side-by-side predicted vs actual */}
+                  {hasTarget ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      {/* Predicted */}
+                      <div className="bg-background/30 rounded-lg px-3 py-2.5">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1">
+                          Predicted
+                        </div>
+                        <div className="text-sm">{sideLabel(predictedAbove)}</div>
+                        <div className="text-xs tabular-nums text-muted-foreground mt-0.5">
+                          ${fmtPrice(rec.predictedPrice)}
+                        </div>
+                      </div>
+
+                      {/* Actual */}
+                      <div className="bg-background/30 rounded-lg px-3 py-2.5">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1">
+                          Actual
+                        </div>
+                        {isPending ? (
+                          <div className="text-sm text-muted-foreground/50 italic">TBD</div>
+                        ) : (
+                          <>
+                            <div className="text-sm">{sideLabel(actualAbove)}</div>
+                            <div className="text-xs tabular-nums text-muted-foreground mt-0.5">
+                              ${fmtPrice(rec.actualPrice!)}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    /* Non-Kalshi layout: predicted price + direction → actual */
+                    <div className="flex items-center gap-3 text-sm tabular-nums">
+                      <div>
+                        {dirLabel(rec.predictedDirection)}
+                      </div>
+                      <span className="text-muted-foreground">${fmtPrice(rec.predictedPrice)}</span>
+                      {!isPending && (
                         <>
                           <span className="text-muted-foreground/40">→</span>
-                          <span className="font-medium">${formatPrice(rec.actualPrice!)}</span>
+                          <span className="font-medium">${fmtPrice(rec.actualPrice!)}</span>
                         </>
                       )}
                     </div>
-                    {/* Kalshi sub-line: K $62,247 · pred ↑ · actual ↑ */}
-                    {kLabel && !isPending && (
-                      <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-muted-foreground/70">
-                        <span>{kLabel}</span>
-                        <span className="text-muted-foreground/30">·</span>
-                        <span className={predictedAbove ? "text-emerald-400" : "text-red-400"}>
-                          pred {predictedAbove ? "↑" : "↓"}
-                        </span>
-                        <span className="text-muted-foreground/30">·</span>
-                        <span className={actualAbove ? "text-emerald-400" : "text-red-400"}>
-                          actual {actualAbove ? "↑" : "↓"}
-                        </span>
+                  )}
+
+                  {/* Footer stats row */}
+                  <div className="flex items-center gap-4 flex-wrap text-[11px]">
+                    {hasTarget && (
+                      <div className="flex items-center gap-1 text-muted-foreground">
+                        <span className="text-[#00C805] font-semibold">K</span>
+                        <span>${rec.kalshiTarget!.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>
                       </div>
                     )}
-                    {kLabel && isPending && (
-                      <div className="text-[10px] text-muted-foreground/50 mt-0.5">
-                        {kLabel} · pred {predictedAbove ? "↑" : "↓"}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Error % — always shown */}
-                  <div className="text-right tabular-nums text-xs">
-                    {isPending ? (
-                      <span className="text-muted-foreground/30">—</span>
-                    ) : (
-                      <span
-                        className={
-                          rec.errorPct! <= ACCURACY_THRESHOLD
-                            ? "text-emerald-400"
-                            : rec.errorPct! <= 2.0
-                              ? "text-amber-400"
-                              : "text-red-400"
-                        }
-                      >
-                        {rec.errorPct!.toFixed(2)}%
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Confidence */}
-                  <div className="text-right text-xs text-muted-foreground tabular-nums">
-                    {rec.confidence}%
-                  </div>
-
-                  {/* Hit / Miss */}
-                  <div className="flex justify-center">
-                    {isPending ? (
-                      dirLabel(rec.predictedDirection)
-                    ) : rec.correct ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    ) : (
-                      <XCircle className="w-4 h-4 text-red-400" />
-                    )}
+                    <div className="flex items-center gap-1 text-muted-foreground">
+                      <span className="opacity-60">Error</span>
+                      {isPending ? (
+                        <span className="opacity-40">—</span>
+                      ) : (
+                        <span
+                          className={
+                            rec.errorPct! <= ACCURACY_THRESHOLD
+                              ? "text-emerald-400 font-medium"
+                              : rec.errorPct! <= 2.0
+                              ? "text-amber-400 font-medium"
+                              : "text-red-400 font-medium"
+                          }
+                        >
+                          {rec.errorPct!.toFixed(2)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 text-muted-foreground">
+                      <span className="opacity-60">Conf</span>
+                      <span className="font-medium">{rec.confidence}%</span>
+                    </div>
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        </>
+              </div>
+            );
+          })}
+        </div>
       )}
 
-      <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-        Claude AI analyzes candle patterns at each :00/:15/:30/:45 snap.
+      <p className="text-[11px] text-muted-foreground mt-4 leading-relaxed">
+        Predictions snap at each :00/:15/:30/:45 mark.{" "}
         {hasKalshiData
-          ? <> BTC hits are scored against the live Kalshi target — correct if Claude called the same YES/NO side as the outcome.</>
-          : <> A hit requires the correct direction call <em>and</em> price within {ACCURACY_THRESHOLD}% of actual.</>
-        }
-        {" "}History resets on server restart.
+          ? "BTC hits scored against live Kalshi target — correct if the above/below call matches the outcome."
+          : `A hit requires the correct direction call and price within ${ACCURACY_THRESHOLD}% of actual.`
+        }{" "}
+        History resets on server restart.
       </p>
     </div>
   );
