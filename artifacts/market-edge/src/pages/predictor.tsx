@@ -118,6 +118,11 @@ interface CoinPrediction {
     trend: "up" | "down" | "flat";
     trendStrength: number;
     volatilityPct: number;
+    bbUpper?: number;
+    bbLower?: number;
+    bbWidth?: number;
+    bbPctB?: number;
+    atr14?: number;
   };
   sparkline: number[];
   candles: Candle[];
@@ -822,8 +827,6 @@ export default function Predictor() {
           </div>
         )}
 
-        {selected === "BTC" && <KalshiBtcCard />}
-
         <PredictionHistory symbol={selected} tz={tz} />
       </div>
     </div>
@@ -852,6 +855,34 @@ function CoinDetail({
   onEnhance: () => void;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
+
+  // Kalshi target + call (BTC only — shared cache key with the standalone card).
+  const kalshiTargetQuery = useQuery({
+    queryKey: ["kalshi-btc-target"],
+    queryFn: () => fetchJson<KalshiTarget>("/crypto/kalshi-btc-target"),
+    refetchInterval: 15_000,
+    enabled: coin.symbol === "BTC",
+  });
+  const ktd = kalshiTargetQuery.data;
+  const kalshiAvailable = coin.symbol === "BTC" && ktd?.available === true;
+  const kalshiTarget = kalshiAvailable ? (ktd?.targetPrice ?? null) : null;
+  const kalshiIsLive = ktd?.isLive === true;
+  const kalshiEventTicker = ktd?.eventTicker;
+  const kalshiCallQuery = useQuery({
+    queryKey: ["kalshi-btc-call", kalshiEventTicker],
+    queryFn: () =>
+      fetchJson<KalshiBtcCall>(
+        `/crypto/kalshi-btc-call?eventTicker=${encodeURIComponent(kalshiEventTicker!)}&target=${kalshiTarget}`,
+      ),
+    enabled: kalshiAvailable && !!kalshiEventTicker && kalshiTarget !== null,
+    staleTime: Infinity,
+    retry: 2,
+  });
+  const kalshiCall = kalshiCallQuery.data;
+  const toET = (iso: string) =>
+    new Date(iso).toLocaleTimeString("en-US", {
+      hour: "2-digit", minute: "2-digit", timeZone: "America/New_York", hour12: true,
+    });
 
   // Merge AI-enhanced predictions over the statistical baseline (by position).
   const displayPreds: Prediction[] = coin.predictions.map((p, i) => {
@@ -1026,12 +1057,105 @@ function CoinDetail({
         </Card>
       </div>
 
-      {/* Prediction showcase */}
+      {/* ── Kalshi Target Banner (BTC only) ── */}
+      {kalshiAvailable && (
+        <div className="rounded-xl border-2 border-[#00C805]/40 bg-[#00C805]/6 overflow-hidden">
+          {/* Banner header */}
+          <div className="flex items-center justify-between px-5 py-3 border-b border-[#00C805]/20 bg-[#00C805]/8">
+            <div className="flex items-center gap-2">
+              <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[#00C805]/20 border border-[#00C805]/40">
+                <span className="text-[11px] font-black text-[#00C805]">K</span>
+              </div>
+              <span className="text-xs font-bold uppercase tracking-wider text-[#00C805]/80">Kalshi 15-min Target</span>
+              {kalshiIsLive ? (
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 rounded px-1.5 py-0.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> LIVE
+                </span>
+              ) : (
+                <span className="text-[10px] text-muted-foreground border border-border rounded px-1.5 py-0.5">Next window</span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              {ktd?.closeTime && kalshiIsLive && (
+                <span className="text-[11px] text-muted-foreground">closes <span className="font-medium text-foreground">{toET(ktd.closeTime)} ET</span></span>
+              )}
+              {ktd?.url && (
+                <a href={ktd.url} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] text-[#00C805]/80 hover:text-[#00C805] transition-colors">
+                  View on Kalshi <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
+          </div>
+          {/* Banner body */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 divide-x divide-[#00C805]/15 px-0">
+            {/* Target price — hero */}
+            <div className="px-5 py-4">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Strike Price</div>
+              {kalshiTarget !== null ? (
+                <>
+                  <div className="text-3xl font-black tabular-nums text-[#00C805]">${formatPrice(kalshiTarget)}</div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">BTC BRTI at window open</div>
+                </>
+              ) : (
+                <>
+                  <div className="text-3xl font-black text-muted-foreground">TBD</div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">{ktd?.openTime ? `set at ${toET(ktd.openTime)} ET` : "set when window opens"}</div>
+                </>
+              )}
+            </div>
+            {/* Current price vs target */}
+            {kalshiTarget !== null && (
+              <div className="px-5 py-4">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Current Price</div>
+                <div className="text-3xl font-black tabular-nums">${formatPrice(livePrice)}</div>
+                <div className={`text-sm font-bold mt-0.5 flex items-center gap-1 ${livePrice >= kalshiTarget ? "text-emerald-400" : "text-red-400"}`}>
+                  {livePrice >= kalshiTarget ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+                  {livePrice >= kalshiTarget ? "Above" : "Below"} target
+                  <span className="font-normal text-[11px] text-muted-foreground ml-1">
+                    ({livePrice >= kalshiTarget ? "+" : ""}{(((livePrice - kalshiTarget) / kalshiTarget) * 100).toFixed(2)}%)
+                  </span>
+                </div>
+              </div>
+            )}
+            {/* Claude's call */}
+            <div className="px-5 py-4 col-span-2 sm:col-span-1">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Claude's Call</div>
+              {kalshiTarget === null ? (
+                <div className="text-sm text-muted-foreground">Awaiting target price…</div>
+              ) : kalshiCallQuery.isFetching ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing…
+                </div>
+              ) : kalshiCall ? (
+                <>
+                  <div className={`flex items-center gap-1.5 text-xl font-black ${kalshiCall.above ? "text-emerald-400" : "text-red-400"}`}>
+                    {kalshiCall.above ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
+                    {kalshiCall.above ? "ABOVE" : "BELOW"}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    ${formatPrice(kalshiCall.predictedPrice)} · {kalshiCall.confidence}% conf.
+                  </div>
+                  {kalshiIsLive && (
+                    <div className={`mt-1.5 text-xs font-bold ${kalshiCall.above ? "text-emerald-400" : "text-red-400"}`}>
+                      → Bet {kalshiCall.above ? "YES" : "NO"} on Kalshi
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-sm text-muted-foreground/60">Awaiting analysis…</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Quarter-Hour Forecasts — side-by-side model comparison ── */}
       <div>
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold flex items-center gap-1.5">
             <Zap className="w-4 h-4 text-primary" /> Quarter-Hour Forecasts
-            <span className="text-xs font-normal text-muted-foreground">— predicted price at each {tz} mark</span>
+            <span className="text-xs font-normal text-muted-foreground">— Statistical vs Claude AI at each {tz} mark</span>
           </h3>
           <div className="flex items-center gap-2">
             {aiError && (
@@ -1041,7 +1165,7 @@ function CoinDetail({
             )}
             {!aiError && aiEntry && (
               <span className="text-[11px] text-primary/60 tabular-nums">
-                AI · {aiEntry.at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} {tz}
+                AI run · {aiEntry.at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} {tz}
               </span>
             )}
             <button
@@ -1050,76 +1174,73 @@ function CoinDetail({
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
             >
               {aiLoading ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  Analyzing…
-                </>
+                <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing…</>
               ) : aiEntry ? (
-                <>
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Re-analyze
-                </>
+                <><Sparkles className="w-3.5 h-3.5" /> Re-analyze</>
               ) : (
-                <>
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Enhance with AI
-                </>
+                <><Sparkles className="w-3.5 h-3.5" /> Enhance with AI</>
               )}
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {displayPreds.map((p, i) => {
-            const visual =
-              p.predictedPrice > livePrice ? "up"
-              : p.predictedPrice < livePrice ? "down"
-              : "flat";
-            const d = DIR[visual];
-            const Icon = d.icon;
-            const isAI = !!aiEntry?.preds[i];
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {coin.predictions.map((statPred, i) => {
+            const aiPred = aiEntry?.preds[i] ?? null;
+            const statChangePct = livePrice > 0 ? ((statPred.predictedPrice - livePrice) / livePrice) * 100 : statPred.changePct;
+            const aiChangePct = aiPred && livePrice > 0 ? ((aiPred.predictedPrice - livePrice) / livePrice) * 100 : 0;
+            const statDir: "up" | "down" | "flat" = statChangePct > 0.05 ? "up" : statChangePct < -0.05 ? "down" : "flat";
+            const aiDir: "up" | "down" | "flat" = aiPred ? (aiChangePct > 0.05 ? "up" : aiChangePct < -0.05 ? "down" : "flat") : "flat";
             return (
-              <Card
-                key={p.target}
-                data-testid={`prediction-${i}`}
-                className={`p-4 border ${d.border} ${d.bg} relative overflow-hidden`}
-              >
-                {isAI && (
-                  <div className="absolute top-2 right-2">
-                    <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-primary/70 bg-primary/10 border border-primary/20 rounded px-1.5 py-0.5">
-                      <Sparkles className="w-2.5 h-2.5" /> AI
-                    </span>
-                  </div>
-                )}
-                <div className="flex items-center justify-between mb-2">
-                  <div>
-                    <div className="text-lg font-bold tabular-nums leading-none">{p.label}</div>
-                    <div className="text-[11px] text-muted-foreground mt-0.5">{tz} · in {p.minutesAhead} min</div>
-                  </div>
-                  <div className={`flex items-center gap-1 ${d.color} ${isAI ? "mr-8" : ""}`}>
-                    <Icon className="w-4 h-4" />
-                    <span className="text-xs font-semibold">{formatPct(p.changePct)}</span>
-                  </div>
+              <Card key={statPred.target} data-testid={`prediction-${i}`} className="overflow-hidden border-border bg-card/60">
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-muted/20">
+                  <span className="text-sm font-bold tabular-nums">{statPred.label}</span>
+                  <span className="text-[11px] text-muted-foreground">{tz} · in {statPred.minutesAhead} min</span>
                 </div>
-
-                <div className={`text-2xl font-extrabold tracking-tight tabular-nums ${d.color}`}>
-                  ${formatPrice(p.predictedPrice)}
-                </div>
-                <div className="text-[11px] text-muted-foreground tabular-nums mt-1">
-                  range ${formatPrice(p.low)} – ${formatPrice(p.high)}
-                </div>
-
-                <div className="mt-3">
-                  <div className="flex items-center justify-between text-[11px] mb-1">
-                    <span className="text-muted-foreground">Confidence</span>
-                    <span className="font-semibold">{p.confidence}%</span>
-                  </div>
-                  <div className="h-1.5 rounded-full bg-muted/50 overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${
-                        visual === "up" ? "bg-emerald-400" : visual === "down" ? "bg-red-400" : "bg-slate-400"
-                      }`}
-                      style={{ width: `${p.confidence}%` }}
+                <div className="grid grid-cols-2 divide-x divide-border">
+                  {/* Statistical Model column */}
+                  <div className="px-4 py-3 space-y-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                      Statistical Model
+                    </div>
+                    <ModelColumn
+                      price={statPred.predictedPrice}
+                      changePct={statChangePct}
+                      direction={statDir}
+                      confidence={statPred.confidence}
+                      low={statPred.low}
+                      high={statPred.high}
+                      kalshiTarget={kalshiTarget}
                     />
+                  </div>
+                  {/* Claude AI column */}
+                  <div className="px-4 py-3 space-y-2">
+                    <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                      <Sparkles className="w-3 h-3 text-primary/50" /> Claude AI
+                    </div>
+                    {aiPred ? (
+                      <ModelColumn
+                        price={aiPred.predictedPrice}
+                        changePct={aiChangePct}
+                        direction={aiDir}
+                        confidence={aiPred.confidence}
+                        low={aiPred.low}
+                        high={aiPred.high}
+                        kalshiTarget={kalshiTarget}
+                      />
+                    ) : (
+                      <div className="pt-1">
+                        {aiLoading ? (
+                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                            <Loader2 className="w-3 h-3 animate-spin" /> Analyzing…
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground/50 italic leading-snug">
+                            Click "Enhance with AI"<br />to run Claude analysis
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </Card>
@@ -1151,10 +1272,64 @@ function CoinDetail({
           <Indicator label="SMA (20)" value={`$${formatPrice(coin.indicators.sma20)}`} />
         </div>
         <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-          Forecasts are powered by Claude AI — each refresh analyzes the latest 30 candles, RSI, MACD, trend strength,
-          and key support/resistance levels to produce refined price targets. Click "Enhance with AI" to force a fresh
-          Claude analysis on demand. Prices update every 3 s. Not financial advice · times shown in US Eastern ({tz}).
+          Statistical Model: drift + regression on 60 min of 1-min candles, RSI, MACD, Bollinger Bands, ATR.
+          Claude AI: extended-thinking analysis of the same chart data — click "Enhance with AI" to run it on demand.
+          Prices update every 3 s · Not financial advice · {tz}.
         </p>
+      </div>
+    </div>
+  );
+}
+
+function ModelColumn({
+  price,
+  changePct,
+  direction,
+  confidence,
+  low,
+  high,
+  kalshiTarget,
+}: {
+  price: number;
+  changePct: number;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  low: number;
+  high: number;
+  kalshiTarget: number | null;
+}) {
+  const d = DIR[direction];
+  const Icon = d.icon;
+  const vsTarget = kalshiTarget !== null ? price >= kalshiTarget : null;
+  return (
+    <div className="space-y-1.5">
+      <div className={`text-xl font-extrabold tabular-nums leading-none ${d.color}`}>
+        ${formatPrice(price)}
+      </div>
+      <div className={`flex items-center gap-1 text-xs ${d.color}`}>
+        <Icon className="w-3 h-3" />
+        <span>{formatPct(changePct)}</span>
+      </div>
+      {vsTarget !== null && (
+        <div className={`text-[11px] font-bold flex items-center gap-0.5 ${vsTarget ? "text-emerald-400" : "text-red-400"}`}>
+          {vsTarget ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+          {vsTarget ? "Above" : "Below"} target
+        </div>
+      )}
+      <div className="pt-0.5">
+        <div className="flex items-center justify-between text-[10px] mb-1">
+          <span className="text-muted-foreground">Conf</span>
+          <span className="font-semibold">{confidence}%</span>
+        </div>
+        <div className="h-1 rounded-full bg-muted/50 overflow-hidden">
+          <div
+            className={`h-full rounded-full ${direction === "up" ? "bg-emerald-400" : direction === "down" ? "bg-red-400" : "bg-slate-400"}`}
+            style={{ width: `${confidence}%` }}
+          />
+        </div>
+      </div>
+      <div className="text-[10px] text-muted-foreground/50 tabular-nums">
+        {formatPrice(low)} – {formatPrice(high)}
       </div>
     </div>
   );
