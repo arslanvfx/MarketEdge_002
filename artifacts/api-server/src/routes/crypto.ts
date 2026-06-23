@@ -5,6 +5,7 @@ import {
   fetchAIPredictions,
   getPredictionHistory,
   ACCURACY_THRESHOLD_PCT,
+  fetchKalshiBtcCall,
 } from "../lib/crypto";
 
 const router = Router();
@@ -137,6 +138,28 @@ router.get("/crypto/kalshi-btc-target", async (_req, res) => {
     res.json(data);
   } catch {
     res.status(500).json({ available: false });
+  }
+});
+
+// Dedicated Claude call for the current Kalshi BTC window
+router.get("/crypto/kalshi-btc-call", async (req, res) => {
+  const eventTicker = String(req.query.eventTicker ?? "");
+  const rawTarget = parseFloat(String(req.query.target ?? ""));
+
+  if (!eventTicker || isNaN(rawTarget)) {
+    res.status(400).json({ error: "eventTicker and target query params required" });
+    return;
+  }
+
+  try {
+    const result = await fetchKalshiBtcCall(rawTarget, eventTicker);
+    if (!result) {
+      res.status(503).json({ error: "Claude call failed" });
+      return;
+    }
+    res.json(result);
+  } catch {
+    res.status(500).json({ error: "Internal error" });
   }
 });
 

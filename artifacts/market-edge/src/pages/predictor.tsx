@@ -250,20 +250,44 @@ function LivePrice({ price, className }: { price: number; className?: string }) 
 // Kalshi 15-min BTC Market card — shows live target price + Claude verdict
 // ---------------------------------------------------------------------------
 
-function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
-  const query = useQuery({
+interface KalshiBtcCall {
+  above: boolean;
+  confidence: number;
+  predictedPrice: number;
+}
+
+function KalshiBtcCard() {
+  const targetQuery = useQuery({
     queryKey: ["kalshi-btc-target"],
     queryFn: () => fetchJson<KalshiTarget>("/crypto/kalshi-btc-target"),
     refetchInterval: 15_000,
   });
 
-  const d = query.data;
+  const d = targetQuery.data;
+  const eventTicker = d?.eventTicker;
+  const target = d?.targetPrice ?? null;
+
+  // Keyed by eventTicker — auto-fires a fresh Claude call whenever the window changes.
+  const callQuery = useQuery({
+    queryKey: ["kalshi-btc-call", eventTicker],
+    queryFn: () =>
+      fetchJson<KalshiBtcCall>(
+        `/crypto/kalshi-btc-call?eventTicker=${encodeURIComponent(eventTicker!)}&target=${target}`,
+      ),
+    enabled: !!eventTicker && target !== null,
+    staleTime: Infinity, // cached on server per eventTicker; no need to re-fetch
+    retry: 2,
+  });
+
   if (!d?.available) return null;
 
   const isLive = d.isLive === true;
-  const target = d.targetPrice;
+  const call = callQuery.data;
+  const isAnalyzing = callQuery.isFetching || callQuery.isLoading;
 
-  const above = target !== null && predictedPrice !== null && predictedPrice >= target;
+  const above = call?.above ?? null;
+  const predictedPrice = call?.predictedPrice ?? null;
+  const confidence = call?.confidence ?? null;
   const diff = target !== null && predictedPrice !== null ? predictedPrice - target : null;
   const diffPct = diff !== null && target ? (diff / target) * 100 : null;
 
@@ -308,12 +332,12 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
             }
           </span>
           <button
-            onClick={() => query.refetch()}
-            disabled={query.isFetching}
+            onClick={() => { void targetQuery.refetch(); void callQuery.refetch(); }}
+            disabled={targetQuery.isFetching || isAnalyzing}
             className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors"
             title="Refresh"
           >
-            <RefreshCw className={`w-3 h-3 ${query.isFetching ? "animate-spin" : ""}`} />
+            <RefreshCw className={`w-3 h-3 ${(targetQuery.isFetching || isAnalyzing) ? "animate-spin" : ""}`} />
           </button>
           {d.url && (
             <a
@@ -359,11 +383,16 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
             <>
               <div className="text-sm text-muted-foreground font-medium">Awaiting target…</div>
               <div className="text-[11px] text-muted-foreground mt-0.5">
-                Will compare once window opens
+                Will analyze once window opens
               </div>
             </>
-          ) : predictedPrice === null ? (
-            <div className="text-sm text-muted-foreground">Loading prediction…</div>
+          ) : isAnalyzing ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              Analyzing market…
+            </div>
+          ) : above === null ? (
+            <div className="text-sm text-muted-foreground">Awaiting analysis…</div>
           ) : (
             <>
               <div className={`flex items-center gap-1.5 text-base font-bold ${above ? "text-emerald-400" : "text-red-400"}`}>
@@ -371,13 +400,15 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
                 {above ? "ABOVE TARGET" : "BELOW TARGET"}
               </div>
               <div className="text-[11px] text-muted-foreground mt-0.5 tabular-nums">
-                ${formatPrice(predictedPrice)}
+                ${formatPrice(predictedPrice!)}
                 {diffPct !== null && (
                   <span className={diffPct >= 0 ? "text-emerald-400" : "text-red-400"}>
                     {" "}({diffPct >= 0 ? "+" : ""}{diffPct.toFixed(2)}%)
                   </span>
                 )}
-                <span className="ml-1">predicted</span>
+                {confidence !== null && (
+                  <span className="ml-1 text-muted-foreground">· {confidence}% conf.</span>
+                )}
               </div>
               {isLive && (
                 <div className={`mt-1.5 text-[11px] font-bold ${above ? "text-emerald-400" : "text-red-400"}`}>
@@ -777,13 +808,7 @@ export default function Predictor() {
           </div>
         )}
 
-        {selected === "BTC" && (
-          <KalshiBtcCard
-            predictedPrice={
-              active?.predictions.find((p) => p.minutesAhead === 15)?.predictedPrice ?? null
-            }
-          />
-        )}
+        {selected === "BTC" && <KalshiBtcCard />}
 
         <PredictionHistory symbol={selected} tz={tz} />
       </div>

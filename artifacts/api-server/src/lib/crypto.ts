@@ -886,12 +886,7 @@ export async function fetchCryptoPredictions(): Promise<{
           getTicker(coin.product).catch(() => 0),
         ]);
         const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-        const base = analyzeCoin(coin, candles, stats, now, livePrice);
-
-        // Ask Claude to study the chart and refine all four horizon targets.
-        // Falls back silently to the statistical model if the call fails.
-        const aiPreds = await callClaudeForPredictions(base);
-        const result = aiPreds ? applyAIPredictions(base, aiPreds) : base;
+        const result = analyzeCoin(coin, candles, stats, now, livePrice);
 
         predCache.set(coin.symbol, { at: Date.now(), value: result });
         return result;
@@ -904,6 +899,113 @@ export async function fetchCryptoPredictions(): Promise<{
     generatedAt: now.toISOString(),
     coins: coins.filter((c): c is CoinPrediction => c !== null),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated Kalshi BTC call — one focused Claude question per market window
+// ---------------------------------------------------------------------------
+
+interface KalshiBtcCallResult {
+  above: boolean;
+  confidence: number;
+  predictedPrice: number;
+}
+
+// Cache keyed by Kalshi eventTicker so the same answer is reused within a window.
+const kalshiBtcCallCache = new Map<string, KalshiBtcCallResult>();
+
+export async function fetchKalshiBtcCall(
+  kalshiTarget: number,
+  eventTicker: string,
+): Promise<KalshiBtcCallResult | null> {
+  // Return cached result for the same Kalshi window.
+  const cached = kalshiBtcCallCache.get(eventTicker);
+  if (cached) return cached;
+
+  try {
+    const btc = CRYPTO_COINS.find((c) => c.symbol === "BTC")!;
+    const [candles, stats, tickerPrice] = await Promise.all([
+      getCandles(btc.product),
+      getStats(btc.product),
+      getTicker(btc.product).catch(() => 0),
+    ]);
+    const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
+    const analysis = analyzeCoin(btc, candles, stats, new Date(), livePrice);
+    const price = livePrice ?? analysis.price;
+
+    const recent = candles.slice(-20);
+    const candleRows = recent
+      .map((c) => `${c.t},${c.o.toFixed(2)},${c.h.toFixed(2)},${c.l.toFixed(2)},${c.c.toFixed(2)}`)
+      .join("\n");
+
+    const ind = analysis.indicators;
+    const rsiHint = ind.rsi >= 70 ? "overbought" : ind.rsi <= 30 ? "oversold" : "neutral";
+
+    const prompt = `BTC/USD Kalshi market question.
+
+Current price: $${price.toFixed(2)}
+Kalshi target (floor strike): $${kalshiTarget.toFixed(2)}
+Gap to target: ${(price - kalshiTarget).toFixed(2)} (${((price - kalshiTarget) / kalshiTarget * 100).toFixed(3)}%)
+
+INDICATORS:
+RSI(14): ${ind.rsi.toFixed(1)} (${rsiHint})
+MACD: ${ind.macd >= 0 ? "Bullish" : "Bearish"} (${ind.macd.toFixed(2)})
+Trend: ${ind.trend.toUpperCase()} | Strength: ${Math.round(ind.trendStrength * 100)}%
+Volatility: ${ind.volatilityPct.toFixed(3)}%/min
+1h change: ${analysis.change1hPct.toFixed(3)}%
+
+RECENT 20 1-MIN CANDLES (unix,open,high,low,close):
+${candleRows}
+
+Question: Will BTC close ABOVE or BELOW the Kalshi target of $${kalshiTarget.toFixed(2)} in the next 15 minutes?
+
+Return ONLY valid JSON:
+{"side":"above","predictedPrice":0.00,"confidence":70}`;
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 256,
+      system:
+        "You are an expert crypto short-term trader. You MUST respond with ONLY a raw JSON object — no markdown, no explanation, no analysis text. Your entire response is the JSON object and nothing else.",
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+
+    // Try to extract a JSON object anywhere in the response.
+    let parsed: { side: string; predictedPrice: number; confidence: number } | null = null;
+    const jsonMatch = raw.match(/\{[^{}]*"side"[^{}]*\}/);
+    if (jsonMatch) {
+      try { parsed = JSON.parse(jsonMatch[0]); } catch { /* fall through */ }
+    }
+
+    // Fallback: parse the prose for ABOVE / BELOW keywords.
+    if (!parsed) {
+      const lower = raw.toLowerCase();
+      const sideInferred = lower.includes("above") ? "above" : "below";
+      const confMatch = lower.match(/(\d{2,3})%\s*confidence|\bconfidence[:\s]+(\d{2,3})/);
+      const confidence = confMatch ? parseInt(confMatch[1] ?? confMatch[2]) : 65;
+      const priceMatch = raw.match(/\$([0-9,]+(?:\.[0-9]+)?)/);
+      const inferredPrice = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, "")) : price;
+      parsed = { side: sideInferred, confidence, predictedPrice: inferredPrice || price };
+    }
+
+    const result: KalshiBtcCallResult = {
+      above: parsed.side === "above",
+      confidence: Math.min(95, Math.max(20, Number(parsed.confidence) || 60)),
+      predictedPrice: Number(parsed.predictedPrice) || price,
+    };
+
+    kalshiBtcCallCache.set(eventTicker, result);
+    // Evict old window answers (keep at most 5 entries)
+    if (kalshiBtcCallCache.size > 5) {
+      kalshiBtcCallCache.delete(kalshiBtcCallCache.keys().next().value!);
+    }
+    return result;
+  } catch (err) {
+    console.error("[fetchKalshiBtcCall] error:", err);
+    return null;
+  }
 }
 
 export async function fetchCryptoPrices(): Promise<{
