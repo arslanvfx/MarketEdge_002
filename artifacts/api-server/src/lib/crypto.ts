@@ -1,4 +1,6 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { db, predictionRecordsTable } from "@workspace/db";
+import { desc, eq, inArray } from "drizzle-orm";
 
 // Real-time crypto price predictor.
 //
@@ -678,6 +680,87 @@ export function getPredictionHistory(symbol: string): PredictionRecord[] {
 }
 
 // ---------------------------------------------------------------------------
+// DB persistence helpers — fire-and-forget, never block the tracker
+// ---------------------------------------------------------------------------
+
+function rowToRecord(row: typeof predictionRecordsTable.$inferSelect): PredictionRecord {
+  return {
+    symbol: row.symbol,
+    snappedAt: row.snappedAt.toISOString(),
+    targetTime: row.targetTime.toISOString(),
+    targetLabel: row.targetLabel,
+    priceAtSnapshot: parseFloat(row.priceAtSnapshot),
+    predictedPrice: parseFloat(row.predictedPrice),
+    predictedDirection: row.predictedDirection as "up" | "down" | "flat",
+    confidence: row.confidence,
+    kalshiTarget: row.kalshiTarget != null ? parseFloat(row.kalshiTarget) : null,
+    actualPrice: row.actualPrice != null ? parseFloat(row.actualPrice) : null,
+    errorPct: row.errorPct != null ? parseFloat(row.errorPct) : null,
+    correct: row.correct,
+    evaluatedAt: row.evaluatedAt ? row.evaluatedAt.toISOString() : null,
+    status: row.status as "pending" | "evaluated",
+  };
+}
+
+async function initHistoryFromDB(): Promise<void> {
+  try {
+    const symbols = CRYPTO_COINS.map((c) => c.symbol);
+    // Load the last MAX_HISTORY records per coin, newest first, then reverse per coin.
+    const rows = await db
+      .select()
+      .from(predictionRecordsTable)
+      .where(inArray(predictionRecordsTable.symbol, symbols))
+      .orderBy(desc(predictionRecordsTable.targetTime))
+      .limit(symbols.length * MAX_HISTORY);
+
+    for (const sym of symbols) {
+      const coinRows = rows.filter((r) => r.symbol === sym).reverse(); // oldest first
+      historyStore.set(sym, coinRows.map(rowToRecord));
+    }
+  } catch (err) {
+    console.error("[initHistoryFromDB] failed (non-fatal):", err);
+  }
+}
+
+function dbInsertRecord(rec: PredictionRecord): void {
+  const id = `${rec.symbol}-${rec.targetTime}`;
+  db.insert(predictionRecordsTable)
+    .values({
+      id,
+      symbol: rec.symbol,
+      snappedAt: new Date(rec.snappedAt),
+      targetTime: new Date(rec.targetTime),
+      targetLabel: rec.targetLabel,
+      priceAtSnapshot: String(rec.priceAtSnapshot),
+      predictedPrice: String(rec.predictedPrice),
+      predictedDirection: rec.predictedDirection,
+      confidence: rec.confidence,
+      kalshiTarget: rec.kalshiTarget != null ? String(rec.kalshiTarget) : null,
+      actualPrice: null,
+      errorPct: null,
+      correct: null,
+      evaluatedAt: null,
+      status: "pending",
+    })
+    .onConflictDoNothing()
+    .catch((err) => console.error("[dbInsertRecord] failed:", err));
+}
+
+function dbUpdateRecord(rec: PredictionRecord): void {
+  const id = `${rec.symbol}-${rec.targetTime}`;
+  db.update(predictionRecordsTable)
+    .set({
+      actualPrice: rec.actualPrice != null ? String(rec.actualPrice) : null,
+      errorPct: rec.errorPct != null ? String(rec.errorPct) : null,
+      correct: rec.correct,
+      evaluatedAt: rec.evaluatedAt ? new Date(rec.evaluatedAt) : null,
+      status: rec.status,
+    })
+    .where(eq(predictionRecordsTable.id, id))
+    .catch((err) => console.error("[dbUpdateRecord] failed:", err));
+}
+
+// ---------------------------------------------------------------------------
 // Claude-powered refinement for the tracker snapshot.
 // Called once per 15-min boundary per coin; falls back to statistical model.
 // ---------------------------------------------------------------------------
@@ -756,6 +839,9 @@ Return ONLY valid JSON (no markdown):
 }
 
 export function startPredictionTracker(): void {
+  // Restore previous history from the database before the first tick.
+  initHistoryFromDB().catch(() => {});
+
   const tick = async () => {
     const nowMs = Date.now();
     const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
@@ -799,6 +885,7 @@ export function startPredictionTracker(): void {
               rec.correct = correct;
               rec.evaluatedAt = new Date().toISOString();
               rec.status = "evaluated";
+              dbUpdateRecord(rec);
             } catch {
               // retry on next tick
             }
@@ -832,7 +919,7 @@ export function startPredictionTracker(): void {
                 refineSnappedPrediction(analysis, basePred),
                 sym === "BTC" ? fetchKalshiBtcTarget() : Promise.resolve(null),
               ]);
-              records.push({
+              const newRec: PredictionRecord = {
                 symbol: sym,
                 snappedAt: new Date(nowMs).toISOString(),
                 targetTime: targetISO,
@@ -847,7 +934,9 @@ export function startPredictionTracker(): void {
                 correct: null,
                 evaluatedAt: null,
                 status: "pending",
-              });
+              };
+              records.push(newRec);
+              dbInsertRecord(newRec);
               if (records.length > MAX_HISTORY)
                 records.splice(0, records.length - MAX_HISTORY);
             }
