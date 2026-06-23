@@ -13,6 +13,7 @@ import Builder from "./pages/builder";
 import Portfolio from "./pages/portfolio";
 import ComboDetail from "./pages/combo-detail";
 import SmartPicks from "./pages/picks";
+import Predictor from "./pages/predictor";
 import { Layout } from "./components/layout";
 import { BuilderProvider } from "./lib/builder-context";
 import { AlertsNotifier } from "./components/alerts-notifier";
@@ -136,6 +137,9 @@ function ClerkProviderWithRoutes() {
             </Route>
             <Route path="/picks">
               <Layout><SmartPicks /></Layout>
+            </Route>
+            <Route path="/predictor">
+              <Layout><Predictor /></Layout>
             </Route>
             <Route path="/builder">
               <Layout><Builder /></Layout>
