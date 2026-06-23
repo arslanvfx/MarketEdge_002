@@ -20,7 +20,7 @@ import {
   Gauge,
   Waves,
   Sparkles,
-  Brain,
+  Loader2,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -48,7 +48,16 @@ interface Prediction {
   direction: "up" | "down" | "flat";
   confidence: number;
   changePct: number;
-  reasoning?: string;
+}
+
+// Shape returned by the on-demand AI endpoint
+interface AIPredictionItem {
+  minutesAhead: number;
+  predictedPrice: number;
+  low: number;
+  high: number;
+  direction: "up" | "down" | "flat";
+  confidence: number;
 }
 
 interface CoinPrediction {
@@ -204,6 +213,10 @@ function LivePrice({ price, className }: { price: number; className?: string }) 
 export default function Predictor() {
   const [selected, setSelected] = useState("BTC");
   const [now, setNow] = useState(new Date());
+  const [aiData, setAiData] = useState<Map<string, { preds: AIPredictionItem[]; at: Date }>>(
+    new Map(),
+  );
+  const [aiLoading, setAiLoading] = useState(false);
 
   // 1-second EST clock
   useEffect(() => {
@@ -233,10 +246,28 @@ export default function Predictor() {
   }, [pricesQuery.data]);
 
   const active = coins.find((c) => c.symbol === selected);
-  // Prefer the fast price feed for the live number, fall back to analysis price.
   const livePrice = priceMap.get(selected)?.price ?? active?.price ?? 0;
   const tz = etAbbrev(now);
   const hasError = predQuery.isError && pricesQuery.isError && coins.length === 0;
+
+  async function handleEnhance() {
+    if (aiLoading) return;
+    setAiLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${selected}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { predictions: AIPredictionItem[]; generatedAt: string };
+      setAiData((prev) => {
+        const next = new Map(prev);
+        next.set(selected, { preds: data.predictions, at: new Date(data.generatedAt) });
+        return next;
+      });
+    } catch {
+      // silently ignore — user can retry
+    } finally {
+      setAiLoading(false);
+    }
+  }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -324,7 +355,15 @@ export default function Predictor() {
         </div>
 
         {active ? (
-          <CoinDetail key={selected} coin={active} livePrice={livePrice} tz={tz} />
+          <CoinDetail
+            key={selected}
+            coin={active}
+            livePrice={livePrice}
+            tz={tz}
+            aiEntry={aiData.get(selected)}
+            aiLoading={aiLoading}
+            onEnhance={handleEnhance}
+          />
         ) : (
           <div className="grid lg:grid-cols-3 gap-4">
             <Skeleton className="h-80 rounded-xl lg:col-span-2" />
@@ -340,8 +379,36 @@ export default function Predictor() {
 // Detailed view for the selected coin
 // ---------------------------------------------------------------------------
 
-function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: number; tz: string }) {
+function CoinDetail({
+  coin,
+  livePrice,
+  tz,
+  aiEntry,
+  aiLoading,
+  onEnhance,
+}: {
+  coin: CoinPrediction;
+  livePrice: number;
+  tz: string;
+  aiEntry?: { preds: AIPredictionItem[]; at: Date };
+  aiLoading: boolean;
+  onEnhance: () => void;
+}) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
+
+  // Merge AI-enhanced predictions over the statistical baseline (by position).
+  const displayPreds: Prediction[] = coin.predictions.map((p, i) => {
+    const ai = aiEntry?.preds[i];
+    if (!ai) return p;
+    return {
+      ...p,
+      predictedPrice: ai.predictedPrice,
+      low: ai.low,
+      high: ai.high,
+      direction: ai.direction,
+      confidence: ai.confidence,
+    };
+  });
 
   // Build combined chart data: historical closes + forward projection w/ band.
   const chartData = useMemo(() => {
@@ -351,22 +418,21 @@ function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: 
       predicted: undefined as number | undefined,
       range: undefined as [number, number] | undefined,
     }));
-    // Bridge: anchor the projection to the latest actual price.
     if (hist.length > 0) {
       const last = hist[hist.length - 1];
       last.predicted = livePrice || last.actual;
       last.range = [livePrice || last.actual, livePrice || last.actual];
     }
-    const future = coin.predictions.map((p) => ({
+    const future = displayPreds.map((p) => ({
       label: `${p.label}`,
       actual: undefined as number | undefined,
       predicted: p.predictedPrice,
       range: [p.low, p.high] as [number, number],
     }));
     return [...hist, ...future];
-  }, [coin, livePrice]);
+  }, [coin, livePrice, aiEntry]);
 
-  const headlinePred = coin.predictions[coin.predictions.length - 1];
+  const headlinePred = displayPreds[displayPreds.length - 1];
   const hd = DIR[headlinePred?.direction ?? "flat"];
 
   return (
@@ -500,32 +566,70 @@ function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: 
 
       {/* Prediction showcase */}
       <div>
-        <h3 className="text-sm font-semibold mb-3 flex items-center gap-1.5">
-          <Zap className="w-4 h-4 text-primary" /> Quarter-Hour Forecasts
-          <span className="text-xs font-normal text-muted-foreground">— predicted price at each {tz} mark</span>
-        </h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold flex items-center gap-1.5">
+            <Zap className="w-4 h-4 text-primary" /> Quarter-Hour Forecasts
+            <span className="text-xs font-normal text-muted-foreground">— predicted price at each {tz} mark</span>
+          </h3>
+          <div className="flex items-center gap-2">
+            {aiEntry && (
+              <span className="text-[11px] text-primary/60 tabular-nums">
+                AI · {aiEntry.at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} {tz}
+              </span>
+            )}
+            <button
+              onClick={onEnhance}
+              disabled={aiLoading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            >
+              {aiLoading ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Analyzing…
+                </>
+              ) : aiEntry ? (
+                <>
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Re-analyze
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Enhance with AI
+                </>
+              )}
+            </button>
+          </div>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {coin.predictions.map((p, i) => {
+          {displayPreds.map((p, i) => {
             const d = DIR[p.direction];
             const Icon = d.icon;
+            const isAI = !!aiEntry?.preds[i];
             return (
               <Card
                 key={p.target}
                 data-testid={`prediction-${i}`}
                 className={`p-4 border ${d.border} ${d.bg} relative overflow-hidden`}
               >
+                {isAI && (
+                  <div className="absolute top-2 right-2">
+                    <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-primary/70 bg-primary/10 border border-primary/20 rounded px-1.5 py-0.5">
+                      <Sparkles className="w-2.5 h-2.5" /> AI
+                    </span>
+                  </div>
+                )}
                 <div className="flex items-center justify-between mb-2">
                   <div>
                     <div className="text-lg font-bold tabular-nums leading-none">{p.label}</div>
                     <div className="text-[11px] text-muted-foreground mt-0.5">{tz} · in {p.minutesAhead} min</div>
                   </div>
-                  <div className={`flex items-center gap-1 ${d.color}`}>
+                  <div className={`flex items-center gap-1 ${d.color} ${isAI ? "mr-8" : ""}`}>
                     <Icon className="w-4 h-4" />
                     <span className="text-xs font-semibold">{formatPct(p.changePct)}</span>
                   </div>
                 </div>
 
-                {/* Showcased predicted price */}
                 <div className={`text-2xl font-extrabold tracking-tight tabular-nums ${d.color}`}>
                   ${formatPrice(p.predictedPrice)}
                 </div>
@@ -533,7 +637,6 @@ function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: 
                   range ${formatPrice(p.low)} – ${formatPrice(p.high)}
                 </div>
 
-                {/* Confidence bar */}
                 <div className="mt-3">
                   <div className="flex items-center justify-between text-[11px] mb-1">
                     <span className="text-muted-foreground">Confidence</span>
@@ -548,16 +651,6 @@ function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: 
                     />
                   </div>
                 </div>
-
-                {/* Claude AI reasoning */}
-                {p.reasoning && (
-                  <div className="mt-2.5 pt-2.5 border-t border-border/40">
-                    <div className="flex items-start gap-1.5">
-                      <Brain className="w-3 h-3 mt-0.5 shrink-0 text-primary/60" />
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">{p.reasoning}</p>
-                    </div>
-                  </div>
-                )}
               </Card>
             );
           })}
@@ -587,9 +680,9 @@ function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: 
           <Indicator label="SMA (20)" value={`$${formatPrice(coin.indicators.sma20)}`} />
         </div>
         <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-          Forecasts combine statistical analysis (momentum, trend regression, RSI, MACD) with Claude AI pattern
-          recognition. AI reasoning refreshes every ~2.5 min; prices update every 3 s. Not financial advice ·
-          times shown in US Eastern ({tz}).
+          Forecasts use statistical analysis (momentum, trend regression, RSI, MACD). Click "Enhance with AI" to
+          layer in Claude AI price targets — each call analyzes the latest 30 candles and key price levels on demand.
+          Prices update every 3 s. Not financial advice · times shown in US Eastern ({tz}).
         </p>
       </div>
     </div>

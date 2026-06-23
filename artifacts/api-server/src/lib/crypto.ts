@@ -61,7 +61,6 @@ export interface Prediction {
   direction: "up" | "down" | "flat";
   confidence: number; // 0-100
   changePct: number; // vs current price
-  reasoning?: string; // Claude's one-sentence technical rationale
 }
 
 export interface CoinPrediction {
@@ -122,19 +121,6 @@ const tickerCache = new Map<string, CacheEntry<number>>();
 const CANDLE_TTL = 8_000;
 const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
-
-// Claude AI analysis cache — per symbol, refreshed every 2.5 minutes.
-interface ClaudeAnalysisItem {
-  direction: "up" | "down" | "flat";
-  confidence: number;
-  reasoning: string;
-}
-interface ClaudeEntry {
-  at: number;
-  analysis: ClaudeAnalysisItem[]; // one item per prediction (by position)
-}
-const claudeCache = new Map<string, ClaudeEntry>();
-const CLAUDE_TTL = 150_000; // 2.5 minutes
 
 // CoinGecko — single batched request for all coins (24h change reference).
 interface GeckoEntry {
@@ -421,35 +407,56 @@ function analyzeCoin(
 }
 
 // ---------------------------------------------------------------------------
-// Claude AI enrichment — overlays direction, confidence, and reasoning onto
-// the statistical predictions. Results are cached per symbol for 2.5 min.
+// On-demand Claude AI prediction refinement.
+// Called only when the user explicitly requests it for the selected coin.
 // ---------------------------------------------------------------------------
 
-async function enrichWithClaude(
-  coin: CoinPrediction,
-  candles: Candle[],
-): Promise<ClaudeAnalysisItem[] | null> {
-  // Serve from cache if fresh enough.
-  const cached = claudeCache.get(coin.symbol);
-  if (cached && Date.now() - cached.at < CLAUDE_TTL) return cached.analysis;
+export interface AIPrediction {
+  minutesAhead: number;
+  predictedPrice: number;
+  low: number;
+  high: number;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+}
 
-  try {
-    const recent = candles.slice(-20);
-    const candleRows = recent
-      .map((c) => `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`)
-      .join("\n");
+export async function fetchAIPredictions(symbol: string): Promise<{
+  coin: string;
+  predictions: AIPrediction[];
+  generatedAt: string;
+}> {
+  const coinDef = CRYPTO_COINS.find((c) => c.symbol === symbol.toUpperCase());
+  if (!coinDef) throw new Error(`Unknown symbol: ${symbol}`);
 
-    const rsiHint =
-      coin.indicators.rsi >= 70 ? "overbought" : coin.indicators.rsi <= 30 ? "oversold" : "neutral";
+  const now = new Date();
+  const [candles, stats, tickerPrice] = await Promise.all([
+    getCandles(coinDef.product),
+    getStats(coinDef.product),
+    getTicker(coinDef.product).catch(() => 0),
+  ]);
+  const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
+  const coin = analyzeCoin(coinDef, candles, stats, now, livePrice);
 
-    const predRows = coin.predictions
-      .map(
-        (p, i) =>
-          `Target ${i + 1}: +${p.minutesAhead}min → ${p.direction} ${p.changePct >= 0 ? "+" : ""}${p.changePct.toFixed(3)}% (model conf: ${p.confidence}%)`,
-      )
-      .join("\n");
+  const recent = candles.slice(-30);
+  const candleRows = recent
+    .map(
+      (c) =>
+        `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`,
+    )
+    .join("\n");
 
-    const userPrompt = `Analyze ${coin.symbol} (${coin.name}) — price $${coin.price.toFixed(6)}
+  const rsiHint =
+    coin.indicators.rsi >= 70 ? "overbought" : coin.indicators.rsi <= 30 ? "oversold" : "neutral";
+
+  const baselineRows = coin.predictions
+    .map(
+      (p, i) =>
+        `Target ${i + 1} (+${p.minutesAhead}min): $${p.predictedPrice.toFixed(6)}, range $${p.low.toFixed(6)}–$${p.high.toFixed(6)}, ${p.direction}, conf ${p.confidence}%`,
+    )
+    .join("\n");
+
+  const userPrompt = `Refine price predictions for ${symbol} (${coin.name}).
+Current price: $${coin.price.toFixed(6)}
 
 INDICATORS:
 RSI(14): ${coin.indicators.rsi} (${rsiHint})
@@ -457,52 +464,80 @@ MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (raw: ${coin.indicato
 Trend: ${coin.indicators.trend.toUpperCase()} | Strength: ${Math.round(coin.indicators.trendStrength * 100)}%
 Volatility: ${coin.indicators.volatilityPct.toFixed(3)}%/min
 SMA(20): $${coin.indicators.sma20.toFixed(6)}
-24h: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}% | 1h: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
-24h range: $${coin.low24h.toFixed(6)} – $${coin.high24h.toFixed(6)}
+24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
+1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
+24h range: $${coin.low24h.toFixed(6)}–$${coin.high24h.toFixed(6)}
 
-RECENT 1-MIN CANDLES (oldest first, unix/open/high/low/close/vol):
+RECENT 30 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
 ${candleRows}
 
-STATISTICAL MODEL (for context):
-${predRows}
+STATISTICAL MODEL BASELINE:
+${baselineRows}
 
-Provide your technical analysis for exactly these ${coin.predictions.length} targets in order.
-Return ONLY valid JSON (no markdown, no extra text):
+Instructions:
+1. Identify concrete support and resistance levels from the candle data
+2. Detect chart patterns (consolidation, breakout, wedge, flag, double top/bottom, channel, etc.)
+3. For each of the ${coin.predictions.length} quarter-hour targets, provide your refined price estimate, a pessimistic low, and an optimistic high — these should reflect real price structure and key levels, not just formula extrapolation
+4. Set direction (up/down/flat) and confidence (0-100) based on signal confluence
+
+Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same order as the baseline:
 {
   "analysis": [
-    {"direction": "up|down|flat", "confidence": 0-100, "reasoning": "One concise sentence citing the key signals."}
+    {"predictedPrice": 0.0, "low": 0.0, "high": 0.0, "direction": "up", "confidence": 70}
   ]
 }`;
 
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 8192,
-      system:
-        "You are an expert crypto technical analyst. Study the chart data and indicators, then predict short-term price direction for each target. Respond with ONLY valid JSON — no markdown fences, no explanatory text outside the JSON.",
-      messages: [{ role: "user", content: userPrompt }],
-    });
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 8192,
+    system:
+      "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns and price structure to produce refined short-term price predictions with concrete price targets. Your predictions should reflect real support/resistance levels and observable chart patterns. Respond with ONLY valid JSON — no markdown, no extra text.",
+    messages: [{ role: "user", content: userPrompt }],
+  });
 
-    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-    const parsed = JSON.parse(cleaned) as { analysis: ClaudeAnalysisItem[] };
+  const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const parsed = JSON.parse(cleaned) as {
+    analysis: Array<{
+      predictedPrice: number;
+      low: number;
+      high: number;
+      direction: string;
+      confidence: number;
+    }>;
+  };
 
-    if (!Array.isArray(parsed.analysis) || parsed.analysis.length === 0) {
-      throw new Error("Unexpected Claude response shape");
-    }
-
-    // Validate and normalise each item.
-    const VALID_DIRS = new Set(["up", "down", "flat"]);
-    const analysis: ClaudeAnalysisItem[] = parsed.analysis.map((item) => ({
-      direction: VALID_DIRS.has(item.direction) ? item.direction : "flat",
-      confidence: Math.min(92, Math.max(20, Number(item.confidence) || 50)),
-      reasoning: typeof item.reasoning === "string" ? item.reasoning : "",
-    }));
-
-    claudeCache.set(coin.symbol, { at: Date.now(), analysis });
-    return analysis;
-  } catch {
-    return null;
+  if (!Array.isArray(parsed.analysis) || parsed.analysis.length === 0) {
+    throw new Error("Invalid Claude response shape");
   }
+
+  const VALID_DIRS = new Set<string>(["up", "down", "flat"]);
+  const predictions: AIPrediction[] = coin.predictions.map((pred, i) => {
+    const ai = parsed.analysis[i];
+    if (!ai) {
+      return {
+        minutesAhead: pred.minutesAhead,
+        predictedPrice: pred.predictedPrice,
+        low: pred.low,
+        high: pred.high,
+        direction: pred.direction,
+        confidence: pred.confidence,
+      };
+    }
+    return {
+      minutesAhead: pred.minutesAhead,
+      predictedPrice: Number(ai.predictedPrice) || pred.predictedPrice,
+      low: Number(ai.low) || pred.low,
+      high: Number(ai.high) || pred.high,
+      direction: (VALID_DIRS.has(ai.direction) ? ai.direction : pred.direction) as
+        | "up"
+        | "down"
+        | "flat",
+      confidence: Math.min(92, Math.max(20, Number(ai.confidence) || pred.confidence)),
+    };
+  });
+
+  return { coin: symbol, predictions, generatedAt: now.toISOString() };
 }
 
 // ---------------------------------------------------------------------------
@@ -523,22 +558,7 @@ export async function fetchCryptoPredictions(): Promise<{
           getTicker(coin.product).catch(() => 0),
         ]);
         const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-        const prediction = analyzeCoin(coin, candles, stats, now, livePrice);
-
-        // Enrich with Claude AI — overlay direction, confidence, and reasoning.
-        // Falls back to the statistical model silently on any error.
-        const claudeAnalysis = await enrichWithClaude(prediction, candles).catch(() => null);
-        if (claudeAnalysis) {
-          prediction.predictions.forEach((pred, i) => {
-            const ai = claudeAnalysis[i];
-            if (!ai) return;
-            pred.direction = ai.direction;
-            pred.confidence = ai.confidence;
-            pred.reasoning = ai.reasoning;
-          });
-        }
-
-        return prediction;
+        return analyzeCoin(coin, candles, stats, now, livePrice);
       } catch {
         return null;
       }
