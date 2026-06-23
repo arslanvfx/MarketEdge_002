@@ -25,6 +25,9 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  ExternalLink,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -69,6 +72,20 @@ interface PredictionRecord {
   correct: boolean | null;
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
+}
+
+// Shape returned by the Kalshi BTC 15-min target endpoint
+interface KalshiTarget {
+  available: boolean;
+  targetPrice: number | null;
+  ticker?: string;
+  eventTicker?: string;
+  closeTime?: string;
+  openTime?: string;
+  isLive?: boolean;
+  yesBid?: number;
+  yesAsk?: number;
+  url?: string;
 }
 
 // Shape returned by the on-demand AI endpoint
@@ -224,6 +241,177 @@ function LivePrice({ price, className }: { price: number; className?: string }) 
     >
       ${formatPrice(price)}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Kalshi 15-min BTC Market card — shows live target price + Claude verdict
+// ---------------------------------------------------------------------------
+
+function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
+  const query = useQuery({
+    queryKey: ["kalshi-btc-target"],
+    queryFn: () => fetchJson<KalshiTarget>("/crypto/kalshi-btc-target"),
+    refetchInterval: 60_000,
+  });
+
+  const d = query.data;
+  if (!d?.available) return null;
+
+  const isLive = d.isLive === true;
+  const target = d.targetPrice;
+
+  const above = target !== null && predictedPrice !== null && predictedPrice >= target;
+  const diff = target !== null && predictedPrice !== null ? predictedPrice - target : null;
+  const diffPct = diff !== null && target ? (diff / target) * 100 : null;
+
+  const toET = (iso: string) =>
+    new Date(iso).toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "America/New_York",
+      hour12: true,
+    });
+
+  const closeLabel = d.closeTime ? toET(d.closeTime) : null;
+  const openLabel  = d.openTime  ? toET(d.openTime)  : null;
+
+  // Kalshi bid/ask in dollars (e.g. 0.033 = 3¢ YES side). Convert to whole cents.
+  const yesCents = d.yesAsk ? Math.round(d.yesAsk * 100) : null;
+  const noCents  = d.yesAsk ? Math.round((1 - d.yesAsk) * 100) : null;
+
+  return (
+    <Card className="border-border bg-card/60 overflow-hidden">
+      {/* ── Header bar ── */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-muted/20">
+        <div className="flex items-center gap-2">
+          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[#00C805]/15 border border-[#00C805]/30">
+            <span className="text-[11px] font-black text-[#00C805]">K</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold">Kalshi 15-min BTC Market</span>
+            {isLive ? (
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 rounded px-1.5 py-0.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                LIVE
+              </span>
+            ) : (
+              <span className="text-[10px] text-muted-foreground border border-border rounded px-1.5 py-0.5">
+                Next window
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-muted-foreground">
+            {isLive
+              ? <>closes <span className="font-medium text-foreground">{closeLabel} ET</span></>
+              : <>opens <span className="font-medium text-foreground">{openLabel} ET</span></>
+            }
+          </span>
+          {d.url && (
+            <a
+              href={d.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+            >
+              View on Kalshi <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
+        </div>
+      </div>
+
+      {/* ── Body ── */}
+      <div className="grid grid-cols-3 divide-x divide-border">
+        {/* Target price */}
+        <div className="px-5 py-4">
+          <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">
+            Target Price
+          </div>
+          {target !== null ? (
+            <>
+              <div className="text-xl font-bold tabular-nums">${formatPrice(target)}</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">BTC BRTI at window open</div>
+            </>
+          ) : (
+            <>
+              <div className="text-xl font-bold text-muted-foreground">TBD</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">
+                set at {openLabel} ET when window opens
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Kalshi odds */}
+        <div className="px-5 py-4">
+          <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">
+            Kalshi Odds
+          </div>
+          {isLive && yesCents !== null ? (
+            <>
+              <div className="flex items-baseline gap-3">
+                <div>
+                  <span className="text-base font-bold text-emerald-400">{yesCents}¢</span>
+                  <span className="text-[11px] text-muted-foreground ml-1">YES</span>
+                </div>
+                {noCents !== null && (
+                  <div>
+                    <span className="text-base font-bold text-red-400">{noCents}¢</span>
+                    <span className="text-[11px] text-muted-foreground ml-1">NO</span>
+                  </div>
+                )}
+              </div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">per $1 payout</div>
+            </>
+          ) : (
+            <>
+              <div className="text-xl font-bold text-muted-foreground">—</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">opens with window</div>
+            </>
+          )}
+        </div>
+
+        {/* Claude's verdict */}
+        <div className="px-5 py-4">
+          <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">
+            Claude's Call
+          </div>
+          {target === null ? (
+            <>
+              <div className="text-sm text-muted-foreground font-medium">Awaiting target…</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">
+                Will compare once window opens
+              </div>
+            </>
+          ) : predictedPrice === null ? (
+            <div className="text-sm text-muted-foreground">Loading prediction…</div>
+          ) : (
+            <>
+              <div className={`flex items-center gap-1.5 text-base font-bold ${above ? "text-emerald-400" : "text-red-400"}`}>
+                {above ? <ArrowUp className="w-4 h-4" /> : <ArrowDown className="w-4 h-4" />}
+                {above ? "ABOVE TARGET" : "BELOW TARGET"}
+              </div>
+              <div className="text-[11px] text-muted-foreground mt-0.5 tabular-nums">
+                ${formatPrice(predictedPrice)}
+                {diffPct !== null && (
+                  <span className={diffPct >= 0 ? "text-emerald-400" : "text-red-400"}>
+                    {" "}({diffPct >= 0 ? "+" : ""}{diffPct.toFixed(2)}%)
+                  </span>
+                )}
+                <span className="ml-1">predicted</span>
+              </div>
+              {isLive && (
+                <div className={`mt-1.5 text-[11px] font-bold ${above ? "text-emerald-400" : "text-red-400"}`}>
+                  → Bet {above ? "YES" : "NO"} on Kalshi
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </Card>
   );
 }
 
@@ -570,6 +758,14 @@ export default function Predictor() {
             <Skeleton className="h-80 rounded-xl lg:col-span-2" />
             <Skeleton className="h-80 rounded-xl" />
           </div>
+        )}
+
+        {selected === "BTC" && (
+          <KalshiBtcCard
+            predictedPrice={
+              active?.predictions.find((p) => p.minutesAhead === 15)?.predictedPrice ?? null
+            }
+          />
         )}
 
         <PredictionHistory symbol={selected} tz={tz} />
