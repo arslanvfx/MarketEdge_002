@@ -277,10 +277,6 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
   const closeLabel = d.closeTime ? toET(d.closeTime) : null;
   const openLabel  = d.openTime  ? toET(d.openTime)  : null;
 
-  // Kalshi bid/ask in dollars (e.g. 0.033 = 3¢ YES side). Convert to whole cents.
-  const yesCents = d.yesAsk ? Math.round(d.yesAsk * 100) : null;
-  const noCents  = d.yesAsk ? Math.round((1 - d.yesAsk) * 100) : null;
-
   return (
     <Card className="border-border bg-card/60 overflow-hidden">
       {/* ── Header bar ── */}
@@ -324,7 +320,7 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
       </div>
 
       {/* ── Body ── */}
-      <div className="grid grid-cols-3 divide-x divide-border">
+      <div className="grid grid-cols-2 divide-x divide-border">
         {/* Target price */}
         <div className="px-5 py-4">
           <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">
@@ -341,35 +337,6 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
               <div className="text-[11px] text-muted-foreground mt-0.5">
                 set at {openLabel} ET when window opens
               </div>
-            </>
-          )}
-        </div>
-
-        {/* Kalshi odds */}
-        <div className="px-5 py-4">
-          <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">
-            Kalshi Odds
-          </div>
-          {isLive && yesCents !== null ? (
-            <>
-              <div className="flex items-baseline gap-3">
-                <div>
-                  <span className="text-base font-bold text-emerald-400">{yesCents}¢</span>
-                  <span className="text-[11px] text-muted-foreground ml-1">YES</span>
-                </div>
-                {noCents !== null && (
-                  <div>
-                    <span className="text-base font-bold text-red-400">{noCents}¢</span>
-                    <span className="text-[11px] text-muted-foreground ml-1">NO</span>
-                  </div>
-                )}
-              </div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">per $1 payout</div>
-            </>
-          ) : (
-            <>
-              <div className="text-xl font-bold text-muted-foreground">—</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">opens with window</div>
             </>
           )}
         </div>
