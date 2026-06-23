@@ -911,9 +911,9 @@ function CoinDetail({
           <Indicator label="SMA (20)" value={`$${formatPrice(coin.indicators.sma20)}`} />
         </div>
         <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-          Forecasts use statistical analysis (momentum, trend regression, RSI, MACD). Click "Enhance with AI" to
-          layer in Claude AI price targets — each call analyzes the latest 30 candles and key price levels on demand.
-          Prices update every 3 s. Not financial advice · times shown in US Eastern ({tz}).
+          Forecasts are powered by Claude AI — each refresh analyzes the latest 30 candles, RSI, MACD, trend strength,
+          and key support/resistance levels to produce refined price targets. Click "Enhance with AI" to force a fresh
+          Claude analysis on demand. Prices update every 3 s. Not financial advice · times shown in US Eastern ({tz}).
         </p>
       </div>
     </div>

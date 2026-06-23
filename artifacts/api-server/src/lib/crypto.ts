@@ -452,8 +452,8 @@ function analyzeCoin(
 }
 
 // ---------------------------------------------------------------------------
-// On-demand Claude AI prediction refinement.
-// Called only when the user explicitly requests it for the selected coin.
+// Claude AI prediction refinement — shared core used by both the automatic
+// cache-refresh path and the on-demand /ai-predict endpoint.
 // ---------------------------------------------------------------------------
 
 export interface AIPrediction {
@@ -465,42 +465,30 @@ export interface AIPrediction {
   confidence: number;
 }
 
-export async function fetchAIPredictions(symbol: string): Promise<{
-  coin: string;
-  predictions: AIPrediction[];
-  generatedAt: string;
-}> {
-  const coinDef = CRYPTO_COINS.find((c) => c.symbol === symbol.toUpperCase());
-  if (!coinDef) throw new Error(`Unknown symbol: ${symbol}`);
+// Calls Claude with the full chart context for a CoinPrediction.
+// Returns refined predictions in the same order as coin.predictions, or null
+// if Claude is unavailable (caller falls back to the statistical model).
+async function callClaudeForPredictions(coin: CoinPrediction): Promise<AIPrediction[] | null> {
+  try {
+    const recent = coin.candles.slice(-30);
+    const candleRows = recent
+      .map(
+        (c) =>
+          `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`,
+      )
+      .join("\n");
 
-  const now = new Date();
-  const [candles, stats, tickerPrice] = await Promise.all([
-    getCandles(coinDef.product),
-    getStats(coinDef.product),
-    getTicker(coinDef.product).catch(() => 0),
-  ]);
-  const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-  const coin = analyzeCoin(coinDef, candles, stats, now, livePrice);
+    const rsiHint =
+      coin.indicators.rsi >= 70 ? "overbought" : coin.indicators.rsi <= 30 ? "oversold" : "neutral";
 
-  const recent = candles.slice(-30);
-  const candleRows = recent
-    .map(
-      (c) =>
-        `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`,
-    )
-    .join("\n");
+    const baselineRows = coin.predictions
+      .map(
+        (p, i) =>
+          `Target ${i + 1} (+${p.minutesAhead}min): $${p.predictedPrice.toFixed(6)}, range $${p.low.toFixed(6)}–$${p.high.toFixed(6)}, ${p.direction}, conf ${p.confidence}%`,
+      )
+      .join("\n");
 
-  const rsiHint =
-    coin.indicators.rsi >= 70 ? "overbought" : coin.indicators.rsi <= 30 ? "oversold" : "neutral";
-
-  const baselineRows = coin.predictions
-    .map(
-      (p, i) =>
-        `Target ${i + 1} (+${p.minutesAhead}min): $${p.predictedPrice.toFixed(6)}, range $${p.low.toFixed(6)}–$${p.high.toFixed(6)}, ${p.direction}, conf ${p.confidence}%`,
-    )
-    .join("\n");
-
-  const userPrompt = `Refine price predictions for ${symbol} (${coin.name}).
+    const userPrompt = `Refine price predictions for ${coin.symbol} (${coin.name}).
 Current price: $${coin.price.toFixed(6)}
 
 INDICATORS:
@@ -532,57 +520,105 @@ Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same ord
   ]
 }`;
 
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 8192,
-    system:
-      "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns and price structure to produce refined short-term price predictions with concrete price targets. Your predictions should reflect real support/resistance levels and observable chart patterns. Respond with ONLY valid JSON — no markdown, no extra text.",
-    messages: [{ role: "user", content: userPrompt }],
-  });
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8192,
+      system:
+        "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns and price structure to produce refined short-term price predictions with concrete price targets. Your predictions should reflect real support/resistance levels and observable chart patterns. Respond with ONLY valid JSON — no markdown, no extra text.",
+      messages: [{ role: "user", content: userPrompt }],
+    });
 
-  const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-  const parsed = JSON.parse(cleaned) as {
-    analysis: Array<{
-      predictedPrice: number;
-      low: number;
-      high: number;
-      direction: string;
-      confidence: number;
-    }>;
-  };
+    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as {
+      analysis: Array<{
+        predictedPrice: number;
+        low: number;
+        high: number;
+        direction: string;
+        confidence: number;
+      }>;
+    };
 
-  if (!Array.isArray(parsed.analysis) || parsed.analysis.length === 0) {
-    throw new Error("Invalid Claude response shape");
-  }
+    if (!Array.isArray(parsed.analysis) || parsed.analysis.length === 0) {
+      return null;
+    }
 
-  const VALID_DIRS = new Set<string>(["up", "down", "flat"]);
-  const predictions: AIPrediction[] = coin.predictions.map((pred, i) => {
-    const ai = parsed.analysis[i];
-    if (!ai) {
+    const VALID_DIRS = new Set<string>(["up", "down", "flat"]);
+    return coin.predictions.map((pred, i) => {
+      const ai = parsed.analysis[i];
+      if (!ai) {
+        return {
+          minutesAhead: pred.minutesAhead,
+          predictedPrice: pred.predictedPrice,
+          low: pred.low,
+          high: pred.high,
+          direction: pred.direction,
+          confidence: pred.confidence,
+        };
+      }
       return {
         minutesAhead: pred.minutesAhead,
-        predictedPrice: pred.predictedPrice,
-        low: pred.low,
-        high: pred.high,
-        direction: pred.direction,
-        confidence: pred.confidence,
+        predictedPrice: Number(ai.predictedPrice) || pred.predictedPrice,
+        low: Number(ai.low) || pred.low,
+        high: Number(ai.high) || pred.high,
+        direction: (VALID_DIRS.has(ai.direction) ? ai.direction : pred.direction) as
+          | "up"
+          | "down"
+          | "flat",
+        confidence: Math.min(92, Math.max(20, Number(ai.confidence) || pred.confidence)),
       };
-    }
-    return {
-      minutesAhead: pred.minutesAhead,
-      predictedPrice: Number(ai.predictedPrice) || pred.predictedPrice,
-      low: Number(ai.low) || pred.low,
-      high: Number(ai.high) || pred.high,
-      direction: (VALID_DIRS.has(ai.direction) ? ai.direction : pred.direction) as
-        | "up"
-        | "down"
-        | "flat",
-      confidence: Math.min(92, Math.max(20, Number(ai.confidence) || pred.confidence)),
-    };
-  });
+    });
+  } catch {
+    return null; // caller uses statistical baseline
+  }
+}
 
-  return { coin: symbol, predictions, generatedAt: now.toISOString() };
+// Merges AIPrediction results back into a CoinPrediction, updating price
+// targets, ranges, directions, confidence, and changePct.
+function applyAIPredictions(coin: CoinPrediction, aiPreds: AIPrediction[]): CoinPrediction {
+  return {
+    ...coin,
+    predictions: coin.predictions.map((p, i) => {
+      const ai = aiPreds[i];
+      if (!ai) return p;
+      const predictedPrice = ai.predictedPrice;
+      return {
+        ...p,
+        predictedPrice,
+        low: ai.low,
+        high: ai.high,
+        direction: ai.direction,
+        confidence: ai.confidence,
+        changePct: coin.price > 0 ? ((predictedPrice - coin.price) / coin.price) * 100 : p.changePct,
+      };
+    }),
+  };
+}
+
+// On-demand endpoint — forces a fresh Claude analysis for the selected coin
+// (bypasses the predCache so the user always gets a new read on demand).
+export async function fetchAIPredictions(symbol: string): Promise<{
+  coin: string;
+  predictions: AIPrediction[];
+  generatedAt: string;
+}> {
+  const coinDef = CRYPTO_COINS.find((c) => c.symbol === symbol.toUpperCase());
+  if (!coinDef) throw new Error(`Unknown symbol: ${symbol}`);
+
+  const now = new Date();
+  const [candles, stats, tickerPrice] = await Promise.all([
+    getCandles(coinDef.product),
+    getStats(coinDef.product),
+    getTicker(coinDef.product).catch(() => 0),
+  ]);
+  const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
+  const coin = analyzeCoin(coinDef, candles, stats, now, livePrice);
+
+  const aiPreds = await callClaudeForPredictions(coin);
+  if (!aiPreds) throw new Error("Claude analysis unavailable");
+
+  return { coin: symbol, predictions: aiPreds, generatedAt: now.toISOString() };
 }
 
 // ---------------------------------------------------------------------------
@@ -807,7 +843,13 @@ export async function fetchCryptoPredictions(): Promise<{
           getTicker(coin.product).catch(() => 0),
         ]);
         const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-        const result = analyzeCoin(coin, candles, stats, now, livePrice);
+        const base = analyzeCoin(coin, candles, stats, now, livePrice);
+
+        // Ask Claude to study the chart and refine all four horizon targets.
+        // Falls back silently to the statistical model if the call fails.
+        const aiPreds = await callClaudeForPredictions(base);
+        const result = aiPreds ? applyAIPredictions(base, aiPreds) : base;
+
         predCache.set(coin.symbol, { at: Date.now(), value: result });
         return result;
       } catch {
