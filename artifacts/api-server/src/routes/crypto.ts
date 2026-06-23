@@ -4,6 +4,7 @@ import {
   fetchCryptoPrices,
   fetchAIPredictions,
   getPredictionHistory,
+  ACCURACY_THRESHOLD_PCT,
 } from "../lib/crypto";
 
 const router = Router();
@@ -57,7 +58,11 @@ router.get("/crypto/prediction-history", (req, res) => {
     res.status(400).json({ error: "symbol query param required" });
     return;
   }
-  res.json({ symbol, history: getPredictionHistory(symbol) });
+  res.json({
+    symbol,
+    history: getPredictionHistory(symbol),
+    accuracyThresholdPct: ACCURACY_THRESHOLD_PCT,
+  });
 });
 
 export default router;

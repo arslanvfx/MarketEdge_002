@@ -645,6 +645,10 @@ export interface PredictionRecord {
 
 const QUARTER_MS = 15 * 60 * 1000;
 const MAX_HISTORY = 30; // last 30 quarter-hour predictions per coin
+// A prediction is a "hit" only if direction is correct AND price is within
+// this threshold of actual. 1% is reasonable for a 15-min crypto window
+// (typical 1-sigma move is ~0.4%, so 1% allows for moderate market noise).
+export const ACCURACY_THRESHOLD_PCT = 1.0;
 const historyStore = new Map<string, PredictionRecord[]>(); // symbol → records
 
 export function getPredictionHistory(symbol: string): PredictionRecord[] {
@@ -750,14 +754,16 @@ export function startPredictionTracker(): void {
                 actual > snapshotPrice * 1.0002 ? "up"
                 : actual < snapshotPrice * 0.9998 ? "down"
                 : "flat";
-              // Direction correct if both non-flat and matching, or both flat-ish
-              const correct =
+              const errorPct =
+                Math.abs((actual - rec.predictedPrice) / rec.predictedPrice) * 100;
+              const directionCorrect =
                 rec.predictedDirection === "flat"
                   ? actualDir === "flat"
                   : rec.predictedDirection === actualDir;
+              // A "hit" requires both correct direction AND price within threshold.
+              const correct = directionCorrect && errorPct <= ACCURACY_THRESHOLD_PCT;
               rec.actualPrice = actual;
-              rec.errorPct =
-                Math.abs((actual - rec.predictedPrice) / rec.predictedPrice) * 100;
+              rec.errorPct = errorPct;
               rec.correct = correct;
               rec.evaluatedAt = new Date().toISOString();
               rec.status = "evaluated";
