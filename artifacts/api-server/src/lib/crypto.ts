@@ -658,14 +658,13 @@ export const ACCURACY_THRESHOLD_PCT = 1.0;
 async function fetchKalshiBtcTarget(): Promise<number | null> {
   try {
     const resp = await fetch(
-      "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=active&limit=10",
+      "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open&limit=5",
       { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
     );
     if (!resp.ok) return null;
-    const body = (await resp.json()) as { markets?: { yes_sub_title?: string }[] };
+    const body = (await resp.json()) as { markets?: { floor_strike?: number }[] };
     for (const m of body.markets ?? []) {
-      const match = (m.yes_sub_title ?? "").match(/\$([\d,]+\.?\d*)/);
-      if (match) return parseFloat(match[1].replace(/,/g, ""));
+      if (typeof m.floor_strike === "number" && m.floor_strike > 0) return m.floor_strike;
     }
     return null;
   } catch {

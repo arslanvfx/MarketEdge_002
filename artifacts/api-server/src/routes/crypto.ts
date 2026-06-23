@@ -91,11 +91,11 @@ router.get("/crypto/kalshi-btc-target", async (_req, res) => {
       return;
     }
 
-    // Fetch the currently-active KXBTC15M market (if one exists).
-    // Kalshi only runs these ~7 PM–5:45 AM ET, so between sessions the card
-    // simply disappears — there's nothing actionable to show without a target.
+    // Fetch the currently-open KXBTC15M market (if one exists).
+    // These run throughout the day in 15-min windows. The target price is
+    // in the floor_strike field (not yes_sub_title which shows "TBD").
     const resp = await fetch(
-      "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=active&limit=10",
+      "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open&limit=5",
       { headers: { accept: "application/json" } },
     );
     if (!resp.ok) {
@@ -105,22 +105,17 @@ router.get("/crypto/kalshi-btc-target", async (_req, res) => {
 
     const body = (await resp.json()) as { markets?: Record<string, unknown>[] };
 
-    // Find the first active market that already has a real target price set.
-    const extractPrice = (sub: string): number | null => {
-      const m = sub.match(/\$([\d,]+\.?\d*)/);
-      return m ? parseFloat(m[1].replace(/,/g, "")) : null;
-    };
-
+    // Find the first open market with a valid floor_strike target.
     let found: Record<string, unknown> | null = null;
     let targetPrice: number | null = null;
     for (const m of body.markets ?? []) {
-      const yst = (m.yes_sub_title as string | undefined) ?? "";
-      const p = extractPrice(yst);
-      if (p) { found = m; targetPrice = p; break; }
+      const strike = m.floor_strike as number | undefined;
+      if (typeof strike === "number" && strike > 0) {
+        found = m; targetPrice = strike; break;
+      }
     }
 
     if (!found) {
-      // Active window exists but target not set yet, or no active window.
       res.json({ available: false });
       return;
     }
