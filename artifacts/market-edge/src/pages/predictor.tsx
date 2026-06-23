@@ -20,6 +20,7 @@ import {
   Gauge,
   Waves,
   Sparkles,
+  Brain,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -47,6 +48,7 @@ interface Prediction {
   direction: "up" | "down" | "flat";
   confidence: number;
   changePct: number;
+  reasoning?: string;
 }
 
 interface CoinPrediction {
@@ -546,6 +548,16 @@ function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: 
                     />
                   </div>
                 </div>
+
+                {/* Claude AI reasoning */}
+                {p.reasoning && (
+                  <div className="mt-2.5 pt-2.5 border-t border-border/40">
+                    <div className="flex items-start gap-1.5">
+                      <Brain className="w-3 h-3 mt-0.5 shrink-0 text-primary/60" />
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">{p.reasoning}</p>
+                    </div>
+                  </div>
+                )}
               </Card>
             );
           })}
@@ -575,9 +587,9 @@ function CoinDetail({ coin, livePrice, tz }: { coin: CoinPrediction; livePrice: 
           <Indicator label="SMA (20)" value={`$${formatPrice(coin.indicators.sma20)}`} />
         </div>
         <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-          Forecasts are model-based estimates derived from recent 1-minute price action (momentum, trend regression,
-          RSI mean-reversion and volatility) and are not financial advice. Updated every few seconds · times shown in
-          US Eastern ({tz}).
+          Forecasts combine statistical analysis (momentum, trend regression, RSI, MACD) with Claude AI pattern
+          recognition. AI reasoning refreshes every ~2.5 min; prices update every 3 s. Not financial advice ·
+          times shown in US Eastern ({tz}).
         </p>
       </div>
     </div>

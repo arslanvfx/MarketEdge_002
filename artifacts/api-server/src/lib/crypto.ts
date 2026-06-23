@@ -1,3 +1,5 @@
+import { anthropic } from "@workspace/integrations-anthropic-ai";
+
 // Real-time crypto price predictor.
 //
 // Price sources:
@@ -59,6 +61,7 @@ export interface Prediction {
   direction: "up" | "down" | "flat";
   confidence: number; // 0-100
   changePct: number; // vs current price
+  reasoning?: string; // Claude's one-sentence technical rationale
 }
 
 export interface CoinPrediction {
@@ -119,6 +122,19 @@ const tickerCache = new Map<string, CacheEntry<number>>();
 const CANDLE_TTL = 8_000;
 const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
+
+// Claude AI analysis cache — per symbol, refreshed every 2.5 minutes.
+interface ClaudeAnalysisItem {
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  reasoning: string;
+}
+interface ClaudeEntry {
+  at: number;
+  analysis: ClaudeAnalysisItem[]; // one item per prediction (by position)
+}
+const claudeCache = new Map<string, ClaudeEntry>();
+const CLAUDE_TTL = 150_000; // 2.5 minutes
 
 // CoinGecko — single batched request for all coins (24h change reference).
 interface GeckoEntry {
@@ -405,6 +421,91 @@ function analyzeCoin(
 }
 
 // ---------------------------------------------------------------------------
+// Claude AI enrichment — overlays direction, confidence, and reasoning onto
+// the statistical predictions. Results are cached per symbol for 2.5 min.
+// ---------------------------------------------------------------------------
+
+async function enrichWithClaude(
+  coin: CoinPrediction,
+  candles: Candle[],
+): Promise<ClaudeAnalysisItem[] | null> {
+  // Serve from cache if fresh enough.
+  const cached = claudeCache.get(coin.symbol);
+  if (cached && Date.now() - cached.at < CLAUDE_TTL) return cached.analysis;
+
+  try {
+    const recent = candles.slice(-20);
+    const candleRows = recent
+      .map((c) => `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`)
+      .join("\n");
+
+    const rsiHint =
+      coin.indicators.rsi >= 70 ? "overbought" : coin.indicators.rsi <= 30 ? "oversold" : "neutral";
+
+    const predRows = coin.predictions
+      .map(
+        (p, i) =>
+          `Target ${i + 1}: +${p.minutesAhead}min → ${p.direction} ${p.changePct >= 0 ? "+" : ""}${p.changePct.toFixed(3)}% (model conf: ${p.confidence}%)`,
+      )
+      .join("\n");
+
+    const userPrompt = `Analyze ${coin.symbol} (${coin.name}) — price $${coin.price.toFixed(6)}
+
+INDICATORS:
+RSI(14): ${coin.indicators.rsi} (${rsiHint})
+MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (raw: ${coin.indicators.macd.toFixed(6)})
+Trend: ${coin.indicators.trend.toUpperCase()} | Strength: ${Math.round(coin.indicators.trendStrength * 100)}%
+Volatility: ${coin.indicators.volatilityPct.toFixed(3)}%/min
+SMA(20): $${coin.indicators.sma20.toFixed(6)}
+24h: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}% | 1h: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
+24h range: $${coin.low24h.toFixed(6)} – $${coin.high24h.toFixed(6)}
+
+RECENT 1-MIN CANDLES (oldest first, unix/open/high/low/close/vol):
+${candleRows}
+
+STATISTICAL MODEL (for context):
+${predRows}
+
+Provide your technical analysis for exactly these ${coin.predictions.length} targets in order.
+Return ONLY valid JSON (no markdown, no extra text):
+{
+  "analysis": [
+    {"direction": "up|down|flat", "confidence": 0-100, "reasoning": "One concise sentence citing the key signals."}
+  ]
+}`;
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8192,
+      system:
+        "You are an expert crypto technical analyst. Study the chart data and indicators, then predict short-term price direction for each target. Respond with ONLY valid JSON — no markdown fences, no explanatory text outside the JSON.",
+      messages: [{ role: "user", content: userPrompt }],
+    });
+
+    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as { analysis: ClaudeAnalysisItem[] };
+
+    if (!Array.isArray(parsed.analysis) || parsed.analysis.length === 0) {
+      throw new Error("Unexpected Claude response shape");
+    }
+
+    // Validate and normalise each item.
+    const VALID_DIRS = new Set(["up", "down", "flat"]);
+    const analysis: ClaudeAnalysisItem[] = parsed.analysis.map((item) => ({
+      direction: VALID_DIRS.has(item.direction) ? item.direction : "flat",
+      confidence: Math.min(92, Math.max(20, Number(item.confidence) || 50)),
+      reasoning: typeof item.reasoning === "string" ? item.reasoning : "",
+    }));
+
+    claudeCache.set(coin.symbol, { at: Date.now(), analysis });
+    return analysis;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -421,9 +522,23 @@ export async function fetchCryptoPredictions(): Promise<{
           getStats(coin.product),
           getTicker(coin.product).catch(() => 0),
         ]);
-        // Use ticker (most precise, per-tick) as the price anchor if available.
         const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-        return analyzeCoin(coin, candles, stats, now, livePrice);
+        const prediction = analyzeCoin(coin, candles, stats, now, livePrice);
+
+        // Enrich with Claude AI — overlay direction, confidence, and reasoning.
+        // Falls back to the statistical model silently on any error.
+        const claudeAnalysis = await enrichWithClaude(prediction, candles).catch(() => null);
+        if (claudeAnalysis) {
+          prediction.predictions.forEach((pred, i) => {
+            const ai = claudeAnalysis[i];
+            if (!ai) return;
+            pred.direction = ai.direction;
+            pred.confidence = ai.confidence;
+            pred.reasoning = ai.reasoning;
+          });
+        }
+
+        return prediction;
       } catch {
         return null;
       }
