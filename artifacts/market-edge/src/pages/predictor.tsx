@@ -443,7 +443,12 @@ function CoinDetail({
   }, [coin, livePrice, aiEntry]);
 
   const headlinePred = displayPreds[displayPreds.length - 1];
-  const hd = DIR[headlinePred?.direction ?? "flat"];
+  const headlineVisual =
+    headlinePred == null ? "flat"
+    : headlinePred.predictedPrice > livePrice ? "up"
+    : headlinePred.predictedPrice < livePrice ? "down"
+    : "flat";
+  const hd = DIR[headlineVisual];
 
   return (
     <div className="space-y-5">
@@ -618,7 +623,11 @@ function CoinDetail({
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {displayPreds.map((p, i) => {
-            const d = DIR[p.direction];
+            const visual =
+              p.predictedPrice > livePrice ? "up"
+              : p.predictedPrice < livePrice ? "down"
+              : "flat";
+            const d = DIR[visual];
             const Icon = d.icon;
             const isAI = !!aiEntry?.preds[i];
             return (
@@ -660,7 +669,7 @@ function CoinDetail({
                   <div className="h-1.5 rounded-full bg-muted/50 overflow-hidden">
                     <div
                       className={`h-full rounded-full ${
-                        p.direction === "up" ? "bg-emerald-400" : p.direction === "down" ? "bg-red-400" : "bg-slate-400"
+                        visual === "up" ? "bg-emerald-400" : visual === "down" ? "bg-red-400" : "bg-slate-400"
                       }`}
                       style={{ width: `${p.confidence}%` }}
                     />
