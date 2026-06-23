@@ -213,10 +213,9 @@ function LivePrice({ price, className }: { price: number; className?: string }) 
 export default function Predictor() {
   const [selected, setSelected] = useState("BTC");
   const [now, setNow] = useState(new Date());
-  const [aiData, setAiData] = useState<Map<string, { preds: AIPredictionItem[]; at: Date }>>(
-    new Map(),
-  );
+  const [aiData, setAiData] = useState<Record<string, { preds: AIPredictionItem[]; at: Date }>>({});
   const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   // 1-second EST clock
   useEffect(() => {
@@ -252,18 +251,26 @@ export default function Predictor() {
 
   async function handleEnhance() {
     if (aiLoading) return;
+    setAiError(null);
     setAiLoading(true);
+    const sym = selected;
     try {
-      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${selected}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${sym}`);
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Server error ${res.status}: ${body}`);
+      }
       const data = (await res.json()) as { predictions: AIPredictionItem[]; generatedAt: string };
-      setAiData((prev) => {
-        const next = new Map(prev);
-        next.set(selected, { preds: data.predictions, at: new Date(data.generatedAt) });
-        return next;
-      });
-    } catch {
-      // silently ignore — user can retry
+      if (!Array.isArray(data.predictions) || data.predictions.length === 0) {
+        throw new Error("Unexpected response from AI endpoint");
+      }
+      setAiData((prev) => ({
+        ...prev,
+        [sym]: { preds: data.predictions, at: new Date(data.generatedAt) },
+      }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "AI enhancement failed";
+      setAiError(msg);
     } finally {
       setAiLoading(false);
     }
@@ -360,8 +367,9 @@ export default function Predictor() {
             coin={active}
             livePrice={livePrice}
             tz={tz}
-            aiEntry={aiData.get(selected)}
+            aiEntry={aiData[selected]}
             aiLoading={aiLoading}
+            aiError={aiError}
             onEnhance={handleEnhance}
           />
         ) : (
@@ -385,6 +393,7 @@ function CoinDetail({
   tz,
   aiEntry,
   aiLoading,
+  aiError,
   onEnhance,
 }: {
   coin: CoinPrediction;
@@ -392,6 +401,7 @@ function CoinDetail({
   tz: string;
   aiEntry?: { preds: AIPredictionItem[]; at: Date };
   aiLoading: boolean;
+  aiError: string | null;
   onEnhance: () => void;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
@@ -572,7 +582,12 @@ function CoinDetail({
             <span className="text-xs font-normal text-muted-foreground">— predicted price at each {tz} mark</span>
           </h3>
           <div className="flex items-center gap-2">
-            {aiEntry && (
+            {aiError && (
+              <span className="text-[11px] text-red-400 max-w-xs truncate" title={aiError}>
+                ⚠ {aiError}
+              </span>
+            )}
+            {!aiError && aiEntry && (
               <span className="text-[11px] text-primary/60 tabular-nums">
                 AI · {aiEntry.at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} {tz}
               </span>
