@@ -3,4 +3,4 @@
 - [sideLabel prop NO side](sidelabel-props.md) — Over→Under flip logic for NO side of prop market subtitles
 - [Smart Picks architecture](smart-picks-arch.md) — Polymarket=single bets always; Kalshi sports=multi-leg; Kalshi non-sport=single; same-game props need sibling expansion in combos.ts
 - [Crypto data source](crypto-data-source.md) — BTC live price uses Kraken mid (BRTI proxy for Kalshi); candles/stats stay on Coinbase; test api-server via localhost:8080 not $REPLIT_DEV_DOMAIN
-- [Crypto Claude enrichment](crypto-claude-enrichment.md) — Claude (sonnet-4-6) enriches each coin's predictions; cached 2.5 min per symbol; overlays direction/confidence/reasoning onto statistical model; falls back silently on error
+- [Crypto Claude enrichment](crypto-claude-enrichment.md) — extended thinking (budget 8k/10k tokens), Bollinger Bands, ATR, 60-min candles, volume spikes, accuracy feedback loop all fed to Claude for snap predictions

@@ -93,6 +93,11 @@ export interface CoinPrediction {
     trend: "up" | "down" | "flat";
     trendStrength: number; // 0-1 signal-to-noise
     volatilityPct: number; // per-minute vol as pct
+    bbUpper: number;
+    bbLower: number;
+    bbWidth: number; // band width as % of SMA20
+    bbPctB: number; // %B: 0=at lower band, 100=at upper band
+    atr14: number; // Average True Range over 14 periods
   };
   sparkline: number[]; // recent closes (last ~60)
   candles: Candle[]; // recent candles for charting (last ~90)
@@ -285,6 +290,37 @@ function rsi(closes: number[], period = 14): number {
   return 100 - 100 / (1 + rs);
 }
 
+function bollingerBands(
+  closes: number[],
+  period = 20,
+  mult = 2,
+): { upper: number; lower: number; width: number; pctB: number } {
+  const s = sma(closes, period);
+  const slice = closes.slice(-period);
+  const sd = stddev(slice);
+  const upper = s + mult * sd;
+  const lower = s - mult * sd;
+  const width = s > 0 ? ((upper - lower) / s) * 100 : 0;
+  const lastClose = closes[closes.length - 1] ?? s;
+  const pctB = upper !== lower ? ((lastClose - lower) / (upper - lower)) * 100 : 50;
+  return { upper, lower, width, pctB };
+}
+
+function atr(candles: Candle[], period = 14): number {
+  if (candles.length < 2) return 0;
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const prev = candles[i - 1].c;
+    const tr = Math.max(
+      candles[i].h - candles[i].l,
+      Math.abs(candles[i].h - prev),
+      Math.abs(candles[i].l - prev),
+    );
+    trs.push(tr);
+  }
+  return sma(trs, period);
+}
+
 // Ordinary least-squares slope (per index step) and R² over the series.
 function linReg(ys: number[]): { slope: number; r2: number } {
   const n = ys.length;
@@ -376,6 +412,8 @@ function analyzeCoin(
   const ema12 = ema(closes, 12);
   const ema26 = ema(closes, 26);
   const macd = ema12 - ema26;
+  const bb = bollingerBands(closes, 20, 2);
+  const atr14 = atr(candles, 14);
 
   // Mean-reversion bias from RSI extremes (small, per-minute).
   let mrBias = 0;
@@ -446,6 +484,11 @@ function analyzeCoin(
       trend,
       trendStrength: Math.round(trendStrength * 100) / 100,
       volatilityPct: Math.round(vol * 10000) / 100,
+      bbUpper: bb.upper,
+      bbLower: bb.lower,
+      bbWidth: Math.round(bb.width * 100) / 100,
+      bbPctB: Math.round(bb.pctB * 10) / 10,
+      atr14,
     },
     sparkline: closes.slice(-60),
     candles: candles.slice(-90),
@@ -472,7 +515,7 @@ export interface AIPrediction {
 // if Claude is unavailable (caller falls back to the statistical model).
 async function callClaudeForPredictions(coin: CoinPrediction): Promise<AIPrediction[] | null> {
   try {
-    const recent = coin.candles.slice(-30);
+    const recent = coin.candles.slice(-60);
     const candleRows = recent
       .map(
         (c) =>
@@ -482,6 +525,19 @@ async function callClaudeForPredictions(coin: CoinPrediction): Promise<AIPredict
 
     const rsiHint =
       coin.indicators.rsi >= 70 ? "overbought" : coin.indicators.rsi <= 30 ? "oversold" : "neutral";
+
+    const bbPos =
+      coin.indicators.bbPctB > 80
+        ? "near upper band (overbought zone)"
+        : coin.indicators.bbPctB < 20
+          ? "near lower band (oversold zone)"
+          : `mid-band (${coin.indicators.bbPctB.toFixed(1)}%B)`;
+
+    // Highlight top-3 volume candles for Claude to flag unusual activity.
+    const sorted = [...recent].sort((a, b) => b.v - a.v).slice(0, 3);
+    const volSpikes = sorted
+      .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(6)}`)
+      .join("\n");
 
     const baselineRows = coin.predictions
       .map(
@@ -495,25 +551,33 @@ Current price: $${coin.price.toFixed(6)}
 
 INDICATORS:
 RSI(14): ${coin.indicators.rsi} (${rsiHint})
-MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (raw: ${coin.indicators.macd.toFixed(6)})
+MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (signal: ${coin.indicators.macd.toFixed(6)})
 Trend: ${coin.indicators.trend.toUpperCase()} | Strength: ${Math.round(coin.indicators.trendStrength * 100)}%
 Volatility: ${coin.indicators.volatilityPct.toFixed(3)}%/min
 SMA(20): $${coin.indicators.sma20.toFixed(6)}
+Bollinger Bands(20,2): upper=$${coin.indicators.bbUpper.toFixed(6)} / lower=$${coin.indicators.bbLower.toFixed(6)} | width=${coin.indicators.bbWidth.toFixed(2)}% | price ${bbPos}
+ATR(14): $${coin.indicators.atr14.toFixed(6)} (expected move per bar)
 24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
 1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
 24h range: $${coin.low24h.toFixed(6)}–$${coin.high24h.toFixed(6)}
 
-RECENT 30 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
+TOP-3 VOLUME SPIKES (possible order-flow events):
+${volSpikes}
+
+RECENT 60 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
 ${candleRows}
 
 STATISTICAL MODEL BASELINE:
 ${baselineRows}
 
 Instructions:
-1. Identify concrete support and resistance levels from the candle data
-2. Detect chart patterns (consolidation, breakout, wedge, flag, double top/bottom, channel, etc.)
-3. For each of the ${coin.predictions.length} quarter-hour targets, provide your refined price estimate, a pessimistic low, and an optimistic high — these should reflect real price structure and key levels, not just formula extrapolation
-4. Set direction (up/down/flat) and confidence (0-100) based on signal confluence
+1. Map concrete support and resistance levels from the candle data — use swing highs/lows, wicks, and consolidation zones
+2. Identify chart patterns (consolidation, breakout, wedge, flag, double top/bottom, channel, range)
+3. Assess volume-price relationship: are the volume spikes aligned with price direction? Are breakouts volume-confirmed?
+4. Use Bollinger Band position to judge momentum compression/expansion and mean-reversion probability
+5. Use ATR to calibrate the size of realistic price swings over each 15-minute window
+6. For each of the ${coin.predictions.length} quarter-hour targets, produce your best price estimate, a pessimistic low, and an optimistic high grounded in actual price structure — not formula extrapolation
+7. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict
 
 Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same order as the baseline:
 {
@@ -524,13 +588,17 @@ Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same ord
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 8192,
+      max_tokens: 16000,
+      thinking: { type: "enabled", budget_tokens: 10000 },
       system:
-        "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns and price structure to produce refined short-term price predictions with concrete price targets. Your predictions should reflect real support/resistance levels and observable chart patterns. Respond with ONLY valid JSON — no markdown, no extra text.",
+        "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns, price structure, volume, and volatility indicators to produce refined short-term price predictions with concrete price targets anchored to real support/resistance levels. Think through your analysis carefully before committing to numbers. Respond with ONLY valid JSON after your thinking — no markdown, no extra text in your final answer.",
       messages: [{ role: "user", content: userPrompt }],
-    });
+    } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const raw = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("") || "";
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(cleaned) as {
       analysis: Array<{
@@ -770,7 +838,7 @@ async function refineSnappedPrediction(
   basePred: Prediction,
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
   try {
-    const recent = coin.candles.slice(-30);
+    const recent = coin.candles.slice(-60);
     const candleRows = recent
       .map(
         (c) =>
@@ -785,39 +853,85 @@ async function refineSnappedPrediction(
           ? "oversold"
           : "neutral";
 
+    const bbPos =
+      coin.indicators.bbPctB > 80
+        ? "near upper band (overbought zone)"
+        : coin.indicators.bbPctB < 20
+          ? "near lower band (oversold zone)"
+          : `mid-band (${coin.indicators.bbPctB.toFixed(1)}%B)`;
+
+    // Top-3 volume candles to surface order-flow events.
+    const sorted = [...recent].sort((a, b) => b.v - a.v).slice(0, 3);
+    const volSpikes = sorted
+      .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(6)}`)
+      .join("\n");
+
+    // Accuracy feedback: last 5 evaluated predictions for this coin.
+    const recentEvals = (historyStore.get(coin.symbol) ?? [])
+      .filter((r) => r.status === "evaluated" && r.errorPct != null)
+      .slice(-5);
+    const feedbackStr =
+      recentEvals.length > 0
+        ? recentEvals
+            .map(
+              (r) =>
+                `  ${r.targetLabel}: predicted $${r.predictedPrice?.toFixed(6)} → actual $${r.actualPrice?.toFixed(6)} | error ${r.errorPct?.toFixed(2)}% | ${r.correct ? "HIT ✓" : "MISS ✗"}`,
+            )
+            .join("\n")
+        : "  No evaluated predictions yet.";
+
     const prompt = `Predict the price of ${coin.symbol} (${coin.name}) at ${basePred.label} ET (+${basePred.minutesAhead} minutes from now).
 
 Current price: $${coin.price.toFixed(6)}
 
 INDICATORS:
 RSI(14): ${coin.indicators.rsi} (${rsiHint})
-MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (raw: ${coin.indicators.macd.toFixed(6)})
+MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (signal: ${coin.indicators.macd.toFixed(6)})
 Trend: ${coin.indicators.trend.toUpperCase()} | Strength: ${Math.round(coin.indicators.trendStrength * 100)}%
 Volatility: ${coin.indicators.volatilityPct.toFixed(3)}%/min
 SMA(20): $${coin.indicators.sma20.toFixed(6)}
+Bollinger Bands(20,2): upper=$${coin.indicators.bbUpper.toFixed(6)} / lower=$${coin.indicators.bbLower.toFixed(6)} | width=${coin.indicators.bbWidth.toFixed(2)}% | price ${bbPos}
+ATR(14): $${coin.indicators.atr14.toFixed(6)} (1-bar expected range)
 24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
 1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
 24h range: $${coin.low24h.toFixed(6)}–$${coin.high24h.toFixed(6)}
 
-RECENT 30 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
+TOP-3 VOLUME SPIKES (potential order-flow events):
+${volSpikes}
+
+RECENT 60 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
 ${candleRows}
 
 STATISTICAL MODEL BASELINE: $${basePred.predictedPrice.toFixed(6)}, ${basePred.direction}, conf ${basePred.confidence}%
 
-Study the candle chart carefully. Identify key support/resistance levels and any chart patterns (e.g. consolidation, breakout, wedge, channel). Provide your best price target for the given window.
+YOUR RECENT ACCURACY FOR ${coin.symbol}:
+${feedbackStr}
+
+Analysis steps:
+1. Identify key support and resistance levels from swing highs/lows, wicks, and consolidation zones in the 60-min candle chart
+2. Detect the dominant chart pattern (range, breakout, trend continuation, reversal setup)
+3. Check whether volume spikes confirm or contradict the price direction — unconfirmed moves are less reliable
+4. Use Bollinger Band position to assess compression (low width = breakout risk) or expansion (momentum)
+5. Use ATR to ground your price target — a 15-min move should be roughly within 1–3× ATR of current price
+6. Review your recent accuracy above: if you have been consistently overshooting or undershooting, recalibrate
+7. Set confidence 0-100 based on signal alignment; reduce confidence when indicators conflict
 
 Return ONLY valid JSON (no markdown):
 {"predictedPrice": 0.0, "direction": "up", "confidence": 70}`;
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 256,
+      max_tokens: 12000,
+      thinking: { type: "enabled", budget_tokens: 8000 },
       system:
-        "You are an expert crypto technical analyst. Study the chart data and indicators carefully to produce a precise short-term price prediction. Respond with ONLY valid JSON — no markdown, no extra text.",
+        "You are an expert crypto technical analyst and quantitative trader. You have access to 60 minutes of 1-minute candle data, key technical indicators, and your own recent prediction accuracy record. Think through the chart structure carefully before committing to a price target. Respond with ONLY valid JSON after your analysis — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
-    });
+    } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const raw = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("") || "";
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(cleaned) as {
       predictedPrice: number;
