@@ -133,7 +133,7 @@ const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
 // Full coin analysis cache: predictions are stable for 3.5 min (no need to
 // recompute the statistical model on every 3-second price tick).
-const PRED_TTL = 30_000; // 30 seconds — keeps forecast intervals fresh across 15-min boundaries
+const PRED_TTL = 60_000; // 60 seconds — fresh enough to drop stale quarter-hour intervals quickly
 const predCache = new Map<string, CacheEntry<CoinPrediction>>();
 
 // CoinGecko — single batched request for all coins (24h change reference).
