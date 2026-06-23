@@ -636,19 +636,42 @@ export interface PredictionRecord {
   predictedPrice: number;         // model's price target for targetTime
   predictedDirection: "up" | "down" | "flat";
   confidence: number;
+  kalshiTarget: number | null;    // Kalshi KXBTC15M strike at snap time (BTC only)
   actualPrice: number | null;     // filled in after targetTime passes
   errorPct: number | null;        // abs % difference from predicted
-  correct: boolean | null;        // direction prediction was right
+  correct: boolean | null;        // was the Kalshi YES/NO call right?
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
 }
 
 const QUARTER_MS = 15 * 60 * 1000;
 const MAX_HISTORY = 30; // last 30 quarter-hour predictions per coin
-// A prediction is a "hit" only if direction is correct AND price is within
-// this threshold of actual. 1% is reasonable for a 15-min crypto window
-// (typical 1-sigma move is ~0.4%, so 1% allows for moderate market noise).
+// Fallback accuracy threshold used when no Kalshi target is available.
+// For coins other than BTC (no KXBTC15M market), a prediction is a "hit"
+// only if direction is correct AND price is within this % of actual.
 export const ACCURACY_THRESHOLD_PCT = 1.0;
+
+// ---------------------------------------------------------------------------
+// Kalshi KXBTC15M target price — fetched at snap time for BTC predictions
+// ---------------------------------------------------------------------------
+
+async function fetchKalshiBtcTarget(): Promise<number | null> {
+  try {
+    const resp = await fetch(
+      "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=active&limit=10",
+      { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
+    );
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as { markets?: { yes_sub_title?: string }[] };
+    for (const m of body.markets ?? []) {
+      const match = (m.yes_sub_title ?? "").match(/\$([\d,]+\.?\d*)/);
+      if (match) return parseFloat(match[1].replace(/,/g, ""));
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 const historyStore = new Map<string, PredictionRecord[]>(); // symbol → records
 
 export function getPredictionHistory(symbol: string): PredictionRecord[] {
@@ -756,12 +779,22 @@ export function startPredictionTracker(): void {
                 : "flat";
               const errorPct =
                 Math.abs((actual - rec.predictedPrice) / rec.predictedPrice) * 100;
-              const directionCorrect =
-                rec.predictedDirection === "flat"
-                  ? actualDir === "flat"
-                  : rec.predictedDirection === actualDir;
-              // A "hit" requires both correct direction AND price within threshold.
-              const correct = directionCorrect && errorPct <= ACCURACY_THRESHOLD_PCT;
+              let correct: boolean;
+              if (rec.kalshiTarget !== null && rec.kalshiTarget !== undefined) {
+                // Kalshi target known: a "hit" = Claude predicted the same side of
+                // the target as where BTC actually landed (mirrors Kalshi YES/NO).
+                const predictedAbove = rec.predictedPrice >= rec.kalshiTarget;
+                const actualAbove    = actual >= rec.kalshiTarget;
+                correct = predictedAbove === actualAbove;
+              } else {
+                // No Kalshi target (non-BTC, or Kalshi market wasn't active at snap).
+                // Fall back: direction correct AND price within threshold.
+                const directionCorrect =
+                  rec.predictedDirection === "flat"
+                    ? actualDir === "flat"
+                    : rec.predictedDirection === actualDir;
+                correct = directionCorrect && errorPct <= ACCURACY_THRESHOLD_PCT;
+              }
               rec.actualPrice = actual;
               rec.errorPct = errorPct;
               rec.correct = correct;
@@ -795,7 +828,11 @@ export function startPredictionTracker(): void {
             if (basePred) {
               // Ask Claude to study the chart and refine the prediction.
               // Falls back to the statistical model if the API call fails.
-              const ai = await refineSnappedPrediction(analysis, basePred);
+              // For BTC, also snap the Kalshi KXBTC15M target in parallel.
+              const [ai, kalshiTarget] = await Promise.all([
+                refineSnappedPrediction(analysis, basePred),
+                sym === "BTC" ? fetchKalshiBtcTarget() : Promise.resolve(null),
+              ]);
               records.push({
                 symbol: sym,
                 snappedAt: new Date(nowMs).toISOString(),
@@ -805,6 +842,7 @@ export function startPredictionTracker(): void {
                 predictedPrice: ai?.predictedPrice ?? basePred.predictedPrice,
                 predictedDirection: ai?.direction ?? basePred.direction,
                 confidence: ai?.confidence ?? basePred.confidence,
+                kalshiTarget,
                 actualPrice: null,
                 errorPct: null,
                 correct: null,

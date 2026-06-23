@@ -67,6 +67,7 @@ interface PredictionRecord {
   predictedPrice: number;
   predictedDirection: "up" | "down" | "flat";
   confidence: number;
+  kalshiTarget: number | null;
   actualPrice: number | null;
   errorPct: number | null;
   correct: boolean | null;
@@ -420,7 +421,7 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
 // ---------------------------------------------------------------------------
 
 function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
-  const ACCURACY_THRESHOLD = 1.0; // must match server ACCURACY_THRESHOLD_PCT
+  const ACCURACY_THRESHOLD = 1.0; // fallback for non-BTC / no Kalshi target
 
   const query = useQuery({
     queryKey: ["pred-history", symbol],
@@ -435,6 +436,9 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
   const evaluated = history.filter((r) => r.status === "evaluated");
   const hits = evaluated.filter((r) => r.correct === true).length;
   const accuracyPct = evaluated.length > 0 ? Math.round((hits / evaluated.length) * 100) : null;
+
+  // Does any record in this history have a Kalshi target? (true for BTC during market hours)
+  const hasKalshiData = history.some((r) => r.kalshiTarget !== null && r.kalshiTarget !== undefined);
 
   const accentClass = (rec: PredictionRecord) => {
     if (rec.status === "pending") return "border-l-amber-400/70";
@@ -457,8 +461,10 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
             Prediction Accuracy Log
           </h3>
           <p className="text-[11px] text-muted-foreground mt-0.5">
-            Hit = direction correct &amp; price within {ACCURACY_THRESHOLD}% of actual
-            &nbsp;·&nbsp; last 30 &nbsp;·&nbsp; refreshes every 30 s
+            {hasKalshiData
+              ? <>BTC hit = Claude called the correct Kalshi YES/NO (above/below target) &nbsp;·&nbsp; last 30 &nbsp;·&nbsp; 30 s refresh</>
+              : <>Hit = direction correct &amp; price within {ACCURACY_THRESHOLD}% of actual &nbsp;·&nbsp; last 30 &nbsp;·&nbsp; 30 s refresh</>
+            }
           </p>
         </div>
 
@@ -496,10 +502,10 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
       ) : (
         <>
           {/* ── Column labels ── */}
-          <div className="grid grid-cols-[96px_1fr_64px_44px_32px] gap-x-3 pl-5 pr-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+          <div className="grid grid-cols-[96px_1fr_72px_44px_32px] gap-x-3 pl-5 pr-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
             <span>Target</span>
             <span>Predicted → Actual</span>
-            <span className="text-right">Error</span>
+            <span className="text-right">{hasKalshiData ? "K Target" : "Error"}</span>
             <span className="text-right">Conf</span>
             <span />
           </div>
@@ -508,10 +514,16 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
           <div className="space-y-1">
             {history.map((rec) => {
               const isPending = rec.status === "pending";
+              const hasTarget = rec.kalshiTarget !== null && rec.kalshiTarget !== undefined;
+
+              // For Kalshi-evaluated rows: show which side of target the prediction landed
+              const predictedAbove = hasTarget && rec.predictedPrice >= rec.kalshiTarget!;
+              const actualAbove    = hasTarget && rec.actualPrice !== null && rec.actualPrice >= rec.kalshiTarget!;
+
               return (
                 <div
                   key={rec.targetTime}
-                  className={`grid grid-cols-[96px_1fr_64px_44px_32px] gap-x-3 items-center
+                  className={`grid grid-cols-[96px_1fr_72px_44px_32px] gap-x-3 items-center
                     border-l-4 ${accentClass(rec)} rounded-r-lg pl-3 pr-3 py-2.5
                     bg-card/40 hover:bg-card/70 transition-colors`}
                 >
@@ -521,26 +533,51 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                     <div className="text-[10px] text-muted-foreground">{tz}</div>
                   </div>
 
-                  {/* Predicted → Actual */}
-                  <div className="tabular-nums text-xs min-w-0 flex items-center gap-1.5">
-                    <span className="text-muted-foreground">${formatPrice(rec.predictedPrice)}</span>
-                    {isPending ? (
-                      <span className="inline-flex items-center gap-1 text-amber-400/80 text-[10px]">
-                        <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                        pending
-                      </span>
-                    ) : (
-                      <>
-                        <span className="text-muted-foreground/40">→</span>
-                        <span className="font-medium">${formatPrice(rec.actualPrice!)}</span>
-                      </>
+                  {/* Predicted → Actual (+ Kalshi verdict for BTC rows) */}
+                  <div className="tabular-nums text-xs min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-muted-foreground">${formatPrice(rec.predictedPrice)}</span>
+                      {isPending ? (
+                        <span className="inline-flex items-center gap-1 text-amber-400/80 text-[10px]">
+                          <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                          pending
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-muted-foreground/40">→</span>
+                          <span className="font-medium">${formatPrice(rec.actualPrice!)}</span>
+                        </>
+                      )}
+                    </div>
+                    {/* Kalshi side-of-target verdict */}
+                    {hasTarget && !isPending && (
+                      <div className="flex items-center gap-2 mt-0.5 text-[10px]">
+                        <span className={predictedAbove ? "text-emerald-400" : "text-red-400"}>
+                          pred {predictedAbove ? "↑" : "↓"} target
+                        </span>
+                        <span className="text-muted-foreground/40">·</span>
+                        <span className={actualAbove ? "text-emerald-400" : "text-red-400"}>
+                          actual {actualAbove ? "↑" : "↓"} target
+                        </span>
+                      </div>
+                    )}
+                    {hasTarget && isPending && (
+                      <div className="text-[10px] text-muted-foreground/50 mt-0.5">
+                        pred {predictedAbove ? "↑" : "↓"} K target
+                      </div>
                     )}
                   </div>
 
-                  {/* Error % */}
+                  {/* Kalshi target OR error % */}
                   <div className="text-right tabular-nums text-xs">
                     {isPending ? (
                       <span className="text-muted-foreground/30">—</span>
+                    ) : hasTarget ? (
+                      <span className="text-muted-foreground">
+                        ${rec.kalshiTarget! >= 1000
+                          ? rec.kalshiTarget!.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+                          : formatPrice(rec.kalshiTarget!)}
+                      </span>
                     ) : (
                       <span
                         className={
@@ -579,9 +616,12 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
       )}
 
       <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-        Claude AI analyzes candle patterns at each :00/:15/:30/:45 snap. A hit requires the
-        correct direction call <em>and</em> price within {ACCURACY_THRESHOLD}% of actual.
-        History resets on server restart.
+        Claude AI analyzes candle patterns at each :00/:15/:30/:45 snap.
+        {hasKalshiData
+          ? <> BTC hits are scored against the live Kalshi target — correct if Claude called the same YES/NO side as the outcome.</>
+          : <> A hit requires the correct direction call <em>and</em> price within {ACCURACY_THRESHOLD}% of actual.</>
+        }
+        {" "}History resets on server restart.
       </p>
     </div>
   );
