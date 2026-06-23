@@ -2,5 +2,5 @@
 - [Polymarket single-bet mode](polymarket-single-bet.md) — Polymarket always emits size-1; Kalshi non-sport categories also forced single
 - [sideLabel prop NO side](sidelabel-props.md) — Over→Under flip logic for NO side of prop market subtitles
 - [Smart Picks architecture](smart-picks-arch.md) — Polymarket=single bets always; Kalshi sports=multi-leg; Kalshi non-sport=single; same-game props need sibling expansion in combos.ts
-- [Crypto data source](crypto-data-source.md) — use Coinbase Exchange API (Binance geo-blocked); test api-server via localhost:8080 not $REPLIT_DEV_DOMAIN; render ET tz abbrev dynamically (EST/EDT)
+- [Crypto data source](crypto-data-source.md) — BTC live price uses Kraken mid (BRTI proxy for Kalshi); candles/stats stay on Coinbase; test api-server via localhost:8080 not $REPLIT_DEV_DOMAIN
 - [Crypto Claude enrichment](crypto-claude-enrichment.md) — Claude (sonnet-4-6) enriches each coin's predictions; cached 2.5 min per symbol; overlays direction/confidence/reasoning onto statistical model; falls back silently on error
