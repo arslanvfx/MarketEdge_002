@@ -115,17 +115,19 @@ async function fetchJson<T>(url: string, timeoutMs = 8000): Promise<T> {
 type CacheEntry<T> = { at: number; value: T };
 const candleCache = new Map<string, CacheEntry<Candle[]>>();
 const statsCache = new Map<string, CacheEntry<CoinStats>>();
+const tickerCache = new Map<string, CacheEntry<number>>();
 const CANDLE_TTL = 8_000;
 const STATS_TTL = 4_000;
+const TICKER_TTL = 2_000; // very short — this is the per-tick live price
 
-// CoinGecko — single batched request for all coins.
+// CoinGecko — single batched request for all coins (24h change reference).
 interface GeckoEntry {
   usd: number;
   usd_24h_change: number;
 }
 type GeckoPrices = Record<string, GeckoEntry>;
 let geckoCache: CacheEntry<GeckoPrices> | null = null;
-const GECKO_TTL = 8_000;
+const GECKO_TTL = 15_000; // CoinGecko free tier; only used for 24h change %
 
 async function getGeckoPrices(): Promise<GeckoPrices> {
   if (geckoCache && Date.now() - geckoCache.at < GECKO_TTL) return geckoCache.value;
@@ -135,6 +137,18 @@ async function getGeckoPrices(): Promise<GeckoPrices> {
   );
   geckoCache = { at: Date.now(), value: data };
   return data;
+}
+
+// Coinbase ticker — per-tick price with full decimal precision.
+async function getTicker(product: string): Promise<number> {
+  const hit = tickerCache.get(product);
+  if (hit && Date.now() - hit.at < TICKER_TTL) return hit.value;
+  const raw = await fetchJson<Record<string, string>>(
+    `${COINBASE}/products/${product}/ticker`,
+  );
+  const price = parseFloat(raw.price ?? "0");
+  tickerCache.set(product, { at: Date.now(), value: price });
+  return price;
 }
 
 interface CoinStats {
@@ -399,19 +413,17 @@ export async function fetchCryptoPredictions(): Promise<{
   coins: CoinPrediction[];
 }> {
   const now = new Date();
-  // Fetch CoinGecko aggregated prices for all coins in one request (best effort).
-  const gecko = await getGeckoPrices().catch(() => ({} as GeckoPrices));
-
   const coins = await Promise.all(
     CRYPTO_COINS.map(async (coin) => {
       try {
-        const [candles, stats] = await Promise.all([
+        const [candles, stats, tickerPrice] = await Promise.all([
           getCandles(coin.product),
           getStats(coin.product),
+          getTicker(coin.product).catch(() => 0),
         ]);
-        const geckoEntry = gecko[GECKO_ID[coin.symbol] ?? ""];
-        const geckoPrice = geckoEntry?.usd && geckoEntry.usd > 0 ? geckoEntry.usd : undefined;
-        return analyzeCoin(coin, candles, stats, now, geckoPrice);
+        // Use ticker (most precise, per-tick) as the price anchor if available.
+        const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
+        return analyzeCoin(coin, candles, stats, now, livePrice);
       } catch {
         return null;
       }
@@ -428,36 +440,48 @@ export async function fetchCryptoPrices(): Promise<{
   prices: CoinPrice[];
 }> {
   const now = new Date();
-  // Primary: CoinGecko aggregated price (single batched request).
-  // Fallback: Coinbase stats per coin.
+  // Use CoinGecko for 24h change % (aggregated reference) and Coinbase ticker for
+  // the live price (per-tick precision, full decimal, no rounding).
   const gecko = await getGeckoPrices().catch(() => ({} as GeckoPrices));
 
   const prices = await Promise.all(
     CRYPTO_COINS.map(async (coin) => {
       try {
         const geckoEntry = gecko[GECKO_ID[coin.symbol] ?? ""];
-        if (geckoEntry?.usd && geckoEntry.usd > 0) {
-          return {
-            symbol: coin.symbol,
-            product: coin.product,
-            name: coin.name,
-            price: geckoEntry.usd,
-            change24hPct: geckoEntry.usd_24h_change ?? 0,
-          };
-        }
-        // Fallback to Coinbase.
-        const stats = await getStats(coin.product);
+        // Always fetch ticker (precise live price) and stats (24h open for fallback change %).
+        const [tickerPrice, stats] = await Promise.all([
+          getTicker(coin.product),
+          geckoEntry?.usd_24h_change == null ? getStats(coin.product) : Promise.resolve(null),
+        ]);
         const change24hPct =
-          stats.open > 0 ? ((stats.last - stats.open) / stats.open) * 100 : 0;
+          geckoEntry?.usd_24h_change != null
+            ? geckoEntry.usd_24h_change
+            : stats
+              ? stats.open > 0 ? ((tickerPrice - stats.open) / stats.open) * 100 : 0
+              : 0;
         return {
           symbol: coin.symbol,
           product: coin.product,
           name: coin.name,
-          price: stats.last,
+          price: tickerPrice,
           change24hPct,
         };
       } catch {
-        return null;
+        // Full fallback: Coinbase stats
+        try {
+          const stats = await getStats(coin.product);
+          const change24hPct =
+            stats.open > 0 ? ((stats.last - stats.open) / stats.open) * 100 : 0;
+          return {
+            symbol: coin.symbol,
+            product: coin.product,
+            name: coin.name,
+            price: stats.last,
+            change24hPct,
+          };
+        } catch {
+          return null;
+        }
       }
     }),
   );
