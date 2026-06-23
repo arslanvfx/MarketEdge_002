@@ -82,7 +82,7 @@ interface KalshiTargetPayload {
   url?: string;
 }
 let kalshiTargetCache: { data: KalshiTargetPayload; fetchedAt: number } | null = null;
-const KALSHI_TARGET_TTL = 90_000;
+const KALSHI_TARGET_TTL = 15_000; // 15s — catches new 15-min windows quickly
 
 router.get("/crypto/kalshi-btc-target", async (_req, res) => {
   try {

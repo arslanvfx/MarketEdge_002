@@ -28,6 +28,7 @@ import {
   ExternalLink,
   ArrowUp,
   ArrowDown,
+  RefreshCw,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -253,7 +254,7 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
   const query = useQuery({
     queryKey: ["kalshi-btc-target"],
     queryFn: () => fetchJson<KalshiTarget>("/crypto/kalshi-btc-target"),
-    refetchInterval: 60_000,
+    refetchInterval: 15_000,
   });
 
   const d = query.data;
@@ -306,6 +307,14 @@ function KalshiBtcCard({ predictedPrice }: { predictedPrice: number | null }) {
               : <>opens <span className="font-medium text-foreground">{openLabel} ET</span></>
             }
           </span>
+          <button
+            onClick={() => query.refetch()}
+            disabled={query.isFetching}
+            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw className={`w-3 h-3 ${query.isFetching ? "animate-spin" : ""}`} />
+          </button>
           {d.url && (
             <a
               href={d.url}
