@@ -608,11 +608,89 @@ export interface PredictionRecord {
 }
 
 const QUARTER_MS = 15 * 60 * 1000;
-const MAX_HISTORY = 8; // 2 hours at 15-min intervals
+const MAX_HISTORY = 30; // last 30 quarter-hour predictions per coin
 const historyStore = new Map<string, PredictionRecord[]>(); // symbol → records
 
 export function getPredictionHistory(symbol: string): PredictionRecord[] {
   return (historyStore.get(symbol.toUpperCase()) ?? []).slice().reverse(); // newest first
+}
+
+// ---------------------------------------------------------------------------
+// Claude-powered refinement for the tracker snapshot.
+// Called once per 15-min boundary per coin; falls back to statistical model.
+// ---------------------------------------------------------------------------
+
+async function refineSnappedPrediction(
+  coin: CoinPrediction,
+  basePred: Prediction,
+): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
+  try {
+    const recent = coin.candles.slice(-30);
+    const candleRows = recent
+      .map(
+        (c) =>
+          `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`,
+      )
+      .join("\n");
+
+    const rsiHint =
+      coin.indicators.rsi >= 70
+        ? "overbought"
+        : coin.indicators.rsi <= 30
+          ? "oversold"
+          : "neutral";
+
+    const prompt = `Predict the price of ${coin.symbol} (${coin.name}) at ${basePred.label} ET (+${basePred.minutesAhead} minutes from now).
+
+Current price: $${coin.price.toFixed(6)}
+
+INDICATORS:
+RSI(14): ${coin.indicators.rsi} (${rsiHint})
+MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (raw: ${coin.indicators.macd.toFixed(6)})
+Trend: ${coin.indicators.trend.toUpperCase()} | Strength: ${Math.round(coin.indicators.trendStrength * 100)}%
+Volatility: ${coin.indicators.volatilityPct.toFixed(3)}%/min
+SMA(20): $${coin.indicators.sma20.toFixed(6)}
+24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
+1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
+24h range: $${coin.low24h.toFixed(6)}–$${coin.high24h.toFixed(6)}
+
+RECENT 30 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
+${candleRows}
+
+STATISTICAL MODEL BASELINE: $${basePred.predictedPrice.toFixed(6)}, ${basePred.direction}, conf ${basePred.confidence}%
+
+Study the candle chart carefully. Identify key support/resistance levels and any chart patterns (e.g. consolidation, breakout, wedge, channel). Provide your best price target for the given window.
+
+Return ONLY valid JSON (no markdown):
+{"predictedPrice": 0.0, "direction": "up", "confidence": 70}`;
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 256,
+      system:
+        "You are an expert crypto technical analyst. Study the chart data and indicators carefully to produce a precise short-term price prediction. Respond with ONLY valid JSON — no markdown, no extra text.",
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as {
+      predictedPrice: number;
+      direction: string;
+      confidence: number;
+    };
+
+    const VALID_DIRS = new Set<string>(["up", "down", "flat"]);
+    return {
+      predictedPrice: Number(parsed.predictedPrice) || basePred.predictedPrice,
+      direction: (VALID_DIRS.has(parsed.direction)
+        ? parsed.direction
+        : basePred.direction) as "up" | "down" | "flat",
+      confidence: Math.min(92, Math.max(20, Number(parsed.confidence) || basePred.confidence)),
+    };
+  } catch {
+    return null; // fall back to statistical model
+  }
 }
 
 export function startPredictionTracker(): void {
@@ -669,19 +747,22 @@ export function startPredictionTracker(): void {
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice);
-            const pred =
+            const basePred =
               analysis.predictions.find((p) => p.target === targetISO) ??
               analysis.predictions[0];
-            if (pred) {
+            if (basePred) {
+              // Ask Claude to study the chart and refine the prediction.
+              // Falls back to the statistical model if the API call fails.
+              const ai = await refineSnappedPrediction(analysis, basePred);
               records.push({
                 symbol: sym,
                 snappedAt: new Date(nowMs).toISOString(),
                 targetTime: targetISO,
-                targetLabel: pred.label,
+                targetLabel: basePred.label,
                 priceAtSnapshot: analysis.price,
-                predictedPrice: pred.predictedPrice,
-                predictedDirection: pred.direction,
-                confidence: pred.confidence,
+                predictedPrice: ai?.predictedPrice ?? basePred.predictedPrice,
+                predictedDirection: ai?.direction ?? basePred.direction,
+                confidence: ai?.confidence ?? basePred.confidence,
                 actualPrice: null,
                 errorPct: null,
                 correct: null,
