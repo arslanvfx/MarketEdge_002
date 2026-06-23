@@ -281,7 +281,8 @@ export default function Predictor() {
             : coins.map((coin) => {
                 const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
                 const isSel = coin.symbol === selected;
-                const price = priceMap.get(coin.symbol)?.price ?? coin.price;
+                // For the selected coin, always mirror livePrice so the tile and big display stay in sync.
+                const price = isSel ? livePrice : (priceMap.get(coin.symbol)?.price ?? coin.price);
                 const chg = priceMap.get(coin.symbol)?.change24hPct ?? coin.change24hPct;
                 const next = coin.predictions[0];
                 const nd = DIR[next?.direction ?? "flat"];
@@ -321,7 +322,7 @@ export default function Predictor() {
         </div>
 
         {active ? (
-          <CoinDetail coin={active} livePrice={livePrice} tz={tz} />
+          <CoinDetail key={selected} coin={active} livePrice={livePrice} tz={tz} />
         ) : (
           <div className="grid lg:grid-cols-3 gap-4">
             <Skeleton className="h-80 rounded-xl lg:col-span-2" />
