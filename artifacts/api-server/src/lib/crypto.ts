@@ -144,7 +144,7 @@ const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
 // Full coin analysis cache: predictions are stable for 3.5 min (no need to
 // recompute the statistical model on every 3-second price tick).
-const PRED_TTL = 60_000; // 60 seconds — fresh enough to drop stale quarter-hour intervals quickly
+const PRED_TTL = 15_000; // 15 seconds — keeps stat model live for flip detection
 const predCache = new Map<string, CacheEntry<CoinPrediction>>();
 
 // Level-2 order book shape from Coinbase.
@@ -733,12 +733,11 @@ Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same ord
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: 10000 },
+      max_tokens: 1024,
       system:
-        "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns, price structure, volume, and volatility indicators to produce refined short-term price predictions with concrete price targets anchored to real support/resistance levels. Think through your analysis carefully before committing to numbers. Respond with ONLY valid JSON after your thinking — no markdown, no extra text in your final answer.",
+        "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns, price structure, volume, and volatility indicators to produce refined short-term price predictions with concrete price targets anchored to real support/resistance levels. Respond with ONLY valid JSON — no markdown, no extra text.",
       messages: [{ role: "user", content: userPrompt }],
-    } as Parameters<typeof anthropic.messages.create>[0]);
+    });
 
     const raw = response.content
       .filter((b) => b.type === "text")
@@ -1122,12 +1121,11 @@ Return ONLY valid JSON (no markdown):
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 12000,
-      thinking: { type: "enabled", budget_tokens: 8000 },
+      max_tokens: 1024,
       system:
-        "You are an expert crypto technical analyst and quantitative trader. You have access to multi-timeframe candle data, a live order book, key technical indicators, VWAP, and your own recent prediction accuracy record. Think through the market structure carefully before committing to a price target. Respond with ONLY valid JSON after your analysis — no markdown, no extra text.",
+        "You are an expert crypto technical analyst and quantitative trader. You have access to multi-timeframe candle data, a live order book, key technical indicators, VWAP, and your own recent prediction accuracy record. Respond with ONLY valid JSON — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
-    } as Parameters<typeof anthropic.messages.create>[0]);
+    });
 
     const raw = response.content
       .filter((b) => b.type === "text")

@@ -768,11 +768,9 @@ export default function Predictor() {
   }
 
   // ── Auto-trigger logic ────────────────────────────────────────────────────
-  // Fires Claude re-analysis when meaningful market conditions change.
-  // Three triggers: stat direction flip, price drift >0.15%, new Kalshi window.
+  // Two triggers: new Kalshi window opens, or stat model flips Above/Below.
   // Guarded by a 90-second cooldown so we don't burn API calls on noise.
   const COOLDOWN_MS = 90_000;
-  const PRICE_DRIFT_THRESHOLD = 0.0015;
 
   useEffect(() => {
     if (!KALSHI_COINS.includes(selected)) return;
@@ -806,21 +804,8 @@ export default function Predictor() {
       }
       prevStatAboveRef.current = statAboveNow;
     }
-
-    // ── Trigger 3: Price drift since last Claude run ───────────────────────
-    if (entry && livePrice > 0 && entry.priceAtRun > 0) {
-      const drift = Math.abs(livePrice - entry.priceAtRun) / entry.priceAtRun;
-      if (drift > PRICE_DRIFT_THRESHOLD) {
-        const now = Date.now();
-        if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
-          lastAutoTriggerRef.current = now;
-          setAutoTriggerReason(`Price moved ${(drift * 100).toFixed(2)}% since last run`);
-          void handleEnhance();
-        }
-      }
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statAboveNow, livePrice, kalshiEventTicker, kalshiIsLive, kalshiTarget]);
+  }, [statAboveNow, kalshiEventTicker, kalshiIsLive, kalshiTarget]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
