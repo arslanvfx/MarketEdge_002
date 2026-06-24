@@ -100,6 +100,14 @@ interface AIPredictionItem {
   confidence: number;
 }
 
+// Context stored alongside each Claude AI run
+interface AiEntry {
+  preds: AIPredictionItem[];
+  at: Date;
+  priceAtRun: number;
+  eventTickerAtRun: string | undefined;
+}
+
 interface CoinPrediction {
   symbol: string;
   product: string;
@@ -661,9 +669,12 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
 export default function Predictor() {
   const [selected, setSelected] = useState("BTC");
   const [now, setNow] = useState(new Date());
-  const [aiData, setAiData] = useState<Record<string, { preds: AIPredictionItem[]; at: Date }>>({});
+  const [aiData, setAiData] = useState<Record<string, AiEntry>>({});
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [autoTriggerReason, setAutoTriggerReason] = useState<string | null>(null);
+  const lastAutoTriggerRef = useRef<number>(0);
+  const prevStatAboveRef = useRef<boolean | null>(null);
 
   // 1-second EST clock
   useEffect(() => {
@@ -678,12 +689,25 @@ export default function Predictor() {
     refetchInterval: 3000,
   });
 
-  // Full analysis + predictions (15s)
+  // Full analysis + predictions — 5s for near-real-time stat model updates
   const predQuery = useQuery({
     queryKey: ["crypto-predictions"],
     queryFn: () => fetchJson<{ generatedAt: string; coins: CoinPrediction[] }>("/crypto/predictions"),
-    refetchInterval: 15000,
+    refetchInterval: 5000,
   });
+
+  // Kalshi BTC target — lifted here so trigger logic can access it alongside stat model
+  const kalshiTargetQuery = useQuery({
+    queryKey: ["kalshi-btc-target"],
+    queryFn: () => fetchJson<KalshiTarget>("/crypto/kalshi-btc-target"),
+    refetchInterval: 10_000,
+    enabled: selected === "BTC",
+  });
+  const ktd = kalshiTargetQuery.data;
+  const kalshiAvailableTop = selected === "BTC" && ktd?.available === true;
+  const kalshiTarget = kalshiAvailableTop ? (ktd?.targetPrice ?? null) : null;
+  const kalshiIsLive = ktd?.isLive === true;
+  const kalshiEventTicker = ktd?.eventTicker;
 
   const coins = predQuery.data?.coins ?? [];
   const priceMap = useMemo(() => {
@@ -697,11 +721,20 @@ export default function Predictor() {
   const tz = etAbbrev(now);
   const hasError = predQuery.isError && pricesQuery.isError && coins.length === 0;
 
+  // Stat model's current verdict vs Kalshi target (recomputed every 5s)
+  const statPred0 = active?.predictions[0];
+  const statAboveNow: boolean | null =
+    kalshiTarget !== null && statPred0 != null
+      ? statPred0.predictedPrice >= kalshiTarget
+      : null;
+
   async function handleEnhance() {
     if (aiLoading) return;
     setAiError(null);
     setAiLoading(true);
     const sym = selected;
+    const priceSnapshot = livePrice;
+    const tickerSnapshot = kalshiEventTicker;
     try {
       const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${sym}`);
       if (!res.ok) {
@@ -714,15 +747,77 @@ export default function Predictor() {
       }
       setAiData((prev) => ({
         ...prev,
-        [sym]: { preds: data.predictions, at: new Date(data.generatedAt) },
+        [sym]: {
+          preds: data.predictions,
+          at: new Date(data.generatedAt),
+          priceAtRun: priceSnapshot,
+          eventTickerAtRun: tickerSnapshot,
+        },
       }));
+      setAutoTriggerReason(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "AI enhancement failed";
       setAiError(msg);
+      setAutoTriggerReason(null);
     } finally {
       setAiLoading(false);
     }
   }
+
+  // ── Auto-trigger logic ────────────────────────────────────────────────────
+  // Fires Claude re-analysis when meaningful market conditions change.
+  // Three triggers: stat direction flip, price drift >0.15%, new Kalshi window.
+  // Guarded by a 90-second cooldown so we don't burn API calls on noise.
+  const COOLDOWN_MS = 90_000;
+  const PRICE_DRIFT_THRESHOLD = 0.0015;
+
+  useEffect(() => {
+    if (selected !== "BTC") return;
+    if (!kalshiIsLive || kalshiTarget === null) return;
+
+    const entry = aiData["BTC"] ?? null;
+
+    // ── Trigger 1: New Kalshi window ──────────────────────────────────────
+    if (entry && kalshiEventTicker && kalshiEventTicker !== entry.eventTickerAtRun) {
+      const now = Date.now();
+      if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
+        lastAutoTriggerRef.current = now;
+        setAutoTriggerReason("New Kalshi window");
+        void handleEnhance();
+        return;
+      }
+    }
+
+    // ── Trigger 2: Stat model direction flip ──────────────────────────────
+    if (statAboveNow !== null) {
+      const prev = prevStatAboveRef.current;
+      if (prev !== null && prev !== statAboveNow) {
+        const now = Date.now();
+        if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
+          lastAutoTriggerRef.current = now;
+          setAutoTriggerReason(`Direction flip: stat → ${statAboveNow ? "Above" : "Below"} target`);
+          void handleEnhance();
+          prevStatAboveRef.current = statAboveNow;
+          return;
+        }
+      }
+      prevStatAboveRef.current = statAboveNow;
+    }
+
+    // ── Trigger 3: Price drift since last Claude run ───────────────────────
+    if (entry && livePrice > 0 && entry.priceAtRun > 0) {
+      const drift = Math.abs(livePrice - entry.priceAtRun) / entry.priceAtRun;
+      if (drift > PRICE_DRIFT_THRESHOLD) {
+        const now = Date.now();
+        if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
+          lastAutoTriggerRef.current = now;
+          setAutoTriggerReason(`Price moved ${(drift * 100).toFixed(2)}% since last run`);
+          void handleEnhance();
+        }
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statAboveNow, livePrice, kalshiEventTicker, kalshiIsLive, kalshiTarget]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -815,10 +910,15 @@ export default function Predictor() {
             coin={active}
             livePrice={livePrice}
             tz={tz}
+            now={now}
             aiEntry={aiData[selected]}
             aiLoading={aiLoading}
             aiError={aiError}
+            autoTriggerReason={autoTriggerReason}
             onEnhance={handleEnhance}
+            kalshiTarget={kalshiTarget}
+            kalshiIsLive={kalshiIsLive}
+            ktd={ktd}
           />
         ) : (
           <div className="grid lg:grid-cols-3 gap-4">
@@ -841,34 +941,33 @@ function CoinDetail({
   coin,
   livePrice,
   tz,
+  now,
   aiEntry,
   aiLoading,
   aiError,
+  autoTriggerReason,
   onEnhance,
+  kalshiTarget,
+  kalshiIsLive,
+  ktd,
 }: {
   coin: CoinPrediction;
   livePrice: number;
   tz: string;
-  aiEntry?: { preds: AIPredictionItem[]; at: Date };
+  now: Date;
+  aiEntry?: AiEntry;
   aiLoading: boolean;
   aiError: string | null;
+  autoTriggerReason: string | null;
   onEnhance: () => void;
+  kalshiTarget: number | null;
+  kalshiIsLive: boolean;
+  ktd: KalshiTarget | undefined;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
-
-  // Kalshi target + call (BTC only — shared cache key with the standalone card).
-  const kalshiTargetQuery = useQuery({
-    queryKey: ["kalshi-btc-target"],
-    queryFn: () => fetchJson<KalshiTarget>("/crypto/kalshi-btc-target"),
-    refetchInterval: 15_000,
-    enabled: coin.symbol === "BTC",
-  });
-  const ktd = kalshiTargetQuery.data;
   const kalshiAvailable = coin.symbol === "BTC" && ktd?.available === true;
-  const kalshiTarget = kalshiAvailable ? (ktd?.targetPrice ?? null) : null;
-  const kalshiIsLive = ktd?.isLive === true;
+
   // Derive Claude's call from the AI forecast — same data as the cards, never contradicts.
-  // Use the first (nearest) quarter-hour AI prediction vs the Kalshi strike.
   const claudeAiPred0 = aiEntry?.preds[0] ?? null;
   const claudeAbove: boolean | null =
     kalshiTarget !== null && claudeAiPred0 !== null
@@ -876,6 +975,14 @@ function CoinDetail({
       : null;
   const claudePredPrice: number | null = claudeAiPred0?.predictedPrice ?? null;
   const claudeConfidence: number | null = claudeAiPred0?.confidence ?? null;
+
+  // Staleness: how many minutes since Claude last ran
+  const staleMins = aiEntry ? Math.floor((now.getTime() - aiEntry.at.getTime()) / 60_000) : null;
+  const staleClass =
+    staleMins === null ? "" :
+    staleMins >= 7 ? "text-red-400" :
+    staleMins >= 3 ? "text-amber-400" :
+    "text-emerald-400/70";
 
   const toET = (iso: string) =>
     new Date(iso).toLocaleTimeString("en-US", {
@@ -1118,12 +1225,26 @@ function CoinDetail({
             )}
             {/* Claude's call — derived from the same AI forecast shown in the cards */}
             <div className="px-5 py-4 col-span-2 sm:col-span-1">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Claude's Call</div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1 flex items-center gap-2">
+                Claude's Call
+                {staleMins !== null && !aiLoading && (
+                  <span className={`font-normal normal-case tracking-normal ${staleClass}`}>
+                    {staleMins === 0 ? "just now" : `${staleMins}m ago`}
+                  </span>
+                )}
+              </div>
               {kalshiTarget === null ? (
                 <div className="text-sm text-muted-foreground">Awaiting target price…</div>
               ) : aiLoading ? (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing…
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing…
+                  </div>
+                  {autoTriggerReason && (
+                    <div className="text-[10px] text-amber-400/80 flex items-center gap-1">
+                      <Zap className="w-3 h-3" /> {autoTriggerReason}
+                    </div>
+                  )}
                 </div>
               ) : claudeAbove !== null ? (
                 <>
@@ -1157,15 +1278,23 @@ function CoinDetail({
             <Zap className="w-4 h-4 text-primary" /> Quarter-Hour Forecasts
             <span className="text-xs font-normal text-muted-foreground">— Statistical vs Claude AI at each {tz} mark</span>
           </h3>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
             {aiError && (
               <span className="text-[11px] text-red-400 max-w-xs truncate" title={aiError}>
                 ⚠ {aiError}
               </span>
             )}
-            {!aiError && aiEntry && (
-              <span className="text-[11px] text-primary/60 tabular-nums">
+            {!aiError && aiLoading && autoTriggerReason && (
+              <span className="text-[11px] text-amber-400 flex items-center gap-1">
+                <Zap className="w-3 h-3" /> {autoTriggerReason}
+              </span>
+            )}
+            {!aiError && !aiLoading && aiEntry && (
+              <span className={`text-[11px] tabular-nums ${staleClass}`}>
                 AI run · {aiEntry.at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} {tz}
+                {staleMins !== null && staleMins >= 3 && (
+                  <span className="ml-1 opacity-70">({staleMins}m ago)</span>
+                )}
               </span>
             )}
             <button
@@ -1174,7 +1303,7 @@ function CoinDetail({
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
             >
               {aiLoading ? (
-                <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing…</>
+                <><Loader2 className="w-3.5 h-3.5 animate-spin" /> {autoTriggerReason ? "Auto-analyzing…" : "Analyzing…"}</>
               ) : aiEntry ? (
                 <><Sparkles className="w-3.5 h-3.5" /> Re-analyze</>
               ) : (
