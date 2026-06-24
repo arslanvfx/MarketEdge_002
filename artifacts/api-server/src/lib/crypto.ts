@@ -444,21 +444,24 @@ function formatOrderBook(book: OrderBook, currentPrice: number): string {
 // Returns a human-readable calibration instruction string.
 function computeSignedBias(symbol: string, lastN = 10): string {
   const records = (historyStore.get(symbol) ?? [])
-    .filter((r) => r.status === "evaluated" && r.actualPrice !== null)
+    .filter((r) => r.status === "evaluated" && r.actualPrice !== null && (r.actualPrice ?? 0) > 0)
     .slice(-lastN);
 
   if (records.length < 3) return "Insufficient history for bias calibration.";
 
-  const signedErrors = records.map((r) => (r.predictedPrice ?? 0) - (r.actualPrice ?? 0));
-  const avg = signedErrors.reduce((a, b) => a + b, 0) / signedErrors.length;
+  // Percentage-based signed error: positive = predicted too high, negative = too low.
+  const signedPctErrors = records.map(
+    (r) => (((r.predictedPrice ?? 0) - (r.actualPrice ?? 0)) / (r.actualPrice ?? 1)) * 100,
+  );
+  const avg = signedPctErrors.reduce((a, b) => a + b, 0) / signedPctErrors.length;
   const absAvg = Math.abs(avg);
 
-  if (absAvg < 10) {
-    return `Well-calibrated: avg signed error is only $${avg.toFixed(2)} (n=${records.length}). No adjustment needed.`;
+  if (absAvg < 0.5) {
+    return `Well-calibrated: avg signed error ${avg >= 0 ? "+" : ""}${avg.toFixed(3)}% (n=${records.length}). No adjustment needed.`;
   }
   const dir = avg > 0 ? "HIGH" : "LOW";
   const adj = avg > 0 ? "DOWN" : "UP";
-  return `CALIBRATION REQUIRED: your recent predictions have averaged $${absAvg.toFixed(0)} too ${dir} (signed avg = ${avg > 0 ? "+" : ""}${avg.toFixed(2)}, n=${records.length}). Shift your price target ${adj} by ~$${absAvg.toFixed(0)} to correct for this systematic bias.`;
+  return `CALIBRATION REQUIRED: recent predictions averaged ${absAvg.toFixed(2)}% too ${dir} (signed avg = ${avg >= 0 ? "+" : ""}${avg.toFixed(3)}%, n=${records.length}). Shift your price target ${adj} by ~${absAvg.toFixed(2)}% to correct this systematic bias.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -625,7 +628,7 @@ export interface AIPrediction {
 // if Claude is unavailable (caller falls back to the statistical model).
 async function callClaudeForPredictions(
   coin: CoinPrediction,
-  extra?: { candles5m?: Candle[]; orderBook?: OrderBook },
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null },
 ): Promise<AIPrediction[] | null> {
   try {
     const recent = coin.candles.slice(-60);
@@ -686,7 +689,23 @@ ${formatOrderBook(extra.orderBook, coin.price)}`;
     // ── C: signed bias calibration ────────────────────────────────────────────
     const biasLine = computeSignedBias(coin.symbol);
 
-    const userPrompt = `Refine price predictions for ${coin.symbol} (${coin.name}).
+    // ── D: Kalshi target block (the primary decision anchor) ─────────────────
+    let kalshiBlock = "";
+    const kt = extra?.kalshiTarget ?? null;
+    if (kt !== null && kt > 0) {
+      const gap = ((coin.price - kt) / kt) * 100;
+      const side = gap >= 0 ? "ABOVE" : "BELOW";
+      kalshiBlock = `
+══ KALSHI 15-MIN BINARY TARGET ══════════════════════════════════════
+Kalshi strike: $${kt.toFixed(kt < 10 ? 4 : 2)}
+Current price: $${coin.price.toFixed(coin.price < 10 ? 4 : 2)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike
+PRIMARY QUESTION: Will ${coin.symbol} close ABOVE or BELOW $${kt.toFixed(kt < 10 ? 4 : 2)}?
+This is the binary you must answer. All indicators below are evidence for or against.
+═════════════════════════════════════════════════════════════════════
+`;
+    }
+
+    const userPrompt = `${kalshiBlock}Refine price predictions for ${coin.symbol} (${coin.name}).
 Current price: $${coin.price.toFixed(2)}
 
 INDICATORS:
@@ -733,11 +752,12 @@ Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same ord
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      max_tokens: 4096,
+      thinking: { type: "enabled", budget_tokens: 2000 },
       system:
-        "You are an expert crypto technical analyst and quantitative trader. Analyze chart patterns, price structure, volume, and volatility indicators to produce refined short-term price predictions with concrete price targets anchored to real support/resistance levels. Respond with ONLY valid JSON — no markdown, no extra text.",
+        "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike — not just to predict general direction. Analyze chart patterns, indicators, and the live order book to produce refined short-term price predictions. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: userPrompt }],
-    });
+    } as Parameters<typeof anthropic.messages.create>[0]);
 
     const raw = response.content
       .filter((b) => b.type === "text")
@@ -821,17 +841,18 @@ export async function fetchAIPredictions(symbol: string): Promise<{
   if (!coinDef) throw new Error(`Unknown symbol: ${symbol}`);
 
   const now = new Date();
-  const [candles, stats, tickerPrice, candles5m, orderBook] = await Promise.all([
+  const [candles, stats, tickerPrice, candles5m, orderBook, kalshiTargetPrice] = await Promise.all([
     getCandles(coinDef.product),
     getStats(coinDef.product),
     getTicker(coinDef.product).catch(() => 0),
     get5mCandles(coinDef.product).catch(() => [] as Candle[]),
     getOrderBook(coinDef.product).catch(() => undefined),
+    fetchKalshiTarget(symbol.toUpperCase()).catch(() => null),
   ]);
   const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
   const coin = analyzeCoin(coinDef, candles, stats, now, livePrice);
 
-  const aiPreds = await callClaudeForPredictions(coin, { candles5m, orderBook });
+  const aiPreds = await callClaudeForPredictions(coin, { candles5m, orderBook, kalshiTarget: kalshiTargetPrice });
   if (!aiPreds) throw new Error("Claude analysis unavailable");
 
   return { coin: symbol, predictions: aiPreds, generatedAt: now.toISOString() };
@@ -1004,7 +1025,7 @@ function dbUpdateRecord(rec: PredictionRecord): void {
 async function refineSnappedPrediction(
   coin: CoinPrediction,
   basePred: Prediction,
-  extra?: { candles5m?: Candle[]; orderBook?: OrderBook },
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null },
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
   try {
     const recent = coin.candles.slice(-60);
@@ -1076,7 +1097,23 @@ ${formatOrderBook(extra.orderBook, coin.price)}`;
     // ── C: signed bias calibration ────────────────────────────────────────────
     const biasLine = computeSignedBias(coin.symbol);
 
-    const prompt = `Predict the price of ${coin.symbol} (${coin.name}) at ${basePred.label} ET (+${basePred.minutesAhead} minutes from now).
+    // ── D: Kalshi target block (the primary decision anchor) ─────────────────
+    let kalshiBlock = "";
+    const kt = extra?.kalshiTarget ?? null;
+    if (kt !== null && kt > 0) {
+      const gap = ((coin.price - kt) / kt) * 100;
+      const side = gap >= 0 ? "ABOVE" : "BELOW";
+      kalshiBlock = `
+══ KALSHI 15-MIN BINARY TARGET ══════════════════════════════════════
+Kalshi strike: $${kt.toFixed(kt < 10 ? 4 : 2)}
+Current price: $${coin.price.toFixed(coin.price < 10 ? 4 : 2)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike
+PRIMARY QUESTION: Will ${coin.symbol} close ABOVE or BELOW $${kt.toFixed(kt < 10 ? 4 : 2)} at ${basePred.label} ET?
+This is the binary you must answer. All indicators below are evidence for or against.
+═════════════════════════════════════════════════════════════════════
+`;
+    }
+
+    const prompt = `${kalshiBlock}Predict the price of ${coin.symbol} (${coin.name}) at ${basePred.label} ET (+${basePred.minutesAhead} minutes from now).
 
 Current price: $${coin.price.toFixed(2)}
 
@@ -1121,11 +1158,12 @@ Return ONLY valid JSON (no markdown):
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      max_tokens: 4096,
+      thinking: { type: "enabled", budget_tokens: 2000 },
       system:
-        "You are an expert crypto technical analyst and quantitative trader. You have access to multi-timeframe candle data, a live order book, key technical indicators, VWAP, and your own recent prediction accuracy record. Respond with ONLY valid JSON — no markdown, no extra text.",
+        "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
-    });
+    } as Parameters<typeof anthropic.messages.create>[0]);
 
     const raw = response.content
       .filter((b) => b.type === "text")
@@ -1214,12 +1252,13 @@ export function startPredictionTracker(): void {
         // stale prediction right before the boundary flips).
         if (!alreadySnapped && timeToNext > 60_000) {
           try {
-            const [candles, stats, tickerPrice, candles5m, orderBook] = await Promise.all([
+            const [candles, stats, tickerPrice, candles5m, orderBook, kalshiTargetSnap] = await Promise.all([
               getCandles(coin.product),
               getStats(coin.product),
               getTicker(coin.product).catch(() => 0),
               get5mCandles(coin.product).catch(() => [] as Candle[]),
               getOrderBook(coin.product).catch(() => undefined),
+              fetchKalshiTarget(sym).catch(() => null),
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice);
@@ -1229,10 +1268,10 @@ export function startPredictionTracker(): void {
             if (basePred) {
               // Ask Claude to study the chart and refine the prediction.
               // Falls back to the statistical model if the API call fails.
-              // For BTC/ETH/XRP, also snap the Kalshi 15-min target in parallel.
+              // Kalshi target is fetched above and passed into Claude as the primary anchor.
               const [ai, kalshiTarget] = await Promise.all([
-                refineSnappedPrediction(analysis, basePred, { candles5m, orderBook }),
-                fetchKalshiTarget(sym),
+                refineSnappedPrediction(analysis, basePred, { candles5m, orderBook, kalshiTarget: kalshiTargetSnap }),
+                Promise.resolve(kalshiTargetSnap),
               ]);
               const newRec: PredictionRecord = {
                 symbol: sym,
