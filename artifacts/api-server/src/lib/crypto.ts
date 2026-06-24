@@ -133,15 +133,25 @@ async function fetchJson<T>(url: string, timeoutMs = 8000): Promise<T> {
 
 type CacheEntry<T> = { at: number; value: T };
 const candleCache = new Map<string, CacheEntry<Candle[]>>();
+const candle5mCache = new Map<string, CacheEntry<Candle[]>>();
+const orderBookCache = new Map<string, CacheEntry<OrderBook>>();
 const statsCache = new Map<string, CacheEntry<CoinStats>>();
 const tickerCache = new Map<string, CacheEntry<number>>();
 const CANDLE_TTL = 8_000;
+const CANDLE_5M_TTL = 20_000; // 5-min candles update slowly
+const ORDER_BOOK_TTL = 4_000; // order book changes fast — keep fresh
 const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
 // Full coin analysis cache: predictions are stable for 3.5 min (no need to
 // recompute the statistical model on every 3-second price tick).
 const PRED_TTL = 60_000; // 60 seconds — fresh enough to drop stale quarter-hour intervals quickly
 const predCache = new Map<string, CacheEntry<CoinPrediction>>();
+
+// Level-2 order book shape from Coinbase.
+interface OrderBook {
+  bids: Array<{ price: number; size: number }>;
+  asks: Array<{ price: number; size: number }>;
+}
 
 // CoinGecko — single batched request for all coins (24h change reference).
 interface GeckoEntry {
@@ -242,6 +252,35 @@ async function getStats(product: string): Promise<CoinStats> {
   };
   statsCache.set(product, { at: Date.now(), value: stats });
   return stats;
+}
+
+// 5-minute candles — last 48 bars = 4 hours of higher-timeframe context.
+async function get5mCandles(product: string): Promise<Candle[]> {
+  const hit = candle5mCache.get(product);
+  if (hit && Date.now() - hit.at < CANDLE_5M_TTL) return hit.value;
+  const raw = await fetchJson<number[][]>(
+    `${COINBASE}/products/${product}/candles?granularity=300`,
+  );
+  const candles: Candle[] = raw
+    .map((r) => ({ t: r[0], l: r[1], h: r[2], o: r[3], c: r[4], v: r[5] }))
+    .sort((a, b) => a.t - b.t)
+    .slice(-48);
+  candle5mCache.set(product, { at: Date.now(), value: candles });
+  return candles;
+}
+
+// Coinbase Level-2 order book — top 20 levels each side.
+async function getOrderBook(product: string): Promise<OrderBook> {
+  const hit = orderBookCache.get(product);
+  if (hit && Date.now() - hit.at < ORDER_BOOK_TTL) return hit.value;
+  const raw = await fetchJson<{ bids: [string, string][]; asks: [string, string][] }>(
+    `${COINBASE}/products/${product}/book?level=2`,
+  );
+  const parse = (rows: [string, string][]): Array<{ price: number; size: number }> =>
+    (rows ?? []).slice(0, 20).map(([p, s]) => ({ price: parseFloat(p), size: parseFloat(s) }));
+  const book: OrderBook = { bids: parse(raw.bids), asks: parse(raw.asks) };
+  orderBookCache.set(product, { at: Date.now(), value: book });
+  return book;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +388,77 @@ function linReg(ys: number[]): { slope: number; r2: number } {
 
 function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
+}
+
+// Volume-Weighted Average Price over a candle series.
+function vwap(candles: Candle[]): number {
+  let cumTPV = 0;
+  let cumVol = 0;
+  for (const c of candles) {
+    const tp = (c.h + c.l + c.c) / 3;
+    cumTPV += tp * c.v;
+    cumVol += c.v;
+  }
+  return cumVol > 0 ? cumTPV / cumVol : 0;
+}
+
+// Bucket the Level-2 order book into $50 price slots and show top walls.
+// Returns a multi-line string ready to paste into a prompt.
+function formatOrderBook(book: OrderBook, currentPrice: number): string {
+  const BUCKET = 50;
+  const bucketAsk = new Map<number, number>();
+  const bucketBid = new Map<number, number>();
+
+  for (const { price, size } of book.asks) {
+    const b = Math.ceil(price / BUCKET) * BUCKET;
+    bucketAsk.set(b, (bucketAsk.get(b) ?? 0) + size);
+  }
+  for (const { price, size } of book.bids) {
+    const b = Math.floor(price / BUCKET) * BUCKET;
+    bucketBid.set(b, (bucketBid.get(b) ?? 0) + size);
+  }
+
+  const topAsks = [...bucketAsk.entries()]
+    .sort(([a], [b]) => a - b)
+    .slice(0, 6)
+    .reverse(); // print highest first so current price is at bottom of ask block
+
+  const topBids = [...bucketBid.entries()]
+    .sort(([a], [b]) => b - a)
+    .slice(0, 6);
+
+  const fmt = (p: number, s: number) =>
+    `  $${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}: ${s.toFixed(2)} BTC`;
+
+  return [
+    "  ASKS (potential resistance):",
+    ...topAsks.map(([p, s]) => fmt(p, s)),
+    `  ── spot $${currentPrice.toFixed(2)} ──`,
+    ...topBids.map(([p, s]) => fmt(p, s)),
+    "  BIDS (potential support):",
+  ].join("\n");
+}
+
+// Compute the average signed prediction error from the last N evaluated records
+// for a coin. Positive = Claude has been predicting too high; negative = too low.
+// Returns a human-readable calibration instruction string.
+function computeSignedBias(symbol: string, lastN = 10): string {
+  const records = (historyStore.get(symbol) ?? [])
+    .filter((r) => r.status === "evaluated" && r.actualPrice !== null)
+    .slice(-lastN);
+
+  if (records.length < 3) return "Insufficient history for bias calibration.";
+
+  const signedErrors = records.map((r) => (r.predictedPrice ?? 0) - (r.actualPrice ?? 0));
+  const avg = signedErrors.reduce((a, b) => a + b, 0) / signedErrors.length;
+  const absAvg = Math.abs(avg);
+
+  if (absAvg < 10) {
+    return `Well-calibrated: avg signed error is only $${avg.toFixed(2)} (n=${records.length}). No adjustment needed.`;
+  }
+  const dir = avg > 0 ? "HIGH" : "LOW";
+  const adj = avg > 0 ? "DOWN" : "UP";
+  return `CALIBRATION REQUIRED: your recent predictions have averaged $${absAvg.toFixed(0)} too ${dir} (signed avg = ${avg > 0 ? "+" : ""}${avg.toFixed(2)}, n=${records.length}). Shift your price target ${adj} by ~$${absAvg.toFixed(0)} to correct for this systematic bias.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,13 +623,16 @@ export interface AIPrediction {
 // Calls Claude with the full chart context for a CoinPrediction.
 // Returns refined predictions in the same order as coin.predictions, or null
 // if Claude is unavailable (caller falls back to the statistical model).
-async function callClaudeForPredictions(coin: CoinPrediction): Promise<AIPrediction[] | null> {
+async function callClaudeForPredictions(
+  coin: CoinPrediction,
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook },
+): Promise<AIPrediction[] | null> {
   try {
     const recent = coin.candles.slice(-60);
     const candleRows = recent
       .map(
         (c) =>
-          `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`,
+          `${c.t},${c.o.toFixed(2)},${c.h.toFixed(2)},${c.l.toFixed(2)},${c.c.toFixed(2)},${c.v.toFixed(2)}`,
       )
       .join("\n");
 
@@ -536,48 +649,80 @@ async function callClaudeForPredictions(coin: CoinPrediction): Promise<AIPredict
     // Highlight top-3 volume candles for Claude to flag unusual activity.
     const sorted = [...recent].sort((a, b) => b.v - a.v).slice(0, 3);
     const volSpikes = sorted
-      .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(6)}`)
+      .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(2)}`)
       .join("\n");
 
     const baselineRows = coin.predictions
       .map(
         (p, i) =>
-          `Target ${i + 1} (+${p.minutesAhead}min): $${p.predictedPrice.toFixed(6)}, range $${p.low.toFixed(6)}–$${p.high.toFixed(6)}, ${p.direction}, conf ${p.confidence}%`,
+          `Target ${i + 1} (+${p.minutesAhead}min): $${p.predictedPrice.toFixed(2)}, range $${p.low.toFixed(2)}–$${p.high.toFixed(2)}, ${p.direction}, conf ${p.confidence}%`,
       )
       .join("\n");
 
+    // ── B: 5-min candle block + VWAP ─────────────────────────────────────────
+    let multiTfBlock = "";
+    if (extra?.candles5m && extra.candles5m.length > 0) {
+      const c5m = extra.candles5m.slice(-24); // last 2 hours at 5-min
+      const vwapVal = vwap(c5m);
+      const rows5m = c5m
+        .map((c) => `${c.t},${c.o.toFixed(2)},${c.h.toFixed(2)},${c.l.toFixed(2)},${c.c.toFixed(2)},${c.v.toFixed(2)}`)
+        .join("\n");
+      const vwapRel = coin.price > vwapVal ? "above VWAP (bullish bias)" : "below VWAP (bearish bias)";
+      multiTfBlock = `
+VWAP (4-hour, 5-min candles): $${vwapVal.toFixed(2)} — price is ${vwapRel}
+
+LAST 24 × 5-MIN CANDLES — 2-hour structure (oldest first, unix/open/high/low/close/volume):
+${rows5m}`;
+    }
+
+    // ── A: order book block ───────────────────────────────────────────────────
+    let orderBookBlock = "";
+    if (extra?.orderBook) {
+      orderBookBlock = `
+LIVE ORDER BOOK — $50 price buckets (use these as real support/resistance levels):
+${formatOrderBook(extra.orderBook, coin.price)}`;
+    }
+
+    // ── C: signed bias calibration ────────────────────────────────────────────
+    const biasLine = computeSignedBias(coin.symbol);
+
     const userPrompt = `Refine price predictions for ${coin.symbol} (${coin.name}).
-Current price: $${coin.price.toFixed(6)}
+Current price: $${coin.price.toFixed(2)}
 
 INDICATORS:
 RSI(14): ${coin.indicators.rsi} (${rsiHint})
-MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (signal: ${coin.indicators.macd.toFixed(6)})
+MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (signal: ${coin.indicators.macd.toFixed(4)})
 Trend: ${coin.indicators.trend.toUpperCase()} | Strength: ${Math.round(coin.indicators.trendStrength * 100)}%
 Volatility: ${coin.indicators.volatilityPct.toFixed(3)}%/min
-SMA(20): $${coin.indicators.sma20.toFixed(6)}
-Bollinger Bands(20,2): upper=$${coin.indicators.bbUpper.toFixed(6)} / lower=$${coin.indicators.bbLower.toFixed(6)} | width=${coin.indicators.bbWidth.toFixed(2)}% | price ${bbPos}
-ATR(14): $${coin.indicators.atr14.toFixed(6)} (expected move per bar)
+SMA(20): $${coin.indicators.sma20.toFixed(2)}
+Bollinger Bands(20,2): upper=$${coin.indicators.bbUpper.toFixed(2)} / lower=$${coin.indicators.bbLower.toFixed(2)} | width=${coin.indicators.bbWidth.toFixed(2)}% | price ${bbPos}
+ATR(14): $${coin.indicators.atr14.toFixed(2)} (expected move per bar)
 24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
 1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
-24h range: $${coin.low24h.toFixed(6)}–$${coin.high24h.toFixed(6)}
-
+24h range: $${coin.low24h.toFixed(2)}–$${coin.high24h.toFixed(2)}
+${multiTfBlock}
 TOP-3 VOLUME SPIKES (possible order-flow events):
 ${volSpikes}
-
+${orderBookBlock}
 RECENT 60 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
 ${candleRows}
 
 STATISTICAL MODEL BASELINE:
 ${baselineRows}
 
+BIAS CALIBRATION:
+${biasLine}
+
 Instructions:
-1. Map concrete support and resistance levels from the candle data — use swing highs/lows, wicks, and consolidation zones
-2. Identify chart patterns (consolidation, breakout, wedge, flag, double top/bottom, channel, range)
-3. Assess volume-price relationship: are the volume spikes aligned with price direction? Are breakouts volume-confirmed?
-4. Use Bollinger Band position to judge momentum compression/expansion and mean-reversion probability
-5. Use ATR to calibrate the size of realistic price swings over each 15-minute window
-6. For each of the ${coin.predictions.length} quarter-hour targets, produce your best price estimate, a pessimistic low, and an optimistic high grounded in actual price structure — not formula extrapolation
-7. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict
+1. Use the LIVE ORDER BOOK as your primary support/resistance map — large BTC walls are real levels, not inferred ones
+2. Use the 5-min candles for 2-hour structure (trend, channels, key swing highs/lows) before zooming into the 1-min detail
+3. Identify VWAP position: price above VWAP favors continuation up; below favors continuation down
+4. Identify chart patterns and volume-price relationship on both timeframes
+5. Use Bollinger Band position to judge momentum compression/expansion
+6. Use ATR to calibrate realistic move size over each 15-minute window
+7. Apply the bias calibration above — if instructed to shift your target, do so
+8. For each of the ${coin.predictions.length} quarter-hour targets, produce your best price estimate, a pessimistic low, and an optimistic high
+9. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict
 
 Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same order as the baseline:
 {
@@ -677,15 +822,17 @@ export async function fetchAIPredictions(symbol: string): Promise<{
   if (!coinDef) throw new Error(`Unknown symbol: ${symbol}`);
 
   const now = new Date();
-  const [candles, stats, tickerPrice] = await Promise.all([
+  const [candles, stats, tickerPrice, candles5m, orderBook] = await Promise.all([
     getCandles(coinDef.product),
     getStats(coinDef.product),
     getTicker(coinDef.product).catch(() => 0),
+    get5mCandles(coinDef.product).catch(() => [] as Candle[]),
+    getOrderBook(coinDef.product).catch(() => undefined),
   ]);
   const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
   const coin = analyzeCoin(coinDef, candles, stats, now, livePrice);
 
-  const aiPreds = await callClaudeForPredictions(coin);
+  const aiPreds = await callClaudeForPredictions(coin, { candles5m, orderBook });
   if (!aiPreds) throw new Error("Claude analysis unavailable");
 
   return { coin: symbol, predictions: aiPreds, generatedAt: now.toISOString() };
@@ -836,13 +983,14 @@ function dbUpdateRecord(rec: PredictionRecord): void {
 async function refineSnappedPrediction(
   coin: CoinPrediction,
   basePred: Prediction,
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook },
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
   try {
     const recent = coin.candles.slice(-60);
     const candleRows = recent
       .map(
         (c) =>
-          `${c.t},${c.o.toFixed(6)},${c.h.toFixed(6)},${c.l.toFixed(6)},${c.c.toFixed(6)},${c.v.toFixed(2)}`,
+          `${c.t},${c.o.toFixed(2)},${c.h.toFixed(2)},${c.l.toFixed(2)},${c.c.toFixed(2)},${c.v.toFixed(2)}`,
       )
       .join("\n");
 
@@ -863,10 +1011,10 @@ async function refineSnappedPrediction(
     // Top-3 volume candles to surface order-flow events.
     const sorted = [...recent].sort((a, b) => b.v - a.v).slice(0, 3);
     const volSpikes = sorted
-      .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(6)}`)
+      .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(2)}`)
       .join("\n");
 
-    // Accuracy feedback: last 5 evaluated predictions for this coin.
+    // Accuracy feedback: last 5 evaluated predictions (raw hit/miss record).
     const recentEvals = (historyStore.get(coin.symbol) ?? [])
       .filter((r) => r.status === "evaluated" && r.errorPct != null)
       .slice(-5);
@@ -875,46 +1023,77 @@ async function refineSnappedPrediction(
         ? recentEvals
             .map(
               (r) =>
-                `  ${r.targetLabel}: predicted $${r.predictedPrice?.toFixed(6)} → actual $${r.actualPrice?.toFixed(6)} | error ${r.errorPct?.toFixed(2)}% | ${r.correct ? "HIT ✓" : "MISS ✗"}`,
+                `  ${r.targetLabel}: predicted $${r.predictedPrice?.toFixed(2)} → actual $${r.actualPrice?.toFixed(2)} | error ${r.errorPct?.toFixed(2)}% | ${r.correct ? "HIT ✓" : "MISS ✗"}`,
             )
             .join("\n")
         : "  No evaluated predictions yet.";
 
+    // ── B: 5-min candles + VWAP ───────────────────────────────────────────────
+    let multiTfBlock = "";
+    if (extra?.candles5m && extra.candles5m.length > 0) {
+      const c5m = extra.candles5m.slice(-24);
+      const vwapVal = vwap(c5m);
+      const rows5m = c5m
+        .map((c) => `${c.t},${c.o.toFixed(2)},${c.h.toFixed(2)},${c.l.toFixed(2)},${c.c.toFixed(2)},${c.v.toFixed(2)}`)
+        .join("\n");
+      const vwapRel = coin.price > vwapVal ? "above VWAP (bullish bias)" : "below VWAP (bearish bias)";
+      multiTfBlock = `
+VWAP (4-hour, 5-min candles): $${vwapVal.toFixed(2)} — price is ${vwapRel}
+
+LAST 24 × 5-MIN CANDLES — 2-hour structure (oldest first, unix/open/high/low/close/volume):
+${rows5m}`;
+    }
+
+    // ── A: order book block ───────────────────────────────────────────────────
+    let orderBookBlock = "";
+    if (extra?.orderBook) {
+      orderBookBlock = `
+LIVE ORDER BOOK — $50 price buckets (use as real support/resistance levels):
+${formatOrderBook(extra.orderBook, coin.price)}`;
+    }
+
+    // ── C: signed bias calibration ────────────────────────────────────────────
+    const biasLine = computeSignedBias(coin.symbol);
+
     const prompt = `Predict the price of ${coin.symbol} (${coin.name}) at ${basePred.label} ET (+${basePred.minutesAhead} minutes from now).
 
-Current price: $${coin.price.toFixed(6)}
+Current price: $${coin.price.toFixed(2)}
 
 INDICATORS:
 RSI(14): ${coin.indicators.rsi} (${rsiHint})
-MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (signal: ${coin.indicators.macd.toFixed(6)})
+MACD: ${coin.indicators.macd >= 0 ? "Bullish" : "Bearish"} (signal: ${coin.indicators.macd.toFixed(4)})
 Trend: ${coin.indicators.trend.toUpperCase()} | Strength: ${Math.round(coin.indicators.trendStrength * 100)}%
 Volatility: ${coin.indicators.volatilityPct.toFixed(3)}%/min
-SMA(20): $${coin.indicators.sma20.toFixed(6)}
-Bollinger Bands(20,2): upper=$${coin.indicators.bbUpper.toFixed(6)} / lower=$${coin.indicators.bbLower.toFixed(6)} | width=${coin.indicators.bbWidth.toFixed(2)}% | price ${bbPos}
-ATR(14): $${coin.indicators.atr14.toFixed(6)} (1-bar expected range)
+SMA(20): $${coin.indicators.sma20.toFixed(2)}
+Bollinger Bands(20,2): upper=$${coin.indicators.bbUpper.toFixed(2)} / lower=$${coin.indicators.bbLower.toFixed(2)} | width=${coin.indicators.bbWidth.toFixed(2)}% | price ${bbPos}
+ATR(14): $${coin.indicators.atr14.toFixed(2)} (1-bar expected range)
 24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
 1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
-24h range: $${coin.low24h.toFixed(6)}–$${coin.high24h.toFixed(6)}
-
+24h range: $${coin.low24h.toFixed(2)}–$${coin.high24h.toFixed(2)}
+${multiTfBlock}
 TOP-3 VOLUME SPIKES (potential order-flow events):
 ${volSpikes}
-
+${orderBookBlock}
 RECENT 60 1-MIN CANDLES (oldest first, unix/open/high/low/close/volume):
 ${candleRows}
 
-STATISTICAL MODEL BASELINE: $${basePred.predictedPrice.toFixed(6)}, ${basePred.direction}, conf ${basePred.confidence}%
+STATISTICAL MODEL BASELINE: $${basePred.predictedPrice.toFixed(2)}, ${basePred.direction}, conf ${basePred.confidence}%
 
 YOUR RECENT ACCURACY FOR ${coin.symbol}:
 ${feedbackStr}
 
+BIAS CALIBRATION:
+${biasLine}
+
 Analysis steps:
-1. Identify key support and resistance levels from swing highs/lows, wicks, and consolidation zones in the 60-min candle chart
-2. Detect the dominant chart pattern (range, breakout, trend continuation, reversal setup)
-3. Check whether volume spikes confirm or contradict the price direction — unconfirmed moves are less reliable
-4. Use Bollinger Band position to assess compression (low width = breakout risk) or expansion (momentum)
-5. Use ATR to ground your price target — a 15-min move should be roughly within 1–3× ATR of current price
-6. Review your recent accuracy above: if you have been consistently overshooting or undershooting, recalibrate
-7. Set confidence 0-100 based on signal alignment; reduce confidence when indicators conflict
+1. Use the LIVE ORDER BOOK as your primary support/resistance map — large BTC walls are real levels, not inferred ones
+2. Use the 5-min candles for 2-hour structure before zooming into 1-min detail
+3. Use VWAP position: above = bullish continuation bias; below = bearish continuation bias
+4. Check volume spikes for order-flow confirmation of directional moves
+5. Use Bollinger Band position to assess compression or expansion
+6. Use ATR to ground your target — a 15-min move should be within 1–3× ATR
+7. Apply the bias calibration — if instructed to shift your target, do so
+8. Set confidence 0-100; reduce when signals conflict
 
 Return ONLY valid JSON (no markdown):
 {"predictedPrice": 0.0, "direction": "up", "confidence": 70}`;
@@ -924,7 +1103,7 @@ Return ONLY valid JSON (no markdown):
       max_tokens: 12000,
       thinking: { type: "enabled", budget_tokens: 8000 },
       system:
-        "You are an expert crypto technical analyst and quantitative trader. You have access to 60 minutes of 1-minute candle data, key technical indicators, and your own recent prediction accuracy record. Think through the chart structure carefully before committing to a price target. Respond with ONLY valid JSON after your analysis — no markdown, no extra text.",
+        "You are an expert crypto technical analyst and quantitative trader. You have access to multi-timeframe candle data, a live order book, key technical indicators, VWAP, and your own recent prediction accuracy record. Think through the market structure carefully before committing to a price target. Respond with ONLY valid JSON after your analysis — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
@@ -1015,10 +1194,12 @@ export function startPredictionTracker(): void {
         // stale prediction right before the boundary flips).
         if (!alreadySnapped && timeToNext > 60_000) {
           try {
-            const [candles, stats, tickerPrice] = await Promise.all([
+            const [candles, stats, tickerPrice, candles5m, orderBook] = await Promise.all([
               getCandles(coin.product),
               getStats(coin.product),
               getTicker(coin.product).catch(() => 0),
+              get5mCandles(coin.product).catch(() => [] as Candle[]),
+              getOrderBook(coin.product).catch(() => undefined),
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice);
@@ -1030,7 +1211,7 @@ export function startPredictionTracker(): void {
               // Falls back to the statistical model if the API call fails.
               // For BTC, also snap the Kalshi KXBTC15M target in parallel.
               const [ai, kalshiTarget] = await Promise.all([
-                refineSnappedPrediction(analysis, basePred),
+                refineSnappedPrediction(analysis, basePred, { candles5m, orderBook }),
                 sym === "BTC" ? fetchKalshiBtcTarget() : Promise.resolve(null),
               ]);
               const newRec: PredictionRecord = {
