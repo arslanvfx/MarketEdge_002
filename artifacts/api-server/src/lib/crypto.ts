@@ -869,20 +869,42 @@ const MAX_HISTORY = 30; // last 30 quarter-hour predictions per coin
 export const ACCURACY_THRESHOLD_PCT = 1.0;
 
 // ---------------------------------------------------------------------------
-// Kalshi KXBTC15M target price — fetched at snap time for BTC predictions
+// Kalshi 15-min target price — fetched at snap time for BTC, ETH, XRP
 // ---------------------------------------------------------------------------
 
-async function fetchKalshiBtcTarget(): Promise<number | null> {
+// Map of symbol → Kalshi series ticker for coins that have 15-min markets.
+export const KALSHI_SERIES: Record<string, string> = {
+  BTC: "KXBTC15M",
+  ETH: "KXETH15M",
+  XRP: "KXXRP15M",
+};
+
+// Per-symbol cache so each coin's Kalshi target is fetched independently.
+const kalshiTargetCache = new Map<string, { value: number | null; at: number }>();
+const KALSHI_TARGET_LIB_TTL = 12_000;
+
+export async function fetchKalshiTarget(symbol: string): Promise<number | null> {
+  const series = KALSHI_SERIES[symbol.toUpperCase()];
+  if (!series) return null;
+  const hit = kalshiTargetCache.get(symbol);
+  if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) return hit.value;
   try {
     const resp = await fetch(
-      "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open&limit=5",
+      `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=5`,
       { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
     );
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      kalshiTargetCache.set(symbol, { value: null, at: Date.now() });
+      return null;
+    }
     const body = (await resp.json()) as { markets?: { floor_strike?: number }[] };
     for (const m of body.markets ?? []) {
-      if (typeof m.floor_strike === "number" && m.floor_strike > 0) return m.floor_strike;
+      if (typeof m.floor_strike === "number" && m.floor_strike > 0) {
+        kalshiTargetCache.set(symbol, { value: m.floor_strike, at: Date.now() });
+        return m.floor_strike;
+      }
     }
+    kalshiTargetCache.set(symbol, { value: null, at: Date.now() });
     return null;
   } catch {
     return null;
@@ -1209,10 +1231,10 @@ export function startPredictionTracker(): void {
             if (basePred) {
               // Ask Claude to study the chart and refine the prediction.
               // Falls back to the statistical model if the API call fails.
-              // For BTC, also snap the Kalshi KXBTC15M target in parallel.
+              // For BTC/ETH/XRP, also snap the Kalshi 15-min target in parallel.
               const [ai, kalshiTarget] = await Promise.all([
                 refineSnappedPrediction(analysis, basePred, { candles5m, orderBook }),
-                sym === "BTC" ? fetchKalshiBtcTarget() : Promise.resolve(null),
+                fetchKalshiTarget(sym),
               ]);
               const newRec: PredictionRecord = {
                 symbol: sym,

@@ -149,6 +149,9 @@ interface CoinPrice {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Coins that have Kalshi 15-min markets (must match KALSHI_SERIES in the API).
+const KALSHI_COINS = ["BTC", "ETH", "XRP"];
+
 const COIN_STYLE: Record<string, { glyph: string; accent: string; ring: string; glow: string }> = {
   BTC:  { glyph: "₿", accent: "text-amber-400",  ring: "ring-amber-500/40 border-amber-500/40",  glow: "shadow-amber-500/20" },
   ETH:  { glyph: "Ξ", accent: "text-indigo-400", ring: "ring-indigo-500/40 border-indigo-500/40", glow: "shadow-indigo-500/20" },
@@ -696,15 +699,15 @@ export default function Predictor() {
     refetchInterval: 5000,
   });
 
-  // Kalshi BTC target — lifted here so trigger logic can access it alongside stat model
+  // Kalshi 15-min target — supported for BTC, ETH, and XRP
   const kalshiTargetQuery = useQuery({
-    queryKey: ["kalshi-btc-target"],
-    queryFn: () => fetchJson<KalshiTarget>("/crypto/kalshi-btc-target"),
+    queryKey: ["kalshi-target", selected],
+    queryFn: () => fetchJson<KalshiTarget>(`/crypto/kalshi-target?symbol=${selected}`),
     refetchInterval: 10_000,
-    enabled: selected === "BTC",
+    enabled: KALSHI_COINS.includes(selected),
   });
   const ktd = kalshiTargetQuery.data;
-  const kalshiAvailableTop = selected === "BTC" && ktd?.available === true;
+  const kalshiAvailableTop = KALSHI_COINS.includes(selected) && ktd?.available === true;
   const kalshiTarget = kalshiAvailableTop ? (ktd?.targetPrice ?? null) : null;
   const kalshiIsLive = ktd?.isLive === true;
   const kalshiEventTicker = ktd?.eventTicker;
@@ -772,10 +775,10 @@ export default function Predictor() {
   const PRICE_DRIFT_THRESHOLD = 0.0015;
 
   useEffect(() => {
-    if (selected !== "BTC") return;
+    if (!KALSHI_COINS.includes(selected)) return;
     if (!kalshiIsLive || kalshiTarget === null) return;
 
-    const entry = aiData["BTC"] ?? null;
+    const entry = aiData[selected] ?? null;
 
     // ── Trigger 1: New Kalshi window ──────────────────────────────────────
     if (entry && kalshiEventTicker && kalshiEventTicker !== entry.eventTickerAtRun) {
@@ -965,7 +968,7 @@ function CoinDetail({
   ktd: KalshiTarget | undefined;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
-  const kalshiAvailable = coin.symbol === "BTC" && ktd?.available === true;
+  const kalshiAvailable = KALSHI_COINS.includes(coin.symbol) && ktd?.available === true;
 
   // Derive Claude's call from the AI forecast — same data as the cards, never contradicts.
   const claudeAiPred0 = aiEntry?.preds[0] ?? null;
@@ -1162,7 +1165,7 @@ function CoinDetail({
         </Card>
       </div>
 
-      {/* ── Kalshi Target Banner (BTC only) ── */}
+      {/* ── Kalshi Target Banner (BTC, ETH, XRP) ── */}
       {kalshiAvailable && (
         <div className="rounded-xl border-2 border-[#00C805]/40 bg-[#00C805]/6 overflow-hidden">
           {/* Banner header */}
@@ -1200,7 +1203,7 @@ function CoinDetail({
               {kalshiTarget !== null ? (
                 <>
                   <div className="text-3xl font-black tabular-nums text-[#00C805]">${formatPrice(kalshiTarget)}</div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5">BTC BRTI at window open</div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">{coin.symbol} RTI at window open</div>
                 </>
               ) : (
                 <>
