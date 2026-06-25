@@ -1307,6 +1307,37 @@ Return ONLY valid JSON (no markdown):
   }
 }
 
+// ── AI Mode Settings ─────────────────────────────────────────────────────────
+// Controls whether Claude is used in the background tracker (costs money).
+// Default: "stat" — statistical model only; Claude only runs when the user
+// explicitly presses "Enhance" for a coin (which also sets claudeEnabledCoins).
+
+let globalAiMode: "stat" | "claude" = "stat";
+const claudeEnabledCoins = new Set<string>();
+
+export function getAiSettings(): { mode: "stat" | "claude"; claudeCoins: string[] } {
+  return { mode: globalAiMode, claudeCoins: [...claudeEnabledCoins] };
+}
+
+export function setGlobalAiMode(mode: "stat" | "claude"): void {
+  globalAiMode = mode;
+  if (mode === "stat") claudeEnabledCoins.clear();
+}
+
+export function setCoinClaudeEnabled(symbol: string, enabled: boolean): void {
+  if (enabled) {
+    claudeEnabledCoins.add(symbol);
+    globalAiMode = "claude";
+  } else {
+    claudeEnabledCoins.delete(symbol);
+    if (claudeEnabledCoins.size === 0) globalAiMode = "stat";
+  }
+}
+
+function isCoinClaudeEnabled(symbol: string): boolean {
+  return globalAiMode === "claude" && claudeEnabledCoins.has(symbol);
+}
+
 export function startPredictionTracker(): void {
   const tick = async () => {
     const nowMs = Date.now();
@@ -1381,19 +1412,21 @@ export function startPredictionTracker(): void {
               analysis.predictions.find((p) => p.target === targetISO) ??
               analysis.predictions[0];
             if (basePred) {
-              // Ask Claude to study the chart and refine the prediction.
-              // Falls back to the statistical model if the API call fails.
-              // Kalshi target is fetched above and passed into Claude as the primary anchor.
+              // Only call Claude if the user has enabled it for this coin.
+              // Default: statistical model only (no cost).
               updateKalshiWindowPrice(getLastKalshiTicker(sym), analysis.price);
               const winCtxSnap = getKalshiWindowContext(sym);
+              const useAI = isCoinClaudeEnabled(sym);
               const [ai, kalshiTarget] = await Promise.all([
-                refineSnappedPrediction(analysis, basePred, {
-                  candles5m,
-                  orderBook,
-                  kalshiTarget: kalshiTargetSnap,
-                  windowOpenPrice: winCtxSnap?.priceAtOpen,
-                  minutesElapsed: winCtxSnap?.minutesElapsed,
-                }),
+                useAI
+                  ? refineSnappedPrediction(analysis, basePred, {
+                      candles5m,
+                      orderBook,
+                      kalshiTarget: kalshiTargetSnap,
+                      windowOpenPrice: winCtxSnap?.priceAtOpen,
+                      minutesElapsed: winCtxSnap?.minutesElapsed,
+                    })
+                  : Promise.resolve(null),
                 Promise.resolve(kalshiTargetSnap),
               ]);
               const newRec: PredictionRecord = {

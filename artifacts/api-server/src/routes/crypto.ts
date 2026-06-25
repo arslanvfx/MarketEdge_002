@@ -11,6 +11,9 @@ import {
   KALSHI_SERIES,
   getKalshiWindowContext,
   CRYPTO_COINS,
+  getAiSettings,
+  setGlobalAiMode,
+  setCoinClaudeEnabled,
 } from "../lib/crypto";
 
 const router = Router();
@@ -56,6 +59,31 @@ router.get("/crypto/ai-predict", async (req, res) => {
     res.status(500).json({ error: `AI prediction failed: ${msg}` });
   }
 });
+
+// ── AI mode settings ─────────────────────────────────────────────────────────
+
+router.get("/crypto/ai-settings", (_req, res) => {
+  res.json(getAiSettings());
+});
+
+router.post("/crypto/ai-settings/mode", (req, res) => {
+  const { mode } = req.body as { mode?: string };
+  if (mode !== "stat" && mode !== "claude") {
+    res.status(400).json({ error: "mode must be 'stat' or 'claude'" });
+    return;
+  }
+  setGlobalAiMode(mode);
+  res.json({ ok: true, ...getAiSettings() });
+});
+
+router.post("/crypto/ai-settings/coin/:symbol", (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const { enabled } = req.body as { enabled?: boolean };
+  setCoinClaudeEnabled(symbol, !!enabled);
+  res.json({ ok: true, ...getAiSettings() });
+});
+
+// ── Prediction history ────────────────────────────────────────────────────────
 
 router.get("/crypto/prediction-history/summary", (_req, res) => {
   const summary = CRYPTO_COINS.map(({ symbol }) => {

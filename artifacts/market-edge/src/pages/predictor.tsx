@@ -730,6 +730,33 @@ export default function Predictor() {
     refetchInterval: 5000,
   });
 
+  // AI settings — controls whether Claude tracker runs per-coin (server-persisted)
+  const aiSettingsQuery = useQuery({
+    queryKey: ["ai-settings"],
+    queryFn: () => fetchJson<{ mode: "stat" | "claude"; claudeCoins: string[] }>("/crypto/ai-settings"),
+    refetchInterval: 10_000,
+  });
+  const aiSettings = aiSettingsQuery.data ?? { mode: "stat" as const, claudeCoins: [] as string[] };
+  const claudeEnabledSet = useMemo(() => new Set(aiSettings.claudeCoins), [aiSettings.claudeCoins]);
+
+  async function handleSetMode(mode: "stat" | "claude") {
+    await fetch(`${API_BASE}/crypto/ai-settings/mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    void aiSettingsQuery.refetch();
+  }
+
+  async function handleToggleCoinClaude(symbol: string, enabled: boolean) {
+    await fetch(`${API_BASE}/crypto/ai-settings/coin/${symbol}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    void aiSettingsQuery.refetch();
+  }
+
   // Per-coin accuracy summary — single request, refreshes every 60s
   const accuracySummaryQuery = useQuery({
     queryKey: ["accuracy-summary"],
@@ -783,6 +810,10 @@ export default function Predictor() {
     if (aiLoading) return;
     setAiError(null);
     setAiLoading(true);
+    // First press also enables Claude tracking for this coin going forward
+    if (!claudeEnabledSet.has(selected)) {
+      void handleToggleCoinClaude(selected, true);
+    }
     const sym = selected;
     const priceSnapshot = livePrice;
     const tickerSnapshot = kalshiEventTicker;
@@ -823,6 +854,8 @@ export default function Predictor() {
   useEffect(() => {
     if (!KALSHI_COINS.includes(selected)) return;
     if (!kalshiIsLive || kalshiTarget === null) return;
+    // Auto-trigger only fires when the user has enabled Claude for this coin
+    if (!claudeEnabledSet.has(selected)) return;
 
     const entry = aiData[selected] ?? null;
 
@@ -891,6 +924,29 @@ export default function Predictor() {
                 <Radio className="w-3 h-3" /> Live
               </span>
             </h1>
+            {/* Global AI mode toggle */}
+            <div className="flex items-center gap-1 mt-1">
+              <button
+                onClick={() => void handleSetMode("stat")}
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-l-full text-[10px] font-semibold border transition-colors ${
+                  aiSettings.mode === "stat"
+                    ? "bg-sky-500/20 text-sky-300 border-sky-500/40"
+                    : "bg-transparent text-muted-foreground border-border hover:text-foreground"
+                }`}
+              >
+                <TrendingUp className="w-3 h-3" /> Statistical
+              </button>
+              <button
+                onClick={() => void handleSetMode("claude")}
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-r-full text-[10px] font-semibold border border-l-0 transition-colors ${
+                  aiSettings.mode === "claude"
+                    ? "bg-violet-500/20 text-violet-300 border-violet-500/40"
+                    : "bg-transparent text-muted-foreground border-border hover:text-foreground"
+                }`}
+              >
+                <Sparkles className="w-3 h-3" /> Claude AI
+              </button>
+            </div>
             <p className="text-xs text-muted-foreground mt-0.5">
               15-minute price forecasts from live chart analysis
             </p>
@@ -950,6 +1006,11 @@ export default function Predictor() {
                             </span>
                           );
                         })()}
+                        {claudeEnabledSet.has(coin.symbol) && (
+                          <span className="inline-flex items-center rounded-full px-1 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/20 text-violet-300 ring-violet-500/30" title="Claude AI tracking active">
+                            <Sparkles className="w-2.5 h-2.5" />
+                          </span>
+                        )}
                       </div>
                       <span className={`text-[11px] font-medium ${chg >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {formatPct(chg)}
@@ -982,6 +1043,8 @@ export default function Predictor() {
             aiError={aiError}
             autoTriggerReason={autoTriggerReason}
             onEnhance={handleEnhance}
+            claudeActive={claudeEnabledSet.has(selected)}
+            onToggleClaude={(enabled) => void handleToggleCoinClaude(selected, enabled)}
             kalshiTarget={kalshiTarget}
             kalshiIsLive={kalshiIsLive}
             ktd={ktd}
@@ -1013,6 +1076,8 @@ function CoinDetail({
   aiError,
   autoTriggerReason,
   onEnhance,
+  claudeActive,
+  onToggleClaude,
   kalshiTarget,
   kalshiIsLive,
   ktd,
@@ -1026,6 +1091,8 @@ function CoinDetail({
   aiError: string | null;
   autoTriggerReason: string | null;
   onEnhance: () => void;
+  claudeActive: boolean;
+  onToggleClaude: (enabled: boolean) => void;
   kalshiTarget: number | null;
   kalshiIsLive: boolean;
   ktd: KalshiTarget | undefined;
@@ -1363,6 +1430,15 @@ function CoinDetail({
                 )}
               </span>
             )}
+            {claudeActive && (
+              <button
+                onClick={() => onToggleClaude(false)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-violet-500/30 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors"
+                title="Claude is auto-tracking this coin — click to disable"
+              >
+                <Sparkles className="w-3 h-3" /> Claude active
+              </button>
+            )}
             <button
               onClick={onEnhance}
               disabled={aiLoading}
@@ -1467,8 +1543,8 @@ function CoinDetail({
           <Indicator label="SMA (20)" value={`$${formatPrice(coin.indicators.sma20)}`} />
         </div>
         <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-          Statistical Model: drift + regression on 60 min of 1-min candles, RSI, MACD, Bollinger Bands, ATR.
-          Claude AI: extended-thinking analysis of the same chart data — click "Enhance with AI" to run it on demand.
+          <strong>Statistical (free):</strong> drift + regression on 60 min of candles, RSI, MACD, Bollinger Bands, ATR — used by default for all tracker snapshots. &nbsp;
+          <strong>Claude AI (paid):</strong> extended-thinking analysis on the same data — press "Enhance with AI" on a coin to run it on demand and enable auto-tracking for that coin.
           Prices update every 3 s · Not financial advice · {tz}.
         </p>
       </div>
