@@ -144,7 +144,7 @@ const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
 // Full coin analysis cache: predictions are stable for 3.5 min (no need to
 // recompute the statistical model on every 3-second price tick).
-const PRED_TTL = 15_000; // 15 seconds — keeps stat model live for flip detection
+const PRED_TTL = 30_000; // 30 seconds — fresh enough for flip detection, less reactive than 15s
 const predCache = new Map<string, CacheEntry<CoinPrediction>>();
 
 // Level-2 order book shape from Coinbase.
@@ -510,12 +510,12 @@ function analyzeCoin(
   for (let i = 1; i < closes.length; i++) {
     if (closes[i - 1] > 0) rets.push(Math.log(closes[i] / closes[i - 1]));
   }
-  const recentRets = rets.slice(-30);
-  const meanRet = mean(recentRets); // per-minute drift (log)
+  const recentRets = rets.slice(-60);
+  const meanRet = mean(recentRets); // per-minute drift (log) — 60-min window for stability
   const vol = stddev(recentRets); // per-minute volatility (log)
 
-  // Trend via linear regression over the last 30 minutes of price.
-  const recentCloses = closes.slice(-30);
+  // Trend via linear regression over the last 60 minutes of price.
+  const recentCloses = closes.slice(-60);
   const { slope, r2 } = linReg(recentCloses);
   const slopeRet = price > 0 ? slope / price : 0; // convert price slope to per-min return
 
@@ -628,7 +628,7 @@ export interface AIPrediction {
 // if Claude is unavailable (caller falls back to the statistical model).
 async function callClaudeForPredictions(
   coin: CoinPrediction,
-  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null },
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number; minutesElapsed?: number },
 ): Promise<AIPrediction[] | null> {
   try {
     const recent = coin.candles.slice(-60);
@@ -695,10 +695,19 @@ ${formatOrderBook(extra.orderBook, coin.price)}`;
     if (kt !== null && kt > 0) {
       const gap = ((coin.price - kt) / kt) * 100;
       const side = gap >= 0 ? "ABOVE" : "BELOW";
+      let trajectoryLine = "";
+      const wop = extra?.windowOpenPrice;
+      const wme = extra?.minutesElapsed;
+      if (wop && wop > 0 && wme != null) {
+        const openGap = ((wop - kt) / kt) * 100;
+        const openSide = openGap >= 0 ? "ABOVE" : "BELOW";
+        const trend = Math.abs(gap) > Math.abs(openGap) ? "moving away from" : "moving toward";
+        trajectoryLine = `\nWindow opened ${wme}min ago at $${wop.toFixed(wop < 10 ? 4 : 2)} (${Math.abs(openGap).toFixed(3)}% ${openSide}) — price is ${trend} the strike.`;
+      }
       kalshiBlock = `
 ══ KALSHI 15-MIN BINARY TARGET ══════════════════════════════════════
 Kalshi strike: $${kt.toFixed(kt < 10 ? 4 : 2)}
-Current price: $${coin.price.toFixed(coin.price < 10 ? 4 : 2)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike
+Current price: $${coin.price.toFixed(coin.price < 10 ? 4 : 2)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike${trajectoryLine}
 PRIMARY QUESTION: Will ${coin.symbol} close ABOVE or BELOW $${kt.toFixed(kt < 10 ? 4 : 2)}?
 This is the binary you must answer. All indicators below are evidence for or against.
 ═════════════════════════════════════════════════════════════════════
@@ -852,7 +861,15 @@ export async function fetchAIPredictions(symbol: string): Promise<{
   const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
   const coin = analyzeCoin(coinDef, candles, stats, now, livePrice);
 
-  const aiPreds = await callClaudeForPredictions(coin, { candles5m, orderBook, kalshiTarget: kalshiTargetPrice });
+  updateKalshiWindowPrice(symbol.toUpperCase(), kalshiTargetPrice, coin.price);
+  const winCtx = getKalshiWindowContext(symbol.toUpperCase());
+  const aiPreds = await callClaudeForPredictions(coin, {
+    candles5m,
+    orderBook,
+    kalshiTarget: kalshiTargetPrice,
+    windowOpenPrice: winCtx?.priceAtOpen,
+    minutesElapsed: winCtx?.minutesElapsed,
+  });
   if (!aiPreds) throw new Error("Claude analysis unavailable");
 
   return { coin: symbol, predictions: aiPreds, generatedAt: now.toISOString() };
@@ -902,6 +919,31 @@ export const KALSHI_SERIES: Record<string, string> = {
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
 const kalshiTargetCache = new Map<string, { value: number | null; at: number }>();
 const KALSHI_TARGET_LIB_TTL = 12_000;
+
+// Tracks the coin price when each Kalshi window opened (keyed by symbol).
+// Updated by snapping/AI code where both target and coin price are available.
+const kalshiWindowStore = new Map<string, {
+  targetPrice: number;
+  priceAtOpen: number;
+  openedAt: number;
+}>();
+
+function updateKalshiWindowPrice(symbol: string, targetPrice: number | null, coinPrice: number): void {
+  if (targetPrice === null || targetPrice <= 0 || coinPrice <= 0) return;
+  const existing = kalshiWindowStore.get(symbol);
+  if (!existing || existing.targetPrice !== targetPrice) {
+    kalshiWindowStore.set(symbol, { targetPrice, priceAtOpen: coinPrice, openedAt: Date.now() });
+  }
+}
+
+function getKalshiWindowContext(symbol: string): { priceAtOpen: number; minutesElapsed: number } | null {
+  const entry = kalshiWindowStore.get(symbol);
+  if (!entry) return null;
+  return {
+    priceAtOpen: entry.priceAtOpen,
+    minutesElapsed: Math.max(0, Math.round((Date.now() - entry.openedAt) / 60_000)),
+  };
+}
 
 export async function fetchKalshiTarget(symbol: string): Promise<number | null> {
   const series = KALSHI_SERIES[symbol.toUpperCase()];
@@ -1025,7 +1067,7 @@ function dbUpdateRecord(rec: PredictionRecord): void {
 async function refineSnappedPrediction(
   coin: CoinPrediction,
   basePred: Prediction,
-  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null },
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number; minutesElapsed?: number },
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
   try {
     const recent = coin.candles.slice(-60);
@@ -1103,10 +1145,19 @@ ${formatOrderBook(extra.orderBook, coin.price)}`;
     if (kt !== null && kt > 0) {
       const gap = ((coin.price - kt) / kt) * 100;
       const side = gap >= 0 ? "ABOVE" : "BELOW";
+      let trajectoryLine = "";
+      const wop = extra?.windowOpenPrice;
+      const wme = extra?.minutesElapsed;
+      if (wop && wop > 0 && wme != null) {
+        const openGap = ((wop - kt) / kt) * 100;
+        const openSide = openGap >= 0 ? "ABOVE" : "BELOW";
+        const trend = Math.abs(gap) > Math.abs(openGap) ? "moving away from" : "moving toward";
+        trajectoryLine = `\nWindow opened ${wme}min ago at $${wop.toFixed(wop < 10 ? 4 : 2)} (${Math.abs(openGap).toFixed(3)}% ${openSide}) — price is ${trend} the strike.`;
+      }
       kalshiBlock = `
 ══ KALSHI 15-MIN BINARY TARGET ══════════════════════════════════════
 Kalshi strike: $${kt.toFixed(kt < 10 ? 4 : 2)}
-Current price: $${coin.price.toFixed(coin.price < 10 ? 4 : 2)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike
+Current price: $${coin.price.toFixed(coin.price < 10 ? 4 : 2)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike${trajectoryLine}
 PRIMARY QUESTION: Will ${coin.symbol} close ABOVE or BELOW $${kt.toFixed(kt < 10 ? 4 : 2)} at ${basePred.label} ET?
 This is the binary you must answer. All indicators below are evidence for or against.
 ═════════════════════════════════════════════════════════════════════
@@ -1269,8 +1320,16 @@ export function startPredictionTracker(): void {
               // Ask Claude to study the chart and refine the prediction.
               // Falls back to the statistical model if the API call fails.
               // Kalshi target is fetched above and passed into Claude as the primary anchor.
+              updateKalshiWindowPrice(sym, kalshiTargetSnap, analysis.price);
+              const winCtxSnap = getKalshiWindowContext(sym);
               const [ai, kalshiTarget] = await Promise.all([
-                refineSnappedPrediction(analysis, basePred, { candles5m, orderBook, kalshiTarget: kalshiTargetSnap }),
+                refineSnappedPrediction(analysis, basePred, {
+                  candles5m,
+                  orderBook,
+                  kalshiTarget: kalshiTargetSnap,
+                  windowOpenPrice: winCtxSnap?.priceAtOpen,
+                  minutesElapsed: winCtxSnap?.minutesElapsed,
+                }),
                 Promise.resolve(kalshiTargetSnap),
               ]);
               const newRec: PredictionRecord = {

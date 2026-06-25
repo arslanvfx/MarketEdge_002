@@ -88,6 +88,7 @@ interface KalshiTarget {
   yesBid?: number;
   yesAsk?: number;
   url?: string;
+  minutesElapsed?: number;
 }
 
 // Shape returned by the on-demand AI endpoint
@@ -790,9 +791,13 @@ export default function Predictor() {
     }
 
     // ── Trigger 2: Stat model direction flip ──────────────────────────────
-    if (statAboveNow !== null) {
+    // Hysteresis: only count as a real flip if predicted price is >= 0.15%
+    // away from the Kalshi strike. Closer than that is noise — don't fire.
+    if (statAboveNow !== null && statPred0 != null && kalshiTarget !== null) {
+      const gapPct = Math.abs(statPred0.predictedPrice - kalshiTarget) / kalshiTarget;
+      const convincingFlip = gapPct >= 0.0015;
       const prev = prevStatAboveRef.current;
-      if (prev !== null && prev !== statAboveNow) {
+      if (prev !== null && prev !== statAboveNow && convincingFlip) {
         const now = Date.now();
         if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
           lastAutoTriggerRef.current = now;
@@ -802,7 +807,9 @@ export default function Predictor() {
           return;
         }
       }
-      prevStatAboveRef.current = statAboveNow;
+      if (convincingFlip) {
+        prevStatAboveRef.current = statAboveNow;
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statAboveNow, kalshiEventTicker, kalshiIsLive, kalshiTarget]);

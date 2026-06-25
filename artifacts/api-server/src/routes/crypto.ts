@@ -83,6 +83,7 @@ interface KalshiTargetPayload {
   yesBid?: number;
   yesAsk?: number;
   url?: string;
+  minutesElapsed?: number;
 }
 
 // Kalshi market URL slugs for each supported symbol.
@@ -122,17 +123,26 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
   }
 
   const slugs = KALSHI_URL_SLUGS[symbol] ?? { path: series.toLowerCase(), label: "price-up-down" };
+  const openTimeStr = found.open_time as string | undefined;
+  let minutesElapsed: number | undefined;
+  if (openTimeStr) {
+    const openMs = new Date(openTimeStr).getTime();
+    if (!isNaN(openMs)) {
+      minutesElapsed = Math.max(0, Math.round((Date.now() - openMs) / 60_000));
+    }
+  }
   const data: KalshiTargetPayload = {
     available: true,
     targetPrice,
     ticker: found.ticker as string,
     eventTicker: found.event_ticker as string,
     closeTime: found.close_time as string,
-    openTime: found.open_time as string,
+    openTime: openTimeStr,
     isLive: true,
     yesBid: parseFloat(found.yes_bid_dollars as string) || 0,
     yesAsk: parseFloat(found.yes_ask_dollars as string) || 0,
     url: `https://kalshi.com/markets/${slugs.path}/${slugs.label}/${found.event_ticker as string}`,
+    minutesElapsed,
   };
   kalshiRouteCache.set(symbol, { data, fetchedAt: Date.now() });
   return data;
