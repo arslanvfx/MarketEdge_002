@@ -146,10 +146,23 @@ const CANDLE_5M_TTL = 20_000; // 5-min candles update slowly
 const ORDER_BOOK_TTL = 4_000; // order book changes fast — keep fresh
 const STATS_TTL = 4_000;
 const TICKER_TTL = 2_000; // very short — this is the per-tick live price
-// Full coin analysis cache: predictions are stable for 3.5 min (no need to
-// recompute the statistical model on every 3-second price tick).
-const PRED_TTL = 30_000; // 30 seconds — fresh enough for flip detection, less reactive than 15s
+// Full coin analysis cache: live price/indicators refresh here (fallback only).
+const PRED_TTL = 15_000;
 const predCache = new Map<string, CacheEntry<CoinPrediction>>();
+
+// Window-level prediction lock — the ABOVE/BELOW call and predicted price are
+// committed once per 15-min window and never change until the next window opens.
+// This eliminates flip-flopping: the stat model won't reverse its call mid-window
+// just because one new candle shifted the regression by a hair.
+const windowPredCache = new Map<string, { windowKey: string; predictions: Prediction[] }>();
+
+// Returns the ISO-minute string for the START of the current 15-min window,
+// e.g. "2026-06-25T15:30". Used as the window lock key.
+function currentWindowKey(now: Date): string {
+  const ms = now.getTime();
+  const windowMs = Math.floor(ms / (15 * 60_000)) * (15 * 60_000);
+  return new Date(windowMs).toISOString().slice(0, 16);
+}
 
 // Level-2 order book shape from Coinbase.
 interface OrderBook {
@@ -608,8 +621,10 @@ function analyzeCoin(
     const high = predictedPrice + band;
     const changePct = price > 0 ? ((predictedPrice - price) / price) * 100 : 0;
     let direction: "up" | "down" | "flat" = "flat";
-    if (changePct > 0.05) direction = "up";
-    else if (changePct < -0.05) direction = "down";
+    // 0.20% threshold (~$210 on BTC) requires a meaningful signal before
+    // committing to a direction — eliminates noise-driven flips.
+    if (changePct > 0.20) direction = "up";
+    else if (changePct < -0.20) direction = "down";
     // Confidence: regression fit + trend strength, decaying with horizon.
     const conf = clamp(
       50 + r2 * 25 + trendStrength * 15 - (minutesAhead / 60) * 22,
@@ -1407,9 +1422,13 @@ export function startPredictionTracker(): void {
         const timeToNext = nextBoundary.getTime() - nowMs;
         const alreadySnapped = records.some((r) => r.targetTime === targetISO);
 
-        // Only snapshot when there's at least 60s left (avoid capturing a
-        // stale prediction right before the boundary flips).
-        if (!alreadySnapped && timeToNext > 60_000) {
+        // Snapshot within the FIRST 4 minutes of a window opening, and only
+        // if at least 60s remain (avoids right-at-boundary noise).
+        // This ensures accuracy is measured against the call made at window OPEN,
+        // not some random mid-window recompute.
+        const windowStartMs = nextBoundary.getTime() - 15 * 60_000;
+        const timeIntoWindow = nowMs - windowStartMs;
+        if (!alreadySnapped && timeToNext > 60_000 && timeIntoWindow < 4 * 60_000) {
           try {
             const [candles, stats, tickerPrice, candles5m, orderBook, kalshiTargetSnap] = await Promise.all([
               getCandles(coin.product),
@@ -1477,7 +1496,7 @@ export function startPredictionTracker(): void {
     .catch(() => {})
     .finally(() => {
       tick().catch(() => {});
-      setInterval(() => tick().catch(() => {}), 60_000);
+      setInterval(() => tick().catch(() => {}), 30_000);
     });
 }
 
@@ -1490,12 +1509,21 @@ export async function fetchCryptoPredictions(): Promise<{
   coins: CoinPrediction[];
 }> {
   const now = new Date();
+  const wk = currentWindowKey(now);
+
   const coins = await Promise.all(
     CRYPTO_COINS.map(async (coin) => {
       try {
-        // Return cached analysis if within the 3.5-min stable window.
+        // Use predCache for live price/indicators (15s TTL keeps display responsive).
         const hit = predCache.get(coin.symbol);
-        if (hit && Date.now() - hit.at < PRED_TTL) return hit.value;
+        if (hit && Date.now() - hit.at < PRED_TTL) {
+          // Indicators are fresh — still apply the window-locked predictions.
+          const wHit = windowPredCache.get(coin.symbol);
+          if (wHit?.windowKey === wk) {
+            return { ...hit.value, predictions: wHit.predictions };
+          }
+          return hit.value;
+        }
 
         const [candles, stats, tickerPrice] = await Promise.all([
           getCandles(coin.product),
@@ -1504,9 +1532,18 @@ export async function fetchCryptoPredictions(): Promise<{
         ]);
         const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
         const result = analyzeCoin(coin, candles, stats, now, livePrice);
-
         predCache.set(coin.symbol, { at: Date.now(), value: result });
-        return result;
+
+        // Lock predictions for this 15-min window on first compute.
+        // Subsequent calls within the same window return these exact predictions
+        // — no flip-flopping even if new candles shift the regression.
+        const wHit = windowPredCache.get(coin.symbol);
+        if (!wHit || wHit.windowKey !== wk) {
+          windowPredCache.set(coin.symbol, { windowKey: wk, predictions: result.predictions });
+        }
+
+        const lockedPreds = windowPredCache.get(coin.symbol)!.predictions;
+        return { ...result, predictions: lockedPreds };
       } catch {
         return null;
       }
