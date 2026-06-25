@@ -1256,9 +1256,6 @@ Return ONLY valid JSON (no markdown):
 }
 
 export function startPredictionTracker(): void {
-  // Restore previous history from the database before the first tick.
-  initHistoryFromDB().catch(() => {});
-
   const tick = async () => {
     const nowMs = Date.now();
     const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
@@ -1376,9 +1373,14 @@ export function startPredictionTracker(): void {
     );
   };
 
-  // Run immediately on startup, then every 60 seconds.
-  tick().catch(() => {});
-  setInterval(() => tick().catch(() => {}), 60_000);
+  // Load DB history first, then tick immediately. Using .finally so a DB
+  // failure doesn't block the tracker from starting.
+  initHistoryFromDB()
+    .catch(() => {})
+    .finally(() => {
+      tick().catch(() => {});
+      setInterval(() => tick().catch(() => {}), 60_000);
+    });
 }
 
 // ---------------------------------------------------------------------------
