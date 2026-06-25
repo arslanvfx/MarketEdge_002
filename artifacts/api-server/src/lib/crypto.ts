@@ -861,7 +861,7 @@ export async function fetchAIPredictions(symbol: string): Promise<{
   const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
   const coin = analyzeCoin(coinDef, candles, stats, now, livePrice);
 
-  updateKalshiWindowPrice(symbol.toUpperCase(), kalshiTargetPrice, coin.price);
+  updateKalshiWindowPrice(getLastKalshiTicker(symbol.toUpperCase()), coin.price);
   const winCtx = getKalshiWindowContext(symbol.toUpperCase());
   const aiPreds = await callClaudeForPredictions(coin, {
     candles5m,
@@ -917,27 +917,31 @@ export const KALSHI_SERIES: Record<string, string> = {
 };
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
-const kalshiTargetCache = new Map<string, { value: number | null; at: number }>();
+// Stores the event ticker so window transitions can be detected by callers.
+const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number }>();
 const KALSHI_TARGET_LIB_TTL = 12_000;
 
-// Tracks the coin price when each Kalshi window opened (keyed by symbol).
-// Updated by snapping/AI code where both target and coin price are available.
-const kalshiWindowStore = new Map<string, {
-  targetPrice: number;
-  priceAtOpen: number;
-  openedAt: number;
-}>();
+// Returns the most-recently-seen event ticker for a symbol (e.g. "KXBTC15M-25JUN2026-B68000").
+// Used by callers (which have the coin price) to detect new windows.
+export function getLastKalshiTicker(symbol: string): string | undefined {
+  return kalshiTargetCache.get(symbol.toUpperCase())?.ticker;
+}
 
-function updateKalshiWindowPrice(symbol: string, targetPrice: number | null, coinPrice: number): void {
-  if (targetPrice === null || targetPrice <= 0 || coinPrice <= 0) return;
-  const existing = kalshiWindowStore.get(symbol);
-  if (!existing || existing.targetPrice !== targetPrice) {
-    kalshiWindowStore.set(symbol, { targetPrice, priceAtOpen: coinPrice, openedAt: Date.now() });
+// Tracks the coin price when each Kalshi window opened, keyed by event ticker.
+// A ticker is registered at most once — subsequent calls for the same ticker are no-ops.
+const kalshiWindowStore = new Map<string, { priceAtOpen: number; openedAt: number }>();
+
+function updateKalshiWindowPrice(ticker: string | undefined, coinPrice: number): void {
+  if (!ticker || coinPrice <= 0) return;
+  if (!kalshiWindowStore.has(ticker)) {
+    kalshiWindowStore.set(ticker, { priceAtOpen: coinPrice, openedAt: Date.now() });
   }
 }
 
-function getKalshiWindowContext(symbol: string): { priceAtOpen: number; minutesElapsed: number } | null {
-  const entry = kalshiWindowStore.get(symbol);
+export function getKalshiWindowContext(symbol: string): { priceAtOpen: number; minutesElapsed: number } | null {
+  const ticker = getLastKalshiTicker(symbol);
+  if (!ticker) return null;
+  const entry = kalshiWindowStore.get(ticker);
   if (!entry) return null;
   return {
     priceAtOpen: entry.priceAtOpen,
@@ -959,10 +963,10 @@ export async function fetchKalshiTarget(symbol: string): Promise<number | null> 
       kalshiTargetCache.set(symbol, { value: null, at: Date.now() });
       return null;
     }
-    const body = (await resp.json()) as { markets?: { floor_strike?: number }[] };
+    const body = (await resp.json()) as { markets?: { floor_strike?: number; ticker?: string }[] };
     for (const m of body.markets ?? []) {
       if (typeof m.floor_strike === "number" && m.floor_strike > 0) {
-        kalshiTargetCache.set(symbol, { value: m.floor_strike, at: Date.now() });
+        kalshiTargetCache.set(symbol, { value: m.floor_strike, ticker: m.ticker, at: Date.now() });
         return m.floor_strike;
       }
     }
@@ -1320,7 +1324,7 @@ export function startPredictionTracker(): void {
               // Ask Claude to study the chart and refine the prediction.
               // Falls back to the statistical model if the API call fails.
               // Kalshi target is fetched above and passed into Claude as the primary anchor.
-              updateKalshiWindowPrice(sym, kalshiTargetSnap, analysis.price);
+              updateKalshiWindowPrice(getLastKalshiTicker(sym), analysis.price);
               const winCtxSnap = getKalshiWindowContext(sym);
               const [ai, kalshiTarget] = await Promise.all([
                 refineSnappedPrediction(analysis, basePred, {

@@ -89,6 +89,7 @@ interface KalshiTarget {
   yesAsk?: number;
   url?: string;
   minutesElapsed?: number;
+  windowOpenPrice?: number;
 }
 
 // Shape returned by the on-demand AI endpoint
@@ -780,13 +781,21 @@ export default function Predictor() {
     const entry = aiData[selected] ?? null;
 
     // ── Trigger 1: New Kalshi window ──────────────────────────────────────
+    // Also guard with hysteresis: if price is within 0.15% of the strike at
+    // window open, the binary is too close to call — skip the auto-trigger.
     if (entry && kalshiEventTicker && kalshiEventTicker !== entry.eventTickerAtRun) {
       const now = Date.now();
       if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
-        lastAutoTriggerRef.current = now;
-        setAutoTriggerReason("New Kalshi window");
-        void handleEnhance();
-        return;
+        const newWindowGapPct =
+          statPred0 != null && kalshiTarget !== null
+            ? Math.abs(statPred0.predictedPrice - kalshiTarget) / kalshiTarget
+            : 1; // unknown gap → allow trigger
+        if (newWindowGapPct >= 0.0015) {
+          lastAutoTriggerRef.current = now;
+          setAutoTriggerReason("New Kalshi window");
+          void handleEnhance();
+          return;
+        }
       }
     }
 

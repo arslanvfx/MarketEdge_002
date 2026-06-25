@@ -8,6 +8,7 @@ import {
   fetchKalshiBtcCall,
   fetchKalshiTarget,
   KALSHI_SERIES,
+  getKalshiWindowContext,
 } from "../lib/crypto";
 
 const router = Router();
@@ -84,6 +85,7 @@ interface KalshiTargetPayload {
   yesAsk?: number;
   url?: string;
   minutesElapsed?: number;
+  windowOpenPrice?: number;
 }
 
 // Kalshi market URL slugs for each supported symbol.
@@ -131,6 +133,7 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
       minutesElapsed = Math.max(0, Math.round((Date.now() - openMs) / 60_000));
     }
   }
+  const winCtx = getKalshiWindowContext(symbol);
   const data: KalshiTargetPayload = {
     available: true,
     targetPrice,
@@ -143,6 +146,7 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
     yesAsk: parseFloat(found.yes_ask_dollars as string) || 0,
     url: `https://kalshi.com/markets/${slugs.path}/${slugs.label}/${found.event_ticker as string}`,
     minutesElapsed,
+    windowOpenPrice: winCtx?.priceAtOpen,
   };
   kalshiRouteCache.set(symbol, { data, fetchedAt: Date.now() });
   return data;
