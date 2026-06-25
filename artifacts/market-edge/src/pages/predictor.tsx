@@ -491,8 +491,7 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
     return <Minus className="w-3 h-3 text-muted-foreground" />;
   };
 
-  const fmtPrice = (n: number) =>
-    n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtPrice = (n: number) => formatPrice(n);
 
   return (
     <div>
@@ -647,7 +646,7 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                     {hasTarget && (
                       <div className="flex items-center gap-1 text-muted-foreground">
                         <span className="text-[#00C805] font-semibold">K</span>
-                        <span>${rec.kalshiTarget!.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>
+                        <span>${formatPrice(rec.kalshiTarget!)}</span>
                       </div>
                     )}
                     <div className="flex items-center gap-1 text-muted-foreground">
