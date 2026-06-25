@@ -706,12 +706,11 @@ async function callClaudeForPredictions(
       .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(dp)}`)
       .join("\n");
 
-    const baselineRows = coin.predictions
-      .map(
-        (p, i) =>
-          `Target ${i + 1} (+${p.minutesAhead}min): $${p.predictedPrice.toFixed(dp)}, range $${p.low.toFixed(dp)}–$${p.high.toFixed(dp)}, ${p.direction}, conf ${p.confidence}%`,
-      )
-      .join("\n");
+    // Claude only analyses the next 15-min boundary — stat model covers 30/45/60.
+    const next15 = coin.predictions[0];
+    const baselineRows = next15
+      ? `+${next15.minutesAhead}min: $${next15.predictedPrice.toFixed(dp)}, range $${next15.low.toFixed(dp)}–$${next15.high.toFixed(dp)}, ${next15.direction}, conf ${next15.confidence}%`
+      : "";
 
     // Expected 15-min price move range based on ATR (1–3× ATR per 15 min).
     const atr15Low  = (coin.indicators.atr14 * 1).toFixed(dp);
@@ -801,10 +800,10 @@ Instructions:
 4. Identify chart patterns and volume-price relationship on both timeframes
 5. Use Bollinger Band position to judge momentum compression/expansion
 6. Use ATR to calibrate realistic move size over each 15-minute window (see PRECISION REQUIREMENT above)
-7. For each of the ${coin.predictions.length} quarter-hour targets, produce your best price estimate, a pessimistic low, and an optimistic high
+7. Produce your best price estimate for the NEXT 15-MIN TARGET ONLY, plus a pessimistic low and optimistic high
 8. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict
 
-Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same order as the baseline:
+Return ONLY valid JSON with exactly 1 item:
 {
   "analysis": [
     {"predictedPrice": 0.0, "low": 0.0, "high": 0.0, "direction": "up", "confidence": 70}
