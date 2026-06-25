@@ -153,15 +153,16 @@ interface CoinPrice {
 // ---------------------------------------------------------------------------
 
 // Coins that have Kalshi 15-min markets (must match KALSHI_SERIES in the API).
-const KALSHI_COINS = ["BTC", "ETH", "XRP"];
+const KALSHI_COINS = ["BTC", "ETH", "SOL", "XRP", "HYPE"];
 
 const COIN_STYLE: Record<string, { glyph: string; accent: string; ring: string; glow: string }> = {
-  BTC:  { glyph: "₿", accent: "text-amber-400",  ring: "ring-amber-500/40 border-amber-500/40",  glow: "shadow-amber-500/20" },
-  ETH:  { glyph: "Ξ", accent: "text-indigo-400", ring: "ring-indigo-500/40 border-indigo-500/40", glow: "shadow-indigo-500/20" },
-  SOL:  { glyph: "◎", accent: "text-fuchsia-400",ring: "ring-fuchsia-500/40 border-fuchsia-500/40",glow: "shadow-fuchsia-500/20" },
-  XRP:  { glyph: "✕", accent: "text-sky-400",    ring: "ring-sky-500/40 border-sky-500/40",       glow: "shadow-sky-500/20" },
-  LINK: { glyph: "⬡", accent: "text-blue-400",   ring: "ring-blue-500/40 border-blue-500/40",     glow: "shadow-blue-500/20" },
-  DOGE: { glyph: "Ð", accent: "text-yellow-400", ring: "ring-yellow-500/40 border-yellow-500/40", glow: "shadow-yellow-500/20" },
+  BTC:  { glyph: "₿", accent: "text-amber-400",   ring: "ring-amber-500/40 border-amber-500/40",   glow: "shadow-amber-500/20" },
+  ETH:  { glyph: "Ξ", accent: "text-indigo-400",  ring: "ring-indigo-500/40 border-indigo-500/40",  glow: "shadow-indigo-500/20" },
+  SOL:  { glyph: "◎", accent: "text-fuchsia-400", ring: "ring-fuchsia-500/40 border-fuchsia-500/40", glow: "shadow-fuchsia-500/20" },
+  XRP:  { glyph: "✕", accent: "text-sky-400",     ring: "ring-sky-500/40 border-sky-500/40",        glow: "shadow-sky-500/20" },
+  HYPE: { glyph: "H", accent: "text-emerald-400", ring: "ring-emerald-500/40 border-emerald-500/40", glow: "shadow-emerald-500/20" },
+  LINK: { glyph: "⬡", accent: "text-blue-400",    ring: "ring-blue-500/40 border-blue-500/40",      glow: "shadow-blue-500/20" },
+  DOGE: { glyph: "Ð", accent: "text-yellow-400",  ring: "ring-yellow-500/40 border-yellow-500/40",  glow: "shadow-yellow-500/20" },
 };
 
 function formatPrice(p: number): string {

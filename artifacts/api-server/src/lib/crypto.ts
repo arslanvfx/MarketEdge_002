@@ -37,6 +37,7 @@ const GECKO_ID: Record<string, string> = {
   XRP: "ripple",
   LINK: "chainlink",
   DOGE: "dogecoin",
+  HYPE: "hyperliquid",
 };
 
 export interface CoinDef {
@@ -46,10 +47,11 @@ export interface CoinDef {
 }
 
 export const CRYPTO_COINS: CoinDef[] = [
-  { symbol: "BTC", product: "BTC-USD", name: "Bitcoin" },
-  { symbol: "ETH", product: "ETH-USD", name: "Ethereum" },
-  { symbol: "SOL", product: "SOL-USD", name: "Solana" },
-  { symbol: "XRP", product: "XRP-USD", name: "XRP" },
+  { symbol: "BTC",  product: "BTC-USD",  name: "Bitcoin" },
+  { symbol: "ETH",  product: "ETH-USD",  name: "Ethereum" },
+  { symbol: "SOL",  product: "SOL-USD",  name: "Solana" },
+  { symbol: "XRP",  product: "XRP-USD",  name: "XRP" },
+  { symbol: "HYPE", product: "HYPE-USD", name: "Hyperliquid" },
   { symbol: "LINK", product: "LINK-USD", name: "Chainlink" },
   { symbol: "DOGE", product: "DOGE-USD", name: "Dogecoin" },
 ];
@@ -911,9 +913,11 @@ export const ACCURACY_THRESHOLD_PCT = 1.0;
 
 // Map of symbol → Kalshi series ticker for coins that have 15-min markets.
 export const KALSHI_SERIES: Record<string, string> = {
-  BTC: "KXBTC15M",
-  ETH: "KXETH15M",
-  XRP: "KXXRP15M",
+  BTC:  "KXBTC15M",
+  ETH:  "KXETH15M",
+  SOL:  "KXSOL15M",
+  XRP:  "KXXRP15M",
+  HYPE: "KXHYPE15M",
 };
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
