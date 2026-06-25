@@ -527,9 +527,33 @@ function analyzeCoin(
   now: Date,
   geckoPrice?: number,
 ): CoinPrediction {
-  const closes = candles.map((c) => c.c);
-  // Prefer CoinGecko (aggregated across exchanges) → Coinbase last → latest candle.
-  const price = geckoPrice ?? (stats.last > 0 ? stats.last : closes[closes.length - 1] ?? 0);
+  // Prefer live ticker (CoinGecko/Kraken) → Coinbase last → latest candle close.
+  const rawLastClose = candles.length > 0 ? candles[candles.length - 1].c : 0;
+  const price = geckoPrice ?? (stats.last > 0 ? stats.last : rawLastClose);
+
+  // Patch the live price into the last candle so that ALL indicator calculations
+  // (RSI, MACD, Bollinger, trend regression) reflect the current real-time price
+  // rather than the last completed 1-min candle close (which can be up to 60s stale).
+  // Without this, Claude sees a contradictory prompt: "Current price: $X" but
+  // every indicator computed from candles that closed at $Y — causing it to trust
+  // the stale indicators and ignore the live price.
+  let patchedCandles = candles;
+  if (geckoPrice && geckoPrice > 0 && candles.length > 0) {
+    const last = candles[candles.length - 1];
+    if (Math.abs(geckoPrice - last.c) / (last.c || 1) > 0.0001) {
+      patchedCandles = [
+        ...candles.slice(0, -1),
+        {
+          ...last,
+          c: geckoPrice,
+          h: Math.max(last.h, geckoPrice),
+          l: Math.min(last.l, geckoPrice),
+        },
+      ];
+    }
+  }
+
+  const closes = patchedCandles.map((c) => c.c);
 
   // Per-minute log returns over the recent window.
   const rets: number[] = [];
@@ -630,7 +654,7 @@ function analyzeCoin(
       atr14,
     },
     sparkline: closes.slice(-60),
-    candles: candles.slice(-90),
+    candles: patchedCandles.slice(-90),
     predictions,
   };
 }
