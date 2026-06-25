@@ -491,7 +491,12 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
     return <Minus className="w-3 h-3 text-muted-foreground" />;
   };
 
-  const fmtPrice = (n: number) => formatPrice(n);
+  // Accuracy log needs fixed-width full precision so $1.07 and $1.0698 are distinguishable.
+  const fmtPrice = (n: number): string => {
+    if (!isFinite(n)) return "—";
+    const dp = n >= 1000 ? 2 : n >= 100 ? 2 : n >= 10 ? 2 : n >= 1 ? 4 : 5;
+    return n.toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  };
 
   return (
     <div>
