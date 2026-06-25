@@ -38,6 +38,7 @@ const GECKO_ID: Record<string, string> = {
   LINK: "chainlink",
   DOGE: "dogecoin",
   HYPE: "hyperliquid",
+  BNB:  "binancecoin",
 };
 
 export interface CoinDef {
@@ -52,6 +53,7 @@ export const CRYPTO_COINS: CoinDef[] = [
   { symbol: "SOL",  product: "SOL-USD",  name: "Solana" },
   { symbol: "XRP",  product: "XRP-USD",  name: "XRP" },
   { symbol: "HYPE", product: "HYPE-USD", name: "Hyperliquid" },
+  { symbol: "BNB",  product: "BNB-USD",  name: "BNB" },
   { symbol: "LINK", product: "LINK-USD", name: "Chainlink" },
   { symbol: "DOGE", product: "DOGE-USD", name: "Dogecoin" },
 ];
@@ -918,6 +920,7 @@ export const KALSHI_SERIES: Record<string, string> = {
   SOL:  "KXSOL15M",
   XRP:  "KXXRP15M",
   HYPE: "KXHYPE15M",
+  BNB:  "KXBNB15M",
 };
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
