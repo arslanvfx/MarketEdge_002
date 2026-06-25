@@ -935,7 +935,7 @@ export default function Predictor() {
                         <span className="font-semibold text-sm">{coin.symbol}</span>
                         {(() => {
                           const acc = accuracyMap.get(coin.symbol);
-                          if (!acc || acc.pct === null || acc.total < 3) return null;
+                          if (!acc || acc.pct === null || acc.total < 1) return null;
                           const color =
                             acc.pct >= 65 ? "bg-emerald-500/20 text-emerald-400 ring-emerald-500/30"
                             : acc.pct >= 45 ? "bg-amber-500/20 text-amber-400 ring-amber-500/30"
