@@ -993,6 +993,11 @@ export function getPredictionHistory(symbol: string): PredictionRecord[] {
   return (historyStore.get(symbol.toUpperCase()) ?? []).slice().reverse(); // newest first
 }
 
+export async function clearPredictionHistory(): Promise<void> {
+  historyStore.clear();
+  await db.delete(predictionRecordsTable);
+}
+
 // ---------------------------------------------------------------------------
 // DB persistence helpers — fire-and-forget, never block the tracker
 // ---------------------------------------------------------------------------

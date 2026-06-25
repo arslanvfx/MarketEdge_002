@@ -4,6 +4,7 @@ import {
   fetchCryptoPrices,
   fetchAIPredictions,
   getPredictionHistory,
+  clearPredictionHistory,
   ACCURACY_THRESHOLD_PCT,
   fetchKalshiBtcCall,
   fetchKalshiTarget,
@@ -67,6 +68,11 @@ router.get("/crypto/prediction-history", (req, res) => {
     history: getPredictionHistory(symbol),
     accuracyThresholdPct: ACCURACY_THRESHOLD_PCT,
   });
+});
+
+router.delete("/crypto/prediction-history", async (_req, res) => {
+  await clearPredictionHistory();
+  res.json({ ok: true });
 });
 
 // ── Kalshi 15-min target (generic: BTC, ETH, XRP) ───────────────────────────
