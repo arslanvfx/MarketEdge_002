@@ -924,29 +924,6 @@ export default function Predictor() {
                 <Radio className="w-3 h-3" /> Live
               </span>
             </h1>
-            {/* Global AI mode toggle */}
-            <div className="flex items-center gap-1 mt-1">
-              <button
-                onClick={() => void handleSetMode("stat")}
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-l-full text-[10px] font-semibold border transition-colors ${
-                  aiSettings.mode === "stat"
-                    ? "bg-sky-500/20 text-sky-300 border-sky-500/40"
-                    : "bg-transparent text-muted-foreground border-border hover:text-foreground"
-                }`}
-              >
-                <TrendingUp className="w-3 h-3" /> Statistical
-              </button>
-              <button
-                onClick={() => void handleSetMode("claude")}
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-r-full text-[10px] font-semibold border border-l-0 transition-colors ${
-                  aiSettings.mode === "claude"
-                    ? "bg-violet-500/20 text-violet-300 border-violet-500/40"
-                    : "bg-transparent text-muted-foreground border-border hover:text-foreground"
-                }`}
-              >
-                <Sparkles className="w-3 h-3" /> Claude AI
-              </button>
-            </div>
             <p className="text-xs text-muted-foreground mt-0.5">
               15-minute price forecasts from live chart analysis
             </p>

@@ -1,12 +1,35 @@
 import { Link, useLocation } from "wouter";
 import { useUser, useClerk, Show } from "@clerk/react";
-import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+
+const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location, setLocation] = useLocation();
   const { user } = useUser();
   const { signOut } = useClerk();
+  const queryClient = useQueryClient();
+
+  const { data: aiSettings } = useQuery({
+    queryKey: ["ai-settings"],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/crypto/ai-settings`);
+      return res.json() as Promise<{ mode: "stat" | "claude"; claudeCoins: string[] }>;
+    },
+    refetchInterval: 15_000,
+  });
+  const aiMode = aiSettings?.mode ?? "stat";
+
+  async function setAiMode(mode: "stat" | "claude") {
+    await fetch(`${API_BASE}/crypto/ai-settings/mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    void queryClient.invalidateQueries({ queryKey: ["ai-settings"] });
+  }
 
   const navigation = [
     { name: "Markets", href: "/markets", icon: LineChart },
@@ -46,6 +69,38 @@ export function Layout({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
+
+        {/* Global AI mode toggle — controls all AI spend across the app */}
+        <div className="px-4 pb-3">
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold mb-1.5 px-1">AI Mode</p>
+          <div className="flex rounded-lg overflow-hidden border border-border">
+            <button
+              onClick={() => void setAiMode("stat")}
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 text-[11px] font-semibold transition-colors ${
+                aiMode === "stat"
+                  ? "bg-sky-500/20 text-sky-300"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              }`}
+            >
+              <TrendingUp className="w-3 h-3" />
+              Statistical
+            </button>
+            <button
+              onClick={() => void setAiMode("claude")}
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 text-[11px] font-semibold border-l border-border transition-colors ${
+                aiMode === "claude"
+                  ? "bg-violet-500/20 text-violet-300"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              }`}
+            >
+              <Sparkles className="w-3 h-3" />
+              Claude AI
+            </button>
+          </div>
+          <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
+            {aiMode === "stat" ? "Free · no AI spend" : "Paid · Claude active"}
+          </p>
+        </div>
 
         <Show when="signed-in">
           <div className="p-4 border-t border-border mt-auto">

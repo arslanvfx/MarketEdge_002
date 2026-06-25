@@ -1319,6 +1319,10 @@ export function getAiSettings(): { mode: "stat" | "claude"; claudeCoins: string[
   return { mode: globalAiMode, claudeCoins: [...claudeEnabledCoins] };
 }
 
+export function isAiGloballyEnabled(): boolean {
+  return globalAiMode === "claude";
+}
+
 export function setGlobalAiMode(mode: "stat" | "claude"): void {
   globalAiMode = mode;
   if (mode === "stat") claudeEnabledCoins.clear();

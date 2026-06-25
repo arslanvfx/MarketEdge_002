@@ -14,6 +14,7 @@ import {
   getAiSettings,
   setGlobalAiMode,
   setCoinClaudeEnabled,
+  isAiGloballyEnabled,
 } from "../lib/crypto";
 
 const router = Router();
@@ -227,6 +228,11 @@ router.get("/crypto/kalshi-btc-target", async (_req, res) => {
 
 // Dedicated Claude call for the current Kalshi BTC window
 router.get("/crypto/kalshi-btc-call", async (req, res) => {
+  if (!isAiGloballyEnabled()) {
+    res.status(503).json({ error: "AI disabled" });
+    return;
+  }
+
   const eventTicker = String(req.query.eventTicker ?? "");
   const rawTarget = parseFloat(String(req.query.target ?? ""));
 
