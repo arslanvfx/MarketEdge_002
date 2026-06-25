@@ -89,7 +89,7 @@ interface KalshiTarget {
   yesAsk?: number;
   url?: string;
   minutesElapsed?: number;
-  windowOpenPrice?: number;
+  windowOpenPrice?: number | null;
 }
 
 // Shape returned by the on-demand AI endpoint
@@ -820,8 +820,11 @@ export default function Predictor() {
         prevStatAboveRef.current = statAboveNow;
       }
     }
+  // statPred0?.predictedPrice included so the effect reruns as price drifts —
+  // a noisy cross that later becomes convincing (>=0.15% gap) without another
+  // side change would otherwise be missed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statAboveNow, kalshiEventTicker, kalshiIsLive, kalshiTarget]);
+  }, [statAboveNow, statPred0?.predictedPrice, kalshiEventTicker, kalshiIsLive, kalshiTarget]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">

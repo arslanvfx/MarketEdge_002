@@ -85,7 +85,7 @@ interface KalshiTargetPayload {
   yesAsk?: number;
   url?: string;
   minutesElapsed?: number;
-  windowOpenPrice?: number;
+  windowOpenPrice?: number | null;
 }
 
 // Kalshi market URL slugs for each supported symbol.

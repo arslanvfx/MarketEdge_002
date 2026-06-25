@@ -628,7 +628,7 @@ export interface AIPrediction {
 // if Claude is unavailable (caller falls back to the statistical model).
 async function callClaudeForPredictions(
   coin: CoinPrediction,
-  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number; minutesElapsed?: number },
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number | null; minutesElapsed?: number },
 ): Promise<AIPrediction[] | null> {
   try {
     const recent = coin.candles.slice(-60);
@@ -928,17 +928,23 @@ export function getLastKalshiTicker(symbol: string): string | undefined {
 }
 
 // Tracks the coin price when each Kalshi window opened, keyed by event ticker.
-// A ticker is registered at most once — subsequent calls for the same ticker are no-ops.
-const kalshiWindowStore = new Map<string, { priceAtOpen: number; openedAt: number }>();
+// Ticker is registered immediately when first seen in fetchKalshiTarget (time is exact).
+// Coin price is filled in lazily on the first AI/snapshot call (where price is available).
+const kalshiWindowStore = new Map<string, { priceAtOpen: number | null; openedAt: number }>();
 
 function updateKalshiWindowPrice(ticker: string | undefined, coinPrice: number): void {
   if (!ticker || coinPrice <= 0) return;
-  if (!kalshiWindowStore.has(ticker)) {
+  const existing = kalshiWindowStore.get(ticker);
+  if (!existing) {
+    // Shouldn't normally happen — fetchKalshiTarget registers tickers first.
     kalshiWindowStore.set(ticker, { priceAtOpen: coinPrice, openedAt: Date.now() });
+  } else if (existing.priceAtOpen === null) {
+    // First coin price we've seen for this ticker window — fill it in.
+    existing.priceAtOpen = coinPrice;
   }
 }
 
-export function getKalshiWindowContext(symbol: string): { priceAtOpen: number; minutesElapsed: number } | null {
+export function getKalshiWindowContext(symbol: string): { priceAtOpen: number | null; minutesElapsed: number } | null {
   const ticker = getLastKalshiTicker(symbol);
   if (!ticker) return null;
   const entry = kalshiWindowStore.get(ticker);
@@ -967,6 +973,11 @@ export async function fetchKalshiTarget(symbol: string): Promise<number | null> 
     for (const m of body.markets ?? []) {
       if (typeof m.floor_strike === "number" && m.floor_strike > 0) {
         kalshiTargetCache.set(symbol, { value: m.floor_strike, ticker: m.ticker, at: Date.now() });
+        // Register the window ticker immediately so minutesElapsed is accurate from first sight.
+        // priceAtOpen is filled in lazily by updateKalshiWindowPrice (first caller with coin price).
+        if (m.ticker && !kalshiWindowStore.has(m.ticker)) {
+          kalshiWindowStore.set(m.ticker, { priceAtOpen: null, openedAt: Date.now() });
+        }
         return m.floor_strike;
       }
     }
@@ -1071,7 +1082,7 @@ function dbUpdateRecord(rec: PredictionRecord): void {
 async function refineSnappedPrediction(
   coin: CoinPrediction,
   basePred: Prediction,
-  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number; minutesElapsed?: number },
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number | null; minutesElapsed?: number },
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
   try {
     const recent = coin.candles.slice(-60);
