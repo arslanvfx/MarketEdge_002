@@ -10,6 +10,7 @@ import {
   fetchKalshiTarget,
   KALSHI_SERIES,
   getKalshiWindowContext,
+  CRYPTO_COINS,
 } from "../lib/crypto";
 
 const router = Router();
@@ -54,6 +55,21 @@ router.get("/crypto/ai-predict", async (req, res) => {
     const msg = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: `AI prediction failed: ${msg}` });
   }
+});
+
+router.get("/crypto/prediction-history/summary", (_req, res) => {
+  const summary = CRYPTO_COINS.map(({ symbol }) => {
+    const history = getPredictionHistory(symbol);
+    const evaluated = history.filter((r) => r.status === "evaluated");
+    const hits = evaluated.filter((r) => r.correct === true).length;
+    return {
+      symbol,
+      hits,
+      total: evaluated.length,
+      pct: evaluated.length > 0 ? Math.round((hits / evaluated.length) * 100) : null,
+    };
+  });
+  res.json({ summary });
 });
 
 router.get("/crypto/prediction-history", (req, res) => {

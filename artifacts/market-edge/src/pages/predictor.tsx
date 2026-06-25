@@ -726,6 +726,23 @@ export default function Predictor() {
     refetchInterval: 5000,
   });
 
+  // Per-coin accuracy summary — single request, refreshes every 60s
+  const accuracySummaryQuery = useQuery({
+    queryKey: ["accuracy-summary"],
+    queryFn: () =>
+      fetchJson<{ summary: { symbol: string; hits: number; total: number; pct: number | null }[] }>(
+        "/crypto/prediction-history/summary",
+      ),
+    refetchInterval: 60_000,
+  });
+  const accuracyMap = useMemo(() => {
+    const m = new Map<string, { pct: number | null; total: number }>();
+    for (const s of accuracySummaryQuery.data?.summary ?? []) {
+      m.set(s.symbol, { pct: s.pct, total: s.total });
+    }
+    return m;
+  }, [accuracySummaryQuery.data]);
+
   // Kalshi 15-min target — supported for BTC, ETH, and XRP
   const kalshiTargetQuery = useQuery({
     queryKey: ["kalshi-target", selected],
@@ -916,6 +933,19 @@ export default function Predictor() {
                       <div className="flex items-center gap-1.5">
                         <span className={`text-lg font-bold ${style.accent}`}>{style.glyph}</span>
                         <span className="font-semibold text-sm">{coin.symbol}</span>
+                        {(() => {
+                          const acc = accuracyMap.get(coin.symbol);
+                          if (!acc || acc.pct === null || acc.total < 3) return null;
+                          const color =
+                            acc.pct >= 65 ? "bg-emerald-500/20 text-emerald-400 ring-emerald-500/30"
+                            : acc.pct >= 45 ? "bg-amber-500/20 text-amber-400 ring-amber-500/30"
+                            : "bg-red-500/20 text-red-400 ring-red-500/30";
+                          return (
+                            <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none ${color}`}>
+                              {acc.pct}%
+                            </span>
+                          );
+                        })()}
                       </div>
                       <span className={`text-[11px] font-medium ${chg >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {formatPct(chg)}
