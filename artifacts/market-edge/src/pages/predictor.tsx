@@ -29,6 +29,7 @@ import {
   ArrowUp,
   ArrowDown,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -447,6 +448,7 @@ function KalshiBtcCard() {
 
 function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
   const ACCURACY_THRESHOLD = 1.0; // fallback for non-BTC / no Kalshi target
+  const [clearing, setClearing] = useState(false);
 
   const query = useQuery({
     queryKey: ["pred-history", symbol],
@@ -456,6 +458,17 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
       ),
     refetchInterval: 30_000,
   });
+
+  async function handleClear() {
+    if (!confirm("Clear all prediction history? This cannot be undone.")) return;
+    setClearing(true);
+    try {
+      await fetch(`${API_BASE}/crypto/prediction-history`, { method: "DELETE" });
+      await query.refetch();
+    } finally {
+      setClearing(false);
+    }
+  }
 
   const history = query.data?.history ?? [];
   const evaluated = history.filter((r) => r.status === "evaluated");
@@ -493,20 +506,30 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
           </p>
         </div>
 
-        {accuracyPct !== null && (
-          <div className="text-right shrink-0 ml-4">
-            <div
-              className={`text-3xl font-black leading-none tabular-nums ${
-                accuracyPct >= 60 ? "text-emerald-400" : accuracyPct >= 40 ? "text-amber-400" : "text-red-400"
-              }`}
-            >
-              {accuracyPct}%
+        <div className="flex items-center gap-3 shrink-0 ml-4">
+          {accuracyPct !== null && (
+            <div className="text-right">
+              <div
+                className={`text-3xl font-black leading-none tabular-nums ${
+                  accuracyPct >= 60 ? "text-emerald-400" : accuracyPct >= 40 ? "text-amber-400" : "text-red-400"
+                }`}
+              >
+                {accuracyPct}%
+              </div>
+              <div className="text-[11px] text-muted-foreground mt-1">
+                {hits} / {evaluated.length} correct
+              </div>
             </div>
-            <div className="text-[11px] text-muted-foreground mt-1">
-              {hits} / {evaluated.length} correct
-            </div>
-          </div>
-        )}
+          )}
+          <button
+            onClick={handleClear}
+            disabled={clearing}
+            title="Clear all history"
+            className="p-1.5 rounded text-muted-foreground hover:text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-40"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* ── Empty state ── */}
