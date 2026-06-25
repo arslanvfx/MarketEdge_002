@@ -1137,6 +1137,7 @@ function CoinDetail({
   kalshiTarget,
   kalshiIsLive,
   ktd,
+  driftAlert,
 }: {
   coin: CoinPrediction;
   livePrice: number;
