@@ -17,17 +17,10 @@ import { desc, eq, inArray } from "drizzle-orm";
 
 const COINBASE = "https://api.exchange.coinbase.com";
 const COINGECKO = "https://api.coingecko.com/api/v3";
-// Kraken is the primary constituent exchange for CF Benchmarks BRTI —
-// the index that Kalshi uses to settle all KXBTC markets. Using Kraken's
-// bid/ask midpoint for BTC gives the closest publicly-available proxy to
-// what Kalshi displays as the current BTC reference price.
-const KRAKEN = "https://api.kraken.com/0/public";
+// Coinbase is the dominant constituent of CF Benchmarks RTI (the index
+// Kalshi uses for all crypto 15-min markets). Using Coinbase for every
+// coin keeps our displayed prices within cents of what Kalshi shows.
 const UA = "MarketEdge/1.0 (crypto-predictor)";
-
-// Coinbase product → Kraken pair (only for coins that need BRTI-aligned pricing).
-const KRAKEN_PAIR: Record<string, string> = {
-  "BTC-USD": "XBTUSD",
-};
 
 // CoinGecko IDs for each symbol.
 const GECKO_ID: Record<string, string> = {
@@ -189,39 +182,10 @@ async function getGeckoPrices(): Promise<GeckoPrices> {
   return data;
 }
 
-// Kraken bid/ask midpoint — used for BTC to match CF Benchmarks BRTI
-// (the settlement index Kalshi uses for all KXBTC markets).
-const krakenTickerCache = new Map<string, CacheEntry<number>>();
-async function getKrakenMid(pair: string): Promise<number> {
-  const hit = krakenTickerCache.get(pair);
-  if (hit && Date.now() - hit.at < TICKER_TTL) return hit.value;
-  const raw = await fetchJson<{ result: Record<string, { a: string[]; b: string[] }> }>(
-    `${KRAKEN}/Ticker?pair=${pair}`,
-  );
-  const entry = Object.values(raw.result ?? {})[0];
-  if (!entry) throw new Error(`Kraken: no result for ${pair}`);
-  const mid = (parseFloat(entry.a[0]) + parseFloat(entry.b[0])) / 2;
-  krakenTickerCache.set(pair, { at: Date.now(), value: mid });
-  return mid;
-}
-
-// Live ticker price. BTC uses Kraken mid (closest proxy to CF Benchmarks BRTI,
-// the index Kalshi settles against). All other coins use Coinbase last-trade.
+// Live ticker price — Coinbase last-trade for all coins.
+// Coinbase is the primary CF Benchmarks RTI constituent so this keeps us
+// within cents of what Kalshi displays as the current reference price.
 async function getTicker(product: string): Promise<number> {
-  const krakenPair = KRAKEN_PAIR[product];
-  if (krakenPair) {
-    return getKrakenMid(krakenPair).catch(async () => {
-      // Fall back to Coinbase if Kraken is unavailable.
-      const hit = tickerCache.get(product);
-      if (hit && Date.now() - hit.at < TICKER_TTL) return hit.value;
-      const raw = await fetchJson<Record<string, string>>(
-        `${COINBASE}/products/${product}/ticker`,
-      );
-      const price = parseFloat(raw.price ?? "0");
-      tickerCache.set(product, { at: Date.now(), value: price });
-      return price;
-    });
-  }
   const hit = tickerCache.get(product);
   if (hit && Date.now() - hit.at < TICKER_TTL) return hit.value;
   const raw = await fetchJson<Record<string, string>>(
