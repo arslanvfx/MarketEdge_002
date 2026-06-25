@@ -30,6 +30,7 @@ import {
   ArrowDown,
   RefreshCw,
   Trash2,
+  AlertTriangle,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -109,6 +110,15 @@ interface AiEntry {
   at: Date;
   priceAtRun: number;
   eventTickerAtRun: string | undefined;
+}
+
+interface DriftAlert {
+  lockedAbove: boolean | null;
+  claudeAbove: boolean | null;
+  lockedDirection: "up" | "down" | "flat";
+  claudeDirection: "up" | "down" | "flat";
+  detectedAt: Date;
+  windowTarget: string;
 }
 
 interface CoinPrediction {
@@ -707,8 +717,11 @@ export default function Predictor() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [autoTriggerReason, setAutoTriggerReason] = useState<string | null>(null);
+  const [driftAlerts, setDriftAlerts] = useState<Record<string, DriftAlert>>({});
   const lastAutoTriggerRef = useRef<number>(0);
   const prevStatAboveRef = useRef<boolean | null>(null);
+  // Tracks the locked prediction call at window-open for each coin
+  const windowOpenCallRef = useRef<Record<string, { windowTarget: string; aboveKalshi: boolean | null; direction: "up" | "down" | "flat" }>>({});
 
   // 1-second EST clock
   useEffect(() => {
@@ -836,6 +849,39 @@ export default function Predictor() {
           eventTickerAtRun: tickerSnapshot,
         },
       }));
+      // ── Drift detection ──────────────────────────────────────────────────
+      // Compare Claude's fresh call against the locked window-open prediction.
+      // If they disagree on ABOVE/BELOW (or direction for non-Kalshi), alert.
+      const locked = windowOpenCallRef.current[sym];
+      const aiPred0 = data.predictions[0] ?? null;
+      if (locked && aiPred0) {
+        const currentKalshi = kalshiTarget; // closure capture
+        const aiAbove = currentKalshi !== null ? aiPred0.predictedPrice >= currentKalshi : null;
+        const drifted =
+          currentKalshi !== null
+            ? aiAbove !== locked.aboveKalshi
+            : aiPred0.direction !== locked.direction && locked.direction !== "flat";
+        if (drifted) {
+          setDriftAlerts((prev) => ({
+            ...prev,
+            [sym]: {
+              lockedAbove: locked.aboveKalshi,
+              claudeAbove: aiAbove,
+              lockedDirection: locked.direction,
+              claudeDirection: aiPred0.direction,
+              detectedAt: new Date(data.generatedAt),
+              windowTarget: locked.windowTarget,
+            },
+          }));
+        } else {
+          setDriftAlerts((prev) => {
+            if (!prev[sym]) return prev;
+            const n = { ...prev };
+            delete n[sym];
+            return n;
+          });
+        }
+      }
       setAutoTriggerReason(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "AI enhancement failed";
@@ -845,6 +891,38 @@ export default function Predictor() {
       setAiLoading(false);
     }
   }
+
+  // ── Window-open call tracker ──────────────────────────────────────────────
+  // Record the locked prediction at the moment a new 15-min window opens.
+  // Used to detect drift when Claude re-analyzes mid-window.
+  useEffect(() => {
+    if (!active) return;
+    const target = active.predictions[0]?.target;
+    if (!target) return;
+    const current = windowOpenCallRef.current[selected];
+    if (current?.windowTarget !== target) {
+      const aboveKalshi =
+        kalshiTarget !== null && active.predictions[0]
+          ? active.predictions[0].predictedPrice >= kalshiTarget
+          : null;
+      windowOpenCallRef.current = {
+        ...windowOpenCallRef.current,
+        [selected]: {
+          windowTarget: target,
+          aboveKalshi,
+          direction: active.predictions[0]?.direction ?? "flat",
+        },
+      };
+      // Clear drift when window changes
+      setDriftAlerts((prev) => {
+        if (!prev[selected]) return prev;
+        const n = { ...prev };
+        delete n[selected];
+        return n;
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.predictions[0]?.target, selected, kalshiTarget]);
 
   // ── Auto-trigger logic ────────────────────────────────────────────────────
   // Two triggers: new Kalshi window opens, or stat model flips Above/Below.
@@ -1025,6 +1103,7 @@ export default function Predictor() {
             kalshiTarget={kalshiTarget}
             kalshiIsLive={kalshiIsLive}
             ktd={ktd}
+            driftAlert={driftAlerts[selected] ?? null}
           />
         ) : (
           <div className="grid lg:grid-cols-3 gap-4">
@@ -1073,6 +1152,7 @@ function CoinDetail({
   kalshiTarget: number | null;
   kalshiIsLive: boolean;
   ktd: KalshiTarget | undefined;
+  driftAlert: DriftAlert | null;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
   const kalshiAvailable = KALSHI_COINS.includes(coin.symbol) && ktd?.available === true;
@@ -1431,6 +1511,43 @@ function CoinDetail({
             </button>
           </div>
         </div>
+
+        {/* ── Drift alert banner ─────────────────────────────────────────── */}
+        {driftAlert && (
+          <div className="flex items-start gap-3 px-4 py-3 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-400" />
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold leading-snug">
+                Model drift detected
+              </div>
+              <div className="text-[11px] text-amber-300/80 leading-snug mt-0.5">
+                {driftAlert.lockedAbove !== null && driftAlert.claudeAbove !== null ? (
+                  <>
+                    Window opened calling{" "}
+                    <span className={driftAlert.lockedAbove ? "text-emerald-400 font-semibold" : "text-red-400 font-semibold"}>
+                      {driftAlert.lockedAbove ? "ABOVE" : "BELOW"}
+                    </span>
+                    {" — Claude now says "}
+                    <span className={driftAlert.claudeAbove ? "text-emerald-400 font-semibold" : "text-red-400 font-semibold"}>
+                      {driftAlert.claudeAbove ? "ABOVE" : "BELOW"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    Window opened calling{" "}
+                    <span className="font-semibold">{driftAlert.lockedDirection.toUpperCase()}</span>
+                    {" — Claude now says "}
+                    <span className="font-semibold">{driftAlert.claudeDirection.toUpperCase()}</span>
+                  </>
+                )}
+                {" · detected "}
+                {driftAlert.detectedAt.toLocaleTimeString("en-US", {
+                  hour: "2-digit", minute: "2-digit", timeZone: "America/New_York",
+                })} ET
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {coin.predictions.map((statPred, i) => {
