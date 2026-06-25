@@ -4,3 +4,4 @@
 - [Smart Picks architecture](smart-picks-arch.md) — Polymarket=single bets always; Kalshi sports=multi-leg; Kalshi non-sport=single; same-game props need sibling expansion in combos.ts
 - [Crypto data source](crypto-data-source.md) — BTC live price uses Kraken mid (BRTI proxy for Kalshi); candles/stats stay on Coinbase; test api-server via localhost:8080 not $REPLIT_DEV_DOMAIN
 - [Crypto Claude enrichment](crypto-claude-enrichment.md) — extended thinking (budget 8k/10k tokens), Bollinger Bands, ATR, 60-min candles, volume spikes, accuracy feedback loop all fed to Claude for snap predictions
+- [Crypto bias calibration pitfall](crypto-bias-calibration.md) — computeSignedBias() must NOT be injected into Claude prompts; history now contains stat-model records which poison Claude's direction calls

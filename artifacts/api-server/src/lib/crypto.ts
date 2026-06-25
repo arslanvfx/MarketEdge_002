@@ -718,10 +718,7 @@ LIVE ORDER BOOK — $${obBucket(coin.price)} price buckets (use these as real su
 ${formatOrderBook(extra.orderBook, coin.price, coin.symbol)}`;
     }
 
-    // ── C: signed bias calibration ────────────────────────────────────────────
-    const biasLine = computeSignedBias(coin.symbol);
-
-    // ── D: Kalshi target block (the primary decision anchor) ─────────────────
+    // ── C: Kalshi target block (the primary decision anchor) ──────────────────
     let kalshiBlock = "";
     const kt = extra?.kalshiTarget ?? null;
     if (kt !== null && kt > 0) {
@@ -770,9 +767,6 @@ ${candleRows}
 STATISTICAL MODEL BASELINE:
 ${baselineRows}
 
-BIAS CALIBRATION:
-${biasLine}
-
 PRECISION REQUIREMENT:
 ${expectedMoveBlock}
 
@@ -783,9 +777,8 @@ Instructions:
 4. Identify chart patterns and volume-price relationship on both timeframes
 5. Use Bollinger Band position to judge momentum compression/expansion
 6. Use ATR to calibrate realistic move size over each 15-minute window (see PRECISION REQUIREMENT above)
-7. Apply the bias calibration above — if instructed to shift your target, do so
-8. For each of the ${coin.predictions.length} quarter-hour targets, produce your best price estimate, a pessimistic low, and an optimistic high
-9. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict
+7. For each of the ${coin.predictions.length} quarter-hour targets, produce your best price estimate, a pessimistic low, and an optimistic high
+8. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict
 
 Return ONLY valid JSON, exactly ${coin.predictions.length} items in the same order as the baseline:
 {
@@ -1200,10 +1193,7 @@ LIVE ORDER BOOK — $${obBucket(coin.price)} price buckets (use as real support/
 ${formatOrderBook(extra.orderBook, coin.price, coin.symbol)}`;
     }
 
-    // ── C: signed bias calibration ────────────────────────────────────────────
-    const biasLine = computeSignedBias(coin.symbol);
-
-    // ── D: Kalshi target block (the primary decision anchor) ─────────────────
+    // ── C: Kalshi target block (the primary decision anchor) ──────────────────
     let kalshiBlock = "";
     const kt = extra?.kalshiTarget ?? null;
     if (kt !== null && kt > 0) {
@@ -1255,9 +1245,6 @@ STATISTICAL MODEL BASELINE: $${basePred.predictedPrice.toFixed(dp)}, ${basePred.
 YOUR RECENT ACCURACY FOR ${coin.symbol}:
 ${feedbackStr}
 
-BIAS CALIBRATION:
-${biasLine}
-
 PRECISION REQUIREMENT:
 ${expectedMoveBlock}
 
@@ -1268,8 +1255,7 @@ Analysis steps:
 4. Check volume spikes for order-flow confirmation of directional moves
 5. Use Bollinger Band position to assess compression or expansion
 6. Use ATR to ground your target — a 15-min move should be within 1–3× ATR (see PRECISION REQUIREMENT)
-7. Apply the bias calibration — if instructed to shift your target, do so
-8. Set confidence 0-100; reduce when signals conflict
+7. Set confidence 0-100; reduce when signals conflict
 
 Return ONLY valid JSON (no markdown):
 {"predictedPrice": 0.0, "direction": "up", "confidence": 70}`;
