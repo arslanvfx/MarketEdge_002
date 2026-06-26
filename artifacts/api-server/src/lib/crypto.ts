@@ -532,6 +532,30 @@ function formatOrderBook(book: OrderBook, currentPrice: number, symbol = "units"
   ].join("\n");
 }
 
+// Format the intra-window momentum metrics (last 15 1-min candles) as a prompt
+// block so Claude can temper confidence in choppy windows and treat spikes with
+// caution. Mirrors the Price Action panel shown to the user on /predictor.
+function intraWindowBlock(ind: CoinPrediction["indicators"]): string {
+  const er = ind.efficiencyRatio;
+  const regime =
+    er >= 0.55
+      ? "TRENDING (clean directional move — momentum is reliable)"
+      : er >= 0.25
+        ? "DRIFTING (mixed — momentum is weak, treat edge as modest)"
+        : "CHOPPY (price is sawing back and forth — momentum is unreliable)";
+  const drift = ind.netDriftPct >= 0 ? "+" : "";
+  const spikeLine = ind.spikeFlag
+    ? `Spike: YES — a candle ranged ${ind.spikeMultiple.toFixed(2)}× the median; recent move may be a one-off blip, not sustained order flow.`
+    : "Spike: none — candle ranges are orderly.";
+  return `
+INTRA-WINDOW MOMENTUM (last 15 × 1-min candles — what price is doing RIGHT NOW):
+Regime: ${regime}
+Efficiency ratio: ${er.toFixed(3)} (|net move| ÷ total path; 1=clean trend, 0=pure chop)
+Oscillations: ${ind.oscillationCount} close-to-close direction reversals
+Net drift: ${drift}${ind.netDriftPct.toFixed(3)}% | Total path travelled: ${ind.totalPathPct.toFixed(3)}%
+${spikeLine}`;
+}
+
 // Compute the average signed prediction error from the last N evaluated records
 // for a coin. Positive = Claude has been predicting too high; negative = too low.
 // Returns a human-readable calibration instruction string.
@@ -884,6 +908,7 @@ ATR(14): $${coin.indicators.atr14.toFixed(dp)} (expected move per bar)
 24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
 1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
 24h range: $${coin.low24h.toFixed(dp)}–$${coin.high24h.toFixed(dp)}
+${intraWindowBlock(coin.indicators)}
 ${multiTfBlock}
 TOP-3 VOLUME SPIKES (possible order-flow events):
 ${volSpikes}
@@ -904,8 +929,10 @@ Instructions:
 4. Identify chart patterns and volume-price relationship on both timeframes
 5. Use Bollinger Band position to judge momentum compression/expansion
 6. Use ATR to calibrate realistic move size over each 15-minute window (see PRECISION REQUIREMENT above)
-7. Produce your best price estimate for the NEXT 15-MIN TARGET ONLY, plus a pessimistic low and optimistic high
-8. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict
+7. Weigh the INTRA-WINDOW MOMENTUM regime heavily: in a CHOPPY / low efficiency-ratio window price is sawing back and forth, so directional edge is weak — lower your confidence accordingly. Only a TRENDING (high ER) window justifies high confidence
+8. If a spike is flagged, treat the recent move with caution — it may be a one-off blip rather than sustained order flow; do not over-extrapolate it
+9. Produce your best price estimate for the NEXT 15-MIN TARGET ONLY, plus a pessimistic low and optimistic high
+10. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict or when the window is choppy
 
 Return ONLY valid JSON with exactly 1 item:
 {
@@ -1360,6 +1387,7 @@ ATR(14): $${coin.indicators.atr14.toFixed(dp)} (1-bar expected range)
 24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}%
 1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
 24h range: $${coin.low24h.toFixed(dp)}–$${coin.high24h.toFixed(dp)}
+${intraWindowBlock(coin.indicators)}
 ${multiTfBlock}
 TOP-3 VOLUME SPIKES (potential order-flow events):
 ${volSpikes}
@@ -1382,7 +1410,8 @@ Analysis steps:
 4. Check volume spikes for order-flow confirmation of directional moves
 5. Use Bollinger Band position to assess compression or expansion
 6. Use ATR to ground your target — a 15-min move should be within 1–3× ATR (see PRECISION REQUIREMENT)
-7. Set confidence 0-100; reduce when signals conflict
+7. Weigh the INTRA-WINDOW MOMENTUM regime: a CHOPPY / low efficiency-ratio window means price is sawing back and forth with little directional edge — lower confidence. A spike flag means the latest move may be a one-off blip — do not over-extrapolate it
+8. Set confidence 0-100; reduce when signals conflict or when the window is choppy
 
 Return ONLY valid JSON (no markdown):
 {"predictedPrice": 0.0, "direction": "up", "confidence": 70}`;
