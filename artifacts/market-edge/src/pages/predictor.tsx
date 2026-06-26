@@ -76,6 +76,7 @@ interface PredictionRecord {
   correct: boolean | null;
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
+  source?: "stat" | "claude";
 }
 
 // Shape returned by the Kalshi BTC 15-min target endpoint
@@ -563,6 +564,16 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
   const hits = evaluated.filter((r) => r.correct === true).length;
   const accuracyPct = evaluated.length > 0 ? Math.round((hits / evaluated.length) * 100) : null;
 
+  // Per-source accuracy so Claude's hit rate is visible separately from the
+  // statistical model's.
+  const sourceStats = (src: "stat" | "claude") => {
+    const recs = evaluated.filter((r) => (r.source ?? "stat") === src);
+    const h = recs.filter((r) => r.correct === true).length;
+    return { hits: h, total: recs.length, pct: recs.length > 0 ? Math.round((h / recs.length) * 100) : null };
+  };
+  const claudeStats = sourceStats("claude");
+  const statStats = sourceStats("stat");
+
   // Does any record in this history have a Kalshi target? (true for BTC during market hours)
   const hasKalshiData = history.some((r) => r.kalshiTarget !== null && r.kalshiTarget !== undefined);
 
@@ -599,6 +610,24 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
         </div>
 
         <div className="flex items-center gap-3 shrink-0 ml-4">
+          {(claudeStats.pct !== null || statStats.pct !== null) && (
+            <div className="text-right text-[11px] leading-tight">
+              {claudeStats.pct !== null && (
+                <div className="text-violet-300">
+                  Claude{" "}
+                  <span className="font-semibold tabular-nums">{claudeStats.pct}%</span>{" "}
+                  <span className="text-muted-foreground">({claudeStats.hits}/{claudeStats.total})</span>
+                </div>
+              )}
+              {statStats.pct !== null && (
+                <div className="text-sky-300">
+                  Stat{" "}
+                  <span className="font-semibold tabular-nums">{statStats.pct}%</span>{" "}
+                  <span className="text-muted-foreground">({statStats.hits}/{statStats.total})</span>
+                </div>
+              )}
+            </div>
+          )}
           {accuracyPct !== null && (
             <div className="text-right">
               <div

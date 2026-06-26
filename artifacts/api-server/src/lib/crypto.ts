@@ -580,7 +580,13 @@ ${spikeLine}`;
 // Returns a human-readable calibration instruction string.
 function computeSignedBias(symbol: string, lastN = 10): string {
   const records = (historyStore.get(symbol) ?? [])
-    .filter((r) => r.status === "evaluated" && r.actualPrice !== null && (r.actualPrice ?? 0) > 0)
+    .filter(
+      (r) =>
+        r.source === "claude" &&
+        r.status === "evaluated" &&
+        r.actualPrice !== null &&
+        (r.actualPrice ?? 0) > 0,
+    )
     .slice(-lastN);
 
   if (records.length < 3) return "Insufficient history for bias calibration.";
@@ -1149,6 +1155,7 @@ export interface PredictionRecord {
   correct: boolean | null;        // was the Kalshi YES/NO call right?
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
+  source: "stat" | "claude";      // which model produced this prediction
 }
 
 const QUARTER_MS = 15 * 60 * 1000;
@@ -1274,6 +1281,7 @@ function rowToRecord(row: typeof predictionRecordsTable.$inferSelect): Predictio
     correct: row.correct,
     evaluatedAt: row.evaluatedAt ? row.evaluatedAt.toISOString() : null,
     status: row.status as "pending" | "evaluated",
+    source: (row.source as "stat" | "claude") ?? "stat",
   };
 }
 
@@ -1316,6 +1324,7 @@ function dbInsertRecord(rec: PredictionRecord): void {
       correct: null,
       evaluatedAt: null,
       status: "pending",
+      source: rec.source,
     })
     .onConflictDoNothing()
     .catch((err) => console.error("[dbInsertRecord] failed:", err));
@@ -1375,9 +1384,11 @@ async function refineSnappedPrediction(
       .map((c) => `  t=${c.t} vol=${c.v.toFixed(2)} close=$${c.c.toFixed(dp)}`)
       .join("\n");
 
-    // Accuracy feedback: last 5 evaluated predictions (raw hit/miss record).
+    // Accuracy feedback: Claude's OWN last 5 evaluated predictions (raw
+    // hit/miss). Filtering to source="claude" keeps the feedback loop honest —
+    // statistical-model records would otherwise poison Claude's self-assessment.
     const recentEvals = (historyStore.get(coin.symbol) ?? [])
-      .filter((r) => r.status === "evaluated" && r.errorPct != null)
+      .filter((r) => r.source === "claude" && r.status === "evaluated" && r.errorPct != null)
       .slice(-5);
     const feedbackStr =
       recentEvals.length > 0
@@ -1388,6 +1399,10 @@ async function refineSnappedPrediction(
             )
             .join("\n")
         : "  No evaluated predictions yet.";
+    // Per-source signed-bias calibration — computed from Claude's own records
+    // only (see computeSignedBias). Safe to feed back now that records are
+    // source-tagged; tells Claude whether it has been running high or low.
+    const calibrationStr = computeSignedBias(coin.symbol);
 
     // Expected 15-min price move range based on ATR (1–3× ATR per 15 min).
     const atr15Low  = (coin.indicators.atr14 * 1).toFixed(dp);
@@ -1468,8 +1483,9 @@ ${candleRows}
 
 STATISTICAL MODEL BASELINE: $${basePred.predictedPrice.toFixed(dp)}, ${basePred.direction}, conf ${basePred.confidence}%
 
-YOUR RECENT ACCURACY FOR ${coin.symbol}:
+YOUR RECENT ACCURACY FOR ${coin.symbol} (your own calls only):
 ${feedbackStr}
+CALIBRATION: ${calibrationStr}
 
 PRECISION REQUIREMENT:
 ${expectedMoveBlock}
@@ -1520,6 +1536,64 @@ Return ONLY valid JSON (no markdown):
   }
 }
 
+// Self-consistency wrapper: when selfConsistencySamples > 1, independently
+// samples Claude that many times and aggregates the calls — majority vote on
+// direction, median predicted price among the agreeing samples, and a
+// confidence that scales with the level of agreement. Sampling several times
+// and aggregating dampens one-off outliers on the calls that matter most.
+async function refineWithSelfConsistency(
+  coin: CoinPrediction,
+  basePred: Prediction,
+  extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number | null; minutesElapsed?: number },
+): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
+  const samples = clamp(selfConsistencySamples, 1, MAX_SELF_CONSISTENCY);
+  if (samples <= 1) return refineSnappedPrediction(coin, basePred, extra);
+
+  const results = (
+    await Promise.all(
+      Array.from({ length: samples }, () => refineSnappedPrediction(coin, basePred, extra)),
+    )
+  ).filter((r): r is NonNullable<typeof r> => r !== null);
+
+  if (results.length === 0) return null;
+  if (results.length === 1) return results[0];
+
+  // Majority vote on direction. Requires a STRICT plurality — if the top two
+  // directions are tied (e.g. 1/1 on 2 samples, or 2/2 on 4), there is no
+  // consensus, so we fall back to the statistical base direction rather than
+  // letting object key order silently bias the call (toward "up").
+  const counts: Record<"up" | "down" | "flat", number> = { up: 0, down: 0, flat: 0 };
+  for (const r of results) counts[r.direction]++;
+  const ranked = (Object.keys(counts) as Array<"up" | "down" | "flat">).sort(
+    (a, b) => counts[b] - counts[a],
+  );
+  const direction: "up" | "down" | "flat" =
+    counts[ranked[0]] > counts[ranked[1]] ? ranked[0] : basePred.direction;
+  const agreeing = results.filter((r) => r.direction === direction);
+  // If the consensus direction matched none of the samples (tie → base
+  // direction with zero votes), aggregate across all samples instead so we
+  // still return a sensible price/confidence.
+  if (agreeing.length === 0) {
+    return {
+      predictedPrice: median(results.map((r) => r.predictedPrice)),
+      direction,
+      confidence: clamp(Math.round(mean(results.map((r) => r.confidence)) * 0.5), 20, 92),
+    };
+  }
+  const agreement = agreeing.length / results.length;
+
+  // Median predicted price among the agreeing samples (robust to outliers).
+  const predictedPrice = median(agreeing.map((r) => r.predictedPrice));
+
+  // Confidence = mean confidence of the agreeing samples, scaled by agreement
+  // so a split vote (low consensus) is reported with proportionally less
+  // certainty. Full agreement → mean confidence; 50/50 → roughly halved.
+  const meanConf = mean(agreeing.map((r) => r.confidence));
+  const confidence = clamp(Math.round(meanConf * (0.5 + 0.5 * agreement)), 20, 92);
+
+  return { predictedPrice, direction, confidence };
+}
+
 // ── AI Mode Settings ─────────────────────────────────────────────────────────
 // Controls whether Claude is used in the background tracker (costs money).
 // Default: "stat" — statistical model only; Claude only runs when the user
@@ -1528,8 +1602,27 @@ Return ONLY valid JSON (no markdown):
 let globalAiMode: "stat" | "claude" = "stat";
 const claudeEnabledCoins = new Set<string>();
 
-export function getAiSettings(): { mode: "stat" | "claude"; claudeCoins: string[] } {
-  return { mode: globalAiMode, claudeCoins: [...claudeEnabledCoins] };
+// Self-consistency: how many times to independently sample Claude per snapshot.
+// 1 = off (single call). When >1, the calls are aggregated by majority vote on
+// direction with a confidence that scales with agreement (see refineWithSelfConsistency).
+let selfConsistencySamples = 1;
+const MAX_SELF_CONSISTENCY = 5;
+
+export function getAiSettings(): {
+  mode: "stat" | "claude";
+  claudeCoins: string[];
+  selfConsistencySamples: number;
+} {
+  return {
+    mode: globalAiMode,
+    claudeCoins: [...claudeEnabledCoins],
+    selfConsistencySamples,
+  };
+}
+
+export function setSelfConsistencySamples(n: number): number {
+  selfConsistencySamples = clamp(Math.round(n) || 1, 1, MAX_SELF_CONSISTENCY);
+  return selfConsistencySamples;
 }
 
 export function isAiGloballyEnabled(): boolean {
@@ -1640,7 +1733,7 @@ export function startPredictionTracker(): void {
               const useAI = isCoinClaudeEnabled(sym);
               const [ai, kalshiTarget] = await Promise.all([
                 useAI
-                  ? refineSnappedPrediction(analysis, basePred, {
+                  ? refineWithSelfConsistency(analysis, basePred, {
                       candles5m,
                       orderBook,
                       kalshiTarget: kalshiTargetSnap,
@@ -1665,6 +1758,10 @@ export function startPredictionTracker(): void {
                 correct: null,
                 evaluatedAt: null,
                 status: "pending",
+                // Tag by the model that actually produced the stored call: when
+                // Claude refinement succeeded it's "claude", otherwise the stat
+                // baseline was used (Claude disabled or its call failed).
+                source: ai ? "claude" : "stat",
               };
               records.push(newRec);
               dbInsertRecord(newRec);

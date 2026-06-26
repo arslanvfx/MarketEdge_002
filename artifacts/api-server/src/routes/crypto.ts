@@ -14,6 +14,7 @@ import {
   getAiSettings,
   setGlobalAiMode,
   setCoinClaudeEnabled,
+  setSelfConsistencySamples,
   isAiGloballyEnabled,
 } from "../lib/crypto";
 import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
@@ -85,18 +86,40 @@ router.post("/crypto/ai-settings/coin/:symbol", (req, res) => {
   res.json({ ok: true, ...getAiSettings() });
 });
 
+// Self-consistency: number of independent Claude samples to aggregate per
+// snapshot (1 = off). Clamped server-side to a safe range.
+router.post("/crypto/ai-settings/self-consistency", (req, res) => {
+  const { samples } = req.body as { samples?: number };
+  if (typeof samples !== "number" || !Number.isFinite(samples)) {
+    res.status(400).json({ error: "samples must be a number" });
+    return;
+  }
+  const applied = setSelfConsistencySamples(samples);
+  res.json({ ok: true, ...getAiSettings(), selfConsistencySamples: applied });
+});
+
 // ── Prediction history ────────────────────────────────────────────────────────
 
 router.get("/crypto/prediction-history/summary", (_req, res) => {
+  const tally = (records: { correct: boolean | null }[]) => {
+    const hits = records.filter((r) => r.correct === true).length;
+    return {
+      hits,
+      total: records.length,
+      pct: records.length > 0 ? Math.round((hits / records.length) * 100) : null,
+    };
+  };
   const summary = CRYPTO_COINS.map(({ symbol }) => {
-    const history = getPredictionHistory(symbol);
-    const evaluated = history.filter((r) => r.status === "evaluated");
-    const hits = evaluated.filter((r) => r.correct === true).length;
+    const evaluated = getPredictionHistory(symbol).filter((r) => r.status === "evaluated");
     return {
       symbol,
-      hits,
-      total: evaluated.length,
-      pct: evaluated.length > 0 ? Math.round((hits / evaluated.length) * 100) : null,
+      ...tally(evaluated),
+      // Broken out by model so Claude's hit rate is visible separately from
+      // the statistical model's.
+      bySource: {
+        stat: tally(evaluated.filter((r) => r.source === "stat")),
+        claude: tally(evaluated.filter((r) => r.source === "claude")),
+      },
     };
   });
   res.json({ summary });

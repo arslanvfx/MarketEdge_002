@@ -16,4 +16,8 @@ export const predictionRecordsTable = pgTable("prediction_records", {
   correct: boolean("correct"),
   evaluatedAt: timestamp("evaluated_at", { withTimezone: true }),
   status: text("status").notNull().default("pending"),
+  // Which model produced this prediction: "stat" (statistical model) or
+  // "claude" (Claude refinement). Lets accuracy and bias be computed per
+  // source so Claude only ever calibrates against its own track record.
+  source: text("source").notNull().default("stat"),
 });
