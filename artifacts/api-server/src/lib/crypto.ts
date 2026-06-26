@@ -736,6 +736,34 @@ function analyzeCoin(
 }
 
 // ---------------------------------------------------------------------------
+// Backtest entry point: run the EXACT statistical model at a historical
+// 15-min window open, given only the 1-min candles that had completed up to
+// that moment plus the price at window open. Used by the accuracy backtest
+// harness (lib/backtest.ts) so the harness always scores the real model
+// (analyzeCoin), never a divergent copy. The returned predictions[0] targets
+// the next quarter-hour boundary (+15 min) — exactly the live Kalshi window.
+// ---------------------------------------------------------------------------
+export function analyzeCoinAt(
+  coin: CoinDef,
+  candlesUpToOpen: Candle[],
+  openPrice: number,
+  windowOpen: Date,
+): CoinPrediction {
+  const highs = candlesUpToOpen.map((c) => c.h);
+  const lows = candlesUpToOpen.map((c) => c.l);
+  const stats: CoinStats = {
+    open: candlesUpToOpen.length > 0 ? candlesUpToOpen[0].c : openPrice,
+    high: highs.length > 0 ? Math.max(...highs) : openPrice,
+    low: lows.length > 0 ? Math.min(...lows) : openPrice,
+    last: openPrice,
+    volume: 0,
+  };
+  // Pass openPrice as the "live" price so the last candle is patched to the
+  // true window-open price — mirroring how the live tracker snaps at open.
+  return analyzeCoin(coin, candlesUpToOpen, stats, windowOpen, openPrice);
+}
+
+// ---------------------------------------------------------------------------
 // Claude AI prediction refinement — shared core used by both the automatic
 // cache-refresh path and the on-demand /ai-predict endpoint.
 // ---------------------------------------------------------------------------

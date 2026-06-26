@@ -16,6 +16,7 @@ import {
   setCoinClaudeEnabled,
   isAiGloballyEnabled,
 } from "../lib/crypto";
+import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
 
 const router = Router();
 
@@ -118,6 +119,53 @@ router.get("/crypto/prediction-history", (req, res) => {
 router.delete("/crypto/prediction-history", async (_req, res) => {
   await clearPredictionHistory();
   res.json({ ok: true });
+});
+
+// ── Statistical-model accuracy backtest ───────────────────────────────────────
+// Replays historical candles and scores the live statistical model over many
+// past 15-min windows. See lib/backtest.ts for the run/compare workflow.
+//   GET /crypto/backtest?coins=BTC,ETH&windows=96&endTime=2026-06-26T12:00:00Z
+router.get("/crypto/backtest", async (req, res) => {
+  try {
+    const coins =
+      typeof req.query.coins === "string" && req.query.coins.length > 0
+        ? req.query.coins.toUpperCase().split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+    const windows =
+      req.query.windows != null ? parseInt(String(req.query.windows), 10) : undefined;
+    let endTime: number | undefined;
+    if (typeof req.query.endTime === "string" && req.query.endTime.length > 0) {
+      const ms = new Date(req.query.endTime).getTime();
+      if (!Number.isNaN(ms)) endTime = Math.floor(ms / 1000);
+    }
+    const report = await runBacktest({
+      coins,
+      windows: windows != null && !Number.isNaN(windows) ? windows : undefined,
+      endTime,
+    });
+    res.json(report);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "backtest failed";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST two backtest reports to get before/after deltas: { a: report, b: report }
+router.post("/crypto/backtest/compare", (req, res) => {
+  const { a, b } = (req.body ?? {}) as { a?: BacktestReport; b?: BacktestReport };
+  const isReport = (r: unknown): r is BacktestReport =>
+    !!r &&
+    typeof r === "object" &&
+    "overall" in r &&
+    "byRegime" in r &&
+    "byCoin" in r;
+  if (!isReport(a) || !isReport(b)) {
+    res.status(400).json({
+      error: "body must include two full backtest reports: { a, b }",
+    });
+    return;
+  }
+  res.json(compareReports(a, b));
 });
 
 // ── Kalshi 15-min target (generic: BTC, ETH, XRP) ───────────────────────────
