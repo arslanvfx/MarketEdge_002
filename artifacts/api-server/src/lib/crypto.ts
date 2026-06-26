@@ -725,6 +725,13 @@ export interface CoinAnalytics {
   // Claude-only reliability curve: for each raw-confidence band, the rate at
   // which those calls actually came true. This is what calibration learns from.
   calibration: Array<{ band: string; n: number; avgConfidencePct: number | null; hitRatePct: number | null }>;
+  // Server-computed blend weights the ensemble ACTUALLY uses. `overall` is the
+  // all-regime baseline; `byRegime` is the regime-aware weight applied when the
+  // live market is in that regime (what computeEnsemble picks per window).
+  ensembleWeights: {
+    overall: EnsembleWeights;
+    byRegime: Record<PromptRegime, EnsembleWeights>;
+  };
 }
 
 function regimeBreakdown(records: PredictionRecord[]): Record<PromptRegime, SourceMetrics> {
@@ -778,7 +785,10 @@ export function getPredictionAnalytics(symbol: string): CoinAnalytics {
       hitRatePct: n > 0 ? Math.round((hits / n) * 100) : null,
     };
   });
-  return {
+  // Build the metrics first, then derive the blend weights FROM that object —
+  // ensembleWeights(symbol) would re-enter getPredictionAnalytics and recurse,
+  // so the weight helpers below take the already-computed analytics instead.
+  const base: Omit<CoinAnalytics, "ensembleWeights"> = {
     symbol: symbol.toUpperCase(),
     bySource: {
       stat: metricsFor(stat),
@@ -792,6 +802,15 @@ export function getPredictionAnalytics(symbol: string): CoinAnalytics {
     },
     abstention,
     calibration,
+  };
+  const byRegimeWeights = {} as Record<PromptRegime, EnsembleWeights>;
+  for (const reg of REGIMES) byRegimeWeights[reg] = ensembleWeightsFor(base, reg);
+  return {
+    ...base,
+    ensembleWeights: {
+      overall: overallWeightsFor(base),
+      byRegime: byRegimeWeights,
+    },
   };
 }
 
@@ -866,10 +885,15 @@ export interface EnsembleCall {
   weights: EnsembleWeights;
 }
 
+// Analytics without the derived blend weights — the shape available WHILE the
+// weights are still being computed (lets the weight helpers run on the partial
+// object built inside getPredictionAnalytics without a chicken-and-egg cycle).
+type CoinAnalyticsBase = Omit<CoinAnalytics, "ensembleWeights">;
+
 // Pull a source's trusted accuracy for a regime: prefer the regime bucket once
 // it has enough samples, else the source's all-regime accuracy, else null.
 function trustedAccuracy(
-  a: CoinAnalytics,
+  a: CoinAnalyticsBase,
   src: "stat" | "claude",
   regime: PromptRegime,
 ): number | null {
@@ -880,14 +904,14 @@ function trustedAccuracy(
   return null;
 }
 
-// Regime-aware blend weights from the analytics layer. Weight is proportional to
-// each model's edge over a coin-flip (accuracy − 50). When either source lacks
-// enough history, fall back to equal weighting so the ensemble degrades to a
-// simple average rather than over-trusting a thin sample.
-export function ensembleWeights(symbol: string, regime: PromptRegime): EnsembleWeights {
-  const a = getPredictionAnalytics(symbol);
-  const statAcc = trustedAccuracy(a, "stat", regime);
-  const claudeAcc = trustedAccuracy(a, "claude", regime);
+// Turn a pair of trusted accuracies into blend weights. Weight is proportional
+// to each model's edge over a coin-flip (accuracy − 50), clamped to the floor.
+// When either accuracy is unknown, fall back to equal weighting so the ensemble
+// degrades to a simple average rather than over-trusting a thin sample.
+function weightsFromAccuracy(
+  statAcc: number | null,
+  claudeAcc: number | null,
+): EnsembleWeights {
   if (statAcc == null || claudeAcc == null) return { stat: 0.5, claude: 0.5 };
   const edgeStat = Math.max(0, statAcc - 50);
   const edgeClaude = Math.max(0, claudeAcc - 50);
@@ -898,6 +922,30 @@ export function ensembleWeights(symbol: string, regime: PromptRegime): EnsembleW
     1 - ENSEMBLE_WEIGHT_FLOOR,
   );
   return { stat: round3(wStat), claude: round3(1 - wStat) };
+}
+
+// Regime-aware weights from a PRECOMPUTED analytics object (no recursion). Uses
+// trustedAccuracy, which prefers the regime bucket and falls back to all-regime.
+function ensembleWeightsFor(a: CoinAnalyticsBase, regime: PromptRegime): EnsembleWeights {
+  return weightsFromAccuracy(
+    trustedAccuracy(a, "stat", regime),
+    trustedAccuracy(a, "claude", regime),
+  );
+}
+
+// All-regime baseline weights from a precomputed analytics object: uses each
+// source's overall accuracy once it clears the min-sample gate, else equal.
+function overallWeightsFor(a: CoinAnalyticsBase): EnsembleWeights {
+  const statAcc =
+    a.bySource.stat.n >= ENSEMBLE_MIN_SAMPLES ? a.bySource.stat.accuracyPct : null;
+  const claudeAcc =
+    a.bySource.claude.n >= ENSEMBLE_MIN_SAMPLES ? a.bySource.claude.accuracyPct : null;
+  return weightsFromAccuracy(statAcc, claudeAcc);
+}
+
+// Regime-aware blend weights for a symbol — the weights computeEnsemble applies.
+export function ensembleWeights(symbol: string, regime: PromptRegime): EnsembleWeights {
+  return ensembleWeightsFor(getPredictionAnalytics(symbol), regime);
 }
 
 // Blend a stat call and a Claude call into one ensemble call, deciding whether

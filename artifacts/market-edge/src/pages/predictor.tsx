@@ -144,6 +144,10 @@ interface CoinAnalytics {
     avgConfidencePct: number | null;
     hitRatePct: number | null;
   }>;
+  ensembleWeights: {
+    overall: EnsembleWeights;
+    byRegime: Record<PromptRegime, EnsembleWeights>;
+  };
 }
 
 // Shape returned by the Kalshi BTC 15-min target endpoint
@@ -606,27 +610,6 @@ function KalshiBtcCard() {
 // blend weights, and auto-pilot status.
 // ---------------------------------------------------------------------------
 
-// Overall blend weight, mirroring the server's ensembleWeights() all-regime
-// fallback: weight ∝ each model's edge over a coin-flip, floored at 0.2, and
-// equal (0.5/0.5) until both models have enough evaluated history.
-const BLEND_MIN_SAMPLES = 8;
-const BLEND_FLOOR = 0.2;
-function blendWeights(stat: SourceMetrics, claude: SourceMetrics): EnsembleWeights {
-  if (
-    stat.n < BLEND_MIN_SAMPLES ||
-    claude.n < BLEND_MIN_SAMPLES ||
-    stat.accuracyPct == null ||
-    claude.accuracyPct == null
-  ) {
-    return { stat: 0.5, claude: 0.5 };
-  }
-  const eS = Math.max(0, stat.accuracyPct - 50);
-  const eC = Math.max(0, claude.accuracyPct - 50);
-  if (eS + eC === 0) return { stat: 0.5, claude: 0.5 };
-  const wStat = Math.min(1 - BLEND_FLOOR, Math.max(BLEND_FLOOR, eS / (eS + eC)));
-  return { stat: wStat, claude: 1 - wStat };
-}
-
 // Calibration quality: sample-weighted average gap between Claude's reported
 // confidence and its actual hit rate across confidence bands. Lower = better
 // calibrated. Returns null until any band has evaluated samples.
@@ -751,7 +734,14 @@ function SelfLearningDashboard({
           <div className="divide-y divide-border">
             {analytics.map((a) => {
               const style = COIN_STYLE[a.symbol] ?? COIN_STYLE.BTC;
-              const w = blendWeights(a.bySource.stat, a.bySource.claude);
+              const w = a.ensembleWeights.overall;
+              const wr = a.ensembleWeights.byRegime;
+              const regimeTip = (["trending", "drifting", "choppy"] as PromptRegime[])
+                .map(
+                  (reg) =>
+                    `${REGIME_META[reg].label}: stat ${Math.round(wr[reg].stat * 100)}% / Claude ${Math.round(wr[reg].claude * 100)}%`,
+                )
+                .join("\n");
               const cal = calibrationGap(a.calibration);
               const decision = autoPilotMap.get(a.symbol);
               return (
@@ -790,7 +780,7 @@ function SelfLearningDashboard({
 
                   {/* Blend weights + calibration */}
                   <div className="col-span-2 sm:col-span-1 space-y-1">
-                    <div className="flex h-2 w-full rounded-full overflow-hidden bg-muted/40" title={`Overall blend weight — stat ${Math.round(w.stat * 100)}% / Claude ${Math.round(w.claude * 100)}%. The live per-window blend is regime-aware and may shift around this baseline.`}>
+                    <div className="flex h-2 w-full rounded-full overflow-hidden bg-muted/40" title={`Blend weights the ensemble actually uses.\nOverall baseline — stat ${Math.round(w.stat * 100)}% / Claude ${Math.round(w.claude * 100)}%.\nPer regime (applied live when the market is in that regime):\n${regimeTip}`}>
                       <div className="h-full bg-sky-400" style={{ width: `${w.stat * 100}%` }} />
                       <div className="h-full bg-violet-400" style={{ width: `${w.claude * 100}%` }} />
                     </div>
