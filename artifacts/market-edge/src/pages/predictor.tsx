@@ -762,6 +762,7 @@ export default function Predictor() {
   const prevStatAboveRef = useRef<boolean | null>(null);
   // Tracks the locked prediction call at window-open for each coin
   const windowOpenCallRef = useRef<Record<string, { windowTarget: string; aboveKalshi: boolean | null; direction: "up" | "down" | "flat" }>>({});
+  const enhanceAbortRef = useRef<AbortController | null>(null);
 
   // 1-second EST clock
   useEffect(() => {
@@ -859,6 +860,16 @@ export default function Predictor() {
       ? statPred0.predictedPrice >= kalshiTarget
       : null;
 
+  function handleCancelEnhance() {
+    if (enhanceAbortRef.current) {
+      enhanceAbortRef.current.abort();
+      enhanceAbortRef.current = null;
+    }
+    setAiLoading(false);
+    setAiError("Cancelled");
+    setAutoTriggerReason(null);
+  }
+
   async function handleEnhance() {
     if (aiLoading) return;
     setAiError(null);
@@ -870,8 +881,12 @@ export default function Predictor() {
     const sym = selected;
     const priceSnapshot = livePrice;
     const tickerSnapshot = kalshiEventTicker;
+    // 60-second hard timeout — Claude extended thinking can be slow
+    const abort = new AbortController();
+    enhanceAbortRef.current = abort;
+    const timer = setTimeout(() => abort.abort(), 60_000);
     try {
-      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${sym}`);
+      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${sym}`, { signal: abort.signal });
       if (!res.ok) {
         const body = await res.text();
         throw new Error(`Server error ${res.status}: ${body}`);
@@ -924,10 +939,16 @@ export default function Predictor() {
       }
       setAutoTriggerReason(null);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "AI enhancement failed";
-      setAiError(msg);
+      if (err instanceof Error && err.name === "AbortError") {
+        setAiError("Request timed out — try again");
+      } else {
+        const msg = err instanceof Error ? err.message : "AI enhancement failed";
+        setAiError(msg);
+      }
       setAutoTriggerReason(null);
     } finally {
+      clearTimeout(timer);
+      enhanceAbortRef.current = null;
       setAiLoading(false);
     }
   }
@@ -1155,10 +1176,13 @@ export default function Predictor() {
             aiError={aiError}
             autoTriggerReason={autoTriggerReason}
             onEnhance={handleEnhance}
+            onCancelEnhance={handleCancelEnhance}
             claudeActive={claudeEnabledSet.has(selected)}
             onToggleClaude={(enabled) => void handleToggleCoinClaude(selected, enabled)}
             kalshiTarget={kalshiTarget}
             kalshiIsLive={kalshiIsLive}
+            kalshiLoading={kalshiTargetQuery.isFetching}
+            onRefreshKalshi={() => void kalshiTargetQuery.refetch()}
             ktd={ktd}
             driftAlert={driftAlerts[selected] ?? null}
           />
@@ -1189,10 +1213,13 @@ function CoinDetail({
   aiError,
   autoTriggerReason,
   onEnhance,
+  onCancelEnhance,
   claudeActive,
   onToggleClaude,
   kalshiTarget,
   kalshiIsLive,
+  kalshiLoading,
+  onRefreshKalshi,
   ktd,
   driftAlert,
 }: {
@@ -1205,10 +1232,13 @@ function CoinDetail({
   aiError: string | null;
   autoTriggerReason: string | null;
   onEnhance: () => void;
+  onCancelEnhance: () => void;
   claudeActive: boolean;
   onToggleClaude: (enabled: boolean) => void;
   kalshiTarget: number | null;
   kalshiIsLive: boolean;
+  kalshiLoading: boolean;
+  onRefreshKalshi: () => void;
   ktd: KalshiTarget | undefined;
   driftAlert: DriftAlert | null;
 }) {
@@ -1446,6 +1476,14 @@ function CoinDetail({
               {ktd?.closeTime && kalshiIsLive && (
                 <span className="text-[11px] text-muted-foreground">closes <span className="font-medium text-foreground">{toET(ktd.closeTime)} ET</span></span>
               )}
+              <button
+                onClick={onRefreshKalshi}
+                disabled={kalshiLoading}
+                title="Refresh Kalshi target"
+                className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${kalshiLoading ? "animate-spin" : ""}`} />
+              </button>
               {ktd?.url && (
                 <a href={ktd.url} target="_blank" rel="noopener noreferrer"
                   className="inline-flex items-center gap-1 text-[11px] text-[#00C805]/80 hover:text-[#00C805] transition-colors">
@@ -1635,6 +1673,15 @@ function CoinDetail({
                 title="Claude is auto-tracking this coin — click to disable"
               >
                 <Sparkles className="w-3 h-3" /> Claude active
+              </button>
+            )}
+            {aiLoading && (
+              <button
+                onClick={onCancelEnhance}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+                title="Cancel Claude analysis"
+              >
+                ✕ Cancel
               </button>
             )}
             <button
