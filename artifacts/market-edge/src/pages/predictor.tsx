@@ -121,6 +121,45 @@ interface DriftAlert {
   windowTarget: string;
 }
 
+// ---------------------------------------------------------------------------
+// Margin signal — how safely the predicted price sits from the Kalshi strike
+// relative to the coin's typical 15-min price swing.
+// ---------------------------------------------------------------------------
+
+interface MarginSignal {
+  level: "risky" | "borderline" | "clear";
+  gapDollars: number;      // |statPred - kalshiTarget|
+  gapPct: number;          // gap as % of livePrice
+  swingDollars: number;    // typical 15-min move ≈ ATR14 × 2
+  swingPct: number;        // typical swing as % of livePrice
+  ratio: number;           // gapDollars / swingDollars (higher = safer)
+  statAbove: boolean;
+  claudeAbove: boolean | null;
+  modelsAgree: boolean | null; // null when Claude hasn't run yet
+}
+
+function computeMarginSignal(
+  statPredPrice: number,
+  claudePredPrice: number | null,
+  kalshiTarget: number,
+  atr14: number,
+  livePrice: number,
+): MarginSignal {
+  const gapDollars = Math.abs(statPredPrice - kalshiTarget);
+  // ATR14 is the 1-min average true range. A typical 15-min swing ≈ 2× ATR
+  // (mid of the 1–3× range used in Claude's expected-move guidance).
+  const swingDollars = atr14 * 2;
+  const ratio = swingDollars > 0 ? gapDollars / swingDollars : 0;
+  const gapPct = livePrice > 0 ? (gapDollars / livePrice) * 100 : 0;
+  const swingPct = livePrice > 0 ? (swingDollars / livePrice) * 100 : 0;
+  const level: "risky" | "borderline" | "clear" =
+    ratio < 0.5 ? "risky" : ratio < 1.0 ? "borderline" : "clear";
+  const statAbove = statPredPrice > kalshiTarget;
+  const claudeAbove = claudePredPrice !== null ? claudePredPrice > kalshiTarget : null;
+  const modelsAgree = claudeAbove !== null ? statAbove === claudeAbove : null;
+  return { level, gapDollars, gapPct, swingDollars, swingPct, ratio, statAbove, claudeAbove, modelsAgree };
+}
+
 interface CoinPrediction {
   symbol: string;
   product: string;
@@ -148,6 +187,7 @@ interface CoinPrediction {
   sparkline: number[];
   candles: Candle[];
   predictions: Prediction[];
+  kalshiTarget?: number | null; // Kalshi RTI strike for current 15-min window
 }
 
 interface CoinPrice {
@@ -1081,6 +1121,23 @@ export default function Predictor() {
                         <span>{next.label} {tz}</span>
                       </div>
                     )}
+                    {(() => {
+                      const kt = coin.kalshiTarget;
+                      const atr = coin.indicators.atr14;
+                      if (!kt || !next || !atr) return null;
+                      const sig = computeMarginSignal(next.predictedPrice, null, kt, atr, price);
+                      return (
+                        <div className={`mt-0.5 flex items-center gap-1 text-[9px] font-bold ${
+                          sig.level === "risky" ? "text-red-400"
+                          : sig.level === "borderline" ? "text-amber-400"
+                          : "text-emerald-400"
+                        }`}>
+                          <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: "currentColor" }} />
+                          {sig.level === "risky" ? "Too Close" : sig.level === "borderline" ? "Borderline" : "Clear"}
+                          <span className="font-normal opacity-70">({sig.ratio.toFixed(1)}×)</span>
+                        </div>
+                      );
+                    })()}
                   </button>
                 );
               })}
@@ -1166,6 +1223,20 @@ function CoinDetail({
       : null;
   const claudePredPrice: number | null = claudeAiPred0?.predictedPrice ?? null;
   const claudeConfidence: number | null = claudeAiPred0?.confidence ?? null;
+
+  // Margin signal — how safely the stat prediction sits from the Kalshi strike.
+  const marginSig: MarginSignal | null =
+    kalshiTarget !== null &&
+    coin.predictions[0] != null &&
+    (coin.indicators.atr14 ?? 0) > 0
+      ? computeMarginSignal(
+          coin.predictions[0].predictedPrice,
+          claudePredPrice,
+          kalshiTarget,
+          coin.indicators.atr14!,
+          livePrice,
+        )
+      : null;
 
   // Staleness: how many minutes since Claude last ran
   const staleMins = aiEntry ? Math.floor((now.getTime() - aiEntry.at.getTime()) / 60_000) : null;
@@ -1461,6 +1532,75 @@ function CoinDetail({
           </div>
         </div>
       )}
+
+      {/* ── Margin Signal — bet safety indicator ── */}
+      {marginSig && (() => {
+        const dp = livePrice >= 100 ? 2 : livePrice >= 1 ? 4 : 6;
+        const fmt = (n: number) => n.toFixed(dp);
+        const cfg = {
+          risky: {
+            border: "border-red-500/40", bg: "bg-red-500/8",
+            badge: "bg-red-500/20 text-red-400 ring-red-500/30",
+            text: "text-red-400", icon: "🔴", label: "Too Close",
+            desc: "Gap is smaller than a typical 15-min swing — high flip risk",
+          },
+          borderline: {
+            border: "border-amber-500/40", bg: "bg-amber-500/8",
+            badge: "bg-amber-500/20 text-amber-400 ring-amber-500/30",
+            text: "text-amber-400", icon: "🟡", label: "Borderline",
+            desc: "Moderate buffer — price could still flip at the boundary",
+          },
+          clear: {
+            border: "border-emerald-500/30", bg: "bg-emerald-500/5",
+            badge: "bg-emerald-500/20 text-emerald-400 ring-emerald-500/30",
+            text: "text-emerald-400", icon: "🟢", label: "Clear Margin",
+            desc: "Gap exceeds a typical swing — model has meaningful room for error",
+          },
+        }[marginSig.level];
+        return (
+          <div className={`rounded-xl border ${cfg.border} ${cfg.bg} px-4 py-3`}>
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-3">
+                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${cfg.badge}`}>
+                  {cfg.icon} {cfg.label}
+                </span>
+                <span className="text-xs text-muted-foreground">{cfg.desc}</span>
+              </div>
+              {marginSig.modelsAgree !== null && (
+                <span className={`text-xs font-semibold flex items-center gap-1.5 ${marginSig.modelsAgree ? "text-emerald-400" : "text-red-400"}`}>
+                  {marginSig.modelsAgree ? "✓ Models agree" : "⚠ Models conflict"}
+                </span>
+              )}
+            </div>
+            <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div>
+                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Gap from target</div>
+                <div className={`text-sm font-bold tabular-nums ${cfg.text}`}>${fmt(marginSig.gapDollars)}</div>
+                <div className="text-[11px] text-muted-foreground">{marginSig.gapPct.toFixed(3)}% of price</div>
+              </div>
+              <div>
+                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Typical 15-min swing</div>
+                <div className="text-sm font-bold tabular-nums">${fmt(marginSig.swingDollars)}</div>
+                <div className="text-[11px] text-muted-foreground">{marginSig.swingPct.toFixed(3)}% of price</div>
+              </div>
+              <div>
+                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Margin ratio</div>
+                <div className={`text-sm font-bold tabular-nums ${
+                  marginSig.ratio < 0.5 ? "text-red-400" : marginSig.ratio < 1 ? "text-amber-400" : "text-emerald-400"
+                }`}>{marginSig.ratio.toFixed(2)}×</div>
+                <div className="text-[11px] text-muted-foreground">gap ÷ swing</div>
+              </div>
+              <div>
+                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Stat model says</div>
+                <div className={`text-sm font-bold ${marginSig.statAbove ? "text-emerald-400" : "text-red-400"}`}>
+                  {marginSig.statAbove ? "▲ Above" : "▼ Below"}
+                </div>
+                <div className="text-[11px] text-muted-foreground">${fmt(coin.predictions[0]!.predictedPrice)}</div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Quarter-Hour Forecasts — side-by-side model comparison ── */}
       <div>

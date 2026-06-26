@@ -99,6 +99,7 @@ export interface CoinPrediction {
   sparkline: number[]; // recent closes (last ~60)
   candles: Candle[]; // recent candles for charting (last ~90)
   predictions: Prediction[];
+  kalshiTarget?: number | null; // Kalshi RTI strike for the current 15-min window
 }
 
 export interface CoinPrice {
@@ -1478,15 +1479,21 @@ export async function fetchCryptoPredictions(): Promise<{
   const coins = await Promise.all(
     CRYPTO_COINS.map(async (coin) => {
       try {
+        // Fetch Kalshi target in parallel (12s cache — no extra network hits per call).
+        const kalshiTargetP = KALSHI_SERIES[coin.symbol]
+          ? fetchKalshiTarget(coin.symbol).catch(() => null)
+          : Promise.resolve(null);
+
         // Use predCache for live price/indicators (15s TTL keeps display responsive).
         const hit = predCache.get(coin.symbol);
         if (hit && Date.now() - hit.at < PRED_TTL) {
           // Indicators are fresh — still apply the window-locked predictions.
           const wHit = windowPredCache.get(coin.symbol);
+          const kalshiTarget = await kalshiTargetP;
           if (wHit?.windowKey === wk) {
-            return { ...hit.value, predictions: wHit.predictions };
+            return { ...hit.value, predictions: wHit.predictions, kalshiTarget };
           }
-          return hit.value;
+          return { ...hit.value, kalshiTarget };
         }
 
         const [candles, stats, tickerPrice] = await Promise.all([
@@ -1507,7 +1514,8 @@ export async function fetchCryptoPredictions(): Promise<{
         }
 
         const lockedPreds = windowPredCache.get(coin.symbol)!.predictions;
-        return { ...result, predictions: lockedPreds };
+        const kalshiTarget = await kalshiTargetP;
+        return { ...result, predictions: lockedPreds, kalshiTarget };
       } catch {
         return null;
       }
