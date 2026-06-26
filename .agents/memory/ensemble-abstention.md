@@ -15,7 +15,7 @@ model's direction MUST be derived from `(predictedPrice - referencePrice)` with 
 stat model's stored `direction`.
 **Why:** Claude's emitted `direction` text can contradict its own `predictedPrice`;
 trusting it makes the persisted abstention disagree with the DISPLAYED up/down calls
-and diverge from the client mirror. (Caught in code review for Task #51.)
+and diverge from the client mirror. (Caught in code review.)
 **How to apply:** In the tracker's ensemble-record creation (crypto.ts) compute
 `dirFromPrice(p)` against `analysis.price` before calling `computeEnsemble`. The
 client `computeCombinedCall` already derives dirs from livePrice the same way.

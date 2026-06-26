@@ -31,6 +31,9 @@ import {
   RefreshCw,
   Trash2,
   AlertTriangle,
+  Bot,
+  BarChart3,
+  Power,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -86,6 +89,61 @@ interface PredictionRecord {
 interface EnsembleWeights {
   stat: number;
   claude: number;
+}
+
+// Auto-pilot's per-coin decision: whether Claude is auto-enabled and why.
+interface AutoPilotDecision {
+  symbol: string;
+  active: boolean;
+  reason: string;
+  exploring: boolean;
+  claudeAccuracyPct: number | null;
+  statAccuracyPct: number | null;
+  claudeN: number;
+  statN: number;
+  marginPct: number | null;
+}
+
+// Shape returned by /crypto/ai-settings
+interface AiSettings {
+  mode: "stat" | "claude";
+  claudeCoins: string[];
+  selfConsistencySamples?: number;
+  autoPilot: {
+    enabled: boolean;
+    maxActive: number;
+    decisions: AutoPilotDecision[];
+  };
+}
+
+// Self-learning analytics shape from /crypto/prediction-analytics
+type PromptRegime = "trending" | "drifting" | "choppy";
+interface SourceMetrics {
+  n: number;
+  hits: number;
+  accuracyPct: number | null;
+  avgErrorPct: number | null;
+}
+interface CoinAnalytics {
+  symbol: string;
+  bySource: { stat: SourceMetrics; claude: SourceMetrics; ensemble: SourceMetrics };
+  byRegime: {
+    stat: Record<PromptRegime, SourceMetrics>;
+    claude: Record<PromptRegime, SourceMetrics>;
+    ensemble: Record<PromptRegime, SourceMetrics>;
+  };
+  abstention: {
+    evaluated: number;
+    avoidedLoss: number;
+    missedWin: number;
+    avoidedLossPct: number | null;
+  };
+  calibration: Array<{
+    band: string;
+    n: number;
+    avgConfidencePct: number | null;
+    hitRatePct: number | null;
+  }>;
 }
 
 // Shape returned by the Kalshi BTC 15-min target endpoint
@@ -543,6 +601,264 @@ function KalshiBtcCard() {
 }
 
 // ---------------------------------------------------------------------------
+// Self-Learning Dashboard — makes the whole adaptive loop visible: per-coin
+// stat/Claude/combined accuracy, accuracy by regime, calibration quality,
+// blend weights, and auto-pilot status.
+// ---------------------------------------------------------------------------
+
+// Overall blend weight, mirroring the server's ensembleWeights() all-regime
+// fallback: weight ∝ each model's edge over a coin-flip, floored at 0.2, and
+// equal (0.5/0.5) until both models have enough evaluated history.
+const BLEND_MIN_SAMPLES = 8;
+const BLEND_FLOOR = 0.2;
+function blendWeights(stat: SourceMetrics, claude: SourceMetrics): EnsembleWeights {
+  if (
+    stat.n < BLEND_MIN_SAMPLES ||
+    claude.n < BLEND_MIN_SAMPLES ||
+    stat.accuracyPct == null ||
+    claude.accuracyPct == null
+  ) {
+    return { stat: 0.5, claude: 0.5 };
+  }
+  const eS = Math.max(0, stat.accuracyPct - 50);
+  const eC = Math.max(0, claude.accuracyPct - 50);
+  if (eS + eC === 0) return { stat: 0.5, claude: 0.5 };
+  const wStat = Math.min(1 - BLEND_FLOOR, Math.max(BLEND_FLOOR, eS / (eS + eC)));
+  return { stat: wStat, claude: 1 - wStat };
+}
+
+// Calibration quality: sample-weighted average gap between Claude's reported
+// confidence and its actual hit rate across confidence bands. Lower = better
+// calibrated. Returns null until any band has evaluated samples.
+function calibrationGap(
+  cal: CoinAnalytics["calibration"],
+): { gap: number; n: number } | null {
+  let wsum = 0;
+  let n = 0;
+  for (const b of cal) {
+    if (b.n > 0 && b.avgConfidencePct != null && b.hitRatePct != null) {
+      wsum += Math.abs(b.avgConfidencePct - b.hitRatePct) * b.n;
+      n += b.n;
+    }
+  }
+  if (n === 0) return null;
+  return { gap: Math.round(wsum / n), n };
+}
+
+function AccCell({ m, color }: { m: SourceMetrics; color: string }) {
+  return (
+    <div className="text-center">
+      {m.accuracyPct !== null ? (
+        <>
+          <div className={`text-base font-black tabular-nums ${color}`}>{m.accuracyPct}%</div>
+          <div className="text-[10px] text-muted-foreground tabular-nums">
+            {m.hits}/{m.n}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="text-base font-black text-muted-foreground/40">—</div>
+          <div className="text-[10px] text-muted-foreground/50 tabular-nums">{m.n} bets</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const REGIME_META: Record<PromptRegime, { label: string; color: string }> = {
+  trending: { label: "Trend", color: "text-emerald-400" },
+  drifting: { label: "Drift", color: "text-amber-400" },
+  choppy: { label: "Chop", color: "text-red-400" },
+};
+
+function SelfLearningDashboard({
+  analytics,
+  autoPilot,
+  autoPilotMap,
+  loading,
+  onToggleAutoPilot,
+}: {
+  analytics: CoinAnalytics[];
+  autoPilot: AiSettings["autoPilot"];
+  autoPilotMap: Map<string, AutoPilotDecision>;
+  loading: boolean;
+  onToggleAutoPilot: (enabled: boolean) => void;
+}) {
+  const accColor = (pct: number | null) =>
+    pct === null
+      ? "text-muted-foreground/40"
+      : pct >= 60
+        ? "text-emerald-400"
+        : pct >= 45
+          ? "text-amber-400"
+          : "text-red-400";
+
+  const activeCount = autoPilot.decisions.filter((d) => d.active).length;
+
+  return (
+    <div>
+      {/* ── Header + auto-pilot master control ── */}
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+        <div>
+          <h3 className="text-sm font-semibold flex items-center gap-1.5">
+            <BarChart3 className="w-4 h-4 text-primary" />
+            Self-Learning Dashboard
+          </h3>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            Where each model is winning · 30 s refresh
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {autoPilot.enabled && (
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              {activeCount}/{autoPilot.maxActive} coins running Claude
+            </span>
+          )}
+          <button
+            onClick={() => onToggleAutoPilot(!autoPilot.enabled)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+              autoPilot.enabled
+                ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                : "border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"
+            }`}
+            title={
+              autoPilot.enabled
+                ? "Auto-pilot is ON — Claude is enabled automatically where it beats the stat model. Click to turn off."
+                : "Turn on auto-pilot — let the system enable Claude only where it's earning its keep."
+            }
+          >
+            {autoPilot.enabled ? <Bot className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
+            Auto-pilot {autoPilot.enabled ? "ON" : "OFF"}
+          </button>
+        </div>
+      </div>
+
+      {loading && analytics.length === 0 ? (
+        <Skeleton className="h-48 rounded-xl" />
+      ) : (
+        <Card className="bg-card/50 overflow-hidden">
+          {/* Column header */}
+          <div className="hidden sm:grid grid-cols-[3.5rem_1fr_1fr_1fr_1.4fr_1.2fr_1.6fr] gap-2 px-4 py-2 border-b border-border text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+            <div>Coin</div>
+            <div className="text-center">Stat</div>
+            <div className="text-center text-violet-300/70">Claude</div>
+            <div className="text-center text-primary/70">Combined</div>
+            <div className="text-center">By regime (Claude)</div>
+            <div className="text-center">Blend · Calib</div>
+            <div>Auto-pilot</div>
+          </div>
+
+          <div className="divide-y divide-border">
+            {analytics.map((a) => {
+              const style = COIN_STYLE[a.symbol] ?? COIN_STYLE.BTC;
+              const w = blendWeights(a.bySource.stat, a.bySource.claude);
+              const cal = calibrationGap(a.calibration);
+              const decision = autoPilotMap.get(a.symbol);
+              return (
+                <div
+                  key={a.symbol}
+                  className="grid grid-cols-2 sm:grid-cols-[3.5rem_1fr_1fr_1fr_1.4fr_1.2fr_1.6fr] gap-2 px-4 py-3 items-center"
+                >
+                  {/* Coin */}
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-base font-bold ${style.accent}`}>{style.glyph}</span>
+                    <span className="font-semibold text-xs">{a.symbol}</span>
+                  </div>
+
+                  {/* Accuracy: stat / claude / combined */}
+                  <AccCell m={a.bySource.stat} color={accColor(a.bySource.stat.accuracyPct)} />
+                  <AccCell m={a.bySource.claude} color={accColor(a.bySource.claude.accuracyPct)} />
+                  <AccCell m={a.bySource.ensemble} color={accColor(a.bySource.ensemble.accuracyPct)} />
+
+                  {/* By regime (Claude) */}
+                  <div className="col-span-2 sm:col-span-1 flex items-center justify-center gap-2.5">
+                    {(["trending", "drifting", "choppy"] as PromptRegime[]).map((reg) => {
+                      const m = a.byRegime.claude[reg];
+                      const meta = REGIME_META[reg];
+                      return (
+                        <div key={reg} className="text-center" title={`${meta.label}: ${m.hits}/${m.n}`}>
+                          <div className={`text-[9px] font-semibold uppercase ${meta.color}/80`}>
+                            {meta.label}
+                          </div>
+                          <div className="text-xs font-bold tabular-nums">
+                            {m.accuracyPct !== null ? `${m.accuracyPct}%` : "—"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Blend weights + calibration */}
+                  <div className="col-span-2 sm:col-span-1 space-y-1">
+                    <div className="flex h-2 w-full rounded-full overflow-hidden bg-muted/40" title={`Overall blend weight — stat ${Math.round(w.stat * 100)}% / Claude ${Math.round(w.claude * 100)}%. The live per-window blend is regime-aware and may shift around this baseline.`}>
+                      <div className="h-full bg-sky-400" style={{ width: `${w.stat * 100}%` }} />
+                      <div className="h-full bg-violet-400" style={{ width: `${w.claude * 100}%` }} />
+                    </div>
+                    <div className="flex items-center justify-between text-[9px] text-muted-foreground tabular-nums">
+                      <span className="text-sky-300/80">S {Math.round(w.stat * 100)}%</span>
+                      <span
+                        title={
+                          cal
+                            ? `Calibration gap: reported vs actual confidence differ by ±${cal.gap}% (over ${cal.n} bets). Lower is better.`
+                            : "Not enough Claude history to measure calibration yet"
+                        }
+                        className={
+                          cal === null
+                            ? "text-muted-foreground/50"
+                            : cal.gap <= 8
+                              ? "text-emerald-400"
+                              : cal.gap <= 15
+                                ? "text-amber-400"
+                                : "text-red-400"
+                        }
+                      >
+                        ±{cal ? cal.gap : "—"}%
+                      </span>
+                      <span className="text-violet-300/80">C {Math.round(w.claude * 100)}%</span>
+                    </div>
+                  </div>
+
+                  {/* Auto-pilot status */}
+                  <div className="col-span-2 sm:col-span-1">
+                    {!autoPilot.enabled ? (
+                      <span className="text-[10px] text-muted-foreground/50">Off</span>
+                    ) : decision?.active ? (
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${
+                          decision.exploring
+                            ? "bg-sky-500/15 text-sky-300 ring-sky-500/30"
+                            : "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30"
+                        }`}
+                        title={decision.reason}
+                      >
+                        <Bot className="w-3 h-3" />
+                        {decision.exploring ? "Exploring" : "Claude on"}
+                      </span>
+                    ) : (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-muted-foreground bg-muted/30 ring-1 ring-border"
+                        title={decision?.reason ?? "Stat only"}
+                      >
+                        <Minus className="w-3 h-3" /> Stat only
+                      </span>
+                    )}
+                    {autoPilot.enabled && decision?.reason && (
+                      <div className="text-[9px] text-muted-foreground/70 mt-0.5 leading-tight line-clamp-2">
+                        {decision.reason}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Prediction Accuracy Log — tracks 15-min boundary predictions vs actual
 // ---------------------------------------------------------------------------
 
@@ -899,11 +1215,21 @@ export default function Predictor() {
   // AI settings — controls whether Claude tracker runs per-coin (server-persisted)
   const aiSettingsQuery = useQuery({
     queryKey: ["ai-settings"],
-    queryFn: () => fetchJson<{ mode: "stat" | "claude"; claudeCoins: string[] }>("/crypto/ai-settings"),
+    queryFn: () => fetchJson<AiSettings>("/crypto/ai-settings"),
     refetchInterval: 10_000,
   });
-  const aiSettings = aiSettingsQuery.data ?? { mode: "stat" as const, claudeCoins: [] as string[] };
+  const aiSettings: AiSettings = aiSettingsQuery.data ?? {
+    mode: "stat",
+    claudeCoins: [],
+    autoPilot: { enabled: false, maxActive: 0, decisions: [] },
+  };
   const claudeEnabledSet = useMemo(() => new Set(aiSettings.claudeCoins), [aiSettings.claudeCoins]);
+  const autoPilot = aiSettings.autoPilot;
+  const autoPilotMap = useMemo(() => {
+    const m = new Map<string, AutoPilotDecision>();
+    for (const d of autoPilot.decisions) m.set(d.symbol, d);
+    return m;
+  }, [autoPilot.decisions]);
 
   async function handleSetMode(mode: "stat" | "claude") {
     await fetch(`${API_BASE}/crypto/ai-settings/mode`, {
@@ -922,6 +1248,22 @@ export default function Predictor() {
     });
     void aiSettingsQuery.refetch();
   }
+
+  async function handleToggleAutoPilot(enabled: boolean) {
+    await fetch(`${API_BASE}/crypto/ai-settings/auto-pilot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    void aiSettingsQuery.refetch();
+  }
+
+  // Self-learning analytics — per-coin model accuracy, regime, calibration, weights
+  const analyticsQuery = useQuery({
+    queryKey: ["prediction-analytics"],
+    queryFn: () => fetchJson<{ analytics: CoinAnalytics[] }>("/crypto/prediction-analytics"),
+    refetchInterval: 30_000,
+  });
 
   // Per-coin accuracy summary — single request, refreshes every 60s
   const accuracySummaryQuery = useQuery({
@@ -1241,11 +1583,25 @@ export default function Predictor() {
                             </span>
                           );
                         })()}
-                        {claudeEnabledSet.has(coin.symbol) && (
-                          <span className="inline-flex items-center rounded-full px-1 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/20 text-violet-300 ring-violet-500/30" title="Claude AI tracking active">
-                            <Sparkles className="w-2.5 h-2.5" />
-                          </span>
-                        )}
+                        {(() => {
+                          const manual = claudeEnabledSet.has(coin.symbol);
+                          const auto = autoPilotMap.get(coin.symbol)?.active ?? false;
+                          if (manual) {
+                            return (
+                              <span className="inline-flex items-center rounded-full px-1 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/20 text-violet-300 ring-violet-500/30" title="Claude AI tracking active (manual)">
+                                <Sparkles className="w-2.5 h-2.5" />
+                              </span>
+                            );
+                          }
+                          if (auto) {
+                            return (
+                              <span className="inline-flex items-center rounded-full px-1 py-0.5 text-[9px] font-bold ring-1 leading-none bg-emerald-500/20 text-emerald-300 ring-emerald-500/30" title={autoPilotMap.get(coin.symbol)?.reason ?? "Auto-pilot enabled Claude"}>
+                                <Bot className="w-2.5 h-2.5" />
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
                       </div>
                       <span className={`text-[11px] font-medium ${chg >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {formatPct(chg)}
@@ -1298,6 +1654,7 @@ export default function Predictor() {
             onCancelEnhance={handleCancelEnhance}
             claudeActive={claudeEnabledSet.has(selected)}
             onToggleClaude={(enabled) => void handleToggleCoinClaude(selected, enabled)}
+            autoPilotDecision={autoPilot.enabled ? (autoPilotMap.get(selected) ?? null) : null}
             kalshiTarget={kalshiTarget}
             kalshiIsLive={kalshiIsLive}
             kalshiLoading={kalshiTargetQuery.isFetching}
@@ -1311,6 +1668,14 @@ export default function Predictor() {
             <Skeleton className="h-80 rounded-xl" />
           </div>
         )}
+
+        <SelfLearningDashboard
+          analytics={analyticsQuery.data?.analytics ?? []}
+          autoPilot={autoPilot}
+          autoPilotMap={autoPilotMap}
+          loading={analyticsQuery.isLoading}
+          onToggleAutoPilot={(enabled) => void handleToggleAutoPilot(enabled)}
+        />
 
         <PredictionHistory symbol={selected} tz={tz} />
       </div>
@@ -1382,6 +1747,7 @@ function CoinDetail({
   onCancelEnhance,
   claudeActive,
   onToggleClaude,
+  autoPilotDecision,
   kalshiTarget,
   kalshiIsLive,
   kalshiLoading,
@@ -1401,6 +1767,7 @@ function CoinDetail({
   onCancelEnhance: () => void;
   claudeActive: boolean;
   onToggleClaude: (enabled: boolean) => void;
+  autoPilotDecision: AutoPilotDecision | null;
   kalshiTarget: number | null;
   kalshiIsLive: boolean;
   kalshiLoading: boolean;
@@ -1943,6 +2310,19 @@ function CoinDetail({
               >
                 <Sparkles className="w-3 h-3" /> Claude active
               </button>
+            )}
+            {!claudeActive && autoPilotDecision?.active && (
+              <span
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${
+                  autoPilotDecision.exploring
+                    ? "border-sky-500/30 bg-sky-500/10 text-sky-300"
+                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                }`}
+                title={autoPilotDecision.reason}
+              >
+                <Bot className="w-3 h-3" />
+                Auto-pilot{autoPilotDecision.exploring ? " · exploring" : ""}
+              </span>
             )}
             {aiLoading && (
               <button

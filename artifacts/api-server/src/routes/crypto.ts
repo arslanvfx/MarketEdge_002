@@ -18,6 +18,7 @@ import {
   setGlobalAiMode,
   setCoinClaudeEnabled,
   setSelfConsistencySamples,
+  setAutoPilot,
   isAiGloballyEnabled,
 } from "../lib/crypto";
 import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
@@ -99,6 +100,19 @@ router.post("/crypto/ai-settings/self-consistency", (req, res) => {
   }
   const applied = setSelfConsistencySamples(samples);
   res.json({ ok: true, ...getAiSettings(), selfConsistencySamples: applied });
+});
+
+// Auto-pilot: when on, the system auto-enables Claude per coin where it beats the
+// statistical model (with min-sample, hysteresis, and a global cap). Manual
+// per-coin enable/disable keeps working alongside it.
+router.post("/crypto/ai-settings/auto-pilot", (req, res) => {
+  const { enabled } = req.body as { enabled?: boolean };
+  if (typeof enabled !== "boolean") {
+    res.status(400).json({ error: "enabled must be a boolean" });
+    return;
+  }
+  setAutoPilot(enabled);
+  res.json({ ok: true, ...getAiSettings() });
 });
 
 // ── Prediction history ────────────────────────────────────────────────────────

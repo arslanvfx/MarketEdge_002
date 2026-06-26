@@ -2017,16 +2017,177 @@ const claudeEnabledCoins = new Set<string>();
 let selfConsistencySamples = 1;
 const MAX_SELF_CONSISTENCY = 5;
 
+// ── Auto-pilot ───────────────────────────────────────────────────────────────
+// When enabled, the system decides per-coin whether Claude is earning its keep —
+// turning it on where Claude beats the statistical model and off where it stops —
+// so AI budget is spent only where it pays off. Runs once per tracker tick.
+//
+// Guardrails:
+//  • min-sample gating — never act on a thin sample
+//  • hysteresis — turn ON only with a clear edge, stay ON until the edge clearly
+//    erodes, so a coin doesn't flip on/off every tick around the break-even line
+//  • global cap — at most N coins run Claude at once, for cost control
+//  • exploration — when a coin lacks enough Claude history to judge, briefly run
+//    Claude (within the cap, lower priority than proven winners) to gather data
+
+// Each model needs this many evaluated bets before a performance-based decision.
+const AUTOPILOT_MIN_SAMPLES = 8;
+// Claude is turned ON when it beats stat by at least this many points…
+const AUTOPILOT_ON_MARGIN = 5;
+// …and stays ON until its edge falls to this margin or below (hysteresis band).
+const AUTOPILOT_OFF_MARGIN = -2;
+// Hard cap on coins auto-running Claude at once (cost control).
+const AUTOPILOT_MAX_ACTIVE = 3;
+// Below this many evaluated Claude bets, a coin is "unproven" → explore to gather
+// data rather than judging it on noise.
+const AUTOPILOT_EXPLORE_SAMPLES = 8;
+
+export interface AutoPilotDecision {
+  symbol: string;
+  active: boolean; // is Claude auto-enabled for this coin right now?
+  reason: string; // human-readable explanation surfaced in the UI
+  exploring: boolean; // active only to gather Claude data (not yet proven)
+  claudeAccuracyPct: number | null;
+  statAccuracyPct: number | null;
+  claudeN: number; // evaluated Claude bets backing the decision
+  statN: number; // evaluated stat bets backing the decision
+  marginPct: number | null; // claudeAccuracy − statAccuracy
+}
+
+let autoPilotEnabled = false;
+const autoPilotDecisions = new Map<string, AutoPilotDecision>();
+
+// Per-coin auto-pilot decision. Compares Claude vs the statistical model from the
+// analytics layer and decides whether Claude should run, honoring all guardrails.
+export function runAutoPilot(): void {
+  if (!autoPilotEnabled) {
+    autoPilotDecisions.clear();
+    return;
+  }
+
+  interface Candidate {
+    symbol: string;
+    claudeAcc: number | null;
+    statAcc: number | null;
+    claudeN: number;
+    statN: number;
+    margin: number | null;
+    want: boolean; // wants to run Claude (before the global cap is applied)
+    exploring: boolean;
+    reason: string;
+    priority: number; // cap ranking: higher kept first (winners > explorers)
+  }
+
+  const candidates: Candidate[] = CRYPTO_COINS.map(({ symbol }) => {
+    const a = getPredictionAnalytics(symbol);
+    const c = a.bySource.claude;
+    const s = a.bySource.stat;
+    const claudeAcc = c.accuracyPct;
+    const statAcc = s.accuracyPct;
+    const margin = claudeAcc != null && statAcc != null ? claudeAcc - statAcc : null;
+    const wasActive = autoPilotDecisions.get(symbol)?.active ?? false;
+    const base = { symbol, claudeAcc, statAcc, claudeN: c.n, statN: s.n, margin };
+
+    // Need a trustworthy stat baseline to compare Claude against.
+    if (s.n < AUTOPILOT_MIN_SAMPLES || statAcc == null) {
+      return {
+        ...base,
+        want: false,
+        exploring: false,
+        reason: `Building stat baseline (${s.n}/${AUTOPILOT_MIN_SAMPLES} bets)`,
+        priority: -1,
+      };
+    }
+    // Not enough Claude history to judge → explore (run it to gather data).
+    if (c.n < AUTOPILOT_EXPLORE_SAMPLES || claudeAcc == null) {
+      return {
+        ...base,
+        want: true,
+        exploring: true,
+        reason: `Gathering Claude data (${c.n}/${AUTOPILOT_EXPLORE_SAMPLES} bets)`,
+        priority: 0,
+      };
+    }
+    // Both proven → performance decision with hysteresis.
+    const want = wasActive ? margin! > AUTOPILOT_OFF_MARGIN : margin! >= AUTOPILOT_ON_MARGIN;
+    const sign = margin! >= 0 ? "+" : "";
+    const reason = want
+      ? `Claude ${claudeAcc}% vs stat ${statAcc}% (${sign}${margin}%)`
+      : `Claude ${claudeAcc}% vs stat ${statAcc}% (${sign}${margin}%) — paused`;
+    return {
+      ...base,
+      want,
+      exploring: false,
+      reason,
+      priority: 1 + Math.max(0, margin!), // proven winners outrank explorers
+    };
+  });
+
+  // Apply the global cap: proven winners (by edge) fill slots first, then explorers.
+  const wanted = candidates.filter((c) => c.want).sort((a, b) => b.priority - a.priority);
+  const activeSet = new Set(wanted.slice(0, AUTOPILOT_MAX_ACTIVE).map((c) => c.symbol));
+
+  for (const c of candidates) {
+    const active = activeSet.has(c.symbol);
+    const reason =
+      c.want && !active
+        ? `Capped — only ${AUTOPILOT_MAX_ACTIVE} coins run Claude at once`
+        : c.reason;
+    autoPilotDecisions.set(c.symbol, {
+      symbol: c.symbol,
+      active,
+      reason,
+      exploring: active && c.exploring,
+      claudeAccuracyPct: c.claudeAcc,
+      statAccuracyPct: c.statAcc,
+      claudeN: c.claudeN,
+      statN: c.statN,
+      marginPct: c.margin,
+    });
+  }
+}
+
 export function getAiSettings(): {
   mode: "stat" | "claude";
   claudeCoins: string[];
   selfConsistencySamples: number;
+  autoPilot: {
+    enabled: boolean;
+    maxActive: number;
+    decisions: AutoPilotDecision[];
+  };
 } {
   return {
     mode: globalAiMode,
     claudeCoins: [...claudeEnabledCoins],
     selfConsistencySamples,
+    autoPilot: {
+      enabled: autoPilotEnabled,
+      maxActive: AUTOPILOT_MAX_ACTIVE,
+      decisions: CRYPTO_COINS.map(
+        ({ symbol }) =>
+          autoPilotDecisions.get(symbol) ?? {
+            symbol,
+            active: false,
+            reason: autoPilotEnabled ? "Evaluating…" : "Auto-pilot off",
+            exploring: false,
+            claudeAccuracyPct: null,
+            statAccuracyPct: null,
+            claudeN: 0,
+            statN: 0,
+            marginPct: null,
+          },
+      ),
+    },
   };
+}
+
+export function setAutoPilot(enabled: boolean): boolean {
+  autoPilotEnabled = enabled;
+  // Recompute immediately so the UI reflects the new state without waiting a tick.
+  if (enabled) runAutoPilot();
+  else autoPilotDecisions.clear();
+  return autoPilotEnabled;
 }
 
 export function setSelfConsistencySamples(n: number): number {
@@ -2053,14 +2214,21 @@ export function setCoinClaudeEnabled(symbol: string, enabled: boolean): void {
   }
 }
 
+// Claude runs for a coin if the user manually enabled it OR auto-pilot chose it.
 function isCoinClaudeEnabled(symbol: string): boolean {
-  return globalAiMode === "claude" && claudeEnabledCoins.has(symbol);
+  if (globalAiMode === "claude" && claudeEnabledCoins.has(symbol)) return true;
+  if (autoPilotEnabled && autoPilotDecisions.get(symbol)?.active) return true;
+  return false;
 }
 
 export function startPredictionTracker(): void {
   const tick = async () => {
     const nowMs = Date.now();
     const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
+
+    // Refresh auto-pilot decisions from the latest accuracy before snapping, so
+    // this tick's Claude on/off choices reflect the most recent performance.
+    runAutoPilot();
 
     await Promise.all(
       CRYPTO_COINS.map(async (coin) => {
