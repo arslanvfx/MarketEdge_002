@@ -4,6 +4,8 @@ import {
   fetchCryptoPrices,
   fetchAIPredictions,
   getPredictionHistory,
+  getPredictionHeadlines,
+  getPredictionAnalytics,
   getAllPredictionAnalytics,
   clearPredictionHistory,
   ACCURACY_THRESHOLD_PCT,
@@ -120,6 +122,11 @@ router.get("/crypto/prediction-history/summary", (_req, res) => {
       bySource: {
         stat: tally(evaluated.filter((r) => r.source === "stat")),
         claude: tally(evaluated.filter((r) => r.source === "claude")),
+        // Ensemble hit-rate covers BET windows only; abstentions are excluded so
+        // it's comparable to a model that always takes a position.
+        ensemble: tally(
+          evaluated.filter((r) => r.source === "ensemble" && r.abstained !== true),
+        ),
       },
     };
   });
@@ -140,9 +147,24 @@ router.get("/crypto/prediction-history", (req, res) => {
     res.status(400).json({ error: "symbol query param required" });
     return;
   }
+  // One headline row per window (ensemble › Claude › stat). Per-source hit rates
+  // and abstention quality come from the analytics rollup so the log header stays
+  // consistent with the ensemble math, even though the list shows one row/window.
+  const analytics = getPredictionAnalytics(symbol);
+  const toSummary = (m: { n: number; hits: number; accuracyPct: number | null }) => ({
+    hits: m.hits,
+    total: m.n,
+    pct: m.accuracyPct,
+  });
   res.json({
     symbol,
-    history: getPredictionHistory(symbol),
+    history: getPredictionHeadlines(symbol),
+    sourceSummary: {
+      stat: toSummary(analytics.bySource.stat),
+      claude: toSummary(analytics.bySource.claude),
+      ensemble: toSummary(analytics.bySource.ensemble),
+    },
+    abstention: analytics.abstention,
     accuracyThresholdPct: ACCURACY_THRESHOLD_PCT,
   });
 });

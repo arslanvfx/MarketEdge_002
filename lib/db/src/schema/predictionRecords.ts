@@ -16,10 +16,15 @@ export const predictionRecordsTable = pgTable("prediction_records", {
   correct: boolean("correct"),
   evaluatedAt: timestamp("evaluated_at", { withTimezone: true }),
   status: text("status").notNull().default("pending"),
-  // Which model produced this prediction: "stat" (statistical model) or
-  // "claude" (Claude refinement). Lets accuracy and bias be computed per
-  // source so Claude only ever calibrates against its own track record.
+  // Which model produced this prediction: "stat" (statistical model),
+  // "claude" (Claude refinement), or "ensemble" (regime-weighted blend of the
+  // two). Lets accuracy and bias be computed per source so Claude only ever
+  // calibrates against its own track record.
   source: text("source").notNull().default("stat"),
+  // Ensemble-only: true when the blended call abstained (no bet) because the
+  // models disagreed on direction or combined confidence was below threshold.
+  // null for stat/claude records (abstention is an ensemble concept only).
+  abstained: boolean("abstained"),
   // Intra-window efficiency ratio at snapshot time — lets accuracy and bias be
   // bucketed by market regime (trending / drifting / choppy) after the fact.
   efficiencyRatio: numeric("efficiency_ratio", { precision: 6, scale: 4 }),

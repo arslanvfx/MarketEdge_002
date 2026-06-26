@@ -76,7 +76,16 @@ interface PredictionRecord {
   correct: boolean | null;
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
-  source?: "stat" | "claude";
+  source?: "stat" | "claude" | "ensemble";
+  id?: string;
+  abstained?: boolean | null;
+}
+
+// Regime-aware blend weights returned alongside an AI run so the client can
+// reproduce the exact combined call shown in the two model columns.
+interface EnsembleWeights {
+  stat: number;
+  claude: number;
 }
 
 // Shape returned by the Kalshi BTC 15-min target endpoint
@@ -111,6 +120,8 @@ interface AiEntry {
   at: Date;
   priceAtRun: number;
   eventTickerAtRun: string | undefined;
+  ensembleWeights?: EnsembleWeights;
+  abstainMinConf?: number;
 }
 
 interface DriftAlert {
@@ -539,12 +550,17 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
   const ACCURACY_THRESHOLD = 1.0; // fallback for non-BTC / no Kalshi target
   const [clearing, setClearing] = useState(false);
 
+  type SourceSummary = { hits: number; total: number; pct: number | null };
   const query = useQuery({
     queryKey: ["pred-history", symbol],
     queryFn: () =>
-      fetchJson<{ symbol: string; history: PredictionRecord[]; accuracyThresholdPct: number }>(
-        `/crypto/prediction-history?symbol=${symbol}`,
-      ),
+      fetchJson<{
+        symbol: string;
+        history: PredictionRecord[];
+        sourceSummary?: { stat: SourceSummary; claude: SourceSummary; ensemble: SourceSummary };
+        abstention?: { evaluated: number; avoidedLoss: number; missedWin: number; avoidedLossPct: number | null };
+        accuracyThresholdPct: number;
+      }>(`/crypto/prediction-history?symbol=${symbol}`),
     refetchInterval: 30_000,
   });
 
@@ -561,18 +577,19 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
 
   const history = query.data?.history ?? [];
   const evaluated = history.filter((r) => r.status === "evaluated");
-  const hits = evaluated.filter((r) => r.correct === true).length;
-  const accuracyPct = evaluated.length > 0 ? Math.round((hits / evaluated.length) * 100) : null;
+  // Headline accuracy counts BET windows only — abstentions ("no bet") are not
+  // wins or losses, so they're excluded from the hit-rate denominator.
+  const headlineBets = evaluated.filter((r) => r.abstained !== true);
+  const hits = headlineBets.filter((r) => r.correct === true).length;
+  const accuracyPct = headlineBets.length > 0 ? Math.round((hits / headlineBets.length) * 100) : null;
 
-  // Per-source accuracy so Claude's hit rate is visible separately from the
-  // statistical model's.
-  const sourceStats = (src: "stat" | "claude") => {
-    const recs = evaluated.filter((r) => (r.source ?? "stat") === src);
-    const h = recs.filter((r) => r.correct === true).length;
-    return { hits: h, total: recs.length, pct: recs.length > 0 ? Math.round((h / recs.length) * 100) : null };
-  };
-  const claudeStats = sourceStats("claude");
-  const statStats = sourceStats("stat");
+  // Per-source hit rates come from the server rollup (over ALL records, not just
+  // the one-per-window headlines shown below) so each model's rate is accurate.
+  const empty: SourceSummary = { hits: 0, total: 0, pct: null };
+  const claudeStats = query.data?.sourceSummary?.claude ?? empty;
+  const statStats = query.data?.sourceSummary?.stat ?? empty;
+  const ensembleStats = query.data?.sourceSummary?.ensemble ?? empty;
+  const abstention = query.data?.abstention;
 
   // Does any record in this history have a Kalshi target? (true for BTC during market hours)
   const hasKalshiData = history.some((r) => r.kalshiTarget !== null && r.kalshiTarget !== undefined);
@@ -610,8 +627,15 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
         </div>
 
         <div className="flex items-center gap-3 shrink-0 ml-4">
-          {(claudeStats.pct !== null || statStats.pct !== null) && (
+          {(claudeStats.pct !== null || statStats.pct !== null || ensembleStats.pct !== null) && (
             <div className="text-right text-[11px] leading-tight">
+              {ensembleStats.pct !== null && (
+                <div className="text-primary">
+                  Combined{" "}
+                  <span className="font-semibold tabular-nums">{ensembleStats.pct}%</span>{" "}
+                  <span className="text-muted-foreground">({ensembleStats.hits}/{ensembleStats.total})</span>
+                </div>
+              )}
               {claudeStats.pct !== null && (
                 <div className="text-violet-300">
                   Claude{" "}
@@ -626,6 +650,13 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                   <span className="text-muted-foreground">({statStats.hits}/{statStats.total})</span>
                 </div>
               )}
+              {abstention && abstention.evaluated > 0 && (
+                <div className="text-amber-300/80">
+                  No-bet{" "}
+                  <span className="font-semibold tabular-nums">{abstention.avoidedLossPct ?? 0}%</span>{" "}
+                  <span className="text-muted-foreground">avoided ({abstention.avoidedLoss}/{abstention.evaluated})</span>
+                </div>
+              )}
             </div>
           )}
           {accuracyPct !== null && (
@@ -638,7 +669,7 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                 {accuracyPct}%
               </div>
               <div className="text-[11px] text-muted-foreground mt-1">
-                {hits} / {evaluated.length} correct
+                {hits} / {headlineBets.length} correct
               </div>
             </div>
           )}
@@ -666,12 +697,15 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
         <div className="space-y-3">
           {history.map((rec) => {
             const isPending = rec.status === "pending";
+            const isAbstained = rec.abstained === true;
             const hasTarget = rec.kalshiTarget !== null && rec.kalshiTarget !== undefined;
             const predictedAbove = hasTarget && rec.predictedPrice >= rec.kalshiTarget!;
             const actualAbove    = hasTarget && rec.actualPrice !== null && rec.actualPrice >= rec.kalshiTarget!;
 
             const borderColor = isPending
               ? "border-l-amber-400/70"
+              : isAbstained
+              ? "border-l-muted-foreground/40"
               : rec.correct
               ? "border-l-emerald-500"
               : "border-l-red-500";
@@ -680,6 +714,19 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
               <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-400 bg-amber-400/10 border border-amber-400/25 rounded-full px-2.5 py-0.5">
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
                 Pending
+              </span>
+            ) : isAbstained ? (
+              <span
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground bg-muted/30 border border-border rounded-full px-2.5 py-0.5"
+                title={
+                  rec.status === "evaluated"
+                    ? rec.correct
+                      ? "Skipped — the would-be bet would have won (missed)"
+                      : "Skipped — the would-be bet would have lost (good skip)"
+                    : "No bet — models disagreed or confidence too low"
+                }
+              >
+                <Minus className="w-3 h-3" /> No bet
               </span>
             ) : rec.correct ? (
               <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-400 bg-emerald-400/10 border border-emerald-500/25 rounded-full px-2.5 py-0.5">
@@ -699,7 +746,7 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
 
             return (
               <div
-                key={rec.targetTime}
+                key={rec.id ?? rec.targetTime}
                 className={`border-l-4 ${borderColor} rounded-r-xl bg-card/50 hover:bg-card/80 transition-colors overflow-hidden`}
               >
                 {/* Card header — time + status badge */}
@@ -956,7 +1003,12 @@ export default function Predictor() {
         const body = await res.text();
         throw new Error(`Server error ${res.status}: ${body}`);
       }
-      const data = (await res.json()) as { predictions: AIPredictionItem[]; generatedAt: string };
+      const data = (await res.json()) as {
+        predictions: AIPredictionItem[];
+        generatedAt: string;
+        ensembleWeights?: EnsembleWeights;
+        abstainMinConf?: number;
+      };
       if (!Array.isArray(data.predictions) || data.predictions.length === 0) {
         throw new Error("Unexpected response from AI endpoint");
       }
@@ -967,6 +1019,8 @@ export default function Predictor() {
           at: new Date(data.generatedAt),
           priceAtRun: priceSnapshot,
           eventTickerAtRun: tickerSnapshot,
+          ensembleWeights: data.ensembleWeights,
+          abstainMinConf: data.abstainMinConf,
         },
       }));
       // ── Drift detection ──────────────────────────────────────────────────
@@ -1265,6 +1319,53 @@ export default function Predictor() {
 }
 
 // ---------------------------------------------------------------------------
+// Adaptive ensemble — client mirror of the server's computeEnsemble so the
+// headline combined call is derived from the exact stat/Claude values shown in
+// the two model columns (keeping the headline consistent with what's on screen).
+// ---------------------------------------------------------------------------
+
+interface CombinedCall {
+  predictedPrice: number;
+  confidence: number;
+  direction: "up" | "down" | "flat";
+  changePct: number;
+  above: boolean | null;
+  abstained: boolean;
+  reason: string;
+}
+
+function computeCombinedCall(args: {
+  statPrice: number;
+  statConf: number;
+  statDir: "up" | "down" | "flat";
+  aiPrice: number;
+  aiConf: number;
+  aiDir: "up" | "down" | "flat";
+  weights: EnsembleWeights;
+  abstainMinConf: number;
+  livePrice: number;
+  kalshiTarget: number | null;
+}): CombinedCall {
+  const { statPrice, statConf, statDir, aiPrice, aiConf, aiDir, weights, abstainMinConf, livePrice, kalshiTarget } = args;
+  const predictedPrice = weights.stat * statPrice + weights.claude * aiPrice;
+  const confidence = Math.round(weights.stat * statConf + weights.claude * aiConf);
+  const changePct = livePrice > 0 ? ((predictedPrice - livePrice) / livePrice) * 100 : 0;
+  const direction: "up" | "down" | "flat" =
+    changePct > 0.05 ? "up" : changePct < -0.05 ? "down" : "flat";
+  const conflict =
+    (statDir === "up" && aiDir === "down") || (statDir === "down" && aiDir === "up");
+  const lowConf = confidence < abstainMinConf;
+  const abstained = conflict || lowConf;
+  const reason = conflict
+    ? "Models disagree on direction"
+    : lowConf
+      ? `Combined confidence ${confidence}% below ${abstainMinConf}% threshold`
+      : "Models agree — regime-weighted blend";
+  const above = kalshiTarget !== null ? predictedPrice >= kalshiTarget : null;
+  return { predictedPrice, confidence, direction, changePct, above, abstained, reason };
+}
+
+// ---------------------------------------------------------------------------
 // Detailed view for the selected coin
 // ---------------------------------------------------------------------------
 
@@ -1318,6 +1419,36 @@ function CoinDetail({
       : null;
   const claudePredPrice: number | null = claudeAiPred0?.predictedPrice ?? null;
   const claudeConfidence: number | null = claudeAiPred0?.confidence ?? null;
+
+  // Headline combined call (first window) — regime-weighted blend of the stat
+  // baseline and Claude, with explicit no-bet abstention. Only when an AI run
+  // with weights is present; otherwise the banner falls back to Claude's call.
+  const statHead = coin.predictions[0] ?? null;
+  const combinedHead: CombinedCall | null =
+    aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
+      ? computeCombinedCall({
+          statPrice: statHead.predictedPrice,
+          statConf: statHead.confidence,
+          statDir:
+            ((statHead.predictedPrice - livePrice) / livePrice) * 100 > 0.05
+              ? "up"
+              : ((statHead.predictedPrice - livePrice) / livePrice) * 100 < -0.05
+                ? "down"
+                : "flat",
+          aiPrice: claudeAiPred0.predictedPrice,
+          aiConf: claudeAiPred0.confidence,
+          aiDir:
+            ((claudeAiPred0.predictedPrice - livePrice) / livePrice) * 100 > 0.05
+              ? "up"
+              : ((claudeAiPred0.predictedPrice - livePrice) / livePrice) * 100 < -0.05
+                ? "down"
+                : "flat",
+          weights: aiEntry.ensembleWeights,
+          abstainMinConf: aiEntry.abstainMinConf ?? 55,
+          livePrice,
+          kalshiTarget,
+        })
+      : null;
 
   // Margin signal — how safely the stat prediction sits from the Kalshi strike.
   const betSig: BetSignal | null =
@@ -1549,6 +1680,42 @@ function CoinDetail({
               )}
             </div>
           </div>
+          {/* Combined call headline — regime-weighted ensemble of stat + Claude
+              with explicit no-bet. Sits above the per-model breakdown below. */}
+          {combinedHead && (
+            <div className="px-5 py-3 border-b border-[#00C805]/20 bg-background/20">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1 flex items-center gap-1.5">
+                <Sparkles className="w-3 h-3 text-primary/60" /> Combined Call
+                <span className="font-normal normal-case tracking-normal text-muted-foreground/60">
+                  · stat {Math.round((aiEntry!.ensembleWeights!.stat) * 100)}% / Claude {Math.round((aiEntry!.ensembleWeights!.claude) * 100)}%
+                </span>
+              </div>
+              {combinedHead.abstained ? (
+                <div>
+                  <div className="inline-flex items-center gap-1.5 text-lg font-black text-amber-400">
+                    <Minus className="w-5 h-5" /> NO BET
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">{combinedHead.reason}</div>
+                </div>
+              ) : combinedHead.above !== null ? (
+                <>
+                  <div className={`flex items-center gap-1.5 text-xl font-black ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
+                    {combinedHead.above ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
+                    {combinedHead.above ? "ABOVE" : "BELOW"}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    ${formatPrice(combinedHead.predictedPrice)} · {combinedHead.confidence}% conf.
+                  </div>
+                  {kalshiIsLive && (
+                    <div className={`mt-1.5 text-xs font-bold ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
+                      → Bet {combinedHead.above ? "YES" : "NO"} on Kalshi
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+          )}
+
           {/* Banner body */}
           <div className="grid grid-cols-2 sm:grid-cols-3 divide-x divide-[#00C805]/15 px-0">
             {/* Target price — hero */}
@@ -1846,12 +2013,51 @@ function CoinDetail({
             const aiChangePct = aiPred && livePrice > 0 ? ((aiPred.predictedPrice - livePrice) / livePrice) * 100 : 0;
             const statDir: "up" | "down" | "flat" = statChangePct > 0.05 ? "up" : statChangePct < -0.05 ? "down" : "flat";
             const aiDir: "up" | "down" | "flat" = aiPred ? (aiChangePct > 0.05 ? "up" : aiChangePct < -0.05 ? "down" : "flat") : "flat";
+            // Per-window combined call — only when Claude has run and weights are
+            // available; mirrors the server ensemble so the headline matches the
+            // two columns below it.
+            const combined: CombinedCall | null =
+              aiPred && aiEntry?.ensembleWeights && livePrice > 0
+                ? computeCombinedCall({
+                    statPrice: statPred.predictedPrice,
+                    statConf: statPred.confidence,
+                    statDir,
+                    aiPrice: aiPred.predictedPrice,
+                    aiConf: aiPred.confidence,
+                    aiDir,
+                    weights: aiEntry.ensembleWeights,
+                    abstainMinConf: aiEntry.abstainMinConf ?? 55,
+                    livePrice,
+                    kalshiTarget,
+                  })
+                : null;
             return (
               <Card key={statPred.target} data-testid={`prediction-${i}`} className="overflow-hidden border-border bg-card/60">
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-muted/20">
                   <span className="text-sm font-bold tabular-nums">{statPred.label}</span>
                   <span className="text-[11px] text-muted-foreground">{tz} · in {statPred.minutesAhead} min</span>
                 </div>
+                {/* Combined call headline — regime-weighted blend with no-bet */}
+                {combined && (
+                  <div className="px-4 py-2 border-b border-border bg-primary/5 flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 text-primary/50" /> Combined
+                    </span>
+                    {combined.abstained ? (
+                      <span className="inline-flex items-center gap-1 text-xs font-black text-amber-400">
+                        <Minus className="w-3.5 h-3.5" /> NO BET
+                      </span>
+                    ) : (
+                      <span className="flex items-baseline gap-2 tabular-nums">
+                        <span className={`inline-flex items-center gap-1 text-sm font-black ${combined.direction === "up" ? "text-emerald-400" : combined.direction === "down" ? "text-red-400" : "text-muted-foreground"}`}>
+                          {combined.direction === "up" ? <TrendingUp className="w-3.5 h-3.5" /> : combined.direction === "down" ? <TrendingDown className="w-3.5 h-3.5" /> : <Minus className="w-3.5 h-3.5" />}
+                          ${formatPrice(combined.predictedPrice)}
+                        </span>
+                        <span className="text-[11px] text-muted-foreground">{combined.confidence}%</span>
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div className="grid grid-cols-2 divide-x divide-border">
                   {/* Statistical Model column */}
                   <div className="px-4 py-3 space-y-2">

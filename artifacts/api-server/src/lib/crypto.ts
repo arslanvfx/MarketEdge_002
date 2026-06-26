@@ -702,10 +702,26 @@ function metricsFor(records: PredictionRecord[]): SourceMetrics {
   };
 }
 
+// Abstention quality for the ensemble: of the windows where it chose NOT to
+// bet, how often was that the right call (the would-be bet would have lost)?
+export interface AbstentionMetrics {
+  evaluated: number;       // abstained ensemble records that have been evaluated
+  avoidedLoss: number;     // abstained AND the would-be call was wrong (good skip)
+  missedWin: number;       // abstained BUT the would-be call was right (bad skip)
+  avoidedLossPct: number | null; // avoidedLoss / evaluated
+}
+
 export interface CoinAnalytics {
   symbol: string;
-  bySource: { stat: SourceMetrics; claude: SourceMetrics };
-  byRegime: { stat: Record<PromptRegime, SourceMetrics>; claude: Record<PromptRegime, SourceMetrics> };
+  // Ensemble metrics cover BET windows only (abstentions excluded), so its
+  // accuracy is comparable to a model that always takes a position.
+  bySource: { stat: SourceMetrics; claude: SourceMetrics; ensemble: SourceMetrics };
+  byRegime: {
+    stat: Record<PromptRegime, SourceMetrics>;
+    claude: Record<PromptRegime, SourceMetrics>;
+    ensemble: Record<PromptRegime, SourceMetrics>;
+  };
+  abstention: AbstentionMetrics;
   // Claude-only reliability curve: for each raw-confidence band, the rate at
   // which those calls actually came true. This is what calibration learns from.
   calibration: Array<{ band: string; n: number; avgConfidencePct: number | null; hitRatePct: number | null }>;
@@ -732,6 +748,24 @@ export function getPredictionAnalytics(symbol: string): CoinAnalytics {
   const recs = historyStore.get(symbol.toUpperCase()) ?? [];
   const stat = recs.filter((r) => r.source === "stat");
   const claude = recs.filter((r) => r.source === "claude");
+  const ensembleAll = recs.filter((r) => r.source === "ensemble");
+  // Ensemble accuracy reflects only the windows where it actually BET — skipping
+  // abstentions, which are scored separately as abstention quality below.
+  const ensembleBets = ensembleAll.filter((r) => r.abstained !== true);
+  const ensembleAbstainedEval = ensembleAll.filter(
+    (r) => r.abstained === true && r.status === "evaluated" && r.correct !== null,
+  );
+  const avoidedLoss = ensembleAbstainedEval.filter((r) => r.correct === false).length;
+  const missedWin = ensembleAbstainedEval.filter((r) => r.correct === true).length;
+  const abstention: AbstentionMetrics = {
+    evaluated: ensembleAbstainedEval.length,
+    avoidedLoss,
+    missedWin,
+    avoidedLossPct:
+      ensembleAbstainedEval.length > 0
+        ? Math.round((avoidedLoss / ensembleAbstainedEval.length) * 100)
+        : null,
+  };
   const calClaude = claude.filter((r) => r.status === "evaluated" && r.correct !== null);
   const calibration = CONF_BANDS.map((b) => {
     const inBand = calClaude.filter((r) => bandValue(r) >= b.lo && bandValue(r) < b.hi);
@@ -746,8 +780,17 @@ export function getPredictionAnalytics(symbol: string): CoinAnalytics {
   });
   return {
     symbol: symbol.toUpperCase(),
-    bySource: { stat: metricsFor(stat), claude: metricsFor(claude) },
-    byRegime: { stat: regimeBreakdown(stat), claude: regimeBreakdown(claude) },
+    bySource: {
+      stat: metricsFor(stat),
+      claude: metricsFor(claude),
+      ensemble: metricsFor(ensembleBets),
+    },
+    byRegime: {
+      stat: regimeBreakdown(stat),
+      claude: regimeBreakdown(claude),
+      ensemble: regimeBreakdown(ensembleBets),
+    },
+    abstention,
     calibration,
   };
 }
@@ -779,6 +822,115 @@ export function calibrateConfidence(symbol: string, rawConf: number): number {
   const w = n / (n + CALIB_SHRINK_K);
   const calibrated = rawConf * (1 - w) + hitRate * w;
   return clamp(Math.round(calibrated), 20, 92);
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive stat + Claude ensemble
+//
+// Fuses the statistical model and Claude into a single call whose blend weights
+// adapt to each model's RECENT, REGIME-AWARE accuracy (from the analytics layer
+// above). When the two models disagree on direction, or the blended confidence
+// is too low to be worth a bet, the ensemble abstains ("no bet") rather than
+// forcing a coin-flip call.
+// ---------------------------------------------------------------------------
+
+// Min evaluated records a (source, regime) bucket needs before its accuracy is
+// trusted for weighting. Below this we fall back to the source's all-regime
+// accuracy, then to equal weights.
+const ENSEMBLE_MIN_SAMPLES = 8;
+// Each model's weight is clamped to [floor, 1-floor] so a hot streak never lets
+// one model fully silence the other — both always retain a voice.
+const ENSEMBLE_WEIGHT_FLOOR = 0.2;
+// Blended confidence below this → abstain (combined edge too thin to bet).
+export const ENSEMBLE_ABSTAIN_MIN_CONF = 55;
+
+export interface EnsembleWeights {
+  stat: number;
+  claude: number;
+}
+
+// One model's call as seen by the ensemble (direction is the DISPLAYED call —
+// derived from predicted price vs the reference price by the caller).
+interface ModelCall {
+  predictedPrice: number;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+}
+
+export interface EnsembleCall {
+  predictedPrice: number;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  abstained: boolean;
+  reason: string;
+  weights: EnsembleWeights;
+}
+
+// Pull a source's trusted accuracy for a regime: prefer the regime bucket once
+// it has enough samples, else the source's all-regime accuracy, else null.
+function trustedAccuracy(
+  a: CoinAnalytics,
+  src: "stat" | "claude",
+  regime: PromptRegime,
+): number | null {
+  const reg = a.byRegime[src][regime];
+  if (reg.n >= ENSEMBLE_MIN_SAMPLES && reg.accuracyPct != null) return reg.accuracyPct;
+  const all = a.bySource[src];
+  if (all.n >= ENSEMBLE_MIN_SAMPLES && all.accuracyPct != null) return all.accuracyPct;
+  return null;
+}
+
+// Regime-aware blend weights from the analytics layer. Weight is proportional to
+// each model's edge over a coin-flip (accuracy − 50). When either source lacks
+// enough history, fall back to equal weighting so the ensemble degrades to a
+// simple average rather than over-trusting a thin sample.
+export function ensembleWeights(symbol: string, regime: PromptRegime): EnsembleWeights {
+  const a = getPredictionAnalytics(symbol);
+  const statAcc = trustedAccuracy(a, "stat", regime);
+  const claudeAcc = trustedAccuracy(a, "claude", regime);
+  if (statAcc == null || claudeAcc == null) return { stat: 0.5, claude: 0.5 };
+  const edgeStat = Math.max(0, statAcc - 50);
+  const edgeClaude = Math.max(0, claudeAcc - 50);
+  if (edgeStat + edgeClaude === 0) return { stat: 0.5, claude: 0.5 };
+  const wStat = clamp(
+    edgeStat / (edgeStat + edgeClaude),
+    ENSEMBLE_WEIGHT_FLOOR,
+    1 - ENSEMBLE_WEIGHT_FLOOR,
+  );
+  return { stat: round3(wStat), claude: round3(1 - wStat) };
+}
+
+// Blend a stat call and a Claude call into one ensemble call, deciding whether
+// to bet or abstain. `referencePrice` is the live price the displayed directions
+// were derived from, so the blended direction stays consistent with the columns.
+export function computeEnsemble(
+  symbol: string,
+  regime: PromptRegime,
+  stat: ModelCall,
+  claude: ModelCall,
+  referencePrice: number,
+): EnsembleCall {
+  const weights = ensembleWeights(symbol, regime);
+  const predictedPrice = weights.stat * stat.predictedPrice + weights.claude * claude.predictedPrice;
+  const confidence = Math.round(weights.stat * stat.confidence + weights.claude * claude.confidence);
+  const changePct = referencePrice > 0 ? ((predictedPrice - referencePrice) / referencePrice) * 100 : 0;
+  const direction: "up" | "down" | "flat" =
+    changePct > 0.05 ? "up" : changePct < -0.05 ? "down" : "flat";
+
+  // Abstain when the models point opposite ways (one up, one down) or when the
+  // blended confidence is too low to justify a bet.
+  const conflict =
+    (stat.direction === "up" && claude.direction === "down") ||
+    (stat.direction === "down" && claude.direction === "up");
+  const lowConf = confidence < ENSEMBLE_ABSTAIN_MIN_CONF;
+  const abstained = conflict || lowConf;
+  const reason = conflict
+    ? "Models disagree on direction"
+    : lowConf
+      ? `Combined confidence ${confidence}% below ${ENSEMBLE_ABSTAIN_MIN_CONF}% threshold`
+      : "Models agree — regime-weighted blend";
+
+  return { predictedPrice, direction, confidence, abstained, reason, weights };
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,6 +1432,12 @@ function applyAIPredictions(coin: CoinPrediction, aiPreds: AIPrediction[]): Coin
 export async function fetchAIPredictions(symbol: string): Promise<{
   coin: string;
   predictions: AIPrediction[];
+  // Regime-aware blend weights + abstention threshold so the client can compute
+  // the combined call from the exact stat/Claude values it displays (keeping the
+  // headline consistent with the two model columns).
+  ensembleWeights: EnsembleWeights;
+  ensembleRegime: PromptRegime;
+  abstainMinConf: number;
   generatedAt: string;
 }> {
   const coinDef = CRYPTO_COINS.find((c) => c.symbol === symbol.toUpperCase());
@@ -1308,7 +1466,15 @@ export async function fetchAIPredictions(symbol: string): Promise<{
   });
   if (!aiPreds) throw new Error("Claude analysis unavailable");
 
-  return { coin: symbol, predictions: aiPreds, generatedAt: now.toISOString() };
+  const ensembleRegime = regimeFromER(coin.indicators.efficiencyRatio);
+  return {
+    coin: symbol,
+    predictions: aiPreds,
+    ensembleWeights: ensembleWeights(symbol.toUpperCase(), ensembleRegime),
+    ensembleRegime,
+    abstainMinConf: ENSEMBLE_ABSTAIN_MIN_CONF,
+    generatedAt: now.toISOString(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1318,6 +1484,7 @@ export async function fetchAIPredictions(symbol: string): Promise<{
 // ---------------------------------------------------------------------------
 
 export interface PredictionRecord {
+  id: string;                     // `${symbol}-${targetTime}-${source}` (unique per window per source)
   symbol: string;
   snappedAt: string;              // ISO — when snapshot was taken
   targetTime: string;             // ISO — the 15-min boundary being predicted
@@ -1332,13 +1499,26 @@ export interface PredictionRecord {
   correct: boolean | null;        // was the Kalshi YES/NO call right?
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
-  source: "stat" | "claude";      // which model produced this prediction
+  source: "stat" | "claude" | "ensemble"; // which model produced this prediction
+  // Ensemble-only: true when the blended call abstained (no bet). null for
+  // stat/claude. Even when abstained the record is still evaluated, so we can
+  // measure abstention quality (a "good" abstention = would-be call was wrong).
+  abstained: boolean | null;
   efficiencyRatio: number | null; // ER at snapshot — used to bucket by regime
   rawConfidence: number | null;   // Claude's pre-calibration confidence (claude only)
 }
 
+// Stable per-source record id. Legacy records (pre-multi-source) used a 2-part
+// `${symbol}-${targetTime}` id; new records append the source so stat/claude/
+// ensemble calls for the same window each persist independently.
+function recordId(symbol: string, targetTime: string, source: PredictionRecord["source"]): string {
+  return `${symbol}-${targetTime}-${source}`;
+}
+
 const QUARTER_MS = 15 * 60 * 1000;
-const MAX_HISTORY = 30; // last 30 quarter-hour predictions per coin
+// Up to 3 records per window (stat + claude + ensemble) when Claude is enabled,
+// so keep ~30 windows × 3 = 90 records per coin.
+const MAX_HISTORY = 90;
 // Fallback accuracy threshold used when no Kalshi target is available.
 // For coins other than BTC (no KXBTC15M market), a prediction is a "hit"
 // only if direction is correct AND price is within this % of actual.
@@ -1435,6 +1615,26 @@ export function getPredictionHistory(symbol: string): PredictionRecord[] {
   return (historyStore.get(symbol.toUpperCase()) ?? []).slice().reverse(); // newest first
 }
 
+// One headline record per window for the accuracy log: prefer the ensemble call,
+// else Claude, else the stat baseline. Keeps the log to one row per window even
+// though up to three source records are stored per window.
+const HEADLINE_RANK: Record<PredictionRecord["source"], number> = {
+  ensemble: 3,
+  claude: 2,
+  stat: 1,
+};
+export function getPredictionHeadlines(symbol: string): PredictionRecord[] {
+  const all = historyStore.get(symbol.toUpperCase()) ?? [];
+  const byWindow = new Map<string, PredictionRecord>();
+  for (const r of all) {
+    const cur = byWindow.get(r.targetTime);
+    if (!cur || HEADLINE_RANK[r.source] > HEADLINE_RANK[cur.source]) byWindow.set(r.targetTime, r);
+  }
+  return [...byWindow.values()].sort(
+    (a, b) => new Date(b.targetTime).getTime() - new Date(a.targetTime).getTime(),
+  );
+}
+
 export async function clearPredictionHistory(): Promise<void> {
   historyStore.clear();
   await db.delete(predictionRecordsTable);
@@ -1445,7 +1645,9 @@ export async function clearPredictionHistory(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function rowToRecord(row: typeof predictionRecordsTable.$inferSelect): PredictionRecord {
+  const source = (row.source as PredictionRecord["source"]) ?? "stat";
   return {
+    id: row.id,
     symbol: row.symbol,
     snappedAt: row.snappedAt.toISOString(),
     targetTime: row.targetTime.toISOString(),
@@ -1460,7 +1662,8 @@ function rowToRecord(row: typeof predictionRecordsTable.$inferSelect): Predictio
     correct: row.correct,
     evaluatedAt: row.evaluatedAt ? row.evaluatedAt.toISOString() : null,
     status: row.status as "pending" | "evaluated",
-    source: (row.source as "stat" | "claude") ?? "stat",
+    source,
+    abstained: row.abstained ?? null,
     efficiencyRatio: row.efficiencyRatio != null ? parseFloat(row.efficiencyRatio) : null,
     rawConfidence: row.rawConfidence ?? null,
   };
@@ -1487,10 +1690,9 @@ async function initHistoryFromDB(): Promise<void> {
 }
 
 function dbInsertRecord(rec: PredictionRecord): void {
-  const id = `${rec.symbol}-${rec.targetTime}`;
   db.insert(predictionRecordsTable)
     .values({
-      id,
+      id: rec.id,
       symbol: rec.symbol,
       snappedAt: new Date(rec.snappedAt),
       targetTime: new Date(rec.targetTime),
@@ -1506,6 +1708,7 @@ function dbInsertRecord(rec: PredictionRecord): void {
       evaluatedAt: null,
       status: "pending",
       source: rec.source,
+      abstained: rec.abstained,
       efficiencyRatio: rec.efficiencyRatio != null ? String(rec.efficiencyRatio) : null,
       rawConfidence: rec.rawConfidence,
     })
@@ -1514,7 +1717,6 @@ function dbInsertRecord(rec: PredictionRecord): void {
 }
 
 function dbUpdateRecord(rec: PredictionRecord): void {
-  const id = `${rec.symbol}-${rec.targetTime}`;
   db.update(predictionRecordsTable)
     .set({
       actualPrice: rec.actualPrice != null ? String(rec.actualPrice) : null,
@@ -1523,7 +1725,7 @@ function dbUpdateRecord(rec: PredictionRecord): void {
       evaluatedAt: rec.evaluatedAt ? new Date(rec.evaluatedAt) : null,
       status: rec.status,
     })
-    .where(eq(predictionRecordsTable.id, id))
+    .where(eq(predictionRecordsTable.id, rec.id))
     .catch((err) => console.error("[dbUpdateRecord] failed:", err));
 }
 
@@ -1950,39 +2152,95 @@ export function startPredictionTracker(): void {
                   : Promise.resolve(null),
                 Promise.resolve(kalshiTargetSnap),
               ]);
-              // Map Claude's reported confidence onto its empirically-observed
-              // reliability before storing. rawConfidence keeps the pre-calibration
-              // value so the reliability curve never learns from its own output.
-              const rawConfidence = ai ? ai.confidence : null;
-              const storedConfidence = ai
-                ? calibrateConfidence(sym, ai.confidence)
-                : basePred.confidence;
-              const newRec: PredictionRecord = {
+              const er = analysis.indicators.efficiencyRatio;
+              const regime = regimeFromER(er);
+              const snappedAt = new Date(nowMs).toISOString();
+              // Shared fields for every record snapped this window.
+              const common = {
                 symbol: sym,
-                snappedAt: new Date(nowMs).toISOString(),
+                snappedAt,
                 targetTime: targetISO,
                 targetLabel: basePred.label,
                 priceAtSnapshot: analysis.price,
-                predictedPrice: ai?.predictedPrice ?? basePred.predictedPrice,
-                predictedDirection: ai?.direction ?? basePred.direction,
-                confidence: storedConfidence,
                 kalshiTarget,
                 actualPrice: null,
                 errorPct: null,
                 correct: null,
                 evaluatedAt: null,
-                status: "pending",
-                // Tag by the model that actually produced the stored call: when
-                // Claude refinement succeeded it's "claude", otherwise the stat
-                // baseline was used (Claude disabled or its call failed).
-                source: ai ? "claude" : "stat",
-                // Snapshot the regime input so accuracy/bias can be bucketed
-                // later, and keep Claude's raw confidence for calibration.
-                efficiencyRatio: analysis.indicators.efficiencyRatio,
-                rawConfidence,
+                status: "pending" as const,
+                efficiencyRatio: er,
               };
-              records.push(newRec);
-              dbInsertRecord(newRec);
+              const newRecs: PredictionRecord[] = [];
+
+              // Statistical baseline — always stored (free, no Claude needed).
+              newRecs.push({
+                ...common,
+                id: recordId(sym, targetISO, "stat"),
+                predictedPrice: basePred.predictedPrice,
+                predictedDirection: basePred.direction,
+                confidence: basePred.confidence,
+                source: "stat",
+                abstained: null,
+                rawConfidence: null,
+              });
+
+              if (ai) {
+                // Map Claude's reported confidence onto its empirically-observed
+                // reliability before storing. rawConfidence keeps the pre-
+                // calibration value so the reliability curve never learns from
+                // its own output.
+                const claudeConfidence = calibrateConfidence(sym, ai.confidence);
+                newRecs.push({
+                  ...common,
+                  id: recordId(sym, targetISO, "claude"),
+                  predictedPrice: ai.predictedPrice,
+                  predictedDirection: ai.direction,
+                  confidence: claudeConfidence,
+                  source: "claude",
+                  abstained: null,
+                  rawConfidence: ai.confidence,
+                });
+
+                // Regime-weighted ensemble of the two calls above. Even when it
+                // abstains we store + evaluate it, so abstention quality (good
+                // skip vs missed win) is measurable later. Directions are derived
+                // from predicted-vs-reference price (NOT the raw Claude direction
+                // string) so the disagreement check matches the DISPLAYED calls.
+                const dirFromPrice = (p: number): "up" | "down" | "flat" => {
+                  const ch = analysis.price > 0 ? ((p - analysis.price) / analysis.price) * 100 : 0;
+                  return ch > 0.05 ? "up" : ch < -0.05 ? "down" : "flat";
+                };
+                const ens = computeEnsemble(
+                  sym,
+                  regime,
+                  {
+                    predictedPrice: basePred.predictedPrice,
+                    direction: dirFromPrice(basePred.predictedPrice),
+                    confidence: basePred.confidence,
+                  },
+                  {
+                    predictedPrice: ai.predictedPrice,
+                    direction: dirFromPrice(ai.predictedPrice),
+                    confidence: claudeConfidence,
+                  },
+                  analysis.price,
+                );
+                newRecs.push({
+                  ...common,
+                  id: recordId(sym, targetISO, "ensemble"),
+                  predictedPrice: ens.predictedPrice,
+                  predictedDirection: ens.direction,
+                  confidence: ens.confidence,
+                  source: "ensemble",
+                  abstained: ens.abstained,
+                  rawConfidence: null,
+                });
+              }
+
+              for (const rec of newRecs) {
+                records.push(rec);
+                dbInsertRecord(rec);
+              }
               if (records.length > MAX_HISTORY)
                 records.splice(0, records.length - MAX_HISTORY);
             }

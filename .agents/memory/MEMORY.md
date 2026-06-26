@@ -10,3 +10,4 @@
 - [Crypto candle live-price patch](crypto-candle-live-patch.md) — last candle MUST be patched with live ticker before computing any indicators; stale candle close vs live price contradicts Claude's reasoning
 - [Crypto regime-aware stat model](crypto-regime-model.md) — analyzeCoin drift weights scale by efficiencyRatio; spikes lean momentum (don't fade); confidence shrunk/capped [50,65]; ~50% is the 15-min ceiling
 - [Crypto backtest harness](crypto-backtest-harness.md) — offline replay scores live stat model via analyzeCoinAt; pin endTime for reproducible before/after compares; Claude not backtestable
+- [Ensemble & abstention](ensemble-abstention.md) — stat+Claude blend: dirs must be price-derived (not raw model string); server/client mirror; abstention quality semantics
