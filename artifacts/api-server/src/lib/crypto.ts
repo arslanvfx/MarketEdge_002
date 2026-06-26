@@ -95,6 +95,13 @@ export interface CoinPrediction {
     bbWidth: number; // band width as % of SMA20
     bbPctB: number; // %B: 0=at lower band, 100=at upper band
     atr14: number; // Average True Range over 14 periods
+    // Intra-window momentum (last 15 1-min candles)
+    efficiencyRatio: number; // |net move| ÷ total path; 1=clean trend, 0=pure chop
+    oscillationCount: number; // close-to-close direction reversals
+    netDriftPct: number; // net signed move as % of window-open price
+    totalPathPct: number; // sum of abs candle moves as % of window-open price
+    spikeFlag: boolean; // any candle range > 3× the median range
+    spikeMultiple: number; // largest candle range ÷ median range
   };
   sparkline: number[]; // recent closes (last ~60)
   candles: Candle[]; // recent candles for charting (last ~90)
@@ -342,6 +349,88 @@ function atr(candles: Candle[], period = 14): number {
   return sma(trs, period);
 }
 
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
+}
+
+// Intra-window momentum analysis over the last `window` 1-min candles.
+// Answers: is price moving cleanly in one direction, or just oscillating?
+// And: were there abnormal spike candles in the window?
+function intraWindowMetrics(
+  candles: Candle[],
+  window = 15,
+): {
+  efficiencyRatio: number; // |net move| ÷ total path; 1=clean trend, 0=pure chop
+  oscillationCount: number; // close-to-close direction reversals
+  netDriftPct: number; // net signed move as % of window-open price
+  totalPathPct: number; // sum of abs candle moves as % of window-open price
+  spikeFlag: boolean; // any candle range > 3× the median range
+  spikeMultiple: number; // largest candle range ÷ median range
+} {
+  const slice = candles.slice(-window);
+  if (slice.length < 3) {
+    return {
+      efficiencyRatio: 0,
+      oscillationCount: 0,
+      netDriftPct: 0,
+      totalPathPct: 0,
+      spikeFlag: false,
+      spikeMultiple: 0,
+    };
+  }
+
+  const closes = slice.map((c) => c.c);
+  const first = closes[0];
+  const last = closes[closes.length - 1];
+  const net = last - first;
+
+  // Sum of absolute close-to-close moves = total path traveled.
+  let totalPath = 0;
+  const deltas: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    deltas.push(d);
+    totalPath += Math.abs(d);
+  }
+
+  const efficiencyRatio = totalPath > 0 ? Math.abs(net) / totalPath : 0;
+
+  // Direction reversals: count sign flips across consecutive non-zero deltas.
+  let oscillationCount = 0;
+  let prevSign = 0;
+  for (const d of deltas) {
+    const sign = d > 0 ? 1 : d < 0 ? -1 : 0;
+    if (sign !== 0) {
+      if (prevSign !== 0 && sign !== prevSign) oscillationCount++;
+      prevSign = sign;
+    }
+  }
+
+  // Spike detection: largest candle high-low range vs median range.
+  // When the median range is zero (mostly flat candles) but one candle still
+  // moved, treat that lone move as a spike with a capped multiple sentinel.
+  const ranges = slice.map((c) => c.h - c.l);
+  const medRange = median(ranges);
+  const maxRange = Math.max(...ranges);
+  const spikeMultiple = medRange > 0 ? maxRange / medRange : maxRange > 0 ? 99 : 0;
+  const spikeFlag = spikeMultiple > 3;
+
+  const netDriftPct = first > 0 ? (net / first) * 100 : 0;
+  const totalPathPct = first > 0 ? (totalPath / first) * 100 : 0;
+
+  return {
+    efficiencyRatio: Math.round(efficiencyRatio * 1000) / 1000,
+    oscillationCount,
+    netDriftPct: Math.round(netDriftPct * 1000) / 1000,
+    totalPathPct: Math.round(totalPathPct * 1000) / 1000,
+    spikeFlag,
+    spikeMultiple: Math.round(spikeMultiple * 100) / 100,
+  };
+}
+
 // Ordinary least-squares slope (per index step) and R² over the series.
 function linReg(ys: number[]): { slope: number; r2: number } {
   const n = ys.length;
@@ -555,6 +644,7 @@ function analyzeCoin(
   const macd = ema12 - ema26;
   const bb = bollingerBands(closes, 20, 2);
   const atr14 = atr(candles, 14);
+  const iwm = intraWindowMetrics(patchedCandles, 15);
 
   // Mean-reversion bias from RSI extremes (small, per-minute).
   let mrBias = 0;
@@ -632,6 +722,12 @@ function analyzeCoin(
       bbWidth: Math.round(bb.width * 100) / 100,
       bbPctB: Math.round(bb.pctB * 10) / 10,
       atr14,
+      efficiencyRatio: iwm.efficiencyRatio,
+      oscillationCount: iwm.oscillationCount,
+      netDriftPct: iwm.netDriftPct,
+      totalPathPct: iwm.totalPathPct,
+      spikeFlag: iwm.spikeFlag,
+      spikeMultiple: iwm.spikeMultiple,
     },
     sparkline: closes.slice(-60),
     candles: patchedCandles.slice(-90),
