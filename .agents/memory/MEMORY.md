@@ -5,7 +5,8 @@
 - [Crypto data source](crypto-data-source.md) — BTC live price uses Kraken mid (BRTI proxy for Kalshi); candles/stats stay on Coinbase; test api-server via localhost:8080 not $REPLIT_DEV_DOMAIN
 - [Crypto Claude enrichment](crypto-claude-enrichment.md) — extended thinking (budget 8k/10k tokens), Bollinger Bands, ATR, 60-min candles, volume spikes, accuracy feedback loop all fed to Claude for snap predictions
 - [Bet signal / Price Action panel](bet-signal-price-action.md) — /predictor signal is intra-window momentum (ER/oscillation/spike over last 15 candles), replaced the old gap-vs-ATR margin signal
-- [Crypto bias calibration pitfall](crypto-bias-calibration.md) — computeSignedBias() must NOT be injected into Claude prompts; history now contains stat-model records which poison Claude's direction calls
+- [Crypto bias calibration](crypto-bias-calibration.md) — any feedback/calibration signal fed to a model must be derived ONLY from that model's own source-tagged records
+- [Self-learning calibration core](self-learning-calibration.md) — rawConfidence vs calibrated confidence, regime bucketing via efficiencyRatio, reliability curve must learn from raw not calibrated
 - [Crypto candle live-price patch](crypto-candle-live-patch.md) — last candle MUST be patched with live ticker before computing any indicators; stale candle close vs live price contradicts Claude's reasoning
 - [Crypto regime-aware stat model](crypto-regime-model.md) — analyzeCoin drift weights scale by efficiencyRatio; spikes lean momentum (don't fade); confidence shrunk/capped [50,65]; ~50% is the 15-min ceiling
 - [Crypto backtest harness](crypto-backtest-harness.md) — offline replay scores live stat model via analyzeCoinAt; pin endTime for reproducible before/after compares; Claude not backtestable

@@ -4,6 +4,7 @@ import {
   fetchCryptoPrices,
   fetchAIPredictions,
   getPredictionHistory,
+  getAllPredictionAnalytics,
   clearPredictionHistory,
   ACCURACY_THRESHOLD_PCT,
   fetchKalshiBtcCall,
@@ -123,6 +124,13 @@ router.get("/crypto/prediction-history/summary", (_req, res) => {
     };
   });
   res.json({ summary });
+});
+
+// Read-only self-learning analytics: per-coin accuracy / Brier / signed bias
+// broken out by source and regime, plus the Claude confidence-reliability curve
+// that drives calibration. Inspectable for tuning; powers the dashboard later.
+router.get("/crypto/prediction-analytics", (_req, res) => {
+  res.json({ analytics: getAllPredictionAnalytics() });
 });
 
 router.get("/crypto/prediction-history", (req, res) => {

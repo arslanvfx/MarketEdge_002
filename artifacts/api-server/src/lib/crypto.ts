@@ -551,17 +551,28 @@ function formatOrderBook(book: OrderBook, currentPrice: number, symbol = "units"
   ].join("\n");
 }
 
+// Market regime derived purely from the intra-window efficiency ratio, using
+// the SAME thresholds the prompt shows Claude (see intraWindowBlock). Keeping
+// one classifier means stored records bucket into exactly the regimes Claude
+// reasoned about. "spike" is tracked separately as a flag, not a regime here.
+type PromptRegime = "trending" | "drifting" | "choppy";
+function regimeFromER(er: number): PromptRegime {
+  if (er >= 0.55) return "trending";
+  if (er >= 0.25) return "drifting";
+  return "choppy";
+}
+
 // Format the intra-window momentum metrics (last 15 1-min candles) as a prompt
 // block so Claude can temper confidence in choppy windows and treat spikes with
 // caution. Mirrors the Price Action panel shown to the user on /predictor.
 function intraWindowBlock(ind: CoinPrediction["indicators"]): string {
   const er = ind.efficiencyRatio;
-  const regime =
-    er >= 0.55
-      ? "TRENDING (clean directional move — momentum is reliable)"
-      : er >= 0.25
-        ? "DRIFTING (mixed — momentum is weak, treat edge as modest)"
-        : "CHOPPY (price is sawing back and forth — momentum is unreliable)";
+  const regimeLabel: Record<PromptRegime, string> = {
+    trending: "TRENDING (clean directional move — momentum is reliable)",
+    drifting: "DRIFTING (mixed — momentum is weak, treat edge as modest)",
+    choppy: "CHOPPY (price is sawing back and forth — momentum is unreliable)",
+  };
+  const regime = regimeLabel[regimeFromER(er)];
   const drift = ind.netDriftPct >= 0 ? "+" : "";
   const spikeLine = ind.spikeFlag
     ? `Spike: YES — a candle ranged ${ind.spikeMultiple.toFixed(2)}× the median; recent move may be a one-off blip, not sustained order flow.`
@@ -575,21 +586,49 @@ Net drift: ${drift}${ind.netDriftPct.toFixed(3)}% | Total path travelled: ${ind.
 ${spikeLine}`;
 }
 
+// Minimum evaluated records a regime bucket needs before we trust its bias on
+// its own. Below this we fall back to the coin's all-regime history so a thin
+// bucket can't whipsaw the calibration note.
+const BIAS_MIN_BUCKET = 3;
+
 // Compute the average signed prediction error from the last N evaluated records
 // for a coin. Positive = Claude has been predicting too high; negative = too low.
+// When a regime is supplied, bias is computed from that regime's bucket (falling
+// back coarser → all-regime when the bucket is too thin), because directional
+// drift in a choppy market is a different beast than in a trending one. Always
+// Claude-only (stat records would poison Claude's self-assessment).
 // Returns a human-readable calibration instruction string.
-function computeSignedBias(symbol: string, lastN = 10): string {
-  const records = (historyStore.get(symbol) ?? [])
-    .filter(
-      (r) =>
-        r.source === "claude" &&
-        r.status === "evaluated" &&
-        r.actualPrice !== null &&
-        (r.actualPrice ?? 0) > 0,
-    )
-    .slice(-lastN);
+function computeSignedBias(
+  symbol: string,
+  opts?: { regime?: PromptRegime; lastN?: number },
+): string {
+  const lastN = opts?.lastN ?? 10;
+  const all = (historyStore.get(symbol) ?? []).filter(
+    (r) =>
+      r.source === "claude" &&
+      r.status === "evaluated" &&
+      r.actualPrice !== null &&
+      (r.actualPrice ?? 0) > 0,
+  );
 
-  if (records.length < 3) return "Insufficient history for bias calibration.";
+  // Bucket by regime when asked and the bucket is deep enough; otherwise fall
+  // back to all-regime history.
+  let records = all;
+  let scope = "all regimes";
+  if (opts?.regime) {
+    const bucket = all.filter(
+      (r) => r.efficiencyRatio != null && regimeFromER(r.efficiencyRatio) === opts.regime,
+    );
+    if (bucket.length >= BIAS_MIN_BUCKET) {
+      records = bucket;
+      scope = `${opts.regime} regime`;
+    }
+  }
+  records = records.slice(-lastN);
+
+  if (records.length < 3) {
+    return `Insufficient history for bias calibration (n=${records.length}, ${scope}).`;
+  }
 
   // Percentage-based signed error: positive = predicted too high, negative = too low.
   const signedPctErrors = records.map(
@@ -599,11 +638,147 @@ function computeSignedBias(symbol: string, lastN = 10): string {
   const absAvg = Math.abs(avg);
 
   if (absAvg < 0.5) {
-    return `Well-calibrated: avg signed error ${avg >= 0 ? "+" : ""}${avg.toFixed(3)}% (n=${records.length}). No adjustment needed.`;
+    return `Well-calibrated: avg signed error ${avg >= 0 ? "+" : ""}${avg.toFixed(3)}% (n=${records.length}, ${scope}). No adjustment needed.`;
   }
   const dir = avg > 0 ? "HIGH" : "LOW";
   const adj = avg > 0 ? "DOWN" : "UP";
-  return `CALIBRATION REQUIRED: recent predictions averaged ${absAvg.toFixed(2)}% too ${dir} (signed avg = ${avg >= 0 ? "+" : ""}${avg.toFixed(3)}%, n=${records.length}). Shift your price target ${adj} by ~${absAvg.toFixed(2)}% to correct this systematic bias.`;
+  return `CALIBRATION REQUIRED: recent predictions averaged ${absAvg.toFixed(2)}% too ${dir} (signed avg = ${avg >= 0 ? "+" : ""}${avg.toFixed(3)}%, n=${records.length}, ${scope}). Shift your price target ${adj} by ~${absAvg.toFixed(2)}% to correct this systematic bias.`;
+}
+
+// ---------------------------------------------------------------------------
+// Self-learning performance analytics + confidence calibration
+//
+// Everything below reads from the in-memory history (kept in sync with the DB)
+// and is pure/read-only except calibrateConfidence, which is still pure — it
+// only consumes history to map a raw confidence onto an empirically-grounded one.
+// ---------------------------------------------------------------------------
+
+// Confidence bands aligned to the model's clamp range (20–92), matching the
+// backtest module so the two analytics surfaces stay comparable.
+const CONF_BANDS: Array<{ band: string; lo: number; hi: number }> = [
+  { band: "20-39%", lo: 0, hi: 40 },
+  { band: "40-54%", lo: 40, hi: 55 },
+  { band: "55-69%", lo: 55, hi: 70 },
+  { band: "70-92%", lo: 70, hi: 101 },
+];
+function confBand(c: number): { band: string; lo: number; hi: number } {
+  return CONF_BANDS.find((b) => c >= b.lo && c < b.hi) ?? CONF_BANDS[CONF_BANDS.length - 1];
+}
+
+const REGIMES: PromptRegime[] = ["trending", "drifting", "choppy"];
+
+export interface SourceMetrics {
+  n: number;                       // evaluated records in this slice
+  hits: number;
+  accuracyPct: number | null;
+  brier: number | null;            // mean (conf - outcome)^2 — confidence calibration quality
+  signedBiasPct: number | null;    // +ve = predicted too high
+}
+
+function round3(x: number): number {
+  return Math.round(x * 1000) / 1000;
+}
+
+// Roll up accuracy / Brier / signed bias over a set of records. Brier is taken
+// over the binary correct/incorrect outcome vs the stored (calibrated) confidence
+// so the reported score reflects what the user actually sees.
+function metricsFor(records: PredictionRecord[]): SourceMetrics {
+  const ev = records.filter((r) => r.status === "evaluated" && r.correct !== null);
+  const n = ev.length;
+  if (n === 0) return { n: 0, hits: 0, accuracyPct: null, brier: null, signedBiasPct: null };
+  const hits = ev.filter((r) => r.correct === true).length;
+  const brier = mean(ev.map((r) => (r.confidence / 100 - (r.correct ? 1 : 0)) ** 2));
+  const biasRecs = ev.filter((r) => r.actualPrice != null && (r.actualPrice ?? 0) > 0);
+  const signedBiasPct =
+    biasRecs.length > 0
+      ? mean(biasRecs.map((r) => ((r.predictedPrice - (r.actualPrice ?? 1)) / (r.actualPrice ?? 1)) * 100))
+      : null;
+  return {
+    n,
+    hits,
+    accuracyPct: Math.round((hits / n) * 100),
+    brier: round3(brier),
+    signedBiasPct: signedBiasPct != null ? round3(signedBiasPct) : null,
+  };
+}
+
+export interface CoinAnalytics {
+  symbol: string;
+  bySource: { stat: SourceMetrics; claude: SourceMetrics };
+  byRegime: { stat: Record<PromptRegime, SourceMetrics>; claude: Record<PromptRegime, SourceMetrics> };
+  // Claude-only reliability curve: for each raw-confidence band, the rate at
+  // which those calls actually came true. This is what calibration learns from.
+  calibration: Array<{ band: string; n: number; avgConfidencePct: number | null; hitRatePct: number | null }>;
+}
+
+function regimeBreakdown(records: PredictionRecord[]): Record<PromptRegime, SourceMetrics> {
+  const out = {} as Record<PromptRegime, SourceMetrics>;
+  for (const reg of REGIMES) {
+    out[reg] = metricsFor(
+      records.filter((r) => r.efficiencyRatio != null && regimeFromER(r.efficiencyRatio) === reg),
+    );
+  }
+  return out;
+}
+
+// The band value used for the reliability curve is Claude's RAW confidence so
+// calibration never feeds on its own (already-calibrated) output. Pre-Task-50
+// records have no rawConfidence, so we fall back to the stored confidence.
+function bandValue(r: PredictionRecord): number {
+  return r.rawConfidence ?? r.confidence;
+}
+
+export function getPredictionAnalytics(symbol: string): CoinAnalytics {
+  const recs = historyStore.get(symbol.toUpperCase()) ?? [];
+  const stat = recs.filter((r) => r.source === "stat");
+  const claude = recs.filter((r) => r.source === "claude");
+  const calClaude = claude.filter((r) => r.status === "evaluated" && r.correct !== null);
+  const calibration = CONF_BANDS.map((b) => {
+    const inBand = calClaude.filter((r) => bandValue(r) >= b.lo && bandValue(r) < b.hi);
+    const n = inBand.length;
+    const hits = inBand.filter((r) => r.correct === true).length;
+    return {
+      band: b.band,
+      n,
+      avgConfidencePct: n > 0 ? Math.round(mean(inBand.map(bandValue))) : null,
+      hitRatePct: n > 0 ? Math.round((hits / n) * 100) : null,
+    };
+  });
+  return {
+    symbol: symbol.toUpperCase(),
+    bySource: { stat: metricsFor(stat), claude: metricsFor(claude) },
+    byRegime: { stat: regimeBreakdown(stat), claude: regimeBreakdown(claude) },
+    calibration,
+  };
+}
+
+export function getAllPredictionAnalytics(): CoinAnalytics[] {
+  return CRYPTO_COINS.map((c) => getPredictionAnalytics(c.symbol));
+}
+
+// Min evaluated records in a confidence band before its observed hit rate is
+// trusted; below this we pass the raw confidence through unchanged.
+const CALIB_MIN_SAMPLES = 5;
+// Shrinkage strength: calibrated conf is a sample-weighted blend of the raw
+// confidence and the band's observed hit rate (weight = n/(n+K)). Larger K =
+// more conservative (leans on the raw value until evidence accumulates).
+const CALIB_SHRINK_K = 8;
+
+// Map Claude's raw confidence onto its empirically-observed reliability. With
+// few samples it passes through; as evidence accumulates it shrinks toward the
+// band's real hit rate. Always clamped to the model's display range (20–92).
+export function calibrateConfidence(symbol: string, rawConf: number): number {
+  const claude = (historyStore.get(symbol.toUpperCase()) ?? []).filter(
+    (r) => r.source === "claude" && r.status === "evaluated" && r.correct !== null,
+  );
+  const b = confBand(rawConf);
+  const inBand = claude.filter((r) => bandValue(r) >= b.lo && bandValue(r) < b.hi);
+  const n = inBand.length;
+  if (n < CALIB_MIN_SAMPLES) return clamp(Math.round(rawConf), 20, 92);
+  const hitRate = (inBand.filter((r) => r.correct === true).length / n) * 100;
+  const w = n / (n + CALIB_SHRINK_K);
+  const calibrated = rawConf * (1 - w) + hitRate * w;
+  return clamp(Math.round(calibrated), 20, 92);
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,7 +1243,9 @@ Return ONLY valid JSON with exactly 1 item:
           | "up"
           | "down"
           | "flat",
-        confidence: Math.min(92, Math.max(20, Number(ai.confidence) || pred.confidence)),
+        // Calibrate the confidence shown to the user the same way the stored
+        // tracker calls are, so display and scored confidence stay consistent.
+        confidence: calibrateConfidence(coin.symbol, Number(ai.confidence) || pred.confidence),
       };
     });
   } catch {
@@ -1156,6 +1333,8 @@ export interface PredictionRecord {
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
   source: "stat" | "claude";      // which model produced this prediction
+  efficiencyRatio: number | null; // ER at snapshot — used to bucket by regime
+  rawConfidence: number | null;   // Claude's pre-calibration confidence (claude only)
 }
 
 const QUARTER_MS = 15 * 60 * 1000;
@@ -1282,6 +1461,8 @@ function rowToRecord(row: typeof predictionRecordsTable.$inferSelect): Predictio
     evaluatedAt: row.evaluatedAt ? row.evaluatedAt.toISOString() : null,
     status: row.status as "pending" | "evaluated",
     source: (row.source as "stat" | "claude") ?? "stat",
+    efficiencyRatio: row.efficiencyRatio != null ? parseFloat(row.efficiencyRatio) : null,
+    rawConfidence: row.rawConfidence ?? null,
   };
 }
 
@@ -1325,6 +1506,8 @@ function dbInsertRecord(rec: PredictionRecord): void {
       evaluatedAt: null,
       status: "pending",
       source: rec.source,
+      efficiencyRatio: rec.efficiencyRatio != null ? String(rec.efficiencyRatio) : null,
+      rawConfidence: rec.rawConfidence,
     })
     .onConflictDoNothing()
     .catch((err) => console.error("[dbInsertRecord] failed:", err));
@@ -1399,10 +1582,31 @@ async function refineSnappedPrediction(
             )
             .join("\n")
         : "  No evaluated predictions yet.";
-    // Per-source signed-bias calibration — computed from Claude's own records
-    // only (see computeSignedBias). Safe to feed back now that records are
-    // source-tagged; tells Claude whether it has been running high or low.
-    const calibrationStr = computeSignedBias(coin.symbol);
+
+    // Learn-from-misses: Claude's 3 biggest recent MISSES (worst absolute
+    // error), so the prompt confronts the model with its actual failure modes
+    // rather than only the chronological tail. Claude-only by construction.
+    const worstCalls = (historyStore.get(coin.symbol) ?? [])
+      .filter((r) => r.source === "claude" && r.status === "evaluated" && r.correct === false && r.errorPct != null)
+      .slice(-15)
+      .sort((a, b) => (b.errorPct ?? 0) - (a.errorPct ?? 0))
+      .slice(0, 3);
+    const worstStr =
+      worstCalls.length > 0
+        ? worstCalls
+            .map(
+              (r) =>
+                `  ${r.targetLabel}: called ${r.predictedDirection} → $${r.predictedPrice?.toFixed(dp)} (conf ${r.confidence}%) but actual $${r.actualPrice?.toFixed(dp)} | off by ${r.errorPct?.toFixed(2)}% ✗`,
+            )
+            .join("\n")
+        : "  No notable recent misses.";
+
+    // Per-source, regime-bucketed signed-bias calibration — computed from
+    // Claude's own records only (see computeSignedBias), bucketed by the CURRENT
+    // market regime so the correction reflects how Claude drifts in this kind of
+    // window, not a global average that blends trending and choppy behaviour.
+    const currentRegime = regimeFromER(coin.indicators.efficiencyRatio);
+    const calibrationStr = computeSignedBias(coin.symbol, { regime: currentRegime });
 
     // Expected 15-min price move range based on ATR (1–3× ATR per 15 min).
     const atr15Low  = (coin.indicators.atr14 * 1).toFixed(dp);
@@ -1485,6 +1689,9 @@ STATISTICAL MODEL BASELINE: $${basePred.predictedPrice.toFixed(dp)}, ${basePred.
 
 YOUR RECENT ACCURACY FOR ${coin.symbol} (your own calls only):
 ${feedbackStr}
+
+YOUR WORST RECENT CALLS FOR ${coin.symbol} (biggest misses — diagnose and avoid repeating these mistakes):
+${worstStr}
 CALIBRATION: ${calibrationStr}
 
 PRECISION REQUIREMENT:
@@ -1743,6 +1950,13 @@ export function startPredictionTracker(): void {
                   : Promise.resolve(null),
                 Promise.resolve(kalshiTargetSnap),
               ]);
+              // Map Claude's reported confidence onto its empirically-observed
+              // reliability before storing. rawConfidence keeps the pre-calibration
+              // value so the reliability curve never learns from its own output.
+              const rawConfidence = ai ? ai.confidence : null;
+              const storedConfidence = ai
+                ? calibrateConfidence(sym, ai.confidence)
+                : basePred.confidence;
               const newRec: PredictionRecord = {
                 symbol: sym,
                 snappedAt: new Date(nowMs).toISOString(),
@@ -1751,7 +1965,7 @@ export function startPredictionTracker(): void {
                 priceAtSnapshot: analysis.price,
                 predictedPrice: ai?.predictedPrice ?? basePred.predictedPrice,
                 predictedDirection: ai?.direction ?? basePred.direction,
-                confidence: ai?.confidence ?? basePred.confidence,
+                confidence: storedConfidence,
                 kalshiTarget,
                 actualPrice: null,
                 errorPct: null,
@@ -1762,6 +1976,10 @@ export function startPredictionTracker(): void {
                 // Claude refinement succeeded it's "claude", otherwise the stat
                 // baseline was used (Claude disabled or its call failed).
                 source: ai ? "claude" : "stat",
+                // Snapshot the regime input so accuracy/bias can be bucketed
+                // later, and keep Claude's raw confidence for calibration.
+                efficiencyRatio: analysis.indicators.efficiencyRatio,
+                rawConfidence,
               };
               records.push(newRec);
               dbInsertRecord(newRec);

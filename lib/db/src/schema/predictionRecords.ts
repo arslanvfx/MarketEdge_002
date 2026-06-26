@@ -20,4 +20,11 @@ export const predictionRecordsTable = pgTable("prediction_records", {
   // "claude" (Claude refinement). Lets accuracy and bias be computed per
   // source so Claude only ever calibrates against its own track record.
   source: text("source").notNull().default("stat"),
+  // Intra-window efficiency ratio at snapshot time — lets accuracy and bias be
+  // bucketed by market regime (trending / drifting / choppy) after the fact.
+  efficiencyRatio: numeric("efficiency_ratio", { precision: 6, scale: 4 }),
+  // Claude's pre-calibration ("reported") confidence. `confidence` stores the
+  // calibrated value that is shown/scored; rawConfidence is what we learn the
+  // reliability curve from, so calibration never feeds on its own output.
+  rawConfidence: integer("raw_confidence"),
 });
