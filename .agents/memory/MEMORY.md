@@ -11,3 +11,4 @@
 - [Crypto regime-aware stat model](crypto-regime-model.md) — analyzeCoin drift weights scale by efficiencyRatio; spikes lean momentum (don't fade); confidence shrunk/capped [50,65]; ~50% is the 15-min ceiling
 - [Crypto backtest harness](crypto-backtest-harness.md) — offline replay scores live stat model via analyzeCoinAt; pin endTime for reproducible before/after compares; Claude not backtestable
 - [Ensemble & abstention](ensemble-abstention.md) — stat+Claude blend: dirs must be price-derived (not raw model string); server/client mirror; abstention quality semantics
+- [api-server unit tests](api-server-unit-tests.md) — node:test + native TS strip; test imports need .ts ext (allowImportingTsExtensions); extract pure logic out of db-importing modules; crypto.ts has pre-existing typecheck errors
