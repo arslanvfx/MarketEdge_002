@@ -7,4 +7,5 @@
 - [Bet signal / Price Action panel](bet-signal-price-action.md) — /predictor signal is intra-window momentum (ER/oscillation/spike over last 15 candles), replaced the old gap-vs-ATR margin signal
 - [Crypto bias calibration pitfall](crypto-bias-calibration.md) — computeSignedBias() must NOT be injected into Claude prompts; history now contains stat-model records which poison Claude's direction calls
 - [Crypto candle live-price patch](crypto-candle-live-patch.md) — last candle MUST be patched with live ticker before computing any indicators; stale candle close vs live price contradicts Claude's reasoning
+- [Crypto regime-aware stat model](crypto-regime-model.md) — analyzeCoin drift weights scale by efficiencyRatio; spikes lean momentum (don't fade); confidence shrunk/capped [50,65]; ~50% is the 15-min ceiling
 - [Crypto backtest harness](crypto-backtest-harness.md) — offline replay scores live stat model via analyzeCoinAt; pin endTime for reproducible before/after compares; Claude not backtestable

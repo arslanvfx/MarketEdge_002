@@ -461,6 +461,25 @@ function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
 }
 
+// Error function (Abramowitz & Stegun 7.1.26) → normal CDF, used to turn the
+// predicted drift-vs-noise ratio into a calibrated probability of the call.
+function erf(x: number): number {
+  const sign = x < 0 ? -1 : 1;
+  const ax = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * ax);
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
+      0.254829592) *
+      t *
+      Math.exp(-ax * ax);
+  return sign * y;
+}
+
+function normCdf(z: number): number {
+  return 0.5 * (1 + erf(z / Math.SQRT2));
+}
+
 // Volume-Weighted Average Price over a candle series.
 function vwap(candles: Candle[]): number {
   let cumTPV = 0;
@@ -617,6 +636,7 @@ function analyzeCoin(
   stats: CoinStats,
   now: Date,
   geckoPrice?: number,
+  orderBook?: OrderBook,
 ): CoinPrediction {
   // Prefer live ticker (CoinGecko/Kraken) → Coinbase last → latest candle close.
   const rawLastClose = candles.length > 0 ? candles[candles.length - 1].c : 0;
@@ -670,13 +690,56 @@ function analyzeCoin(
   const atr14 = atr(candles, 14);
   const iwm = intraWindowMetrics(patchedCandles, 15);
 
-  // Mean-reversion bias from RSI extremes (small, per-minute).
-  let mrBias = 0;
-  if (rsiVal > 70) mrBias = -((rsiVal - 70) / 30) * 0.0004;
-  else if (rsiVal < 30) mrBias = ((30 - rsiVal) / 30) * 0.0004;
+  // --- Regime-aware drift -------------------------------------------------
+  // The blend of momentum / regression / mean-reversion adapts to how clean
+  // the recent price action is (efficiency ratio). In clean trends we lean on
+  // momentum + regression; in chop we fade extension back toward VWAP. This is
+  // the main lever for raising hit rate in the choppy windows where a fixed
+  // momentum blend performs worst.
+  const ER = iwm.efficiencyRatio; // 0 = pure chop, 1 = clean one-way move
+  let trendFactor = clamp((ER - 0.25) / (0.55 - 0.25), 0, 1);
+  // A volatility spike marks a breakout/impulse that tends to continue over the
+  // next 15 min, so lean momentum rather than fading it.
+  if (iwm.spikeFlag) trendFactor = Math.max(trendFactor, 0.8);
 
-  // Blended per-minute drift: momentum + regression trend + mean reversion.
-  const drift = 0.45 * meanRet + 0.4 * slopeRet + 0.15 * mrBias;
+  // Short-term volume: recent (5m) vs baseline (30m). Elevated volume confirms
+  // a real trend; a volume burst inside chop tends to be climactic → reverts.
+  const vols = patchedCandles.map((c) => c.v);
+  const recentVol = mean(vols.slice(-5));
+  const baseVol = mean(vols.slice(-30));
+  const volRatio = baseVol > 0 ? recentVol / baseVol : 1;
+  const volTilt = clamp((volRatio - 1) * 0.5, -0.3, 0.3);
+  // Push trendFactor toward its current extreme: in a trend high volume → more
+  // trend; in chop high volume → more chop (stronger reversion).
+  trendFactor = clamp(trendFactor + volTilt * (trendFactor - 0.5) * 2, 0, 1);
+
+  // Mean-reversion signal: pull back toward the recent VWAP, plus an RSI-extreme
+  // nudge. Spread the total gap over the ~15-min window and cap it.
+  const vwapVal = vwap(patchedCandles.slice(-30));
+  const revGapTotal = vwapVal > 0 && price > 0 ? (vwapVal - price) / price : 0;
+  const revPerMin = clamp(revGapTotal / 15, -0.001, 0.001);
+  let rsiBias = 0;
+  if (rsiVal > 70) rsiBias = -((rsiVal - 70) / 30) * 0.0004;
+  else if (rsiVal < 30) rsiBias = ((30 - rsiVal) / 30) * 0.0004;
+  const mrSignal = revPerMin + rsiBias;
+
+  // Regime-weighted blend (weights sum to 1): momentum + regression dominate in
+  // trends, mean-reversion dominates in chop.
+  const wMom = 0.15 + 0.4 * trendFactor; // 0.15 → 0.55
+  const wReg = 0.15 + 0.3 * trendFactor; // 0.15 → 0.45
+  const wMR = Math.max(0, 1 - wMom - wReg); // 0.70 → 0.00
+  let drift = wMom * meanRet + wReg * slopeRet + wMR * mrSignal;
+
+  // Order-book imbalance (live only — never available in backtest, so it stays
+  // neutral there). Top-of-book pressure nudges near-term drift/direction.
+  if (orderBook && orderBook.bids.length > 0 && orderBook.asks.length > 0) {
+    const topN = 10;
+    const bidVol = orderBook.bids.slice(0, topN).reduce((s, b) => s + b.size, 0);
+    const askVol = orderBook.asks.slice(0, topN).reduce((s, a) => s + a.size, 0);
+    const denom = bidVol + askVol;
+    const imbalance = denom > 0 ? (bidVol - askVol) / denom : 0; // -1..1
+    drift += imbalance * 0.00015; // small per-minute nudge
+  }
 
   // Trend classification (signal-to-noise of the slope vs volatility).
   const trendStrength = clamp(Math.abs(slopeRet) / (vol + 1e-9), 0, 1);
@@ -704,12 +767,20 @@ function analyzeCoin(
     // committing to a direction — eliminates noise-driven flips.
     if (changePct > 0.20) direction = "up";
     else if (changePct < -0.20) direction = "down";
-    // Confidence: regression fit + trend strength, decaying with horizon.
-    const conf = clamp(
-      50 + r2 * 25 + trendStrength * 15 - (minutesAhead / 60) * 22,
-      20,
-      92,
-    );
+    // Confidence = probability the ABOVE/BELOW call is correct under a
+    // random-walk-with-drift model: predicted log-move vs the noise band
+    // (vol·√t). Haircut in choppy/spike/low-fit regimes where the model is
+    // less sure, then shrunk/capped (below) to match the achievable hit rate.
+    const z = vol > 1e-9 ? (drift * Math.sqrt(minutesAhead)) / vol : 0;
+    const pUp = normCdf(z);
+    const pSide = Math.max(pUp, 1 - pUp); // prob of the side we actually call
+    const fit = clamp(r2, 0, 1);
+    const quality =
+      clamp(0.4 + 0.4 * trendFactor + 0.2 * fit, 0.4, 1) * (iwm.spikeFlag ? 0.85 : 1);
+    // Backtesting shows the raw drift/vol z-score has only a few points of real
+    // directional skill at this horizon, so the probability edge is shrunk and
+    // capped — keeping stated confidence close to the achievable hit rate.
+    const conf = clamp(50 + (pSide * 100 - 50) * quality * 0.5, 50, 65);
     return {
       target: target.toISOString(),
       label: estLabel(target),
@@ -1557,7 +1628,7 @@ export function startPredictionTracker(): void {
               fetchKalshiTarget(sym).catch(() => null),
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-            const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice);
+            const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice, orderBook);
             const basePred =
               analysis.predictions.find((p) => p.target === targetISO) ??
               analysis.predictions[0];
@@ -1649,13 +1720,14 @@ export async function fetchCryptoPredictions(): Promise<{
           return { ...hit.value, kalshiTarget };
         }
 
-        const [candles, stats, tickerPrice] = await Promise.all([
+        const [candles, stats, tickerPrice, orderBook] = await Promise.all([
           getCandles(coin.product),
           getStats(coin.product),
           getTicker(coin.product).catch(() => 0),
+          getOrderBook(coin.product).catch(() => undefined),
         ]);
         const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
-        const result = analyzeCoin(coin, candles, stats, now, livePrice);
+        const result = analyzeCoin(coin, candles, stats, now, livePrice, orderBook);
         predCache.set(coin.symbol, { at: Date.now(), value: result });
 
         // Lock predictions for this 15-min window on first compute.
