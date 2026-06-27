@@ -2790,11 +2790,101 @@ function CoinDetail({
             {/* Consensus verdict */}
             {consensusAbove !== null && consensusConf !== null ? (
               <>
-                <div className={`flex items-center gap-2 mb-2 ${consensusAbove ? "text-emerald-400" : "text-red-400"}`}>
+                <div className={`flex items-center gap-2 mb-3 ${consensusAbove ? "text-emerald-400" : "text-red-400"}`}>
                   {consensusAbove ? <ArrowUp className="w-6 h-6" /> : <ArrowDown className="w-6 h-6" />}
                   <span className="text-2xl font-black">{consensusAbove ? "ABOVE" : "BELOW"}</span>
                   <span className="text-base font-bold text-muted-foreground">{consensusConf}%</span>
                 </div>
+
+                {/* ── Predicted-close price targets ─────────────────────────────
+                    Show each model's specific price call for window-end, big and
+                    scannable. Live Pulse is direction-only (no price), so it shows
+                    ABOVE/BELOW with confidence instead. Claude falls back from
+                    the Enhance run to the window-open tracker snapshot price. */}
+                {(() => {
+                  const effectiveClaudePrice = claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null;
+                  const effectiveClaudeLabel = claudePredPrice != null ? "Claude AI" : trackerSnapshot?.predictedPrice != null ? "Claude (open)" : null;
+                  const dp = (p: number) => p >= 100 ? 2 : p >= 1 ? 4 : 6;
+                  const pctVsStrike = (p: number) => kalshiTarget ? ((p - kalshiTarget) / kalshiTarget * 100) : null;
+
+                  const hasAnyPrice = statHead != null || effectiveClaudePrice != null || liveDirection?.aboveKalshi != null;
+                  if (!hasAnyPrice) return null;
+
+                  return (
+                    <div className="grid grid-cols-3 gap-3 mb-3">
+                      {/* Stat model */}
+                      <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-1">
+                          Stat Model
+                        </div>
+                        {statHead ? (
+                          <>
+                            <div className="text-xl font-black text-foreground leading-none mb-1">
+                              ${statHead.predictedPrice.toFixed(dp(statHead.predictedPrice))}
+                            </div>
+                            {kalshiTarget && (() => {
+                              const pct = pctVsStrike(statHead.predictedPrice)!;
+                              return (
+                                <div className={`text-[10px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                  {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
+                                </div>
+                              );
+                            })()}
+                          </>
+                        ) : (
+                          <div className="text-[11px] text-muted-foreground/40 italic">—</div>
+                        )}
+                      </div>
+
+                      {/* Claude AI */}
+                      <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-1">
+                          {effectiveClaudeLabel ?? "Claude AI"}
+                        </div>
+                        {effectiveClaudePrice != null ? (
+                          <>
+                            <div className="text-xl font-black text-foreground leading-none mb-1">
+                              ${effectiveClaudePrice.toFixed(dp(effectiveClaudePrice))}
+                            </div>
+                            {kalshiTarget && (() => {
+                              const pct = pctVsStrike(effectiveClaudePrice)!;
+                              return (
+                                <div className={`text-[10px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                  {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
+                                </div>
+                              );
+                            })()}
+                          </>
+                        ) : (
+                          <div className="text-[11px] text-muted-foreground/40 italic">run Enhance</div>
+                        )}
+                      </div>
+
+                      {/* Live Pulse — directional only, no specific price */}
+                      <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-1">
+                          Live Pulse
+                        </div>
+                        {liveDirection?.aboveKalshi != null ? (
+                          <>
+                            <div className={`text-xl font-black leading-none mb-1 ${liveDirection.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
+                              {liveDirection.aboveKalshi ? "↑ ABOVE" : "↓ BELOW"}
+                            </div>
+                            <div className="text-[10px] text-muted-foreground/50">
+                              {liveDirection.confidence}% conf · {liveAgeMin === 0 ? "now" : `${liveAgeMin}m ago`}
+                            </div>
+                          </>
+                        ) : liveDirectionLoading ? (
+                          <div className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground/40 mt-1">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-muted-foreground/40 italic">—</div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Signal breakdown */}
                 <div className="flex items-center gap-3 flex-wrap">
