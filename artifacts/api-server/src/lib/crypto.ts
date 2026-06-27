@@ -1551,7 +1551,7 @@ ${formatOrderBook(extra.orderBook, coin.price, coin.symbol)}`;
       }
       kalshiBlock = `
 ══ KALSHI 15-MIN BINARY TARGET ══════════════════════════════════════
-Kalshi strike: $${kt.toFixed(dp)}
+Kalshi strike: $${kt.toFixed(dp)}  ← this is ${coin.symbol}'s closing price at the START of this window (previous window's close). The question is whether price ends the window ABOVE or BELOW where it opened.
 Current price: $${coin.price.toFixed(dp)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike${trajectoryLine}
 PRIMARY QUESTION: Will ${coin.symbol} close ABOVE or BELOW $${kt.toFixed(dp)}?
 This is the binary you must answer. All indicators below are evidence for or against.
@@ -2113,14 +2113,38 @@ async function refineSnappedPrediction(
     const recentEvals = (historyStore.get(coin.symbol) ?? [])
       .filter((r) => r.source === "claude" && r.status === "evaluated" && r.errorPct != null)
       .slice(-5);
+    // Format a single evaluated record for the feedback prompt.
+    // When a kalshiTarget is present the binary ABOVE/BELOW call is the
+    // primary accuracy signal — show it explicitly so Claude's self-correction
+    // is grounded in the same metric used to score it, not a raw price error.
+    const formatEval = (r: PredictionRecord): string => {
+      const rdp = priceDp(r.priceAtSnapshot ?? r.predictedPrice);
+      const kt = r.kalshiTarget;
+      if (kt != null) {
+        const predSide = r.predictedPrice >= kt ? "ABOVE" : "BELOW";
+        const actSide =
+          r.actualPrice != null
+            ? r.actualPrice >= kt
+              ? "ABOVE"
+              : "BELOW"
+            : "?";
+        return (
+          `  ${r.targetLabel}: predicted ${predSide} $${kt.toFixed(rdp)} strike` +
+          ` → $${r.predictedPrice?.toFixed(rdp)} | actual ${actSide} at $${r.actualPrice?.toFixed(rdp)}` +
+          ` | ${r.correct ? "HIT ✓" : "MISS ✗"}`
+        );
+      }
+      return (
+        `  ${r.targetLabel}: predicted $${r.predictedPrice?.toFixed(rdp)}` +
+        ` → actual $${r.actualPrice?.toFixed(rdp)}` +
+        ` | error ${r.errorPct?.toFixed(2)}%` +
+        ` | ${r.correct ? "HIT ✓" : "MISS ✗"}`
+      );
+    };
+
     const feedbackStr =
       recentEvals.length > 0
-        ? recentEvals
-            .map(
-              (r) =>
-                `  ${r.targetLabel}: predicted $${r.predictedPrice?.toFixed(dp)} → actual $${r.actualPrice?.toFixed(dp)} | error ${r.errorPct?.toFixed(2)}% | ${r.correct ? "HIT ✓" : "MISS ✗"}`,
-            )
-            .join("\n")
+        ? recentEvals.map(formatEval).join("\n")
         : "  No evaluated predictions yet.";
 
     // Learn-from-misses: Claude's 3 biggest recent MISSES (worst absolute
@@ -2134,10 +2158,28 @@ async function refineSnappedPrediction(
     const worstStr =
       worstCalls.length > 0
         ? worstCalls
-            .map(
-              (r) =>
-                `  ${r.targetLabel}: called ${r.predictedDirection} → $${r.predictedPrice?.toFixed(dp)} (conf ${r.confidence}%) but actual $${r.actualPrice?.toFixed(dp)} | off by ${r.errorPct?.toFixed(2)}% ✗`,
-            )
+            .map((r) => {
+              const rdp = priceDp(r.priceAtSnapshot ?? r.predictedPrice);
+              const kt = r.kalshiTarget;
+              if (kt != null) {
+                const predSide = r.predictedPrice >= kt ? "ABOVE" : "BELOW";
+                const actSide =
+                  r.actualPrice != null
+                    ? r.actualPrice >= kt
+                      ? "ABOVE"
+                      : "BELOW"
+                    : "?";
+                return (
+                  `  ${r.targetLabel}: predicted ${predSide} $${kt.toFixed(rdp)} (conf ${r.confidence}%)` +
+                  ` but actual ${actSide} | error ${r.errorPct?.toFixed(2)}% ✗`
+                );
+              }
+              return (
+                `  ${r.targetLabel}: called ${r.predictedDirection} → $${r.predictedPrice?.toFixed(rdp)}` +
+                ` (conf ${r.confidence}%) but actual $${r.actualPrice?.toFixed(rdp)}` +
+                ` | off by ${r.errorPct?.toFixed(2)}% ✗`
+              );
+            })
             .join("\n")
         : "  No notable recent misses.";
 
@@ -2194,7 +2236,7 @@ ${formatOrderBook(extra.orderBook, coin.price, coin.symbol)}`;
       }
       kalshiBlock = `
 ══ KALSHI 15-MIN BINARY TARGET ══════════════════════════════════════
-Kalshi strike: $${kt.toFixed(dp)}
+Kalshi strike: $${kt.toFixed(dp)}  ← this is ${coin.symbol}'s closing price at the START of this window (previous window's close). The question is whether price ends the window ABOVE or BELOW where it opened.
 Current price: $${coin.price.toFixed(dp)} — ${Math.abs(gap).toFixed(3)}% ${side} the strike${trajectoryLine}
 PRIMARY QUESTION: Will ${coin.symbol} close ABOVE or BELOW $${kt.toFixed(dp)} at ${basePred.label} ET?
 This is the binary you must answer. All indicators below are evidence for or against.
@@ -2560,9 +2602,27 @@ export function startPredictionTracker(): void {
           try {
             // Fetch Kalshi target before the expensive data calls so we can
             // bail early if the market isn't ready yet.
-            const kalshiTargetSnap = KALSHI_SERIES[sym]
+            let kalshiTargetSnap = KALSHI_SERIES[sym]
               ? await fetchKalshiTarget(sym, nextBoundary).catch(() => null)
               : null;
+
+            // Duplicate-target guard: the Kalshi target for a new window must be
+            // the closing price of the PREVIOUS window — every target should be
+            // unique. If the freshly-fetched target exactly matches the most
+            // recent prior window's target, Kalshi is still returning the old
+            // market (or a race-condition cache). Treat it as null and retry.
+            if (kalshiTargetSnap !== null) {
+              const prevTarget = records
+                .filter((r) => r.targetTime !== targetISO && r.kalshiTarget != null)
+                .at(-1)?.kalshiTarget ?? null;
+              if (prevTarget !== null && Math.abs(kalshiTargetSnap - prevTarget) < 1e-6) {
+                console.warn(
+                  `[kalshi] ${sym}: new-window target $${kalshiTargetSnap} ` +
+                  `matches previous window ($${prevTarget}) — stale market, retrying`,
+                );
+                kalshiTargetSnap = null;
+              }
+            }
 
             // If the target is missing AND Kalshi has a series for this coin
             // AND we're still inside the grace window, skip and retry next tick.
@@ -2657,8 +2717,13 @@ export function startPredictionTracker(): void {
                 // skip vs missed win) is measurable later. Directions are derived
                 // from predicted-vs-reference price (NOT the raw Claude direction
                 // string) so the disagreement check matches the DISPLAYED calls.
+                //
+                // Reference = Kalshi target (the window-open price) when known,
+                // else current price. This keeps "up" = ABOVE target and "down" =
+                // BELOW target — exactly matching the ABOVE/BELOW evaluation rule.
+                const dirRef = kalshiTargetSnap ?? analysis.price;
                 const dirFromPrice = (p: number): "up" | "down" | "flat" => {
-                  const ch = analysis.price > 0 ? ((p - analysis.price) / analysis.price) * 100 : 0;
+                  const ch = dirRef > 0 ? ((p - dirRef) / dirRef) * 100 : 0;
                   return ch > 0.05 ? "up" : ch < -0.05 ? "down" : "flat";
                 };
                 const ens = computeEnsemble(
