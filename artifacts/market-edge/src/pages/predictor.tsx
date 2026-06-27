@@ -2567,14 +2567,6 @@ function CoinDetail({
               <span className="flex items-center gap-1">
                 <span className="inline-block w-3 h-0.5 border-t border-dashed" style={{ borderColor: hd.stroke }} /> Forecast
               </span>
-              <button
-                onClick={onRefreshStat}
-                disabled={statLoading}
-                title="Reanalyze — force a fresh stat model run now"
-                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors ml-1"
-              >
-                <RefreshCw className={`w-3 h-3 ${statLoading ? "animate-spin" : ""}`} />
-              </button>
             </div>
           </div>
           <div className="h-64 -ml-2">
@@ -2872,6 +2864,14 @@ function CoinDetail({
                   </span>
                 )}
               </div>
+              <button
+                onClick={onRefreshStat}
+                disabled={statLoading}
+                title="Force-refresh stat model predictions now"
+                className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${statLoading ? "animate-spin" : ""}`} />
+              </button>
             </div>
 
             {/* Consensus verdict */}
