@@ -1852,38 +1852,66 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
   const sym = symbol.toUpperCase();
   const series = KALSHI_SERIES[sym];
   if (!series) return null;
-  const hit = kalshiTargetCache.get(sym);
-  if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) return hit.value;
+
+  // Display calls (no targetTime) use the short-lived shared cache so every
+  // render doesn't hammer the Kalshi API.
+  //
+  // Snapshot calls (targetTime provided) MUST bypass the shared cache because
+  // it may still hold the PREVIOUS window's strike for up to 12 s after the
+  // boundary — silently recording the wrong target in a new prediction record.
+  if (!targetTime) {
+    const hit = kalshiTargetCache.get(sym);
+    if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) return hit.value;
+  }
+
   try {
     const resp = await fetch(
       `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=10`,
       { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
     );
     if (!resp.ok) {
-      kalshiTargetCache.set(sym, { value: null, at: Date.now() });
+      if (!targetTime) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
       return null;
     }
     const body = (await resp.json()) as {
       markets?: { floor_strike?: number; ticker?: string; close_time?: string }[];
     };
 
-    // Keep only markets with a valid strike.
     const markets = (body.markets ?? []).filter(
       (m) => typeof m.floor_strike === "number" && (m.floor_strike as number) > 0,
     );
 
-    // When a specific window boundary is requested, prefer the market whose
-    // close_time is closest to that boundary.  This prevents picking the NEXT
-    // window's market when Kalshi opens it before the current one closes.
-    let selected = markets[0];
-    if (targetTime && markets.length > 1) {
+    let selected: (typeof markets)[0] | undefined;
+
+    if (targetTime) {
+      // Prefer strict close_time matching: only accept a market expiring
+      // within 8 min of the requested window boundary.  This prevents picking
+      // the next window's market when Kalshi opens it before the current one
+      // closes (which would store the wrong strike in the prediction record).
       const targetMs = targetTime.getTime();
-      let bestDiff = Infinity;
-      for (const m of markets) {
-        if (!m.close_time) continue;
-        const diff = Math.abs(new Date(m.close_time).getTime() - targetMs);
-        if (diff < bestDiff) { bestDiff = diff; selected = m; }
+      const marketsWithCloseTime = markets.filter((m) => m.close_time);
+      if (marketsWithCloseTime.length > 0) {
+        let bestDiff = Infinity;
+        for (const m of marketsWithCloseTime) {
+          const diff = Math.abs(new Date(m.close_time!).getTime() - targetMs);
+          if (diff < 8 * 60_000 && diff < bestDiff) { bestDiff = diff; selected = m; }
+        }
+        if (!selected) {
+          // Close_time data is available but no market fits this window yet.
+          // Return null so the tracker retries on the next 30-second tick.
+          console.info(`[kalshi] ${sym}: no market within 8 min of ${targetTime.toISOString()} — will retry`);
+          return null;
+        }
+      } else {
+        // API doesn't include close_time — fall back to first market and log
+        // a warning so we know the strict guard couldn't run.
+        selected = markets[0];
+        if (selected) {
+          console.warn(`[kalshi] ${sym}: close_time absent from API response — using first market (strike ${selected.floor_strike}). Consider checking the API format.`);
+        }
       }
+    } else {
+      selected = markets[0];
     }
 
     if (selected) {
@@ -1896,7 +1924,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       return selected.floor_strike!;
     }
 
-    kalshiTargetCache.set(sym, { value: null, at: Date.now() });
+    if (!targetTime) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
     return null;
   } catch {
     return null;
@@ -2507,21 +2535,50 @@ export function startPredictionTracker(): void {
         const timeToNext = nextBoundary.getTime() - nowMs;
         const alreadySnapped = records.some((r) => r.targetTime === targetISO);
 
-        // Snapshot within the FIRST 4 minutes of a window opening, and only
-        // if at least 60s remain (avoids right-at-boundary noise).
-        // This ensures accuracy is measured against the call made at window OPEN,
-        // not some random mid-window recompute.
+        // Timing strategy:
+        //   • Wait at least 30 s into the window before the first snap attempt.
+        //     Kalshi sometimes doesn't publish the new market's strike until
+        //     a few seconds (or up to ~1 min) after the boundary fires.
+        //   • Fetch the Kalshi target FIRST, separately from the other data.
+        //     If no matching market is available yet AND we're still within the
+        //     4-minute grace window, skip this tick and retry on the next one.
+        //   • After 4 min with no target, snap anyway (null target) so the
+        //     window always has a prediction for model-accuracy tracking.
+        //   • Never snap after 6 min (too far from window open).
+        const SNAP_DELAY_MS   = 30_000;      // min ms into window before first attempt
+        const SNAP_GIVE_UP_MS = 4 * 60_000;  // stop waiting for target after this
+        const SNAP_MAX_MS     = 6 * 60_000;  // never snap this late in the window
         const windowStartMs = nextBoundary.getTime() - 15 * 60_000;
         const timeIntoWindow = nowMs - windowStartMs;
-        if (!alreadySnapped && timeToNext > 60_000 && timeIntoWindow < 4 * 60_000) {
+
+        if (
+          !alreadySnapped &&
+          timeToNext > 60_000 &&
+          timeIntoWindow >= SNAP_DELAY_MS &&
+          timeIntoWindow < SNAP_MAX_MS
+        ) {
           try {
-            const [candles, stats, tickerPrice, candles5m, orderBook, kalshiTargetSnap] = await Promise.all([
+            // Fetch Kalshi target before the expensive data calls so we can
+            // bail early if the market isn't ready yet.
+            const kalshiTargetSnap = KALSHI_SERIES[sym]
+              ? await fetchKalshiTarget(sym, nextBoundary).catch(() => null)
+              : null;
+
+            // If the target is missing AND Kalshi has a series for this coin
+            // AND we're still inside the grace window, skip and retry next tick.
+            if (
+              kalshiTargetSnap === null &&
+              KALSHI_SERIES[sym] &&
+              timeIntoWindow < SNAP_GIVE_UP_MS
+            ) {
+              // Kalshi market not published yet — will retry on the next tick.
+            } else {
+            const [candles, stats, tickerPrice, candles5m, orderBook] = await Promise.all([
               getCandles(coin.product),
               getStats(coin.product),
               getTicker(coin.product).catch(() => 0),
               get5mCandles(coin.product).catch(() => [] as Candle[]),
               getOrderBook(coin.product).catch(() => undefined),
-              fetchKalshiTarget(sym, nextBoundary).catch(() => null),
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice, orderBook);
@@ -2638,6 +2695,7 @@ export function startPredictionTracker(): void {
               if (records.length > MAX_HISTORY)
                 records.splice(0, records.length - MAX_HISTORY);
             }
+            } // end else (kalshiTarget available or gave up waiting)
           } catch {
             // non-fatal — will retry next tick
           }
