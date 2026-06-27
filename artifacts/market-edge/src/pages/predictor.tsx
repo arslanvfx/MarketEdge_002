@@ -2798,7 +2798,7 @@ function CoinDetail({
                   const dp = (p: number) => p >= 100 ? 2 : p >= 1 ? 4 : 6;
                   const pctVsStrike = (p: number) => kalshiTarget ? ((p - kalshiTarget) / kalshiTarget * 100) : null;
 
-                  const hasAnyPrice = statHead != null || effectiveClaudePrice != null || liveDirection?.aboveKalshi != null;
+                  const hasAnyPrice = statHead != null || effectiveClaudePrice != null || autoPilotAbove !== null;
                   if (!hasAnyPrice) return null;
 
                   return (
@@ -2863,14 +2863,16 @@ function CoinDetail({
                           const apPct   = apPrice != null ? ((apPrice - kalshiTarget) / kalshiTarget * 100) : null;
                           const modelLabel = autoPilotDecision.active ? "Claude" : "Stat";
                           const dp = apPrice != null ? (apPrice >= 100 ? 2 : apPrice >= 1 ? 4 : 6) : 2;
-                          const winnerAcc = autoPilotDecision.active
-                            ? autoPilotDecision.claudeAccuracyPct
-                            : autoPilotDecision.statAccuracyPct;
-                          const loserAcc  = autoPilotDecision.active
-                            ? autoPilotDecision.statAccuracyPct
-                            : autoPilotDecision.claudeAccuracyPct;
+                          const claudeAcc = autoPilotDecision.claudeAccuracyPct;
+                          const statAcc   = autoPilotDecision.statAccuracyPct;
+                          const bothHaveAcc = claudeAcc != null && statAcc != null;
                           return (
                             <>
+                              {autoPilotDecision.exploring && (
+                                <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400/80 mb-1">
+                                  Exploring
+                                </div>
+                              )}
                               {apPrice != null ? (
                                 <>
                                   <div className="text-xl font-black text-foreground leading-none mb-1">
@@ -2887,13 +2889,10 @@ function CoinDetail({
                                   {autoPilotAbove ? "↑ ABOVE" : "↓ BELOW"}
                                 </div>
                               ) : null}
-                              <div className="mt-1.5 text-[10px] text-violet-300/70 font-medium">
-                                via {modelLabel}
-                                {winnerAcc != null && loserAcc != null
-                                  ? ` · ${winnerAcc.toFixed(0)}% vs ${loserAcc.toFixed(0)}%`
-                                  : winnerAcc != null
-                                  ? ` · ${winnerAcc.toFixed(0)}% acc`
-                                  : ""}
+                              <div className="mt-1.5 text-[10px] text-violet-300/70 font-medium leading-tight">
+                                {bothHaveAcc
+                                  ? `via ${modelLabel} · ${(autoPilotDecision.active ? claudeAcc : statAcc)!.toFixed(0)}% vs ${(autoPilotDecision.active ? statAcc : claudeAcc)!.toFixed(0)}%`
+                                  : autoPilotDecision.reason}
                               </div>
                             </>
                           );

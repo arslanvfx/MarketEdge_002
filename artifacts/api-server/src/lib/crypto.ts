@@ -2406,7 +2406,7 @@ const MAX_SELF_CONSISTENCY = 5;
 // cap) live in the pure, unit-tested ./autopilot module. This wrapper only feeds
 // it the latest live accuracy stats and stores the resulting decisions.
 
-let autoPilotEnabled = false;
+let autoPilotEnabled = true; // ON by default — self-learning runs from first tick
 const autoPilotDecisions = new Map<string, AutoPilotDecision>();
 
 // Per-coin auto-pilot decision. Gathers Claude vs statistical-model accuracy from
