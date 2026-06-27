@@ -915,7 +915,19 @@ function SelfLearningDashboard({
 
 const TRAINING_COIN_FILTERS = ["ALL", "BTC", "ETH", "XRP", "HYPE", "BNB"] as const;
 
-function bucketBarColor(b: TradingWindowBucket): string {
+type BarViewMode = "er" | "accuracy";
+
+function bucketBarColor(b: TradingWindowBucket, mode: BarViewMode = "er"): string {
+  if (mode === "accuracy") {
+    const sparse = b.evaluatedCount < 5 || b.accuracyPct === null;
+    if (sparse) return "bg-slate-600/40";
+    const acc = b.accuracyPct!;
+    if (acc >= 65) return "bg-emerald-500";
+    if (acc >= 55) return "bg-emerald-400/60";
+    if (acc >= 45) return "bg-amber-400";
+    if (acc >= 35) return "bg-orange-500";
+    return "bg-red-500";
+  }
   if (b.sparse || b.avgEfficiencyRatio === null) return "bg-slate-600/40";
   const er = b.avgEfficiencyRatio;
   if (er >= 0.55) return "bg-emerald-500";
@@ -925,7 +937,12 @@ function bucketBarColor(b: TradingWindowBucket): string {
   return "bg-red-500";
 }
 
-function bucketBarHeight(b: TradingWindowBucket, maxPx = 56): number {
+function bucketBarHeight(b: TradingWindowBucket, maxPx = 56, mode: BarViewMode = "er"): number {
+  if (mode === "accuracy") {
+    const sparse = b.evaluatedCount < 5 || b.accuracyPct === null;
+    if (sparse) return 4;
+    return Math.max(4, Math.round((b.accuracyPct! / 100) * maxPx));
+  }
   if (b.sparse || b.avgEfficiencyRatio === null) return 4;
   return Math.max(4, Math.round(b.avgEfficiencyRatio * maxPx));
 }
@@ -934,20 +951,28 @@ function HourlyBars({
   hourly,
   currentHour,
   showLabels,
+  mode = "er",
 }: {
   hourly: TradingWindowsData["hourly"];
   currentHour: number;
   showLabels: Set<number>;
+  mode?: BarViewMode;
 }) {
   return (
     <div className="flex gap-px items-end" style={{ height: "72px" }}>
       {hourly.map((b) => {
         const isCurrent = b.hour === currentHour;
-        const h = bucketBarHeight(b, 56);
-        const col = bucketBarColor(b);
-        const tip = b.sparse
-          ? `${b.label} ET: ${b.count} samples (sparse — need 10+)`
-          : `${b.label} ET: ${b.count} windows · ER ${b.avgEfficiencyRatio?.toFixed(2)} · ${b.trendingPct ?? "—"}% trending · accuracy ${b.accuracyPct !== null ? `${b.accuracyPct}%` : "—"}`;
+        const accSparse = b.evaluatedCount < 5 || b.accuracyPct === null;
+        const h = bucketBarHeight(b, 56, mode);
+        const col = bucketBarColor(b, mode);
+        const isSparse = accSparse || b.sparse;
+        const tip = mode === "accuracy"
+          ? (accSparse
+              ? `${b.label} ET: ${b.evaluatedCount} evaluated (sparse — need 5+)`
+              : `${b.label} ET: ${b.evaluatedCount} evaluated · accuracy ${b.accuracyPct}% · ER ${b.avgEfficiencyRatio?.toFixed(2) ?? "—"}`)
+          : (b.sparse
+              ? `${b.label} ET: ${b.count} samples (sparse — need 10+)`
+              : `${b.label} ET: ${b.count} windows · ER ${b.avgEfficiencyRatio?.toFixed(2)} · ${b.trendingPct ?? "—"}% trending · accuracy ${b.accuracyPct !== null ? `${b.accuracyPct}%` : "—"}`);
         return (
           <div
             key={b.hour}
@@ -957,7 +982,7 @@ function HourlyBars({
             <div
               className={`w-full rounded-t transition-all ${col} ${
                 isCurrent ? "ring-2 ring-white/50 ring-offset-0" : ""
-              } ${b.sparse ? "border border-dashed border-slate-500/50" : ""}`}
+              } ${isSparse ? "border border-dashed border-slate-500/50" : ""}`}
               style={{ height: `${h}px` }}
               title={tip}
             />
@@ -992,6 +1017,7 @@ const ET_TIME_FMT = new Intl.DateTimeFormat("en-US", {
 function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
   const [coinFilter, setCoinFilter] = useState<string>("ALL");
   const [open, setOpen] = useState(true);
+  const [barMode, setBarMode] = useState<BarViewMode>("er");
   const SHOW_LABELS = new Set([0, 6, 12, 18]);
 
   const query = useQuery({
@@ -1082,15 +1108,46 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
               {/* Recommendation */}
               <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2.5">
                 <Zap className="w-3.5 h-3.5 shrink-0 mt-0.5 text-emerald-400" />
-                <p className="text-[11px] text-emerald-100/90 leading-snug">{data.recommendation}</p>
+                <p className="text-[11px] text-emerald-100/90 leading-snug">
+                  {barMode === "accuracy"
+                    ? "Chart below shows observed prediction accuracy % per hour — toggle to Efficiency ratio to see market predictability."
+                    : data.recommendation}
+                </p>
               </div>
 
               {/* 24-hour bar chart */}
               <div>
-                <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
-                  Hour of day (ET) — bar height = avg market efficiency ratio · white outline = now
+                <div className="flex items-center justify-between mb-2 gap-2">
+                  <div className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-semibold">
+                    {barMode === "er"
+                      ? "Hour of day (ET) — bar height = avg market efficiency ratio · white outline = now"
+                      : "Hour of day (ET) — bar height = observed prediction accuracy % · white outline = now"}
+                  </div>
+                  {/* Mode toggle */}
+                  <div className="flex shrink-0 rounded overflow-hidden border border-border text-[9px] font-semibold">
+                    <button
+                      onClick={() => setBarMode("er")}
+                      className={`px-2 py-0.5 transition-colors ${
+                        barMode === "er"
+                          ? "bg-primary/20 text-primary"
+                          : "bg-muted/20 text-muted-foreground hover:bg-muted/40"
+                      }`}
+                    >
+                      Efficiency ratio
+                    </button>
+                    <button
+                      onClick={() => setBarMode("accuracy")}
+                      className={`px-2 py-0.5 transition-colors ${
+                        barMode === "accuracy"
+                          ? "bg-primary/20 text-primary"
+                          : "bg-muted/20 text-muted-foreground hover:bg-muted/40"
+                      }`}
+                    >
+                      Accuracy %
+                    </button>
+                  </div>
                 </div>
-                <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
+                <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} mode={barMode} />
               </div>
 
               {/* Day-of-week chart */}
@@ -1118,22 +1175,53 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
 
               {/* Legend */}
               <div className="flex items-center gap-3 flex-wrap text-[9px] text-muted-foreground/60">
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />
-                  Trending (ER≥0.55)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />
-                  Drifting (0.25–0.55)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />
-                  Choppy (&lt;0.25)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />
-                  Sparse (&lt;10 samples)
-                </span>
+                {barMode === "er" ? (
+                  <>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />
+                      Trending (ER≥0.55)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />
+                      Drifting (0.25–0.55)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />
+                      Choppy (&lt;0.25)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />
+                      Sparse (&lt;10 samples)
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />
+                      Strong (≥65%)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-emerald-400/60 inline-block" />
+                      Good (55–65%)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />
+                      Coin-flip (45–55%)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-orange-500 inline-block" />
+                      Weak (35–45%)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />
+                      Poor (&lt;35%)
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />
+                      Sparse (&lt;5 evaluated)
+                    </span>
+                  </>
+                )}
               </div>
 
               <div className="text-[9px] text-muted-foreground/40 flex items-center gap-2 flex-wrap">
