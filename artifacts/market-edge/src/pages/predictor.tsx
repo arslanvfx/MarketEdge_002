@@ -2174,6 +2174,8 @@ export default function Predictor() {
             }}
             isTrainingCoin={trainingCoinsSet.has(selected)}
             mlPred={mlPredQuery.data ?? null}
+            onRefreshStat={() => void predQuery.refetch()}
+            statLoading={predQuery.isFetching}
           />
         ) : (
           <div className="grid lg:grid-cols-3 gap-4">
@@ -2312,6 +2314,8 @@ function CoinDetail({
   onRefreshLiveDirection,
   isTrainingCoin,
   mlPred,
+  onRefreshStat,
+  statLoading,
 }: {
   coin: CoinPrediction;
   livePrice: number;
@@ -2338,6 +2342,8 @@ function CoinDetail({
   onRefreshLiveDirection: () => void;
   isTrainingCoin: boolean;
   mlPred?: MLPredResponse | null;
+  onRefreshStat: () => void;
+  statLoading: boolean;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
   const kalshiAvailable = KALSHI_COINS.includes(coin.symbol) && ktd?.available === true;
@@ -2561,6 +2567,14 @@ function CoinDetail({
               <span className="flex items-center gap-1">
                 <span className="inline-block w-3 h-0.5 border-t border-dashed" style={{ borderColor: hd.stroke }} /> Forecast
               </span>
+              <button
+                onClick={onRefreshStat}
+                disabled={statLoading}
+                title="Reanalyze — force a fresh stat model run now"
+                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors ml-1"
+              >
+                <RefreshCw className={`w-3 h-3 ${statLoading ? "animate-spin" : ""}`} />
+              </button>
             </div>
           </div>
           <div className="h-64 -ml-2">
