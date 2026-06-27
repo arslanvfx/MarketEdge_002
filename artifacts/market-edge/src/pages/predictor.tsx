@@ -2787,16 +2787,15 @@ function CoinDetail({
                   )}
                 </div>
 
-                {/* Window-open anchor timestamp */}
-                {trackerSnapshot && (
+                {/* Window-open anchor — show the Kalshi strike (RTI at open),
+                    NOT the tracker's predicted close price which will differ. */}
+                {trackerSnapshot && kalshiTarget !== null && (
                   <div className="mt-2 text-[10px] text-muted-foreground/50 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
-                    Window opened at{" "}
+                    Strike set at{" "}
                     {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
                       hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
-                    })} ET · ${trackerSnapshot.predictedPrice >= 100
-                      ? trackerSnapshot.predictedPrice.toFixed(2)
-                      : trackerSnapshot.predictedPrice.toFixed(4)}
+                    })} ET · ${kalshiTarget >= 100 ? kalshiTarget.toFixed(2) : kalshiTarget.toFixed(4)}
                   </div>
                 )}
               </>
