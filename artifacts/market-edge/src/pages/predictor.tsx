@@ -2132,6 +2132,7 @@ interface CombinedCall {
   changePct: number;
   above: boolean | null;
   abstained: boolean;
+  conflict: boolean;   // stat and Claude are on opposite sides of the target
   reason: string;
 }
 
@@ -2153,17 +2154,26 @@ function computeCombinedCall(args: {
   const changePct = livePrice > 0 ? ((predictedPrice - livePrice) / livePrice) * 100 : 0;
   const direction: "up" | "down" | "flat" =
     changePct > 0.05 ? "up" : changePct < -0.05 ? "down" : "flat";
-  const conflict =
-    (statDir === "up" && aiDir === "down") || (statDir === "down" && aiDir === "up");
-  const lowConf = confidence < abstainMinConf;
+  const above = kalshiTarget !== null ? predictedPrice >= kalshiTarget : null;
+
+  // Use target as the reference for conflict detection when available.
+  // Comparing predicted prices vs current live price creates false conflicts
+  // when price has moved away from the strike mid-window.
+  const statAboveKt = kalshiTarget !== null ? statPrice >= kalshiTarget : null;
+  const aiAboveKt   = kalshiTarget !== null ? aiPrice  >= kalshiTarget : null;
+  const conflict = statAboveKt !== null && aiAboveKt !== null
+    ? statAboveKt !== aiAboveKt
+    : (statDir === "up" && aiDir === "down") || (statDir === "down" && aiDir === "up");
+
+  const lowConf  = confidence < abstainMinConf;
+  // Only suppress Kalshi bet on genuine model conflict or very low confidence.
   const abstained = conflict || lowConf;
   const reason = conflict
-    ? "Models disagree on direction"
+    ? "Stat and Claude are on opposite sides of the target"
     : lowConf
       ? `Combined confidence ${confidence}% below ${abstainMinConf}% threshold`
       : "Models agree — regime-weighted blend";
-  const above = kalshiTarget !== null ? predictedPrice >= kalshiTarget : null;
-  return { predictedPrice, confidence, direction, changePct, above, abstained, reason };
+  return { predictedPrice, confidence, direction, changePct, above, abstained, conflict, reason };
 }
 
 // Small helper used by the Claude Pulse panel — extracted to module level so
@@ -2258,26 +2268,58 @@ function CoinDetail({
       ? computeCombinedCall({
           statPrice: statHead.predictedPrice,
           statConf: statHead.confidence,
-          statDir:
-            ((statHead.predictedPrice - livePrice) / livePrice) * 100 > 0.05
-              ? "up"
-              : ((statHead.predictedPrice - livePrice) / livePrice) * 100 < -0.05
-                ? "down"
-                : "flat",
+          // Use target as the direction reference when available — "up" = ABOVE
+          // the Kalshi strike, not above the current live price (which may have
+          // moved significantly from the strike since window open).
+          statDir: kalshiTarget !== null
+            ? (statHead.predictedPrice >= kalshiTarget ? "up" : "down")
+            : ((statHead.predictedPrice - livePrice) / livePrice) * 100 > 0.05 ? "up"
+              : ((statHead.predictedPrice - livePrice) / livePrice) * 100 < -0.05 ? "down" : "flat",
           aiPrice: claudeAiPred0.predictedPrice,
           aiConf: claudeAiPred0.confidence,
-          aiDir:
-            ((claudeAiPred0.predictedPrice - livePrice) / livePrice) * 100 > 0.05
-              ? "up"
-              : ((claudeAiPred0.predictedPrice - livePrice) / livePrice) * 100 < -0.05
-                ? "down"
-                : "flat",
+          aiDir: kalshiTarget !== null
+            ? (claudeAiPred0.predictedPrice >= kalshiTarget ? "up" : "down")
+            : ((claudeAiPred0.predictedPrice - livePrice) / livePrice) * 100 > 0.05 ? "up"
+              : ((claudeAiPred0.predictedPrice - livePrice) / livePrice) * 100 < -0.05 ? "down" : "flat",
           weights: aiEntry.ensembleWeights,
           abstainMinConf: aiEntry.abstainMinConf ?? 55,
           livePrice,
           kalshiTarget,
         })
       : null;
+
+  // Multi-signal consensus — weighted vote across stat model, Claude AI (window
+  // open or tracker snapshot), and Live Pulse. All three signals always included
+  // regardless of freshness so the user sees everything; stale signals are
+  // visually dimmed in the panel but still counted for the consensus direction.
+  interface ConsensusSignal { name: string; above: boolean; conf: number; ageMin?: number }
+  const liveAgeMs  = liveDirection ? Date.now() - new Date(liveDirection.at).getTime() : Infinity;
+  const liveAgeMin = Math.round(liveAgeMs / 60_000);
+  const liveFresh  = liveAgeMs < 2 * 60_000;
+  const consensusSignals: ConsensusSignal[] = (() => {
+    if (kalshiTarget === null) return [];
+    const sigs: ConsensusSignal[] = [];
+    if (statHead != null)
+      sigs.push({ name: "Stat", above: statHead.predictedPrice >= kalshiTarget, conf: statHead.confidence });
+    const claudeSig = claudeAbove !== null
+      ? { name: "Claude AI", above: claudeAbove, conf: claudeConfidence ?? 55 }
+      : trackerSnapshot?.aboveKalshi != null
+      ? { name: "Claude AI", above: trackerSnapshot.aboveKalshi, conf: trackerSnapshot.confidence }
+      : null;
+    if (claudeSig) sigs.push(claudeSig);
+    if (liveDirection?.aboveKalshi != null)
+      sigs.push({ name: "Live Pulse", above: liveDirection.aboveKalshi, conf: liveDirection.confidence, ageMin: liveAgeMin });
+    return sigs;
+  })();
+  const consAboveW   = consensusSignals.filter(s => s.above).reduce((sum, s) => sum + s.conf, 0);
+  const consBelowW   = consensusSignals.filter(s => !s.above).reduce((sum, s) => sum + s.conf, 0);
+  const consTotalW   = consAboveW + consBelowW;
+  const consensusAbove = consTotalW > 0 ? consAboveW >= consBelowW : null;
+  const consensusConf  = consTotalW > 0 && consensusAbove !== null
+    ? Math.round((consensusAbove ? consAboveW : consBelowW) / consTotalW * 100)
+    : null;
+  const consensusAgreement = consensusSignals.filter(s => s.above === consensusAbove).length;
+  const allConsensusAgree  = consensusAgreement === consensusSignals.length && consensusSignals.length > 1;
 
   // Margin signal — how safely the stat prediction sits from the Kalshi strike.
   const betSig: BetSignal | null =
@@ -2519,14 +2561,19 @@ function CoinDetail({
                   · stat {Math.round((aiEntry!.ensembleWeights!.stat) * 100)}% / Claude {Math.round((aiEntry!.ensembleWeights!.claude) * 100)}%
                 </span>
               </div>
-              {combinedHead.abstained ? (
+              {combinedHead.conflict ? (
+                /* Models are on opposite sides of the target — show which way each
+                   is pointing so the user can judge rather than hiding both. */
                 <div>
                   <div className="inline-flex items-center gap-1.5 text-lg font-black text-amber-400">
-                    <Minus className="w-5 h-5" /> NO BET
+                    <Minus className="w-5 h-5" /> SPLIT SIGNAL
                   </div>
                   <div className="text-[11px] text-muted-foreground mt-0.5">{combinedHead.reason}</div>
                 </div>
               ) : combinedHead.above !== null ? (
+                /* Models agree on direction — always show it. Only suppress the
+                   Kalshi bet recommendation when confidence is below the threshold,
+                   never hide the direction itself. */
                 <>
                   <div className={`flex items-center gap-1.5 text-xl font-black ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
                     {combinedHead.above ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
@@ -2534,8 +2581,9 @@ function CoinDetail({
                   </div>
                   <div className="text-[11px] text-muted-foreground mt-0.5">
                     ${formatPrice(combinedHead.predictedPrice)} · {combinedHead.confidence}% conf.
+                    {combinedHead.abstained && <span className="text-amber-400/80 ml-1">· low confidence — skip bet</span>}
                   </div>
-                  {kalshiIsLive && (
+                  {kalshiIsLive && !combinedHead.abstained && (
                     <div className={`mt-1.5 text-xs font-bold ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
                       → Bet {combinedHead.above ? "YES" : "NO"} on Kalshi
                     </div>
@@ -2649,51 +2697,38 @@ function CoinDetail({
         </div>
       )}
 
-      {/* ── Claude Pulse — opening call vs live re-check ── */}
+      {/* ── AI Consensus — unified vote across stat model, Claude AI, and Live Pulse ── */}
       {(isTrainingCoin || claudeActive) && kalshiTarget !== null && (() => {
-        const snap = trackerSnapshot;
-        const live = liveDirection;
-        const showPanel = snap !== null || live !== null || liveDirectionLoading;
+        const showPanel = consensusSignals.length > 0 || liveDirectionLoading;
         if (!showPanel) return null;
 
-        const snapAbove = snap?.aboveKalshi;
-        const liveAbove = live?.aboveKalshi;
-        const flipped =
-          snapAbove !== null && snapAbove !== undefined &&
-          liveAbove !== null && liveAbove !== undefined &&
-          snapAbove !== liveAbove;
-        const confirmed =
-          snapAbove !== null && snapAbove !== undefined &&
-          liveAbove !== null && liveAbove !== undefined &&
-          snapAbove === liveAbove;
-
-        const borderCls = flipped
-          ? "border-red-500/50"
-          : confirmed
+        const borderCls = allConsensusAgree && consensusSignals.length > 1
           ? "border-emerald-500/30"
+          : consensusAgreement < consensusSignals.length && consensusSignals.length > 1
+          ? "border-amber-500/30"
           : "border-border/30";
-        const bgCls = flipped
-          ? "bg-red-500/5"
-          : confirmed
+        const bgCls = allConsensusAgree && consensusSignals.length > 1
           ? "bg-emerald-500/5"
+          : consensusAgreement < consensusSignals.length && consensusSignals.length > 1
+          ? "bg-amber-500/5"
           : "bg-card/60";
 
         return (
           <div className={`rounded-xl border ${borderCls} ${bgCls} px-5 py-4 mt-0`}>
+            {/* Header */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <Radio className="w-3.5 h-3.5 text-violet-400" />
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
-                  Claude Pulse
+                  AI Consensus
                 </span>
-                {flipped && (
-                  <span className="text-[10px] font-bold uppercase tracking-wide bg-red-500/20 text-red-400 ring-1 ring-red-500/40 rounded px-1.5 py-0.5 animate-pulse">
-                    ⚠ Direction changed
-                  </span>
-                )}
-                {confirmed && (
-                  <span className="text-[10px] font-bold uppercase tracking-wide bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30 rounded px-1.5 py-0.5">
-                    ✓ Confirmed
+                {consensusSignals.length > 1 && (
+                  <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 ring-1 ${
+                    allConsensusAgree
+                      ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30"
+                      : "bg-amber-500/15 text-amber-400 ring-amber-500/30"
+                  }`}>
+                    {consensusAgreement}/{consensusSignals.length} agree
                   </span>
                 )}
               </div>
@@ -2701,59 +2736,77 @@ function CoinDetail({
                 onClick={onRefreshLiveDirection}
                 disabled={liveDirectionLoading}
                 className="text-muted-foreground/50 hover:text-muted-foreground transition-colors disabled:opacity-40"
-                title="Re-ask Claude now"
+                title="Re-check Live Pulse now"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${liveDirectionLoading ? "animate-spin" : ""}`} />
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              {/* Opening call */}
-              <div>
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1.5 flex items-center gap-1">
-                  <Clock className="w-3 h-3" />
-                  Window open
+            {/* Consensus verdict */}
+            {consensusAbove !== null && consensusConf !== null ? (
+              <>
+                <div className={`flex items-center gap-2 mb-2 ${consensusAbove ? "text-emerald-400" : "text-red-400"}`}>
+                  {consensusAbove ? <ArrowUp className="w-6 h-6" /> : <ArrowDown className="w-6 h-6" />}
+                  <span className="text-2xl font-black">{consensusAbove ? "ABOVE" : "BELOW"}</span>
+                  <span className="text-base font-bold text-muted-foreground">{consensusConf}%</span>
                 </div>
-                {snap ? (
-                  <>
-                    <AboveLabel above={snap.aboveKalshi} conf={snap.confidence} />
-                    <div className="text-[10px] text-muted-foreground/60 mt-0.5">
-                      ${snap.predictedPrice >= 100 ? snap.predictedPrice.toFixed(2) : snap.predictedPrice.toFixed(4)}
-                      {" · "}{new Date(snap.snappedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York" })} ET
-                    </div>
-                  </>
-                ) : (
-                  <div className="text-[11px] text-muted-foreground/50 leading-snug">Awaiting next window open…</div>
-                )}
-              </div>
 
-              {/* Live re-check */}
-              <div>
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1.5 flex items-center gap-1">
-                  <Zap className="w-3 h-3 text-amber-400" />
-                  Live now
+                {/* Signal breakdown */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  {consensusSignals.map((sig) => {
+                    const isLive = sig.name === "Live Pulse";
+                    const stale = isLive && !liveFresh;
+                    return (
+                      <div
+                        key={sig.name}
+                        className={`flex items-center gap-1 text-[11px] font-semibold ${
+                          sig.above ? "text-emerald-400" : "text-red-400"
+                        } ${stale ? "opacity-50" : ""}`}
+                        title={isLive
+                          ? `Live Pulse · ${sig.ageMin === 0 ? "just now" : `${sig.ageMin}m ago`}${stale ? " · stale" : ""}`
+                          : sig.name === "Stat"
+                          ? `Stat model · ${sig.conf}% conf`
+                          : `Claude AI · ${sig.conf}% conf`}
+                      >
+                        {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                        <span>{sig.name}</span>
+                        {isLive && (
+                          <span className={`font-normal ${stale ? "text-muted-foreground/50" : "text-muted-foreground/70"}`}>
+                            {sig.ageMin === 0 ? "now" : `${sig.ageMin}m`}
+                          </span>
+                        )}
+                        {stale && <span className="text-[9px] text-amber-400/70">stale</span>}
+                      </div>
+                    );
+                  })}
+                  {liveDirectionLoading && !consensusSignals.find(s => s.name === "Live Pulse") && (
+                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>Live pulse…</span>
+                    </div>
+                  )}
                 </div>
-                {liveDirectionLoading && !live ? (
-                  <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Checking…
+
+                {/* Window-open anchor timestamp */}
+                {trackerSnapshot && (
+                  <div className="mt-2 text-[10px] text-muted-foreground/50 flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    Window opened at{" "}
+                    {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
+                      hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
+                    })} ET · ${trackerSnapshot.predictedPrice >= 100
+                      ? trackerSnapshot.predictedPrice.toFixed(2)
+                      : trackerSnapshot.predictedPrice.toFixed(4)}
                   </div>
-                ) : live ? (
-                  <>
-                    <AboveLabel above={live.aboveKalshi} conf={live.confidence} />
-                    <div className="text-[10px] text-muted-foreground/60 mt-0.5">
-                      Updated {Math.round((Date.now() - new Date(live.at).getTime()) / 60_000)}m ago
-                      {live.cached && " · cached"}
-                    </div>
-                  </>
-                ) : (
-                  <div className="text-[11px] text-muted-foreground/50">Awaiting first check…</div>
                 )}
-              </div>
-            </div>
-
-            {flipped && (
-              <div className="mt-3 pt-3 border-t border-red-500/20 text-[11px] text-red-400/90 leading-snug">
-                Claude's current read differs from the window-open call — consider reviewing your position before close.
+              </>
+            ) : (
+              <div className="text-[11px] text-muted-foreground/50">
+                {liveDirectionLoading ? (
+                  <span className="flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Gathering signals…</span>
+                ) : (
+                  "Awaiting signals — data builds after window open"
+                )}
               </div>
             )}
           </div>

@@ -3093,12 +3093,12 @@ export interface LiveDirectionResult {
 }
 
 const liveDirectionCache = new Map<string, { result: LiveDirectionResult; at: number }>();
-const LIVE_DIR_TTL = 5 * 60_000; // 5 minutes
+const LIVE_DIR_TTL = 2 * 60_000; // 2 minutes — "live" means live
 // Tracks in-flight live-direction re-checks (prevents concurrent calls per coin).
 const liveDirectionInFlight = new Set<string>();
 // Tracks when the last auto-trigger fired per coin (cooldown guard).
 const liveDirectionLastAutoTrigger = new Map<string, number>();
-const LIVE_DIR_AUTO_COOLDOWN = 5 * 60_000; // min gap between auto-triggers per coin
+const LIVE_DIR_AUTO_COOLDOWN = 2 * 60_000; // min gap between auto-triggers per coin
 
 // Cheap, fast Claude call — no extended thinking, minimal context.  Just enough
 // to answer the binary "ABOVE or BELOW the Kalshi strike at window close?" so
@@ -3127,26 +3127,41 @@ export async function fetchLiveDirection(symbol: string, force = false): Promise
     const dp = price >= 100 ? 2 : price >= 1 ? 4 : 6;
     const ind = analysis.indicators;
 
-    // Last 5 closes only — just enough for short-term momentum
-    const recent5 = candles
-      .slice(-5)
-      .map((c) => `$${c.c.toFixed(dp)}`)
-      .join(" → ");
+    // Last 10 closes for momentum context, plus top volume candle
+    const recent10 = candles.slice(-10);
+    const closesStr = recent10.map((c) => `$${c.c.toFixed(dp)}`).join(" → ");
+    const topVol = [...recent10].sort((a, b) => b.v - a.v)[0];
+    const regime =
+      ind.efficiencyRatio >= 0.4 ? "trending" : ind.efficiencyRatio >= 0.15 ? "drifting" : "choppy";
+
+    // Window trajectory: how far price has moved from the strike since open
+    const winCtx = getKalshiWindowContext(coin.symbol);
+    let trajectoryNote = "";
+    if (kalshiTargetVal && winCtx?.priceAtOpen && winCtx.minutesElapsed != null) {
+      const openGapPct = ((winCtx.priceAtOpen - kalshiTargetVal) / kalshiTargetVal * 100).toFixed(3);
+      const openSide = winCtx.priceAtOpen >= kalshiTargetVal ? "ABOVE" : "BELOW";
+      trajectoryNote = `Window opened ${winCtx.minutesElapsed}min ago at $${winCtx.priceAtOpen.toFixed(dp)} (${Math.abs(Number(openGapPct))}% ${openSide} strike).`;
+    }
 
     let prompt: string;
     if (kalshiTargetVal) {
       const side = price >= kalshiTargetVal ? "ABOVE" : "BELOW";
       const gapPct = (Math.abs(price - kalshiTargetVal) / kalshiTargetVal * 100).toFixed(3);
-      prompt = `${coin.symbol} is $${price.toFixed(dp)}, ${gapPct}% ${side} the Kalshi strike of $${kalshiTargetVal.toFixed(dp)}.
-RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bull" : "bear"} | trend ${ind.trend} | ER ${ind.efficiencyRatio.toFixed(2)}
-Recent closes: ${recent5}
+      prompt = `${coin.symbol} live check — Kalshi strike $${kalshiTargetVal.toFixed(dp)} (this window's opening price).
+${trajectoryNote}
+Now: $${price.toFixed(dp)} — ${gapPct}% ${side} strike.
+RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bull" : "bear"} | BB%B ${ind.bbPctB.toFixed(0)} | trend ${ind.trend} (strength ${Math.round(ind.trendStrength * 100)}%) | ER ${ind.efficiencyRatio.toFixed(2)} (${regime})
+Recent 10 closes: ${closesStr}
+Largest candle vol: $${topVol?.c.toFixed(dp)} (${topVol?.v.toFixed(0)} volume)
+Oscillations last 15 candles: ${ind.oscillationCount} | Net drift: ${ind.netDriftPct >= 0 ? "+" : ""}${ind.netDriftPct.toFixed(3)}%
 
 Will ${coin.symbol} close ABOVE or BELOW $${kalshiTargetVal.toFixed(dp)} at window close?
 JSON only: {"above":true,"confidence":70}`;
     } else {
       prompt = `${coin.symbol} at $${price.toFixed(dp)}.
-RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bull" : "bear"} | trend ${ind.trend}
-Recent closes: ${recent5}
+RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bull" : "bear"} | trend ${ind.trend} | ER ${ind.efficiencyRatio.toFixed(2)} (${regime})
+Recent 10 closes: ${closesStr}
+Net drift: ${ind.netDriftPct >= 0 ? "+" : ""}${ind.netDriftPct.toFixed(3)}%
 
 Will price be higher (up) or lower (down) in the next 15 min?
 JSON only: {"direction":"up","confidence":65}`;
