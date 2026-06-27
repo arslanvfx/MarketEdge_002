@@ -221,9 +221,18 @@ interface TradingWindowBucket {
   trendingPct: number | null;
   sparse: boolean;
 }
+interface RecommendedWindow {
+  hour: number;
+  label: string;
+  score: number;
+  avgEfficiencyRatio: number;
+  accuracyPct: number | null;
+  rank: "best" | "worst";
+}
 interface TradingWindowsData {
   hourly: Array<TradingWindowBucket & { hour: number; label: string }>;
   daily: Array<TradingWindowBucket & { dayIndex: number; label: string }>;
+  recommendedWindows: RecommendedWindow[];
   totalSamples: number;
   lastUpdatedAt: string;
   recommendation: string;
@@ -973,8 +982,16 @@ function HourlyBars({
   );
 }
 
+const ET_TIME_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true,
+});
+
 function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
   const [coinFilter, setCoinFilter] = useState<string>("ALL");
+  const [open, setOpen] = useState(true);
   const SHOW_LABELS = new Set([0, 6, 12, 18]);
 
   const query = useQuery({
@@ -990,125 +1007,145 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
   });
 
   const data = query.data ?? null;
+  const updatedLabel = data?.lastUpdatedAt
+    ? `Updated ${ET_TIME_FMT.format(new Date(data.lastUpdatedAt))} ET`
+    : null;
 
   return (
     <div className="mt-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <div>
-          <h3 className="text-sm font-semibold flex items-center gap-1.5">
-            <Clock className="w-4 h-4 text-primary" />
-            Best Windows to Trade
-          </h3>
-          <p className="text-[11px] text-muted-foreground mt-0.5">
-            When training-coin markets are most predictable ·{" "}
-            {data ? `${data.totalSamples} windows recorded` : "loading…"}
-          </p>
-        </div>
-        {/* Per-coin filter pills */}
-        <div className="flex gap-1 flex-wrap">
-          {TRAINING_COIN_FILTERS.map((c) => (
-            <button
-              key={c}
-              onClick={() => setCoinFilter(c)}
-              className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
-                coinFilter === c
-                  ? "border-primary/60 bg-primary/15 text-primary"
-                  : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
-              }`}
-            >
-              {c}
-            </button>
-          ))}
-        </div>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-start gap-2 text-left group"
+        >
+          <Clock className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+          <div>
+            <h3 className="text-sm font-semibold flex items-center gap-1">
+              Best Windows to Trade
+              <span className="text-muted-foreground/50 group-hover:text-muted-foreground transition-colors text-xs ml-1">
+                {open ? "▾" : "▸"}
+              </span>
+            </h3>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              When training-coin markets are most predictable ·{" "}
+              {data ? `${data.totalSamples} windows recorded` : "loading…"}
+            </p>
+          </div>
+        </button>
+        {/* Per-coin filter pills — only shown when expanded */}
+        {open && (
+          <div className="flex gap-1 flex-wrap">
+            {TRAINING_COIN_FILTERS.map((c) => (
+              <button
+                key={c}
+                onClick={() => setCoinFilter(c)}
+                className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                  coinFilter === c
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
+                }`}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {query.isLoading && !data ? (
-        <Skeleton className="h-40 rounded-xl" />
-      ) : !data?.hasEnoughData ? (
-        /* ── Collecting data state ── */
-        <Card className="bg-card/50 px-4 py-3 space-y-3">
-          <div className="flex items-start gap-2">
-            <Clock className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
-            <div className="text-[11px] leading-snug">
-              <span className="text-amber-300 font-semibold">Collecting data </span>
-              <span className="text-muted-foreground">
-                — needs at least 50 recorded windows to identify patterns.{" "}
-                {data ? `${data.totalSamples} recorded so far.` : ""}
-              </span>
-            </div>
-          </div>
-          {/* Show a faint partial chart when any data exists */}
-          {data && data.totalSamples > 0 && (
-            <div className="opacity-40 pointer-events-none">
-              <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
-            </div>
-          )}
-        </Card>
-      ) : (
-        /* ── Full panel ── */
-        <Card className="bg-card/50 px-4 py-4 space-y-4">
-          {/* Recommendation */}
-          <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2.5">
-            <Zap className="w-3.5 h-3.5 shrink-0 mt-0.5 text-emerald-400" />
-            <p className="text-[11px] text-emerald-100/90 leading-snug">{data.recommendation}</p>
-          </div>
-
-          {/* 24-hour bar chart */}
-          <div>
-            <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
-              Hour of day (ET) — bar height = avg market efficiency ratio · white outline = now
-            </div>
-            <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
-          </div>
-
-          {/* Day-of-week chart */}
-          <div>
-            <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
-              Day of week
-            </div>
-            <div className="flex gap-2 items-end" style={{ height: "52px" }}>
-              {data.daily.map((b) => (
-                <div key={b.dayIndex} className="flex-1 flex flex-col items-center gap-1">
-                  <div
-                    className={`w-full rounded-t transition-all ${bucketBarColor(b)}`}
-                    style={{ height: `${bucketBarHeight(b, 36)}px` }}
-                    title={
-                      b.sparse
-                        ? `${b.label}: ${b.count} samples (sparse)`
-                        : `${b.label}: ER ${b.avgEfficiencyRatio?.toFixed(2)} · ${b.trendingPct ?? "—"}% trending · accuracy ${b.accuracyPct ?? "—"}%`
-                    }
-                  />
-                  <span className="text-[9px] text-muted-foreground/60">{b.label}</span>
+      {open && (
+        <>
+          {query.isLoading && !data ? (
+            <Skeleton className="h-40 rounded-xl" />
+          ) : !data?.hasEnoughData ? (
+            /* ── Collecting data state ── */
+            <Card className="bg-card/50 px-4 py-3 space-y-3">
+              <div className="flex items-start gap-2">
+                <Clock className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+                <div className="text-[11px] leading-snug">
+                  <span className="text-amber-300 font-semibold">Collecting data </span>
+                  <span className="text-muted-foreground">
+                    — needs at least 50 recorded windows to identify patterns.{" "}
+                    {data ? `${data.totalSamples} recorded so far.` : ""}
+                  </span>
                 </div>
-              ))}
-            </div>
-          </div>
+              </div>
+              {data && data.totalSamples > 0 && (
+                <div className="opacity-40 pointer-events-none">
+                  <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
+                </div>
+              )}
+            </Card>
+          ) : (
+            /* ── Full panel ── */
+            <Card className="bg-card/50 px-4 py-4 space-y-4">
+              {/* Recommendation */}
+              <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2.5">
+                <Zap className="w-3.5 h-3.5 shrink-0 mt-0.5 text-emerald-400" />
+                <p className="text-[11px] text-emerald-100/90 leading-snug">{data.recommendation}</p>
+              </div>
 
-          {/* Legend */}
-          <div className="flex items-center gap-3 flex-wrap text-[9px] text-muted-foreground/60">
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />
-              Trending (ER≥0.55)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />
-              Drifting (0.25–0.55)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />
-              Choppy (&lt;0.25)
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />
-              Sparse (&lt;10 samples)
-            </span>
-          </div>
+              {/* 24-hour bar chart */}
+              <div>
+                <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
+                  Hour of day (ET) — bar height = avg market efficiency ratio · white outline = now
+                </div>
+                <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
+              </div>
 
-          <div className="text-[9px] text-muted-foreground/40">
-            Updated every 15 min · hover a bar for details · based on {data.totalSamples} recorded windows
-          </div>
-        </Card>
+              {/* Day-of-week chart */}
+              <div>
+                <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
+                  Day of week
+                </div>
+                <div className="flex gap-2 items-end" style={{ height: "52px" }}>
+                  {data.daily.map((b) => (
+                    <div key={b.dayIndex} className="flex-1 flex flex-col items-center gap-1">
+                      <div
+                        className={`w-full rounded-t transition-all ${bucketBarColor(b)}`}
+                        style={{ height: `${bucketBarHeight(b, 36)}px` }}
+                        title={
+                          b.sparse
+                            ? `${b.label}: ${b.count} samples (sparse)`
+                            : `${b.label}: ER ${b.avgEfficiencyRatio?.toFixed(2)} · ${b.trendingPct ?? "—"}% trending · accuracy ${b.accuracyPct ?? "—"}%`
+                        }
+                      />
+                      <span className="text-[9px] text-muted-foreground/60">{b.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Legend */}
+              <div className="flex items-center gap-3 flex-wrap text-[9px] text-muted-foreground/60">
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />
+                  Trending (ER≥0.55)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />
+                  Drifting (0.25–0.55)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />
+                  Choppy (&lt;0.25)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />
+                  Sparse (&lt;10 samples)
+                </span>
+              </div>
+
+              <div className="text-[9px] text-muted-foreground/40 flex items-center gap-2 flex-wrap">
+                <span>{updatedLabel ?? "Updated every 15 min"}</span>
+                <span>·</span>
+                <span>hover a bar for details</span>
+                <span>·</span>
+                <span>{data.totalSamples} recorded windows</span>
+              </div>
+            </Card>
+          )}
+        </>
       )}
     </div>
   );

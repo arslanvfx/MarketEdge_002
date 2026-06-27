@@ -852,9 +852,19 @@ export interface TradingWindowBucket {
   sparse: boolean;
 }
 
+export interface RecommendedWindow {
+  hour: number;
+  label: string;
+  score: number;
+  avgEfficiencyRatio: number;
+  accuracyPct: number | null;
+  rank: "best" | "worst";
+}
+
 export interface TradingWindowsData {
   hourly: Array<TradingWindowBucket & { hour: number; label: string }>;
   daily: Array<TradingWindowBucket & { dayIndex: number; label: string }>;
+  recommendedWindows: RecommendedWindow[];
   totalSamples: number;
   lastUpdatedAt: string;
   recommendation: string;
@@ -954,6 +964,7 @@ export function getTradingWindows(filterSymbol?: string): TradingWindowsData {
     .sort((a, b) => b.score - a.score);
 
   let recommendation: string;
+  let recommendedWindows: RecommendedWindow[] = [];
   if (totalSamples < TW_MIN_TOTAL) {
     recommendation =
       `Collecting data — needs at least ${TW_MIN_TOTAL} windows to identify patterns. ` +
@@ -969,11 +980,30 @@ export function getTradingWindows(filterSymbol?: string): TradingWindowsData {
     recommendation =
       `Best windows: ${topStr} ET (avg efficiency ${avgTopER.toFixed(2)}). ` +
       `Tend to avoid: ${worstStr} ET — markets are choppier during those hours.`;
+    recommendedWindows = [
+      ...top.map((h) => ({
+        hour: h.hour,
+        label: h.label,
+        score: Math.round(h.score * 1000) / 1000,
+        avgEfficiencyRatio: Math.round(h.er * 1000) / 1000,
+        accuracyPct: hourly[h.hour].accuracyPct,
+        rank: "best" as const,
+      })),
+      ...worst.map((h) => ({
+        hour: h.hour,
+        label: h.label,
+        score: Math.round(h.score * 1000) / 1000,
+        avgEfficiencyRatio: Math.round(h.er * 1000) / 1000,
+        accuracyPct: hourly[h.hour].accuracyPct,
+        rank: "worst" as const,
+      })),
+    ];
   }
 
   return {
     hourly,
     daily,
+    recommendedWindows,
     totalSamples,
     lastUpdatedAt: new Date().toISOString(),
     recommendation,
