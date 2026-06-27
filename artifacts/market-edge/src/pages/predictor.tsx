@@ -2290,24 +2290,6 @@ function CoinDetail({
     }
   }, [trackerSnapshot, kalshiTarget, statHead]);
 
-  // ── Auto-refresh Live Pulse on model flip ───────────────────────────────
-  // When the stat model or Claude AI changes direction (ABOVE ↔ BELOW), the
-  // Live Pulse context is stale — force a fresh call immediately (?force=1
-  // bypasses the server-side 2-min TTL).
-  const prevStatAboveRef = useRef<boolean | null>(null);
-  const prevClaudeAboveRef = useRef<boolean | null>(null);
-  useEffect(() => {
-    if (kalshiTarget === null) return;
-    const statAboveNow = statHead ? statHead.predictedPrice >= kalshiTarget : null;
-    const statFlipped  = prevStatAboveRef.current  !== null && statAboveNow !== null  && prevStatAboveRef.current  !== statAboveNow;
-    const claudeFlipped= prevClaudeAboveRef.current !== null && claudeAbove !== null   && prevClaudeAboveRef.current !== claudeAbove;
-    if (statFlipped || claudeFlipped) {
-      onRefreshLiveDirection(); // liveForceRef already set in parent; will use ?force=1
-    }
-    if (statAboveNow !== null) prevStatAboveRef.current  = statAboveNow;
-    if (claudeAbove  !== null) prevClaudeAboveRef.current = claudeAbove;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statHead?.predictedPrice, claudeAbove, kalshiTarget]);
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
       ? computeCombinedCall({
@@ -2333,14 +2315,26 @@ function CoinDetail({
         })
       : null;
 
+  // Auto-Pilot direction: uses whichever model has the proven accuracy edge.
+  // When active (Claude wins historically) → uses Claude's direction.
+  // When inactive (stat wins or insufficient data) → uses stat direction.
+  // The confidence weight is the winning model's historical accuracy %.
+  const autoPilotAbove: boolean | null = (() => {
+    if (!autoPilotDecision || kalshiTarget === null) return null;
+    if (autoPilotDecision.active) {
+      return claudeAbove ?? (trackerSnapshot?.aboveKalshi ?? null);
+    }
+    return statHead ? statHead.predictedPrice >= kalshiTarget : null;
+  })();
+  const autoPilotConf: number | null = autoPilotDecision
+    ? (autoPilotDecision.active
+        ? (autoPilotDecision.claudeAccuracyPct ?? 55)
+        : (autoPilotDecision.statAccuracyPct ?? 55))
+    : null;
+
   // Multi-signal consensus — weighted vote across stat model, Claude AI (window
-  // open or tracker snapshot), and Live Pulse. All three signals always included
-  // regardless of freshness so the user sees everything; stale signals are
-  // visually dimmed in the panel but still counted for the consensus direction.
-  interface ConsensusSignal { name: string; above: boolean; conf: number; ageMin?: number }
-  const liveAgeMs  = liveDirection ? Date.now() - new Date(liveDirection.at).getTime() : Infinity;
-  const liveAgeMin = Math.round(liveAgeMs / 60_000);
-  const liveFresh  = liveAgeMs < 2 * 60_000;
+  // open or tracker snapshot), and Auto-Pilot (self-learning accuracy-weighted).
+  interface ConsensusSignal { name: string; above: boolean; conf: number; modelUsed?: "claude" | "stat" }
   const consensusSignals: ConsensusSignal[] = (() => {
     if (kalshiTarget === null) return [];
     const sigs: ConsensusSignal[] = [];
@@ -2352,8 +2346,13 @@ function CoinDetail({
       ? { name: "Claude AI", above: trackerSnapshot.aboveKalshi, conf: trackerSnapshot.confidence }
       : null;
     if (claudeSig) sigs.push(claudeSig);
-    if (liveDirection?.aboveKalshi != null)
-      sigs.push({ name: "Live Pulse", above: liveDirection.aboveKalshi, conf: liveDirection.confidence, ageMin: liveAgeMin });
+    if (autoPilotAbove !== null && autoPilotConf !== null)
+      sigs.push({
+        name: "Auto-Pilot",
+        above: autoPilotAbove,
+        conf: autoPilotConf,
+        modelUsed: autoPilotDecision?.active ? "claude" : "stat",
+      });
     return sigs;
   })();
   const consAboveW   = consensusSignals.filter(s => s.above).reduce((sum, s) => sum + s.conf, 0);
@@ -2777,14 +2776,6 @@ function CoinDetail({
                   </span>
                 )}
               </div>
-              <button
-                onClick={onRefreshLiveDirection}
-                disabled={liveDirectionLoading}
-                className="text-muted-foreground/50 hover:text-muted-foreground transition-colors disabled:opacity-40"
-                title="Re-check Live Pulse now"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${liveDirectionLoading ? "animate-spin" : ""}`} />
-              </button>
             </div>
 
             {/* Consensus verdict */}
@@ -2860,66 +2851,88 @@ function CoinDetail({
                         )}
                       </div>
 
-                      {/* Live Pulse — directional only, no specific price */}
-                      <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
-                          Live Pulse
+                      {/* Auto-Pilot — self-learning decision maker */}
+                      <div className="rounded-lg bg-violet-500/5 border border-violet-500/25 px-3 py-2.5 text-center">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-violet-400/80 mb-1">
+                          Auto-Pilot
                         </div>
-                        {liveDirection?.aboveKalshi != null ? (
-                          <>
-                            <div className={`text-xl font-black leading-none mb-1 ${liveDirection.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
-                              {liveDirection.aboveKalshi ? "↑ ABOVE" : "↓ BELOW"}
-                            </div>
-                            <div className="text-[11px] text-muted-foreground/70">
-                              {liveDirection.confidence}% conf · {liveAgeMin === 0 ? "now" : `${liveAgeMin}m ago`}
-                            </div>
-                          </>
-                        ) : liveDirectionLoading ? (
-                          <div className="flex items-center justify-center gap-1 text-[12px] text-muted-foreground/60 mt-1">
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                          </div>
-                        ) : (
-                          <div className="text-[12px] text-muted-foreground/60 italic">—</div>
+                        {autoPilotDecision && kalshiTarget !== null ? (() => {
+                          const apPrice = autoPilotDecision.active
+                            ? (claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null)
+                            : (statHead?.predictedPrice ?? null);
+                          const apPct   = apPrice != null ? ((apPrice - kalshiTarget) / kalshiTarget * 100) : null;
+                          const modelLabel = autoPilotDecision.active ? "Claude" : "Stat";
+                          const dp = apPrice != null ? (apPrice >= 100 ? 2 : apPrice >= 1 ? 4 : 6) : 2;
+                          const winnerAcc = autoPilotDecision.active
+                            ? autoPilotDecision.claudeAccuracyPct
+                            : autoPilotDecision.statAccuracyPct;
+                          const loserAcc  = autoPilotDecision.active
+                            ? autoPilotDecision.statAccuracyPct
+                            : autoPilotDecision.claudeAccuracyPct;
+                          return (
+                            <>
+                              {apPrice != null ? (
+                                <>
+                                  <div className="text-xl font-black text-foreground leading-none mb-1">
+                                    ${apPrice.toFixed(dp)}
+                                  </div>
+                                  {apPct != null && (
+                                    <div className={`text-[11px] font-semibold ${apPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                      {apPct >= 0 ? "+" : ""}{apPct.toFixed(3)}% vs strike
+                                    </div>
+                                  )}
+                                </>
+                              ) : autoPilotAbove !== null ? (
+                                <div className={`text-xl font-black leading-none mb-1 ${autoPilotAbove ? "text-emerald-400" : "text-red-400"}`}>
+                                  {autoPilotAbove ? "↑ ABOVE" : "↓ BELOW"}
+                                </div>
+                              ) : null}
+                              <div className="mt-1.5 text-[10px] text-violet-300/70 font-medium">
+                                via {modelLabel}
+                                {winnerAcc != null && loserAcc != null
+                                  ? ` · ${winnerAcc.toFixed(0)}% vs ${loserAcc.toFixed(0)}%`
+                                  : winnerAcc != null
+                                  ? ` · ${winnerAcc.toFixed(0)}% acc`
+                                  : ""}
+                              </div>
+                            </>
+                          );
+                        })() : (
+                          <div className="text-[12px] text-muted-foreground/60 italic mt-2">collecting data…</div>
                         )}
                       </div>
                     </div>
                   );
                 })()}
 
-                {/* Signal breakdown */}
+                {/* Signal breakdown chips */}
                 <div className="flex items-center gap-3 flex-wrap">
                   {consensusSignals.map((sig) => {
-                    const isLive = sig.name === "Live Pulse";
-                    const stale = isLive && !liveFresh;
+                    const isAP = sig.name === "Auto-Pilot";
                     return (
                       <div
                         key={sig.name}
                         className={`flex items-center gap-1 text-[11px] font-semibold ${
-                          sig.above ? "text-emerald-400" : "text-red-400"
-                        } ${stale ? "opacity-50" : ""}`}
-                        title={isLive
-                          ? `Live Pulse · ${sig.ageMin === 0 ? "just now" : `${sig.ageMin}m ago`}${stale ? " · stale" : ""}`
+                          isAP
+                            ? sig.above ? "text-emerald-400" : "text-red-400"
+                            : sig.above ? "text-emerald-400" : "text-red-400"
+                        }`}
+                        title={isAP
+                          ? `Auto-Pilot · via ${sig.modelUsed === "claude" ? "Claude" : "Stat"} · ${sig.conf.toFixed(0)}% historical acc`
                           : sig.name === "Stat"
                           ? `Stat model · ${sig.conf}% conf`
                           : `Claude AI · ${sig.conf}% conf`}
                       >
                         {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                        <span>{sig.name}</span>
-                        {isLive && (
-                          <span className={`font-normal ${stale ? "text-muted-foreground/50" : "text-muted-foreground/70"}`}>
-                            {sig.ageMin === 0 ? "now" : `${sig.ageMin}m`}
+                        <span className={isAP ? "text-violet-300" : ""}>{sig.name}</span>
+                        {isAP && sig.modelUsed && (
+                          <span className="font-normal text-violet-300/60 text-[10px]">
+                            ({sig.modelUsed === "claude" ? "Claude" : "Stat"})
                           </span>
                         )}
-                        {stale && <span className="text-[9px] text-amber-400/70">stale</span>}
                       </div>
                     );
                   })}
-                  {liveDirectionLoading && !consensusSignals.find(s => s.name === "Live Pulse") && (
-                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      <span>Live pulse…</span>
-                    </div>
-                  )}
                 </div>
 
                 {/* ── At-open snapshot row ────────────────────────────────
