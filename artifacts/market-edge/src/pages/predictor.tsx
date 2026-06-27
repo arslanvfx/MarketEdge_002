@@ -1694,11 +1694,20 @@ export default function Predictor() {
   });
   const trackerSnapshot = trackerSnapshotQuery.data?.snapshot ?? null;
 
-  // Live direction — lightweight mid-window Claude re-check, cached 5 min server-side.
+  // Live direction — lightweight mid-window Claude re-check.
+  // liveForceRef: when true the next fetch bypasses the server-side 2-min cache (?force=1).
+  // Set to true before any manual refresh or auto-trigger (model flip).
+  const liveForceRef = useRef(false);
   const liveDirectionQuery = useQuery({
     queryKey: ["live-direction", selected],
-    queryFn: () => fetchJson<LiveDirectionResult>(`/crypto/live-direction/${selected}`),
-    refetchInterval: 30_000, // poll every 30 s — server caches 5 min, but auto-trigger may refresh sooner
+    queryFn: () => {
+      const force = liveForceRef.current;
+      liveForceRef.current = false;
+      return fetchJson<LiveDirectionResult>(
+        `/crypto/live-direction/${selected}${force ? "?force=1" : ""}`
+      );
+    },
+    refetchInterval: 30_000, // poll every 30 s; cache handles dedup on the server
     enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected),
   });
   const liveDirection = liveDirectionQuery.data ?? null;
@@ -2082,7 +2091,10 @@ export default function Predictor() {
             trackerSnapshot={trackerSnapshot}
             liveDirection={liveDirection}
             liveDirectionLoading={liveDirectionQuery.isFetching}
-            onRefreshLiveDirection={() => void liveDirectionQuery.refetch()}
+            onRefreshLiveDirection={() => {
+              liveForceRef.current = true;
+              void liveDirectionQuery.refetch();
+            }}
             isTrainingCoin={trainingCoinsSet.has(selected)}
           />
         ) : (
@@ -2263,6 +2275,39 @@ function CoinDetail({
   // baseline and Claude, with explicit no-bet abstention. Only when an AI run
   // with weights is present; otherwise the banner falls back to Claude's call.
   const statHead = coin.predictions[0] ?? null;
+
+  // ── Opening-stat snapshot ────────────────────────────────────────────────
+  // Capture the stat model's ABOVE/BELOW call at window open (when the tracker
+  // fires and sets a new trackerSnapshot.snappedAt). This lets us show "At open"
+  // vs "Live now" so the user can see if the stat model has flipped mid-window.
+  const prevSnappedAtRef = useRef<string | null>(null);
+  const [openingStatAbove, setOpeningStatAbove] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!trackerSnapshot || kalshiTarget === null || !statHead) return;
+    if (trackerSnapshot.snappedAt !== prevSnappedAtRef.current) {
+      prevSnappedAtRef.current = trackerSnapshot.snappedAt;
+      setOpeningStatAbove(statHead.predictedPrice >= kalshiTarget);
+    }
+  }, [trackerSnapshot, kalshiTarget, statHead]);
+
+  // ── Auto-refresh Live Pulse on model flip ───────────────────────────────
+  // When the stat model or Claude AI changes direction (ABOVE ↔ BELOW), the
+  // Live Pulse context is stale — force a fresh call immediately (?force=1
+  // bypasses the server-side 2-min TTL).
+  const prevStatAboveRef = useRef<boolean | null>(null);
+  const prevClaudeAboveRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (kalshiTarget === null) return;
+    const statAboveNow = statHead ? statHead.predictedPrice >= kalshiTarget : null;
+    const statFlipped  = prevStatAboveRef.current  !== null && statAboveNow !== null  && prevStatAboveRef.current  !== statAboveNow;
+    const claudeFlipped= prevClaudeAboveRef.current !== null && claudeAbove !== null   && prevClaudeAboveRef.current !== claudeAbove;
+    if (statFlipped || claudeFlipped) {
+      onRefreshLiveDirection(); // liveForceRef already set in parent; will use ?force=1
+    }
+    if (statAboveNow !== null) prevStatAboveRef.current  = statAboveNow;
+    if (claudeAbove  !== null) prevClaudeAboveRef.current = claudeAbove;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statHead?.predictedPrice, claudeAbove, kalshiTarget]);
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
       ? computeCombinedCall({
@@ -2787,17 +2832,62 @@ function CoinDetail({
                   )}
                 </div>
 
-                {/* Window-open anchor — show the Kalshi strike (RTI at open),
-                    NOT the tracker's predicted close price which will differ. */}
-                {trackerSnapshot && kalshiTarget !== null && (
-                  <div className="mt-2 text-[10px] text-muted-foreground/50 flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    Strike set at{" "}
-                    {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
-                      hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
-                    })} ET · ${kalshiTarget >= 100 ? kalshiTarget.toFixed(2) : kalshiTarget.toFixed(4)}
-                  </div>
-                )}
+                {/* ── At-open snapshot row ────────────────────────────────
+                    Shows what stat + Claude predicted when the window opened.
+                    If either has flipped since open, the chip shows "→ flipped"
+                    so the user can see intra-window direction changes. */}
+                {trackerSnapshot && kalshiTarget !== null &&
+                  (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null) && (() => {
+                  const statAboveNow    = statHead ? statHead.predictedPrice >= kalshiTarget : null;
+                  const statFlippedMid  = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
+                  const claudeAboveOpen = trackerSnapshot.aboveKalshi;
+                  const claudeFlippedMid= claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
+
+                  return (
+                    <div className="mt-3 pt-2.5 border-t border-border/20">
+                      {/* Row label */}
+                      <div className="flex items-center gap-1 text-[10px] text-muted-foreground/40 mb-1.5">
+                        <Clock className="w-3 h-3" />
+                        At open ·{" "}
+                        {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
+                          hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
+                        })} ET · ${kalshiTarget >= 100 ? kalshiTarget.toFixed(2) : kalshiTarget.toFixed(4)}
+                      </div>
+                      {/* Per-signal opening chips */}
+                      <div className="flex items-center gap-3 flex-wrap">
+                        {openingStatAbove !== null && (
+                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
+                            openingStatAbove ? "text-emerald-400/55" : "text-red-400/55"
+                          }`}>
+                            {openingStatAbove ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                            <span>Stat</span>
+                            {statFlippedMid && (
+                              <span className="ml-0.5 text-[9px] font-semibold text-amber-400/90 bg-amber-500/10 rounded px-1">
+                                → {statAboveNow ? "ABOVE" : "BELOW"} now
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {claudeAboveOpen !== null && (
+                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
+                            claudeAboveOpen ? "text-emerald-400/55" : "text-red-400/55"
+                          }`}>
+                            {claudeAboveOpen ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                            <span>Claude AI</span>
+                            {claudeFlippedMid && (
+                              <span className="ml-0.5 text-[9px] font-semibold text-amber-400/90 bg-amber-500/10 rounded px-1">
+                                → {claudeAbove ? "ABOVE" : "BELOW"} now
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {!statFlippedMid && !claudeFlippedMid && (
+                          <span className="text-[10px] text-muted-foreground/30 italic">no change since open</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </>
             ) : (
               <div className="text-[11px] text-muted-foreground/50">
