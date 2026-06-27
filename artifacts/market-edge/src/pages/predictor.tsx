@@ -2814,7 +2814,7 @@ function CoinDetail({
                     <div className="grid grid-cols-3 gap-3 mb-3">
                       {/* Stat model */}
                       <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
                           Stat Model
                         </div>
                         {statHead ? (
@@ -2825,20 +2825,20 @@ function CoinDetail({
                             {kalshiTarget && (() => {
                               const pct = pctVsStrike(statHead.predictedPrice)!;
                               return (
-                                <div className={`text-[10px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                   {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
                                 </div>
                               );
                             })()}
                           </>
                         ) : (
-                          <div className="text-[11px] text-muted-foreground/40 italic">—</div>
+                          <div className="text-[12px] text-muted-foreground/60 italic">—</div>
                         )}
                       </div>
 
                       {/* Claude AI */}
                       <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
                           {effectiveClaudeLabel ?? "Claude AI"}
                         </div>
                         {effectiveClaudePrice != null ? (
@@ -2849,20 +2849,20 @@ function CoinDetail({
                             {kalshiTarget && (() => {
                               const pct = pctVsStrike(effectiveClaudePrice)!;
                               return (
-                                <div className={`text-[10px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                   {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
                                 </div>
                               );
                             })()}
                           </>
                         ) : (
-                          <div className="text-[11px] text-muted-foreground/40 italic">run Enhance</div>
+                          <div className="text-[12px] text-muted-foreground/60 italic">run Enhance</div>
                         )}
                       </div>
 
                       {/* Live Pulse — directional only, no specific price */}
                       <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
                           Live Pulse
                         </div>
                         {liveDirection?.aboveKalshi != null ? (
@@ -2870,16 +2870,16 @@ function CoinDetail({
                             <div className={`text-xl font-black leading-none mb-1 ${liveDirection.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
                               {liveDirection.aboveKalshi ? "↑ ABOVE" : "↓ BELOW"}
                             </div>
-                            <div className="text-[10px] text-muted-foreground/50">
+                            <div className="text-[11px] text-muted-foreground/70">
                               {liveDirection.confidence}% conf · {liveAgeMin === 0 ? "now" : `${liveAgeMin}m ago`}
                             </div>
                           </>
                         ) : liveDirectionLoading ? (
-                          <div className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground/40 mt-1">
+                          <div className="flex items-center justify-center gap-1 text-[12px] text-muted-foreground/60 mt-1">
                             <Loader2 className="w-3 h-3 animate-spin" />
                           </div>
                         ) : (
-                          <div className="text-[11px] text-muted-foreground/40 italic">—</div>
+                          <div className="text-[12px] text-muted-foreground/60 italic">—</div>
                         )}
                       </div>
                     </div>
@@ -2936,7 +2936,7 @@ function CoinDetail({
                   return (
                     <div className="mt-3 pt-2.5 border-t border-border/20">
                       {/* Row label */}
-                      <div className="flex items-center gap-1 text-[10px] text-muted-foreground/40 mb-1.5">
+                      <div className="flex items-center gap-1 text-[11px] text-muted-foreground/60 mb-1.5">
                         <Clock className="w-3 h-3" />
                         At open ·{" "}
                         {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
@@ -2947,7 +2947,7 @@ function CoinDetail({
                       <div className="flex items-center gap-3 flex-wrap">
                         {openingStatAbove !== null && (
                           <div className={`flex items-center gap-1 text-[11px] font-semibold ${
-                            openingStatAbove ? "text-emerald-400/55" : "text-red-400/55"
+                            openingStatAbove ? "text-emerald-400/70" : "text-red-400/70"
                           }`}>
                             {openingStatAbove ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
                             <span>Stat</span>
@@ -2960,7 +2960,7 @@ function CoinDetail({
                         )}
                         {claudeAboveOpen !== null && (
                           <div className={`flex items-center gap-1 text-[11px] font-semibold ${
-                            claudeAboveOpen ? "text-emerald-400/55" : "text-red-400/55"
+                            claudeAboveOpen ? "text-emerald-400/70" : "text-red-400/70"
                           }`}>
                             {claudeAboveOpen ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
                             <span>Claude AI</span>
@@ -2972,7 +2972,7 @@ function CoinDetail({
                           </div>
                         )}
                         {!statFlippedMid && !claudeFlippedMid && (
-                          <span className="text-[10px] text-muted-foreground/30 italic">no change since open</span>
+                          <span className="text-[11px] text-muted-foreground/55 italic">no change since open</span>
                         )}
                       </div>
                     </div>
