@@ -1426,11 +1426,17 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                 <Minus className="w-3 h-3" /> No bet
               </span>
             ) : rec.correct ? (
-              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-400 bg-emerald-400/10 border border-emerald-500/25 rounded-full px-2.5 py-0.5">
+              <span
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-400 bg-emerald-400/10 border border-emerald-500/25 rounded-full px-2.5 py-0.5"
+                title="Model accuracy: our above/below call matched the Coinbase price captured at window close. Kalshi settles on its own data source at the exact :00/:15/:30/:45 mark — your bet outcome may differ slightly."
+              >
                 <CheckCircle2 className="w-3 h-3" /> Hit
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-red-400 bg-red-400/10 border border-red-500/25 rounded-full px-2.5 py-0.5">
+              <span
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-red-400 bg-red-400/10 border border-red-500/25 rounded-full px-2.5 py-0.5"
+                title="Model accuracy: our above/below call did not match the Coinbase price captured at window close. Kalshi settles on its own data source at the exact :00/:15/:30/:45 mark — your bet outcome may differ slightly."
+              >
                 <XCircle className="w-3 h-3" /> Miss
               </span>
             );

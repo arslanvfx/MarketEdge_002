@@ -1848,33 +1848,55 @@ export function getKalshiWindowContext(symbol: string): { priceAtOpen: number | 
   };
 }
 
-export async function fetchKalshiTarget(symbol: string): Promise<number | null> {
-  const series = KALSHI_SERIES[symbol.toUpperCase()];
+export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Promise<number | null> {
+  const sym = symbol.toUpperCase();
+  const series = KALSHI_SERIES[sym];
   if (!series) return null;
-  const hit = kalshiTargetCache.get(symbol);
+  const hit = kalshiTargetCache.get(sym);
   if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) return hit.value;
   try {
     const resp = await fetch(
-      `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=5`,
+      `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=10`,
       { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
     );
     if (!resp.ok) {
-      kalshiTargetCache.set(symbol, { value: null, at: Date.now() });
+      kalshiTargetCache.set(sym, { value: null, at: Date.now() });
       return null;
     }
-    const body = (await resp.json()) as { markets?: { floor_strike?: number; ticker?: string }[] };
-    for (const m of body.markets ?? []) {
-      if (typeof m.floor_strike === "number" && m.floor_strike > 0) {
-        kalshiTargetCache.set(symbol, { value: m.floor_strike, ticker: m.ticker, at: Date.now() });
-        // Register the window ticker immediately so minutesElapsed is accurate from first sight.
-        // priceAtOpen is filled in lazily by updateKalshiWindowPrice (first caller with coin price).
-        if (m.ticker && !kalshiWindowStore.has(m.ticker)) {
-          kalshiWindowStore.set(m.ticker, { priceAtOpen: null, openedAt: Date.now() });
-        }
-        return m.floor_strike;
+    const body = (await resp.json()) as {
+      markets?: { floor_strike?: number; ticker?: string; close_time?: string }[];
+    };
+
+    // Keep only markets with a valid strike.
+    const markets = (body.markets ?? []).filter(
+      (m) => typeof m.floor_strike === "number" && (m.floor_strike as number) > 0,
+    );
+
+    // When a specific window boundary is requested, prefer the market whose
+    // close_time is closest to that boundary.  This prevents picking the NEXT
+    // window's market when Kalshi opens it before the current one closes.
+    let selected = markets[0];
+    if (targetTime && markets.length > 1) {
+      const targetMs = targetTime.getTime();
+      let bestDiff = Infinity;
+      for (const m of markets) {
+        if (!m.close_time) continue;
+        const diff = Math.abs(new Date(m.close_time).getTime() - targetMs);
+        if (diff < bestDiff) { bestDiff = diff; selected = m; }
       }
     }
-    kalshiTargetCache.set(symbol, { value: null, at: Date.now() });
+
+    if (selected) {
+      kalshiTargetCache.set(sym, { value: selected.floor_strike!, ticker: selected.ticker, at: Date.now() });
+      // Register the window ticker immediately so minutesElapsed is accurate from first sight.
+      // priceAtOpen is filled in lazily by updateKalshiWindowPrice (first caller with coin price).
+      if (selected.ticker && !kalshiWindowStore.has(selected.ticker)) {
+        kalshiWindowStore.set(selected.ticker, { priceAtOpen: null, openedAt: Date.now() });
+      }
+      return selected.floor_strike!;
+    }
+
+    kalshiTargetCache.set(sym, { value: null, at: Date.now() });
     return null;
   } catch {
     return null;
@@ -2499,7 +2521,7 @@ export function startPredictionTracker(): void {
               getTicker(coin.product).catch(() => 0),
               get5mCandles(coin.product).catch(() => [] as Candle[]),
               getOrderBook(coin.product).catch(() => undefined),
-              fetchKalshiTarget(sym).catch(() => null),
+              fetchKalshiTarget(sym, nextBoundary).catch(() => null),
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice, orderBook);
