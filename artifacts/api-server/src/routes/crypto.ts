@@ -20,6 +20,8 @@ import {
   setSelfConsistencySamples,
   setAutoPilot,
   isAiGloballyEnabled,
+  getTrackerWindowCall,
+  fetchLiveDirection,
 } from "../lib/crypto";
 import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
 
@@ -360,6 +362,39 @@ router.get("/crypto/kalshi-btc-call", async (req, res) => {
     const result = await fetchKalshiBtcCall(rawTarget, eventTicker);
     if (!result) {
       res.status(503).json({ error: "Claude call failed" });
+      return;
+    }
+    res.json(result);
+  } catch {
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// Claude's opening call for the current window (from the tracker snapshot).
+// Free — reads from in-memory historyStore, no new API call.
+router.get("/crypto/tracker-snapshot/:symbol", (req, res) => {
+  const symbol = (req.params.symbol ?? "").toUpperCase();
+  const snap = getTrackerWindowCall(symbol);
+  if (!snap) {
+    res.json({ snapshot: null });
+    return;
+  }
+  res.json({ snapshot: snap });
+});
+
+// Lightweight mid-window Claude re-check — fast binary ABOVE/BELOW call.
+// Cached 5 min per coin. Pass ?force=1 to bypass the cache.
+router.get("/crypto/live-direction/:symbol", async (req, res) => {
+  const symbol = (req.params.symbol ?? "").toUpperCase();
+  const force = req.query.force === "1";
+  if (!CRYPTO_COINS.find((c) => c.symbol === symbol)) {
+    res.status(404).json({ error: "Unknown symbol" });
+    return;
+  }
+  try {
+    const result = await fetchLiveDirection(symbol, force);
+    if (!result) {
+      res.status(503).json({ error: "Direction check unavailable" });
       return;
     }
     res.json(result);

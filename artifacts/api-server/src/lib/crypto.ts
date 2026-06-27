@@ -1573,6 +1573,12 @@ const QUARTER_MS = 15 * 60 * 1000;
 // Up to 3 records per window (stat + claude + ensemble) when Claude is enabled,
 // so keep ~30 windows × 3 = 90 records per coin.
 const MAX_HISTORY = 90;
+
+// These coins ALWAYS run Claude in the background tracker regardless of UI mode
+// or auto-pilot state.  The data collected here is what trains the self-learning
+// loop — without it the auto-pilot and ensemble have nothing to learn from.
+// Kept to 5 to bound API cost while building a meaningful dataset quickly.
+const TRAINING_COINS = new Set(["BTC", "ETH", "XRP", "HYPE", "BNB"]);
 // Fallback accuracy threshold used when no Kalshi target is available.
 // For coins other than BTC (no KXBTC15M market), a prediction is a "hit"
 // only if direction is correct AND price is within this % of actual.
@@ -2112,6 +2118,7 @@ export function runAutoPilot(): void {
 export function getAiSettings(): {
   mode: "stat" | "claude";
   claudeCoins: string[];
+  trainingCoins: string[];
   selfConsistencySamples: number;
   autoPilot: {
     enabled: boolean;
@@ -2122,6 +2129,7 @@ export function getAiSettings(): {
   return {
     mode: globalAiMode,
     claudeCoins: [...claudeEnabledCoins],
+    trainingCoins: [...TRAINING_COINS],
     selfConsistencySamples,
     autoPilot: {
       enabled: autoPilotEnabled,
@@ -2176,8 +2184,12 @@ export function setCoinClaudeEnabled(symbol: string, enabled: boolean): void {
   }
 }
 
-// Claude runs for a coin if the user manually enabled it OR auto-pilot chose it.
+// Claude runs for a coin if:
+//  (a) the user manually enabled it,
+//  (b) auto-pilot chose it, OR
+//  (c) it is a training coin — always-on so the self-learning loop accumulates data.
 function isCoinClaudeEnabled(symbol: string): boolean {
+  if (TRAINING_COINS.has(symbol)) return true;
   return claudeEnabledFor({
     manualEnabled: globalAiMode === "claude" && claudeEnabledCoins.has(symbol),
     autoPilotEnabled,
@@ -2618,4 +2630,139 @@ export async function fetchCryptoPrices(): Promise<{
     generatedAt: now.toISOString(),
     prices: prices.filter((p): p is CoinPrice => p !== null),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Tracker window snapshot — Claude's opening call for the current 15-min window
+// ---------------------------------------------------------------------------
+
+export interface TrackerWindowCall {
+  direction: "up" | "down" | "flat";
+  aboveKalshi: boolean | null;
+  predictedPrice: number;
+  confidence: number;
+  snappedAt: string;
+}
+
+// Returns the tracker's Claude record for the CURRENT window, if one has been
+// snapped already (i.e., within the first 4 minutes of the window).  Callers
+// use this to display the "what did Claude say at window-open?" signal without
+// triggering a new API call.
+export function getTrackerWindowCall(symbol: string): TrackerWindowCall | null {
+  const nowMs = Date.now();
+  const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
+  const targetISO = nextBoundary.toISOString();
+  const records = historyStore.get(symbol.toUpperCase()) ?? [];
+  const rec = records.find((r) => r.targetTime === targetISO && r.source === "claude");
+  if (!rec) return null;
+  const predPrice = Number(rec.predictedPrice);
+  const aboveKalshi =
+    rec.kalshiTarget != null ? predPrice >= Number(rec.kalshiTarget) : null;
+  return {
+    direction: rec.predictedDirection as "up" | "down" | "flat",
+    aboveKalshi,
+    predictedPrice: predPrice,
+    confidence: rec.confidence,
+    snappedAt: rec.snappedAt,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Live direction — lightweight mid-window Claude re-check (cached 5 min)
+// ---------------------------------------------------------------------------
+
+export interface LiveDirectionResult {
+  aboveKalshi: boolean | null;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  at: string;
+  cached: boolean;
+}
+
+const liveDirectionCache = new Map<string, { result: LiveDirectionResult; at: number }>();
+const LIVE_DIR_TTL = 5 * 60_000; // 5 minutes
+
+// Cheap, fast Claude call — no extended thinking, minimal context.  Just enough
+// to answer the binary "ABOVE or BELOW the Kalshi strike at window close?" so
+// the user can see if Claude's opinion has shifted during the window.
+export async function fetchLiveDirection(symbol: string, force = false): Promise<LiveDirectionResult | null> {
+  const nowMs = Date.now();
+  const entry = liveDirectionCache.get(symbol.toUpperCase());
+  if (!force && entry && nowMs - entry.at < LIVE_DIR_TTL) {
+    return { ...entry.result, cached: true };
+  }
+
+  const coin = CRYPTO_COINS.find((c) => c.symbol === symbol.toUpperCase());
+  if (!coin) return null;
+
+  try {
+    const [candles, stats, tickerPrice, kalshiTargetVal] = await Promise.all([
+      getCandles(coin.product),
+      getStats(coin.product),
+      getTicker(coin.product).catch(() => 0),
+      KALSHI_SERIES[coin.symbol] ? fetchKalshiTarget(coin.symbol).catch(() => null) : Promise.resolve(null),
+    ]);
+
+    const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
+    const analysis = analyzeCoin(coin, candles, stats, new Date(), livePrice);
+    const price = livePrice ?? analysis.price;
+    const dp = price >= 100 ? 2 : price >= 1 ? 4 : 6;
+    const ind = analysis.indicators;
+
+    // Last 5 closes only — just enough for short-term momentum
+    const recent5 = candles
+      .slice(-5)
+      .map((c) => `$${c.c.toFixed(dp)}`)
+      .join(" → ");
+
+    let prompt: string;
+    if (kalshiTargetVal) {
+      const side = price >= kalshiTargetVal ? "ABOVE" : "BELOW";
+      const gapPct = (Math.abs(price - kalshiTargetVal) / kalshiTargetVal * 100).toFixed(3);
+      prompt = `${coin.symbol} is $${price.toFixed(dp)}, ${gapPct}% ${side} the Kalshi strike of $${kalshiTargetVal.toFixed(dp)}.
+RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bull" : "bear"} | trend ${ind.trend} | ER ${ind.efficiencyRatio.toFixed(2)}
+Recent closes: ${recent5}
+
+Will ${coin.symbol} close ABOVE or BELOW $${kalshiTargetVal.toFixed(dp)} at window close?
+JSON only: {"above":true,"confidence":70}`;
+    } else {
+      prompt = `${coin.symbol} at $${price.toFixed(dp)}.
+RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bull" : "bear"} | trend ${ind.trend}
+Recent closes: ${recent5}
+
+Will price be higher (up) or lower (down) in the next 15 min?
+JSON only: {"direction":"up","confidence":65}`;
+    }
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 40,
+      system:
+        "Return ONLY valid compact JSON. For Kalshi questions: {\"above\":true,\"confidence\":70}. For direction questions: {\"direction\":\"up\",\"confidence\":65}. No markdown, no prose.",
+      messages: [{ role: "user", content: prompt }],
+    } as Parameters<typeof anthropic.messages.create>[0]);
+
+    const raw = (response.content.filter((b) => b.type === "text") as Array<{ type: "text"; text: string }>)
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    const parsed = JSON.parse(raw) as { above?: boolean; direction?: string; confidence?: number };
+
+    const confidence = Math.min(90, Math.max(20, parsed.confidence ?? 60));
+    let aboveKalshi: boolean | null = null;
+    let direction: "up" | "down" | "flat" = "flat";
+
+    if (kalshiTargetVal) {
+      aboveKalshi = parsed.above ?? null;
+      direction = aboveKalshi === null ? "flat" : aboveKalshi ? "up" : "down";
+    } else {
+      direction = (["up", "down", "flat"].includes(parsed.direction ?? "") ? parsed.direction : "flat") as "up" | "down" | "flat";
+    }
+
+    const result: LiveDirectionResult = { aboveKalshi, direction, confidence, at: new Date().toISOString(), cached: false };
+    liveDirectionCache.set(symbol.toUpperCase(), { result, at: nowMs });
+    return result;
+  } catch {
+    return null;
+  }
 }

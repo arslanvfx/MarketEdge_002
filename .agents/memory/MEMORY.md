@@ -12,3 +12,4 @@
 - [Crypto backtest harness](crypto-backtest-harness.md) — offline replay scores live stat model via analyzeCoinAt; pin endTime for reproducible before/after compares; Claude not backtestable
 - [Ensemble & abstention](ensemble-abstention.md) — stat+Claude blend: dirs must be price-derived (not raw model string); server/client mirror; abstention quality semantics
 - [api-server unit tests](api-server-unit-tests.md) — node:test + native TS strip; test imports need .ts ext (allowImportingTsExtensions); extract pure logic out of db-importing modules; crypto.ts has pre-existing typecheck errors
+- [Claude Pulse two-signal UI](claude-pulse-signals.md) — opening call from getTrackerWindowCall (historyStore, free) + live re-check via fetchLiveDirection (cheap Claude, 5-min cache); both exposed as endpoints; AboveLabel must be module-level not inside IIFE

@@ -108,6 +108,7 @@ interface AutoPilotDecision {
 interface AiSettings {
   mode: "stat" | "claude";
   claudeCoins: string[];
+  trainingCoins: string[];
   selfConsistencySamples?: number;
   autoPilot: {
     enabled: boolean;
@@ -193,6 +194,22 @@ interface DriftAlert {
   claudeDirection: "up" | "down" | "flat";
   detectedAt: Date;
   windowTarget: string;
+}
+
+interface TrackerWindowCall {
+  direction: "up" | "down" | "flat";
+  aboveKalshi: boolean | null;
+  predictedPrice: number;
+  confidence: number;
+  snappedAt: string;
+}
+
+interface LiveDirectionResult {
+  aboveKalshi: boolean | null;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  at: string;
+  cached: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -658,12 +675,14 @@ function SelfLearningDashboard({
   analytics,
   autoPilot,
   autoPilotMap,
+  trainingCoins,
   loading,
   onToggleAutoPilot,
 }: {
   analytics: CoinAnalytics[];
   autoPilot: AiSettings["autoPilot"];
   autoPilotMap: Map<string, AutoPilotDecision>;
+  trainingCoins: Set<string>;
   loading: boolean;
   onToggleAutoPilot: (enabled: boolean) => void;
 }) {
@@ -808,9 +827,16 @@ function SelfLearningDashboard({
                     </div>
                   </div>
 
-                  {/* Auto-pilot status */}
+                  {/* Auto-pilot / training status */}
                   <div className="col-span-2 sm:col-span-1">
-                    {!autoPilot.enabled ? (
+                    {trainingCoins.has(a.symbol) ? (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30"
+                        title="Always running Claude to build its accuracy track record"
+                      >
+                        <Bot className="w-3 h-3" /> Training
+                      </span>
+                    ) : !autoPilot.enabled ? (
                       <span className="text-[10px] text-muted-foreground/50">Off</span>
                     ) : decision?.active ? (
                       <span
@@ -832,7 +858,7 @@ function SelfLearningDashboard({
                         <Minus className="w-3 h-3" /> Stat only
                       </span>
                     )}
-                    {autoPilot.enabled && decision?.reason && (
+                    {autoPilot.enabled && !trainingCoins.has(a.symbol) && decision?.reason && (
                       <div className="text-[9px] text-muted-foreground/70 mt-0.5 leading-tight line-clamp-2">
                         {decision.reason}
                       </div>
@@ -1211,9 +1237,11 @@ export default function Predictor() {
   const aiSettings: AiSettings = aiSettingsQuery.data ?? {
     mode: "stat",
     claudeCoins: [],
+    trainingCoins: ["BTC", "ETH", "XRP", "HYPE", "BNB"],
     autoPilot: { enabled: false, maxActive: 0, decisions: [] },
   };
   const claudeEnabledSet = useMemo(() => new Set(aiSettings.claudeCoins), [aiSettings.claudeCoins]);
+  const trainingCoinsSet = useMemo(() => new Set(aiSettings.trainingCoins ?? []), [aiSettings.trainingCoins]);
   const autoPilot = aiSettings.autoPilot;
   const autoPilotMap = useMemo(() => {
     const m = new Map<string, AutoPilotDecision>();
@@ -1284,6 +1312,25 @@ export default function Predictor() {
   const kalshiTarget = kalshiAvailableTop ? (ktd?.targetPrice ?? null) : null;
   const kalshiIsLive = ktd?.isLive === true;
   const kalshiEventTicker = ktd?.eventTicker;
+
+  // Tracker window snapshot — Claude's opening call for the current window.
+  // Free (in-memory lookup on the server), safe to poll every 30s.
+  const trackerSnapshotQuery = useQuery({
+    queryKey: ["tracker-snapshot", selected],
+    queryFn: () => fetchJson<{ snapshot: TrackerWindowCall | null }>(`/crypto/tracker-snapshot/${selected}`),
+    refetchInterval: 30_000,
+    enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected),
+  });
+  const trackerSnapshot = trackerSnapshotQuery.data?.snapshot ?? null;
+
+  // Live direction — lightweight mid-window Claude re-check, cached 5 min server-side.
+  const liveDirectionQuery = useQuery({
+    queryKey: ["live-direction", selected],
+    queryFn: () => fetchJson<LiveDirectionResult>(`/crypto/live-direction/${selected}`),
+    refetchInterval: 5 * 60_000, // re-fetch every 5 min (server also caches 5 min)
+    enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected),
+  });
+  const liveDirection = liveDirectionQuery.data ?? null;
 
   const coins = predQuery.data?.coins ?? [];
   const priceMap = useMemo(() => {
@@ -1651,6 +1698,11 @@ export default function Predictor() {
             onRefreshKalshi={() => void kalshiTargetQuery.refetch()}
             ktd={ktd}
             driftAlert={driftAlerts[selected] ?? null}
+            trackerSnapshot={trackerSnapshot}
+            liveDirection={liveDirection}
+            liveDirectionLoading={liveDirectionQuery.isFetching}
+            onRefreshLiveDirection={() => void liveDirectionQuery.refetch()}
+            isTrainingCoin={trainingCoinsSet.has(selected)}
           />
         ) : (
           <div className="grid lg:grid-cols-3 gap-4">
@@ -1663,6 +1715,7 @@ export default function Predictor() {
           analytics={analyticsQuery.data?.analytics ?? []}
           autoPilot={autoPilot}
           autoPilotMap={autoPilotMap}
+          trainingCoins={trainingCoinsSet}
           loading={analyticsQuery.isLoading}
           onToggleAutoPilot={(enabled) => void handleToggleAutoPilot(enabled)}
         />
@@ -1720,6 +1773,22 @@ function computeCombinedCall(args: {
   return { predictedPrice, confidence, direction, changePct, above, abstained, reason };
 }
 
+// Small helper used by the Claude Pulse panel — extracted to module level so
+// React doesn't see a "new" component type on every render.
+function AboveLabel({ above, conf }: { above: boolean | null | undefined; conf?: number }) {
+  if (above === null || above === undefined)
+    return <span className="text-muted-foreground/60 text-sm">—</span>;
+  return (
+    <span className={`flex items-center gap-1 font-black text-lg ${above ? "text-emerald-400" : "text-red-400"}`}>
+      {above ? <ArrowUp className="w-4 h-4" /> : <ArrowDown className="w-4 h-4" />}
+      {above ? "ABOVE" : "BELOW"}
+      {conf !== undefined && (
+        <span className="text-[11px] font-normal text-muted-foreground ml-1">{conf}%</span>
+      )}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Detailed view for the selected coin
 // ---------------------------------------------------------------------------
@@ -1744,6 +1813,11 @@ function CoinDetail({
   onRefreshKalshi,
   ktd,
   driftAlert,
+  trackerSnapshot,
+  liveDirection,
+  liveDirectionLoading,
+  onRefreshLiveDirection,
+  isTrainingCoin,
 }: {
   coin: CoinPrediction;
   livePrice: number;
@@ -1764,6 +1838,11 @@ function CoinDetail({
   onRefreshKalshi: () => void;
   ktd: KalshiTarget | undefined;
   driftAlert: DriftAlert | null;
+  trackerSnapshot: TrackerWindowCall | null;
+  liveDirection: LiveDirectionResult | null;
+  liveDirectionLoading: boolean;
+  onRefreshLiveDirection: () => void;
+  isTrainingCoin: boolean;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
   const kalshiAvailable = KALSHI_COINS.includes(coin.symbol) && ktd?.available === true;
@@ -2151,6 +2230,117 @@ function CoinDetail({
           </div>
         </div>
       )}
+
+      {/* ── Claude Pulse — opening call vs live re-check ── */}
+      {(isTrainingCoin || claudeActive) && kalshiTarget !== null && (() => {
+        const snap = trackerSnapshot;
+        const live = liveDirection;
+        const showPanel = snap !== null || live !== null || liveDirectionLoading;
+        if (!showPanel) return null;
+
+        const snapAbove = snap?.aboveKalshi;
+        const liveAbove = live?.aboveKalshi;
+        const flipped =
+          snapAbove !== null && snapAbove !== undefined &&
+          liveAbove !== null && liveAbove !== undefined &&
+          snapAbove !== liveAbove;
+        const confirmed =
+          snapAbove !== null && snapAbove !== undefined &&
+          liveAbove !== null && liveAbove !== undefined &&
+          snapAbove === liveAbove;
+
+        const borderCls = flipped
+          ? "border-red-500/50"
+          : confirmed
+          ? "border-emerald-500/30"
+          : "border-border/30";
+        const bgCls = flipped
+          ? "bg-red-500/5"
+          : confirmed
+          ? "bg-emerald-500/5"
+          : "bg-card/60";
+
+        return (
+          <div className={`rounded-xl border ${borderCls} ${bgCls} px-5 py-4 mt-0`}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Radio className="w-3.5 h-3.5 text-violet-400" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                  Claude Pulse
+                </span>
+                {flipped && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide bg-red-500/20 text-red-400 ring-1 ring-red-500/40 rounded px-1.5 py-0.5 animate-pulse">
+                    ⚠ Direction changed
+                  </span>
+                )}
+                {confirmed && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30 rounded px-1.5 py-0.5">
+                    ✓ Confirmed
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={onRefreshLiveDirection}
+                disabled={liveDirectionLoading}
+                className="text-muted-foreground/50 hover:text-muted-foreground transition-colors disabled:opacity-40"
+                title="Re-ask Claude now"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${liveDirectionLoading ? "animate-spin" : ""}`} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              {/* Opening call */}
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1.5 flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  Window open
+                </div>
+                {snap ? (
+                  <>
+                    <AboveLabel above={snap.aboveKalshi} conf={snap.confidence} />
+                    <div className="text-[10px] text-muted-foreground/60 mt-0.5">
+                      ${snap.predictedPrice >= 100 ? snap.predictedPrice.toFixed(2) : snap.predictedPrice.toFixed(4)}
+                      {" · "}{new Date(snap.snappedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York" })} ET
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-[11px] text-muted-foreground/50 leading-snug">Awaiting next window open…</div>
+                )}
+              </div>
+
+              {/* Live re-check */}
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1.5 flex items-center gap-1">
+                  <Zap className="w-3 h-3 text-amber-400" />
+                  Live now
+                </div>
+                {liveDirectionLoading && !live ? (
+                  <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Checking…
+                  </div>
+                ) : live ? (
+                  <>
+                    <AboveLabel above={live.aboveKalshi} conf={live.confidence} />
+                    <div className="text-[10px] text-muted-foreground/60 mt-0.5">
+                      Updated {Math.round((Date.now() - new Date(live.at).getTime()) / 60_000)}m ago
+                      {live.cached && " · cached"}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-[11px] text-muted-foreground/50">Awaiting first check…</div>
+                )}
+              </div>
+            </div>
+
+            {flipped && (
+              <div className="mt-3 pt-3 border-t border-red-500/20 text-[11px] text-red-400/90 leading-snug">
+                Claude's current read differs from the window-open call — consider reviewing your position before close.
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Price Action — intra-window momentum read ── */}
       {betSig && (() => {
