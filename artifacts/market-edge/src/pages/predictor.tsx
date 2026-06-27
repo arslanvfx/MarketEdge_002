@@ -811,107 +811,163 @@ function SelfLearningDashboard({
                 .join("\n");
               const cal = calibrationGap(a.calibration);
               const decision = autoPilotMap.get(a.symbol);
+              const statusBadge = trainingCoins.has(a.symbol) ? (
+                <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30" title="Always running Claude to build its accuracy track record">
+                  <Bot className="w-3 h-3" /> Training
+                </span>
+              ) : !autoPilot.enabled ? (
+                <span className="text-[10px] text-muted-foreground/50">Off</span>
+              ) : decision?.active ? (
+                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${decision.exploring ? "bg-sky-500/15 text-sky-300 ring-sky-500/30" : "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30"}`} title={decision.reason}>
+                  <Bot className="w-3 h-3" />{decision.exploring ? "Exploring" : "Claude on"}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-muted-foreground bg-muted/30 ring-1 ring-border" title={decision?.reason ?? "Stat only"}>
+                  <Minus className="w-3 h-3" /> Stat only
+                </span>
+              );
+
               return (
-                <div
-                  key={a.symbol}
-                  className="grid grid-cols-2 sm:grid-cols-[3.5rem_1fr_1fr_1fr_1.4fr_1.2fr_1.6fr] gap-2 px-4 py-3 items-center"
-                >
-                  {/* Coin */}
-                  <div className="flex items-center gap-1.5">
-                    <span className={`text-base font-bold ${style.accent}`}>{style.glyph}</span>
-                    <span className="font-semibold text-xs">{a.symbol}</span>
-                  </div>
+                <div key={a.symbol}>
 
-                  {/* Accuracy: stat / claude / combined */}
-                  <AccCell m={a.bySource.stat} color={accColor(a.bySource.stat.accuracyPct)} />
-                  <AccCell m={a.bySource.claude} color={accColor(a.bySource.claude.accuracyPct)} />
-                  <AccCell m={a.bySource.ensemble} color={accColor(a.bySource.ensemble.accuracyPct)} />
+                  {/* ── Mobile card layout ── */}
+                  <div className="sm:hidden px-4 py-3 space-y-3">
 
-                  {/* By regime (Claude) */}
-                  <div className="col-span-2 sm:col-span-1 flex items-center justify-center gap-2.5">
-                    {(["trending", "drifting", "choppy"] as PromptRegime[]).map((reg) => {
-                      const m = a.byRegime.claude[reg];
-                      const meta = REGIME_META[reg];
-                      return (
-                        <div key={reg} className="text-center" title={`${meta.label}: ${m.hits}/${m.n}`}>
-                          <div className={`text-[9px] font-semibold uppercase ${meta.color}/80`}>
-                            {meta.label}
-                          </div>
-                          <div className="text-xs font-bold tabular-nums">
-                            {m.accuracyPct !== null ? `${m.accuracyPct}%` : "—"}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Blend weights + calibration */}
-                  <div className="col-span-2 sm:col-span-1 space-y-1">
-                    <div className="flex h-2 w-full rounded-full overflow-hidden bg-muted/40" title={`Blend weights the ensemble actually uses.\nOverall baseline — stat ${Math.round(w.stat * 100)}% / Claude ${Math.round(w.claude * 100)}%.\nPer regime (applied live when the market is in that regime):\n${regimeTip}`}>
-                      <div className="h-full bg-sky-400" style={{ width: `${w.stat * 100}%` }} />
-                      <div className="h-full bg-violet-400" style={{ width: `${w.claude * 100}%` }} />
-                    </div>
-                    <div className="flex items-center justify-between text-[9px] text-muted-foreground tabular-nums">
-                      <span className="text-sky-300/80">S {Math.round(w.stat * 100)}%</span>
-                      <span
-                        title={
-                          cal
-                            ? `Calibration gap: reported vs actual confidence differ by ±${cal.gap}% (over ${cal.n} bets). Lower is better.`
-                            : "Not enough Claude history to measure calibration yet"
-                        }
-                        className={
-                          cal === null
-                            ? "text-muted-foreground/50"
-                            : cal.gap <= 8
-                              ? "text-emerald-400"
-                              : cal.gap <= 15
-                                ? "text-amber-400"
-                                : "text-red-400"
-                        }
-                      >
-                        ±{cal ? cal.gap : "—"}%
-                      </span>
-                      <span className="text-violet-300/80">C {Math.round(w.claude * 100)}%</span>
-                    </div>
-                  </div>
-
-                  {/* Auto-pilot / training status */}
-                  <div className="col-span-2 sm:col-span-1">
-                    {trainingCoins.has(a.symbol) ? (
-                      <span
-                        className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30"
-                        title="Always running Claude to build its accuracy track record"
-                      >
-                        <Bot className="w-3 h-3" /> Training
-                      </span>
-                    ) : !autoPilot.enabled ? (
-                      <span className="text-[10px] text-muted-foreground/50">Off</span>
-                    ) : decision?.active ? (
-                      <span
-                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${
-                          decision.exploring
-                            ? "bg-sky-500/15 text-sky-300 ring-sky-500/30"
-                            : "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30"
-                        }`}
-                        title={decision.reason}
-                      >
-                        <Bot className="w-3 h-3" />
-                        {decision.exploring ? "Exploring" : "Claude on"}
-                      </span>
-                    ) : (
-                      <span
-                        className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-muted-foreground bg-muted/30 ring-1 ring-border"
-                        title={decision?.reason ?? "Stat only"}
-                      >
-                        <Minus className="w-3 h-3" /> Stat only
-                      </span>
-                    )}
-                    {autoPilot.enabled && !trainingCoins.has(a.symbol) && decision?.reason && (
-                      <div className="text-[9px] text-muted-foreground/70 mt-0.5 leading-tight line-clamp-2">
-                        {decision.reason}
+                    {/* Header: coin + status */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-lg font-bold ${style.accent}`}>{style.glyph}</span>
+                        <span className="font-bold text-sm">{a.symbol}</span>
                       </div>
+                      {statusBadge}
+                    </div>
+
+                    {/* Accuracy: Stat | Claude | Combined — with explicit labels */}
+                    <div className="grid grid-cols-3 divide-x divide-border/50 border border-border/40 rounded-lg overflow-hidden">
+                      {(
+                        [
+                          { label: "Stat",     m: a.bySource.stat,     labelCls: "text-muted-foreground/60" },
+                          { label: "Claude",   m: a.bySource.claude,   labelCls: "text-violet-300/80" },
+                          { label: "Combined", m: a.bySource.ensemble, labelCls: "text-primary/80" },
+                        ] as const
+                      ).map(({ label, m, labelCls }) => (
+                        <div key={label} className="text-center py-2 px-1 bg-background/20">
+                          <div className={`text-[9px] font-semibold uppercase tracking-wider mb-1 ${labelCls}`}>{label}</div>
+                          {m.accuracyPct !== null ? (
+                            <>
+                              <div className={`text-base font-black tabular-nums ${accColor(m.accuracyPct)}`}>{m.accuracyPct}%</div>
+                              <div className="text-[10px] text-muted-foreground">{m.hits}/{m.n}</div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="text-base font-black text-muted-foreground/40">—</div>
+                              <div className="text-[10px] text-muted-foreground/50">{m.n} bets</div>
+                            </>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* By regime */}
+                    <div className="border border-border/40 rounded-lg overflow-hidden">
+                      <div className="px-3 py-1.5 bg-background/20 border-b border-border/40">
+                        <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50">By Regime · Claude accuracy</span>
+                      </div>
+                      <div className="grid grid-cols-3 divide-x divide-border/50">
+                        {(["trending", "drifting", "choppy"] as PromptRegime[]).map((reg) => {
+                          const m = a.byRegime.claude[reg];
+                          const meta = REGIME_META[reg];
+                          return (
+                            <div key={reg} className="text-center py-2 bg-background/10" title={`${meta.label}: ${m.hits}/${m.n}`}>
+                              <div className={`text-[9px] font-semibold uppercase ${meta.color}/80`}>{meta.label}</div>
+                              <div className="text-sm font-bold tabular-nums mt-0.5">
+                                {m.accuracyPct !== null ? `${m.accuracyPct}%` : "—"}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Blend bar + calibration */}
+                    <div className="space-y-1.5">
+                      <div className="flex h-2.5 w-full rounded-full overflow-hidden bg-muted/40" title={`Stat ${Math.round(w.stat * 100)}% / Claude ${Math.round(w.claude * 100)}%\n${regimeTip}`}>
+                        <div className="h-full bg-sky-400 transition-all" style={{ width: `${w.stat * 100}%` }} />
+                        <div className="h-full bg-violet-400 transition-all" style={{ width: `${w.claude * 100}%` }} />
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] tabular-nums">
+                        <span className="text-sky-300/80 font-medium">Stat {Math.round(w.stat * 100)}%</span>
+                        <span
+                          className={cal === null ? "text-muted-foreground/50" : cal.gap <= 8 ? "text-emerald-400 font-medium" : cal.gap <= 15 ? "text-amber-400 font-medium" : "text-red-400 font-medium"}
+                          title={cal ? `Calibration gap ±${cal.gap}% over ${cal.n} bets` : "Not enough Claude history for calibration"}
+                        >
+                          {cal ? `±${cal.gap}% cal` : "cal —"}
+                        </span>
+                        <span className="text-violet-300/80 font-medium">Claude {Math.round(w.claude * 100)}%</span>
+                      </div>
+                    </div>
+
+                    {autoPilot.enabled && !trainingCoins.has(a.symbol) && decision?.reason && (
+                      <div className="text-[10px] text-muted-foreground/60 leading-snug">{decision.reason}</div>
                     )}
                   </div>
+
+                  {/* ── Desktop row layout (unchanged) ── */}
+                  <div className="hidden sm:grid sm:grid-cols-[3.5rem_1fr_1fr_1fr_1.4fr_1.2fr_1.6fr] gap-2 px-4 py-3 items-center">
+                    {/* Coin */}
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-base font-bold ${style.accent}`}>{style.glyph}</span>
+                      <span className="font-semibold text-xs">{a.symbol}</span>
+                    </div>
+
+                    {/* Accuracy: stat / claude / combined */}
+                    <AccCell m={a.bySource.stat} color={accColor(a.bySource.stat.accuracyPct)} />
+                    <AccCell m={a.bySource.claude} color={accColor(a.bySource.claude.accuracyPct)} />
+                    <AccCell m={a.bySource.ensemble} color={accColor(a.bySource.ensemble.accuracyPct)} />
+
+                    {/* By regime (Claude) */}
+                    <div className="flex items-center justify-center gap-2.5">
+                      {(["trending", "drifting", "choppy"] as PromptRegime[]).map((reg) => {
+                        const m = a.byRegime.claude[reg];
+                        const meta = REGIME_META[reg];
+                        return (
+                          <div key={reg} className="text-center" title={`${meta.label}: ${m.hits}/${m.n}`}>
+                            <div className={`text-[9px] font-semibold uppercase ${meta.color}/80`}>{meta.label}</div>
+                            <div className="text-xs font-bold tabular-nums">
+                              {m.accuracyPct !== null ? `${m.accuracyPct}%` : "—"}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Blend weights + calibration */}
+                    <div className="space-y-1">
+                      <div className="flex h-2 w-full rounded-full overflow-hidden bg-muted/40" title={`Blend weights the ensemble actually uses.\nOverall baseline — stat ${Math.round(w.stat * 100)}% / Claude ${Math.round(w.claude * 100)}%.\nPer regime (applied live when the market is in that regime):\n${regimeTip}`}>
+                        <div className="h-full bg-sky-400" style={{ width: `${w.stat * 100}%` }} />
+                        <div className="h-full bg-violet-400" style={{ width: `${w.claude * 100}%` }} />
+                      </div>
+                      <div className="flex items-center justify-between text-[9px] text-muted-foreground tabular-nums">
+                        <span className="text-sky-300/80">S {Math.round(w.stat * 100)}%</span>
+                        <span
+                          title={cal ? `Calibration gap: reported vs actual confidence differ by ±${cal.gap}% (over ${cal.n} bets). Lower is better.` : "Not enough Claude history to measure calibration yet"}
+                          className={cal === null ? "text-muted-foreground/50" : cal.gap <= 8 ? "text-emerald-400" : cal.gap <= 15 ? "text-amber-400" : "text-red-400"}
+                        >
+                          ±{cal ? cal.gap : "—"}%
+                        </span>
+                        <span className="text-violet-300/80">C {Math.round(w.claude * 100)}%</span>
+                      </div>
+                    </div>
+
+                    {/* Auto-pilot / training status */}
+                    <div>
+                      {statusBadge}
+                      {autoPilot.enabled && !trainingCoins.has(a.symbol) && decision?.reason && (
+                        <div className="text-[9px] text-muted-foreground/70 mt-0.5 leading-tight line-clamp-2">{decision.reason}</div>
+                      )}
+                    </div>
+                  </div>
+
                 </div>
               );
             })}
