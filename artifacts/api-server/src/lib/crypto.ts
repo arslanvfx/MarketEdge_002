@@ -2620,6 +2620,41 @@ export function startPredictionTracker(): void {
             // non-fatal — will retry next tick
           }
         }
+
+        // ── Auto-trigger live-direction re-check (training coins only) ────────
+        // When the live price crosses the Kalshi strike in the opposite direction
+        // from Claude's last cached "Live now" answer, re-ask Claude immediately
+        // so Claude Pulse stays current without a manual refresh.
+        if (TRAINING_COINS.has(sym) && !liveDirectionInFlight.has(sym)) {
+          const cached = liveDirectionCache.get(sym);
+          if (cached && cached.result.aboveKalshi !== null) {
+            const statRec = records.slice().reverse().find(
+              (r) => r.source === "stat" && r.kalshiTarget != null,
+            );
+            if (statRec?.kalshiTarget != null) {
+              try {
+                const currentPrice = await getTicker(coin.product);
+                const priceAbove = currentPrice >= statRec.kalshiTarget;
+                const lastTrigger = liveDirectionLastAutoTrigger.get(sym) ?? 0;
+                if (
+                  priceAbove !== cached.result.aboveKalshi &&
+                  nowMs - lastTrigger > LIVE_DIR_AUTO_COOLDOWN
+                ) {
+                  liveDirectionInFlight.add(sym);
+                  liveDirectionLastAutoTrigger.set(sym, nowMs);
+                  console.info(
+                    `[live-dir] ${sym}: price ${currentPrice} crossed strike ${statRec.kalshiTarget} — auto re-check`,
+                  );
+                  fetchLiveDirection(sym, true)
+                    .catch(() => {})
+                    .finally(() => liveDirectionInFlight.delete(sym));
+                }
+              } catch {
+                // non-fatal
+              }
+            }
+          }
+        }
       }),
     );
   };
@@ -2914,6 +2949,11 @@ export interface LiveDirectionResult {
 
 const liveDirectionCache = new Map<string, { result: LiveDirectionResult; at: number }>();
 const LIVE_DIR_TTL = 5 * 60_000; // 5 minutes
+// Tracks in-flight live-direction re-checks (prevents concurrent calls per coin).
+const liveDirectionInFlight = new Set<string>();
+// Tracks when the last auto-trigger fired per coin (cooldown guard).
+const liveDirectionLastAutoTrigger = new Map<string, number>();
+const LIVE_DIR_AUTO_COOLDOWN = 5 * 60_000; // min gap between auto-triggers per coin
 
 // Cheap, fast Claude call — no extended thinking, minimal context.  Just enough
 // to answer the binary "ABOVE or BELOW the Kalshi strike at window close?" so

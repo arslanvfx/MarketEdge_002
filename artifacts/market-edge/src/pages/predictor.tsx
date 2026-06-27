@@ -1692,7 +1692,7 @@ export default function Predictor() {
   const liveDirectionQuery = useQuery({
     queryKey: ["live-direction", selected],
     queryFn: () => fetchJson<LiveDirectionResult>(`/crypto/live-direction/${selected}`),
-    refetchInterval: 5 * 60_000, // re-fetch every 5 min (server also caches 5 min)
+    refetchInterval: 30_000, // poll every 30 s — server caches 5 min, but auto-trigger may refresh sooner
     enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected),
   });
   const liveDirection = liveDirectionQuery.data ?? null;
@@ -1801,6 +1801,9 @@ export default function Predictor() {
         }
       }
       setAutoTriggerReason(null);
+      // Sync Claude Pulse "Live now" immediately — the Enhance call just ran Claude,
+      // so force a fresh live-direction check rather than waiting up to 30 s.
+      void liveDirectionQuery.refetch();
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
         setAiError("Request timed out — try again");
