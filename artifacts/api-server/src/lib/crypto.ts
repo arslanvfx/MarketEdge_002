@@ -824,6 +824,163 @@ export function getAllPredictionAnalytics(): CoinAnalytics[] {
   return CRYPTO_COINS.map((c) => getPredictionAnalytics(c.symbol));
 }
 
+// ---------------------------------------------------------------------------
+// Best-trading-windows analytics
+// Groups training-coin history by ET hour-of-day and day-of-week to surface
+// when the market is most predictable. Uses the in-memory historyStore so it
+// is always fresh and requires no additional DB queries.
+// ---------------------------------------------------------------------------
+
+const TW_MIN_BUCKET = 10;   // samples per hour/day bucket before we trust it
+const TW_MIN_TOTAL  = 50;   // total windows before issuing recommendations
+
+const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function fmtHourLabel(h: number): string {
+  if (h === 0)  return "12 AM";
+  if (h < 12)   return `${h} AM`;
+  if (h === 12) return "12 PM";
+  return `${h - 12} PM`;
+}
+
+export interface TradingWindowBucket {
+  count: number;
+  evaluatedCount: number;
+  accuracyPct: number | null;
+  avgEfficiencyRatio: number | null;
+  trendingPct: number | null;
+  sparse: boolean;
+}
+
+export interface TradingWindowsData {
+  hourly: Array<TradingWindowBucket & { hour: number; label: string }>;
+  daily: Array<TradingWindowBucket & { dayIndex: number; label: string }>;
+  totalSamples: number;
+  lastUpdatedAt: string;
+  recommendation: string;
+  hasEnoughData: boolean;
+}
+
+export function getTradingWindows(filterSymbol?: string): TradingWindowsData {
+  const symbols = filterSymbol
+    ? TRAINING_COINS.has(filterSymbol) ? [filterSymbol] : []
+    : [...TRAINING_COINS];
+
+  // One representative record per (symbol, window) — stat preferred (always has ER).
+  const windowMap = new Map<string, PredictionRecord>();
+  for (const symbol of symbols) {
+    for (const r of historyStore.get(symbol) ?? []) {
+      const key = `${symbol}|${r.targetTime}`;
+      const ex  = windowMap.get(key);
+      if (!ex || r.source === "stat") windowMap.set(key, r);
+    }
+  }
+
+  type Acc = {
+    erSum: number; erCount: number; trendingCount: number;
+    hits: number; evaluated: number; total: number;
+  };
+  const mkAcc = (): Acc => ({
+    erSum: 0, erCount: 0, trendingCount: 0, hits: 0, evaluated: 0, total: 0,
+  });
+  const hourAcc: Acc[] = Array.from({ length: 24 }, mkAcc);
+  const dayAcc:  Acc[] = Array.from({ length: 7  }, mkAcc);
+
+  const ET_FMT = new Intl.DateTimeFormat("en-US", {
+    timeZone:  "America/New_York",
+    hour:      "numeric",
+    hour12:    false,
+    weekday:   "short",
+  });
+
+  for (const rec of windowMap.values()) {
+    const date  = new Date(rec.snappedAt);
+    const parts = ET_FMT.formatToParts(date);
+    const rawH  = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0");
+    const hour  = rawH === 24 ? 0 : rawH; // some Intl engines emit 24 for midnight
+    const dow   = parts.find((p) => p.type === "weekday")?.value ?? "";
+    const dayIdx = DOW_LABELS.indexOf(dow);
+    if (hour < 0 || hour > 23 || dayIdx === -1) continue;
+
+    const hA = hourAcc[hour];
+    const dA = dayAcc[dayIdx];
+
+    hA.total++; dA.total++;
+
+    if (rec.efficiencyRatio !== null) {
+      hA.erSum += rec.efficiencyRatio;
+      hA.erCount++;
+      dA.erSum += rec.efficiencyRatio;
+      dA.erCount++;
+      if (rec.efficiencyRatio >= 0.55) { hA.trendingCount++; dA.trendingCount++; }
+    }
+
+    if (rec.status === "evaluated" && rec.correct !== null && rec.abstained !== true) {
+      hA.evaluated++; dA.evaluated++;
+      if (rec.correct) { hA.hits++; dA.hits++; }
+    }
+  }
+
+  const toBucket = (acc: Acc): TradingWindowBucket => {
+    const avgER = acc.erCount > 0
+      ? Math.round((acc.erSum / acc.erCount) * 1000) / 1000
+      : null;
+    return {
+      count:              acc.total,
+      evaluatedCount:     acc.evaluated,
+      accuracyPct:        acc.evaluated >= 5
+        ? Math.round((acc.hits / acc.evaluated) * 100) : null,
+      avgEfficiencyRatio: avgER,
+      trendingPct:        acc.erCount > 0
+        ? Math.round((acc.trendingCount / acc.erCount) * 100) : null,
+      sparse: acc.total < TW_MIN_BUCKET,
+    };
+  };
+
+  const hourly = hourAcc.map((acc, h) => ({ ...toBucket(acc), hour: h, label: fmtHourLabel(h) }));
+  const daily  = dayAcc.map((acc, i)  => ({ ...toBucket(acc), dayIndex: i, label: DOW_LABELS[i] }));
+
+  const totalSamples = windowMap.size;
+
+  // Score each non-sparse hour: blend of ER (predictability) and accuracy.
+  const scored = hourly
+    .filter((h) => !h.sparse && h.avgEfficiencyRatio !== null)
+    .map((h) => ({
+      hour:  h.hour,
+      label: h.label,
+      er:    h.avgEfficiencyRatio ?? 0,
+      score: ((h.accuracyPct ?? 50) / 100) * 0.4 + (h.avgEfficiencyRatio ?? 0) * 0.6,
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  let recommendation: string;
+  if (totalSamples < TW_MIN_TOTAL) {
+    recommendation =
+      `Collecting data — needs at least ${TW_MIN_TOTAL} windows to identify patterns. ` +
+      `${totalSamples} recorded so far.`;
+  } else if (scored.length === 0) {
+    recommendation = "No hour bucket has enough samples yet.";
+  } else {
+    const top   = scored.slice(0, Math.min(3, scored.length));
+    const worst = scored.slice(-Math.min(3, scored.length)).reverse();
+    const avgTopER = Math.round((top.reduce((s, h) => s + h.er, 0) / top.length) * 100) / 100;
+    const topStr   = top.map((h) => h.label).join(", ");
+    const worstStr = worst.map((h) => h.label).join(", ");
+    recommendation =
+      `Best windows: ${topStr} ET (avg efficiency ${avgTopER.toFixed(2)}). ` +
+      `Tend to avoid: ${worstStr} ET — markets are choppier during those hours.`;
+  }
+
+  return {
+    hourly,
+    daily,
+    totalSamples,
+    lastUpdatedAt: new Date().toISOString(),
+    recommendation,
+    hasEnoughData: totalSamples >= TW_MIN_TOTAL,
+  };
+}
+
 // Min evaluated records in a confidence band before its observed hit rate is
 // trusted; below this we pass the raw confidence through unchanged.
 const CALIB_MIN_SAMPLES = 5;

@@ -22,6 +22,7 @@ import {
   isAiGloballyEnabled,
   getTrackerWindowCall,
   fetchLiveDirection,
+  getTradingWindows,
 } from "../lib/crypto";
 import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
 
@@ -401,6 +402,18 @@ router.get("/crypto/live-direction/:symbol", async (req, res) => {
   } catch {
     res.status(500).json({ error: "Internal error" });
   }
+});
+
+// ── Best-time-to-trade analytics ─────────────────────────────────────────────
+// Aggregates training-coin history by ET hour-of-day and day-of-week so the
+// user can see when the market is most predictable.
+// Optional ?symbol=BTC to filter to a single training coin.
+router.get("/crypto/trading-windows", (req, res) => {
+  const symbol =
+    typeof req.query.symbol === "string" && req.query.symbol.length > 0
+      ? req.query.symbol.toUpperCase()
+      : undefined;
+  res.json(getTradingWindows(symbol));
 });
 
 export default router;
