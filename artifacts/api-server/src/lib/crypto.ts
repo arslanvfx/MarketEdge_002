@@ -1,6 +1,6 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { db, predictionRecordsTable } from "@workspace/db";
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray, lt } from "drizzle-orm";
 import {
   AUTOPILOT_MAX_ACTIVE,
   type AutoPilotDecision,
@@ -1781,6 +1781,10 @@ const QUARTER_MS = 15 * 60 * 1000;
 // so keep ~30 windows × 3 = 90 records per coin.
 const MAX_HISTORY = 90;
 
+// How many days of prediction records to retain in the DB.  Records with
+// snapped_at older than this are deleted once per day — non-fatal if it fails.
+const RETENTION_DAYS = 60;
+
 // These coins ALWAYS run Claude in the background tracker regardless of UI mode
 // or auto-pilot state.  The data collected here is what trains the self-learning
 // loop — without it the auto-pilot and ensemble have nothing to learn from.
@@ -1953,6 +1957,23 @@ async function initHistoryFromDB(): Promise<void> {
     }
   } catch (err) {
     console.error("[initHistoryFromDB] failed (non-fatal):", err);
+  }
+}
+
+async function pruneOldPredictionRecords(): Promise<void> {
+  try {
+    const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const result = await db
+      .delete(predictionRecordsTable)
+      .where(lt(predictionRecordsTable.snappedAt, cutoff));
+    const count = (result as unknown as { rowCount?: number }).rowCount ?? 0;
+    if (count > 0) {
+      console.info(
+        `[pruneOldRecords] deleted ${count} records older than ${RETENTION_DAYS} days (before ${cutoff.toISOString()})`,
+      );
+    }
+  } catch (err) {
+    console.error("[pruneOldRecords] failed (non-fatal):", err);
   }
 }
 
@@ -2611,6 +2632,11 @@ export function startPredictionTracker(): void {
       tick().catch(() => {});
       setInterval(() => tick().catch(() => {}), 30_000);
     });
+
+  // Prune records older than RETENTION_DAYS once at startup and then every 24 h.
+  // Non-fatal — a failure is logged but does not affect the tracker.
+  pruneOldPredictionRecords().catch(() => {});
+  setInterval(() => pruneOldPredictionRecords().catch(() => {}), 24 * 60 * 60 * 1000);
 }
 
 // ---------------------------------------------------------------------------
