@@ -713,7 +713,7 @@ function SelfLearningDashboard({
         <div className="flex items-center gap-3">
           {autoPilot.enabled && (
             <span className="text-[11px] text-muted-foreground tabular-nums">
-              {activeCount}/{autoPilot.maxActive} coins running Claude
+              {activeCount}/{autoPilot.maxActive} non-training coins
             </span>
           )}
           <button
@@ -725,13 +725,21 @@ function SelfLearningDashboard({
             }`}
             title={
               autoPilot.enabled
-                ? "Auto-pilot is ON — Claude is enabled automatically where it beats the stat model. Click to turn off."
-                : "Turn on auto-pilot — let the system enable Claude only where it's earning its keep."
+                ? "Auto-pilot is ON — Claude is enabled automatically where it beats the stat model. Applies to non-training coins only. Click to turn off."
+                : "Turn on auto-pilot — let the system enable Claude only where it's earning its keep. Applies to non-training coins (SOL, LINK, DOGE) only."
             }
           >
             {autoPilot.enabled ? <Bot className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
             Auto-pilot {autoPilot.enabled ? "ON" : "OFF"}
           </button>
+        </div>
+      </div>
+      {/* Training coins explanation */}
+      <div className="mb-4 flex items-start gap-2 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2.5">
+        <Bot className="w-3.5 h-3.5 text-violet-400 shrink-0 mt-0.5" />
+        <div className="text-[11px] text-muted-foreground leading-snug">
+          <span className="text-violet-300 font-semibold">BTC · ETH · XRP · HYPE · BNB</span> always run Claude — every window, automatically, building their accuracy records below.
+          {" "}Auto-pilot controls the remaining coins (SOL, LINK, DOGE).
         </div>
       </div>
 
@@ -1621,9 +1629,16 @@ export default function Predictor() {
                           );
                         })()}
                         {(() => {
-                          const manual = claudeEnabledSet.has(coin.symbol);
+                          const training = trainingCoinsSet.has(coin.symbol);
                           const auto = autoPilotMap.get(coin.symbol)?.active ?? false;
-                          if (manual) {
+                          if (training) {
+                            return (
+                              <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/25 text-violet-300 ring-violet-500/40" title="Training coin — Claude runs automatically every window for self-learning">
+                                <Bot className="w-2.5 h-2.5" /> Training
+                              </span>
+                            );
+                          }
+                          if (claudeEnabledSet.has(coin.symbol)) {
                             return (
                               <span className="inline-flex items-center rounded-full px-1 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/20 text-violet-300 ring-violet-500/30" title="Claude AI tracking active (manual)">
                                 <Sparkles className="w-2.5 h-2.5" />
@@ -2221,6 +2236,31 @@ function CoinDetail({
                     </div>
                   )}
                 </>
+              ) : isTrainingCoin && trackerSnapshot !== null ? (
+                /* Training coin — show the tracker's window-open Claude snapshot */
+                <>
+                  <div className={`flex items-center gap-1.5 text-xl font-black ${trackerSnapshot.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
+                    {trackerSnapshot.aboveKalshi ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
+                    {trackerSnapshot.aboveKalshi ? "ABOVE" : "BELOW"}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    ${formatPrice(trackerSnapshot.predictedPrice)} · {trackerSnapshot.confidence}% conf.
+                  </div>
+                  <div className="text-[10px] text-violet-400/80 mt-1 flex items-center gap-1">
+                    <Bot className="w-3 h-3" /> Auto-ran at window open
+                  </div>
+                  {kalshiIsLive && (
+                    <div className={`mt-1.5 text-xs font-bold ${trackerSnapshot.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
+                      → Bet {trackerSnapshot.aboveKalshi ? "YES" : "NO"} on Kalshi
+                    </div>
+                  )}
+                </>
+              ) : isTrainingCoin ? (
+                /* Training coin but window hasn't opened yet / tracker hasn't run */
+                <div className="text-[11px] text-muted-foreground/70 leading-snug flex items-start gap-1.5">
+                  <Bot className="w-3.5 h-3.5 text-violet-400/60 shrink-0 mt-0.5" />
+                  <span>Claude runs automatically at window open — or click "Enhance" for a call now</span>
+                </div>
               ) : (
                 <div className="text-[11px] text-muted-foreground/70 leading-snug">
                   Click "Enhance with AI"<br />to see Claude's call
