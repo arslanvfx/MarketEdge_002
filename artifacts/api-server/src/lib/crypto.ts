@@ -827,8 +827,9 @@ export function getAllPredictionAnalytics(): CoinAnalytics[] {
 // ---------------------------------------------------------------------------
 // Best-trading-windows analytics
 // Groups training-coin history by ET hour-of-day and day-of-week to surface
-// when the market is most predictable. Uses the in-memory historyStore so it
-// is always fresh and requires no additional DB queries.
+// when the market is most predictable.  Reads directly from the DB (no row
+// limit) so the panel survives server restarts with a full history, while
+// falling back to the in-memory historyStore on DB error.
 // ---------------------------------------------------------------------------
 
 const TW_MIN_BUCKET = 10;   // samples per hour/day bucket before we trust it
@@ -871,19 +872,38 @@ export interface TradingWindowsData {
   hasEnoughData: boolean;
 }
 
-export function getTradingWindows(filterSymbol?: string): TradingWindowsData {
+export async function getTradingWindows(filterSymbol?: string): Promise<TradingWindowsData> {
   const symbols = filterSymbol
     ? TRAINING_COINS.has(filterSymbol) ? [filterSymbol] : []
     : [...TRAINING_COINS];
 
+  // Fetch all DB records for the requested training coins (no row limit so the
+  // panel keeps growing across server restarts).  Fall back to in-memory store
+  // if the DB query fails — this keeps the endpoint functional even if Postgres
+  // is temporarily unavailable.
+  let sourceRecords: PredictionRecord[];
+  try {
+    if (symbols.length === 0) {
+      sourceRecords = [];
+    } else {
+      const rows = await db
+        .select()
+        .from(predictionRecordsTable)
+        .where(inArray(predictionRecordsTable.symbol, symbols))
+        .orderBy(desc(predictionRecordsTable.targetTime));
+      sourceRecords = rows.map(rowToRecord);
+    }
+  } catch {
+    // Fallback: read from capped in-memory store so the endpoint still responds.
+    sourceRecords = symbols.flatMap((sym) => historyStore.get(sym) ?? []);
+  }
+
   // One representative record per (symbol, window) — stat preferred (always has ER).
   const windowMap = new Map<string, PredictionRecord>();
-  for (const symbol of symbols) {
-    for (const r of historyStore.get(symbol) ?? []) {
-      const key = `${symbol}|${r.targetTime}`;
-      const ex  = windowMap.get(key);
-      if (!ex || r.source === "stat") windowMap.set(key, r);
-    }
+  for (const r of sourceRecords) {
+    const key = `${r.symbol}|${r.targetTime}`;
+    const ex  = windowMap.get(key);
+    if (!ex || r.source === "stat") windowMap.set(key, r);
   }
 
   type Acc = {

@@ -408,12 +408,16 @@ router.get("/crypto/live-direction/:symbol", async (req, res) => {
 // Aggregates training-coin history by ET hour-of-day and day-of-week so the
 // user can see when the market is most predictable.
 // Optional ?symbol=BTC to filter to a single training coin.
-router.get("/crypto/trading-windows", (req, res) => {
+router.get("/crypto/trading-windows", async (req, res) => {
   const symbol =
     typeof req.query.symbol === "string" && req.query.symbol.length > 0
       ? req.query.symbol.toUpperCase()
       : undefined;
-  res.json(getTradingWindows(symbol));
+  try {
+    res.json(await getTradingWindows(symbol));
+  } catch (err) {
+    res.status(500).json({ error: "Failed to compute trading windows" });
+  }
 });
 
 export default router;
