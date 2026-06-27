@@ -1,6 +1,14 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { db, predictionRecordsTable } from "@workspace/db";
 import { desc, eq, inArray, lt } from "drizzle-orm";
+import { extractMLFeatures } from "./ml-features";
+import {
+  captureMLSnapshot,
+  labelWindowAndRetrain,
+  initMLFromDB,
+  getMLPrediction,
+  getMLStatus,
+} from "./ml-store";
 import {
   AUTOPILOT_MAX_ACTIVE,
   type AutoPilotDecision,
@@ -2551,6 +2559,12 @@ export function startPredictionTracker(): void {
                 const predictedAbove = rec.predictedPrice >= rec.kalshiTarget;
                 const actualAbove    = actual >= rec.kalshiTarget;
                 correct = predictedAbove === actualAbove;
+                // ML: label this window's snapshot with the actual ABOVE/BELOW
+                // outcome and trigger an incremental retrain.  Only the stat
+                // record drives labeling (one label per window, not 3×).
+                if (rec.source === "stat") {
+                  labelWindowAndRetrain(sym, rec.targetTime, actualAbove ? 1 : 0);
+                }
               } else {
                 // No Kalshi target (non-BTC, or Kalshi market wasn't active at snap).
                 // Fall back: direction correct AND price within threshold.
@@ -2642,6 +2656,16 @@ export function startPredictionTracker(): void {
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice, orderBook);
+
+            // ── ML: capture one feature snapshot per window at snap time ────────
+            // elapsedFraction ≈ 0.03–0.07 (30-60s of 900s elapsed).
+            // Only captured when a Kalshi target is known (required feature).
+            if (kalshiTargetSnap != null) {
+              const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
+              const mlFeatures = extractMLFeatures(analysis, kalshiTargetSnap, elapsed);
+              captureMLSnapshot(sym, targetISO, mlFeatures, elapsed);
+            }
+
             const basePred =
               analysis.predictions.find((p) => p.target === targetISO) ??
               analysis.predictions[0];
@@ -2804,14 +2828,15 @@ export function startPredictionTracker(): void {
     );
   };
 
-  // Load DB history first, then tick immediately. Using .finally so a DB
-  // failure doesn't block the tracker from starting.
-  initHistoryFromDB()
-    .catch(() => {})
-    .finally(() => {
-      tick().catch(() => {});
-      setInterval(() => tick().catch(() => {}), 30_000);
-    });
+  // Load DB history and ML state in parallel, then start the tick loop.
+  // Both are non-fatal — failures are logged but don't block the tracker.
+  Promise.all([
+    initHistoryFromDB().catch(() => {}),
+    initMLFromDB().catch(() => {}),
+  ]).finally(() => {
+    tick().catch(() => {});
+    setInterval(() => tick().catch(() => {}), 30_000);
+  });
 
   // Prune records older than RETENTION_DAYS once at startup and then every 24 h.
   // Non-fatal — a failure is logged but does not affect the tracker.
@@ -2822,6 +2847,11 @@ export function startPredictionTracker(): void {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/** Return the most-recently-cached analysis for a coin, or null if cold. */
+export function getCachedPrediction(symbol: string): CoinPrediction | null {
+  return predCache.get(symbol)?.value ?? null;
+}
 
 export async function fetchCryptoPredictions(): Promise<{
   generatedAt: string;

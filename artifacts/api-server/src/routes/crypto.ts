@@ -23,7 +23,10 @@ import {
   getTrackerWindowCall,
   fetchLiveDirection,
   getTradingWindows,
+  getCachedPrediction,
 } from "../lib/crypto";
+import { getMLPrediction, getMLStatus } from "../lib/ml-store";
+import { extractMLFeatures } from "../lib/ml-features";
 import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
 
 const router = Router();
@@ -402,6 +405,52 @@ router.get("/crypto/live-direction/:symbol", async (req, res) => {
   } catch {
     res.status(500).json({ error: "Internal error" });
   }
+});
+
+// ── ML Model prediction ───────────────────────────────────────────────────────
+// Returns the self-trained logistic-regression prediction for the current
+// 15-min window.  When the model hasn't seen enough data (< 30 labeled windows)
+// the response carries ready:false and no directional prediction.
+router.get("/crypto/ml-prediction/:symbol", async (req, res) => {
+  const symbol = (req.params.symbol ?? "").toUpperCase();
+  const status  = getMLStatus(symbol);
+
+  // Base response — always returned even when model isn't ready.
+  const base = {
+    symbol,
+    above:       null as boolean | null,
+    confidence:  null as number | null,
+    prob:        null as number | null,
+    ready:       status.ready,
+    windows:     status.windows,
+    samples:     status.samples,
+    minWindows:  status.minWindows,
+    valAccuracy: status.valAccuracy,
+  };
+
+  if (!status.ready) return res.json(base);
+  if (!KALSHI_SERIES[symbol]) return res.json(base);
+
+  // Need a cached coin snapshot for live features + a Kalshi target.
+  const cached = getCachedPrediction(symbol);
+  if (!cached) return res.json(base);
+
+  const kalshiTarget = await fetchKalshiTarget(symbol).catch(() => null);
+  if (kalshiTarget == null) return res.json(base);
+
+  // Elapsed fraction in the current 15-min window.
+  const now       = Date.now();
+  const windowMs  = Math.floor(now / (15 * 60_000)) * (15 * 60_000);
+  const elapsed   = Math.min((now - windowMs) / (15 * 60_000), 1);
+  const features  = extractMLFeatures(cached, kalshiTarget, elapsed);
+  const { prediction } = getMLPrediction(symbol, features);
+
+  res.json({
+    ...base,
+    above:      prediction?.above ?? null,
+    confidence: prediction?.confidence ?? null,
+    prob:       prediction?.prob ?? null,
+  });
 });
 
 // ── Best-time-to-trade analytics ─────────────────────────────────────────────

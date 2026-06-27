@@ -63,6 +63,19 @@ interface Prediction {
   changePct: number;
 }
 
+// Response from GET /crypto/ml-prediction/:symbol
+interface MLPredResponse {
+  symbol:      string;
+  above:       boolean | null;
+  confidence:  number | null;
+  prob:        number | null;
+  ready:       boolean;
+  windows:     number;
+  samples:     number;
+  minWindows:  number;
+  valAccuracy: number | null;
+}
+
 // Shape returned by the prediction history endpoint
 interface PredictionRecord {
   symbol: string;
@@ -1599,6 +1612,14 @@ export default function Predictor() {
     refetchInterval: 5000,
   });
 
+  // ML model prediction — updates every 30s (matches tracker tick rate)
+  const mlPredQuery = useQuery({
+    queryKey: ["ml-prediction", selected],
+    queryFn: () => fetchJson<MLPredResponse>(`/crypto/ml-prediction/${selected}`),
+    refetchInterval: 30_000,
+    staleTime: 20_000,
+  });
+
   // AI settings — controls whether Claude tracker runs per-coin (server-persisted)
   const aiSettingsQuery = useQuery({
     queryKey: ["ai-settings"],
@@ -2096,6 +2117,7 @@ export default function Predictor() {
               void liveDirectionQuery.refetch();
             }}
             isTrainingCoin={trainingCoinsSet.has(selected)}
+            mlPred={mlPredQuery.data ?? null}
           />
         ) : (
           <div className="grid lg:grid-cols-3 gap-4">
@@ -2233,6 +2255,7 @@ function CoinDetail({
   liveDirectionLoading,
   onRefreshLiveDirection,
   isTrainingCoin,
+  mlPred,
 }: {
   coin: CoinPrediction;
   livePrice: number;
@@ -2258,6 +2281,7 @@ function CoinDetail({
   liveDirectionLoading: boolean;
   onRefreshLiveDirection: () => void;
   isTrainingCoin: boolean;
+  mlPred?: MLPredResponse | null;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
   const kalshiAvailable = KALSHI_COINS.includes(coin.symbol) && ktd?.available === true;
@@ -2333,8 +2357,8 @@ function CoinDetail({
     : null;
 
   // Multi-signal consensus — weighted vote across stat model, Claude AI (window
-  // open or tracker snapshot), and Auto-Pilot (self-learning accuracy-weighted).
-  interface ConsensusSignal { name: string; above: boolean; conf: number; modelUsed?: "claude" | "stat" }
+  // open or tracker snapshot), Auto-Pilot, and ML Model.
+  interface ConsensusSignal { name: string; above: boolean; conf: number; modelUsed?: "claude" | "stat" | "ml" }
   const consensusSignals: ConsensusSignal[] = (() => {
     if (kalshiTarget === null) return [];
     const sigs: ConsensusSignal[] = [];
@@ -2353,6 +2377,8 @@ function CoinDetail({
         conf: autoPilotConf,
         modelUsed: autoPilotDecision?.active ? "claude" : "stat",
       });
+    if (mlPred?.ready && mlPred.above !== null && mlPred.confidence !== null)
+      sigs.push({ name: "ML Model", above: mlPred.above, conf: mlPred.confidence, modelUsed: "ml" });
     return sigs;
   })();
   const consAboveW   = consensusSignals.filter(s => s.above).reduce((sum, s) => sum + s.conf, 0);
@@ -2802,7 +2828,7 @@ function CoinDetail({
                   if (!hasAnyPrice) return null;
 
                   return (
-                    <div className="grid grid-cols-3 gap-3 mb-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
                       {/* Stat model */}
                       <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
                         <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
@@ -2900,6 +2926,43 @@ function CoinDetail({
                           <div className="text-[12px] text-muted-foreground/60 italic mt-2">collecting data…</div>
                         )}
                       </div>
+
+                      {/* ML Model — self-trained logistic regression */}
+                      <div className="rounded-lg bg-sky-500/5 border border-sky-500/25 px-3 py-2.5 text-center">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-400/80 mb-1">
+                          ML Model
+                        </div>
+                        {mlPred ? (
+                          mlPred.ready && mlPred.above !== null ? (
+                            <>
+                              <div className={`text-xl font-black leading-none mb-1 ${mlPred.above ? "text-emerald-400" : "text-red-400"}`}>
+                                {mlPred.above ? "↑ ABOVE" : "↓ BELOW"}
+                              </div>
+                              <div className={`text-[11px] font-semibold ${mlPred.above ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                                {mlPred.confidence}% conf
+                              </div>
+                              <div className="mt-1.5 text-[10px] text-sky-300/60 font-medium leading-tight">
+                                {mlPred.windows}w · {mlPred.valAccuracy != null ? `${mlPred.valAccuracy}% val` : "learning"}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="text-[12px] text-muted-foreground/60 italic mb-1">Training…</div>
+                              <div className="w-full bg-muted/30 rounded-full h-1 mt-1">
+                                <div
+                                  className="bg-sky-500/60 h-1 rounded-full transition-all"
+                                  style={{ width: `${Math.min(100, ((mlPred.windows ?? 0) / (mlPred.minWindows ?? 30)) * 100)}%` }}
+                                />
+                              </div>
+                              <div className="text-[10px] text-sky-400/60 mt-1">
+                                {mlPred.windows}/{mlPred.minWindows} windows
+                              </div>
+                            </>
+                          )
+                        ) : (
+                          <div className="text-[12px] text-muted-foreground/60 italic mt-2">initializing…</div>
+                        )}
+                      </div>
                     </div>
                   );
                 })()}
@@ -2908,25 +2971,31 @@ function CoinDetail({
                 <div className="flex items-center gap-3 flex-wrap">
                   {consensusSignals.map((sig) => {
                     const isAP = sig.name === "Auto-Pilot";
+                    const isML = sig.name === "ML Model";
                     return (
                       <div
                         key={sig.name}
                         className={`flex items-center gap-1 text-[11px] font-semibold ${
-                          isAP
-                            ? sig.above ? "text-emerald-400" : "text-red-400"
-                            : sig.above ? "text-emerald-400" : "text-red-400"
+                          sig.above ? "text-emerald-400" : "text-red-400"
                         }`}
                         title={isAP
                           ? `Auto-Pilot · via ${sig.modelUsed === "claude" ? "Claude" : "Stat"} · ${sig.conf.toFixed(0)}% historical acc`
+                          : isML
+                          ? `ML Model · logistic regression · ${sig.conf}% confidence`
                           : sig.name === "Stat"
                           ? `Stat model · ${sig.conf}% conf`
                           : `Claude AI · ${sig.conf}% conf`}
                       >
                         {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                        <span className={isAP ? "text-violet-300" : ""}>{sig.name}</span>
+                        <span className={isAP ? "text-violet-300" : isML ? "text-sky-300" : ""}>{sig.name}</span>
                         {isAP && sig.modelUsed && (
                           <span className="font-normal text-violet-300/60 text-[10px]">
                             ({sig.modelUsed === "claude" ? "Claude" : "Stat"})
+                          </span>
+                        )}
+                        {isML && mlPred?.valAccuracy != null && (
+                          <span className="font-normal text-sky-300/60 text-[10px]">
+                            ({mlPred.valAccuracy}%)
                           </span>
                         )}
                       </div>
