@@ -1524,7 +1524,16 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                 {/* Card header — time + status badge */}
                 <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-border/40">
                   <div className="flex items-baseline gap-2">
-                    <span className="text-sm font-bold tabular-nums">{rec.targetLabel}</span>
+                    <span className="text-sm font-bold tabular-nums">
+                      {new Intl.DateTimeFormat("en-US", {
+                        timeZone: "America/New_York",
+                        hour: "numeric",
+                        minute: "2-digit",
+                        hour12: true,
+                      }).format(new Date(new Date(rec.targetTime).getTime() - 15 * 60_000))}
+                      {" – "}
+                      {rec.targetLabel}
+                    </span>
                     <span className="text-[11px] text-muted-foreground">{tz}</span>
                   </div>
                   {statusBadge}
