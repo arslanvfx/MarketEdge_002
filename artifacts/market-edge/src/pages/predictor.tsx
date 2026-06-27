@@ -245,6 +245,7 @@ interface RecommendedWindow {
 interface TradingWindowsData {
   hourly: Array<TradingWindowBucket & { hour: number; label: string }>;
   daily: Array<TradingWindowBucket & { dayIndex: number; label: string }>;
+  byDayHour: Array<Array<TradingWindowBucket & { hour: number; label: string }>>;
   recommendedWindows: RecommendedWindow[];
   totalSamples: number;
   lastUpdatedAt: string;
@@ -1083,10 +1084,35 @@ const ET_TIME_FMT = new Intl.DateTimeFormat("en-US", {
   hour12: true,
 });
 
+const DOW_FILTER_LABELS = ["All", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+// Sun=0…Sat=6 in JS Date, matching our DOW_LABELS on the server.
+const DOW_FILTER_INDEX: Record<string, number | null> = {
+  All: null, Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+};
+
+/** Re-score an hourly bucket array and return top-N best + worst. */
+function scoreHourly(
+  hourly: Array<TradingWindowBucket & { hour: number; label: string }>,
+  n = 3,
+): { best: typeof hourly; worst: typeof hourly } {
+  const scored = hourly
+    .filter((h) => !h.sparse && h.avgEfficiencyRatio !== null)
+    .map((h) => ({
+      ...h,
+      score: ((h.accuracyPct ?? 50) / 100) * 0.4 + (h.avgEfficiencyRatio ?? 0) * 0.6,
+    }))
+    .sort((a, b) => b.score - a.score);
+  return {
+    best:  scored.slice(0, Math.min(n, scored.length)),
+    worst: scored.slice(-Math.min(n, scored.length)).reverse(),
+  };
+}
+
 function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
   const [coinFilter, setCoinFilter] = useState<string>("ALL");
-  const [open, setOpen] = useState(true);
-  const [barMode, setBarMode] = useState<BarViewMode>("er");
+  const [dayFilter, setDayFilter]   = useState<string>("All");
+  const [open, setOpen]             = useState(true);
+  const [barMode, setBarMode]       = useState<BarViewMode>("er");
   const SHOW_LABELS = new Set([0, 6, 12, 18]);
 
   const query = useQuery({
@@ -1105,6 +1131,19 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
   const updatedLabel = data?.lastUpdatedAt
     ? `Updated ${ET_TIME_FMT.format(new Date(data.lastUpdatedAt))} ET`
     : null;
+
+  // Which hourly array to show — all-days or a specific day-of-week.
+  const selectedDayIdx = DOW_FILTER_INDEX[dayFilter] ?? null;
+  const activeHourly   = selectedDayIdx !== null
+    ? (data?.byDayHour?.[selectedDayIdx] ?? data?.hourly ?? [])
+    : (data?.hourly ?? []);
+
+  // Best/worst for the currently visible hourly slice.
+  const { best: bestHours, worst: worstHours } = data
+    ? scoreHourly(activeHourly)
+    : { best: [], worst: [] };
+
+  const dayLabel = selectedDayIdx !== null ? `on ${dayFilter}s` : "across all days";
 
   return (
     <div className="mt-6">
@@ -1128,22 +1167,41 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
             </p>
           </div>
         </button>
-        {/* Per-coin filter pills — only shown when expanded */}
+        {/* Filters — only shown when expanded */}
         {open && (
-          <div className="flex gap-1 flex-wrap">
-            {TRAINING_COIN_FILTERS.map((c) => (
-              <button
-                key={c}
-                onClick={() => setCoinFilter(c)}
-                className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
-                  coinFilter === c
-                    ? "border-primary/60 bg-primary/15 text-primary"
-                    : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                }`}
-              >
-                {c}
-              </button>
-            ))}
+          <div className="flex flex-col gap-1.5 items-end">
+            {/* Coin filter */}
+            <div className="flex gap-1 flex-wrap justify-end">
+              {TRAINING_COIN_FILTERS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setCoinFilter(c)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                    coinFilter === c
+                      ? "border-primary/60 bg-primary/15 text-primary"
+                      : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
+                  }`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            {/* Day-of-week filter */}
+            <div className="flex gap-1 flex-wrap justify-end">
+              {DOW_FILTER_LABELS.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDayFilter(d)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                    dayFilter === d
+                      ? "border-sky-500/60 bg-sky-500/15 text-sky-300"
+                      : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
+                  }`}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -1167,30 +1225,62 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
               </div>
               {data && data.totalSamples > 0 && (
                 <div className="opacity-40 pointer-events-none">
-                  <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
+                  <HourlyBars hourly={activeHourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
                 </div>
               )}
             </Card>
           ) : (
             /* ── Full panel ── */
             <Card className="bg-card/50 px-4 py-4 space-y-4">
-              {/* Recommendation */}
-              <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2.5">
-                <Zap className="w-3.5 h-3.5 shrink-0 mt-0.5 text-emerald-400" />
-                <p className="text-[11px] text-emerald-100/90 leading-snug">
-                  {barMode === "accuracy"
-                    ? "Chart below shows observed prediction accuracy % per hour — toggle to Efficiency ratio to see market predictability."
-                    : data.recommendation}
-                </p>
-              </div>
+
+              {/* Best / Worst chips */}
+              {(bestHours.length > 0 || worstHours.length > 0) && (
+                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                  {bestHours.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider shrink-0">
+                        ✓ Best {dayLabel}
+                      </span>
+                      {bestHours.map((h) => (
+                        <span
+                          key={h.hour}
+                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30"
+                          title={`ER ${h.avgEfficiencyRatio?.toFixed(2)} · accuracy ${h.accuracyPct ?? "—"}% · ${h.count} windows`}
+                        >
+                          {h.label}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {worstHours.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[10px] font-semibold text-red-400 uppercase tracking-wider shrink-0">
+                        ✗ Avoid {dayLabel}
+                      </span>
+                      {worstHours.map((h) => (
+                        <span
+                          key={h.hour}
+                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-red-500/15 text-red-300 ring-1 ring-red-500/30"
+                          title={`ER ${h.avgEfficiencyRatio?.toFixed(2)} · accuracy ${h.accuracyPct ?? "—"}% · ${h.count} windows`}
+                        >
+                          {h.label}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* 24-hour bar chart */}
               <div>
                 <div className="flex items-center justify-between mb-2 gap-2">
                   <div className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-semibold">
+                    {selectedDayIdx !== null
+                      ? `${dayFilter}s only — `
+                      : "All days — "}
                     {barMode === "er"
-                      ? "Hour of day (ET) — bar height = avg market efficiency ratio · white outline = now"
-                      : "Hour of day (ET) — bar height = observed prediction accuracy % · white outline = now"}
+                      ? "bar height = avg efficiency ratio · white outline = now"
+                      : "bar height = prediction accuracy % · white outline = now"}
                   </div>
                   {/* Mode toggle */}
                   <div className="flex shrink-0 rounded overflow-hidden border border-border text-[9px] font-semibold">
@@ -1216,79 +1306,55 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
                     </button>
                   </div>
                 </div>
-                <HourlyBars hourly={data.hourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} mode={barMode} />
+                <HourlyBars hourly={activeHourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} mode={barMode} />
               </div>
 
-              {/* Day-of-week chart */}
-              <div>
-                <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
-                  Day of week
-                </div>
-                <div className="flex gap-2 items-end" style={{ height: "52px" }}>
-                  {data.daily.map((b) => (
-                    <div key={b.dayIndex} className="flex-1 flex flex-col items-center gap-1">
-                      <div
-                        className={`w-full rounded-t transition-all ${bucketBarColor(b)}`}
-                        style={{ height: `${bucketBarHeight(b, 36)}px` }}
+              {/* Day-of-week chart — hide when a specific day is already selected */}
+              {selectedDayIdx === null && (
+                <div>
+                  <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
+                    Day of week — click a day above to drill in
+                  </div>
+                  <div className="flex gap-2 items-end" style={{ height: "52px" }}>
+                    {data.daily.map((b) => (
+                      <button
+                        key={b.dayIndex}
+                        onClick={() => setDayFilter(DOW_FILTER_LABELS[b.dayIndex + 1])}
+                        className="flex-1 flex flex-col items-center gap-1 group"
                         title={
                           b.sparse
                             ? `${b.label}: ${b.count} samples (sparse)`
                             : `${b.label}: ER ${b.avgEfficiencyRatio?.toFixed(2)} · ${b.trendingPct ?? "—"}% trending · accuracy ${b.accuracyPct ?? "—"}%`
                         }
-                      />
-                      <span className="text-[9px] text-muted-foreground/60">{b.label}</span>
-                    </div>
-                  ))}
+                      >
+                        <div
+                          className={`w-full rounded-t transition-all group-hover:opacity-80 ${bucketBarColor(b)}`}
+                          style={{ height: `${bucketBarHeight(b, 36)}px` }}
+                        />
+                        <span className="text-[9px] text-muted-foreground/60 group-hover:text-muted-foreground transition-colors">{b.label}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Legend */}
               <div className="flex items-center gap-3 flex-wrap text-[9px] text-muted-foreground/60">
                 {barMode === "er" ? (
                   <>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />
-                      Trending (ER≥0.55)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />
-                      Drifting (0.25–0.55)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />
-                      Choppy (&lt;0.25)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />
-                      Sparse (&lt;10 samples)
-                    </span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />Trending (ER≥0.55)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Drifting (0.25–0.55)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />Choppy (&lt;0.25)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />Sparse (&lt;10 samples)</span>
                   </>
                 ) : (
                   <>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />
-                      Strong (≥65%)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-emerald-400/60 inline-block" />
-                      Good (55–65%)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />
-                      Coin-flip (45–55%)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-orange-500 inline-block" />
-                      Weak (35–45%)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />
-                      Poor (&lt;35%)
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />
-                      Sparse (&lt;5 evaluated)
-                    </span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />Strong (≥65%)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-400/60 inline-block" />Good (55–65%)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Coin-flip (45–55%)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-orange-500 inline-block" />Weak (35–45%)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />Poor (&lt;35%)</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />Sparse (&lt;5 evaluated)</span>
                   </>
                 )}
               </div>

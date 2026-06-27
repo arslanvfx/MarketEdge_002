@@ -873,6 +873,9 @@ export interface RecommendedWindow {
 export interface TradingWindowsData {
   hourly: Array<TradingWindowBucket & { hour: number; label: string }>;
   daily: Array<TradingWindowBucket & { dayIndex: number; label: string }>;
+  /** 7-element array (Sun=0…Sat=6), each containing 24 hourly buckets.
+   *  Lets the UI show "best hours on Mondays" etc. */
+  byDayHour: Array<Array<TradingWindowBucket & { hour: number; label: string }>>;
   recommendedWindows: RecommendedWindow[];
   totalSamples: number;
   lastUpdatedAt: string;
@@ -921,8 +924,11 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
   const mkAcc = (): Acc => ({
     erSum: 0, erCount: 0, trendingCount: 0, hits: 0, evaluated: 0, total: 0,
   });
-  const hourAcc: Acc[] = Array.from({ length: 24 }, mkAcc);
-  const dayAcc:  Acc[] = Array.from({ length: 7  }, mkAcc);
+  const hourAcc:    Acc[]   = Array.from({ length: 24 }, mkAcc);
+  const dayAcc:     Acc[]   = Array.from({ length: 7  }, mkAcc);
+  const dayHourAcc: Acc[][] = Array.from({ length: 7  }, () =>
+    Array.from({ length: 24 }, mkAcc),
+  );
 
   const ET_FMT = new Intl.DateTimeFormat("en-US", {
     timeZone:  "America/New_York",
@@ -940,22 +946,24 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
     const dayIdx = DOW_LABELS.indexOf(dow);
     if (hour < 0 || hour > 23 || dayIdx === -1) continue;
 
-    const hA = hourAcc[hour];
-    const dA = dayAcc[dayIdx];
+    const hA  = hourAcc[hour];
+    const dA  = dayAcc[dayIdx];
+    const dhA = dayHourAcc[dayIdx][hour];
 
-    hA.total++; dA.total++;
+    hA.total++; dA.total++; dhA.total++;
 
     if (rec.efficiencyRatio !== null) {
-      hA.erSum += rec.efficiencyRatio;
-      hA.erCount++;
-      dA.erSum += rec.efficiencyRatio;
-      dA.erCount++;
-      if (rec.efficiencyRatio >= 0.55) { hA.trendingCount++; dA.trendingCount++; }
+      hA.erSum  += rec.efficiencyRatio; hA.erCount++;
+      dA.erSum  += rec.efficiencyRatio; dA.erCount++;
+      dhA.erSum += rec.efficiencyRatio; dhA.erCount++;
+      if (rec.efficiencyRatio >= 0.55) {
+        hA.trendingCount++; dA.trendingCount++; dhA.trendingCount++;
+      }
     }
 
     if (rec.status === "evaluated" && rec.correct !== null && rec.abstained !== true) {
-      hA.evaluated++; dA.evaluated++;
-      if (rec.correct) { hA.hits++; dA.hits++; }
+      hA.evaluated++; dA.evaluated++; dhA.evaluated++;
+      if (rec.correct) { hA.hits++; dA.hits++; dhA.hits++; }
     }
   }
 
@@ -975,8 +983,11 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
     };
   };
 
-  const hourly = hourAcc.map((acc, h) => ({ ...toBucket(acc), hour: h, label: fmtHourLabel(h) }));
-  const daily  = dayAcc.map((acc, i)  => ({ ...toBucket(acc), dayIndex: i, label: DOW_LABELS[i] }));
+  const hourly     = hourAcc.map((acc, h) => ({ ...toBucket(acc), hour: h, label: fmtHourLabel(h) }));
+  const daily      = dayAcc.map((acc, i)  => ({ ...toBucket(acc), dayIndex: i, label: DOW_LABELS[i] }));
+  const byDayHour  = dayHourAcc.map((dayHours) =>
+    dayHours.map((acc, h) => ({ ...toBucket(acc), hour: h, label: fmtHourLabel(h) })),
+  );
 
   const totalSamples = windowMap.size;
 
@@ -1031,6 +1042,7 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
   return {
     hourly,
     daily,
+    byDayHour,
     recommendedWindows,
     totalSamples,
     lastUpdatedAt: new Date().toISOString(),
