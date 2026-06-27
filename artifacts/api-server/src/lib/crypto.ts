@@ -2620,24 +2620,6 @@ export function startPredictionTracker(): void {
               ? await fetchKalshiTarget(sym, nextBoundary).catch(() => null)
               : null;
 
-            // Duplicate-target guard: the Kalshi target for a new window must be
-            // the closing price of the PREVIOUS window — every target should be
-            // unique. If the freshly-fetched target exactly matches the most
-            // recent prior window's target, Kalshi is still returning the old
-            // market (or a race-condition cache). Treat it as null and retry.
-            if (kalshiTargetSnap !== null) {
-              const prevTarget = records
-                .filter((r) => r.targetTime !== targetISO && r.kalshiTarget != null)
-                .at(-1)?.kalshiTarget ?? null;
-              if (prevTarget !== null && Math.abs(kalshiTargetSnap - prevTarget) < 1e-6) {
-                console.warn(
-                  `[kalshi] ${sym}: new-window target $${kalshiTargetSnap} ` +
-                  `matches previous window ($${prevTarget}) — stale market, retrying`,
-                );
-                kalshiTargetSnap = null;
-              }
-            }
-
             // If the target is missing AND Kalshi has a series for this coin
             // AND we're still inside the grace window, skip and retry next tick.
             if (

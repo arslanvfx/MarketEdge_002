@@ -202,15 +202,27 @@ export async function initMLFromDB(): Promise<void> {
       .from(mlWindowSnapshotsTable)
       .orderBy(mlWindowSnapshotsTable.snapshotAt);
 
+    let labeledCount = 0;
+    let pendingCount = 0;
     for (const row of snapshots) {
-      if (row.outcome === null) continue;  // unlabeled — skip
-      const s = getOrCreate(row.symbol);
       const features = row.features as number[];
       if (!Array.isArray(features) || features.length !== N_FEATURES) continue;
-      s.examples.push({ features, label: row.outcome });
+      const s = getOrCreate(row.symbol);
+      if (row.outcome === null) {
+        // Restore unlabeled snapshot to pending so post-restart labeling still works.
+        s.pending.set(row.windowId, {
+          features,
+          snapshotAt: new Date(row.snapshotAt).getTime(),
+          elapsedFraction: Number(row.elapsedFraction),
+        });
+        pendingCount++;
+      } else {
+        s.examples.push({ features, label: row.outcome });
+        labeledCount++;
+      }
     }
 
-    console.info(`[ml-store] loaded ${savedModels.length} models, ${snapshots.filter(r => r.outcome !== null).length} labeled snapshots`);
+    console.info(`[ml-store] loaded ${savedModels.length} models, ${labeledCount} labeled snapshots, ${pendingCount} pending snapshots restored`);
   } catch (err) {
     console.warn("[ml-store] initMLFromDB failed (non-fatal):", err);
   }
