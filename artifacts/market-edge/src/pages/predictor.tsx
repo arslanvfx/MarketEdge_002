@@ -1391,13 +1391,11 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
   const [clearPassword, setClearPassword]     = useState("");
   const [clearPasswordError, setClearPasswordError] = useState<string | null>(null);
-  const [clearUnlocked, setClearUnlocked]     = useState(false);
   const [clearing, setClearing]               = useState(false);
 
   function openClearDialog() {
     setClearPassword("");
     setClearPasswordError(null);
-    setClearUnlocked(false);
     setClearDialogOpen(true);
   }
 
@@ -1451,17 +1449,6 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
       }>(`/crypto/prediction-history?symbol=${symbol}`),
     refetchInterval: 30_000,
   });
-
-  async function handleClear() {
-    if (!confirm("Clear all prediction history? This cannot be undone.")) return;
-    setClearing(true);
-    try {
-      await fetch(`${API_BASE}/crypto/prediction-history`, { method: "DELETE" });
-      await query.refetch();
-    } finally {
-      setClearing(false);
-    }
-  }
 
   const history = query.data?.history ?? [];
   const evaluated = history.filter((r) => r.status === "evaluated");
