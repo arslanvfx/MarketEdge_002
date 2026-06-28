@@ -4,55 +4,32 @@
 //   captureMLSnapshot()       — store a feature vector for the active window
 //   labelWindowAndRetrain()   — mark outcome when window closes, retrain model
 //   getMLPrediction()         — run inference on current live features
+//   getMLStatus()             — return training status for a coin
 //   initMLFromDB()            — reload labeled examples + weights on startup
 //
 // Persistence: labeled snapshots and model weights are written to PostgreSQL
 // so nothing is lost across server restarts.
+//
+// Pure in-memory state lives in ml-core.ts (fully unit-testable without DB).
 
 import { db, mlWindowSnapshotsTable, mlModelStateTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { initWeights, type MLPrediction } from "./ml-model.ts";
 import {
-  N_FEATURES,
-  MIN_TRAINING_WINDOWS,
-  initWeights,
-  trainModel,
-  evalAccuracy,
-  predict,
-  type Weights,
-  type TrainingExample,
-  type MLPrediction,
-} from "./ml-model";
+  applyHydratedModel,
+  applyLabeledSnapshot,
+  applyPendingSnapshot,
+  reconcileStateFromExamples,
+  captureSnapshot,
+  labelAndRetrain,
+  getPrediction,
+  getStatus,
+  getAllStatus,
+  getCoinState,
+} from "./ml-core.ts";
 
-// ── In-memory state ──────────────────────────────────────────────────────────
-
-interface PendingWindow {
-  features: number[];   // snapshot taken at window open
-  snapshotAt: number;   // unix ms
-  elapsedFraction: number;
-}
-
-interface CoinState {
-  pending:  Map<string, PendingWindow>; // windowId → snapshot (not yet labeled)
-  examples: TrainingExample[];          // all labeled examples for this coin
-  windows:  number;                     // count of labeled windows
-  weights:  Weights;
-  valAcc:   number | null;
-}
-
-const coinState = new Map<string, CoinState>();
-
-function getOrCreate(symbol: string): CoinState {
-  if (!coinState.has(symbol)) {
-    coinState.set(symbol, {
-      pending:  new Map(),
-      examples: [],
-      windows:  0,
-      weights:  initWeights(),
-      valAcc:   null,
-    });
-  }
-  return coinState.get(symbol)!;
-}
+// Re-export types that callers need
+export type { MLPrediction };
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -61,17 +38,15 @@ function getOrCreate(symbol: string): CoinState {
  * prediction-snap time (~T+30-60s into the window).
  */
 export function captureMLSnapshot(
-  symbol:         string,
-  windowId:       string,   // targetTime ISO
-  features:       number[],
+  symbol:          string,
+  windowId:        string,   // targetTime ISO
+  features:        number[],
   elapsedFraction: number,
 ): void {
-  if (features.length !== N_FEATURES) return;
-  const s = getOrCreate(symbol);
-  if (s.pending.has(windowId)) return; // already captured this window
-  s.pending.set(windowId, { features, snapshotAt: Date.now(), elapsedFraction });
+  const captured = captureSnapshot(symbol, windowId, features, elapsedFraction);
+  if (!captured) return; // already captured this window
 
-  // Persist snapshot to DB (outcome filled later)
+  // Persist snapshot to DB (outcome filled later by labelWindowAndRetrain)
   db.insert(mlWindowSnapshotsTable)
     .values({
       symbol,
@@ -96,14 +71,8 @@ export function labelWindowAndRetrain(
   windowId: string,
   outcome:  0 | 1,
 ): void {
-  const s = getOrCreate(symbol);
-  const snap = s.pending.get(windowId);
-  if (!snap) return;                      // no snapshot for this window
-
-  // Move from pending → labeled training set
-  s.pending.delete(windowId);
-  s.examples.push({ features: snap.features, label: outcome });
-  s.windows++;
+  const snap = labelAndRetrain(symbol, windowId, outcome);
+  if (!snap) return; // no snapshot for this window
 
   // Update DB snapshot outcome
   db.update(mlWindowSnapshotsTable)
@@ -111,14 +80,9 @@ export function labelWindowAndRetrain(
     .where(eq(mlWindowSnapshotsTable.windowId, windowId))
     .catch(() => {});
 
-  // Retrain
-  const newWeights = trainModel(s.weights, s.examples);
-  // Eval on last 200 examples (out-of-bag would be better but this is fast)
-  s.valAcc   = evalAccuracy(newWeights, s.examples.slice(-200));
-  s.weights  = newWeights;
-
-  // Persist model state
-  persistModelState(symbol, s).catch(() => {});
+  // Persist updated model weights
+  const s = getCoinState(symbol);
+  if (s) persistModelState(symbol, s).catch(() => {});
 }
 
 /** Get current ML prediction for the live feature vector. */
@@ -130,34 +94,20 @@ export function getMLPrediction(symbol: string, features: number[]): {
   minWindows:  number;
   valAccuracy: number | null;
 } {
-  const s = getOrCreate(symbol);
-  const ready = s.windows >= MIN_TRAINING_WINDOWS;
-  return {
-    prediction:  ready ? predict(s.weights, features) : null,
-    windows:     s.windows,
-    samples:     s.examples.length,
-    ready,
-    minWindows:  MIN_TRAINING_WINDOWS,
-    valAccuracy: s.valAcc != null ? Math.round(s.valAcc * 100) : null,
-  };
+  return getPrediction(symbol, features);
 }
 
 /** Return current training status for a coin (for status endpoint). */
 export function getMLStatus(symbol: string) {
-  const s = coinState.get(symbol);
-  if (!s) return { windows: 0, samples: 0, ready: false, minWindows: MIN_TRAINING_WINDOWS, valAccuracy: null };
-  return {
-    windows:     s.windows,
-    samples:     s.examples.length,
-    ready:       s.windows >= MIN_TRAINING_WINDOWS,
-    minWindows:  MIN_TRAINING_WINDOWS,
-    valAccuracy: s.valAcc != null ? Math.round(s.valAcc * 100) : null,
-  };
+  return getStatus(symbol);
 }
 
 // ── DB helpers ───────────────────────────────────────────────────────────────
 
-async function persistModelState(symbol: string, s: CoinState): Promise<void> {
+async function persistModelState(
+  symbol: string,
+  s: { examples: { features: number[]; label: number }[]; windows: number; weights: number[]; valAcc: number | null },
+): Promise<void> {
   await db
     .insert(mlModelStateTable)
     .values({
@@ -184,19 +134,27 @@ async function persistModelState(symbol: string, s: CoinState): Promise<void> {
 /**
  * Load persisted labeled snapshots and model weights on server startup.
  * Called once from startPredictionTracker() before the first tick.
+ *
+ * After this call, any coin that has accumulated ≥ MIN_TRAINING_WINDOWS
+ * labeled windows will immediately serve predictions — no wait needed.
  */
 export async function initMLFromDB(): Promise<void> {
   try {
-    // Restore model weights (fast)
+    // 1. Restore model weights first (fast — one row per coin).
+    //    This gives the model working weights immediately so predictions
+    //    are available as soon as the window count gate is met.
     const savedModels = await db.select().from(mlModelStateTable);
     for (const row of savedModels) {
-      const s = getOrCreate(row.symbol);
-      s.weights  = (row.weights as number[]) ?? initWeights();
-      s.windows  = row.labeledWindows ?? 0;
-      s.valAcc   = row.valAccuracy != null ? Number(row.valAccuracy) : null;
+      applyHydratedModel(
+        row.symbol,
+        (row.weights as number[]) ?? initWeights(),
+        row.labeledWindows ?? 0,
+        row.valAccuracy != null ? Number(row.valAccuracy) : null,
+      );
     }
 
-    // Restore labeled training examples (slow on first load — runs once)
+    // 2. Restore labeled training examples so the model can retrain
+    //    incrementally after restart without starting from zero.
     const snapshots = await db
       .select()
       .from(mlWindowSnapshotsTable)
@@ -206,23 +164,52 @@ export async function initMLFromDB(): Promise<void> {
     let pendingCount = 0;
     for (const row of snapshots) {
       const features = row.features as number[];
-      if (!Array.isArray(features) || features.length !== N_FEATURES) continue;
-      const s = getOrCreate(row.symbol);
       if (row.outcome === null) {
-        // Restore unlabeled snapshot to pending so post-restart labeling still works.
-        s.pending.set(row.windowId, {
+        // Restore unlabeled snapshot to pending so post-restart labeling works.
+        applyPendingSnapshot(
+          row.symbol,
+          row.windowId,
           features,
-          snapshotAt: new Date(row.snapshotAt).getTime(),
-          elapsedFraction: Number(row.elapsedFraction),
-        });
+          new Date(row.snapshotAt).getTime(),
+          Number(row.elapsedFraction),
+        );
         pendingCount++;
       } else {
-        s.examples.push({ features, label: row.outcome });
+        applyLabeledSnapshot(row.symbol, features, row.outcome as 0 | 1);
         labeledCount++;
       }
     }
 
-    console.info(`[ml-store] loaded ${savedModels.length} models, ${labeledCount} labeled snapshots, ${pendingCount} pending snapshots restored`);
+    // 3. Reconcile each coin's state against its labeled snapshots.
+    //    This covers two failure modes:
+    //      a) ml_model_state row was absent (first run / corrupt) → derive
+    //         windows from example count and retrain so predictions surface
+    //         immediately without waiting for 30 new windows.
+    //      b) labeled_windows in model_state diverges from snapshot count
+    //         (partial write / race) → use examples as source of truth.
+    //    In the normal case (counts match) this is a fast no-op.
+    const coinSymbols = new Set<string>(
+      (await db.select({ symbol: mlWindowSnapshotsTable.symbol }).from(mlWindowSnapshotsTable))
+        .map(r => r.symbol),
+    );
+    for (const sym of coinSymbols) {
+      const r = reconcileStateFromExamples(sym);
+      if (r.wasInconsistent) {
+        console.info(`[ml-store] reconciled ${sym}: windows set to ${r.windows} from labeled snapshots (retrained)`);
+      }
+    }
+
+    // 4. Log hydration summary — shows which coins are immediately ready
+    //    (predictions available right now) vs still accumulating data.
+    const allStatus = getAllStatus();
+    const readyCoins  = allStatus.filter(c => c.ready).map(c => `${c.symbol}(${c.valAccuracy ?? "?"}%)`);
+    const warmingCoins = allStatus.filter(c => !c.ready).map(c => `${c.symbol}(${c.windows}/${30})`);
+
+    console.info(
+      `[ml-store] hydrated ${savedModels.length} models, ${labeledCount} labeled + ${pendingCount} pending snapshots` +
+      (readyCoins.length  ? `; ready: ${readyCoins.join(", ")}`          : "") +
+      (warmingCoins.length ? `; warming: ${warmingCoins.join(", ")}`      : ""),
+    );
   } catch (err) {
     console.warn("[ml-store] initMLFromDB failed (non-fatal):", err);
   }

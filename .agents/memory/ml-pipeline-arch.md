@@ -26,6 +26,11 @@ description: Self-learning logistic regression pipeline for Kalshi ABOVE/BELOW p
 
 **Why:** The model only predicts when it has a Kalshi target (strike price) — that's the binary label. Coins without a Kalshi series never accumulate labeled windows and thus never become ready.
 
+## DB persistence (confirmed working)
+- `ml_window_snapshots` and `ml_model_state` tables exist in PostgreSQL and survive restarts.
+- After restart: `valAccuracy` and `windows` are non-null immediately (e.g., BTC: valAcc=76, windows=25), proving weights + labeled counts are hydrated from DB before the first tick.
+- `ready:false` after restart just means that coin hasn't hit 30 labeled windows yet in total history — not a persistence failure. Any coin with ≥30 historical labeled windows will be `ready:true` immediately after restart.
+
 ## Frontend
 - `MLPredResponse` interface in predictor.tsx
 - `mlPredQuery` refetches every 30s (tracker tick rate)
