@@ -1644,9 +1644,9 @@ Return ONLY valid JSON with exactly 1 item:
       messages: [{ role: "user", content: userPrompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = response.content
+    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
       .filter((b) => b.type === "text")
-      .map((b) => (b as { type: "text"; text: string }).text)
+      .map((b) => b.text ?? "")
       .join("") || "";
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(cleaned) as {
@@ -2345,9 +2345,9 @@ Return ONLY valid JSON (no markdown):
       messages: [{ role: "user", content: prompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = response.content
+    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
       .filter((b) => b.type === "text")
-      .map((b) => (b as { type: "text"; text: string }).text)
+      .map((b) => b.text ?? "")
       .join("") || "";
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(cleaned) as {
@@ -2962,7 +2962,7 @@ export async function fetchCryptoPredictions(): Promise<{
   );
   return {
     generatedAt: now.toISOString(),
-    coins: coins.filter((c): c is CoinPrediction => c !== null),
+    coins: coins.filter((c) => c !== null) as CoinPrediction[],
   };
 }
 
@@ -3281,8 +3281,9 @@ JSON only: {"direction":"up","confidence":65}`;
       messages: [{ role: "user", content: prompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = (response.content.filter((b) => b.type === "text") as Array<{ type: "text"; text: string }>)
-      .map((b) => b.text)
+    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
       .join("")
       .trim();
     const parsed = JSON.parse(raw) as { above?: boolean; direction?: string; confidence?: number };
