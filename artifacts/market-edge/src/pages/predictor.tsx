@@ -34,7 +34,6 @@ import {
   Bot,
   BarChart3,
   Power,
-  Lock,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -2536,13 +2535,6 @@ function CoinDetail({
     : Infinity;
   const nearWindowClose = windowRemainingMs < 120_000 && windowRemainingMs > 0;
 
-  // ── Hysteresis for live stat "current momentum" indicator ────────────────
-  // Only flip the displayed direction when the stat model has crossed 0.40% of
-  // the Kalshi target on the opposite side — suppresses near-threshold jitter.
-  const STAT_MOMENTUM_FLIP = 0.0040;
-  const [momentumAbove, setMomentumAbove] = useState<boolean | null>(null);
-  const momentumAboveRef = useRef<boolean | null>(null);
-
   // Derive Claude's call from the AI forecast — same data as the cards, never contradicts.
   const claudeAiPred0 = aiEntry?.preds[0] ?? null;
   const claudeAbove: boolean | null =
@@ -2570,26 +2562,6 @@ function CoinDetail({
       setOpeningStatAbove(statHead.predictedPrice >= kalshiTarget);
     }
   }, [trackerSnapshot, kalshiTarget, statHead]);
-
-  // Reset hysteresis ref at every new window (new snappedAt = new window opened).
-  useEffect(() => {
-    momentumAboveRef.current = null;
-  }, [statSnapshot?.snappedAt]);
-
-  // Apply hysteresis: update displayed momentum only when the stat model has
-  // crossed 0.40% of the target on the opposite side from the current display.
-  useEffect(() => {
-    if (!statHead || kalshiTarget === null) return;
-    const liveAbove = statHead.predictedPrice >= kalshiTarget;
-    const gap = Math.abs(statHead.predictedPrice - kalshiTarget) / kalshiTarget;
-    if (momentumAboveRef.current === null) {
-      momentumAboveRef.current = liveAbove;
-      setMomentumAbove(liveAbove);
-    } else if (liveAbove !== momentumAboveRef.current && gap >= STAT_MOMENTUM_FLIP) {
-      momentumAboveRef.current = liveAbove;
-      setMomentumAbove(liveAbove);
-    }
-  }, [statHead?.predictedPrice, kalshiTarget, STAT_MOMENTUM_FLIP]);
 
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
@@ -3123,78 +3095,36 @@ function CoinDetail({
 
                   return (
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-                      {/* Stat model — two modes:
-                          • Normal: statSnapshot (locked at window open) as primary, live momentum chip as secondary
-                          • Near close (<2 min): live stat prediction takes over — the opening call is too old */}
+                      {/* Stat model — always shows current live prediction.
+                          Server applies a near-close live-price blend (<2 min) so
+                          the predicted price converges to reality near window end. */}
                       <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1 flex items-center justify-center gap-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
                           Stat Model
-                          {!nearWindowClose && statSnapshot && <Lock className="w-2.5 h-2.5 text-sky-300/60" />}
-                          {nearWindowClose && (
-                            <span className="text-[9px] font-bold text-amber-400 bg-amber-400/15 rounded px-1">LIVE</span>
-                          )}
                         </div>
-                        {/* ── Near-close mode: show current live stat call ── */}
-                        {nearWindowClose && statHead && kalshiTarget !== null ? (() => {
+                        {statHead && kalshiTarget !== null ? (() => {
                           const liveAbove = statHead.predictedPrice >= kalshiTarget;
                           const pct = pctVsStrike(statHead.predictedPrice)!;
-                          const secsLeft = Math.round(windowRemainingMs / 1_000);
                           return (
                             <>
-                              <div className={`text-xl font-black leading-none mb-0.5 ${liveAbove ? "text-emerald-400" : "text-red-400"}`}>
+                              <div className={`text-xl font-black leading-none mb-1 ${liveAbove ? "text-emerald-400" : "text-red-400"}`}>
                                 {liveAbove ? "↑ ABOVE" : "↓ BELOW"}
                               </div>
-                              <div className="text-[10px] text-amber-400/70 mt-0.5 leading-tight">
-                                {secsLeft}s left · live call
-                              </div>
-                              <div className={`text-[10px] font-semibold mt-0.5 ${pct >= 0 ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                              <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                 {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
                               </div>
+                              {nearWindowClose && (
+                                <div className="text-[10px] text-amber-400/70 mt-0.5">
+                                  {Math.round(windowRemainingMs / 1_000)}s left
+                                </div>
+                              )}
                             </>
                           );
-                        })() : statSnapshot?.aboveKalshi !== null && statSnapshot?.aboveKalshi !== undefined ? (
-                          /* ── Normal mode: locked opening call ── */
-                          <>
-                            <div className={`text-xl font-black leading-none mb-0.5 ${statSnapshot.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
-                              {statSnapshot.aboveKalshi ? "↑ ABOVE" : "↓ BELOW"}
-                            </div>
-                            <div className="text-[10px] text-sky-300/55 mt-0.5 leading-tight">
-                              Opening call · {(() => {
-                                const minsAgo = Math.round(
-                                  (Date.now() - new Date(statSnapshot.snappedAt).getTime()) / 60_000
-                                );
-                                return minsAgo === 0 ? "just now" : `locked ${minsAgo}m ago`;
-                              })()}
-                            </div>
-                            {momentumAbove !== null && momentumAbove !== statSnapshot.aboveKalshi && (
-                              <div className={`mt-1.5 flex items-center justify-center gap-0.5 text-[10px] font-semibold ${momentumAbove ? "text-emerald-300/70" : "text-red-300/70"}`}>
-                                {momentumAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
-                                momentum shifted
-                              </div>
-                            )}
-                            {kalshiTarget && statHead && (() => {
-                              const pct = pctVsStrike(statHead.predictedPrice)!;
-                              return (
-                                <div className="text-[10px] text-muted-foreground/50 mt-0.5">
-                                  live: {pct >= 0 ? "+" : ""}{pct.toFixed(3)}%
-                                </div>
-                              );
-                            })()}
-                          </>
-                        ) : statHead ? (
-                          /* ── Fallback: no snapshot yet, show raw price ── */
+                        })() : statHead ? (
                           <>
                             <div className="text-xl font-black text-foreground leading-none mb-1">
                               ${statHead.predictedPrice.toFixed(dp(statHead.predictedPrice))}
                             </div>
-                            {kalshiTarget && (() => {
-                              const pct = pctVsStrike(statHead.predictedPrice)!;
-                              return (
-                                <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                  {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
-                                </div>
-                              );
-                            })()}
                           </>
                         ) : (
                           <div className="text-[12px] text-muted-foreground/60 italic">—</div>
