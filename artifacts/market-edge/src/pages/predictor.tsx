@@ -3310,74 +3310,74 @@ function CoinDetail({
 
                     {/* Live signal bubbles */}
                     {consensusSignals.length > 0 && (
-                      <div className="flex items-center gap-2 flex-wrap">
+                      <div className="space-y-2">
 
-                        {/* LIVE label chip */}
-                        <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/50 border border-border/50 px-2 py-1 shrink-0">
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/60">Live</span>
+                        {/* Header: LIVE chip left, Refresh right — always on one line */}
+                        <div className="flex items-center justify-between">
+                          <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/50 border border-border/50 px-2 py-1">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/60">Live</span>
+                          </div>
+                          <button
+                            onClick={handleRefreshStat}
+                            disabled={statLoading}
+                            title="Force-refresh all models"
+                            className={`inline-flex items-center gap-1.5 text-[10px] font-medium px-2.5 py-1.5 rounded-lg border transition-all ${
+                              statJustRefreshed
+                                ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/30"
+                                : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border-border/40"
+                            } disabled:opacity-40`}
+                          >
+                            {statJustRefreshed ? (
+                              <><Check className="w-3 h-3" /> Refreshed</>
+                            ) : (
+                              <><RefreshCw className={`w-3 h-3 ${statLoading ? "animate-spin" : ""}`} /> Refresh</>
+                            )}
+                          </button>
                         </div>
 
-                        {/* One bubble per model signal */}
-                        {consensusSignals.map((sig) => {
-                          const isAP = sig.name === "Auto-Pilot";
-                          const isML = sig.name === "ML Model";
-                          const bubbleCls = sig.above
-                            ? "bg-emerald-500/10 text-emerald-400 ring-emerald-500/25"
-                            : "bg-red-500/10 text-red-400 ring-red-500/25";
-                          const nameCls = isAP ? "text-violet-300" : isML ? "text-sky-300" : "";
-                          return (
-                            <div
-                              key={sig.name}
-                              className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold ring-1 ${bubbleCls}`}
-                              title={isAP
-                                ? `Auto-Pilot · via ${sig.modelUsed === "claude" ? "Claude" : "Stat"} · ${sig.conf.toFixed(0)}% historical acc`
-                                : isML
-                                ? `ML Model · logistic regression · ${sig.conf}% confidence`
-                                : sig.name === "Stat"
-                                ? `Stat model · ${sig.conf}% conf`
-                                : `Claude AI · ${sig.conf}% conf`}
-                            >
-                              {sig.above ? <ArrowUp className="w-3 h-3 shrink-0" /> : <ArrowDown className="w-3 h-3 shrink-0" />}
-                              <span className={nameCls}>{sig.name}</span>
-                              {isAP && sig.modelUsed && (
-                                <span className="text-[9px] font-medium text-violet-300/60">({sig.modelUsed === "claude" ? "C" : "S"})</span>
-                              )}
-                              {isML && mlPred?.valAccuracy != null && (
-                                <span className="text-[9px] font-medium text-sky-300/60">({mlPred.valAccuracy}%)</span>
-                              )}
+                        {/* Signal pills + agree badge — free to wrap */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {consensusSignals.map((sig) => {
+                            const isAP = sig.name === "Auto-Pilot";
+                            const isML = sig.name === "ML Model";
+                            const bubbleCls = sig.above
+                              ? "bg-emerald-500/10 text-emerald-400 ring-emerald-500/25"
+                              : "bg-red-500/10 text-red-400 ring-red-500/25";
+                            const nameCls = isAP ? "text-violet-300" : isML ? "text-sky-300" : "";
+                            return (
+                              <div
+                                key={sig.name}
+                                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold ring-1 ${bubbleCls}`}
+                                title={isAP
+                                  ? `Auto-Pilot · via ${sig.modelUsed === "claude" ? "Claude" : "Stat"} · ${sig.conf.toFixed(0)}% historical acc`
+                                  : isML
+                                  ? `ML Model · logistic regression · ${sig.conf}% confidence`
+                                  : sig.name === "Stat"
+                                  ? `Stat model · ${sig.conf}% conf`
+                                  : `Claude AI · ${sig.conf}% conf`}
+                              >
+                                {sig.above ? <ArrowUp className="w-3 h-3 shrink-0" /> : <ArrowDown className="w-3 h-3 shrink-0" />}
+                                <span className={nameCls}>{sig.name}</span>
+                                {isAP && sig.modelUsed && (
+                                  <span className="text-[9px] font-medium text-violet-300/60">({sig.modelUsed === "claude" ? "C" : "S"})</span>
+                                )}
+                                {isML && mlPred?.valAccuracy != null && (
+                                  <span className="text-[9px] font-medium text-sky-300/60">({mlPred.valAccuracy}%)</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {consensusSignals.length > 1 && (
+                            <div className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold ring-1 ${
+                              allConsensusAgree
+                                ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30"
+                                : "bg-amber-500/15 text-amber-400 ring-amber-500/30"
+                            }`}>
+                              {consensusAgreement}/{consensusSignals.length} agree
                             </div>
-                          );
-                        })}
-
-                        {/* Agreement bubble */}
-                        {consensusSignals.length > 1 && (
-                          <div className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold ring-1 ${
-                            allConsensusAgree
-                              ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30"
-                              : "bg-amber-500/15 text-amber-400 ring-amber-500/30"
-                          }`}>
-                            {consensusAgreement}/{consensusSignals.length} agree
-                          </div>
-                        )}
-
-                        {/* Refresh */}
-                        <button
-                          onClick={handleRefreshStat}
-                          disabled={statLoading}
-                          title="Force-refresh all models"
-                          className={`inline-flex items-center gap-1.5 text-[10px] font-medium ml-auto px-2.5 py-1.5 rounded-lg border transition-all ${
-                            statJustRefreshed
-                              ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/30"
-                              : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border-border/40"
-                          } disabled:opacity-40`}
-                        >
-                          {statJustRefreshed ? (
-                            <><Check className="w-3 h-3" /> Refreshed</>
-                          ) : (
-                            <><RefreshCw className={`w-3 h-3 ${statLoading ? "animate-spin" : ""}`} /> Refresh</>
                           )}
-                        </button>
+                        </div>
                       </div>
                     )}
 
