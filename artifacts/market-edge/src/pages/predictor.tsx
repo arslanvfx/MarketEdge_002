@@ -1721,7 +1721,7 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                     };
                     return (
                       <div className="flex items-center gap-2 flex-wrap pt-1.5 border-t border-border/30">
-                        {wgRecs.map((r) => {
+                        {wgRecs.map((r, i) => {
                           const rAbove = r.kalshiTarget != null
                             ? r.predictedPrice >= r.kalshiTarget
                             : r.predictedDirection === "up";
@@ -1748,7 +1748,7 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                           );
                           return (
                             <div
-                              key={r.source}
+                              key={(r.source ?? "unknown") + "-" + i}
                               className="group flex items-center gap-1 text-[10px] cursor-default"
                               title={`${srcLabel[r.source ?? "stat"] ?? r.source}: ${r.confidence}% confidence${isLockedAtOpen ? " · locked at window open" : " · mid-window call"}`}
                             >
@@ -3329,15 +3329,29 @@ function CoinDetail({
                 </div>
 
                 {/* ── At-open snapshot row ────────────────────────────────
-                    Shows what stat + Claude predicted when the window opened.
-                    If either has flipped since open, the chip shows "→ flipped"
+                    Shows what all 4 models predicted when the window opened.
+                    If any model has flipped since open, the chip shows "→ now"
                     so the user can see intra-window direction changes. */}
                 {trackerSnapshot && kalshiTarget !== null &&
                   (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null) && (() => {
-                  const statAboveNow    = statHead ? statHead.predictedPrice >= kalshiTarget : null;
-                  const statFlippedMid  = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
-                  const claudeAboveOpen = trackerSnapshot.aboveKalshi;
-                  const claudeFlippedMid= claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
+                  const statAboveNow      = statHead ? statHead.predictedPrice >= kalshiTarget : null;
+                  const statFlippedMid    = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
+                  const claudeAboveOpen   = trackerSnapshot.aboveKalshi;
+                  const claudeFlippedMid  = claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
+                  // ML at open — ML model is stable within a window (trained on historical
+                  // data, not re-scored intra-window), so current value IS the opening call.
+                  const mlAboveAtOpen     = (mlPred?.ready && mlPred.above !== null && !windowExpiredLocal)
+                    ? mlPred.above : null;
+                  // Ensemble at open — derive from stat+claude agreement at open.
+                  // If they agreed, that was the combined direction; if they disagreed,
+                  // the combined call was split/no-bet at open.
+                  const openingSplit      = openingStatAbove !== null && claudeAboveOpen !== null
+                    && openingStatAbove !== claudeAboveOpen;
+                  const openingEnsembleAbove = openingStatAbove !== null && claudeAboveOpen !== null && !openingSplit
+                    ? openingStatAbove : null;
+                  const ensembleFlippedMid = openingEnsembleAbove !== null && combinedHead?.above != null
+                    ? openingEnsembleAbove !== combinedHead.above : false;
+                  const anyFlipped = statFlippedMid || claudeFlippedMid || ensembleFlippedMid;
 
                   return (
                     <div className="mt-3 pt-2.5 border-t border-border/20">
@@ -3349,8 +3363,9 @@ function CoinDetail({
                           hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
                         })} ET · ${kalshiTarget >= 100 ? kalshiTarget.toFixed(2) : kalshiTarget.toFixed(4)}
                       </div>
-                      {/* Per-signal opening chips */}
+                      {/* Per-signal opening chips — all 4 models */}
                       <div className="flex items-center gap-3 flex-wrap">
+                        {/* Stat */}
                         {openingStatAbove !== null && (
                           <div className={`flex items-center gap-1 text-[11px] font-semibold ${
                             openingStatAbove ? "text-emerald-400/70" : "text-red-400/70"
@@ -3364,12 +3379,13 @@ function CoinDetail({
                             )}
                           </div>
                         )}
+                        {/* Claude AI */}
                         {claudeAboveOpen !== null && (
                           <div className={`flex items-center gap-1 text-[11px] font-semibold ${
                             claudeAboveOpen ? "text-emerald-400/70" : "text-red-400/70"
                           }`}>
                             {claudeAboveOpen ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                            <span>Claude AI</span>
+                            <span className="text-violet-300/80">Claude AI</span>
                             {claudeFlippedMid && (
                               <span className="ml-0.5 text-[9px] font-semibold text-amber-400/90 bg-amber-500/10 rounded px-1">
                                 → {claudeAbove ? "ABOVE" : "BELOW"} now
@@ -3377,7 +3393,38 @@ function CoinDetail({
                             )}
                           </div>
                         )}
-                        {!statFlippedMid && !claudeFlippedMid && (
+                        {/* ML Model */}
+                        {mlAboveAtOpen !== null && (
+                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
+                            mlAboveAtOpen ? "text-emerald-400/70" : "text-red-400/70"
+                          }`}>
+                            {mlAboveAtOpen ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                            <span className="text-sky-300/80">ML</span>
+                          </div>
+                        )}
+                        {/* Combined / Ensemble */}
+                        {(openingEnsembleAbove !== null || openingSplit) && (
+                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
+                            openingSplit ? "text-amber-400/70"
+                              : openingEnsembleAbove ? "text-emerald-400/70" : "text-red-400/70"
+                          }`}>
+                            {!openingSplit && (
+                              openingEnsembleAbove
+                                ? <ArrowUp className="w-3 h-3" />
+                                : <ArrowDown className="w-3 h-3" />
+                            )}
+                            <span className="text-primary/70">Combined</span>
+                            {openingSplit && (
+                              <span className="text-[9px] text-amber-400/80 bg-amber-500/10 rounded px-1">split</span>
+                            )}
+                            {ensembleFlippedMid && (
+                              <span className="ml-0.5 text-[9px] font-semibold text-amber-400/90 bg-amber-500/10 rounded px-1">
+                                → {combinedHead!.above ? "ABOVE" : "BELOW"} now
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {!anyFlipped && (
                           <span className="text-[11px] text-muted-foreground/55 italic">no change since open</span>
                         )}
                       </div>
