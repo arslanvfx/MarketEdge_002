@@ -34,6 +34,7 @@ import {
   Bot,
   BarChart3,
   Power,
+  Lock,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -1724,6 +1725,10 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                           const rAbove = r.kalshiTarget != null
                             ? r.predictedPrice >= r.kalshiTarget
                             : r.predictedDirection === "up";
+                          // Detect "locked at open": snapped within 2 min of window open
+                          const windowOpenMs = new Date(r.targetTime).getTime() - 15 * 60_000;
+                          const snappedMs = new Date(r.snappedAt).getTime();
+                          const isLockedAtOpen = Math.abs(snappedMs - windowOpenMs) <= 2 * 60_000;
                           const badge = r.status === "pending" ? (
                             <span className="text-[9px] font-semibold text-amber-400 bg-amber-400/10 border border-amber-400/25 rounded px-1 py-0.5 leading-none">
                               Pending
@@ -1742,11 +1747,22 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                             </span>
                           );
                           return (
-                            <div key={r.source} className="flex items-center gap-1 text-[10px]">
+                            <div
+                              key={r.source}
+                              className="group flex items-center gap-1 text-[10px] cursor-default"
+                              title={`${srcLabel[r.source ?? "stat"] ?? r.source}: ${r.confidence}% confidence${isLockedAtOpen ? " · locked at window open" : " · mid-window call"}`}
+                            >
                               <span className={`font-semibold ${srcColor[r.source ?? "stat"] ?? "text-muted-foreground"}`}>
                                 {srcLabel[r.source ?? "stat"] ?? r.source}
                               </span>
                               <span className={rAbove ? "text-emerald-400" : "text-red-400"}>{rAbove ? "↑" : "↓"}</span>
+                              {isLockedAtOpen && (
+                                <Lock className="w-2.5 h-2.5 text-muted-foreground/50 shrink-0" />
+                              )}
+                              {/* Confidence — always visible, highlighted on hover */}
+                              <span className="tabular-nums text-muted-foreground/50 group-hover:text-muted-foreground/90 transition-colors">
+                                {r.confidence}%
+                              </span>
                               {badge}
                             </div>
                           );
@@ -3099,12 +3115,17 @@ function CoinDetail({
                           Server applies a near-close live-price blend (<2 min) so
                           the predicted price converges to reality near window end. */}
                       <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1 flex items-center justify-center gap-1">
                           Stat Model
                         </div>
                         {statHead && kalshiTarget !== null ? (() => {
                           const liveAbove = statHead.predictedPrice >= kalshiTarget;
                           const pct = pctVsStrike(statHead.predictedPrice)!;
+                          // Check if statSnapshot disagrees with live stat call
+                          const snapAbove = statSnapshot && kalshiTarget !== null
+                            ? statSnapshot.predictedPrice >= kalshiTarget
+                            : null;
+                          const snapFlipped = snapAbove !== null && snapAbove !== liveAbove;
                           return (
                             <>
                               <div className={`text-xl font-black leading-none mb-1 ${liveAbove ? "text-emerald-400" : "text-red-400"}`}>
@@ -3118,6 +3139,14 @@ function CoinDetail({
                                   {Math.round(windowRemainingMs / 1_000)}s left
                                 </div>
                               )}
+                              {/* Locked opening call — shown when statSnapshot differs from live */}
+                              {statSnapshot && snapAbove !== null && (
+                                <div className={`flex items-center justify-center gap-0.5 mt-1.5 text-[9px] ${snapFlipped ? "text-amber-400/80" : "text-muted-foreground/50"}`}>
+                                  <Lock className="w-2 h-2 shrink-0" />
+                                  <span>open: {snapAbove ? "↑" : "↓"} {statSnapshot.confidence}%</span>
+                                  {snapFlipped && <span className="font-semibold">· flipped</span>}
+                                </div>
+                              )}
                             </>
                           );
                         })() : statHead ? (
@@ -3126,7 +3155,25 @@ function CoinDetail({
                               ${statHead.predictedPrice.toFixed(dp(statHead.predictedPrice))}
                             </div>
                           </>
-                        ) : (
+                        ) : statSnapshot && kalshiTarget !== null ? (() => {
+                          /* No live stat head yet — show locked opening snapshot instead */
+                          const snapAbove = statSnapshot.predictedPrice >= kalshiTarget;
+                          const pct = pctVsStrike(statSnapshot.predictedPrice)!;
+                          return (
+                            <>
+                              <div className={`text-xl font-black leading-none mb-1 ${snapAbove ? "text-emerald-400" : "text-red-400"}`}>
+                                {snapAbove ? "↑ ABOVE" : "↓ BELOW"}
+                              </div>
+                              <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
+                              </div>
+                              <div className="flex items-center justify-center gap-0.5 mt-1 text-[9px] text-muted-foreground/60">
+                                <Lock className="w-2 h-2 shrink-0" />
+                                <span>locked at open · {statSnapshot.confidence}%</span>
+                              </div>
+                            </>
+                          );
+                        })() : (
                           <div className="text-[12px] text-muted-foreground/60 italic">—</div>
                         )}
                       </div>
