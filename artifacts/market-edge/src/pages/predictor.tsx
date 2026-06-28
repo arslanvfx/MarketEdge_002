@@ -92,7 +92,7 @@ interface PredictionRecord {
   correct: boolean | null;
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
-  source?: "stat" | "claude" | "ensemble";
+  source?: "stat" | "claude" | "ensemble" | "ml";
   id?: string;
   abstained?: boolean | null;
 }
@@ -1389,7 +1389,8 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
       fetchJson<{
         symbol: string;
         history: PredictionRecord[];
-        sourceSummary?: { stat: SourceSummary; claude: SourceSummary; ensemble: SourceSummary };
+        sourceSummary?: { stat: SourceSummary; claude: SourceSummary; ensemble: SourceSummary; ml: SourceSummary };
+        windowGroups?: { targetTime: string; records: PredictionRecord[] }[];
         abstention?: { evaluated: number; avoidedLoss: number; missedWin: number; avoidedLossPct: number | null };
         accuracyThresholdPct: number;
       }>(`/crypto/prediction-history?symbol=${symbol}`),
@@ -1421,7 +1422,14 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
   const claudeStats = query.data?.sourceSummary?.claude ?? empty;
   const statStats = query.data?.sourceSummary?.stat ?? empty;
   const ensembleStats = query.data?.sourceSummary?.ensemble ?? empty;
+  const mlStats = query.data?.sourceSummary?.ml ?? empty;
   const abstention = query.data?.abstention;
+
+  // Build a lookup from targetTime → all model records for the per-model strip on each card
+  const windowGroupMap = new Map<string, PredictionRecord[]>();
+  for (const wg of query.data?.windowGroups ?? []) {
+    windowGroupMap.set(wg.targetTime, wg.records);
+  }
 
   // Does any record in this history have a Kalshi target? (true for BTC during market hours)
   const hasKalshiData = history.some((r) => r.kalshiTarget !== null && r.kalshiTarget !== undefined);
@@ -1459,7 +1467,7 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
         </div>
 
         <div className="flex items-center gap-3 shrink-0 ml-4">
-          {(claudeStats.pct !== null || statStats.pct !== null || ensembleStats.pct !== null) && (
+          {(claudeStats.pct !== null || statStats.pct !== null || ensembleStats.pct !== null || mlStats.pct !== null) && (
             <div className="text-right text-[11px] leading-tight">
               {ensembleStats.pct !== null && (
                 <div className="text-primary">
@@ -1480,6 +1488,13 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                   Stat{" "}
                   <span className="font-semibold tabular-nums">{statStats.pct}%</span>{" "}
                   <span className="text-muted-foreground">({statStats.hits}/{statStats.total})</span>
+                </div>
+              )}
+              {mlStats.pct !== null && (
+                <div className="text-teal-300">
+                  ML{" "}
+                  <span className="font-semibold tabular-nums">{mlStats.pct}%</span>{" "}
+                  <span className="text-muted-foreground">({mlStats.hits}/{mlStats.total})</span>
                 </div>
               )}
               {abstention && abstention.evaluated > 0 && (
@@ -1686,6 +1701,43 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                       <span className="font-medium">{rec.confidence}%</span>
                     </div>
                   </div>
+
+                  {/* Per-model verdict strip — shows all 4 sources for this window */}
+                  {(() => {
+                    const wgRecs = windowGroupMap.get(rec.targetTime) ?? [];
+                    if (wgRecs.length <= 1) return null;
+                    const srcColor: Record<string, string> = {
+                      ensemble: "text-primary",
+                      claude: "text-violet-300",
+                      stat: "text-sky-300",
+                      ml: "text-teal-300",
+                    };
+                    const srcLabel: Record<string, string> = {
+                      ensemble: "Combined",
+                      claude: "Claude",
+                      stat: "Stat",
+                      ml: "ML",
+                    };
+                    return (
+                      <div className="flex items-center gap-2.5 flex-wrap pt-1.5 border-t border-border/30">
+                        {wgRecs.map((r) => {
+                          const rAbove = r.kalshiTarget != null
+                            ? r.predictedPrice >= r.kalshiTarget
+                            : r.predictedDirection === "up";
+                          const dot = r.status === "evaluated"
+                            ? (r.correct ? <span className="text-emerald-400">●</span> : <span className="text-red-400">○</span>)
+                            : null;
+                          return (
+                            <span key={r.source} className={`text-[10px] font-semibold flex items-center gap-0.5 ${srcColor[r.source ?? "stat"] ?? "text-muted-foreground"}`}>
+                              {srcLabel[r.source ?? "stat"] ?? r.source}
+                              {" "}{rAbove ? "↑" : "↓"}
+                              {dot}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             );
@@ -1747,8 +1799,14 @@ export default function Predictor() {
   const mlPredQuery = useQuery({
     queryKey: ["ml-prediction", selected],
     queryFn: () => fetchJson<MLPredResponse>(`/crypto/ml-prediction/${selected}`),
-    refetchInterval: 30_000,
-    staleTime: 20_000,
+    // Poll faster (5 s) to quickly pick up the snap that fires just after each
+    // window boundary; back off to 15 s once data is stable mid-window.
+    refetchInterval: (query) => {
+      const d = query.state.data;
+      if (!d || !d.ready) return 5_000; // waiting for first snap
+      return 15_000;
+    },
+    staleTime: 10_000,
   });
 
   // AI settings — controls whether Claude tracker runs per-coin (server-persisted)
@@ -1858,15 +1916,16 @@ export default function Predictor() {
   const kalshiIsLive = ktd?.isLive === true && !kalshiWindowExpired;
   const kalshiEventTicker = ktd?.eventTicker;
 
-  // Tracker window snapshot — Claude's opening call for the current window.
+  // Tracker window snapshot — Claude's and stat model's opening calls for the current window.
   // Free (in-memory lookup on the server), safe to poll every 30s.
   const trackerSnapshotQuery = useQuery({
     queryKey: ["tracker-snapshot", selected],
-    queryFn: () => fetchJson<{ snapshot: TrackerWindowCall | null }>(`/crypto/tracker-snapshot/${selected}`),
+    queryFn: () => fetchJson<{ snapshot: TrackerWindowCall | null; statSnapshot: TrackerWindowCall | null }>(`/crypto/tracker-snapshot/${selected}`),
     refetchInterval: 30_000,
     enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected),
   });
   const trackerSnapshot = trackerSnapshotQuery.data?.snapshot ?? null;
+  const statSnapshot = trackerSnapshotQuery.data?.statSnapshot ?? null;
 
   // Live direction — lightweight mid-window Claude re-check.
   // liveForceRef: when true the next fetch bypasses the server-side 2-min cache (?force=1).
@@ -2444,6 +2503,11 @@ function CoinDetail({
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
   const kalshiAvailable = KALSHI_COINS.includes(coin.symbol) && ktd?.available === true;
+  // Computed locally from available props so CoinCard doesn't need an extra prop.
+  const windowExpiredLocal = Boolean(ktd?.closeTime && new Date(ktd.closeTime).getTime() < Date.now());
+  const kalshiTargetRefreshing = KALSHI_COINS.includes(coin.symbol) && (
+    windowExpiredLocal || (kalshiLoading && !kalshiAvailable)
+  );
 
   // Derive Claude's call from the AI forecast — same data as the cards, never contradicts.
   const claudeAiPred0 = aiEntry?.preds[0] ?? null;
@@ -3108,8 +3172,14 @@ function CoinDetail({
                         <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-400/80 mb-1">
                           ML Model
                         </div>
-                        {mlPred ? (
-                          mlPred.ready && mlPred.above !== null ? (
+                        {(() => {
+                          // Suppress the ML verdict when the Kalshi window has expired —
+                          // the model's Kalshi target feature is from the old window.
+                          const windowExpired = Boolean(
+                            ktd?.closeTime && new Date(ktd.closeTime).getTime() < Date.now(),
+                          );
+                          return mlPred ? (
+                          mlPred.ready && mlPred.above !== null && !windowExpired ? (
                             <>
                               <div className={`text-xl font-black leading-none mb-1 ${mlPred.above ? "text-emerald-400" : "text-red-400"}`}>
                                 {mlPred.above ? "↑ ABOVE" : "↓ BELOW"}
@@ -3137,7 +3207,8 @@ function CoinDetail({
                           )
                         ) : (
                           <div className="text-[12px] text-muted-foreground/60 italic mt-2">initializing…</div>
-                        )}
+                        );
+                        })()}
                       </div>
                     </div>
                   );

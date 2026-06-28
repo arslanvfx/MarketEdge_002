@@ -1780,7 +1780,7 @@ export interface PredictionRecord {
   correct: boolean | null;        // was the Kalshi YES/NO call right?
   evaluatedAt: string | null;
   status: "pending" | "evaluated";
-  source: "stat" | "claude" | "ensemble"; // which model produced this prediction
+  source: "stat" | "claude" | "ensemble" | "ml"; // which model produced this prediction
   // Ensemble-only: true when the blended call abstained (no bet). null for
   // stat/claude. Even when abstained the record is still evaluated, so we can
   // measure abstention quality (a "good" abstention = would-be call was wrong).
@@ -1831,7 +1831,7 @@ export const KALSHI_SERIES: Record<string, string> = {
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
 // Stores the event ticker so window transitions can be detected by callers.
-const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number }>();
+const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number; closeTime?: string }>();
 const KALSHI_TARGET_LIB_TTL = 12_000;
 
 // Returns the most-recently-seen event ticker for a symbol (e.g. "KXBTC15M-25JUN2026-B68000").
@@ -1882,12 +1882,14 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
   if (!targetTime) {
     const hit = kalshiTargetCache.get(sym);
     if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) {
-      // Guard: if this entry was written before the current 15-min window opened
-      // it holds the previous window's target. Force a fresh fetch so callers
-      // (prediction display, Claude prompt) never see the wrong strike price.
-      const windowBoundaryMs = Math.floor(Date.now() / (15 * 60_000)) * (15 * 60_000);
-      if (hit.at >= windowBoundaryMs) return hit.value;
-      // Pre-window entry — fall through to re-fetch.
+      // Guard: if the cached market's close_time has already passed, the entry
+      // holds the previous window's target — even if it was written just now
+      // (Kalshi's API can take 20-30s to transition the market to "closed").
+      // This mirrors the route-level cache fix and prevents all model calls from
+      // comparing against the expired window's strike price.
+      const ct = hit.closeTime;
+      if (!ct || new Date(ct).getTime() > Date.now()) return hit.value;
+      // closeTime passed — fall through to re-fetch the new window's target.
     }
   }
 
@@ -1942,7 +1944,12 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     }
 
     if (selected) {
-      kalshiTargetCache.set(sym, { value: selected.floor_strike!, ticker: selected.ticker, at: Date.now() });
+      kalshiTargetCache.set(sym, {
+        value: selected.floor_strike!,
+        ticker: selected.ticker,
+        at: Date.now(),
+        closeTime: (selected as Record<string, unknown>).close_time as string | undefined,
+      });
       // Register the window ticker immediately so minutesElapsed is accurate from first sight.
       // priceAtOpen is filled in lazily by updateKalshiWindowPrice (first caller with coin price).
       if (selected.ticker && !kalshiWindowStore.has(selected.ticker)) {
@@ -1970,6 +1977,7 @@ const HEADLINE_RANK: Record<PredictionRecord["source"], number> = {
   ensemble: 3,
   claude: 2,
   stat: 1,
+  ml: 0,
 };
 export function getPredictionHeadlines(symbol: string): PredictionRecord[] {
   const all = historyStore.get(symbol.toUpperCase()) ?? [];
@@ -2781,6 +2789,39 @@ export function startPredictionTracker(): void {
                 });
               }
 
+              // ML model record — written alongside stat/claude/ensemble so its
+              // accuracy is tracked in the same evaluation pipeline. Only added
+              // when the model is ready and a Kalshi target is available (ML
+              // requires the target as a feature). Stored as a synthetic price
+              // just above/below the strike to encode the binary ABOVE/BELOW call
+              // in the same predictedPrice→kalshiTarget comparison used for eval.
+              if (kalshiTarget != null) {
+                const mlStatus = getMLStatus(sym);
+                if (mlStatus.ready) {
+                  const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
+                  const mlFeatures = extractMLFeatures(analysis, kalshiTarget, elapsed);
+                  const mlResult = getMLPrediction(sym, mlFeatures);
+                  if (mlResult.prediction?.above !== null && mlResult.prediction?.above !== undefined) {
+                    const mlAbove = mlResult.prediction.above;
+                    // Synthetic price: 0.1% above/below strike encodes direction
+                    // and evaluates correctly against the actual close price.
+                    const mlPredPrice = mlAbove
+                      ? kalshiTarget * 1.001
+                      : kalshiTarget * 0.999;
+                    newRecs.push({
+                      ...common,
+                      id: recordId(sym, targetISO, "ml"),
+                      predictedPrice: mlPredPrice,
+                      predictedDirection: mlAbove ? "up" : "down",
+                      confidence: mlResult.prediction.confidence ?? 50,
+                      source: "ml",
+                      abstained: null,
+                      rawConfidence: mlResult.prediction.prob ?? null,
+                    });
+                  }
+                }
+              }
+
               for (const rec of newRecs) {
                 records.push(rec);
                 dbInsertRecord(rec);
@@ -3101,6 +3142,28 @@ export function getTrackerWindowCall(symbol: string): TrackerWindowCall | null {
   const targetISO = nextBoundary.toISOString();
   const records = historyStore.get(symbol.toUpperCase()) ?? [];
   const rec = records.find((r) => r.targetTime === targetISO && r.source === "claude");
+  if (!rec) return null;
+  const predPrice = Number(rec.predictedPrice);
+  const aboveKalshi =
+    rec.kalshiTarget != null ? predPrice >= Number(rec.kalshiTarget) : null;
+  return {
+    direction: rec.predictedDirection as "up" | "down" | "flat",
+    aboveKalshi,
+    predictedPrice: predPrice,
+    confidence: rec.confidence,
+    snappedAt: rec.snappedAt,
+  };
+}
+
+// Returns the tracker's stat record for the CURRENT window — the stat model's
+// opening call, locked at first snap (30–90 s after window open). Used to show
+// a committed ABOVE/BELOW that doesn't flip with live candle jitter.
+export function getStatWindowCall(symbol: string): TrackerWindowCall | null {
+  const nowMs = Date.now();
+  const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
+  const targetISO = nextBoundary.toISOString();
+  const records = historyStore.get(symbol.toUpperCase()) ?? [];
+  const rec = records.find((r) => r.targetTime === targetISO && r.source === "stat");
   if (!rec) return null;
   const predPrice = Number(rec.predictedPrice);
   const aboveKalshi =

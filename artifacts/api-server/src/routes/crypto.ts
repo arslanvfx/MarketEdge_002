@@ -21,6 +21,7 @@ import {
   setAutoPilot,
   isAiGloballyEnabled,
   getTrackerWindowCall,
+  getStatWindowCall,
   fetchLiveDirection,
   getTradingWindows,
   getCachedPrediction,
@@ -147,6 +148,7 @@ router.get("/crypto/prediction-history/summary", (_req, res) => {
         ensemble: tally(
           evaluated.filter((r) => r.source === "ensemble" && r.abstained !== true),
         ),
+        ml: tally(evaluated.filter((r) => r.source === "ml")),
       },
     };
   });
@@ -167,22 +169,52 @@ router.get("/crypto/prediction-history", (req, res) => {
     res.status(400).json({ error: "symbol query param required" });
     return;
   }
-  // One headline row per window (ensemble › Claude › stat). Per-source hit rates
-  // and abstention quality come from the analytics rollup so the log header stays
-  // consistent with the ensemble math, even though the list shows one row/window.
+  // One headline row per window (ensemble › Claude › stat › ml). Per-source hit
+  // rates come from analytics; windowGroups gives all model records per window so
+  // the frontend can show a per-model verdict strip on each history card.
   const analytics = getPredictionAnalytics(symbol);
+  const allRecords = getPredictionHistory(symbol);
   const toSummary = (m: { n: number; hits: number; accuracyPct: number | null }) => ({
     hits: m.hits,
     total: m.n,
     pct: m.accuracyPct,
   });
+
+  // ML accuracy computed directly from raw history (not in analytics rollup yet)
+  const mlEvaluated = allRecords.filter((r) => r.source === "ml" && r.status === "evaluated");
+  const mlHits = mlEvaluated.filter((r) => r.correct === true).length;
+
+  // Group all records by window target time for history card per-model strip
+  const windowMap = new Map<string, typeof allRecords>();
+  for (const r of allRecords) {
+    const arr = windowMap.get(r.targetTime) ?? [];
+    arr.push(r);
+    windowMap.set(r.targetTime, arr);
+  }
+  const sourceOrder: Record<string, number> = { ensemble: 3, claude: 2, stat: 1, ml: 0 };
+  const windowGroups = [...windowMap.entries()]
+    .sort(([a], [b]) => new Date(b).getTime() - new Date(a).getTime())
+    .slice(0, 30)
+    .map(([targetTime, recs]) => ({
+      targetTime,
+      records: recs
+        .slice()
+        .sort((a, b) => (sourceOrder[b.source] ?? -1) - (sourceOrder[a.source] ?? -1)),
+    }));
+
   res.json({
     symbol,
     history: getPredictionHeadlines(symbol),
+    windowGroups,
     sourceSummary: {
       stat: toSummary(analytics.bySource.stat),
       claude: toSummary(analytics.bySource.claude),
       ensemble: toSummary(analytics.bySource.ensemble),
+      ml: {
+        hits: mlHits,
+        total: mlEvaluated.length,
+        pct: mlEvaluated.length > 0 ? Math.round((mlHits / mlEvaluated.length) * 100) : null,
+      },
     },
     abstention: analytics.abstention,
     accuracyThresholdPct: ACCURACY_THRESHOLD_PCT,
@@ -382,16 +414,13 @@ router.get("/crypto/kalshi-btc-call", async (req, res) => {
   }
 });
 
-// Claude's opening call for the current window (from the tracker snapshot).
+// Claude's and stat model's opening calls for the current window.
 // Free — reads from in-memory historyStore, no new API call.
 router.get("/crypto/tracker-snapshot/:symbol", (req, res) => {
   const symbol = (req.params.symbol ?? "").toUpperCase();
   const snap = getTrackerWindowCall(symbol);
-  if (!snap) {
-    res.json({ snapshot: null });
-    return;
-  }
-  res.json({ snapshot: snap });
+  const statSnap = getStatWindowCall(symbol);
+  res.json({ snapshot: snap ?? null, statSnapshot: statSnap ?? null });
 });
 
 // Lightweight mid-window Claude re-check — fast binary ABOVE/BELOW call.
@@ -453,7 +482,7 @@ router.get("/crypto/ml-prediction/:symbol", async (req, res) => {
   const features  = extractMLFeatures(cached, kalshiTarget, elapsed);
   const { prediction } = getMLPrediction(symbol, features);
 
-  res.json({
+  return res.json({
     ...base,
     above:      prediction?.above ?? null,
     confidence: prediction?.confidence ?? null,
