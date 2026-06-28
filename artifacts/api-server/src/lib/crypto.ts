@@ -2695,16 +2695,18 @@ export function startPredictionTracker(): void {
         //     a few seconds (or up to ~1 min) after the boundary fires.
         //   • Fetch the Kalshi target FIRST, separately from the other data.
         //     If no matching market is available yet AND we're still within the
-        //     4-minute grace window, skip this tick and retry on the next one.
-        //   • After 4 min with no target, snap anyway (null target) so the
+        //     60-second grace window, skip this tick and retry on the next one.
+        //   • After 60 s with no target, snap anyway (null target) so the
         //     window always has a prediction for model-accuracy tracking.
         //   • Never snap after 12 min (too far from window open).
         const SNAP_DELAY_MS   = 30_000;       // min ms into window before first attempt
-        const SNAP_GIVE_UP_MS = 4 * 60_000;  // stop waiting for target after this
+        const SNAP_GIVE_UP_MS = 60_000;      // snap without Kalshi target after 60 s max
         const SNAP_MAX_MS     = 12 * 60_000; // never snap this late in the window
         //   Extended from 6→12 min so a brief server restart (e.g. deployment)
         //   mid-window can still catch up on the next 30-s tick.  The timeToNext
         //   > 60s guard already prevents snapping in the final minute.
+        //   SNAP_GIVE_UP_MS reduced from 4 min → 60 s: Kalshi normally publishes
+        //   within 30 s; waiting 4 min was blocking the stat snap unnecessarily.
         const windowStartMs = nextBoundary.getTime() - 15 * 60_000;
         const timeIntoWindow = nowMs - windowStartMs;
 
