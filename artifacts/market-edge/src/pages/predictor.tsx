@@ -3569,14 +3569,26 @@ function CoinDetail({
                       // trackerSnapshot is Claude's opening call — null when Claude is paused.
                       const claudeAboveOpen = trackerSnapshot?.aboveKalshi ?? null;
                       const claudeFlippedMid = claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
+                      // Auto-Pilot opening call: same routing logic as the live autoPilotAbove
+                      // but using locked opening values for stat and Claude.
+                      const openingAutoPilotAbove: boolean | null = (() => {
+                        if (!autoPilotDecision) return null;
+                        if (autoPilotDecision.active) {
+                          return claudeAboveOpen ?? openingStatAbove;
+                        }
+                        return openingStatAbove;
+                      })();
+                      const apFlippedMid = openingAutoPilotAbove !== null && autoPilotAbove !== null
+                        && openingAutoPilotAbove !== autoPilotAbove;
                       // openingMlAbove is locked at first ML reading per window — never flips
                       const mlFlippedMid = openingMlAbove !== null && mlPred?.above !== null && mlPred?.above !== undefined
                         && openingMlAbove !== mlPred.above;
-                      // Combined at-open: majority vote of all locked opening signals (stat + claude + ML)
+                      // Combined at-open: majority vote of all locked opening signals (stat + auto-pilot + claude + ML)
                       const atOpenSignals: boolean[] = [
-                        ...(openingStatAbove !== null ? [openingStatAbove] : []),
-                        ...(claudeAboveOpen  !== null ? [claudeAboveOpen]  : []),
-                        ...(openingMlAbove   !== null ? [openingMlAbove]   : []),
+                        ...(openingStatAbove       !== null ? [openingStatAbove]       : []),
+                        ...(openingAutoPilotAbove  !== null ? [openingAutoPilotAbove]  : []),
+                        ...(claudeAboveOpen        !== null ? [claudeAboveOpen]        : []),
+                        ...(openingMlAbove         !== null ? [openingMlAbove]         : []),
                       ];
                       const atOpenAbove = atOpenSignals.filter(Boolean).length;
                       const atOpenBelow = atOpenSignals.length - atOpenAbove;
@@ -3584,7 +3596,7 @@ function CoinDetail({
                       const openingEnsembleAbove = !openingSplit && atOpenSignals.length > 1 ? atOpenAbove > atOpenBelow : null;
                       const ensembleFlippedMid = openingEnsembleAbove !== null && combinedHead?.above != null
                         ? openingEnsembleAbove !== combinedHead.above : false;
-                      const anyFlipped = statFlippedMid || claudeFlippedMid || mlFlippedMid || ensembleFlippedMid;
+                      const anyFlipped = statFlippedMid || apFlippedMid || claudeFlippedMid || mlFlippedMid || ensembleFlippedMid;
                       return (
                         <div className="flex items-center gap-2 flex-wrap">
 
@@ -3611,6 +3623,22 @@ function CoinDetail({
                               {statFlippedMid && (
                                 <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
                                   → {statAboveNow ? "↑" : "↓"} now
+                                </span>
+                              )}
+                            </div>
+                          )}
+
+                          {openingAutoPilotAbove !== null && (
+                            <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
+                              openingAutoPilotAbove
+                                ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
+                                : "bg-red-500/6 text-red-400/70 ring-red-500/15"
+                            }`}>
+                              {openingAutoPilotAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                              <span className="text-blue-300/80">Auto-Pilot</span>
+                              {apFlippedMid && (
+                                <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
+                                  → {autoPilotAbove ? "↑" : "↓"} now
                                 </span>
                               )}
                             </div>

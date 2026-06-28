@@ -2950,7 +2950,15 @@ export function startPredictionTracker(): void {
             // (b) Periodic trigger — no cache yet, or cache is stale.
             if (!triggerReason) {
               if (!cached) {
-                triggerReason = "initial";
+                // Only fire the initial Claude call once the stat snap for THIS
+                // window is done — that guarantees the Kalshi target has been
+                // fetched, so Claude's prompt will have the correct strike price.
+                const statSnappedThisWindow = records.find(
+                  (r) => r.source === "stat" && r.targetTime === targetISO,
+                );
+                if (statSnappedThisWindow) {
+                  triggerReason = "initial (stat snap ready)";
+                }
               } else if (nowMs - cached.at > LIVE_DIR_PERIODIC_MS) {
                 triggerReason = `periodic (${Math.round((nowMs - cached.at) / 60_000)}m since last)`;
               }
