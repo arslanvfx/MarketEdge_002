@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, numeric, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, numeric, integer, boolean, doublePrecision } from "drizzle-orm/pg-core";
 
 export const predictionRecordsTable = pgTable("prediction_records", {
   id: text("id").primaryKey(), // `${symbol}-${targetTime ISO}`
@@ -31,7 +31,7 @@ export const predictionRecordsTable = pgTable("prediction_records", {
   // Claude's pre-calibration ("reported") confidence. `confidence` stores the
   // calibrated value that is shown/scored; rawConfidence is what we learn the
   // reliability curve from, so calibration never feeds on its own output.
-  rawConfidence: integer("raw_confidence"),
+  rawConfidence: doublePrecision("raw_confidence"),
   // Set by soft-clear (admin action). Archived records are hidden from the
   // display log but still count toward analytics (best windows, auto-pilot
   // accuracy) so historical stats are never corrupted by a display clear.

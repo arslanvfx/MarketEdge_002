@@ -1812,10 +1812,10 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                     </div>
                   </div>
 
-                  {/* Per-model verdict strip — shows all 4 sources for this window */}
+                  {/* Per-model verdict strip — shows all sources that ran for this window */}
                   {(() => {
                     const wgRecs = windowGroupMap.get(rec.targetTime) ?? [];
-                    if (wgRecs.length <= 1) return null;
+                    if (wgRecs.length === 0) return null;
                     const srcColor: Record<string, string> = {
                       ensemble: "text-primary",
                       claude: "text-violet-300",

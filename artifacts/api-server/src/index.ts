@@ -27,6 +27,14 @@ async function runStartupMigrations(): Promise<void> {
       ALTER TABLE prediction_records
         ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ
     `);
+    // raw_confidence was originally INTEGER but ML stores a 0-1 probability
+    // float — this widens the column to DOUBLE PRECISION (idempotent if already
+    // that type; Postgres allows ALTER COLUMN TYPE to same-or-wider numeric).
+    await client.query(`
+      ALTER TABLE prediction_records
+        ALTER COLUMN raw_confidence TYPE DOUBLE PRECISION
+          USING raw_confidence::DOUBLE PRECISION
+    `);
   } finally {
     client.release();
   }
