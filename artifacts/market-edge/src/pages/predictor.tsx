@@ -2123,7 +2123,8 @@ export default function Predictor() {
     setAiError(null);
     setAiLoading(true);
     // Only persist Claude tracking for training coins — non-training coins
-    // are stat-only (no API cost). Training coins are always-on server-side.
+    // are stat-only (no API cost). For training coins auto-pilot decides whether
+    // Claude is actually running; the toggle here only records user intent.
     if (trainingCoinsSet.has(selected) && !claudeEnabledSet.has(selected)) {
       void handleToggleCoinClaude(selected, true);
     }
@@ -2393,11 +2394,35 @@ export default function Predictor() {
                               {acc!.pct}%
                             </span>
                           )}
-                          {training && (
-                            <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/25 text-violet-300 ring-violet-500/40" title="Training coin">
-                              <Bot className="w-2.5 h-2.5" /> Training
-                            </span>
-                          )}
+                          {training && (() => {
+                            const apDec = autoPilotMap.get(coin.symbol);
+                            if (!autoPilot.enabled) {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/25 text-violet-300 ring-violet-500/40" title="Training coin — auto-pilot off">
+                                  <Bot className="w-2.5 h-2.5" /> Training
+                                </span>
+                              );
+                            }
+                            if (apDec?.active && apDec.exploring) {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-sky-500/20 text-sky-300 ring-sky-500/30" title={apDec.reason}>
+                                  <Bot className="w-2.5 h-2.5" /> Exploring
+                                </span>
+                              );
+                            }
+                            if (apDec?.active) {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-emerald-500/20 text-emerald-300 ring-emerald-500/30" title={apDec.reason}>
+                                  <Bot className="w-2.5 h-2.5" /> Claude on
+                                </span>
+                              );
+                            }
+                            return (
+                              <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-medium ring-1 leading-none text-muted-foreground bg-muted/30 ring-border" title={apDec?.reason ?? "Stat only"}>
+                                <Minus className="w-2.5 h-2.5" /> Paused
+                              </span>
+                            );
+                          })()}
                           {!training && claudeEnabledSet.has(coin.symbol) && (
                             <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/20 text-violet-300 ring-violet-500/30" title="Claude AI tracking active">
                               <Sparkles className="w-2.5 h-2.5" /> Claude

@@ -32,4 +32,8 @@ export const predictionRecordsTable = pgTable("prediction_records", {
   // calibrated value that is shown/scored; rawConfidence is what we learn the
   // reliability curve from, so calibration never feeds on its own output.
   rawConfidence: integer("raw_confidence"),
+  // Set by soft-clear (admin action). Archived records are hidden from the
+  // display log but still count toward analytics (best windows, auto-pilot
+  // accuracy) so historical stats are never corrupted by a display clear.
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
 });

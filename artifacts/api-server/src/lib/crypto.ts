@@ -1,6 +1,6 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable } from "@workspace/db";
-import { desc, eq, gt, inArray, lt } from "drizzle-orm";
+import { desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import { extractMLFeatures } from "./ml-features";
 import {
   captureMLSnapshot,
@@ -1806,6 +1806,7 @@ export interface PredictionRecord {
   abstained: boolean | null;
   efficiencyRatio: number | null; // ER at snapshot — used to bucket by regime
   rawConfidence: number | null;   // Claude's pre-calibration confidence (claude only)
+  archivedAt: string | null;      // set by soft-clear; hidden from display but counted in analytics
 }
 
 // Stable per-source record id. Legacy records (pre-multi-source) used a 2-part
@@ -2008,6 +2009,9 @@ export function getPredictionHeadlines(symbol: string): PredictionRecord[] {
   const all = historyStore.get(symbol.toUpperCase()) ?? [];
   const byWindow = new Map<string, PredictionRecord>();
   for (const r of all) {
+    // Archived records (soft-cleared) are hidden from the display log.
+    // They remain in the in-memory store and DB so analytics are unaffected.
+    if (r.archivedAt) continue;
     const cur = byWindow.get(r.targetTime);
     if (!cur || HEADLINE_RANK[r.source] > HEADLINE_RANK[cur.source]) byWindow.set(r.targetTime, r);
   }
@@ -2016,13 +2020,17 @@ export function getPredictionHeadlines(symbol: string): PredictionRecord[] {
   );
 }
 
-// Soft clear — removes only prediction records older than 48 hours.
-// Best Windows, auto-pilot accuracy stats, and the self-learning dashboard
-// remain intact because recent records (< 48 h) are preserved.
+// Soft clear — archives records older than 48 hours by setting archivedAt.
+// No rows are deleted: archived records still power Best Windows, auto-pilot
+// accuracy, and the self-learning dashboard (analytics are unaffected).
+// Only the display log filters them out (getPredictionHeadlines skips archived).
 export async function clearPredictionHistoryOld(): Promise<void> {
   const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
-  await db.delete(predictionRecordsTable).where(lt(predictionRecordsTable.snappedAt, cutoff));
-  // Rebuild in-memory store from what remains in the DB.
+  await db
+    .update(predictionRecordsTable)
+    .set({ archivedAt: new Date() })
+    .where(lt(predictionRecordsTable.snappedAt, cutoff));
+  // Reload the in-memory store so the display reflects the change immediately.
   historyStore.clear();
   await initHistoryFromDB();
 }
@@ -2064,6 +2072,7 @@ function rowToRecord(row: typeof predictionRecordsTable.$inferSelect): Predictio
     abstained: row.abstained ?? null,
     efficiencyRatio: row.efficiencyRatio != null ? parseFloat(row.efficiencyRatio) : null,
     rawConfidence: row.rawConfidence ?? null,
+    archivedAt: row.archivedAt ? row.archivedAt.toISOString() : null,
   };
 }
 
@@ -2793,6 +2802,7 @@ export function startPredictionTracker(): void {
                 source: "stat",
                 abstained: null,
                 rawConfidence: null,
+                archivedAt: null,
               });
 
               if (ai) {
@@ -2810,6 +2820,7 @@ export function startPredictionTracker(): void {
                   source: "claude",
                   abstained: null,
                   rawConfidence: ai.confidence,
+                  archivedAt: null,
                 });
 
                 // Regime-weighted ensemble of the two calls above. Even when it
@@ -2850,6 +2861,7 @@ export function startPredictionTracker(): void {
                   source: "ensemble",
                   abstained: ens.abstained,
                   rawConfidence: null,
+                  archivedAt: null,
                 });
               }
 
@@ -2879,6 +2891,7 @@ export function startPredictionTracker(): void {
                       source: "ml",
                       abstained: null,
                       rawConfidence: mlResult.prediction.prob ?? null,
+                      archivedAt: null,
                     });
                   }
                 }
