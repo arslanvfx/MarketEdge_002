@@ -2554,12 +2554,15 @@ function CoinDetail({
   // with weights is present; otherwise the banner falls back to Claude's call.
   const statHead = coin.predictions[0] ?? null;
 
-  // ── Opening-stat snapshot ────────────────────────────────────────────────
-  // Capture the stat model's ABOVE/BELOW call at window open (when the tracker
-  // fires and sets a new trackerSnapshot.snappedAt). This lets us show "At open"
-  // vs "Live now" so the user can see if the stat model has flipped mid-window.
+  // ── Opening-call snapshots ───────────────────────────────────────────────
+  // Capture each model's initial ABOVE/BELOW call at window open (when
+  // trackerSnapshot.snappedAt changes). These are locked for the full window
+  // so the "At open" row never flip-flops mid-window, and they match what the
+  // accuracy log records (DB uses onConflictDoNothing — first write wins).
   const prevSnappedAtRef = useRef<string | null>(null);
   const [openingStatAbove, setOpeningStatAbove] = useState<boolean | null>(null);
+  const [openingMlAbove,  setOpeningMlAbove]  = useState<boolean | null>(null);
+  const mlLockedRef = useRef<boolean>(false); // true once ML is locked for current window
 
   // ── Force-refresh confirmation ────────────────────────────────────────────
   const [statJustRefreshed, setStatJustRefreshed] = useState(false);
@@ -2570,13 +2573,25 @@ function CoinDetail({
     if (statRefreshTimerRef.current) clearTimeout(statRefreshTimerRef.current);
     statRefreshTimerRef.current = setTimeout(() => setStatJustRefreshed(false), 2000);
   }
+
+  // New window detected → lock stat direction immediately, reset ML lock
   useEffect(() => {
     if (!trackerSnapshot || kalshiTarget === null || !statHead) return;
     if (trackerSnapshot.snappedAt !== prevSnappedAtRef.current) {
       prevSnappedAtRef.current = trackerSnapshot.snappedAt;
       setOpeningStatAbove(statHead.predictedPrice >= kalshiTarget);
+      setOpeningMlAbove(null);   // clear stale window's ML direction
+      mlLockedRef.current = false; // allow next ML reading to lock
     }
   }, [trackerSnapshot, kalshiTarget, statHead]);
+
+  // Lock ML direction the first time it's ready in this window
+  useEffect(() => {
+    if (mlLockedRef.current) return;           // already locked for this window
+    if (!mlPred?.ready || mlPred.above === null || mlPred.above === undefined) return;
+    setOpeningMlAbove(mlPred.above);
+    mlLockedRef.current = true;
+  }, [mlPred?.ready, mlPred?.above]);
 
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
@@ -3388,12 +3403,22 @@ function CoinDetail({
                       const statFlippedMid = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
                       const claudeAboveOpen = trackerSnapshot.aboveKalshi;
                       const claudeFlippedMid = claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
-                      const mlAboveAtOpen = (mlPred?.ready && mlPred.above !== null && !windowExpiredLocal) ? mlPred.above : null;
-                      const openingSplit = openingStatAbove !== null && claudeAboveOpen !== null && openingStatAbove !== claudeAboveOpen;
-                      const openingEnsembleAbove = openingStatAbove !== null && claudeAboveOpen !== null && !openingSplit ? openingStatAbove : null;
+                      // openingMlAbove is locked at first ML reading per window — never flips
+                      const mlFlippedMid = openingMlAbove !== null && mlPred?.above !== null && mlPred?.above !== undefined
+                        && openingMlAbove !== mlPred.above;
+                      // Combined at-open: majority vote of all locked opening signals (stat + claude + ML)
+                      const atOpenSignals: boolean[] = [
+                        ...(openingStatAbove !== null ? [openingStatAbove] : []),
+                        ...(claudeAboveOpen  !== null ? [claudeAboveOpen]  : []),
+                        ...(openingMlAbove   !== null ? [openingMlAbove]   : []),
+                      ];
+                      const atOpenAbove = atOpenSignals.filter(Boolean).length;
+                      const atOpenBelow = atOpenSignals.length - atOpenAbove;
+                      const openingSplit = atOpenAbove > 0 && atOpenBelow > 0;
+                      const openingEnsembleAbove = !openingSplit && atOpenSignals.length > 1 ? atOpenAbove > atOpenBelow : null;
                       const ensembleFlippedMid = openingEnsembleAbove !== null && combinedHead?.above != null
                         ? openingEnsembleAbove !== combinedHead.above : false;
-                      const anyFlipped = statFlippedMid || claudeFlippedMid || ensembleFlippedMid;
+                      const anyFlipped = statFlippedMid || claudeFlippedMid || mlFlippedMid || ensembleFlippedMid;
                       return (
                         <div className="flex items-center gap-2 flex-wrap">
 
@@ -3441,14 +3466,19 @@ function CoinDetail({
                             </div>
                           )}
 
-                          {mlAboveAtOpen !== null && (
+                          {openingMlAbove !== null && (
                             <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
-                              mlAboveAtOpen
+                              openingMlAbove
                                 ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
                                 : "bg-red-500/6 text-red-400/70 ring-red-500/15"
                             }`}>
-                              {mlAboveAtOpen ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                              {openingMlAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
                               <span className="text-sky-300/80">ML</span>
+                              {mlFlippedMid && (
+                                <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
+                                  → {mlPred!.above ? "↑" : "↓"} now
+                                </span>
+                              )}
                             </div>
                           )}
 
