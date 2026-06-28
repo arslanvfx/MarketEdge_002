@@ -2468,18 +2468,24 @@ export function runAutoPilot(): void {
     return;
   }
 
-  const inputs = CRYPTO_COINS.map(({ symbol }) => {
-    const a = getPredictionAnalytics(symbol);
-    return {
-      symbol,
-      claudeAcc: a.bySource.claude.accuracyPct,
-      statAcc: a.bySource.stat.accuracyPct,
-      claudeN: a.bySource.claude.n,
-      statN: a.bySource.stat.n,
-      // wasActive drives hysteresis — read before we overwrite the decisions map.
-      wasActive: autoPilotDecisions.get(symbol)?.active ?? false,
-    };
-  });
+  // Auto-pilot only manages training coins — non-training coins are stat-only by
+  // policy (isCoinClaudeEnabled always returns false for them). Including them in
+  // computeAutoPilotDecisions would produce active=true decisions that the UI shows
+  // as "Claude on" even though Claude never runs, which is confusing and wrong.
+  const inputs = CRYPTO_COINS
+    .filter(({ symbol }) => TRAINING_COINS.has(symbol))
+    .map(({ symbol }) => {
+      const a = getPredictionAnalytics(symbol);
+      return {
+        symbol,
+        claudeAcc: a.bySource.claude.accuracyPct,
+        statAcc: a.bySource.stat.accuracyPct,
+        claudeN: a.bySource.claude.n,
+        statN: a.bySource.stat.n,
+        // wasActive drives hysteresis — read before we overwrite the decisions map.
+        wasActive: autoPilotDecisions.get(symbol)?.active ?? false,
+      };
+    });
 
   const decisions = computeAutoPilotDecisions(inputs);
   autoPilotDecisions.clear();
@@ -2505,20 +2511,26 @@ export function getAiSettings(): {
     autoPilot: {
       enabled: autoPilotEnabled,
       maxActive: AUTOPILOT_MAX_ACTIVE,
-      decisions: CRYPTO_COINS.map(
-        ({ symbol }) =>
-          autoPilotDecisions.get(symbol) ?? {
-            symbol,
-            active: false,
-            reason: autoPilotEnabled ? "Evaluating…" : "Auto-pilot off",
-            exploring: false,
-            claudeAccuracyPct: null,
-            statAccuracyPct: null,
-            claudeN: 0,
-            statN: 0,
-            marginPct: null,
-          },
-      ),
+      decisions: CRYPTO_COINS.map(({ symbol }) => {
+        const stored = autoPilotDecisions.get(symbol);
+        if (stored) return stored;
+        // Non-training coins are stat-only by policy; training coins may still
+        // be evaluating on first tick before computeAutoPilotDecisions runs.
+        const isTraining = TRAINING_COINS.has(symbol);
+        return {
+          symbol,
+          active: false,
+          reason: isTraining
+            ? autoPilotEnabled ? "Evaluating…" : "Auto-pilot off"
+            : "Stat only",
+          exploring: false,
+          claudeAccuracyPct: null,
+          statAccuracyPct: null,
+          claudeN: 0,
+          statN: 0,
+          marginPct: null,
+        };
+      }),
     },
   };
 }
