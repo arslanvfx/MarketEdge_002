@@ -34,6 +34,7 @@ import {
   Bot,
   BarChart3,
   Power,
+  Lock,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -1719,20 +1720,36 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                       ml: "ML",
                     };
                     return (
-                      <div className="flex items-center gap-2.5 flex-wrap pt-1.5 border-t border-border/30">
+                      <div className="flex items-center gap-2 flex-wrap pt-1.5 border-t border-border/30">
                         {wgRecs.map((r) => {
                           const rAbove = r.kalshiTarget != null
                             ? r.predictedPrice >= r.kalshiTarget
                             : r.predictedDirection === "up";
-                          const dot = r.status === "evaluated"
-                            ? (r.correct ? <span className="text-emerald-400">●</span> : <span className="text-red-400">○</span>)
-                            : null;
-                          return (
-                            <span key={r.source} className={`text-[10px] font-semibold flex items-center gap-0.5 ${srcColor[r.source ?? "stat"] ?? "text-muted-foreground"}`}>
-                              {srcLabel[r.source ?? "stat"] ?? r.source}
-                              {" "}{rAbove ? "↑" : "↓"}
-                              {dot}
+                          const badge = r.status === "pending" ? (
+                            <span className="text-[9px] font-semibold text-amber-400 bg-amber-400/10 border border-amber-400/25 rounded px-1 py-0.5 leading-none">
+                              Pending
                             </span>
+                          ) : r.abstained ? (
+                            <span className="text-[9px] font-semibold text-muted-foreground/70 bg-muted/30 border border-border/60 rounded px-1 py-0.5 leading-none">
+                              Abstain
+                            </span>
+                          ) : r.correct ? (
+                            <span className="text-[9px] font-semibold text-emerald-400 bg-emerald-400/10 border border-emerald-500/30 rounded px-1 py-0.5 leading-none">
+                              Hit ✓
+                            </span>
+                          ) : (
+                            <span className="text-[9px] font-semibold text-red-400 bg-red-400/10 border border-red-500/30 rounded px-1 py-0.5 leading-none">
+                              Miss ✗
+                            </span>
+                          );
+                          return (
+                            <div key={r.source} className="flex items-center gap-1 text-[10px]">
+                              <span className={`font-semibold ${srcColor[r.source ?? "stat"] ?? "text-muted-foreground"}`}>
+                                {srcLabel[r.source ?? "stat"] ?? r.source}
+                              </span>
+                              <span className={rAbove ? "text-emerald-400" : "text-red-400"}>{rAbove ? "↑" : "↓"}</span>
+                              {badge}
+                            </div>
                           );
                         })}
                       </div>
@@ -2329,6 +2346,7 @@ export default function Predictor() {
               void liveDirectionQuery.refetch();
             }}
             isTrainingCoin={trainingCoinsSet.has(selected)}
+            statSnapshot={statSnapshot}
             mlPred={mlPredQuery.data ?? null}
             onRefreshStat={() => void predQuery.refetch()}
             statLoading={predQuery.isFetching}
@@ -2465,6 +2483,7 @@ function CoinDetail({
   ktd,
   driftAlert,
   trackerSnapshot,
+  statSnapshot,
   liveDirection,
   liveDirectionLoading,
   onRefreshLiveDirection,
@@ -2493,6 +2512,7 @@ function CoinDetail({
   ktd: KalshiTarget | undefined;
   driftAlert: DriftAlert | null;
   trackerSnapshot: TrackerWindowCall | null;
+  statSnapshot?: TrackerWindowCall | null;
   liveDirection: LiveDirectionResult | null;
   liveDirectionLoading: boolean;
   onRefreshLiveDirection: () => void;
@@ -2508,6 +2528,13 @@ function CoinDetail({
   const kalshiTargetRefreshing = KALSHI_COINS.includes(coin.symbol) && (
     windowExpiredLocal || (kalshiLoading && !kalshiAvailable)
   );
+
+  // ── Hysteresis for live stat "current momentum" indicator ────────────────
+  // Only flip the displayed direction when the stat model has crossed 0.40% of
+  // the Kalshi target on the opposite side — suppresses near-threshold jitter.
+  const STAT_MOMENTUM_FLIP = 0.0040;
+  const [momentumAbove, setMomentumAbove] = useState<boolean | null>(null);
+  const momentumAboveRef = useRef<boolean | null>(null);
 
   // Derive Claude's call from the AI forecast — same data as the cards, never contradicts.
   const claudeAiPred0 = aiEntry?.preds[0] ?? null;
@@ -2536,6 +2563,26 @@ function CoinDetail({
       setOpeningStatAbove(statHead.predictedPrice >= kalshiTarget);
     }
   }, [trackerSnapshot, kalshiTarget, statHead]);
+
+  // Reset hysteresis ref at every new window (new snappedAt = new window opened).
+  useEffect(() => {
+    momentumAboveRef.current = null;
+  }, [statSnapshot?.snappedAt]);
+
+  // Apply hysteresis: update displayed momentum only when the stat model has
+  // crossed 0.40% of the target on the opposite side from the current display.
+  useEffect(() => {
+    if (!statHead || kalshiTarget === null) return;
+    const liveAbove = statHead.predictedPrice >= kalshiTarget;
+    const gap = Math.abs(statHead.predictedPrice - kalshiTarget) / kalshiTarget;
+    if (momentumAboveRef.current === null) {
+      momentumAboveRef.current = liveAbove;
+      setMomentumAbove(liveAbove);
+    } else if (liveAbove !== momentumAboveRef.current && gap >= STAT_MOMENTUM_FLIP) {
+      momentumAboveRef.current = liveAbove;
+      setMomentumAbove(liveAbove);
+    }
+  }, [statHead?.predictedPrice, kalshiTarget, STAT_MOMENTUM_FLIP]);
 
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
@@ -3069,12 +3116,42 @@ function CoinDetail({
 
                   return (
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-                      {/* Stat model */}
+                      {/* Stat model — statSnapshot (locked at window open) is primary;
+                          live stat with 0.40% hysteresis is secondary "momentum" chip. */}
                       <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1 flex items-center justify-center gap-1">
                           Stat Model
+                          {statSnapshot && <Lock className="w-2.5 h-2.5 text-sky-300/60" />}
                         </div>
-                        {statHead ? (
+                        {statSnapshot?.aboveKalshi !== null && statSnapshot?.aboveKalshi !== undefined ? (
+                          <>
+                            <div className={`text-xl font-black leading-none mb-0.5 ${statSnapshot.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
+                              {statSnapshot.aboveKalshi ? "↑ ABOVE" : "↓ BELOW"}
+                            </div>
+                            <div className="text-[10px] text-sky-300/55 mt-0.5 leading-tight">
+                              Opening call · {(() => {
+                                const minsAgo = Math.round(
+                                  (Date.now() - new Date(statSnapshot.snappedAt).getTime()) / 60_000
+                                );
+                                return minsAgo === 0 ? "just now" : `locked ${minsAgo}m ago`;
+                              })()}
+                            </div>
+                            {momentumAbove !== null && momentumAbove !== statSnapshot.aboveKalshi && (
+                              <div className={`mt-1.5 flex items-center justify-center gap-0.5 text-[10px] font-semibold ${momentumAbove ? "text-emerald-300/70" : "text-red-300/70"}`}>
+                                {momentumAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                                momentum shifted
+                              </div>
+                            )}
+                            {kalshiTarget && statHead && (() => {
+                              const pct = pctVsStrike(statHead.predictedPrice)!;
+                              return (
+                                <div className="text-[10px] text-muted-foreground/50 mt-0.5">
+                                  live: {pct >= 0 ? "+" : ""}{pct.toFixed(3)}%
+                                </div>
+                              );
+                            })()}
+                          </>
+                        ) : statHead ? (
                           <>
                             <div className="text-xl font-black text-foreground leading-none mb-1">
                               ${statHead.predictedPrice.toFixed(dp(statHead.predictedPrice))}
