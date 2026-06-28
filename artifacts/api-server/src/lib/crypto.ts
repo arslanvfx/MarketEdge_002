@@ -1,6 +1,6 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
-import { db, predictionRecordsTable } from "@workspace/db";
-import { desc, eq, inArray, lt } from "drizzle-orm";
+import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable } from "@workspace/db";
+import { desc, eq, gt, inArray, lt } from "drizzle-orm";
 import { extractMLFeatures } from "./ml-features";
 import {
   captureMLSnapshot,
@@ -2016,9 +2016,26 @@ export function getPredictionHeadlines(symbol: string): PredictionRecord[] {
   );
 }
 
+// Soft clear — removes only prediction records older than 48 hours.
+// Best Windows, auto-pilot accuracy stats, and the self-learning dashboard
+// remain intact because recent records (< 48 h) are preserved.
+export async function clearPredictionHistoryOld(): Promise<void> {
+  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  await db.delete(predictionRecordsTable).where(lt(predictionRecordsTable.snappedAt, cutoff));
+  // Rebuild in-memory store from what remains in the DB.
+  historyStore.clear();
+  await initHistoryFromDB();
+}
+
+// Full reset — wipes ALL prediction records, ML snapshots, and ML model
+// weights, then re-initialises the ML engine from the now-empty DB so the
+// in-memory state matches (training restarts from zero).
 export async function clearPredictionHistory(): Promise<void> {
   historyStore.clear();
   await db.delete(predictionRecordsTable);
+  await db.delete(mlWindowSnapshotsTable);
+  await db.delete(mlModelStateTable);
+  await initMLFromDB();
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   getPredictionAnalytics,
   getAllPredictionAnalytics,
   clearPredictionHistory,
+  clearPredictionHistoryOld,
   ACCURACY_THRESHOLD_PCT,
   fetchKalshiBtcCall,
   fetchKalshiTarget,
@@ -214,7 +215,32 @@ router.get("/crypto/prediction-history", (req, res) => {
   });
 });
 
-router.delete("/crypto/prediction-history", async (_req, res) => {
+// ── Password guard for destructive log-clear operations ──────────────────────
+function checkClearPassword(req: import("express").Request, res: import("express").Response): boolean {
+  const expected = process.env.CLEAR_LOGS_PASSWORD;
+  if (!expected) {
+    res.status(503).json({ error: "Clear password not configured on server" });
+    return false;
+  }
+  const provided = req.headers["x-clear-password"];
+  if (provided !== expected) {
+    res.status(401).json({ error: "Invalid password" });
+    return false;
+  }
+  return true;
+}
+
+// Soft clear — removes only records older than 48 h. Recent training data,
+// Best Windows, and auto-pilot accuracy stats remain untouched.
+router.delete("/crypto/prediction-history/old", async (req, res) => {
+  if (!checkClearPassword(req, res)) return;
+  await clearPredictionHistoryOld();
+  res.json({ ok: true });
+});
+
+// Full reset — wipes all prediction records, ML snapshots, and ML model weights.
+router.delete("/crypto/prediction-history", async (req, res) => {
+  if (!checkClearPassword(req, res)) return;
   await clearPredictionHistory();
   res.json({ ok: true });
 });

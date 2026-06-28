@@ -39,6 +39,12 @@ import {
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the api-server crypto endpoints)
@@ -1380,7 +1386,56 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
 
 function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
   const ACCURACY_THRESHOLD = 1.0; // fallback for non-BTC / no Kalshi target
-  const [clearing, setClearing] = useState(false);
+
+  // ── Clear-log dialog state ─────────────────────────────────────────────────
+  const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const [clearPassword, setClearPassword]     = useState("");
+  const [clearPasswordError, setClearPasswordError] = useState<string | null>(null);
+  const [clearUnlocked, setClearUnlocked]     = useState(false);
+  const [clearing, setClearing]               = useState(false);
+
+  function openClearDialog() {
+    setClearPassword("");
+    setClearPasswordError(null);
+    setClearUnlocked(false);
+    setClearDialogOpen(true);
+  }
+
+  async function handleSoftClear(e: React.FormEvent) {
+    e.preventDefault();
+    setClearPasswordError(null);
+    setClearing(true);
+    try {
+      const res = await fetch(`${API_BASE}/crypto/prediction-history/old`, {
+        method: "DELETE",
+        headers: { "x-clear-password": clearPassword },
+      });
+      if (res.status === 401) { setClearPasswordError("Incorrect password — try again."); return; }
+      if (!res.ok) { setClearPasswordError("Server error — please retry."); return; }
+      await query.refetch();
+      setClearDialogOpen(false);
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  async function handleFullReset(e: React.FormEvent) {
+    e.preventDefault();
+    setClearPasswordError(null);
+    setClearing(true);
+    try {
+      const res = await fetch(`${API_BASE}/crypto/prediction-history`, {
+        method: "DELETE",
+        headers: { "x-clear-password": clearPassword },
+      });
+      if (res.status === 401) { setClearPasswordError("Incorrect password — try again."); return; }
+      if (!res.ok) { setClearPasswordError("Server error — please retry."); return; }
+      await query.refetch();
+      setClearDialogOpen(false);
+    } finally {
+      setClearing(false);
+    }
+  }
 
   type SourceSummary = { hits: number; total: number; pct: number | null };
   const query = useQuery({
@@ -1521,15 +1576,83 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
             </div>
           )}
           <button
-            onClick={handleClear}
+            onClick={openClearDialog}
             disabled={clearing}
-            title="Clear all history"
+            title="Clear prediction history"
             className="p-1.5 rounded text-muted-foreground hover:text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-40"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
+
+      {/* ── Clear-log dialog ── */}
+      <Dialog open={clearDialogOpen} onOpenChange={(open) => { if (!clearing) setClearDialogOpen(open); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Lock className="w-4 h-4 text-muted-foreground" />
+              Clear prediction logs
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 pt-1">
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Enter the admin password to continue. Both actions below require it.
+            </p>
+
+            {/* Password field shared by both actions */}
+            <div>
+              <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Password</label>
+              <input
+                type="password"
+                value={clearPassword}
+                onChange={(e) => { setClearPassword(e.target.value); setClearPasswordError(null); }}
+                placeholder="••••••••••••"
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                autoFocus
+              />
+              {clearPasswordError && (
+                <p className="text-xs text-red-400 mt-1.5">{clearPasswordError}</p>
+              )}
+            </div>
+
+            {/* Soft clear */}
+            <div className="rounded-lg border border-border/50 p-3 space-y-2">
+              <div>
+                <p className="text-xs font-semibold">Clear display log</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
+                  Removes records older than 48 hours. Best Windows, auto-pilot accuracy stats, and ML training data are <span className="text-emerald-400 font-medium">kept intact</span>.
+                </p>
+              </div>
+              <button
+                onClick={handleSoftClear}
+                disabled={clearing || !clearPassword}
+                className="w-full rounded-md bg-muted/50 hover:bg-muted border border-border text-xs font-medium py-1.5 transition-colors disabled:opacity-40"
+              >
+                {clearing ? "Clearing…" : "Clear old logs only (>48 h)"}
+              </button>
+            </div>
+
+            {/* Full reset */}
+            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 space-y-2">
+              <div>
+                <p className="text-xs font-semibold text-red-400">Full reset</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
+                  Wipes <span className="text-red-400 font-medium">all</span> prediction records, ML training snapshots, and ML model weights. Best Windows, auto-pilot history, and self-learning dashboard reset to zero. Cannot be undone.
+                </p>
+              </div>
+              <button
+                onClick={handleFullReset}
+                disabled={clearing || !clearPassword}
+                className="w-full rounded-md bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-xs font-medium text-red-400 py-1.5 transition-colors disabled:opacity-40"
+              >
+                {clearing ? "Resetting…" : "Full reset — wipe everything"}
+              </button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Empty state ── */}
       {history.length === 0 ? (
