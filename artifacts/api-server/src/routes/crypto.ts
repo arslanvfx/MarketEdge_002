@@ -275,7 +275,15 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
   if (!series) return { available: false, targetPrice: null };
 
   const cached = kalshiRouteCache.get(symbol);
-  if (cached && Date.now() - cached.fetchedAt < KALSHI_TARGET_TTL) return cached.data;
+  if (cached && Date.now() - cached.fetchedAt < KALSHI_TARGET_TTL) {
+    // If the cached market's close_time has already passed, the previous window
+    // has expired — bypass the cache immediately so the new window's strike is
+    // fetched instead of serving a stale target that would produce the wrong
+    // ABOVE/BELOW direction for up to KALSHI_TARGET_TTL seconds.
+    const ct = cached.data.closeTime;
+    if (!ct || new Date(ct).getTime() > Date.now()) return cached.data;
+    // closeTime is in the past — fall through to re-fetch the current window.
+  }
 
   const resp = await fetch(
     `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=5`,

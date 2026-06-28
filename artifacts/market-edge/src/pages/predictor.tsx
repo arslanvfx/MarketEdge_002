@@ -1827,13 +1827,35 @@ export default function Predictor() {
   const kalshiTargetQuery = useQuery({
     queryKey: ["kalshi-target", selected],
     queryFn: () => fetchJson<KalshiTarget>(`/crypto/kalshi-target?symbol=${selected}`),
-    refetchInterval: 10_000,
+    // Refetch faster when the cached market has already expired so the new
+    // window's target arrives within 3 s rather than waiting a full 10 s.
+    refetchInterval: (query) => {
+      const ct = query.state.data?.closeTime;
+      return ct && new Date(ct).getTime() < Date.now() ? 3_000 : 10_000;
+    },
     enabled: KALSHI_COINS.includes(selected),
   });
   const ktd = kalshiTargetQuery.data;
   const kalshiAvailableTop = KALSHI_COINS.includes(selected) && ktd?.available === true;
-  const kalshiTarget = kalshiAvailableTop ? (ktd?.targetPrice ?? null) : null;
-  const kalshiIsLive = ktd?.isLive === true;
+  // Belt-and-suspenders frontend guard: if the fetched market's close_time has
+  // already passed, the target is from the just-expired window — treat it as
+  // null so no ABOVE/BELOW verdict is rendered against the wrong strike price.
+  // The server-side cache already bypasses on this condition, but the frontend
+  // may still hold stale ktd for up to one refetch cycle.
+  const kalshiWindowExpired = Boolean(
+    ktd?.closeTime && new Date(ktd.closeTime).getTime() < Date.now(),
+  );
+  const kalshiTarget = kalshiAvailableTop && !kalshiWindowExpired
+    ? (ktd?.targetPrice ?? null)
+    : null;
+  // True when Kalshi IS supported for this coin but we're in the brief
+  // transition period between windows — used to show "Calculating…" vs the
+  // generic "Awaiting target price…" fallback.
+  const kalshiTargetRefreshing = KALSHI_COINS.includes(selected) && (
+    kalshiWindowExpired ||
+    (kalshiTargetQuery.isFetching && !kalshiAvailableTop)
+  );
+  const kalshiIsLive = ktd?.isLive === true && !kalshiWindowExpired;
   const kalshiEventTicker = ktd?.eventTicker;
 
   // Tracker window snapshot — Claude's opening call for the current window.
@@ -2842,7 +2864,16 @@ function CoinDetail({
                 )}
               </div>
               {kalshiTarget === null ? (
-                <div className="text-sm text-muted-foreground">Awaiting target price…</div>
+                <div className="text-sm text-muted-foreground flex items-center gap-1.5">
+                  {kalshiTargetRefreshing ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      Calculating…
+                    </>
+                  ) : (
+                    "Awaiting target price…"
+                  )}
+                </div>
               ) : aiLoading ? (
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">

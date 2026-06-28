@@ -1881,7 +1881,14 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
   // boundary — silently recording the wrong target in a new prediction record.
   if (!targetTime) {
     const hit = kalshiTargetCache.get(sym);
-    if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) return hit.value;
+    if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) {
+      // Guard: if this entry was written before the current 15-min window opened
+      // it holds the previous window's target. Force a fresh fetch so callers
+      // (prediction display, Claude prompt) never see the wrong strike price.
+      const windowBoundaryMs = Math.floor(Date.now() / (15 * 60_000)) * (15 * 60_000);
+      if (hit.at >= windowBoundaryMs) return hit.value;
+      // Pre-window entry — fall through to re-fetch.
+    }
   }
 
   try {
