@@ -3306,19 +3306,30 @@ function CoinDetail({
 
                 {/* ── Signals + At-open footer ── */}
                 {(consensusSignals.length > 0 || (trackerSnapshot && kalshiTarget !== null && (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null))) && (
-                  <div className="px-5 py-3 border-t border-[#00C805]/20 bg-background/10 space-y-2">
+                  <div className="px-5 py-4 border-t border-[#00C805]/20 bg-background/10 space-y-3">
 
-                    {/* Signal chips + agree count + refresh */}
+                    {/* Live signal bubbles */}
                     {consensusSignals.length > 0 && (
-                      <div className="flex items-center gap-2.5 flex-wrap">
-                        <span className="text-[10px] text-muted-foreground/50 font-semibold uppercase tracking-wider shrink-0">Now:</span>
+                      <div className="flex items-center gap-2 flex-wrap">
+
+                        {/* LIVE label chip */}
+                        <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/50 border border-border/50 px-2 py-1 shrink-0">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/60">Live</span>
+                        </div>
+
+                        {/* One bubble per model signal */}
                         {consensusSignals.map((sig) => {
                           const isAP = sig.name === "Auto-Pilot";
                           const isML = sig.name === "ML Model";
+                          const bubbleCls = sig.above
+                            ? "bg-emerald-500/10 text-emerald-400 ring-emerald-500/25"
+                            : "bg-red-500/10 text-red-400 ring-red-500/25";
+                          const nameCls = isAP ? "text-violet-300" : isML ? "text-sky-300" : "";
                           return (
                             <div
                               key={sig.name}
-                              className={`flex items-center gap-0.5 text-[11px] font-semibold ${sig.above ? "text-emerald-400" : "text-red-400"}`}
+                              className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold ring-1 ${bubbleCls}`}
                               title={isAP
                                 ? `Auto-Pilot · via ${sig.modelUsed === "claude" ? "Claude" : "Stat"} · ${sig.conf.toFixed(0)}% historical acc`
                                 : isML
@@ -3327,34 +3338,38 @@ function CoinDetail({
                                 ? `Stat model · ${sig.conf}% conf`
                                 : `Claude AI · ${sig.conf}% conf`}
                             >
-                              {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                              <span className={isAP ? "text-violet-300" : isML ? "text-sky-300" : ""}>{sig.name}</span>
+                              {sig.above ? <ArrowUp className="w-3 h-3 shrink-0" /> : <ArrowDown className="w-3 h-3 shrink-0" />}
+                              <span className={nameCls}>{sig.name}</span>
                               {isAP && sig.modelUsed && (
-                                <span className="font-normal text-violet-300/60 text-[10px] ml-0.5">({sig.modelUsed === "claude" ? "C" : "S"})</span>
+                                <span className="text-[9px] font-medium text-violet-300/60">({sig.modelUsed === "claude" ? "C" : "S"})</span>
                               )}
                               {isML && mlPred?.valAccuracy != null && (
-                                <span className="font-normal text-sky-300/60 text-[10px] ml-0.5">({mlPred.valAccuracy}%)</span>
+                                <span className="text-[9px] font-medium text-sky-300/60">({mlPred.valAccuracy}%)</span>
                               )}
                             </div>
                           );
                         })}
+
+                        {/* Agreement bubble */}
                         {consensusSignals.length > 1 && (
-                          <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 ring-1 ${
+                          <div className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold ring-1 ${
                             allConsensusAgree
                               ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30"
                               : "bg-amber-500/15 text-amber-400 ring-amber-500/30"
                           }`}>
                             {consensusAgreement}/{consensusSignals.length} agree
-                          </span>
+                          </div>
                         )}
+
+                        {/* Refresh */}
                         <button
                           onClick={handleRefreshStat}
                           disabled={statLoading}
                           title="Force-refresh all models"
-                          className={`inline-flex items-center gap-1.5 text-[10px] font-medium ml-auto px-2 py-1 rounded transition-all ${
+                          className={`inline-flex items-center gap-1.5 text-[10px] font-medium ml-auto px-2.5 py-1.5 rounded-lg border transition-all ${
                             statJustRefreshed
-                              ? "text-emerald-400 bg-emerald-500/10 border border-emerald-500/30"
-                              : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border border-transparent"
+                              ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/30"
+                              : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border-border/40"
                           } disabled:opacity-40`}
                         >
                           {statJustRefreshed ? (
@@ -3366,7 +3381,7 @@ function CoinDetail({
                       </div>
                     )}
 
-                    {/* At-open row */}
+                    {/* At-open historical bubbles */}
                     {trackerSnapshot && kalshiTarget !== null &&
                       (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null) && (() => {
                       const statAboveNow = statHead ? statHead.predictedPrice >= kalshiTarget : null;
@@ -3381,43 +3396,84 @@ function CoinDetail({
                       const anyFlipped = statFlippedMid || claudeFlippedMid || ensembleFlippedMid;
                       return (
                         <div className="flex items-center gap-2 flex-wrap">
-                          <div className="flex items-center gap-1 text-[10px] text-muted-foreground/55 shrink-0">
-                            <Clock className="w-3 h-3" />
-                            At open ·{" "}
-                            {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
-                              hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
-                            })} ET
+
+                          {/* At open label chip */}
+                          <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/30 border border-border/30 px-2 py-1 shrink-0">
+                            <Clock className="w-2.5 h-2.5 text-muted-foreground/50" />
+                            <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50">At open</span>
+                            <span className="text-[9px] text-muted-foreground/40">·</span>
+                            <span className="text-[9px] text-muted-foreground/55 font-medium tabular-nums">
+                              {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
+                                hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
+                              })} ET
+                            </span>
                           </div>
-                          <div className="w-px h-3 bg-border/30 shrink-0" />
+
                           {openingStatAbove !== null && (
-                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${openingStatAbove ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                            <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
+                              openingStatAbove
+                                ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
+                                : "bg-red-500/6 text-red-400/70 ring-red-500/15"
+                            }`}>
                               {openingStatAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
                               <span>Stat</span>
-                              {statFlippedMid && <span className="text-[9px] text-amber-400/90 bg-amber-500/10 rounded px-1 ml-0.5">→ {statAboveNow ? "↑" : "↓"} now</span>}
+                              {statFlippedMid && (
+                                <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
+                                  → {statAboveNow ? "↑" : "↓"} now
+                                </span>
+                              )}
                             </div>
                           )}
+
                           {trackerSnapshot.aboveKalshi !== null && (
-                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${trackerSnapshot.aboveKalshi ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                            <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
+                              trackerSnapshot.aboveKalshi
+                                ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
+                                : "bg-red-500/6 text-red-400/70 ring-red-500/15"
+                            }`}>
                               {trackerSnapshot.aboveKalshi ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
                               <span className="text-violet-300/80">Claude</span>
-                              {claudeFlippedMid && <span className="text-[9px] text-amber-400/90 bg-amber-500/10 rounded px-1 ml-0.5">→ {claudeAbove ? "↑" : "↓"} now</span>}
+                              {claudeFlippedMid && (
+                                <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
+                                  → {claudeAbove ? "↑" : "↓"} now
+                                </span>
+                              )}
                             </div>
                           )}
+
                           {mlAboveAtOpen !== null && (
-                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${mlAboveAtOpen ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                            <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
+                              mlAboveAtOpen
+                                ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
+                                : "bg-red-500/6 text-red-400/70 ring-red-500/15"
+                            }`}>
                               {mlAboveAtOpen ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
                               <span className="text-sky-300/80">ML</span>
                             </div>
                           )}
+
                           {(openingEnsembleAbove !== null || openingSplit) && (
-                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${openingSplit ? "text-amber-400/70" : openingEnsembleAbove ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                            <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
+                              openingSplit
+                                ? "bg-amber-500/6 text-amber-400/70 ring-amber-500/15"
+                                : openingEnsembleAbove
+                                ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
+                                : "bg-red-500/6 text-red-400/70 ring-red-500/15"
+                            }`}>
                               {!openingSplit && (openingEnsembleAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />)}
                               <span className="text-primary/70">Combined</span>
-                              {openingSplit && <span className="text-[9px] text-amber-400/80 bg-amber-500/10 rounded px-1 ml-0.5">split</span>}
-                              {ensembleFlippedMid && <span className="text-[9px] text-amber-400/90 bg-amber-500/10 rounded px-1 ml-0.5">→ {combinedHead!.above ? "↑" : "↓"} now</span>}
+                              {openingSplit && <span className="ml-0.5 text-[9px] font-bold">split</span>}
+                              {ensembleFlippedMid && (
+                                <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
+                                  → {combinedHead!.above ? "↑" : "↓"} now
+                                </span>
+                              )}
                             </div>
                           )}
-                          {!anyFlipped && <span className="text-[10px] text-muted-foreground/50 italic">no change since open</span>}
+
+                          {!anyFlipped && (
+                            <span className="text-[9px] text-muted-foreground/40 italic">no change since open</span>
+                          )}
                         </div>
                       );
                     })()}
@@ -3482,13 +3538,27 @@ function CoinDetail({
             ) : (
               <div className="text-[11px] text-muted-foreground/50 mb-3">Awaiting signals — data builds after window open</div>
             )}
-            <div className="flex items-center gap-3 flex-wrap">
-              {consensusSignals.map((sig) => (
-                <div key={sig.name} className={`flex items-center gap-1 text-[11px] font-semibold ${sig.above ? "text-emerald-400" : "text-red-400"}`}>
-                  {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                  <span>{sig.name}</span>
-                </div>
-              ))}
+            <div className="flex items-center gap-2 flex-wrap">
+              {consensusSignals.map((sig) => {
+                const isAP = sig.name === "Auto-Pilot";
+                const isML = sig.name === "ML Model";
+                const bubbleCls = sig.above
+                  ? "bg-emerald-500/10 text-emerald-400 ring-emerald-500/25"
+                  : "bg-red-500/10 text-red-400 ring-red-500/25";
+                const nameCls = isAP ? "text-violet-300" : isML ? "text-sky-300" : "";
+                return (
+                  <div key={sig.name} className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold ring-1 ${bubbleCls}`}>
+                    {sig.above ? <ArrowUp className="w-3 h-3 shrink-0" /> : <ArrowDown className="w-3 h-3 shrink-0" />}
+                    <span className={nameCls}>{sig.name}</span>
+                    {isAP && sig.modelUsed && (
+                      <span className="text-[9px] font-medium text-violet-300/60">({sig.modelUsed === "claude" ? "C" : "S"})</span>
+                    )}
+                    {isML && mlPred?.valAccuracy != null && (
+                      <span className="text-[9px] font-medium text-sky-300/60">({mlPred.valAccuracy}%)</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         );
