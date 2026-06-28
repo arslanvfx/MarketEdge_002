@@ -29,6 +29,7 @@ import {
 import { getMLPrediction, getMLStatus } from "../lib/ml-store";
 import { extractMLFeatures } from "../lib/ml-features";
 import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
+import { tally } from "../lib/history-tally";
 
 const router = Router();
 
@@ -125,14 +126,6 @@ router.post("/crypto/ai-settings/auto-pilot", (req, res) => {
 // ── Prediction history ────────────────────────────────────────────────────────
 
 router.get("/crypto/prediction-history/summary", (_req, res) => {
-  const tally = (records: { correct: boolean | null }[]) => {
-    const hits = records.filter((r) => r.correct === true).length;
-    return {
-      hits,
-      total: records.length,
-      pct: records.length > 0 ? Math.round((hits / records.length) * 100) : null,
-    };
-  };
   const summary = CRYPTO_COINS.map(({ symbol }) => {
     const evaluated = getPredictionHistory(symbol).filter((r) => r.status === "evaluated");
     return {

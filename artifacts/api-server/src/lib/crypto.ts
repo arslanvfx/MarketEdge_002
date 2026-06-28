@@ -15,6 +15,7 @@ import {
   claudeEnabledFor,
   computeAutoPilotDecisions,
 } from "./autopilot";
+import { mlSnapPrice, computeStatWindowCall, SNAP_QUARTER_MS } from "./prediction-utils";
 
 // Real-time crypto price predictor.
 //
@@ -2814,9 +2815,7 @@ export function startPredictionTracker(): void {
                     const mlAbove = mlResult.prediction.above;
                     // Synthetic price: 0.1% above/below strike encodes direction
                     // and evaluates correctly against the actual close price.
-                    const mlPredPrice = mlAbove
-                      ? kalshiTarget * 1.001
-                      : kalshiTarget * 0.999;
+                    const mlPredPrice = mlSnapPrice(mlAbove, kalshiTarget);
                     newRecs.push({
                       ...common,
                       id: recordId(sym, targetISO, "ml"),
@@ -3168,22 +3167,8 @@ export function getTrackerWindowCall(symbol: string): TrackerWindowCall | null {
 // opening call, locked at first snap (30–90 s after window open). Used to show
 // a committed ABOVE/BELOW that doesn't flip with live candle jitter.
 export function getStatWindowCall(symbol: string): TrackerWindowCall | null {
-  const nowMs = Date.now();
-  const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
-  const targetISO = nextBoundary.toISOString();
   const records = historyStore.get(symbol.toUpperCase()) ?? [];
-  const rec = records.find((r) => r.targetTime === targetISO && r.source === "stat");
-  if (!rec) return null;
-  const predPrice = Number(rec.predictedPrice);
-  const aboveKalshi =
-    rec.kalshiTarget != null ? predPrice >= Number(rec.kalshiTarget) : null;
-  return {
-    direction: rec.predictedDirection as "up" | "down" | "flat",
-    aboveKalshi,
-    predictedPrice: predPrice,
-    confidence: rec.confidence,
-    snappedAt: rec.snappedAt,
-  };
+  return computeStatWindowCall(records, Date.now());
 }
 
 // ---------------------------------------------------------------------------
