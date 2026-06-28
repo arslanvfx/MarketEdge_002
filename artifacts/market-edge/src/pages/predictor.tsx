@@ -2560,7 +2560,13 @@ function CoinDetail({
   // so the "At open" row never flip-flops mid-window, and they match what the
   // accuracy log records (DB uses onConflictDoNothing — first write wins).
   const prevSnappedAtRef = useRef<string | null>(null);
-  const [openingStatAbove, setOpeningStatAbove] = useState<boolean | null>(null);
+  // openingStatAbove is derived directly from statSnapshot (always available
+  // within 30s, regardless of whether Claude is running). No state needed —
+  // statSnapshot is already a locked DB value (onConflictDoNothing first-write).
+  const openingStatAbove: boolean | null =
+    statSnapshot != null && kalshiTarget !== null
+      ? statSnapshot.predictedPrice >= kalshiTarget
+      : null;
   const [openingMlAbove,  setOpeningMlAbove]  = useState<boolean | null>(null);
   const mlLockedRef = useRef<boolean>(false); // true once ML is locked for current window
 
@@ -2574,16 +2580,14 @@ function CoinDetail({
     statRefreshTimerRef.current = setTimeout(() => setStatJustRefreshed(false), 2000);
   }
 
-  // New window detected → lock stat direction immediately, reset ML lock
+  // New window detected → reset ML lock. Key off statSnapshot (always present
+  // within 30 s regardless of whether Claude is running) instead of
+  // trackerSnapshot (Claude-only, null when Claude is paused by auto-pilot).
   useEffect(() => {
-    if (!trackerSnapshot || kalshiTarget === null || !statHead) return;
-    if (trackerSnapshot.snappedAt !== prevSnappedAtRef.current) {
-      prevSnappedAtRef.current = trackerSnapshot.snappedAt;
-      setOpeningStatAbove(statHead.predictedPrice >= kalshiTarget);
+    if (!statSnapshot) return;
+    if (statSnapshot.snappedAt !== prevSnappedAtRef.current) {
+      prevSnappedAtRef.current = statSnapshot.snappedAt;
       // Re-lock ML immediately if it's already resolved for this window.
-      // Without this, when mlPred arrives BEFORE trackerSnapshot on page load,
-      // the reset below clears openingMlAbove and the ML lock effect never
-      // re-fires (its deps haven't changed), leaving the ML pill stuck null.
       if (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined) {
         setOpeningMlAbove(mlPred.above);
         mlLockedRef.current = true;
@@ -2592,7 +2596,7 @@ function CoinDetail({
         mlLockedRef.current = false;
       }
     }
-  }, [trackerSnapshot, kalshiTarget, statHead, mlPred?.ready, mlPred?.above]);
+  }, [statSnapshot, mlPred?.ready, mlPred?.above]);
 
   // Lock ML direction the first time it's ready in this window
   useEffect(() => {
@@ -3410,9 +3414,11 @@ function CoinDetail({
 
                     {/* At-open historical bubbles — always visible; "calculating" until snap */}
                     {kalshiTarget !== null && (() => {
-                      // No snapshot yet (first ~30 s of window) — show placeholder so the
-                      // row doesn't pop in out of nowhere once the snap arrives.
-                      if (!trackerSnapshot || (openingStatAbove === null && trackerSnapshot.aboveKalshi === null && openingMlAbove === null)) {
+                      // No stat snapshot yet (first ~30 s of window) — show placeholder.
+                      // statSnapshot is the gate because it's always available regardless
+                      // of whether Claude is running; trackerSnapshot (Claude-only) is null
+                      // when Claude is paused by auto-pilot and must never be the gate.
+                      if (!statSnapshot) {
                         return (
                           <div className="flex items-center gap-2 flex-wrap">
                             <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/30 border border-border/30 px-2 py-1 shrink-0">
@@ -3425,7 +3431,8 @@ function CoinDetail({
                       }
                       const statAboveNow = statHead ? statHead.predictedPrice >= kalshiTarget : null;
                       const statFlippedMid = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
-                      const claudeAboveOpen = trackerSnapshot.aboveKalshi;
+                      // trackerSnapshot is Claude's opening call — null when Claude is paused.
+                      const claudeAboveOpen = trackerSnapshot?.aboveKalshi ?? null;
                       const claudeFlippedMid = claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
                       // openingMlAbove is locked at first ML reading per window — never flips
                       const mlFlippedMid = openingMlAbove !== null && mlPred?.above !== null && mlPred?.above !== undefined
@@ -3452,7 +3459,7 @@ function CoinDetail({
                             <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50">At open</span>
                             <span className="text-[9px] text-muted-foreground/40">·</span>
                             <span className="text-[9px] text-muted-foreground/55 font-medium tabular-nums">
-                              {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
+                              {new Date(statSnapshot.snappedAt).toLocaleTimeString("en-US", {
                                 hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
                               })} ET
                             </span>
@@ -3474,7 +3481,7 @@ function CoinDetail({
                             </div>
                           )}
 
-                          {trackerSnapshot.aboveKalshi !== null && (
+                          {trackerSnapshot?.aboveKalshi !== null && trackerSnapshot?.aboveKalshi !== undefined && (
                             <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
                               trackerSnapshot.aboveKalshi
                                 ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
