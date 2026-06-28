@@ -781,8 +781,9 @@ function SelfLearningDashboard({
       <div className="mb-4 flex items-start gap-2 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2.5">
         <Bot className="w-3.5 h-3.5 text-violet-400 shrink-0 mt-0.5" />
         <div className="text-[11px] text-muted-foreground leading-snug">
-          <span className="text-violet-300 font-semibold">BTC · ETH · XRP · HYPE · BNB</span> always run Claude — every window, automatically, building their accuracy records below.
-          {" "}Auto-pilot evaluates each coin's track record and routes the <span className="text-foreground/70 font-medium">Auto-Pilot</span> consensus signal through whichever model has the proven edge.
+          <span className="text-violet-300 font-semibold">BTC · ETH · XRP · HYPE · BNB</span> are training coins — auto-pilot evaluates Claude vs stat accuracy per coin and runs Claude only where it has the proven edge.
+          {" "}New coins enter an <span className="text-sky-300/80 font-medium">Exploring</span> phase to gather enough data before the comparison is made.
+          {" "}The <span className="text-foreground/70 font-medium">Auto-Pilot</span> consensus signal is routed through whichever model is winning per coin.
         </div>
       </div>
 
@@ -814,19 +815,22 @@ function SelfLearningDashboard({
                 .join("\n");
               const cal = calibrationGap(a.calibration);
               const decision = autoPilotMap.get(a.symbol);
-              const statusBadge = trainingCoins.has(a.symbol) ? (
-                <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30" title="Always running Claude to build its accuracy track record">
-                  <Bot className="w-3 h-3" /> Training
+              // Auto-pilot decision drives the badge for all coins (including training
+              // coins). "Training" is no longer special-cased — the actual decision
+              // (exploring, Claude on, or paused/stat-only) is shown for every coin.
+              const statusBadge = !autoPilot.enabled ? (
+                <span className="text-[10px] text-muted-foreground/50">Auto-pilot off</span>
+              ) : decision?.active && decision.exploring ? (
+                <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 bg-sky-500/15 text-sky-300 ring-sky-500/30" title={decision.reason}>
+                  <Bot className="w-3 h-3" /> Exploring
                 </span>
-              ) : !autoPilot.enabled ? (
-                <span className="text-[10px] text-muted-foreground/50">Off</span>
               ) : decision?.active ? (
-                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${decision.exploring ? "bg-sky-500/15 text-sky-300 ring-sky-500/30" : "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30"}`} title={decision.reason}>
-                  <Bot className="w-3 h-3" />{decision.exploring ? "Exploring" : "Claude on"}
+                <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 bg-emerald-500/15 text-emerald-300 ring-emerald-500/30" title={decision.reason}>
+                  <Bot className="w-3 h-3" /> Claude on
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-muted-foreground bg-muted/30 ring-1 ring-border" title={decision?.reason ?? "Stat only"}>
-                  <Minus className="w-3 h-3" /> Stat only
+                  <Minus className="w-3 h-3" />{trainingCoins.has(a.symbol) ? "Paused" : "Stat only"}
                 </span>
               );
 
@@ -910,7 +914,7 @@ function SelfLearningDashboard({
                       </div>
                     </div>
 
-                    {autoPilot.enabled && !trainingCoins.has(a.symbol) && decision?.reason && (
+                    {autoPilot.enabled && decision?.reason && (
                       <div className="text-[10px] text-muted-foreground/60 leading-snug">{decision.reason}</div>
                     )}
                   </div>
@@ -965,7 +969,7 @@ function SelfLearningDashboard({
                     {/* Auto-pilot / training status */}
                     <div>
                       {statusBadge}
-                      {autoPilot.enabled && !trainingCoins.has(a.symbol) && decision?.reason && (
+                      {autoPilot.enabled && decision?.reason && (
                         <div className="text-[9px] text-muted-foreground/70 mt-0.5 leading-tight line-clamp-2">{decision.reason}</div>
                       )}
                     </div>
@@ -1111,11 +1115,11 @@ function scoreHourly(
 }
 
 function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
-  const [coinFilter, setCoinFilter] = useState<string>("ALL");
-  const [dayFilter, setDayFilter]   = useState<string>("All");
-  const [open, setOpen]             = useState(true);
-  const [barMode, setBarMode]       = useState<BarViewMode>("er");
-  const SHOW_LABELS = new Set([0, 6, 12, 18]);
+  const [coinFilter,   setCoinFilter]   = useState<string>("ALL");
+  const [selectedDay,  setSelectedDay]  = useState<string>("All"); // "All" or "Sun"…"Sat"
+  const [barMode,      setBarMode]      = useState<BarViewMode>("er");
+  // Show hour labels every 3 hours so the axis is readable without crowding.
+  const SHOW_LABELS = new Set([0, 3, 6, 9, 12, 15, 18, 21]);
 
   const query = useQuery({
     queryKey: ["trading-windows", coinFilter],
@@ -1134,243 +1138,237 @@ function TradingWindowsPanel({ currentEtHour }: { currentEtHour: number }) {
     ? `Updated ${ET_TIME_FMT.format(new Date(data.lastUpdatedAt))} ET`
     : null;
 
-  // Which hourly array to show — all-days or a specific day-of-week.
-  const selectedDayIdx = DOW_FILTER_INDEX[dayFilter] ?? null;
-  const activeHourly   = selectedDayIdx !== null
+  const selectedDayIdx = DOW_FILTER_INDEX[selectedDay] ?? null;
+  const activeHourly = selectedDayIdx !== null
     ? (data?.byDayHour?.[selectedDayIdx] ?? data?.hourly ?? [])
     : (data?.hourly ?? []);
 
-  // Best/worst for the currently visible hourly slice.
   const { best: bestHours, worst: worstHours } = data
     ? scoreHourly(activeHourly)
     : { best: [], worst: [] };
 
-  const dayLabel = selectedDayIdx !== null ? `on ${dayFilter}s` : "across all days";
+  // Toggle: clicking the active day deselects back to "All".
+  function handleDayClick(label: string) {
+    setSelectedDay((prev) => (prev === label ? "All" : label));
+  }
+
+  const isSingleCoin = coinFilter !== "ALL";
 
   return (
-    <div className="mt-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          className="flex items-start gap-2 text-left group"
-        >
+    <div className="mt-6 space-y-3">
+
+      {/* ── Section header ── */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex items-start gap-2">
           <Clock className="w-4 h-4 text-primary mt-0.5 shrink-0" />
           <div>
-            <h3 className="text-sm font-semibold flex items-center gap-1">
-              Best Windows to Trade
-              <span className="text-muted-foreground/50 group-hover:text-muted-foreground transition-colors text-xs ml-1">
-                {open ? "▾" : "▸"}
-              </span>
-            </h3>
-            <p className="text-[11px] text-muted-foreground mt-0.5">
-              When training-coin markets are most predictable ·{" "}
-              {data ? `${data.totalSamples} windows recorded` : "loading…"}
+            <h3 className="text-sm font-semibold">Best Windows to Trade</h3>
+            <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+              When markets are most predictable
+              {data ? ` · ${data.totalSamples} windows recorded` : ""}
+              {isSingleCoin ? ` (${coinFilter} only)` : " across all training coins"}
             </p>
           </div>
-        </button>
-        {/* Filters — only shown when expanded */}
-        {open && (
-          <div className="flex flex-col gap-1.5 items-end">
-            {/* Coin filter */}
-            <div className="flex gap-1 flex-wrap justify-end">
-              {TRAINING_COIN_FILTERS.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setCoinFilter(c)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
-                    coinFilter === c
-                      ? "border-primary/60 bg-primary/15 text-primary"
-                      : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                  }`}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-            {/* Day-of-week filter */}
-            <div className="flex gap-1 flex-wrap justify-end">
-              {DOW_FILTER_LABELS.map((d) => (
-                <button
-                  key={d}
-                  onClick={() => setDayFilter(d)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
-                    dayFilter === d
-                      ? "border-sky-500/60 bg-sky-500/15 text-sky-300"
-                      : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        </div>
+        {/* ER / Accuracy mode toggle */}
+        <div className="flex shrink-0 rounded-lg overflow-hidden border border-border text-[10px] font-semibold">
+          <button
+            onClick={() => setBarMode("er")}
+            className={`px-2.5 py-1 transition-colors ${
+              barMode === "er"
+                ? "bg-primary/20 text-primary"
+                : "bg-muted/20 text-muted-foreground hover:bg-muted/40"
+            }`}
+          >
+            Efficiency
+          </button>
+          <button
+            onClick={() => setBarMode("accuracy")}
+            className={`px-2.5 py-1 transition-colors ${
+              barMode === "accuracy"
+                ? "bg-primary/20 text-primary"
+                : "bg-muted/20 text-muted-foreground hover:bg-muted/40"
+            }`}
+          >
+            Accuracy %
+          </button>
+        </div>
       </div>
 
-      {open && (
-        <>
-          {query.isLoading && !data ? (
-            <Skeleton className="h-40 rounded-xl" />
-          ) : !data?.hasEnoughData ? (
-            /* ── Collecting data state ── */
-            <Card className="bg-card/50 px-4 py-3 space-y-3">
-              <div className="flex items-start gap-2">
-                <Clock className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
-                <div className="text-[11px] leading-snug">
-                  <span className="text-amber-300 font-semibold">Collecting data </span>
-                  <span className="text-muted-foreground">
-                    — needs at least 50 recorded windows to identify patterns.{" "}
-                    {data ? `${data.totalSamples} recorded so far.` : ""}
-                  </span>
-                </div>
-              </div>
-              {data && data.totalSamples > 0 && (
-                <div className="opacity-40 pointer-events-none">
-                  <HourlyBars hourly={activeHourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} />
-                </div>
-              )}
-            </Card>
-          ) : (
-            /* ── Full panel ── */
-            <Card className="bg-card/50 px-4 py-4 space-y-4">
+      {/* ── Coin filter pills ── */}
+      <div className="flex gap-1.5 flex-wrap">
+        {TRAINING_COIN_FILTERS.map((c) => (
+          <button
+            key={c}
+            onClick={() => setCoinFilter(c)}
+            className={`px-3 py-1 rounded-full text-[11px] font-semibold border transition-colors ${
+              coinFilter === c
+                ? "border-primary/60 bg-primary/15 text-primary"
+                : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
+            }`}
+          >
+            {c}
+          </button>
+        ))}
+      </div>
 
-              {/* Best / Worst chips */}
-              {(bestHours.length > 0 || worstHours.length > 0) && (
-                <div className="flex flex-wrap gap-x-4 gap-y-2">
-                  {bestHours.length > 0 && (
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider shrink-0">
-                        ✓ Best {dayLabel}
-                      </span>
-                      {bestHours.map((h) => (
-                        <span
-                          key={h.hour}
-                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30"
-                          title={`ER ${h.avgEfficiencyRatio?.toFixed(2)} · accuracy ${h.accuracyPct ?? "—"}% · ${h.count} windows`}
-                        >
-                          {h.label}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {worstHours.length > 0 && (
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[10px] font-semibold text-red-400 uppercase tracking-wider shrink-0">
-                        ✗ Avoid {dayLabel}
-                      </span>
-                      {worstHours.map((h) => (
-                        <span
-                          key={h.hour}
-                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-red-500/15 text-red-300 ring-1 ring-red-500/30"
-                          title={`ER ${h.avgEfficiencyRatio?.toFixed(2)} · accuracy ${h.accuracyPct ?? "—"}% · ${h.count} windows`}
-                        >
-                          {h.label}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* 24-hour bar chart */}
-              <div>
-                <div className="flex items-center justify-between mb-2 gap-2">
-                  <div className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-semibold">
-                    {selectedDayIdx !== null
-                      ? `${dayFilter}s only — `
-                      : "All days — "}
-                    {barMode === "er"
-                      ? "bar height = avg efficiency ratio · white outline = now"
-                      : "bar height = prediction accuracy % · white outline = now"}
-                  </div>
-                  {/* Mode toggle */}
-                  <div className="flex shrink-0 rounded overflow-hidden border border-border text-[9px] font-semibold">
-                    <button
-                      onClick={() => setBarMode("er")}
-                      className={`px-2 py-0.5 transition-colors ${
-                        barMode === "er"
-                          ? "bg-primary/20 text-primary"
-                          : "bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                      }`}
-                    >
-                      Efficiency ratio
-                    </button>
-                    <button
-                      onClick={() => setBarMode("accuracy")}
-                      className={`px-2 py-0.5 transition-colors ${
-                        barMode === "accuracy"
-                          ? "bg-primary/20 text-primary"
-                          : "bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                      }`}
-                    >
-                      Accuracy %
-                    </button>
-                  </div>
-                </div>
-                <HourlyBars hourly={activeHourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} mode={barMode} />
-              </div>
-
-              {/* Day-of-week chart — hide when a specific day is already selected */}
-              {selectedDayIdx === null && (
-                <div>
-                  <div className="text-[10px] text-muted-foreground/60 mb-2 uppercase tracking-wider font-semibold">
-                    Day of week — click a day above to drill in
-                  </div>
-                  <div className="flex gap-2 items-end" style={{ height: "52px" }}>
-                    {data.daily.map((b) => (
-                      <button
-                        key={b.dayIndex}
-                        onClick={() => setDayFilter(DOW_FILTER_LABELS[b.dayIndex + 1])}
-                        className="flex-1 flex flex-col items-center gap-1 group"
-                        title={
-                          b.sparse
-                            ? `${b.label}: ${b.count} samples (sparse)`
-                            : `${b.label}: ER ${b.avgEfficiencyRatio?.toFixed(2)} · ${b.trendingPct ?? "—"}% trending · accuracy ${b.accuracyPct ?? "—"}%`
-                        }
-                      >
-                        <div
-                          className={`w-full rounded-t transition-all group-hover:opacity-80 ${bucketBarColor(b)}`}
-                          style={{ height: `${bucketBarHeight(b, 36)}px` }}
-                        />
-                        <span className="text-[9px] text-muted-foreground/60 group-hover:text-muted-foreground transition-colors">{b.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Legend */}
-              <div className="flex items-center gap-3 flex-wrap text-[9px] text-muted-foreground/60">
-                {barMode === "er" ? (
-                  <>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />Trending (ER≥0.55)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Drifting (0.25–0.55)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />Choppy (&lt;0.25)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />Sparse (&lt;10 samples)</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />Strong (≥65%)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-400/60 inline-block" />Good (55–65%)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Coin-flip (45–55%)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-orange-500 inline-block" />Weak (35–45%)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />Poor (&lt;35%)</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />Sparse (&lt;5 evaluated)</span>
-                  </>
-                )}
-              </div>
-
-              <div className="text-[9px] text-muted-foreground/40 flex items-center gap-2 flex-wrap">
-                <span>{updatedLabel ?? "Updated every 15 min"}</span>
-                <span>·</span>
-                <span>hover a bar for details</span>
-                <span>·</span>
-                <span>{data.totalSamples} recorded windows</span>
-              </div>
-            </Card>
+      {/* ── Loading / empty / full panel ── */}
+      {query.isLoading && !data ? (
+        <Skeleton className="h-48 rounded-xl" />
+      ) : !data ? null : !data.hasEnoughData ? (
+        /* Collecting data */
+        <Card className="bg-card/50 px-4 py-4 space-y-3">
+          <div className="flex items-start gap-2">
+            <Clock className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+            <div className="text-[11px] leading-snug">
+              <span className="text-amber-300 font-semibold">Collecting data </span>
+              <span className="text-muted-foreground">
+                — needs more recorded windows to surface patterns.{" "}
+                {data.totalSamples} recorded so far
+                {isSingleCoin ? ` for ${coinFilter}` : ""}.
+              </span>
+            </div>
+          </div>
+          {data.totalSamples > 0 && (
+            <div className="opacity-30 pointer-events-none">
+              <HourlyBars hourly={activeHourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} mode={barMode} />
+            </div>
           )}
-        </>
+        </Card>
+      ) : (
+        /* ── Full panel ── */
+        <Card className="bg-card/50 px-4 py-5 space-y-5">
+
+          {/* Best / Avoid recommendation chips */}
+          {(bestHours.length > 0 || worstHours.length > 0) && (
+            <div className="flex gap-4 flex-wrap">
+              {bestHours.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider shrink-0">
+                    Best{selectedDay !== "All" ? ` (${selectedDay}s)` : ""}
+                  </span>
+                  {bestHours.map((h) => (
+                    <span
+                      key={h.hour}
+                      className="inline-flex items-center rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30"
+                      title={`ER ${h.avgEfficiencyRatio?.toFixed(2)} · accuracy ${h.accuracyPct ?? "—"}% · ${h.count} windows`}
+                    >
+                      {h.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {worstHours.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-red-400 uppercase tracking-wider shrink-0">
+                    Avoid{selectedDay !== "All" ? ` (${selectedDay}s)` : ""}
+                  </span>
+                  {worstHours.map((h) => (
+                    <span
+                      key={h.hour}
+                      className="inline-flex items-center rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-red-500/15 text-red-300 ring-1 ring-red-500/30"
+                      title={`ER ${h.avgEfficiencyRatio?.toFixed(2)} · accuracy ${h.accuracyPct ?? "—"}% · ${h.count} windows`}
+                    >
+                      {h.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 24-hour bar chart */}
+          <div className="space-y-1.5">
+            <div className="text-[10px] text-muted-foreground/60 font-semibold uppercase tracking-wider">
+              Hours of day (ET){selectedDay !== "All" ? ` · ${selectedDay}s only` : " · all days"}
+              {" "}·{" "}
+              {barMode === "er" ? "bar height = efficiency ratio" : "bar height = prediction accuracy"}
+              {" · "}white ring = current hour
+            </div>
+            <HourlyBars hourly={activeHourly} currentHour={currentEtHour} showLabels={SHOW_LABELS} mode={barMode} />
+          </div>
+
+          {/* Day-of-week bars — always visible; clicking a day filters the hourly chart above */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground/60 font-semibold uppercase tracking-wider">
+                Day of week · click to filter
+              </span>
+              {selectedDay !== "All" && (
+                <button
+                  onClick={() => setSelectedDay("All")}
+                  className="text-[10px] text-sky-400 hover:text-sky-300 transition-colors font-medium"
+                >
+                  ← show all days
+                </button>
+              )}
+            </div>
+            <div className="flex gap-2 items-end" style={{ height: "60px" }}>
+              {data.daily.map((b) => {
+                const dayLabel = DOW_FILTER_LABELS[b.dayIndex + 1];
+                const isSelected = selectedDay === dayLabel;
+                return (
+                  <button
+                    key={b.dayIndex}
+                    onClick={() => handleDayClick(dayLabel)}
+                    className="flex-1 flex flex-col items-center justify-end gap-1 group"
+                    style={{ height: "60px" }}
+                    title={
+                      b.sparse
+                        ? `${b.label}: ${b.count} samples (sparse)`
+                        : `${b.label}: ER ${b.avgEfficiencyRatio?.toFixed(2)} · ${b.trendingPct ?? "—"}% trending · accuracy ${b.accuracyPct ?? "—"}%`
+                    }
+                  >
+                    <div
+                      className={`w-full rounded-t transition-all group-hover:opacity-80 ${bucketBarColor(b)} ${
+                        isSelected ? "ring-2 ring-white/60 ring-offset-0" : ""
+                      }`}
+                      style={{ height: `${bucketBarHeight(b, 40)}px` }}
+                    />
+                    <span
+                      className={`text-[9px] font-semibold transition-colors ${
+                        isSelected
+                          ? "text-white"
+                          : "text-muted-foreground/50 group-hover:text-muted-foreground"
+                      }`}
+                    >
+                      {b.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Legend + footer */}
+          <div className="border-t border-border/30 pt-3 space-y-2">
+            <div className="flex items-center gap-3 flex-wrap text-[9px] text-muted-foreground/60">
+              {barMode === "er" ? (
+                <>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />Trending (ER ≥ 0.55)</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Drifting (0.25–0.55)</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />Choppy (&lt; 0.25)</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />Sparse (&lt; 10 samples)</span>
+                </>
+              ) : (
+                <>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" />Strong (≥ 65%)</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-400/60 inline-block" />Good (55–65%)</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Coin-flip (45–55%)</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500 inline-block" />Poor (&lt; 45%)</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-600/40 border border-dashed border-slate-500/60 inline-block" />Sparse (&lt; 5 evaluated)</span>
+                </>
+              )}
+            </div>
+            <div className="text-[9px] text-muted-foreground/40 flex items-center gap-2 flex-wrap">
+              <span>{updatedLabel ?? "Updated every 15 min"}</span>
+              <span>·</span>
+              <span>hover a bar for details</span>
+              <span>·</span>
+              <span>{data.totalSamples} recorded windows</span>
+            </div>
+          </div>
+        </Card>
       )}
     </div>
   );
@@ -1943,7 +1941,8 @@ export default function Predictor() {
     queryKey: ["tracker-snapshot", selected],
     queryFn: () => fetchJson<{ snapshot: TrackerWindowCall | null; statSnapshot: TrackerWindowCall | null }>(`/crypto/tracker-snapshot/${selected}`),
     refetchInterval: 30_000,
-    enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected),
+    // Also enable for coins auto-pilot is actively running Claude on.
+    enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected) || (autoPilotMap.get(selected)?.active ?? false),
   });
   const trackerSnapshot = trackerSnapshotQuery.data?.snapshot ?? null;
   const statSnapshot = trackerSnapshotQuery.data?.statSnapshot ?? null;
@@ -1962,7 +1961,8 @@ export default function Predictor() {
       );
     },
     refetchInterval: 30_000, // poll every 30 s; cache handles dedup on the server
-    enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected),
+    // Also enable for coins auto-pilot is actively running Claude on.
+    enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected) || (autoPilotMap.get(selected)?.active ?? false),
   });
   const liveDirection = liveDirectionQuery.data ?? null;
 

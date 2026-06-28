@@ -1048,7 +1048,7 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
     totalSamples,
     lastUpdatedAt: new Date().toISOString(),
     recommendation,
-    hasEnoughData: totalSamples >= TW_MIN_TOTAL,
+    hasEnoughData: totalSamples >= (symbols.length === 1 ? 10 : TW_MIN_TOTAL),
   };
 }
 
@@ -2573,10 +2573,18 @@ export function setCoinClaudeEnabled(symbol: string, enabled: boolean): void {
   }
 }
 
-// Claude runs only for training coins — always on so the self-learning loop
-// accumulates data. Non-training coins always use the stat model (free, no API cost).
+// Claude runs for a training coin only when the user has manually enabled it
+// OR when auto-pilot has decided it's earning its keep (or is in the exploration
+// phase gathering data). Non-training coins are always stat-only.
+// claudeEnabledFor() from autopilot.ts is the single source of truth so the
+// tracker tick, live-direction watcher, and UI dashboard all stay consistent.
 function isCoinClaudeEnabled(symbol: string): boolean {
-  return TRAINING_COINS.has(symbol);
+  if (!TRAINING_COINS.has(symbol)) return false;
+  return claudeEnabledFor({
+    manualEnabled: claudeEnabledCoins.has(symbol),
+    autoPilotEnabled,
+    autoActive: autoPilotDecisions.get(symbol)?.active ?? false,
+  });
 }
 
 export function startPredictionTracker(): void {
