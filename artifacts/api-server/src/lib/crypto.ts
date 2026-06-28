@@ -2540,6 +2540,12 @@ export function setGlobalAiMode(mode: "stat" | "claude"): void {
 }
 
 export function setCoinClaudeEnabled(symbol: string, enabled: boolean): void {
+  // Only training coins may have Claude toggled on — non-training coins are
+  // stat-only so we never spend Claude API budget outside the self-learning loop.
+  if (!TRAINING_COINS.has(symbol)) {
+    claudeEnabledCoins.delete(symbol); // purge if somehow present
+    return;
+  }
   if (enabled) {
     claudeEnabledCoins.add(symbol);
     globalAiMode = "claude";
@@ -2549,17 +2555,10 @@ export function setCoinClaudeEnabled(symbol: string, enabled: boolean): void {
   }
 }
 
-// Claude runs for a coin if:
-//  (a) the user manually enabled it,
-//  (b) auto-pilot chose it, OR
-//  (c) it is a training coin — always-on so the self-learning loop accumulates data.
+// Claude runs only for training coins — always on so the self-learning loop
+// accumulates data. Non-training coins always use the stat model (free, no API cost).
 function isCoinClaudeEnabled(symbol: string): boolean {
-  if (TRAINING_COINS.has(symbol)) return true;
-  return claudeEnabledFor({
-    manualEnabled: globalAiMode === "claude" && claudeEnabledCoins.has(symbol),
-    autoPilotEnabled,
-    autoActive: autoPilotDecisions.get(symbol)?.active ?? false,
-  });
+  return TRAINING_COINS.has(symbol);
 }
 
 export function startPredictionTracker(): void {

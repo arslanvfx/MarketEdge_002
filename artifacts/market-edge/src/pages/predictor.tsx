@@ -1999,8 +1999,9 @@ export default function Predictor() {
     if (aiLoading) return;
     setAiError(null);
     setAiLoading(true);
-    // First press also enables Claude tracking for this coin going forward
-    if (!claudeEnabledSet.has(selected)) {
+    // Only persist Claude tracking for training coins — non-training coins
+    // are stat-only (no API cost). Training coins are always-on server-side.
+    if (trainingCoinsSet.has(selected) && !claudeEnabledSet.has(selected)) {
       void handleToggleCoinClaude(selected, true);
     }
     const sym = selected;
@@ -2920,7 +2921,7 @@ function CoinDetail({
                   Auto-pilot{autoPilotDecision.exploring ? " · exploring" : ""}
                 </span>
               )}
-              {aiLoading && (
+              {isTrainingCoin && aiLoading && (
                 <button
                   onClick={onCancelEnhance}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-semibold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
@@ -2928,19 +2929,21 @@ function CoinDetail({
                   ✕ Cancel
                 </button>
               )}
-              <button
-                onClick={onEnhance}
-                disabled={aiLoading}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[10px] font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-              >
-                {aiLoading ? (
-                  <><Loader2 className="w-3 h-3 animate-spin" /> {autoTriggerReason ? "Auto-analyzing…" : "Analyzing…"}</>
-                ) : aiEntry ? (
-                  <><Sparkles className="w-3 h-3" /> Re-analyze</>
-                ) : (
-                  <><Sparkles className="w-3 h-3" /> Enhance</>
-                )}
-              </button>
+              {isTrainingCoin && (
+                <button
+                  onClick={onEnhance}
+                  disabled={aiLoading}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[10px] font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                >
+                  {aiLoading ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" /> {autoTriggerReason ? "Auto-analyzing…" : "Analyzing…"}</>
+                  ) : aiEntry ? (
+                    <><Sparkles className="w-3 h-3" /> Re-analyze</>
+                  ) : (
+                    <><Sparkles className="w-3 h-3" /> Enhance</>
+                  )}
+                </button>
+              )}
             </div>
           </div>
 
