@@ -29,6 +29,7 @@ import {
   ArrowUp,
   ArrowDown,
   RefreshCw,
+  Check,
   Trash2,
   AlertTriangle,
   Bot,
@@ -1827,18 +1828,13 @@ export default function Predictor() {
     refetchInterval: 5000,
   });
 
-  // ML model prediction — updates every 30s (matches tracker tick rate)
+  // ML model prediction — poll every 5 s so direction flips surface immediately.
+  // The route is cheap (in-memory inference) so aggressive polling is fine.
   const mlPredQuery = useQuery({
     queryKey: ["ml-prediction", selected],
     queryFn: () => fetchJson<MLPredResponse>(`/crypto/ml-prediction/${selected}`),
-    // Poll faster (5 s) to quickly pick up the snap that fires just after each
-    // window boundary; back off to 15 s once data is stable mid-window.
-    refetchInterval: (query) => {
-      const d = query.state.data;
-      if (!d || !d.ready) return 5_000; // waiting for first snap
-      return 15_000;
-    },
-    staleTime: 10_000,
+    refetchInterval: 5_000,
+    staleTime: 4_000,
   });
 
   // AI settings — controls whether Claude tracker runs per-coin (server-persisted)
@@ -2563,6 +2559,16 @@ function CoinDetail({
   // vs "Live now" so the user can see if the stat model has flipped mid-window.
   const prevSnappedAtRef = useRef<string | null>(null);
   const [openingStatAbove, setOpeningStatAbove] = useState<boolean | null>(null);
+
+  // ── Force-refresh confirmation ────────────────────────────────────────────
+  const [statJustRefreshed, setStatJustRefreshed] = useState(false);
+  const statRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function handleRefreshStat() {
+    onRefreshStat();
+    setStatJustRefreshed(true);
+    if (statRefreshTimerRef.current) clearTimeout(statRefreshTimerRef.current);
+    statRefreshTimerRef.current = setTimeout(() => setStatJustRefreshed(false), 2000);
+  }
   useEffect(() => {
     if (!trackerSnapshot || kalshiTarget === null || !statHead) return;
     if (trackerSnapshot.snappedAt !== prevSnappedAtRef.current) {
@@ -3118,8 +3124,10 @@ function CoinDetail({
                 <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-[#00C805]/15 border-t border-[#00C805]/20">
 
                   {/* Stat Model */}
-                  <div className="px-4 py-3 text-center">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1.5">Stat Model</div>
+                  <div className="px-4 py-4 text-center">
+                    <div className="text-[11px] font-bold text-muted-foreground/80 mb-2 flex items-center justify-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-sky-400/70" />Stat Model
+                    </div>
                     {statHead && kalshiTarget !== null ? (() => {
                       const liveAbove = statHead.predictedPrice >= kalshiTarget;
                       const pct = pctVsStrike(statHead.predictedPrice)!;
@@ -3174,8 +3182,10 @@ function CoinDetail({
                   </div>
 
                   {/* Claude AI */}
-                  <div className="px-4 py-3 text-center">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1.5">Claude AI</div>
+                  <div className="px-4 py-4 text-center">
+                    <div className="text-[11px] font-bold text-muted-foreground/80 mb-2 flex items-center justify-center gap-1">
+                      <Sparkles className="w-2.5 h-2.5 text-violet-400/80" />Claude AI
+                    </div>
                     {(() => {
                       const effectiveClaudePrice = claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null;
                       return effectiveClaudePrice != null ? (
@@ -3202,8 +3212,10 @@ function CoinDetail({
                   </div>
 
                   {/* Auto-Pilot */}
-                  <div className="px-4 py-3 text-center bg-violet-500/[0.03]">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-violet-400/80 mb-1.5">Auto-Pilot</div>
+                  <div className="px-4 py-4 text-center bg-violet-500/[0.03]">
+                    <div className="text-[11px] font-bold text-violet-400/80 mb-2 flex items-center justify-center gap-1">
+                      <Bot className="w-2.5 h-2.5" />Auto-Pilot
+                    </div>
                     {autoPilotDecision && kalshiTarget !== null ? (() => {
                       const apPrice = autoPilotDecision.active
                         ? (claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null)
@@ -3247,31 +3259,37 @@ function CoinDetail({
                   </div>
 
                   {/* ML Model */}
-                  <div className="px-4 py-3 text-center bg-sky-500/[0.03]">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-400/80 mb-1.5">ML Model</div>
+                  <div className="px-4 py-4 text-center bg-sky-500/[0.03]">
+                    <div className="text-[11px] font-bold text-sky-400/80 mb-2 flex items-center justify-center gap-1">
+                      <Activity className="w-2.5 h-2.5" />ML Model
+                    </div>
                     {mlPred ? (
                       mlPred.ready && mlPred.above !== null && !windowExpiredLocal ? (
                         <>
                           <div className={`text-lg font-black leading-none mb-1 ${mlPred.above ? "text-emerald-400" : "text-red-400"}`}>
                             {mlPred.above ? "↑ ABOVE" : "↓ BELOW"}
                           </div>
-                          <div className={`text-[11px] font-semibold ${mlPred.above ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                          <div className={`text-[11px] font-semibold tabular-nums ${mlPred.above ? "text-emerald-400/80" : "text-red-400/80"}`}>
                             {mlPred.confidence}% conf
                           </div>
-                          <div className="mt-1.5 text-[9px] text-sky-300/60 font-medium">
-                            {mlPred.windows}w · {mlPred.valAccuracy != null ? `${mlPred.valAccuracy}% val` : "learning"}
+                          <div className="mt-2 text-[10px] text-sky-300/60 font-medium">
+                            {mlPred.valAccuracy != null ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/10 px-1.5 py-0.5">
+                                {mlPred.valAccuracy}% val · {mlPred.windows}w
+                              </span>
+                            ) : `${mlPred.windows}w · learning`}
                           </div>
                         </>
                       ) : (
                         <>
-                          <div className="text-[11px] text-muted-foreground/60 italic mb-1">Training…</div>
-                          <div className="w-full bg-muted/30 rounded-full h-1 mt-1">
+                          <div className="text-[11px] text-muted-foreground/60 mb-2">Training…</div>
+                          <div className="w-full bg-muted/30 rounded-full h-1.5 mx-auto max-w-[80px]">
                             <div
-                              className="bg-sky-500/60 h-1 rounded-full transition-all"
+                              className="bg-sky-500/70 h-1.5 rounded-full transition-all duration-500"
                               style={{ width: `${Math.min(100, ((mlPred.windows ?? 0) / (mlPred.minWindows ?? 30)) * 100)}%` }}
                             />
                           </div>
-                          <div className="text-[9px] text-sky-400/60 mt-1">
+                          <div className="text-[10px] text-sky-400/60 mt-1.5 tabular-nums">
                             {mlPred.windows}/{mlPred.minWindows} windows
                           </div>
                         </>
@@ -3327,12 +3345,20 @@ function CoinDetail({
                           </span>
                         )}
                         <button
-                          onClick={onRefreshStat}
+                          onClick={handleRefreshStat}
                           disabled={statLoading}
-                          title="Force-refresh stat model"
-                          className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors ml-auto"
+                          title="Force-refresh all models"
+                          className={`inline-flex items-center gap-1.5 text-[10px] font-medium ml-auto px-2 py-1 rounded transition-all ${
+                            statJustRefreshed
+                              ? "text-emerald-400 bg-emerald-500/10 border border-emerald-500/30"
+                              : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border border-transparent"
+                          } disabled:opacity-40`}
                         >
-                          <RefreshCw className={`w-3 h-3 ${statLoading ? "animate-spin" : ""}`} />
+                          {statJustRefreshed ? (
+                            <><Check className="w-3 h-3" /> Refreshed</>
+                          ) : (
+                            <><RefreshCw className={`w-3 h-3 ${statLoading ? "animate-spin" : ""}`} /> Refresh</>
+                          )}
                         </button>
                       </div>
                     )}
@@ -3423,8 +3449,21 @@ function CoinDetail({
                   </span>
                 )}
               </div>
-              <button onClick={onRefreshStat} disabled={statLoading} title="Force-refresh stat model" className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors">
-                <RefreshCw className={`w-3.5 h-3.5 ${statLoading ? "animate-spin" : ""}`} />
+              <button
+                onClick={handleRefreshStat}
+                disabled={statLoading}
+                title="Force-refresh all models"
+                className={`inline-flex items-center gap-1.5 text-[10px] font-medium px-2 py-1 rounded transition-all ${
+                  statJustRefreshed
+                    ? "text-emerald-400 bg-emerald-500/10 border border-emerald-500/30"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border border-transparent"
+                } disabled:opacity-40`}
+              >
+                {statJustRefreshed ? (
+                  <><Check className="w-3.5 h-3.5" /> Refreshed</>
+                ) : (
+                  <><RefreshCw className={`w-3.5 h-3.5 ${statLoading ? "animate-spin" : ""}`} /> Refresh</>
+                )}
               </button>
             </div>
             {consensusAbove !== null && consensusConf !== null ? (
