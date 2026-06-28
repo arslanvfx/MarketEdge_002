@@ -2244,54 +2244,53 @@ export default function Predictor() {
                         : "bg-card/50 border-border hover:bg-card hover:border-border/80"
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-lg font-bold ${style.accent}`}>{style.glyph}</span>
-                        <span className="font-semibold text-sm">{coin.symbol}</span>
-                        {(() => {
-                          const acc = accuracyMap.get(coin.symbol);
-                          if (!acc || acc.pct === null || acc.total < 1) return null;
-                          const color =
-                            acc.pct >= 65 ? "bg-emerald-500/20 text-emerald-400 ring-emerald-500/30"
-                            : acc.pct >= 45 ? "bg-amber-500/20 text-amber-400 ring-amber-500/30"
-                            : "bg-red-500/20 text-red-400 ring-red-500/30";
-                          return (
-                            <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none ${color}`}>
-                              {acc.pct}%
-                            </span>
-                          );
-                        })()}
-                        {(() => {
-                          const training = trainingCoinsSet.has(coin.symbol);
-                          const auto = autoPilotMap.get(coin.symbol)?.active ?? false;
-                          if (training) {
-                            return (
-                              <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/25 text-violet-300 ring-violet-500/40" title="Training coin — Claude runs automatically every window for self-learning">
-                                <Bot className="w-2.5 h-2.5" /> Training
-                              </span>
-                            );
-                          }
-                          if (claudeEnabledSet.has(coin.symbol)) {
-                            return (
-                              <span className="inline-flex items-center rounded-full px-1 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/20 text-violet-300 ring-violet-500/30" title="Claude AI tracking active (manual)">
-                                <Sparkles className="w-2.5 h-2.5" />
-                              </span>
-                            );
-                          }
-                          if (auto) {
-                            return (
-                              <span className="inline-flex items-center rounded-full px-1 py-0.5 text-[9px] font-bold ring-1 leading-none bg-emerald-500/20 text-emerald-300 ring-emerald-500/30" title={autoPilotMap.get(coin.symbol)?.reason ?? "Auto-pilot enabled Claude"}>
-                                <Bot className="w-2.5 h-2.5" />
-                              </span>
-                            );
-                          }
-                          return null;
-                        })()}
+                    {/* Row 1: symbol + 24h change */}
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className={`text-base font-bold shrink-0 ${style.accent}`}>{style.glyph}</span>
+                        <span className="font-semibold text-sm truncate">{coin.symbol}</span>
                       </div>
-                      <span className={`text-[11px] font-medium ${chg >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      <span className={`text-[11px] font-medium shrink-0 ml-1 ${chg >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {formatPct(chg)}
                       </span>
                     </div>
+                    {/* Row 2: badges */}
+                    {(() => {
+                      const acc = accuracyMap.get(coin.symbol);
+                      const training = trainingCoinsSet.has(coin.symbol);
+                      const auto = autoPilotMap.get(coin.symbol)?.active ?? false;
+                      const hasAcc = acc && acc.pct !== null && acc.total >= 1;
+                      const hasMode = training || claudeEnabledSet.has(coin.symbol) || auto;
+                      if (!hasAcc && !hasMode) return <div className="mb-1.5" />;
+                      const accColor = !hasAcc ? "" :
+                        acc!.pct! >= 65 ? "bg-emerald-500/20 text-emerald-400 ring-emerald-500/30"
+                        : acc!.pct! >= 45 ? "bg-amber-500/20 text-amber-400 ring-amber-500/30"
+                        : "bg-red-500/20 text-red-400 ring-red-500/30";
+                      return (
+                        <div className="flex items-center gap-1 mb-1.5 flex-wrap">
+                          {hasAcc && (
+                            <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none ${accColor}`}>
+                              {acc!.pct}%
+                            </span>
+                          )}
+                          {training && (
+                            <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/25 text-violet-300 ring-violet-500/40" title="Training coin">
+                              <Bot className="w-2.5 h-2.5" /> Training
+                            </span>
+                          )}
+                          {!training && claudeEnabledSet.has(coin.symbol) && (
+                            <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-violet-500/20 text-violet-300 ring-violet-500/30" title="Claude AI tracking active">
+                              <Sparkles className="w-2.5 h-2.5" /> Claude
+                            </span>
+                          )}
+                          {!training && !claudeEnabledSet.has(coin.symbol) && auto && (
+                            <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 leading-none bg-emerald-500/20 text-emerald-300 ring-emerald-500/30" title={autoPilotMap.get(coin.symbol)?.reason ?? "Auto-pilot"}>
+                              <Bot className="w-2.5 h-2.5" /> Auto
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <div className="text-sm font-bold tabular-nums mb-1">
                       <LivePrice price={price} />
                     </div>
