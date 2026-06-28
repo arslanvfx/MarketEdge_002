@@ -1370,7 +1370,16 @@ function analyzeCoin(
   const targets = nextQuarterTargets(now, 4);
   const predictions: Prediction[] = targets.map((target) => {
     const minutesAhead = Math.max(1, Math.round((target.getTime() - now.getTime()) / 60_000));
-    const predictedPrice = price * Math.exp(drift * minutesAhead);
+    const rawPredicted  = price * Math.exp(drift * minutesAhead);
+    // Near-close live-price blend: when < 2 minutes remain in the current window,
+    // the live price is by far the best predictor of the closing price — drift-based
+    // extrapolation can't realistically reverse a meaningful gap in 60–90 seconds.
+    // We linearly blend the model's prediction toward the live price:
+    //   2 min remaining → 0 % blend (pure model)
+    //   0 min remaining → 100 % blend (pure live price)
+    const secsRemaining = Math.max(0, target.getTime() - now.getTime()) / 1_000;
+    const nearCloseFrac  = Math.max(0, 1 - secsRemaining / 120); // 0 at ≥2 min, 1 at close
+    const predictedPrice = rawPredicted * (1 - nearCloseFrac) + price * nearCloseFrac;
     // ~1 sigma random-walk band scaling with sqrt(time).
     const band = price * vol * Math.sqrt(minutesAhead);
     const low = predictedPrice - band;
