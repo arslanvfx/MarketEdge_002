@@ -468,13 +468,19 @@ router.get("/crypto/ml-prediction/:symbol", async (req, res) => {
   const cached = getCachedPrediction(symbol);
   if (!cached) return res.json(base);
 
-  const kalshiTarget = await fetchKalshiTarget(symbol).catch(() => null);
+  // Compute the current window boundary and fetch with it so we bypass the
+  // shared display cache — that cache can still hold the PREVIOUS window's
+  // strike for up to ~15 s after the boundary fires, which would give the ML
+  // model wrong features right when the new window opens.
+  const now        = Date.now();
+  const QUARTER_MS = 15 * 60_000;
+  const windowMs   = Math.floor(now / QUARTER_MS) * QUARTER_MS;
+  const nextBoundary = new Date(windowMs + QUARTER_MS);
+  const kalshiTarget = await fetchKalshiTarget(symbol, nextBoundary).catch(() => null);
   if (kalshiTarget == null) return res.json(base);
 
   // Elapsed fraction in the current 15-min window.
-  const now       = Date.now();
-  const windowMs  = Math.floor(now / (15 * 60_000)) * (15 * 60_000);
-  const elapsed   = Math.min((now - windowMs) / (15 * 60_000), 1);
+  const elapsed   = Math.min((now - windowMs) / QUARTER_MS, 1);
   const features  = extractMLFeatures(cached, kalshiTarget, elapsed);
   const { prediction } = getMLPrediction(symbol, features);
 

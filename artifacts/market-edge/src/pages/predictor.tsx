@@ -2580,10 +2580,19 @@ function CoinDetail({
     if (trackerSnapshot.snappedAt !== prevSnappedAtRef.current) {
       prevSnappedAtRef.current = trackerSnapshot.snappedAt;
       setOpeningStatAbove(statHead.predictedPrice >= kalshiTarget);
-      setOpeningMlAbove(null);   // clear stale window's ML direction
-      mlLockedRef.current = false; // allow next ML reading to lock
+      // Re-lock ML immediately if it's already resolved for this window.
+      // Without this, when mlPred arrives BEFORE trackerSnapshot on page load,
+      // the reset below clears openingMlAbove and the ML lock effect never
+      // re-fires (its deps haven't changed), leaving the ML pill stuck null.
+      if (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined) {
+        setOpeningMlAbove(mlPred.above);
+        mlLockedRef.current = true;
+      } else {
+        setOpeningMlAbove(null);
+        mlLockedRef.current = false;
+      }
     }
-  }, [trackerSnapshot, kalshiTarget, statHead]);
+  }, [trackerSnapshot, kalshiTarget, statHead, mlPred?.ready, mlPred?.above]);
 
   // Lock ML direction the first time it's ready in this window
   useEffect(() => {
@@ -3320,7 +3329,10 @@ function CoinDetail({
                 </div>
 
                 {/* ── Signals + At-open footer ── */}
-                {(consensusSignals.length > 0 || (trackerSnapshot && kalshiTarget !== null && (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null))) && (
+                {/* Always render the footer when we have live signals or a Kalshi
+                    window — AT OPEN shows a "calculating" placeholder until the
+                    first snap arrives rather than popping in out of nowhere. */}
+                {(consensusSignals.length > 0 || kalshiTarget !== null) && (
                   <div className="px-5 py-4 border-t border-[#00C805]/20 bg-background/10 space-y-3">
 
                     {/* Live signal bubbles */}
@@ -3396,9 +3408,21 @@ function CoinDetail({
                       </div>
                     )}
 
-                    {/* At-open historical bubbles */}
-                    {trackerSnapshot && kalshiTarget !== null &&
-                      (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null) && (() => {
+                    {/* At-open historical bubbles — always visible; "calculating" until snap */}
+                    {kalshiTarget !== null && (() => {
+                      // No snapshot yet (first ~30 s of window) — show placeholder so the
+                      // row doesn't pop in out of nowhere once the snap arrives.
+                      if (!trackerSnapshot || (openingStatAbove === null && trackerSnapshot.aboveKalshi === null && openingMlAbove === null)) {
+                        return (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/30 border border-border/30 px-2 py-1 shrink-0">
+                              <Clock className="w-2.5 h-2.5 text-muted-foreground/50" />
+                              <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50">At open</span>
+                            </div>
+                            <span className="text-[9px] text-muted-foreground/35 italic animate-pulse">calculating…</span>
+                          </div>
+                        );
+                      }
                       const statAboveNow = statHead ? statHead.predictedPrice >= kalshiTarget : null;
                       const statFlippedMid = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
                       const claudeAboveOpen = trackerSnapshot.aboveKalshi;
