@@ -1938,13 +1938,6 @@ export default function Predictor() {
   const kalshiTarget = kalshiAvailableTop && !kalshiWindowExpired
     ? (ktd?.targetPrice ?? null)
     : null;
-  // True when Kalshi IS supported for this coin but we're in the brief
-  // transition period between windows — used to show "Calculating…" vs the
-  // generic "Awaiting target price…" fallback.
-  const kalshiTargetRefreshing = KALSHI_COINS.includes(selected) && (
-    kalshiWindowExpired ||
-    (kalshiTargetQuery.isFetching && !kalshiAvailableTop)
-  );
   const kalshiIsLive = ktd?.isLive === true && !kalshiWindowExpired;
   const kalshiEventTicker = ktd?.eventTicker;
 
