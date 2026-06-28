@@ -841,8 +841,10 @@ export function getAllPredictionAnalytics(): CoinAnalytics[] {
 // falling back to the in-memory historyStore on DB error.
 // ---------------------------------------------------------------------------
 
-const TW_MIN_BUCKET = 10;   // samples per hour/day bucket before we trust it
-const TW_MIN_TOTAL  = 50;   // total windows before issuing recommendations
+const TW_MIN_BUCKET        = 10;  // samples per hour/day bucket — all-coin mode
+const TW_MIN_BUCKET_SINGLE =  3;  // single-coin: spread thinner, still meaningful
+const TW_MIN_TOTAL         = 50;  // total windows before recommendations — all-coin
+const TW_MIN_TOTAL_SINGLE  = 10;  // single-coin total threshold
 
 const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -888,6 +890,12 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
   const symbols = filterSymbol
     ? TRAINING_COINS.has(filterSymbol) ? [filterSymbol] : []
     : [...TRAINING_COINS];
+
+  // Scale thresholds down for single-coin mode: 48 windows spread across
+  // ~20 active hours yields only 2-4 per bucket — far below the all-coin
+  // TW_MIN_BUCKET of 10. Single-coin analysis is still meaningful at 3+.
+  const minBucket = symbols.length === 1 ? TW_MIN_BUCKET_SINGLE : TW_MIN_BUCKET;
+  const minTotal  = symbols.length === 1 ? TW_MIN_TOTAL_SINGLE  : TW_MIN_TOTAL;
 
   // Fetch all DB records for the requested training coins (no row limit so the
   // panel keeps growing across server restarts).  Fall back to in-memory store
@@ -975,12 +983,13 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
     return {
       count:              acc.total,
       evaluatedCount:     acc.evaluated,
-      accuracyPct:        acc.evaluated >= 5
+      // Use minBucket as the evaluated floor too — consistency between modes.
+      accuracyPct:        acc.evaluated >= minBucket
         ? Math.round((acc.hits / acc.evaluated) * 100) : null,
       avgEfficiencyRatio: avgER,
       trendingPct:        acc.erCount > 0
         ? Math.round((acc.trendingCount / acc.erCount) * 100) : null,
-      sparse: acc.total < TW_MIN_BUCKET,
+      sparse: acc.total < minBucket,
     };
   };
 
@@ -1005,9 +1014,9 @@ export async function getTradingWindows(filterSymbol?: string): Promise<TradingW
 
   let recommendation: string;
   let recommendedWindows: RecommendedWindow[] = [];
-  if (totalSamples < TW_MIN_TOTAL) {
+  if (totalSamples < minTotal) {
     recommendation =
-      `Collecting data — needs at least ${TW_MIN_TOTAL} windows to identify patterns. ` +
+      `Collecting data — needs at least ${minTotal} windows to identify patterns. ` +
       `${totalSamples} recorded so far.`;
   } else if (scored.length === 0) {
     recommendation = "No hour bucket has enough samples yet.";
