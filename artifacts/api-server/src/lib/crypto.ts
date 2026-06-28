@@ -1975,6 +1975,12 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
   }
 }
 const historyStore = new Map<string, PredictionRecord[]>(); // symbol → records
+// Prevents concurrent ticks from double-snapping the same window. setInterval
+// fires every 30s without awaiting the previous tick, so if a Claude call takes
+// >30s two ticks overlap and both see alreadySnapped=false before either pushes
+// records. The DB deduplicates via onConflictDoNothing but the in-memory array
+// gets both copies. This Set is the synchronous guard that closes the gap.
+const snapInFlight = new Set<string>(); // `${sym}:${targetISO}`
 
 export function getPredictionHistory(symbol: string): PredictionRecord[] {
   return (historyStore.get(symbol.toUpperCase()) ?? []).slice().reverse(); // newest first
@@ -2626,6 +2632,7 @@ export function startPredictionTracker(): void {
         const targetISO = nextBoundary.toISOString();
         const timeToNext = nextBoundary.getTime() - nowMs;
         const alreadySnapped = records.some((r) => r.targetTime === targetISO);
+        const snapKey = `${sym}:${targetISO}`;
 
         // Timing strategy:
         //   • Wait at least 30 s into the window before the first snap attempt.
@@ -2648,10 +2655,12 @@ export function startPredictionTracker(): void {
 
         if (
           !alreadySnapped &&
+          !snapInFlight.has(snapKey) &&
           timeToNext > 60_000 &&
           timeIntoWindow >= SNAP_DELAY_MS &&
           timeIntoWindow < SNAP_MAX_MS
         ) {
+          snapInFlight.add(snapKey);
           try {
             // Fetch Kalshi target before the expensive data calls so we can
             // bail early if the market isn't ready yet.
@@ -2839,6 +2848,8 @@ export function startPredictionTracker(): void {
             } // end else (kalshiTarget available or gave up waiting)
           } catch {
             // non-fatal — will retry next tick
+          } finally {
+            snapInFlight.delete(snapKey);
           }
         }
 
