@@ -2843,37 +2843,55 @@ export function startPredictionTracker(): void {
           }
         }
 
-        // ── Auto-trigger live-direction re-check (training coins only) ────────
-        // When the live price crosses the Kalshi strike in the opposite direction
-        // from Claude's last cached "Live now" answer, re-ask Claude immediately
-        // so Claude Pulse stays current without a manual refresh.
-        if (TRAINING_COINS.has(sym) && !liveDirectionInFlight.has(sym)) {
+        // ── Auto-trigger live-direction re-check ────────────────────────────
+        // Keeps Claude's Call current throughout the window for every coin
+        // with Claude enabled. Two independent triggers — both respect the
+        // LIVE_DIR_AUTO_COOLDOWN throttle so we never spam Claude:
+        //   (a) Strike-crossing: live price moved to the opposite side from
+        //       Claude's last cached ABOVE/BELOW call.
+        //   (b) Periodic: cache is stale (> LIVE_DIR_PERIODIC_MS elapsed since
+        //       the last fetch), so Claude re-analyses current market conditions.
+        const LIVE_DIR_PERIODIC_MS = 5 * 60_000; // refresh at least every 5 min
+        if (isCoinClaudeEnabled(sym) && !liveDirectionInFlight.has(sym)) {
           const cached = liveDirectionCache.get(sym);
-          if (cached && cached.result.aboveKalshi !== null) {
-            const statRec = records.slice().reverse().find(
-              (r) => r.source === "stat" && r.kalshiTarget != null,
-            );
-            if (statRec?.kalshiTarget != null) {
-              try {
-                const currentPrice = await getTicker(coin.product);
-                const priceAbove = currentPrice >= statRec.kalshiTarget;
-                const lastTrigger = liveDirectionLastAutoTrigger.get(sym) ?? 0;
-                if (
-                  priceAbove !== cached.result.aboveKalshi &&
-                  nowMs - lastTrigger > LIVE_DIR_AUTO_COOLDOWN
-                ) {
-                  liveDirectionInFlight.add(sym);
-                  liveDirectionLastAutoTrigger.set(sym, nowMs);
-                  console.info(
-                    `[live-dir] ${sym}: price ${currentPrice} crossed strike ${statRec.kalshiTarget} — auto re-check`,
-                  );
-                  fetchLiveDirection(sym, true)
-                    .catch(() => {})
-                    .finally(() => liveDirectionInFlight.delete(sym));
+          const lastTrigger = liveDirectionLastAutoTrigger.get(sym) ?? 0;
+          if (nowMs - lastTrigger > LIVE_DIR_AUTO_COOLDOWN) {
+            let triggerReason: string | null = null;
+
+            // (a) Strike-crossing trigger.
+            if (cached && cached.result.aboveKalshi !== null) {
+              const statRec = records.slice().reverse().find(
+                (r) => r.source === "stat" && r.kalshiTarget != null,
+              );
+              if (statRec?.kalshiTarget != null) {
+                try {
+                  const currentPrice = await getTicker(coin.product);
+                  const priceAbove = currentPrice >= statRec.kalshiTarget;
+                  if (priceAbove !== cached.result.aboveKalshi) {
+                    triggerReason = `price ${currentPrice.toFixed(4)} crossed strike ${statRec.kalshiTarget}`;
+                  }
+                } catch {
+                  // non-fatal
                 }
-              } catch {
-                // non-fatal
               }
+            }
+
+            // (b) Periodic trigger — no cache yet, or cache is stale.
+            if (!triggerReason) {
+              if (!cached) {
+                triggerReason = "initial";
+              } else if (nowMs - cached.at > LIVE_DIR_PERIODIC_MS) {
+                triggerReason = `periodic (${Math.round((nowMs - cached.at) / 60_000)}m since last)`;
+              }
+            }
+
+            if (triggerReason) {
+              liveDirectionInFlight.add(sym);
+              liveDirectionLastAutoTrigger.set(sym, nowMs);
+              console.info(`[live-dir] ${sym}: ${triggerReason} — re-checking Claude`);
+              fetchLiveDirection(sym, true)
+                .catch(() => {})
+                .finally(() => liveDirectionInFlight.delete(sym));
             }
           }
         }
