@@ -2757,11 +2757,15 @@ export function startPredictionTracker(): void {
               analysis.predictions.find((p) => p.target === targetISO) ??
               analysis.predictions[0];
             if (basePred) {
-              // Only call Claude if the user has enabled it for this coin.
-              // Default: statistical model only (no cost).
+              // For accuracy tracking, always run Claude + ensemble for training
+              // coins so every window has all 4 model records to compare.
+              // Auto-pilot only controls which model drives the live bet
+              // recommendation (autoPilotAbove in the frontend) — it should NOT
+              // stop Claude from recording, otherwise we can't measure whether
+              // Claude improves while paused and accuracy tracking breaks.
               updateKalshiWindowPrice(getLastKalshiTicker(sym), analysis.price);
               const winCtxSnap = getKalshiWindowContext(sym);
-              const useAI = isCoinClaudeEnabled(sym);
+              const useAI = TRAINING_COINS.has(sym);
               const [ai, kalshiTarget] = await Promise.all([
                 useAI
                   ? refineWithSelfConsistency(analysis, basePred, {
