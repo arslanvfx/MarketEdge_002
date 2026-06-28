@@ -2841,11 +2841,12 @@ function CoinDetail({
         </Card>
       </div>
 
-      {/* ── Kalshi Target Banner (BTC, ETH, XRP) ── */}
+      {/* ── Prediction Hub — Kalshi target + all model calls (unified card) ── */}
       {kalshiAvailable && (
         <div className="rounded-xl border-2 border-[#00C805]/40 bg-[#00C805]/6 overflow-hidden">
-          {/* Banner header */}
-          <div className="flex items-center justify-between px-5 py-3 border-b border-[#00C805]/20 bg-[#00C805]/8">
+
+          {/* ── HEADER ── */}
+          <div className="flex items-center justify-between px-5 py-3 border-b border-[#00C805]/20 bg-[#00C805]/8 gap-2 flex-wrap">
             <div className="flex items-center gap-2">
               <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[#00C805]/20 border border-[#00C805]/40">
                 <span className="text-[11px] font-black text-[#00C805]">K</span>
@@ -2858,11 +2859,11 @@ function CoinDetail({
               ) : (
                 <span className="text-[10px] text-muted-foreground border border-border rounded px-1.5 py-0.5">Next window</span>
               )}
-            </div>
-            <div className="flex items-center gap-3">
               {ktd?.closeTime && kalshiIsLive && (
-                <span className="text-[11px] text-muted-foreground">closes <span className="font-medium text-foreground">{toET(ktd.closeTime)} ET</span></span>
+                <span className="text-[11px] text-muted-foreground hidden sm:inline">closes <span className="font-medium text-foreground">{toET(ktd.closeTime)} ET</span></span>
               )}
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 onClick={onRefreshKalshi}
                 disabled={kalshiLoading}
@@ -2877,53 +2878,71 @@ function CoinDetail({
                   View on Kalshi <ExternalLink className="w-3 h-3" />
                 </a>
               )}
+              <div className="w-px h-4 bg-border/40 mx-0.5" />
+              {aiError && (
+                <span className="text-[10px] text-red-400 max-w-[160px] truncate" title={aiError}>⚠ {aiError}</span>
+              )}
+              {!aiError && !aiLoading && aiEntry && (
+                <span className={`text-[10px] tabular-nums ${staleClass}`}>
+                  {aiEntry.at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} {tz}
+                  {staleMins !== null && staleMins >= 3 && <span className="ml-1 opacity-70">({staleMins}m)</span>}
+                </span>
+              )}
+              {!aiError && aiLoading && autoTriggerReason && (
+                <span className="text-[10px] text-amber-400 flex items-center gap-1">
+                  <Zap className="w-3 h-3" /> {autoTriggerReason}
+                </span>
+              )}
+              {claudeActive && (
+                <button
+                  onClick={() => onToggleClaude(false)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold border border-violet-500/30 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors"
+                  title="Claude auto-tracking — click to disable"
+                >
+                  <Sparkles className="w-2.5 h-2.5" /> Claude active
+                </button>
+              )}
+              {!claudeActive && autoPilotDecision?.active && (
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold border ${
+                    autoPilotDecision.exploring
+                      ? "border-sky-500/30 bg-sky-500/10 text-sky-300"
+                      : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                  }`}
+                  title={autoPilotDecision.reason}
+                >
+                  <Bot className="w-2.5 h-2.5" />
+                  Auto-pilot{autoPilotDecision.exploring ? " · exploring" : ""}
+                </span>
+              )}
+              {aiLoading && (
+                <button
+                  onClick={onCancelEnhance}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-semibold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+                >
+                  ✕ Cancel
+                </button>
+              )}
+              <button
+                onClick={onEnhance}
+                disabled={aiLoading}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[10px] font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+              >
+                {aiLoading ? (
+                  <><Loader2 className="w-3 h-3 animate-spin" /> {autoTriggerReason ? "Auto-analyzing…" : "Analyzing…"}</>
+                ) : aiEntry ? (
+                  <><Sparkles className="w-3 h-3" /> Re-analyze</>
+                ) : (
+                  <><Sparkles className="w-3 h-3" /> Enhance</>
+                )}
+              </button>
             </div>
           </div>
-          {/* Combined call headline — regime-weighted ensemble of stat + Claude
-              with explicit no-bet. Sits above the per-model breakdown below. */}
-          {combinedHead && (
-            <div className="px-5 py-3 border-b border-[#00C805]/20 bg-background/20">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1 flex items-center gap-1.5">
-                <Sparkles className="w-3 h-3 text-primary/60" /> Combined Call
-                <span className="font-normal normal-case tracking-normal text-muted-foreground/60">
-                  · stat {Math.round((aiEntry!.ensembleWeights!.stat) * 100)}% / Claude {Math.round((aiEntry!.ensembleWeights!.claude) * 100)}%
-                </span>
-              </div>
-              {combinedHead.conflict ? (
-                /* Models are on opposite sides of the target — show which way each
-                   is pointing so the user can judge rather than hiding both. */
-                <div>
-                  <div className="inline-flex items-center gap-1.5 text-lg font-black text-amber-400">
-                    <Minus className="w-5 h-5" /> SPLIT SIGNAL
-                  </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5">{combinedHead.reason}</div>
-                </div>
-              ) : combinedHead.above !== null ? (
-                /* Models agree on direction — always show it. Only suppress the
-                   Kalshi bet recommendation when confidence is below the threshold,
-                   never hide the direction itself. */
-                <>
-                  <div className={`flex items-center gap-1.5 text-xl font-black ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
-                    {combinedHead.above ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
-                    {combinedHead.above ? "ABOVE" : "BELOW"}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5">
-                    ${formatPrice(combinedHead.predictedPrice)} · {combinedHead.confidence}% conf.
-                    {combinedHead.abstained && <span className="text-amber-400/80 ml-1">· low confidence — skip bet</span>}
-                  </div>
-                  {kalshiIsLive && !combinedHead.abstained && (
-                    <div className={`mt-1.5 text-xs font-bold ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
-                      → Bet {combinedHead.above ? "YES" : "NO"} on Kalshi
-                    </div>
-                  )}
-                </>
-              ) : null}
-            </div>
-          )}
 
-          {/* Banner body */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 divide-x divide-[#00C805]/15 px-0">
-            {/* Target price — hero */}
+          {/* ── STATS ROW: Strike | Current + Price Action | Claude's Call ── */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-[#00C805]/15">
+
+            {/* Strike price + Combined call */}
             <div className="px-5 py-4">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Strike Price</div>
               {kalshiTarget !== null ? (
@@ -2937,27 +2956,90 @@ function CoinDetail({
                   <div className="text-[11px] text-muted-foreground mt-0.5">{ktd?.openTime ? `set at ${toET(ktd.openTime)} ET` : "set when window opens"}</div>
                 </>
               )}
-            </div>
-            {/* Current price vs target */}
-            {kalshiTarget !== null && (
-              <div className="px-5 py-4">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Current Price</div>
-                <div className="text-3xl font-black tabular-nums">${formatPrice(livePrice)}</div>
-                <div className={`text-sm font-bold mt-0.5 flex items-center gap-1 ${livePrice >= kalshiTarget ? "text-emerald-400" : "text-red-400"}`}>
-                  {livePrice >= kalshiTarget ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
-                  {livePrice >= kalshiTarget ? "Above" : "Below"} target
-                  <span className="font-normal text-[11px] text-muted-foreground ml-1">
-                    ({livePrice >= kalshiTarget ? "+" : ""}{(((livePrice - kalshiTarget) / kalshiTarget) * 100).toFixed(2)}%)
-                  </span>
+              {combinedHead && (
+                <div className="mt-3 pt-3 border-t border-[#00C805]/15">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-primary/60" /> Combined
+                    {aiEntry?.ensembleWeights && (
+                      <span className="font-normal normal-case tracking-normal text-muted-foreground/50">
+                        · s{Math.round(aiEntry.ensembleWeights.stat * 100)}% c{Math.round(aiEntry.ensembleWeights.claude * 100)}%
+                      </span>
+                    )}
+                  </div>
+                  {combinedHead.conflict ? (
+                    <div className="inline-flex items-center gap-1 text-sm font-black text-amber-400">
+                      <Minus className="w-4 h-4" /> SPLIT SIGNAL
+                    </div>
+                  ) : combinedHead.above !== null ? (
+                    <>
+                      <div className={`flex items-center gap-1 text-lg font-black ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
+                        {combinedHead.above ? <ArrowUp className="w-4 h-4" /> : <ArrowDown className="w-4 h-4" />}
+                        {combinedHead.above ? "ABOVE" : "BELOW"}
+                      </div>
+                      <div className="text-[11px] text-muted-foreground mt-0.5">
+                        ${formatPrice(combinedHead.predictedPrice)} · {combinedHead.confidence}%
+                        {combinedHead.abstained && <span className="text-amber-400/80 ml-1">· skip bet</span>}
+                      </div>
+                      {kalshiIsLive && !combinedHead.abstained && (
+                        <div className={`mt-1 text-xs font-bold ${combinedHead.above ? "text-emerald-400" : "text-red-400"}`}>
+                          → Bet {combinedHead.above ? "YES" : "NO"} on Kalshi
+                        </div>
+                      )}
+                    </>
+                  ) : null}
                 </div>
-              </div>
-            )}
-            {/* Claude's call — derived from the same AI forecast shown in the cards */}
-            <div className="px-5 py-4 col-span-2 sm:col-span-1">
+              )}
+            </div>
+
+            {/* Current price vs target + Price Action */}
+            <div className="px-5 py-4">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1">Current Price</div>
+              {kalshiTarget !== null ? (
+                <>
+                  <div className="text-3xl font-black tabular-nums">${formatPrice(livePrice)}</div>
+                  <div className={`text-sm font-bold mt-0.5 flex items-center gap-1 ${livePrice >= kalshiTarget ? "text-emerald-400" : "text-red-400"}`}>
+                    {livePrice >= kalshiTarget ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+                    {livePrice >= kalshiTarget ? "Above" : "Below"} target
+                    <span className="font-normal text-[11px] text-muted-foreground ml-1">
+                      ({livePrice >= kalshiTarget ? "+" : ""}{(((livePrice - kalshiTarget) / kalshiTarget) * 100).toFixed(2)}%)
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-3xl font-black tabular-nums">${formatPrice(livePrice)}</div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">strike not yet set</div>
+                </>
+              )}
+              {betSig && (() => {
+                const erPct = Math.min(100, Math.max(0, betSig.er * 100));
+                const cfgColor: Record<string, string> = { choppy: "text-red-400", drifting: "text-amber-400", trending: "text-emerald-400", spike: "text-orange-400" };
+                const cfgBar: Record<string, string> = { choppy: "bg-red-400", drifting: "bg-amber-400", trending: "bg-emerald-400", spike: "bg-orange-400" };
+                const cfgLabel: Record<string, string> = { choppy: "Choppy", drifting: "Drifting", trending: "Trending", spike: "Spike ⚠" };
+                return (
+                  <div className="mt-3 pt-3 border-t border-[#00C805]/15">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1.5">Price Action</div>
+                    <div className={`text-sm font-bold ${cfgColor[betSig.level]}`}>{cfgLabel[betSig.level]}</div>
+                    <div className="flex items-center gap-2 mt-1.5">
+                      <div className="flex-1 h-1.5 rounded-full bg-muted/40 overflow-hidden">
+                        <div className={`h-full rounded-full ${cfgBar[betSig.level]}`} style={{ width: `${erPct}%` }} />
+                      </div>
+                      <span className={`text-[10px] font-bold tabular-nums shrink-0 ${cfgColor[betSig.level]}`}>{betSig.er.toFixed(2)}× ER</span>
+                    </div>
+                    <div className="mt-1 text-[10px] text-muted-foreground">
+                      {betSig.oscCount} reversals · {betSig.driftUp ? "▲" : "▼"} {betSig.netDriftPct.toFixed(3)}%{betSig.spikeFlag ? " · ⚠ spike" : ""}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Claude's call */}
+            <div className="px-5 py-4">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1 flex items-center gap-2">
                 Claude's Call
                 {staleMins !== null && !aiLoading && (
-                  <span className={`font-normal normal-case tracking-normal ${staleClass}`}>
+                  <span className={`font-normal normal-case tracking-normal text-[10px] ${staleClass}`}>
                     {staleMins === 0 ? "just now" : `${staleMins}m ago`}
                   </span>
                 )}
@@ -2965,13 +3047,8 @@ function CoinDetail({
               {kalshiTarget === null ? (
                 <div className="text-sm text-muted-foreground flex items-center gap-1.5">
                   {kalshiTargetRefreshing ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                      Calculating…
-                    </>
-                  ) : (
-                    "Awaiting target price…"
-                  )}
+                    <><Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> Calculating…</>
+                  ) : "Awaiting target price…"}
                 </div>
               ) : aiLoading ? (
                 <div className="space-y-1">
@@ -3000,7 +3077,6 @@ function CoinDetail({
                   )}
                 </>
               ) : isTrainingCoin && trackerSnapshot !== null ? (
-                /* Training coin — show the tracker's window-open Claude snapshot */
                 <>
                   <div className={`flex items-center gap-1.5 text-xl font-black ${trackerSnapshot.aboveKalshi ? "text-emerald-400" : "text-red-400"}`}>
                     {trackerSnapshot.aboveKalshi ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
@@ -3019,541 +3095,359 @@ function CoinDetail({
                   )}
                 </>
               ) : isTrainingCoin ? (
-                /* Training coin but window hasn't opened yet / tracker hasn't run */
                 <div className="text-[11px] text-muted-foreground/70 leading-snug flex items-start gap-1.5">
                   <Bot className="w-3.5 h-3.5 text-violet-400/60 shrink-0 mt-0.5" />
-                  <span>Claude runs automatically at window open — or click "Enhance" for a call now</span>
+                  <span>Claude runs automatically at window open — or click Enhance for a call now</span>
                 </div>
               ) : (
                 <div className="text-[11px] text-muted-foreground/70 leading-snug">
-                  Click "Enhance with AI"<br />to see Claude's call
+                  Click Enhance to see Claude's call
                 </div>
               )}
             </div>
           </div>
+
+          {/* ── MODEL DETAIL — shown when AI consensus is available ── */}
+          {(isTrainingCoin || claudeActive) && kalshiTarget !== null && (() => {
+            const showPanel = consensusSignals.length > 0 || liveDirectionLoading;
+            if (!showPanel) return null;
+            const dp = (p: number) => p >= 100 ? 2 : p >= 1 ? 4 : 6;
+            const pctVsStrike = (p: number) => kalshiTarget ? ((p - kalshiTarget) / kalshiTarget * 100) : null;
+            return (
+              <>
+                {/* 4 Model cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-[#00C805]/15 border-t border-[#00C805]/20">
+
+                  {/* Stat Model */}
+                  <div className="px-4 py-3 text-center">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1.5">Stat Model</div>
+                    {statHead && kalshiTarget !== null ? (() => {
+                      const liveAbove = statHead.predictedPrice >= kalshiTarget;
+                      const pct = pctVsStrike(statHead.predictedPrice)!;
+                      const snapAbove = statSnapshot && kalshiTarget !== null ? statSnapshot.predictedPrice >= kalshiTarget : null;
+                      const snapFlipped = snapAbove !== null && snapAbove !== liveAbove;
+                      return (
+                        <>
+                          <div className={`text-lg font-black leading-none mb-1 ${liveAbove ? "text-emerald-400" : "text-red-400"}`}>
+                            {liveAbove ? "↑ ABOVE" : "↓ BELOW"}
+                          </div>
+                          <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                            {pct >= 0 ? "+" : ""}{pct.toFixed(3)}%
+                          </div>
+                          {nearWindowClose && (
+                            <div className="text-[10px] text-amber-400/70 mt-0.5">
+                              {Math.round(windowRemainingMs / 1_000)}s left
+                            </div>
+                          )}
+                          {statSnapshot && snapAbove !== null && (
+                            <div className={`flex items-center justify-center gap-0.5 mt-1.5 text-[9px] ${snapFlipped ? "text-amber-400/80" : "text-muted-foreground/50"}`}>
+                              <Lock className="w-2 h-2 shrink-0" />
+                              <span>open: {snapAbove ? "↑" : "↓"} {statSnapshot.confidence}%</span>
+                              {snapFlipped && <span className="font-semibold">· flipped</span>}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })() : statHead ? (
+                      <div className="text-lg font-black text-foreground leading-none mb-1">
+                        ${statHead.predictedPrice.toFixed(dp(statHead.predictedPrice))}
+                      </div>
+                    ) : statSnapshot && kalshiTarget !== null ? (() => {
+                      const snapAbove = statSnapshot.predictedPrice >= kalshiTarget;
+                      const pct = pctVsStrike(statSnapshot.predictedPrice)!;
+                      return (
+                        <>
+                          <div className={`text-lg font-black leading-none mb-1 ${snapAbove ? "text-emerald-400" : "text-red-400"}`}>
+                            {snapAbove ? "↑ ABOVE" : "↓ BELOW"}
+                          </div>
+                          <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                            {pct >= 0 ? "+" : ""}{pct.toFixed(3)}%
+                          </div>
+                          <div className="flex items-center justify-center gap-0.5 mt-1 text-[9px] text-muted-foreground/60">
+                            <Lock className="w-2 h-2 shrink-0" />
+                            <span>locked at open · {statSnapshot.confidence}%</span>
+                          </div>
+                        </>
+                      );
+                    })() : (
+                      <div className="text-[11px] text-muted-foreground/60 italic">—</div>
+                    )}
+                  </div>
+
+                  {/* Claude AI */}
+                  <div className="px-4 py-3 text-center">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-1.5">Claude AI</div>
+                    {(() => {
+                      const effectiveClaudePrice = claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null;
+                      return effectiveClaudePrice != null ? (
+                        kalshiTarget !== null ? (() => {
+                          const above = effectiveClaudePrice >= kalshiTarget;
+                          const pct = pctVsStrike(effectiveClaudePrice)!;
+                          return (
+                            <>
+                              <div className={`text-lg font-black leading-none mb-1 ${above ? "text-emerald-400" : "text-red-400"}`}>
+                                {above ? "↑ ABOVE" : "↓ BELOW"}
+                              </div>
+                              <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {pct >= 0 ? "+" : ""}{pct.toFixed(3)}%
+                              </div>
+                            </>
+                          );
+                        })() : (
+                          <div className="text-lg font-black leading-none">${effectiveClaudePrice.toFixed(dp(effectiveClaudePrice))}</div>
+                        )
+                      ) : (
+                        <div className="text-[11px] text-muted-foreground/60 italic">run Enhance</div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Auto-Pilot */}
+                  <div className="px-4 py-3 text-center bg-violet-500/[0.03]">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-violet-400/80 mb-1.5">Auto-Pilot</div>
+                    {autoPilotDecision && kalshiTarget !== null ? (() => {
+                      const apPrice = autoPilotDecision.active
+                        ? (claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null)
+                        : (statHead?.predictedPrice ?? null);
+                      const apPct = apPrice != null ? ((apPrice - kalshiTarget) / kalshiTarget * 100) : null;
+                      const modelLabel = autoPilotDecision.active ? "Claude" : "Stat";
+                      const claudeAcc = autoPilotDecision.claudeAccuracyPct;
+                      const statAcc = autoPilotDecision.statAccuracyPct;
+                      const bothHaveAcc = claudeAcc != null && statAcc != null;
+                      return (
+                        <>
+                          {autoPilotDecision.exploring && (
+                            <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400/80 mb-1">Exploring</div>
+                          )}
+                          {apPrice != null ? (
+                            <>
+                              <div className={`text-lg font-black leading-none mb-1 ${apPct !== null && apPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {apPct !== null ? (apPct >= 0 ? "↑ ABOVE" : "↓ BELOW") : `$${apPrice.toFixed(dp(apPrice))}`}
+                              </div>
+                              {apPct != null && (
+                                <div className={`text-[11px] font-semibold ${apPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                  {apPct >= 0 ? "+" : ""}{apPct.toFixed(3)}%
+                                </div>
+                              )}
+                            </>
+                          ) : autoPilotAbove !== null ? (
+                            <div className={`text-lg font-black leading-none mb-1 ${autoPilotAbove ? "text-emerald-400" : "text-red-400"}`}>
+                              {autoPilotAbove ? "↑ ABOVE" : "↓ BELOW"}
+                            </div>
+                          ) : null}
+                          <div className="mt-1.5 text-[9px] text-violet-300/70 font-medium leading-tight">
+                            {bothHaveAcc
+                              ? `via ${modelLabel} · ${(autoPilotDecision.active ? claudeAcc : statAcc)!.toFixed(0)}% vs ${(autoPilotDecision.active ? statAcc : claudeAcc)!.toFixed(0)}%`
+                              : autoPilotDecision.reason}
+                          </div>
+                        </>
+                      );
+                    })() : (
+                      <div className="text-[11px] text-muted-foreground/60 italic mt-2">collecting data…</div>
+                    )}
+                  </div>
+
+                  {/* ML Model */}
+                  <div className="px-4 py-3 text-center bg-sky-500/[0.03]">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-400/80 mb-1.5">ML Model</div>
+                    {mlPred ? (
+                      mlPred.ready && mlPred.above !== null && !windowExpiredLocal ? (
+                        <>
+                          <div className={`text-lg font-black leading-none mb-1 ${mlPred.above ? "text-emerald-400" : "text-red-400"}`}>
+                            {mlPred.above ? "↑ ABOVE" : "↓ BELOW"}
+                          </div>
+                          <div className={`text-[11px] font-semibold ${mlPred.above ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                            {mlPred.confidence}% conf
+                          </div>
+                          <div className="mt-1.5 text-[9px] text-sky-300/60 font-medium">
+                            {mlPred.windows}w · {mlPred.valAccuracy != null ? `${mlPred.valAccuracy}% val` : "learning"}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="text-[11px] text-muted-foreground/60 italic mb-1">Training…</div>
+                          <div className="w-full bg-muted/30 rounded-full h-1 mt-1">
+                            <div
+                              className="bg-sky-500/60 h-1 rounded-full transition-all"
+                              style={{ width: `${Math.min(100, ((mlPred.windows ?? 0) / (mlPred.minWindows ?? 30)) * 100)}%` }}
+                            />
+                          </div>
+                          <div className="text-[9px] text-sky-400/60 mt-1">
+                            {mlPred.windows}/{mlPred.minWindows} windows
+                          </div>
+                        </>
+                      )
+                    ) : (
+                      <div className="text-[11px] text-muted-foreground/60 italic mt-2">initializing…</div>
+                    )}
+                  </div>
+
+                </div>
+
+                {/* ── Signals + At-open footer ── */}
+                {(consensusSignals.length > 0 || (trackerSnapshot && kalshiTarget !== null && (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null))) && (
+                  <div className="px-5 py-3 border-t border-[#00C805]/20 bg-background/10 space-y-2">
+
+                    {/* Signal chips + agree count + refresh */}
+                    {consensusSignals.length > 0 && (
+                      <div className="flex items-center gap-2.5 flex-wrap">
+                        <span className="text-[10px] text-muted-foreground/50 font-semibold uppercase tracking-wider shrink-0">Now:</span>
+                        {consensusSignals.map((sig) => {
+                          const isAP = sig.name === "Auto-Pilot";
+                          const isML = sig.name === "ML Model";
+                          return (
+                            <div
+                              key={sig.name}
+                              className={`flex items-center gap-0.5 text-[11px] font-semibold ${sig.above ? "text-emerald-400" : "text-red-400"}`}
+                              title={isAP
+                                ? `Auto-Pilot · via ${sig.modelUsed === "claude" ? "Claude" : "Stat"} · ${sig.conf.toFixed(0)}% historical acc`
+                                : isML
+                                ? `ML Model · logistic regression · ${sig.conf}% confidence`
+                                : sig.name === "Stat"
+                                ? `Stat model · ${sig.conf}% conf`
+                                : `Claude AI · ${sig.conf}% conf`}
+                            >
+                              {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                              <span className={isAP ? "text-violet-300" : isML ? "text-sky-300" : ""}>{sig.name}</span>
+                              {isAP && sig.modelUsed && (
+                                <span className="font-normal text-violet-300/60 text-[10px] ml-0.5">({sig.modelUsed === "claude" ? "C" : "S"})</span>
+                              )}
+                              {isML && mlPred?.valAccuracy != null && (
+                                <span className="font-normal text-sky-300/60 text-[10px] ml-0.5">({mlPred.valAccuracy}%)</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                        {consensusSignals.length > 1 && (
+                          <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 ring-1 ${
+                            allConsensusAgree
+                              ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30"
+                              : "bg-amber-500/15 text-amber-400 ring-amber-500/30"
+                          }`}>
+                            {consensusAgreement}/{consensusSignals.length} agree
+                          </span>
+                        )}
+                        <button
+                          onClick={onRefreshStat}
+                          disabled={statLoading}
+                          title="Force-refresh stat model"
+                          className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors ml-auto"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${statLoading ? "animate-spin" : ""}`} />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* At-open row */}
+                    {trackerSnapshot && kalshiTarget !== null &&
+                      (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null) && (() => {
+                      const statAboveNow = statHead ? statHead.predictedPrice >= kalshiTarget : null;
+                      const statFlippedMid = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
+                      const claudeAboveOpen = trackerSnapshot.aboveKalshi;
+                      const claudeFlippedMid = claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
+                      const mlAboveAtOpen = (mlPred?.ready && mlPred.above !== null && !windowExpiredLocal) ? mlPred.above : null;
+                      const openingSplit = openingStatAbove !== null && claudeAboveOpen !== null && openingStatAbove !== claudeAboveOpen;
+                      const openingEnsembleAbove = openingStatAbove !== null && claudeAboveOpen !== null && !openingSplit ? openingStatAbove : null;
+                      const ensembleFlippedMid = openingEnsembleAbove !== null && combinedHead?.above != null
+                        ? openingEnsembleAbove !== combinedHead.above : false;
+                      const anyFlipped = statFlippedMid || claudeFlippedMid || ensembleFlippedMid;
+                      return (
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="flex items-center gap-1 text-[10px] text-muted-foreground/55 shrink-0">
+                            <Clock className="w-3 h-3" />
+                            At open ·{" "}
+                            {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
+                              hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
+                            })} ET
+                          </div>
+                          <div className="w-px h-3 bg-border/30 shrink-0" />
+                          {openingStatAbove !== null && (
+                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${openingStatAbove ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                              {openingStatAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                              <span>Stat</span>
+                              {statFlippedMid && <span className="text-[9px] text-amber-400/90 bg-amber-500/10 rounded px-1 ml-0.5">→ {statAboveNow ? "↑" : "↓"} now</span>}
+                            </div>
+                          )}
+                          {trackerSnapshot.aboveKalshi !== null && (
+                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${trackerSnapshot.aboveKalshi ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                              {trackerSnapshot.aboveKalshi ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                              <span className="text-violet-300/80">Claude</span>
+                              {claudeFlippedMid && <span className="text-[9px] text-amber-400/90 bg-amber-500/10 rounded px-1 ml-0.5">→ {claudeAbove ? "↑" : "↓"} now</span>}
+                            </div>
+                          )}
+                          {mlAboveAtOpen !== null && (
+                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${mlAboveAtOpen ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                              {mlAboveAtOpen ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                              <span className="text-sky-300/80">ML</span>
+                            </div>
+                          )}
+                          {(openingEnsembleAbove !== null || openingSplit) && (
+                            <div className={`flex items-center gap-0.5 text-[10px] font-semibold ${openingSplit ? "text-amber-400/70" : openingEnsembleAbove ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                              {!openingSplit && (openingEnsembleAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />)}
+                              <span className="text-primary/70">Combined</span>
+                              {openingSplit && <span className="text-[9px] text-amber-400/80 bg-amber-500/10 rounded px-1 ml-0.5">split</span>}
+                              {ensembleFlippedMid && <span className="text-[9px] text-amber-400/90 bg-amber-500/10 rounded px-1 ml-0.5">→ {combinedHead!.above ? "↑" : "↓"} now</span>}
+                            </div>
+                          )}
+                          {!anyFlipped && <span className="text-[10px] text-muted-foreground/50 italic">no change since open</span>}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+
         </div>
       )}
 
-      {/* ── AI Consensus — unified vote across stat model, Claude AI, and Live Pulse ── */}
-      {(isTrainingCoin || claudeActive) && kalshiTarget !== null && (() => {
+      {/* Non-Kalshi coins with Claude — compact consensus strip */}
+      {!kalshiAvailable && (isTrainingCoin || claudeActive) && (() => {
         const showPanel = consensusSignals.length > 0 || liveDirectionLoading;
         if (!showPanel) return null;
-
         const borderCls = allConsensusAgree && consensusSignals.length > 1
-          ? "border-emerald-500/30"
-          : consensusAgreement < consensusSignals.length && consensusSignals.length > 1
-          ? "border-amber-500/30"
-          : "border-border/30";
+          ? "border-emerald-500/30" : consensusAgreement < consensusSignals.length && consensusSignals.length > 1
+          ? "border-amber-500/30" : "border-border/30";
         const bgCls = allConsensusAgree && consensusSignals.length > 1
-          ? "bg-emerald-500/5"
-          : consensusAgreement < consensusSignals.length && consensusSignals.length > 1
-          ? "bg-amber-500/5"
-          : "bg-card/60";
-
+          ? "bg-emerald-500/5" : consensusAgreement < consensusSignals.length && consensusSignals.length > 1
+          ? "bg-amber-500/5" : "bg-card/60";
         return (
-          <div className={`rounded-xl border ${borderCls} ${bgCls} px-5 py-4 mt-0`}>
-            {/* Header */}
+          <div className={`rounded-xl border ${borderCls} ${bgCls} px-5 py-4`}>
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <Radio className="w-3.5 h-3.5 text-violet-400" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
-                  AI Consensus
-                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">AI Consensus</span>
                 {consensusSignals.length > 1 && (
-                  <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 ring-1 ${
-                    allConsensusAgree
-                      ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30"
-                      : "bg-amber-500/15 text-amber-400 ring-amber-500/30"
-                  }`}>
+                  <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 ring-1 ${allConsensusAgree ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30" : "bg-amber-500/15 text-amber-400 ring-amber-500/30"}`}>
                     {consensusAgreement}/{consensusSignals.length} agree
                   </span>
                 )}
               </div>
-              <button
-                onClick={onRefreshStat}
-                disabled={statLoading}
-                title="Force-refresh stat model predictions now"
-                className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors"
-              >
+              <button onClick={onRefreshStat} disabled={statLoading} title="Force-refresh stat model" className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors">
                 <RefreshCw className={`w-3.5 h-3.5 ${statLoading ? "animate-spin" : ""}`} />
               </button>
             </div>
-
-            {/* Consensus verdict */}
             {consensusAbove !== null && consensusConf !== null ? (
-              <>
-                <div className={`flex items-center gap-2 mb-3 ${consensusAbove ? "text-emerald-400" : "text-red-400"}`}>
-                  {consensusAbove ? <ArrowUp className="w-6 h-6" /> : <ArrowDown className="w-6 h-6" />}
-                  <span className="text-2xl font-black">{consensusAbove ? "ABOVE" : "BELOW"}</span>
-                  <span className="text-base font-bold text-muted-foreground">{consensusConf}%</span>
-                </div>
-
-                {/* ── Predicted-close price targets ─────────────────────────────
-                    Show each model's specific price call for window-end, big and
-                    scannable. Live Pulse is direction-only (no price), so it shows
-                    ABOVE/BELOW with confidence instead. Claude falls back from
-                    the Enhance run to the window-open tracker snapshot price. */}
-                {(() => {
-                  const effectiveClaudePrice = claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null;
-                  const effectiveClaudeLabel = claudePredPrice != null ? "Claude AI" : trackerSnapshot?.predictedPrice != null ? "Claude (open)" : null;
-                  const dp = (p: number) => p >= 100 ? 2 : p >= 1 ? 4 : 6;
-                  const pctVsStrike = (p: number) => kalshiTarget ? ((p - kalshiTarget) / kalshiTarget * 100) : null;
-
-                  const hasAnyPrice = statHead != null || effectiveClaudePrice != null || autoPilotAbove !== null;
-                  if (!hasAnyPrice) return null;
-
-                  return (
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-                      {/* Stat model — always shows current live prediction.
-                          Server applies a near-close live-price blend (<2 min) so
-                          the predicted price converges to reality near window end. */}
-                      <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1 flex items-center justify-center gap-1">
-                          Stat Model
-                        </div>
-                        {statHead && kalshiTarget !== null ? (() => {
-                          const liveAbove = statHead.predictedPrice >= kalshiTarget;
-                          const pct = pctVsStrike(statHead.predictedPrice)!;
-                          // Check if statSnapshot disagrees with live stat call
-                          const snapAbove = statSnapshot && kalshiTarget !== null
-                            ? statSnapshot.predictedPrice >= kalshiTarget
-                            : null;
-                          const snapFlipped = snapAbove !== null && snapAbove !== liveAbove;
-                          return (
-                            <>
-                              <div className={`text-xl font-black leading-none mb-1 ${liveAbove ? "text-emerald-400" : "text-red-400"}`}>
-                                {liveAbove ? "↑ ABOVE" : "↓ BELOW"}
-                              </div>
-                              <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
-                              </div>
-                              {nearWindowClose && (
-                                <div className="text-[10px] text-amber-400/70 mt-0.5">
-                                  {Math.round(windowRemainingMs / 1_000)}s left
-                                </div>
-                              )}
-                              {/* Locked opening call — shown when statSnapshot differs from live */}
-                              {statSnapshot && snapAbove !== null && (
-                                <div className={`flex items-center justify-center gap-0.5 mt-1.5 text-[9px] ${snapFlipped ? "text-amber-400/80" : "text-muted-foreground/50"}`}>
-                                  <Lock className="w-2 h-2 shrink-0" />
-                                  <span>open: {snapAbove ? "↑" : "↓"} {statSnapshot.confidence}%</span>
-                                  {snapFlipped && <span className="font-semibold">· flipped</span>}
-                                </div>
-                              )}
-                            </>
-                          );
-                        })() : statHead ? (
-                          <>
-                            <div className="text-xl font-black text-foreground leading-none mb-1">
-                              ${statHead.predictedPrice.toFixed(dp(statHead.predictedPrice))}
-                            </div>
-                          </>
-                        ) : statSnapshot && kalshiTarget !== null ? (() => {
-                          /* No live stat head yet — show locked opening snapshot instead */
-                          const snapAbove = statSnapshot.predictedPrice >= kalshiTarget;
-                          const pct = pctVsStrike(statSnapshot.predictedPrice)!;
-                          return (
-                            <>
-                              <div className={`text-xl font-black leading-none mb-1 ${snapAbove ? "text-emerald-400" : "text-red-400"}`}>
-                                {snapAbove ? "↑ ABOVE" : "↓ BELOW"}
-                              </div>
-                              <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
-                              </div>
-                              <div className="flex items-center justify-center gap-0.5 mt-1 text-[9px] text-muted-foreground/60">
-                                <Lock className="w-2 h-2 shrink-0" />
-                                <span>locked at open · {statSnapshot.confidence}%</span>
-                              </div>
-                            </>
-                          );
-                        })() : (
-                          <div className="text-[12px] text-muted-foreground/60 italic">—</div>
-                        )}
-                      </div>
-
-                      {/* Claude AI */}
-                      <div className="rounded-lg bg-background/40 border border-border/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75 mb-1">
-                          {effectiveClaudeLabel ?? "Claude AI"}
-                        </div>
-                        {effectiveClaudePrice != null ? (
-                          <>
-                            <div className="text-xl font-black text-foreground leading-none mb-1">
-                              ${effectiveClaudePrice.toFixed(dp(effectiveClaudePrice))}
-                            </div>
-                            {kalshiTarget && (() => {
-                              const pct = pctVsStrike(effectiveClaudePrice)!;
-                              return (
-                                <div className={`text-[11px] font-semibold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                  {pct >= 0 ? "+" : ""}{pct.toFixed(3)}% vs strike
-                                </div>
-                              );
-                            })()}
-                          </>
-                        ) : (
-                          <div className="text-[12px] text-muted-foreground/60 italic">run Enhance</div>
-                        )}
-                      </div>
-
-                      {/* Auto-Pilot — self-learning decision maker */}
-                      <div className="rounded-lg bg-violet-500/5 border border-violet-500/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-violet-400/80 mb-1">
-                          Auto-Pilot
-                        </div>
-                        {autoPilotDecision && kalshiTarget !== null ? (() => {
-                          const apPrice = autoPilotDecision.active
-                            ? (claudePredPrice ?? trackerSnapshot?.predictedPrice ?? null)
-                            : (statHead?.predictedPrice ?? null);
-                          const apPct   = apPrice != null ? ((apPrice - kalshiTarget) / kalshiTarget * 100) : null;
-                          const modelLabel = autoPilotDecision.active ? "Claude" : "Stat";
-                          const dp = apPrice != null ? (apPrice >= 100 ? 2 : apPrice >= 1 ? 4 : 6) : 2;
-                          const claudeAcc = autoPilotDecision.claudeAccuracyPct;
-                          const statAcc   = autoPilotDecision.statAccuracyPct;
-                          const bothHaveAcc = claudeAcc != null && statAcc != null;
-                          return (
-                            <>
-                              {autoPilotDecision.exploring && (
-                                <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400/80 mb-1">
-                                  Exploring
-                                </div>
-                              )}
-                              {apPrice != null ? (
-                                <>
-                                  <div className="text-xl font-black text-foreground leading-none mb-1">
-                                    ${apPrice.toFixed(dp)}
-                                  </div>
-                                  {apPct != null && (
-                                    <div className={`text-[11px] font-semibold ${apPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                      {apPct >= 0 ? "+" : ""}{apPct.toFixed(3)}% vs strike
-                                    </div>
-                                  )}
-                                </>
-                              ) : autoPilotAbove !== null ? (
-                                <div className={`text-xl font-black leading-none mb-1 ${autoPilotAbove ? "text-emerald-400" : "text-red-400"}`}>
-                                  {autoPilotAbove ? "↑ ABOVE" : "↓ BELOW"}
-                                </div>
-                              ) : null}
-                              <div className="mt-1.5 text-[10px] text-violet-300/70 font-medium leading-tight">
-                                {bothHaveAcc
-                                  ? `via ${modelLabel} · ${(autoPilotDecision.active ? claudeAcc : statAcc)!.toFixed(0)}% vs ${(autoPilotDecision.active ? statAcc : claudeAcc)!.toFixed(0)}%`
-                                  : autoPilotDecision.reason}
-                              </div>
-                            </>
-                          );
-                        })() : (
-                          <div className="text-[12px] text-muted-foreground/60 italic mt-2">collecting data…</div>
-                        )}
-                      </div>
-
-                      {/* ML Model — self-trained logistic regression */}
-                      <div className="rounded-lg bg-sky-500/5 border border-sky-500/25 px-3 py-2.5 text-center">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-400/80 mb-1">
-                          ML Model
-                        </div>
-                        {(() => {
-                          // Suppress the ML verdict when the Kalshi window has expired —
-                          // the model's Kalshi target feature is from the old window.
-                          const windowExpired = Boolean(
-                            ktd?.closeTime && new Date(ktd.closeTime).getTime() < Date.now(),
-                          );
-                          return mlPred ? (
-                          mlPred.ready && mlPred.above !== null && !windowExpired ? (
-                            <>
-                              <div className={`text-xl font-black leading-none mb-1 ${mlPred.above ? "text-emerald-400" : "text-red-400"}`}>
-                                {mlPred.above ? "↑ ABOVE" : "↓ BELOW"}
-                              </div>
-                              <div className={`text-[11px] font-semibold ${mlPred.above ? "text-emerald-400/80" : "text-red-400/80"}`}>
-                                {mlPred.confidence}% conf
-                              </div>
-                              <div className="mt-1.5 text-[10px] text-sky-300/60 font-medium leading-tight">
-                                {mlPred.windows}w · {mlPred.valAccuracy != null ? `${mlPred.valAccuracy}% val` : "learning"}
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="text-[12px] text-muted-foreground/60 italic mb-1">Training…</div>
-                              <div className="w-full bg-muted/30 rounded-full h-1 mt-1">
-                                <div
-                                  className="bg-sky-500/60 h-1 rounded-full transition-all"
-                                  style={{ width: `${Math.min(100, ((mlPred.windows ?? 0) / (mlPred.minWindows ?? 30)) * 100)}%` }}
-                                />
-                              </div>
-                              <div className="text-[10px] text-sky-400/60 mt-1">
-                                {mlPred.windows}/{mlPred.minWindows} windows
-                              </div>
-                            </>
-                          )
-                        ) : (
-                          <div className="text-[12px] text-muted-foreground/60 italic mt-2">initializing…</div>
-                        );
-                        })()}
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                {/* Signal breakdown chips */}
-                <div className="flex items-center gap-3 flex-wrap">
-                  {consensusSignals.map((sig) => {
-                    const isAP = sig.name === "Auto-Pilot";
-                    const isML = sig.name === "ML Model";
-                    return (
-                      <div
-                        key={sig.name}
-                        className={`flex items-center gap-1 text-[11px] font-semibold ${
-                          sig.above ? "text-emerald-400" : "text-red-400"
-                        }`}
-                        title={isAP
-                          ? `Auto-Pilot · via ${sig.modelUsed === "claude" ? "Claude" : "Stat"} · ${sig.conf.toFixed(0)}% historical acc`
-                          : isML
-                          ? `ML Model · logistic regression · ${sig.conf}% confidence`
-                          : sig.name === "Stat"
-                          ? `Stat model · ${sig.conf}% conf`
-                          : `Claude AI · ${sig.conf}% conf`}
-                      >
-                        {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                        <span className={isAP ? "text-violet-300" : isML ? "text-sky-300" : ""}>{sig.name}</span>
-                        {isAP && sig.modelUsed && (
-                          <span className="font-normal text-violet-300/60 text-[10px]">
-                            ({sig.modelUsed === "claude" ? "Claude" : "Stat"})
-                          </span>
-                        )}
-                        {isML && mlPred?.valAccuracy != null && (
-                          <span className="font-normal text-sky-300/60 text-[10px]">
-                            ({mlPred.valAccuracy}%)
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* ── At-open snapshot row ────────────────────────────────
-                    Shows what all 4 models predicted when the window opened.
-                    If any model has flipped since open, the chip shows "→ now"
-                    so the user can see intra-window direction changes. */}
-                {trackerSnapshot && kalshiTarget !== null &&
-                  (openingStatAbove !== null || trackerSnapshot.aboveKalshi !== null) && (() => {
-                  const statAboveNow      = statHead ? statHead.predictedPrice >= kalshiTarget : null;
-                  const statFlippedMid    = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
-                  const claudeAboveOpen   = trackerSnapshot.aboveKalshi;
-                  const claudeFlippedMid  = claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
-                  // ML at open — ML model is stable within a window (trained on historical
-                  // data, not re-scored intra-window), so current value IS the opening call.
-                  const mlAboveAtOpen     = (mlPred?.ready && mlPred.above !== null && !windowExpiredLocal)
-                    ? mlPred.above : null;
-                  // Ensemble at open — derive from stat+claude agreement at open.
-                  // If they agreed, that was the combined direction; if they disagreed,
-                  // the combined call was split/no-bet at open.
-                  const openingSplit      = openingStatAbove !== null && claudeAboveOpen !== null
-                    && openingStatAbove !== claudeAboveOpen;
-                  const openingEnsembleAbove = openingStatAbove !== null && claudeAboveOpen !== null && !openingSplit
-                    ? openingStatAbove : null;
-                  const ensembleFlippedMid = openingEnsembleAbove !== null && combinedHead?.above != null
-                    ? openingEnsembleAbove !== combinedHead.above : false;
-                  const anyFlipped = statFlippedMid || claudeFlippedMid || ensembleFlippedMid;
-
-                  return (
-                    <div className="mt-3 pt-2.5 border-t border-border/20">
-                      {/* Row label */}
-                      <div className="flex items-center gap-1 text-[11px] text-muted-foreground/60 mb-1.5">
-                        <Clock className="w-3 h-3" />
-                        At open ·{" "}
-                        {new Date(trackerSnapshot.snappedAt).toLocaleTimeString("en-US", {
-                          hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
-                        })} ET · ${kalshiTarget >= 100 ? kalshiTarget.toFixed(2) : kalshiTarget.toFixed(4)}
-                      </div>
-                      {/* Per-signal opening chips — all 4 models */}
-                      <div className="flex items-center gap-3 flex-wrap">
-                        {/* Stat */}
-                        {openingStatAbove !== null && (
-                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
-                            openingStatAbove ? "text-emerald-400/70" : "text-red-400/70"
-                          }`}>
-                            {openingStatAbove ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                            <span>Stat</span>
-                            {statFlippedMid && (
-                              <span className="ml-0.5 text-[9px] font-semibold text-amber-400/90 bg-amber-500/10 rounded px-1">
-                                → {statAboveNow ? "ABOVE" : "BELOW"} now
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {/* Claude AI */}
-                        {claudeAboveOpen !== null && (
-                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
-                            claudeAboveOpen ? "text-emerald-400/70" : "text-red-400/70"
-                          }`}>
-                            {claudeAboveOpen ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                            <span className="text-violet-300/80">Claude AI</span>
-                            {claudeFlippedMid && (
-                              <span className="ml-0.5 text-[9px] font-semibold text-amber-400/90 bg-amber-500/10 rounded px-1">
-                                → {claudeAbove ? "ABOVE" : "BELOW"} now
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {/* ML Model */}
-                        {mlAboveAtOpen !== null && (
-                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
-                            mlAboveAtOpen ? "text-emerald-400/70" : "text-red-400/70"
-                          }`}>
-                            {mlAboveAtOpen ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                            <span className="text-sky-300/80">ML</span>
-                          </div>
-                        )}
-                        {/* Combined / Ensemble */}
-                        {(openingEnsembleAbove !== null || openingSplit) && (
-                          <div className={`flex items-center gap-1 text-[11px] font-semibold ${
-                            openingSplit ? "text-amber-400/70"
-                              : openingEnsembleAbove ? "text-emerald-400/70" : "text-red-400/70"
-                          }`}>
-                            {!openingSplit && (
-                              openingEnsembleAbove
-                                ? <ArrowUp className="w-3 h-3" />
-                                : <ArrowDown className="w-3 h-3" />
-                            )}
-                            <span className="text-primary/70">Combined</span>
-                            {openingSplit && (
-                              <span className="text-[9px] text-amber-400/80 bg-amber-500/10 rounded px-1">split</span>
-                            )}
-                            {ensembleFlippedMid && (
-                              <span className="ml-0.5 text-[9px] font-semibold text-amber-400/90 bg-amber-500/10 rounded px-1">
-                                → {combinedHead!.above ? "ABOVE" : "BELOW"} now
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {!anyFlipped && (
-                          <span className="text-[11px] text-muted-foreground/55 italic">no change since open</span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </>
+              <div className={`flex items-center gap-2 mb-3 ${consensusAbove ? "text-emerald-400" : "text-red-400"}`}>
+                {consensusAbove ? <ArrowUp className="w-5 h-5" /> : <ArrowDown className="w-5 h-5" />}
+                <span className="text-xl font-black">{consensusAbove ? "ABOVE" : "BELOW"}</span>
+                <span className="text-base font-bold text-muted-foreground">{consensusConf}%</span>
+              </div>
+            ) : liveDirectionLoading ? (
+              <div className="text-[11px] text-muted-foreground/50 flex items-center gap-1.5 mb-3">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Gathering signals…
+              </div>
             ) : (
-              <div className="text-[11px] text-muted-foreground/50">
-                {liveDirectionLoading ? (
-                  <span className="flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Gathering signals…</span>
-                ) : (
-                  "Awaiting signals — data builds after window open"
-                )}
-              </div>
+              <div className="text-[11px] text-muted-foreground/50 mb-3">Awaiting signals — data builds after window open</div>
             )}
-          </div>
-        );
-      })()}
-
-      {/* ── Price Action — intra-window momentum read ── */}
-      {betSig && (() => {
-        const dp = livePrice >= 100 ? 2 : livePrice >= 1 ? 4 : 6;
-        const cfg = {
-          choppy: {
-            border: "border-red-500/40", bg: "bg-red-500/8",
-            badge: "bg-red-500/20 text-red-400 ring-red-500/30",
-            bar: "bg-red-400", text: "text-red-400", icon: "🔴", label: "Choppy",
-            desc: "Price is oscillating back and forth — no clean edge, stay out",
-          },
-          drifting: {
-            border: "border-amber-500/40", bg: "bg-amber-500/8",
-            badge: "bg-amber-500/20 text-amber-400 ring-amber-500/30",
-            bar: "bg-amber-400", text: "text-amber-400", icon: "🟡", label: "Drifting",
-            desc: "Some direction but noisy — moderate confidence",
-          },
-          trending: {
-            border: "border-emerald-500/30", bg: "bg-emerald-500/5",
-            badge: "bg-emerald-500/20 text-emerald-400 ring-emerald-500/30",
-            bar: "bg-emerald-400", text: "text-emerald-400", icon: "🟢", label: "Trending",
-            desc: "Price is moving cleanly in one direction — good bet window",
-          },
-          spike: {
-            border: "border-orange-500/50", bg: "bg-orange-500/8",
-            badge: "bg-orange-500/20 text-orange-400 ring-orange-500/30",
-            bar: "bg-orange-400", text: "text-orange-400", icon: "⚠️", label: "Spike Alert",
-            desc: "Abnormal spike candle in the last 15 min — treat with caution",
-          },
-        }[betSig.level];
-        const erPct = Math.min(100, Math.max(0, betSig.er * 100));
-        const gapDollars = kalshiTarget !== null ? Math.abs(livePrice - kalshiTarget) : null;
-        const gapPct = kalshiTarget !== null && livePrice > 0 ? (gapDollars! / livePrice) * 100 : null;
-        return (
-          <div className={`rounded-xl border ${cfg.border} ${cfg.bg} px-4 py-3`}>
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div className="flex items-center gap-3">
-                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${cfg.badge}`}>
-                  {cfg.icon} {cfg.label}
-                </span>
-                <span className="text-xs text-muted-foreground">{cfg.desc}</span>
-              </div>
-              {betSig.driftTowardTarget !== null && (
-                <span className={`text-xs font-semibold flex items-center gap-1.5 ${betSig.driftTowardTarget ? "text-red-400" : "text-emerald-400"}`}>
-                  {betSig.driftTowardTarget ? "⚠ Drifting toward strike" : "✓ Drifting away from strike"}
-                </span>
-              )}
-            </div>
-
-            {/* Spike detail banner */}
-            {betSig.spikeFlag && (
-              <div className="mt-3 flex items-center gap-2 rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-xs text-orange-300">
-                <span className="font-bold">⚠ Spike detected</span>
-                <span className="text-orange-300/80">
-                  largest candle range was {betSig.spikeMultiple.toFixed(1)}× the median — abnormal move in the window
-                </span>
-              </div>
-            )}
-
-            {/* Efficiency Ratio bar */}
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">Efficiency Ratio</span>
-                <span className={`text-sm font-bold tabular-nums ${cfg.text}`}>{betSig.er.toFixed(2)}×</span>
-              </div>
-              <div className="h-2 w-full rounded-full bg-muted/40 overflow-hidden">
-                <div className={`h-full rounded-full ${cfg.bar}`} style={{ width: `${erPct}%` }} />
-              </div>
-              <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
-                <span>0 · pure chop</span>
-                <span>clean trend · 1</span>
-              </div>
-            </div>
-
-            <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div>
-                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Direction reversals</div>
-                <div className={`text-sm font-bold tabular-nums ${
-                  betSig.oscCount >= 6 ? "text-red-400" : betSig.oscCount >= 3 ? "text-amber-400" : "text-emerald-400"
-                }`}>{betSig.oscCount}</div>
-                <div className="text-[11px] text-muted-foreground">in last 15 candles</div>
-              </div>
-              <div>
-                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Net drift</div>
-                <div className={`text-sm font-bold tabular-nums ${betSig.driftUp ? "text-emerald-400" : "text-red-400"}`}>
-                  {betSig.driftUp ? "▲" : "▼"} {betSig.netDriftPct >= 0 ? "+" : ""}{betSig.netDriftPct.toFixed(3)}%
+            <div className="flex items-center gap-3 flex-wrap">
+              {consensusSignals.map((sig) => (
+                <div key={sig.name} className={`flex items-center gap-1 text-[11px] font-semibold ${sig.above ? "text-emerald-400" : "text-red-400"}`}>
+                  {sig.above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                  <span>{sig.name}</span>
                 </div>
-                <div className="text-[11px] text-muted-foreground">{betSig.totalPathPct.toFixed(3)}% path traveled</div>
-              </div>
-              <div>
-                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Spike guard</div>
-                <div className={`text-sm font-bold tabular-nums ${betSig.spikeFlag ? "text-orange-400" : "text-emerald-400"}`}>
-                  {betSig.spikeFlag ? `⚠ ${betSig.spikeMultiple.toFixed(1)}×` : "Clear"}
-                </div>
-                <div className="text-[11px] text-muted-foreground">max ÷ median range</div>
-              </div>
-              <div>
-                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">Gap to target</div>
-                {gapDollars !== null ? (
-                  <>
-                    <div className="text-sm font-bold tabular-nums">${gapDollars.toFixed(dp)}</div>
-                    <div className="text-[11px] text-muted-foreground">{gapPct!.toFixed(3)}% of price</div>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-sm font-bold text-muted-foreground">—</div>
-                    <div className="text-[11px] text-muted-foreground">no Kalshi market</div>
-                  </>
-                )}
-              </div>
+              ))}
             </div>
           </div>
         );
@@ -3566,70 +3460,11 @@ function CoinDetail({
             <Zap className="w-4 h-4 text-primary" /> Quarter-Hour Forecasts
             <span className="text-xs font-normal text-muted-foreground">— Statistical vs Claude AI at each {tz} mark</span>
           </h3>
-          <div className="flex items-center gap-2 flex-wrap justify-end">
-            {aiError && (
-              <span className="text-[11px] text-red-400 max-w-xs truncate" title={aiError}>
-                ⚠ {aiError}
-              </span>
-            )}
-            {!aiError && aiLoading && autoTriggerReason && (
-              <span className="text-[11px] text-amber-400 flex items-center gap-1">
-                <Zap className="w-3 h-3" /> {autoTriggerReason}
-              </span>
-            )}
-            {!aiError && !aiLoading && aiEntry && (
-              <span className={`text-[11px] tabular-nums ${staleClass}`}>
-                AI run · {aiEntry.at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} {tz}
-                {staleMins !== null && staleMins >= 3 && (
-                  <span className="ml-1 opacity-70">({staleMins}m ago)</span>
-                )}
-              </span>
-            )}
-            {claudeActive && (
-              <button
-                onClick={() => onToggleClaude(false)}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-violet-500/30 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors"
-                title="Claude is auto-tracking this coin — click to disable"
-              >
-                <Sparkles className="w-3 h-3" /> Claude active
-              </button>
-            )}
-            {!claudeActive && autoPilotDecision?.active && (
-              <span
-                className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${
-                  autoPilotDecision.exploring
-                    ? "border-sky-500/30 bg-sky-500/10 text-sky-300"
-                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                }`}
-                title={autoPilotDecision.reason}
-              >
-                <Bot className="w-3 h-3" />
-                Auto-pilot{autoPilotDecision.exploring ? " · exploring" : ""}
-              </span>
-            )}
-            {aiLoading && (
-              <button
-                onClick={onCancelEnhance}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-                title="Cancel Claude analysis"
-              >
-                ✕ Cancel
-              </button>
-            )}
-            <button
-              onClick={onEnhance}
-              disabled={aiLoading}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-            >
-              {aiLoading ? (
-                <><Loader2 className="w-3.5 h-3.5 animate-spin" /> {autoTriggerReason ? "Auto-analyzing…" : "Analyzing…"}</>
-              ) : aiEntry ? (
-                <><Sparkles className="w-3.5 h-3.5" /> Re-analyze</>
-              ) : (
-                <><Sparkles className="w-3.5 h-3.5" /> Enhance with AI</>
-              )}
-            </button>
-          </div>
+          {aiLoading && (
+            <span className="text-[11px] text-amber-400 flex items-center gap-1">
+              <Loader2 className="w-3 h-3 animate-spin" /> {autoTriggerReason ?? "Analyzing…"}
+            </span>
+          )}
         </div>
 
         {/* ── Drift alert banner ─────────────────────────────────────────── */}
@@ -3760,7 +3595,7 @@ function CoinDetail({
                           </div>
                         ) : (
                           <div className="text-xs text-muted-foreground/50 italic leading-snug">
-                            Click "Enhance with AI"<br />to run Claude analysis
+                            Click Enhance in the prediction panel<br />to run Claude analysis
                           </div>
                         )}
                       </div>
@@ -3795,10 +3630,8 @@ function CoinDetail({
           />
           <Indicator label="SMA (20)" value={`$${formatPrice(coin.indicators.sma20)}`} />
         </div>
-        <p className="text-[11px] text-muted-foreground mt-3 leading-relaxed">
-          <strong>Statistical (free):</strong> drift + regression on 60 min of candles, RSI, MACD, Bollinger Bands, ATR — used by default for all tracker snapshots. &nbsp;
-          <strong>Claude AI (paid):</strong> extended-thinking analysis on the same data — press "Enhance with AI" on a coin to run it on demand and enable auto-tracking for that coin.
-          Prices update every 3 s · Not financial advice · {tz}.
+        <p className="text-[11px] text-muted-foreground mt-3">
+          60-min candles · RSI, MACD, Bollinger Bands, ATR · Prices update every 3 s · Not financial advice · {tz}
         </p>
       </div>
     </div>
