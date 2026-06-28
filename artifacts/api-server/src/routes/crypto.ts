@@ -324,9 +324,12 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
     if (typeof strike === "number" && strike > 0) { found = m; targetPrice = strike; break; }
   }
   if (!found) {
-    const data: KalshiTargetPayload = { available: false, targetPrice: null };
-    kalshiRouteCache.set(symbol, { data, fetchedAt: Date.now() });
-    return data;
+    // Do NOT cache this result. The new window's market often takes 10-30 s
+    // to be published after the boundary fires. Caching available:false for
+    // KALSHI_TARGET_TTL would hide the Kalshi hub for the full TTL on every
+    // window transition. Instead, let each frontend poll retry Kalshi directly
+    // so the section reappears as soon as the market publishes.
+    return { available: false, targetPrice: null };
   }
 
   const slugs = KALSHI_URL_SLUGS[symbol] ?? { path: series.toLowerCase(), label: "price-up-down" };

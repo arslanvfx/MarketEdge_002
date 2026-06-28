@@ -756,7 +756,7 @@ function SelfLearningDashboard({
         <div className="flex items-center gap-3">
           {autoPilot.enabled && (
             <span className="text-[11px] text-muted-foreground tabular-nums">
-              {activeCount}/{autoPilot.maxActive} non-training coins
+              {activeCount}/{autoPilot.maxActive} coins prefer Claude
             </span>
           )}
           <button
@@ -768,8 +768,8 @@ function SelfLearningDashboard({
             }`}
             title={
               autoPilot.enabled
-                ? "Auto-pilot is ON — Claude is enabled automatically where it beats the stat model. Applies to non-training coins only. Click to turn off."
-                : "Turn on auto-pilot — let the system enable Claude only where it's earning its keep. Applies to non-training coins (SOL, LINK, DOGE) only."
+                ? "Auto-pilot is ON — evaluates Claude vs stat accuracy per coin. Where Claude has the edge the Auto-Pilot consensus signal uses Claude's direction. Click to turn off."
+                : "Turn on auto-pilot — the system tracks which model is winning per coin and routes the Auto-Pilot consensus signal through the better-performing model automatically."
             }
           >
             {autoPilot.enabled ? <Bot className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
@@ -782,7 +782,7 @@ function SelfLearningDashboard({
         <Bot className="w-3.5 h-3.5 text-violet-400 shrink-0 mt-0.5" />
         <div className="text-[11px] text-muted-foreground leading-snug">
           <span className="text-violet-300 font-semibold">BTC · ETH · XRP · HYPE · BNB</span> always run Claude — every window, automatically, building their accuracy records below.
-          {" "}Auto-pilot controls the remaining coins (SOL, LINK, DOGE).
+          {" "}Auto-pilot evaluates each coin's track record and routes the <span className="text-foreground/70 font-medium">Auto-Pilot</span> consensus signal through whichever model has the proven edge.
         </div>
       </div>
 
