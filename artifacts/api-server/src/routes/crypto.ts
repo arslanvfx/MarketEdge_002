@@ -31,7 +31,12 @@ import {
 } from "../lib/crypto";
 import { getMLPrediction, getMLStatus } from "../lib/ml-store";
 import { extractMLFeatures } from "../lib/ml-features";
-import { runBacktest, compareReports, type BacktestReport } from "../lib/backtest";
+import {
+  runBacktest,
+  compareReports,
+  runThresholdAnalysis,
+  type BacktestReport,
+} from "../lib/backtest";
 import { tally } from "../lib/history-tally";
 
 const router = Router();
@@ -272,6 +277,36 @@ router.get("/crypto/backtest", async (req, res) => {
     res.json(report);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "backtest failed";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/backtest/threshold-analysis — run a backtest and show hit rates
+// bucketed by pre-window efficiency ratio (0.05 steps). Use to check whether
+// the hardcoded BET/STAY-AWAY ER thresholds still have real edge and to get
+// data-derived threshold suggestions.
+//   ?coins=BTC,ETH  ?windows=96  ?endTime=2026-06-26T12:00:00Z
+router.get("/crypto/backtest/threshold-analysis", async (req, res) => {
+  try {
+    const coins =
+      typeof req.query.coins === "string" && req.query.coins.length > 0
+        ? req.query.coins.toUpperCase().split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+    const windows =
+      req.query.windows != null ? parseInt(String(req.query.windows), 10) : undefined;
+    let endTime: number | undefined;
+    if (typeof req.query.endTime === "string" && req.query.endTime.length > 0) {
+      const ms = new Date(req.query.endTime).getTime();
+      if (!Number.isNaN(ms)) endTime = Math.floor(ms / 1000);
+    }
+    const report = await runThresholdAnalysis({
+      coins,
+      windows: windows != null && !Number.isNaN(windows) ? windows : undefined,
+      endTime,
+    });
+    res.json(report);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "threshold analysis failed";
     res.status(500).json({ error: msg });
   }
 });

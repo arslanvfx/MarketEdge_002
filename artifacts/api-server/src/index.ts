@@ -2,6 +2,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
+import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { pool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -84,4 +85,29 @@ app.listen(port, (err) => {
   // 15-min boundary and evaluates them against actual prices once the window closes.
   startPredictionTracker();
   logger.info("Prediction tracker started");
+
+  // Daily threshold analysis: runs once at midnight UTC then every 24h.
+  // Fetches 96 windows (~24h) of historical candles, buckets hit rates by
+  // pre-window efficiency ratio, and logs suggested threshold updates when
+  // the data-derived optimum drifts from the current hardcoded values.
+  const runDailyThresholdLog = () => {
+    runThresholdAnalysis({ windows: 96 })
+      .then((report) =>
+        logger.info({ summary: formatThresholdReport(report) }, "[threshold-analysis] daily"),
+      )
+      .catch((err) =>
+        logger.warn({ err }, "[threshold-analysis] daily run failed (non-fatal)"),
+      );
+  };
+  const msUntilMidnightUTC = (): number => {
+    const now = new Date();
+    const next = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+    );
+    return next.getTime() - now.getTime();
+  };
+  setTimeout(() => {
+    runDailyThresholdLog();
+    setInterval(runDailyThresholdLog, 24 * 60 * 60 * 1_000);
+  }, msUntilMidnightUTC());
 });

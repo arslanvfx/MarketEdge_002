@@ -31,6 +31,13 @@
 //   2. POST both reports to get the deltas:
 //        curl -X POST ".../crypto/backtest/compare" -H 'content-type: application/json' \
 //             -d "{\"a\": $(cat before.json), \"b\": $(cat after.json)}"
+//
+// ── Threshold analysis ────────────────────────────────────────────────────────
+//   curl "$REPLIT_DEV_DOMAIN/api/crypto/backtest/threshold-analysis?windows=96"
+//   Returns hit rates bucketed by pre-window efficiency ratio (0.05 steps) so
+//   you can see whether the hardcoded BET/STAY-AWAY ER thresholds in
+//   computeWindowBetSignal still have real edge. Also suggests data-derived
+//   thresholds. Run automatically once daily and logged to server output.
 // ---------------------------------------------------------------------------
 
 import {
@@ -50,6 +57,11 @@ const WINDOW_SEC = 15 * 60;
 const LOOKBACK_SEC = 90 * 60; // candles fed to the model before each window open
 const MAX_CANDLES_PER_REQ = 300; // Coinbase hard limit
 const MIN_INPUT_CANDLES = 30; // need enough history for the indicators
+
+// These mirror the live thresholds in computeWindowBetSignal. Keep in sync
+// when updating crypto.ts — the analysis uses them to label each bucket.
+const BET_ER_THRESHOLD        = 0.30; // preWindowER >= this → "bet zone"
+const STAY_AWAY_ER_THRESHOLD  = 0.25; // preWindowER <  this → "stay_away zone"
 
 export type Regime = "trending" | "drifting" | "choppy" | "spike";
 
@@ -95,6 +107,53 @@ export interface BacktestReport {
   errors?: Record<string, string>;
 }
 
+/** One 0.05-wide pre-window efficiency-ratio bucket. */
+export interface ThresholdBucket {
+  erLo: number;   // inclusive lower bound  (e.g. 0.25)
+  erHi: number;   // exclusive upper bound  (e.g. 0.30)
+  label: string;  // human label "0.25–0.30"
+  windows: number;
+  hitRatePct: number | null;
+  /** What the current hardcoded thresholds assign to this ER band. */
+  currentSignal: BetSignalRec;
+}
+
+/**
+ * Returned by runThresholdAnalysis.
+ * Shows hit rates per 0.05-wide ER band so the operator can see whether the
+ * hardcoded BET/STAY-AWAY ER thresholds still reflect reality, and what
+ * data-derived thresholds would look like.
+ */
+export interface ThresholdAnalysisReport {
+  generatedAt: string;
+  params: BacktestReport["params"];
+  /** The ER thresholds currently hardcoded in computeWindowBetSignal. */
+  currentThresholds: {
+    betER: number;
+    stayAwayER: number;
+  };
+  /**
+   * Data-derived suggestion: the lowest ER threshold where windows with
+   * preWindowER >= threshold hit >= 55% (minimum 20 samples).
+   * null = not enough data or no qualifying threshold found.
+   */
+  suggestedBetER: number | null;
+  /**
+   * Data-derived suggestion: the highest ER threshold where windows with
+   * preWindowER < threshold hit <= 45% (minimum 20 samples).
+   * null = not enough data or no qualifying threshold found.
+   */
+  suggestedStayAwayER: number | null;
+  /** Hit rates for windows in the current bet zone (preWindowER >= betER). */
+  currentBetZoneHitRatePct: number | null;
+  /** Hit rates for windows in the current stay_away zone (preWindowER < stayAwayER). */
+  currentStayAwayZoneHitRatePct: number | null;
+  buckets: ThresholdBucket[];
+  overallHitRatePct: number | null;
+  note: string;
+  errors?: Record<string, string>;
+}
+
 export interface BacktestOpts {
   coins?: string[];
   windows?: number;
@@ -111,7 +170,8 @@ interface WindowResult {
   signedErrPct: number;
   pAbove: number; // probability mass the model put on "above" (for Brier)
   actualAbove: boolean;
-  betSignal: BetSignalRec; // recommendation from computeWindowBetSignal at t=5
+  betSignal: BetSignalRec;
+  preWindowER: number; // 90-min pre-window efficiency ratio (from analyzeCoinAt)
 }
 
 // Confidence bands aligned to the model's clamp range (20–92).
@@ -122,11 +182,18 @@ const CONF_BANDS: Array<{ band: string; lo: number; hi: number }> = [
   { band: "70-92%", lo: 70, hi: 101 },
 ];
 
+// Pre-window ER bucket boundaries (0.00, 0.05, 0.10, … 0.95, 1.00).
+const ER_STEP = 0.05;
+const ER_N_BUCKETS = 20;
+
 function mean(xs: number[]): number {
   return xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
 }
 function round1(x: number): number {
   return Math.round(x * 10) / 10;
+}
+function round2(x: number): number {
+  return Math.round(x * 100) / 100;
 }
 function round3(x: number): number {
   return Math.round(x * 1000) / 1000;
@@ -268,12 +335,23 @@ async function backtestCoin(
       pAbove: predictedAbove ? pred.confidence / 100 : 1 - pred.confidence / 100,
       actualAbove,
       betSignal,
+      preWindowER: cp.indicators.efficiencyRatio,
     });
   }
   return results;
 }
 
-export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestReport> {
+// ── Shared internal runner ────────────────────────────────────────────────────
+
+interface RawBacktestData {
+  results: WindowResult[];
+  errors: Record<string, string>;
+  coinDefs: CoinDef[];
+  firstOpen: number;
+  lastSettleableOpen: number;
+}
+
+async function runRawBacktest(opts: BacktestOpts): Promise<RawBacktestData> {
   const windows = clampInt(opts.windows ?? 48, 1, 480);
   const coinDefs =
     opts.coins && opts.coins.length > 0
@@ -282,37 +360,45 @@ export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestRepo
 
   const nowSec = Math.floor(opts.endTime ?? Date.now() / 1000);
   const lastBoundary = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
-  // The most recent window we can settle must have closed already.
   const lastSettleableOpen = lastBoundary - WINDOW_SEC;
   const firstOpen = lastSettleableOpen - (windows - 1) * WINDOW_SEC;
 
-  const all: WindowResult[] = [];
+  const results: WindowResult[] = [];
   const errors: Record<string, string> = {};
 
   for (const coin of coinDefs) {
     try {
       const res = await backtestCoin(coin, firstOpen, lastSettleableOpen);
-      all.push(...res);
+      results.push(...res);
     } catch (err) {
       errors[coin.symbol] = err instanceof Error ? err.message : String(err);
       logger.warn({ err, symbol: coin.symbol }, "[backtest] coin failed");
     }
   }
 
+  return { results, errors, coinDefs, firstOpen, lastSettleableOpen };
+}
+
+// ── Public: standard backtest report ─────────────────────────────────────────
+
+export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestReport> {
+  const { results, errors, coinDefs, firstOpen, lastSettleableOpen } =
+    await runRawBacktest(opts);
+
   const byCoin: Record<string, MetricSummary> = {};
   for (const coin of coinDefs) {
-    byCoin[coin.symbol] = aggregate(all.filter((r) => r.symbol === coin.symbol));
+    byCoin[coin.symbol] = aggregate(results.filter((r) => r.symbol === coin.symbol));
   }
 
   const byRegime = {
-    trending: aggregate(all.filter((r) => r.regime === "trending")),
-    drifting: aggregate(all.filter((r) => r.regime === "drifting")),
-    choppy: aggregate(all.filter((r) => r.regime === "choppy")),
-    spike: aggregate(all.filter((r) => r.regime === "spike")),
+    trending: aggregate(results.filter((r) => r.regime === "trending")),
+    drifting: aggregate(results.filter((r) => r.regime === "drifting")),
+    choppy: aggregate(results.filter((r) => r.regime === "choppy")),
+    spike: aggregate(results.filter((r) => r.regime === "spike")),
   } satisfies Record<Regime, MetricSummary>;
 
   const calibration: CalibrationBin[] = CONF_BANDS.map(({ band, lo, hi }) => {
-    const bin = all.filter((r) => r.confidence >= lo && r.confidence < hi);
+    const bin = results.filter((r) => r.confidence >= lo && r.confidence < hi);
     return {
       band,
       windows: bin.length,
@@ -321,9 +407,9 @@ export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestRepo
     };
   });
 
-  const totalWindows = all.length;
+  const totalWindows = results.length;
   const makeBetSummary = (rec: BetSignalRec): BetSignalSummary => {
-    const bin = all.filter((r) => r.betSignal === rec);
+    const bin = results.filter((r) => r.betSignal === rec);
     const base = aggregate(bin);
     return {
       ...base,
@@ -344,11 +430,11 @@ export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestRepo
       "(synthetic Kalshi strike). Settlement = price 15 min after each window open.",
     params: {
       coins: coinDefs.map((c) => c.symbol),
-      windows,
-      firstWindowOpen: all.length > 0 ? new Date(firstOpen * 1000).toISOString() : null,
-      lastWindowOpen: all.length > 0 ? new Date(lastSettleableOpen * 1000).toISOString() : null,
+      windows: clampInt(opts.windows ?? 48, 1, 480),
+      firstWindowOpen: results.length > 0 ? new Date(firstOpen * 1000).toISOString() : null,
+      lastWindowOpen: results.length > 0 ? new Date(lastSettleableOpen * 1000).toISOString() : null,
     },
-    overall: aggregate(all),
+    overall: aggregate(results),
     byCoin,
     byRegime,
     calibration,
@@ -359,6 +445,124 @@ export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestRepo
   logger.info({ summary: formatReport(report) }, "[backtest] complete");
   return report;
 }
+
+// ── Public: threshold analysis ────────────────────────────────────────────────
+
+function buildThresholdBuckets(results: WindowResult[]): ThresholdBucket[] {
+  const buckets: ThresholdBucket[] = [];
+  for (let i = 0; i < ER_N_BUCKETS; i++) {
+    const erLo = round2(i * ER_STEP);
+    const erHi = round2((i + 1) * ER_STEP);
+    const bin = results.filter((r) => r.preWindowER >= erLo && r.preWindowER < erHi);
+    const hits = bin.filter((r) => r.hit).length;
+    const currentSignal: BetSignalRec =
+      erLo >= BET_ER_THRESHOLD ? "bet"
+      : erHi <= STAY_AWAY_ER_THRESHOLD ? "stay_away"
+      : "caution";
+    buckets.push({
+      erLo,
+      erHi,
+      label: `${erLo.toFixed(2)}–${erHi.toFixed(2)}`,
+      windows: bin.length,
+      hitRatePct: bin.length > 0 ? round1((hits / bin.length) * 100) : null,
+      currentSignal,
+    });
+  }
+  return buckets;
+}
+
+function deriveThresholds(results: WindowResult[]): {
+  suggestedBetER: number | null;
+  suggestedStayAwayER: number | null;
+} {
+  const MIN_SAMPLES = 20;
+  const BET_TARGET = 55.0;
+  const STAY_TARGET = 45.0;
+
+  // suggestedBetER: lowest ER cutoff where windows with preWindowER >= cutoff
+  // have hit rate >= BET_TARGET and at least MIN_SAMPLES windows.
+  let suggestedBetER: number | null = null;
+  for (let i = 0; i < ER_N_BUCKETS; i++) {
+    const er = round2(i * ER_STEP);
+    const above = results.filter((r) => r.preWindowER >= er);
+    if (above.length < MIN_SAMPLES) continue;
+    const hr = (above.filter((r) => r.hit).length / above.length) * 100;
+    if (hr >= BET_TARGET) {
+      suggestedBetER = er;
+      break; // take the most inclusive (lowest) qualifying threshold
+    }
+  }
+
+  // suggestedStayAwayER: highest ER cutoff where windows with preWindowER < cutoff
+  // have hit rate <= STAY_TARGET and at least MIN_SAMPLES windows.
+  let suggestedStayAwayER: number | null = null;
+  for (let i = Math.floor(ER_N_BUCKETS / 2); i > 0; i--) {
+    const er = round2(i * ER_STEP);
+    const below = results.filter((r) => r.preWindowER < er);
+    if (below.length < MIN_SAMPLES) continue;
+    const hr = (below.filter((r) => r.hit).length / below.length) * 100;
+    if (hr <= STAY_TARGET) {
+      suggestedStayAwayER = er;
+      break; // take the most inclusive (highest) qualifying threshold
+    }
+  }
+
+  return { suggestedBetER, suggestedStayAwayER };
+}
+
+/**
+ * Run a full backtest and produce a threshold analysis report that shows
+ * hit rates per 0.05-wide ER band. Use this to check whether the hardcoded
+ * BET/STAY-AWAY thresholds in computeWindowBetSignal still have real edge,
+ * and to derive data-driven threshold suggestions.
+ */
+export async function runThresholdAnalysis(
+  opts: BacktestOpts = {},
+): Promise<ThresholdAnalysisReport> {
+  const { results, errors, coinDefs, firstOpen, lastSettleableOpen } =
+    await runRawBacktest(opts);
+
+  const buckets = buildThresholdBuckets(results);
+  const { suggestedBetER, suggestedStayAwayER } = deriveThresholds(results);
+
+  const overall = aggregate(results);
+
+  // Current zone hit rates (for quick comparison with suggestions).
+  const betZone = results.filter((r) => r.preWindowER >= BET_ER_THRESHOLD);
+  const stayZone = results.filter((r) => r.preWindowER < STAY_AWAY_ER_THRESHOLD);
+  const hrBet  = betZone.length  > 0 ? round1((betZone.filter((r)  => r.hit).length  / betZone.length)  * 100) : null;
+  const hrStay = stayZone.length > 0 ? round1((stayZone.filter((r) => r.hit).length / stayZone.length) * 100) : null;
+
+  const report: ThresholdAnalysisReport = {
+    generatedAt: new Date().toISOString(),
+    params: {
+      coins: coinDefs.map((c) => c.symbol),
+      windows: clampInt(opts.windows ?? 48, 1, 480),
+      firstWindowOpen: results.length > 0 ? new Date(firstOpen * 1000).toISOString() : null,
+      lastWindowOpen:  results.length > 0 ? new Date(lastSettleableOpen * 1000).toISOString() : null,
+    },
+    currentThresholds: {
+      betER: BET_ER_THRESHOLD,
+      stayAwayER: STAY_AWAY_ER_THRESHOLD,
+    },
+    suggestedBetER,
+    suggestedStayAwayER,
+    currentBetZoneHitRatePct: hrBet,
+    currentStayAwayZoneHitRatePct: hrStay,
+    buckets,
+    overallHitRatePct: overall.hitRatePct,
+    note:
+      "suggestedBetER = lowest ER threshold where preWindowER>=er gives ≥55% hit rate (≥20 samples). " +
+      "suggestedStayAwayER = highest ER threshold where preWindowER<er gives ≤45% hit rate (≥20 samples). " +
+      "Update BET_ER_THRESHOLD / STAY_AWAY_ER_THRESHOLD in backtest.ts and crypto.ts when suggestions diverge meaningfully.",
+    ...(Object.keys(errors).length > 0 ? { errors } : {}),
+  };
+
+  logger.info({ summary: formatThresholdReport(report) }, "[threshold-analysis] complete");
+  return report;
+}
+
+// ── Formatting ────────────────────────────────────────────────────────────────
 
 function pct(x: number | null): string {
   return x === null ? "  n/a" : `${x.toFixed(1)}%`.padStart(6);
@@ -385,6 +589,33 @@ export function formatReport(r: BacktestReport): string {
     const s = r.byBetSignal[rec];
     lines.push(
       `    ${rec.padEnd(10)} n=${String(s.windows).padStart(4)} (${String(s.pct ?? "n/a").padStart(4)}% of windows)  hit ${pct(s.hitRatePct)}  dir ${pct(s.dirAccPct)}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Compact log-friendly summary of a threshold analysis run. */
+export function formatThresholdReport(r: ThresholdAnalysisReport): string {
+  const lines: string[] = [];
+  lines.push(
+    `THRESHOLD-ANALYSIS ${r.params.coins.join(",")} | ${r.params.windows} windows | overall hit ${pct(r.overallHitRatePct)}`,
+  );
+  lines.push(
+    `  current thresholds: betER≥${r.currentThresholds.betER} → hit ${pct(r.currentBetZoneHitRatePct)} | ` +
+    `stayAwayER<${r.currentThresholds.stayAwayER} → hit ${pct(r.currentStayAwayZoneHitRatePct)}`,
+  );
+  lines.push(
+    `  suggested thresholds: betER=${r.suggestedBetER ?? "n/a"} stayAwayER=${r.suggestedStayAwayER ?? "n/a"}`,
+  );
+  lines.push("  ER buckets (preWindowER → hit rate):");
+  for (const b of r.buckets) {
+    if (b.windows === 0) continue; // skip empty buckets
+    const marker =
+      b.currentSignal === "bet" ? " [BET]"
+      : b.currentSignal === "stay_away" ? " [STAY]"
+      : "";
+    lines.push(
+      `    ${b.label.padEnd(10)} n=${String(b.windows).padStart(4)}  hit ${pct(b.hitRatePct)}${marker}`,
     );
   }
   return lines.join("\n");
