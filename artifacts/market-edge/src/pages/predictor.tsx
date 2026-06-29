@@ -2845,16 +2845,25 @@ function CoinDetail({
   // trackerSnapshot.snappedAt changes). These are locked for the full window
   // so the "At open" row never flip-flops mid-window, and they match what the
   // accuracy log records (DB uses onConflictDoNothing — first write wins).
-  // openingStatAbove is derived directly from statSnapshot (always available
-  // within 30s, regardless of whether Claude is running). No state needed —
-  // statSnapshot is already a locked DB value (onConflictDoNothing first-write).
-  const openingStatAbove: boolean | null =
-    statSnapshot != null && kalshiTarget !== null
-      ? statSnapshot.predictedPrice >= kalshiTarget
-      : null;
-  const [openingMlAbove,  setOpeningMlAbove]  = useState<boolean | null>(null);
-  const mlLockedRef    = useRef<boolean>(false);          // true once ML is locked for this window
-  const prevTickerRef  = useRef<string | undefined>(undefined); // tracks which Kalshi window we locked for
+  // openingStatAbove: use the server-computed aboveKalshi from statSnapshot,
+  // which was already evaluated against the strike price at snap time.
+  // Never recompute against the live kalshiTarget — if the client's cache has
+  // a slightly different value than what the tracker used, the direction flips.
+  const openingStatAbove: boolean | null = statSnapshot?.aboveKalshi ?? null;
+  const [openingMlAbove,     setOpeningMlAbove]     = useState<boolean | null>(null);
+  const mlLockedRef    = useRef<boolean>(false);
+  const prevTickerRef  = useRef<string | undefined>(undefined);
+
+  // openingClaudeAbove: locked to the FIRST liveDirection.aboveKalshi reading per window.
+  // Uses liveDirection (direct binary ABOVE/BELOW from Claude) rather than
+  // trackerSnapshot.aboveKalshi (Claude's extended-thinking price → strike mapping).
+  // Reason: Auto-Pilot's live direction uses liveDirection?.aboveKalshi as its primary
+  // signal, so the AT OPEN call must use the same signal to be consistent with what
+  // the user was seeing on screen at window open.  liveDirection also fires AFTER the
+  // stat snap confirms the Kalshi target, ensuring Claude answers against the right strike.
+  const [openingClaudeAbove, setOpeningClaudeAbove] = useState<boolean | null>(null);
+  const claudeLockedRef     = useRef<boolean>(false);
+  const prevClaudeTickerRef = useRef<string | undefined>(undefined);
 
   // ── Force-refresh confirmation ────────────────────────────────────────────
   const [statJustRefreshed, setStatJustRefreshed] = useState(false);
@@ -2866,17 +2875,17 @@ function CoinDetail({
     statRefreshTimerRef.current = setTimeout(() => setStatJustRefreshed(false), 2000);
   }
 
-  // New Kalshi window → reset the ML opening-call lock.
+  // New Kalshi window → reset the ML and Claude opening-call locks.
   // Key off ktd.eventTicker (Kalshi's own stable window ID) NOT statSnapshot.snappedAt.
   // snappedAt is an in-memory server value; a server restart mid-window creates a new
-  // snapshot with a new timestamp, falsely triggering a re-lock with whatever mlPred.above
-  // happens to be at that moment instead of the true opening call.
+  // snapshot with a new timestamp, falsely triggering a re-lock with the wrong value.
   const eventTicker = ktd?.eventTicker;
+
+  // ── ML opening-call lock ──────────────────────────────────────────────────
   useEffect(() => {
     if (!eventTicker) return;
-    if (eventTicker === prevTickerRef.current) return; // same window, nothing to do
+    if (eventTicker === prevTickerRef.current) return;
     prevTickerRef.current = eventTicker;
-    // New window: reset the lock, then immediately re-lock if ML is already ready.
     mlLockedRef.current = false;
     if (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined) {
       setOpeningMlAbove(mlPred.above);
@@ -2884,21 +2893,41 @@ function CoinDetail({
     } else {
       setOpeningMlAbove(null);
     }
-  // mlPred?.ready / mlPred?.above included so the immediate-lock fires when ML
-  // arrives slightly after the new ticker does, not just when the ticker itself changes.
   }, [eventTicker, mlPred?.ready, mlPred?.above]);
 
-  // Lock ML direction the FIRST time it becomes ready in the current window.
-  // Deliberately depends only on mlPred?.ready, NOT mlPred?.above — once the
-  // ML model fires its first verdict for a window that verdict is frozen.
-  // If we also depended on mlPred?.above, a mid-window re-prediction would
-  // re-run this effect and, if the guard somehow fails, overwrite the snapshot.
   useEffect(() => {
-    if (mlLockedRef.current) return;  // already frozen for this window
+    if (mlLockedRef.current) return;
     if (!mlPred?.ready || mlPred.above === null || mlPred.above === undefined) return;
     setOpeningMlAbove(mlPred.above);
     mlLockedRef.current = true;
-  }, [mlPred?.ready]); // ← only the ready flag; above changes never re-run this
+  }, [mlPred?.ready]);
+
+  // ── Claude opening-call lock ──────────────────────────────────────────────
+  // Locked to the FIRST liveDirection.aboveKalshi reading after the stat snap.
+  // liveDirection fires AFTER the stat snap (confirmed Kalshi target) and gives
+  // a direct binary ABOVE/BELOW — the same signal Auto-Pilot uses live, so the
+  // AT OPEN call matches what the user was seeing on screen at window open.
+  useEffect(() => {
+    if (!eventTicker) return;
+    if (eventTicker === prevClaudeTickerRef.current) return;
+    prevClaudeTickerRef.current = eventTicker;
+    claudeLockedRef.current = false;
+    const abv = liveDirection?.aboveKalshi;
+    if (abv !== null && abv !== undefined) {
+      setOpeningClaudeAbove(abv);
+      claudeLockedRef.current = true;
+    } else {
+      setOpeningClaudeAbove(null);
+    }
+  }, [eventTicker, liveDirection?.aboveKalshi]);
+
+  useEffect(() => {
+    if (claudeLockedRef.current) return;
+    const abv = liveDirection?.aboveKalshi;
+    if (abv === null || abv === undefined) return;
+    setOpeningClaudeAbove(abv);
+    claudeLockedRef.current = true;
+  }, [liveDirection?.aboveKalshi]);
 
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
@@ -3902,9 +3931,15 @@ function CoinDetail({
                       }
                       const statAboveNow = statHead ? statHead.predictedPrice >= kalshiTarget : null;
                       const statFlippedMid = openingStatAbove !== null && statAboveNow !== null && openingStatAbove !== statAboveNow;
-                      // trackerSnapshot is Claude's opening call — null when Claude is paused.
-                      const claudeAboveOpen = trackerSnapshot?.aboveKalshi ?? null;
-                      const claudeFlippedMid = claudeAboveOpen !== null && claudeAbove !== null && claudeAboveOpen !== claudeAbove;
+                      // Claude's opening call: locked to the first liveDirection.aboveKalshi
+                      // for this window (same signal Auto-Pilot uses live). Falls back to
+                      // trackerSnapshot if liveDirection hasn't arrived yet.
+                      const claudeAboveOpen = openingClaudeAbove ?? (trackerSnapshot?.aboveKalshi ?? null);
+                      // Flip detection: compare opening liveDirection vs. current liveDirection
+                      // (same method on both sides — price-prediction mapping not involved).
+                      const claudeFlippedMid = claudeAboveOpen !== null
+                        && liveDirection?.aboveKalshi !== null && liveDirection?.aboveKalshi !== undefined
+                        && claudeAboveOpen !== liveDirection.aboveKalshi;
                       // Auto-Pilot opening call: same routing logic as the live autoPilotAbove
                       // but using locked opening values for stat and Claude.
                       const openingAutoPilotAbove: boolean | null = (() => {
@@ -4002,17 +4037,17 @@ function CoinDetail({
                             </div>
                           )}
 
-                          {trackerSnapshot?.aboveKalshi !== null && trackerSnapshot?.aboveKalshi !== undefined && (
+                          {claudeAboveOpen !== null && (
                             <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
-                              trackerSnapshot.aboveKalshi
+                              claudeAboveOpen
                                 ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
                                 : "bg-red-500/6 text-red-400/70 ring-red-500/15"
                             }`}>
-                              {trackerSnapshot.aboveKalshi ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                              {claudeAboveOpen ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
                               <span className="text-violet-300/80">Claude</span>
-                              {claudeFlippedMid && (
+                              {claudeFlippedMid && liveDirection && (
                                 <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
-                                  → {claudeAbove ? "↑" : "↓"} now
+                                  → {liveDirection.aboveKalshi ? "↑" : "↓"} now
                                 </span>
                               )}
                             </div>
