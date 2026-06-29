@@ -1440,6 +1440,24 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
     }
   }
 
+  async function handleAccuracyOnlyClear(e: React.FormEvent) {
+    e.preventDefault();
+    setClearPasswordError(null);
+    setClearing(true);
+    try {
+      const res = await fetch(`${API_BASE}/crypto/prediction-history/accuracy-only`, {
+        method: "DELETE",
+        headers: { "x-clear-password": clearPassword },
+      });
+      if (res.status === 401) { setClearPasswordError("Incorrect password — try again."); return; }
+      if (!res.ok) { setClearPasswordError("Server error — please retry."); return; }
+      await query.refetch();
+      setClearDialogOpen(false);
+    } finally {
+      setClearing(false);
+    }
+  }
+
   async function handleFullReset(e: React.FormEvent) {
     e.preventDefault();
     setClearPasswordError(null);
@@ -1641,6 +1659,23 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                 className="w-full rounded-md bg-muted/50 hover:bg-muted border border-border text-xs font-medium py-1.5 transition-colors disabled:opacity-40"
               >
                 {clearing ? "Clearing…" : "Clear old logs only (>48 h)"}
+              </button>
+            </div>
+
+            {/* Accuracy-only clear */}
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 space-y-2">
+              <div>
+                <p className="text-xs font-semibold text-amber-400">Reset accuracy stats</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
+                  Wipes <span className="text-amber-400 font-medium">all</span> prediction records so accuracy restarts from zero. ML training snapshots and model weights are <span className="text-emerald-400 font-medium">kept intact</span>.
+                </p>
+              </div>
+              <button
+                onClick={handleAccuracyOnlyClear}
+                disabled={clearing || !clearPassword}
+                className="w-full rounded-md bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-xs font-medium text-amber-400 py-1.5 transition-colors disabled:opacity-40"
+              >
+                {clearing ? "Clearing…" : "Reset accuracy — keep ML model"}
               </button>
             </div>
 

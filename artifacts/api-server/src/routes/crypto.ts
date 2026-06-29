@@ -9,6 +9,7 @@ import {
   getAllPredictionAnalytics,
   clearPredictionHistory,
   clearPredictionHistoryOld,
+  clearAccuracyLogsOnly,
   ACCURACY_THRESHOLD_PCT,
   fetchKalshiBtcCall,
   fetchKalshiTarget,
@@ -242,6 +243,14 @@ function checkClearPassword(req: import("express").Request, res: import("express
 router.delete("/crypto/prediction-history/old", async (req, res) => {
   if (!checkClearPassword(req, res)) return;
   await clearPredictionHistoryOld();
+  res.json({ ok: true });
+});
+
+// Accuracy-only clear — wipes ALL prediction records so accuracy stats restart
+// from zero, but leaves ML snapshots and model weights completely untouched.
+router.delete("/crypto/prediction-history/accuracy-only", async (req, res) => {
+  if (!checkClearPassword(req, res)) return;
+  await clearAccuracyLogsOnly();
   res.json({ ok: true });
 });
 

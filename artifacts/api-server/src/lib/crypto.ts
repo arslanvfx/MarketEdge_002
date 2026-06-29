@@ -2101,6 +2101,17 @@ export async function clearPredictionHistoryOld(): Promise<void> {
   await initHistoryFromDB();
 }
 
+// Accuracy-only clear — wipes all prediction records from the display log and
+// DB so accuracy stats restart from zero, but leaves ML snapshots and model
+// weights completely untouched.  Use this to reset accuracy after tweaks
+// without throwing away hard-won training data.
+export async function clearAccuracyLogsOnly(): Promise<void> {
+  historyStore.clear();
+  await db.delete(predictionRecordsTable);
+  // Re-init so in-memory state is consistent with the (now empty) DB.
+  await initHistoryFromDB();
+}
+
 // Full reset — wipes ALL prediction records, ML snapshots, and ML model
 // weights, then re-initialises the ML engine from the now-empty DB so the
 // in-memory state matches (training restarts from zero).
