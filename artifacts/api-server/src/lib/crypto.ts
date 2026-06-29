@@ -3998,31 +3998,57 @@ export interface TimingAnalysisRow {
  * When `symbol` is omitted: aggregates across ALL symbols, grouped by
  * minute_mark only — the global recommendation curve.
  * When `symbol` is provided: groups by symbol+minute_mark — per-coin curve.
+ * When `days` is provided: limits rows to the last N calendar days (by evaluated_at).
  */
-export async function getTimingAnalysis(symbol?: string): Promise<TimingAnalysisRow[]> {
+export async function getTimingAnalysis(symbol?: string, days?: number): Promise<TimingAnalysisRow[]> {
   const rawRows = await db.execute(
     symbol
-      ? sql`
-          SELECT symbol, minute_mark,
-            COUNT(*)::int                                            AS sample_count,
-            COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
-            AVG(kalshi_yes_price::float)                            AS avg_yes_price
-          FROM window_timing_snapshots
-          WHERE actual_above IS NOT NULL
-            AND symbol = ${symbol}
-          GROUP BY symbol, minute_mark
-          ORDER BY minute_mark
-        `
-      : sql`
-          SELECT NULL AS symbol, minute_mark,
-            COUNT(*)::int                                            AS sample_count,
-            COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
-            AVG(kalshi_yes_price::float)                            AS avg_yes_price
-          FROM window_timing_snapshots
-          WHERE actual_above IS NOT NULL
-          GROUP BY minute_mark
-          ORDER BY minute_mark
-        `,
+      ? days != null
+        ? sql`
+            SELECT symbol, minute_mark,
+              COUNT(*)::int                                            AS sample_count,
+              COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+            FROM window_timing_snapshots
+            WHERE actual_above IS NOT NULL
+              AND symbol = ${symbol}
+              AND evaluated_at >= NOW() - (${days} || ' days')::interval
+            GROUP BY symbol, minute_mark
+            ORDER BY minute_mark
+          `
+        : sql`
+            SELECT symbol, minute_mark,
+              COUNT(*)::int                                            AS sample_count,
+              COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+            FROM window_timing_snapshots
+            WHERE actual_above IS NOT NULL
+              AND symbol = ${symbol}
+            GROUP BY symbol, minute_mark
+            ORDER BY minute_mark
+          `
+      : days != null
+        ? sql`
+            SELECT NULL AS symbol, minute_mark,
+              COUNT(*)::int                                            AS sample_count,
+              COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+            FROM window_timing_snapshots
+            WHERE actual_above IS NOT NULL
+              AND evaluated_at >= NOW() - (${days} || ' days')::interval
+            GROUP BY minute_mark
+            ORDER BY minute_mark
+          `
+        : sql`
+            SELECT NULL AS symbol, minute_mark,
+              COUNT(*)::int                                            AS sample_count,
+              COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+            FROM window_timing_snapshots
+            WHERE actual_above IS NOT NULL
+            GROUP BY minute_mark
+            ORDER BY minute_mark
+          `,
   );
 
   return (rawRows.rows as Array<Record<string, unknown>>).map((row) => {

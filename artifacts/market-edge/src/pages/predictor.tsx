@@ -2204,8 +2204,16 @@ export default function Predictor() {
   });
 
   const timingAnalysisQuery = useQuery({
-    queryKey: ["timing-analysis"],
-    queryFn: () => fetchJson<TimingAnalysisRow[]>(`/crypto/timing-analysis`),
+    queryKey: ["timing-analysis", selected],
+    queryFn: () => fetchJson<TimingAnalysisRow[]>(`/crypto/timing-analysis?symbol=${selected}`),
+    refetchInterval: 15 * 60_000,
+    enabled: kalshiAvailableTop,
+    staleTime: 10 * 60_000,
+  });
+
+  const timingAnalysis7dQuery = useQuery({
+    queryKey: ["timing-analysis-7d", selected],
+    queryFn: () => fetchJson<TimingAnalysisRow[]>(`/crypto/timing-analysis?symbol=${selected}&days=7`),
     refetchInterval: 15 * 60_000,
     enabled: kalshiAvailableTop,
     staleTime: 10 * 60_000,
@@ -2671,10 +2679,14 @@ export default function Predictor() {
         {/* ── ENTRY TIMING ANALYSIS ── */}
         {kalshiAvailableTop && (() => {
           const rows = timingAnalysisQuery.data ?? [];
+          const rows7d = timingAnalysis7dQuery.data ?? [];
+          // Build a lookup map from minuteMark → 7-day row for easy side-by-side access
+          const map7d = new Map(rows7d.map((r) => [r.minuteMark, r]));
           // Use max sample count across marks as proxy for unique window count.
           // Each evaluated window contributes exactly 1 snapshot per mark, so the
           // mark with the highest count = most windows collected for this coin.
           const windowsCollected = rows.length > 0 ? Math.max(...rows.map((r) => r.sampleCount)) : 0;
+          const windows7dCollected = rows7d.length > 0 ? Math.max(...rows7d.map((r) => r.sampleCount)) : 0;
           const MIN_WINDOWS = 10;
           const collecting = windowsCollected < MIN_WINDOWS;
           // Best row = highest positive EV; fallback to highest accuracy when EV unavailable
@@ -2687,6 +2699,8 @@ export default function Predictor() {
             null,
           );
           const best = bestByEv ?? bestByAcc;
+          // Has enough 7-day data to show a meaningful comparison?
+          const has7d = rows7d.length > 0 && windows7dCollected >= 3;
           if (rows.length === 0 && !timingAnalysisQuery.isLoading) return null;
           return (
             <div className="mt-4 rounded-lg border border-purple-800/40 bg-purple-950/20 overflow-hidden">
@@ -2741,8 +2755,19 @@ export default function Predictor() {
                         <thead>
                           <tr className="text-purple-400/70 border-b border-purple-800/30">
                             <th className="text-left pb-1.5 font-medium">Minute</th>
-                            <th className="text-right pb-1.5 font-medium">Accuracy %</th>
-                            <th className="text-right pb-1.5 font-medium">Avg Return</th>
+                            <th className="text-right pb-1.5 font-medium">
+                              {has7d ? "All-time %" : "Accuracy %"}
+                            </th>
+                            {has7d && (
+                              <th className="text-right pb-1.5 font-medium">
+                                <span className="text-sky-400">7-day %</span>
+                              </th>
+                            )}
+                            {has7d && (
+                              <th className="text-right pb-1.5 font-medium">
+                                <span className="text-purple-400/70">Trend</span>
+                              </th>
+                            )}
                             <th className="text-right pb-1.5 font-medium">EV Score</th>
                             <th className="text-right pb-1.5 font-medium">n</th>
                           </tr>
@@ -2755,6 +2780,15 @@ export default function Predictor() {
                             const isNegative = acc < 0.45;
                             const isBest = row.minuteMark === best?.minuteMark;
                             const evSign = row.ev !== null && row.ev > 0 ? "+" : "";
+                            const row7 = map7d.get(row.minuteMark);
+                            const acc7 = row7?.accuracy ?? null;
+                            const pct7 = acc7 !== null ? Math.round(acc7 * 100) : null;
+                            const isPositive7 = acc7 !== null && acc7 >= 0.55;
+                            const isNegative7 = acc7 !== null && acc7 < 0.45;
+                            // Trend: difference between 7-day and all-time accuracy
+                            const trendDiff = acc7 !== null ? Math.round((acc7 - acc) * 100) : null;
+                            const trendUp = trendDiff !== null && trendDiff >= 3;
+                            const trendDown = trendDiff !== null && trendDiff <= -3;
                             return (
                               <tr
                                 key={row.minuteMark}
@@ -2766,11 +2800,24 @@ export default function Predictor() {
                                 <td className={`py-1.5 text-right font-semibold ${isPositive ? "text-emerald-400" : isNegative ? "text-red-400" : "text-yellow-400"}`}>
                                   {pct}%
                                 </td>
-                                <td className="py-1.5 text-right text-purple-300/70">
-                                  {row.avgReturn !== null
-                                    ? `${(row.avgReturn * 100).toFixed(0)}%`
-                                    : "—"}
-                                </td>
+                                {has7d && (
+                                  <td className={`py-1.5 text-right font-semibold ${pct7 === null ? "text-gray-600" : isPositive7 ? "text-sky-400" : isNegative7 ? "text-red-400" : "text-yellow-400"}`}>
+                                    {pct7 !== null ? `${pct7}%` : "—"}
+                                  </td>
+                                )}
+                                {has7d && (
+                                  <td className="py-1.5 text-right font-mono text-[11px]">
+                                    {trendDiff === null ? (
+                                      <span className="text-gray-600">—</span>
+                                    ) : trendUp ? (
+                                      <span className="text-emerald-400">↑{trendDiff}pp</span>
+                                    ) : trendDown ? (
+                                      <span className="text-red-400">↓{Math.abs(trendDiff)}pp</span>
+                                    ) : (
+                                      <span className="text-purple-400/50">≈</span>
+                                    )}
+                                  </td>
+                                )}
                                 <td className={`py-1.5 text-right ${row.ev === null ? "text-gray-600" : row.ev > 0 ? "text-emerald-400" : "text-red-400"}`}>
                                   {row.ev !== null ? `${evSign}${(row.ev * 100).toFixed(1)}%` : "—"}
                                 </td>
@@ -2781,7 +2828,9 @@ export default function Predictor() {
                         </tbody>
                       </table>
                       <p className="text-xs text-purple-300/40 mt-2">
-                        Avg Return and EV require Kalshi Yes price data (accumulates over time). Accuracy alone is useful for timing.
+                        {has7d
+                          ? `Trend column shows 7-day accuracy vs all-time (pp = percentage points). ↑ means recent windows are more accurate.`
+                          : "EV requires Kalshi Yes price data (accumulates over time). Accuracy alone is useful for timing."}
                       </p>
                     </>
                   )}

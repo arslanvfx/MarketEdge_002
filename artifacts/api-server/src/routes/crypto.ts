@@ -602,13 +602,16 @@ router.get("/crypto/trading-windows", async (req, res) => {
 
 // Intra-window timing analysis — per-symbol accuracy at 1,3,6,9,12-min marks.
 // ?symbol=BTC restricts to one coin; omit for all coins.
+// ?days=7 limits to last N calendar days (by evaluated_at); omit for all-time.
 router.get("/crypto/timing-analysis", async (req, res) => {
   const symbol =
     typeof req.query.symbol === "string" && req.query.symbol.length > 0
       ? req.query.symbol.toUpperCase()
       : undefined;
+  const daysRaw = typeof req.query.days === "string" ? Number(req.query.days) : NaN;
+  const days = isNaN(daysRaw) || daysRaw <= 0 ? undefined : daysRaw;
   try {
-    const rows = await getTimingAnalysis(symbol);
+    const rows = await getTimingAnalysis(symbol, days);
     res.json(rows);
   } catch {
     res.status(500).json({ error: "Failed to fetch timing analysis" });
