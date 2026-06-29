@@ -3579,12 +3579,19 @@ export function computeWindowBetSignal(
 // if the market suddenly goes choppy.  Returns null when no Kalshi window is
 // active or candle data isn't cached yet (UI should suppress the card).
 export function getWindowBetSignal(symbol: string): WindowBetSignal | null {
-  const winCtx = getKalshiWindowContext(symbol.toUpperCase());
+  const sym = symbol.toUpperCase();
+  const winCtx = getKalshiWindowContext(sym);
   if (!winCtx) return null;
 
   const { minutesElapsed } = winCtx;
-  const wKey = currentWindowKey(new Date());
-  const sym = symbol.toUpperCase();
+  // Use the Kalshi event ticker as the window key, not the UTC clock boundary.
+  // currentWindowKey() snaps to :00/:15/:30/:45 which may not align with
+  // Kalshi's actual window start times — a new Kalshi window that opens at
+  // (say) 07:32 still falls inside the "07:30" UTC block, so the lock cache
+  // would incorrectly return the previous window's locked verdict as current.
+  // The eventTicker changes on every new Kalshi window regardless of when
+  // within the UTC block that transition happens.
+  const wKey = getLastKalshiTicker(sym) ?? currentWindowKey(new Date());
 
   // Return the locked signal if it was already committed for this window.
   const locked = windowBetSignalLockCache.get(sym);

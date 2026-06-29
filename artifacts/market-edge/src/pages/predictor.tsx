@@ -2123,7 +2123,7 @@ export default function Predictor() {
   const kalshiEventTicker = ktd?.eventTicker;
 
   // Tracker window snapshot — Claude's and stat model's opening calls for the current window.
-  // Free (in-memory lookup on the server), safe to poll every 30s.
+  // Free (in-memory lookup on the server), safe to poll every 15s.
   const trackerSnapshotQuery = useQuery({
     queryKey: ["tracker-snapshot", selected],
     queryFn: () => fetchJson<{ snapshot: TrackerWindowCall | null; statSnapshot: TrackerWindowCall | null; windowBetSignal: WindowBetSignal | null }>(`/crypto/tracker-snapshot/${selected}`),
@@ -2131,6 +2131,20 @@ export default function Predictor() {
     // Also enable for any coin with an active Kalshi window so the Window Monitor card works.
     enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected) || (autoPilotMap.get(selected)?.active ?? false) || kalshiAvailableTop,
   });
+
+  // When the Kalshi event ticker changes (new window), immediately re-fetch
+  // the tracker snapshot so the Window Monitor resets to "MONITORING…" without
+  // waiting up to 15 s for the next scheduled poll to arrive.
+  const prevKalshiTickerRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!kalshiEventTicker) return;
+    if (kalshiEventTicker !== prevKalshiTickerRef.current) {
+      prevKalshiTickerRef.current = kalshiEventTicker;
+      void trackerSnapshotQuery.refetch();
+    }
+  // trackerSnapshotQuery is stable — only re-run when ticker changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kalshiEventTicker]);
 
   const wmAccuracyQuery = useQuery({
     queryKey: ["wm-accuracy", selected],
