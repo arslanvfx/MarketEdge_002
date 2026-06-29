@@ -1985,6 +1985,9 @@ export default function Predictor() {
   const [autoTriggerReason, setAutoTriggerReason] = useState<string | null>(null);
   const [driftAlerts, setDriftAlerts] = useState<Record<string, DriftAlert>>({});
   const lastAutoTriggerRef = useRef<number>(0);
+  // Separate cooldown for new-window triggers so a recent stat-flip never
+  // blocks the most important re-analysis (when a new Kalshi window opens).
+  const lastNewWindowTriggerRef = useRef<number>(0);
   const prevStatAboveRef = useRef<boolean | null>(null);
   // Tracks the locked prediction call at window-open for each coin
   const windowOpenCallRef = useRef<Record<string, { windowTarget: string; aboveKalshi: boolean | null; direction: "up" | "down" | "flat" }>>({});
@@ -2329,17 +2332,21 @@ export default function Predictor() {
     const entry = aiData[selected] ?? null;
 
     // ── Trigger 1: New Kalshi window ──────────────────────────────────────
+    // Uses its OWN 30-second cooldown so a recent stat-flip can never block
+    // the window-open re-analysis.  The shared COOLDOWN_MS only guards flips.
     // Also guard with hysteresis: if price is within 0.15% of the strike at
     // window open, the binary is too close to call — skip the auto-trigger.
+    const NEW_WINDOW_COOLDOWN_MS = 30_000;
     if (entry && kalshiEventTicker && kalshiEventTicker !== entry.eventTickerAtRun) {
       const now = Date.now();
-      if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
+      if (now - lastNewWindowTriggerRef.current >= NEW_WINDOW_COOLDOWN_MS) {
         const newWindowGapPct =
           statPred0 != null && kalshiTarget !== null
             ? Math.abs(statPred0.predictedPrice - kalshiTarget) / kalshiTarget
             : 1; // unknown gap → allow trigger
         if (newWindowGapPct >= 0.0015) {
-          lastAutoTriggerRef.current = now;
+          lastNewWindowTriggerRef.current = now;
+          lastAutoTriggerRef.current = now; // also block stat-flip for 90s after window trigger
           setAutoTriggerReason("New Kalshi window");
           void handleEnhance();
           return;
@@ -2857,7 +2864,7 @@ function CoinDetail({
 
   // Auto-Pilot direction: uses whichever model has the proven accuracy edge.
   // When active (Claude wins historically) → uses Claude's direction.
-  // When inactive (stat wins or insufficient data) → uses stat direction.
+  // When inactive (stat wins or insufficient data) → uses stat direction ONLY.
   // The confidence weight is the winning model's historical accuracy %.
   const autoPilotAbove: boolean | null = (() => {
     if (!autoPilotDecision || kalshiTarget === null) return null;
@@ -2866,9 +2873,12 @@ function CoinDetail({
       // live price position (never fall back to a stale window-open snapshot).
       return liveDirection?.aboveKalshi ?? claudeAbove ?? (livePrice > 0 ? livePrice >= kalshiTarget : null);
     }
-    // Stat mode: stat model is only computed at window open, so prefer live
-    // price position as the most current signal; fall back to opening call.
-    return liveDirection?.aboveKalshi ?? (livePrice > 0 ? livePrice >= kalshiTarget : (statHead ? statHead.predictedPrice >= kalshiTarget : null));
+    // Stat mode: stat was chosen because it outperforms Claude, so never use
+    // liveDirection (a Claude call) here.  Follow the stat model's live
+    // prediction; fall back to live-price position only if stat hasn't run yet.
+    return statHead
+      ? statHead.predictedPrice >= kalshiTarget
+      : (livePrice > 0 ? livePrice >= kalshiTarget : null);
   })();
   const autoPilotConf: number | null = autoPilotDecision
     ? (autoPilotDecision.active
