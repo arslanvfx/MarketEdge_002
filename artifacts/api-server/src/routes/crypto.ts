@@ -356,6 +356,7 @@ const KALSHI_URL_SLUGS: Record<string, { path: string; label: string }> = {
 };
 
 const kalshiRouteCache = new Map<string, { data: KalshiTargetPayload; fetchedAt: number }>();
+const KALSHI_TARGET_TTL = 15_000; // 15s — catches new 15-min windows quickly
 
 // Per-window Kalshi target cache for the ML prediction endpoint.
 // Key: `${symbol}:${windowMs}` — automatically expires each 15-min boundary.

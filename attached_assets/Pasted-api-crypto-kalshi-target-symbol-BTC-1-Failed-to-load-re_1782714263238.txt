@@ -1,0 +1,70 @@
+api/crypto/kalshi-target?symbol=BTC:1  Failed to load resource: the server responded with a status of 500 ()
+api/crypto/kalshi-target?symbol=BTC:1  Failed to load resource: the server responded with a status of 500 ()
+api/crypto/kalshi-target?symbol=BTC:1  Failed to load resource: the server responded with a status of 500 ()
+api/crypto/kalshi-target?symbol=BTC:1  Failed to load resource: the server responded with a status of 500 ()
+index-PBAj1i3N.js:133  GET https://market-combo-analyzer.replit.app/api/crypto/kalshi-target?symbol=BTC 500 (Internal Server Error)
+Sr @ index-PBAj1i3N.js:133
+queryFn @ index-PBAj1i3N.js:138
+a @ index-PBAj1i3N.js:16
+j @ index-PBAj1i3N.js:16
+start @ index-PBAj1i3N.js:16
+fetch @ index-PBAj1i3N.js:16
+#h @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+index-PBAj1i3N.js:133  GET https://market-combo-analyzer.replit.app/api/crypto/kalshi-target?symbol=BTC 500 (Internal Server Error)
+Sr @ index-PBAj1i3N.js:133
+queryFn @ index-PBAj1i3N.js:138
+a @ index-PBAj1i3N.js:16
+j @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.then
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.catch
+j @ index-PBAj1i3N.js:16
+start @ index-PBAj1i3N.js:16
+fetch @ index-PBAj1i3N.js:16
+#h @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+index-PBAj1i3N.js:133  GET https://market-combo-analyzer.replit.app/api/crypto/kalshi-target?symbol=BTC 500 (Internal Server Error)
+Sr @ index-PBAj1i3N.js:133
+queryFn @ index-PBAj1i3N.js:138
+a @ index-PBAj1i3N.js:16
+j @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.then
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.catch
+j @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.then
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.catch
+j @ index-PBAj1i3N.js:16
+start @ index-PBAj1i3N.js:16
+fetch @ index-PBAj1i3N.js:16
+#h @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+index-PBAj1i3N.js:133  GET https://market-combo-analyzer.replit.app/api/crypto/kalshi-target?symbol=BTC 500 (Internal Server Error)
+Sr @ index-PBAj1i3N.js:133
+queryFn @ index-PBAj1i3N.js:138
+a @ index-PBAj1i3N.js:16
+j @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.then
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.catch
+j @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.then
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.catch
+j @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.then
+(anonymous) @ index-PBAj1i3N.js:16
+Promise.catch
+j @ index-PBAj1i3N.js:16
+start @ index-PBAj1i3N.js:16
+fetch @ index-PBAj1i3N.js:16
+#h @ index-PBAj1i3N.js:16
+(anonymous) @ index-PBAj1i3N.js:16
