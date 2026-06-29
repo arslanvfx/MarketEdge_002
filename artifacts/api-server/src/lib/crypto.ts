@@ -2688,7 +2688,7 @@ function isCoinClaudeEnabled(symbol: string): boolean {
   });
 }
 
-export function startPredictionTracker(): void {
+export function startPredictionTracker(onInitComplete?: () => void): void {
   const tick = async () => {
     const nowMs = Date.now();
     const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
@@ -3164,6 +3164,7 @@ export function startPredictionTracker(): void {
   ]).finally(() => {
     tick().catch(() => {});
     setInterval(() => tick().catch(() => {}), 30_000);
+    onInitComplete?.();
   });
 
   // Prune records older than RETENTION_DAYS once at startup and then every 24 h.

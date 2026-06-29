@@ -31,6 +31,18 @@ import {
 // Re-export types that callers need
 export type { MLPrediction };
 
+/**
+ * One labeled training example for ML backfill — features + outcome already
+ * known (from a historical backtest replay rather than a live window).
+ */
+export interface MLTrainingExample {
+  symbol:          string;
+  windowId:        string;  // e.g. "backfill:BTC:2026-06-29T06:00:00.000Z"
+  features:        number[]; // N_FEATURES-length vector
+  outcome:         0 | 1;   // 1 = actual above kalshiTarget, 0 = below
+  elapsedFraction: number;
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -100,6 +112,60 @@ export function getMLPrediction(symbol: string, features: number[]): {
 /** Return current training status for a coin (for status endpoint). */
 export function getMLStatus(symbol: string) {
   return getStatus(symbol);
+}
+
+/** Return training status for every coin that has been seen so far. */
+export function getAllMLStatus() {
+  return getAllStatus();
+}
+
+/**
+ * Load pre-labeled training examples (from a historical backtest replay)
+ * into both in-memory state and the DB.  Used during startup when the model
+ * has been reset (e.g. after an N_FEATURES bump) to avoid waiting 30+ live
+ * windows before predictions resume.
+ *
+ * The caller must ensure features.length === N_FEATURES — examples that
+ * don't match are silently skipped by applyLabeledSnapshot.
+ */
+export async function backfillFromExamples(examples: MLTrainingExample[]): Promise<void> {
+  if (examples.length === 0) return;
+
+  // 1. Load into in-memory training state.
+  const symbolsAffected = new Set<string>();
+  for (const ex of examples) {
+    applyLabeledSnapshot(ex.symbol, ex.features, ex.outcome);
+    symbolsAffected.add(ex.symbol);
+  }
+
+  // 2. Persist to DB so the examples survive future restarts.
+  //    Batch in chunks of 200 to stay within pg parameter limits.
+  const now = new Date();
+  const CHUNK = 200;
+  for (let i = 0; i < examples.length; i += CHUNK) {
+    const chunk = examples.slice(i, i + CHUNK);
+    await db
+      .insert(mlWindowSnapshotsTable)
+      .values(
+        chunk.map((ex) => ({
+          symbol:          ex.symbol,
+          windowId:        ex.windowId,
+          snapshotAt:      now,
+          elapsedFraction: String(ex.elapsedFraction),
+          features:        ex.features,
+          outcome:         ex.outcome,
+        })),
+      )
+      .catch(() => {}); // non-fatal — in-memory state is already updated
+  }
+
+  // 3. Reconcile each coin's window count from loaded examples, retrain,
+  //    and persist model weights so they survive a restart.
+  for (const sym of symbolsAffected) {
+    reconcileStateFromExamples(sym);
+    const s = getCoinState(sym);
+    if (s) await persistModelState(sym, s).catch(() => {});
+  }
 }
 
 // ── DB helpers ───────────────────────────────────────────────────────────────

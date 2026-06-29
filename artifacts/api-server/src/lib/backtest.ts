@@ -48,6 +48,8 @@ import {
   type Candle,
   type CoinDef,
 } from "./crypto";
+import { extractMLFeatures } from "./ml-features.ts";
+import { type MLTrainingExample } from "./ml-store.ts";
 import { logger } from "./logger";
 
 const COINBASE = "https://api.exchange.coinbase.com";
@@ -172,6 +174,8 @@ interface WindowResult {
   actualAbove: boolean;
   betSignal: BetSignalRec;
   preWindowER: number; // 90-min pre-window efficiency ratio (from analyzeCoinAt)
+  mlFeatures: number[];  // 14-dim feature vector at simulated snap time (elapsed=0.05, priceAtOpen=openPrice)
+  windowIso: string;     // ISO timestamp of window open — used as backfill windowId
 }
 
 // Confidence bands aligned to the model's clamp range (20–92).
@@ -324,6 +328,11 @@ async function backtestCoin(
       if (sig.ready) betSignal = sig.recommendation;
     }
 
+    // 14-feature vector at simulated snap time (elapsed=0.05 ≈ 45s into window).
+    // Feature 12 (windowPriceDriftNorm) = 0 since we're at the window open.
+    // Feature 13 (recentMom2) uses the last 2 pre-window candles — valid for training.
+    const mlFeatures = extractMLFeatures(cp, openPrice, 0.05, openPrice);
+
     results.push({
       symbol: coin.symbol,
       regime: classifyRegime(cp.indicators),
@@ -336,6 +345,8 @@ async function backtestCoin(
       actualAbove,
       betSignal,
       preWindowER: cp.indicators.efficiencyRatio,
+      mlFeatures,
+      windowIso: new Date(open * 1000).toISOString(),
     });
   }
   return results;
@@ -444,6 +455,29 @@ export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestRepo
 
   logger.info({ summary: formatReport(report) }, "[backtest] complete");
   return report;
+}
+
+// ── Public: ML training example generation ───────────────────────────────────
+
+/**
+ * Run a backtest and return labeled training examples suitable for backfilling
+ * the ML model.  Each example has the 14-feature vector computed at simulated
+ * snap time (elapsed=0.05, priceAtOpen=openPrice) and the actual outcome.
+ *
+ * Use this when the model resets (e.g. after a feature version bump) to avoid
+ * waiting 30+ live windows before predictions resume.
+ */
+export async function generateMLTrainingExamples(
+  opts: BacktestOpts = {},
+): Promise<MLTrainingExample[]> {
+  const { results } = await runRawBacktest(opts);
+  return results.map((r) => ({
+    symbol: r.symbol,
+    windowId: `backfill:${r.symbol}:${r.windowIso}`,
+    features: r.mlFeatures,
+    outcome: r.actualAbove ? 1 : 0,
+    elapsedFraction: 0.05,
+  }));
 }
 
 // ── Public: threshold analysis ────────────────────────────────────────────────

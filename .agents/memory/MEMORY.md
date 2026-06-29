@@ -13,6 +13,7 @@
 - [Ensemble & abstention](ensemble-abstention.md) — stat+Claude blend: dirs must be price-derived (not raw model string); server/client mirror; abstention quality semantics
 - [api-server unit tests](api-server-unit-tests.md) — node:test + native TS strip; test imports need .ts ext (allowImportingTsExtensions); extract pure logic out of db-importing modules; crypto.ts has pre-existing typecheck errors
 - [ML feature versioning](ml-feature-versioning.md) — N_FEATURES lives in ml-model.ts (authoritative); applyHydratedModel must reset windows=0 on size mismatch or model shows "ready" with random weights
+- [ML startup backfill](ml-startup-backfill.md) — runMLBackfillIfNeeded() in ml-backfill.ts fires via startPredictionTracker onInitComplete after initMLFromDB; guard: windows>=30 → skip
 - [Snap race condition](snap-race-condition.md) — setInterval+async snap: must hold a synchronous snapInFlight Set lock before first await or concurrent ticks double-write in-memory history
 - [Claude Pulse two-signal UI](claude-pulse-signals.md) — opening call from getTrackerWindowCall (historyStore, free) + live re-check via fetchLiveDirection (cheap Claude, 5-min cache); both exposed as endpoints; AboveLabel must be module-level not inside IIFE
 - [ML pipeline architecture](ml-pipeline-arch.md) — logistic regression in ml-model.ts, features in ml-features.ts, orchestration in ml-store.ts; 1 snapshot per window at snap time; 30-window gate; DB survives restarts; endpoint GET /api/crypto/ml-prediction/:symbol

@@ -3,6 +3,7 @@ import { logger } from "./lib/logger";
 import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
+import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
 import { pool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -83,7 +84,12 @@ app.listen(port, (err) => {
 
   // Start the prediction accuracy tracker: snaps model predictions at each
   // 15-min boundary and evaluates them against actual prices once the window closes.
-  startPredictionTracker();
+  // The onInitComplete callback runs after initMLFromDB() resolves — backfill
+  // runs at that point so it sees the true post-hydration warming status.
+  startPredictionTracker(() => {
+    runMLBackfillIfNeeded(96)
+      .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
+  });
   logger.info("Prediction tracker started");
 
   // Daily threshold analysis: runs once at midnight UTC then every 24h.
