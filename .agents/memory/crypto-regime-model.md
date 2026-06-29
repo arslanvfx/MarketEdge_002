@@ -19,3 +19,10 @@ The per-minute `drift` is a regime-weighted blend, not fixed. Weights scale by a
 
 # Achievable performance
 ~50% overall hit rate is roughly the realistic ceiling for 15-min direction. The edge lives in the drifting regime (reversion toward VWAP, ~53%) and spike continuation (~52%). Deep chop stays near coin-flip (~48%) regardless of reversion anchor tried — treat sub-50% chop as close to irreducible, not a bug. Validate any model change with the backtest endpoints against a pinned `endTime`.
+
+# Trending-regime accuracy inversion (critical — do NOT revert)
+**Discovery:** when ER > 0.55 (clean trend), empirical accuracy was 14–25% — *worse than random*. Root cause: trendFactor reached 1.0, setting wMom=0.55 wMR=0 (pure momentum). But 15-min trending windows almost always REVERT in the next window: the trend is exhausted by the time ER reads high. Following momentum in this regime reliably bets on the wrong side.
+
+**Fix (in place):** `trendFactor` capped at 0.5. At cap: wMom≈0.35, wMR≈0.35 — same blend as the middle regime (0.3–0.5 ER), which empirically scores 52–73%. Spike flag is still allowed to push trendFactor to 0.8 (impulse breakouts are NOT the same pattern as clean-trend exhaustion).
+
+**Why:** do NOT restore the cap-at-1.0 behaviour. The data is clear: high ER is a *lagging* indicator — the trend is done, not starting. Mean-reversion logic (pull toward VWAP) is correct here.

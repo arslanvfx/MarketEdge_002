@@ -1321,7 +1321,14 @@ function analyzeCoin(
   // the main lever for raising hit rate in the choppy windows where a fixed
   // momentum blend performs worst.
   const ER = iwm.efficiencyRatio; // 0 = pure chop, 1 = clean one-way move
-  let trendFactor = clamp((ER - 0.25) / (0.55 - 0.25), 0, 1);
+  // Cap trendFactor at 0.5 (middle-regime level). Empirically, 15-min windows
+  // with ER > 0.55 (clean trend) almost always REVERT in the following window —
+  // the trend is already exhausted by the time ER reads high. Letting trendFactor
+  // reach 1.0 sets wMom=0.55, wMR=0: pure momentum continuation with zero
+  // mean-reversion — and that exact combination produced 14–25 % accuracy in
+  // trending windows (worse than random). Capping at 0.5 keeps the blend similar
+  // to the middle regime (wMom≈0.35, wMR≈0.35) which scores 52–73 % accuracy.
+  let trendFactor = clamp((ER - 0.25) / (0.55 - 0.25), 0, 0.5);
   // A volatility spike marks a breakout/impulse that tends to continue over the
   // next 15 min, so lean momentum rather than fading it.
   if (iwm.spikeFlag) trendFactor = Math.max(trendFactor, 0.8);
