@@ -2845,25 +2845,64 @@ function CoinDetail({
   // trackerSnapshot.snappedAt changes). These are locked for the full window
   // so the "At open" row never flip-flops mid-window, and they match what the
   // accuracy log records (DB uses onConflictDoNothing — first write wins).
-  // openingStatAbove: use the server-computed aboveKalshi from statSnapshot,
-  // which was already evaluated against the strike price at snap time.
-  // Never recompute against the live kalshiTarget — if the client's cache has
-  // a slightly different value than what the tracker used, the direction flips.
-  const openingStatAbove: boolean | null = statSnapshot?.aboveKalshi ?? null;
-  const [openingMlAbove,     setOpeningMlAbove]     = useState<boolean | null>(null);
-  const mlLockedRef    = useRef<boolean>(false);
-  const prevTickerRef  = useRef<string | undefined>(undefined);
+  // ── AT OPEN opening-call architecture ─────────────────────────────────────
+  //
+  // ALL opening calls are gated on statSnapshot existing (~30s into window).
+  // Kalshi sometimes delays publishing the new window's target price; models
+  // that lock before 30s may read a stale target and record the wrong direction.
+  // statSnapshot is computed server-side at :30s against the confirmed target,
+  // so using it as the gate gives every model time to catch up before we freeze
+  // the AT OPEN row.  While waiting, the AT OPEN area shows "calculating…".
+  //
+  //   • Stat     → statSnapshot.aboveKalshi  (server-locked at snap time, no client recompute)
+  //   • Claude   → first liveDirection.aboveKalshi AFTER statSnapshot exists
+  //   • ML       → first mlPred.above AFTER statSnapshot exists
+  //   • AutoPilot → derived from above (no separate lock needed)
+  //
+  // The gate key is eventTicker (Kalshi's own stable window ID), NOT snappedAt.
+  // snappedAt resets on every server restart, causing mid-window false re-locks.
 
-  // openingClaudeAbove: locked to the FIRST liveDirection.aboveKalshi reading per window.
-  // Uses liveDirection (direct binary ABOVE/BELOW from Claude) rather than
-  // trackerSnapshot.aboveKalshi (Claude's extended-thinking price → strike mapping).
-  // Reason: Auto-Pilot's live direction uses liveDirection?.aboveKalshi as its primary
-  // signal, so the AT OPEN call must use the same signal to be consistent with what
-  // the user was seeing on screen at window open.  liveDirection also fires AFTER the
-  // stat snap confirms the Kalshi target, ensuring Claude answers against the right strike.
+  const openingStatAbove: boolean | null = statSnapshot?.aboveKalshi ?? null;
+
+  const [openingMlAbove,     setOpeningMlAbove]     = useState<boolean | null>(null);
   const [openingClaudeAbove, setOpeningClaudeAbove] = useState<boolean | null>(null);
-  const claudeLockedRef     = useRef<boolean>(false);
-  const prevClaudeTickerRef = useRef<string | undefined>(undefined);
+  const mlLockedRef     = useRef<boolean>(false);
+  const claudeLockedRef = useRef<boolean>(false);
+  const prevTickerRef   = useRef<string | undefined>(undefined);
+
+  const eventTicker = ktd?.eventTicker;
+
+  // New window → reset all opening-call locks immediately.
+  useEffect(() => {
+    if (!eventTicker) return;
+    if (eventTicker === prevTickerRef.current) return;
+    prevTickerRef.current  = eventTicker;
+    mlLockedRef.current    = false;
+    claudeLockedRef.current = false;
+    setOpeningMlAbove(null);
+    setOpeningClaudeAbove(null);
+  }, [eventTicker]);
+
+  // Once statSnapshot arrives (≈30s gate), lock Claude and ML to whatever they
+  // read at that moment.  If either hasn't produced data yet, re-run each time
+  // that model's value updates until both are captured.
+  const snapKey = statSnapshot?.snappedAt;   // stable per-window scalar dep
+  useEffect(() => {
+    if (!snapKey) return;   // stat snap not yet available — stay in "calculating"
+    if (!claudeLockedRef.current) {
+      const abv = liveDirection?.aboveKalshi;
+      if (abv !== null && abv !== undefined) {
+        setOpeningClaudeAbove(abv);
+        claudeLockedRef.current = true;
+      }
+    }
+    if (!mlLockedRef.current) {
+      if (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined) {
+        setOpeningMlAbove(mlPred.above);
+        mlLockedRef.current = true;
+      }
+    }
+  }, [snapKey, liveDirection?.aboveKalshi, mlPred?.ready, mlPred?.above]);
 
   // ── Force-refresh confirmation ────────────────────────────────────────────
   const [statJustRefreshed, setStatJustRefreshed] = useState(false);
@@ -2874,60 +2913,6 @@ function CoinDetail({
     if (statRefreshTimerRef.current) clearTimeout(statRefreshTimerRef.current);
     statRefreshTimerRef.current = setTimeout(() => setStatJustRefreshed(false), 2000);
   }
-
-  // New Kalshi window → reset the ML and Claude opening-call locks.
-  // Key off ktd.eventTicker (Kalshi's own stable window ID) NOT statSnapshot.snappedAt.
-  // snappedAt is an in-memory server value; a server restart mid-window creates a new
-  // snapshot with a new timestamp, falsely triggering a re-lock with the wrong value.
-  const eventTicker = ktd?.eventTicker;
-
-  // ── ML opening-call lock ──────────────────────────────────────────────────
-  useEffect(() => {
-    if (!eventTicker) return;
-    if (eventTicker === prevTickerRef.current) return;
-    prevTickerRef.current = eventTicker;
-    mlLockedRef.current = false;
-    if (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined) {
-      setOpeningMlAbove(mlPred.above);
-      mlLockedRef.current = true;
-    } else {
-      setOpeningMlAbove(null);
-    }
-  }, [eventTicker, mlPred?.ready, mlPred?.above]);
-
-  useEffect(() => {
-    if (mlLockedRef.current) return;
-    if (!mlPred?.ready || mlPred.above === null || mlPred.above === undefined) return;
-    setOpeningMlAbove(mlPred.above);
-    mlLockedRef.current = true;
-  }, [mlPred?.ready]);
-
-  // ── Claude opening-call lock ──────────────────────────────────────────────
-  // Locked to the FIRST liveDirection.aboveKalshi reading after the stat snap.
-  // liveDirection fires AFTER the stat snap (confirmed Kalshi target) and gives
-  // a direct binary ABOVE/BELOW — the same signal Auto-Pilot uses live, so the
-  // AT OPEN call matches what the user was seeing on screen at window open.
-  useEffect(() => {
-    if (!eventTicker) return;
-    if (eventTicker === prevClaudeTickerRef.current) return;
-    prevClaudeTickerRef.current = eventTicker;
-    claudeLockedRef.current = false;
-    const abv = liveDirection?.aboveKalshi;
-    if (abv !== null && abv !== undefined) {
-      setOpeningClaudeAbove(abv);
-      claudeLockedRef.current = true;
-    } else {
-      setOpeningClaudeAbove(null);
-    }
-  }, [eventTicker, liveDirection?.aboveKalshi]);
-
-  useEffect(() => {
-    if (claudeLockedRef.current) return;
-    const abv = liveDirection?.aboveKalshi;
-    if (abv === null || abv === undefined) return;
-    setOpeningClaudeAbove(abv);
-    claudeLockedRef.current = true;
-  }, [liveDirection?.aboveKalshi]);
 
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
