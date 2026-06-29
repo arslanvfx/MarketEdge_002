@@ -24,6 +24,7 @@ import {
   getTrackerWindowCall,
   getStatWindowCall,
   getWindowBetSignal,
+  getKalshiWindowContext,
   fetchLiveDirection,
   getTradingWindows,
   getCachedPrediction,
@@ -509,8 +510,9 @@ router.get("/crypto/ml-prediction/:symbol", async (req, res) => {
   if (kalshiTarget == null) return res.json(base);
 
   // Elapsed fraction in the current 15-min window.
-  const elapsed   = Math.min((now - windowMs) / QUARTER_MS, 1);
-  const features  = extractMLFeatures(cached, kalshiTarget, elapsed);
+  const elapsed      = Math.min((now - windowMs) / QUARTER_MS, 1);
+  const priceAtOpen  = getKalshiWindowContext(symbol)?.priceAtOpen ?? null;
+  const features     = extractMLFeatures(cached, kalshiTarget, elapsed, priceAtOpen);
   const { prediction } = getMLPrediction(symbol, features);
 
   return res.json({

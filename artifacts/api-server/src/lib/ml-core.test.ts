@@ -60,10 +60,11 @@ test("applyHydratedModel: coin is not ready when windows < MIN_TRAINING_WINDOWS"
   assert.equal(s.valAccuracy, null);
 });
 
-test("applyHydratedModel: falls back to zero weights when wrong length provided", () => {
-  applyHydratedModel("BTC", [1, 2, 3], 10, null); // wrong length → reset
+test("applyHydratedModel: resets windows + weights when wrong length provided", () => {
+  applyHydratedModel("BTC", [1, 2, 3], 10, null); // wrong length → full reset
   const s = getStatus("BTC");
-  assert.equal(s.windows, 10); // window count still applied
+  assert.equal(s.windows, 0); // window count discarded with stale weights
+  assert.equal(s.ready, false);
 });
 
 // ── applyLabeledSnapshot ──────────────────────────────────────────────────────

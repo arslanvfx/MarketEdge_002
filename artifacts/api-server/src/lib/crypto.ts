@@ -2809,7 +2809,8 @@ export function startPredictionTracker(): void {
             // Only captured when a Kalshi target is known (required feature).
             if (kalshiTargetSnap != null) {
               const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
-              const mlFeatures = extractMLFeatures(analysis, kalshiTargetSnap, elapsed);
+              const priceAtOpen = getKalshiWindowContext(sym)?.priceAtOpen ?? null;
+              const mlFeatures = extractMLFeatures(analysis, kalshiTargetSnap, elapsed, priceAtOpen);
               captureMLSnapshot(sym, targetISO, mlFeatures, elapsed);
             }
 
@@ -2978,7 +2979,8 @@ export function startPredictionTracker(): void {
                 const mlStatus = getMLStatus(sym);
                 if (mlStatus.ready) {
                   const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
-                  const mlFeatures = extractMLFeatures(analysis, kalshiTarget, elapsed);
+                  const priceAtOpen = getKalshiWindowContext(sym)?.priceAtOpen ?? null;
+                  const mlFeatures = extractMLFeatures(analysis, kalshiTarget, elapsed, priceAtOpen);
                   const mlResult = getMLPrediction(sym, mlFeatures);
                   if (mlResult.prediction?.above !== null && mlResult.prediction?.above !== undefined) {
                     const mlAbove = mlResult.prediction.above;

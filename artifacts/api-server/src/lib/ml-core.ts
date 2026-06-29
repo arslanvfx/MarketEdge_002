@@ -69,10 +69,21 @@ export function applyHydratedModel(
   windows: number,
   valAcc:  number | null,
 ): void {
-  const s    = getOrCreate(symbol);
-  s.weights  = weights.length === N_FEATURES + 1 ? weights : initWeights();
-  s.windows  = windows;
-  s.valAcc   = valAcc;
+  const s = getOrCreate(symbol);
+  if (weights.length === N_FEATURES + 1) {
+    // Weights match the current feature count — restore the model as-is.
+    s.weights = weights;
+    s.windows = windows;
+    s.valAcc  = valAcc;
+  } else {
+    // Feature vector size changed (model version bump).  Discard the old
+    // weights AND the old window count so the model re-warms from scratch
+    // with the new features.  Leaving a stale window count would make the
+    // model appear "ready" while actually running on random weights.
+    s.weights = initWeights();
+    s.windows = 0;
+    s.valAcc  = null;
+  }
 }
 
 /**

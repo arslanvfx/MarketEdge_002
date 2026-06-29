@@ -1,10 +1,13 @@
 // Pure feature extraction — no DB, no side effects.
-// Converts the live CoinPrediction snapshot into a normalized 12-element vector
+// Converts the live CoinPrediction snapshot into a normalized 14-element vector
 // suitable for logistic regression. Every feature is in the range [-1, 1] or [0, 1].
+//
+// v2 (14 features): added windowPriceDriftNorm + recentMom2 so the model can
+// see intra-window momentum — the most important signal for "is this trend real?"
 
 import type { CoinPrediction } from "./crypto";
 
-export const N_FEATURES = 12;
+export const N_FEATURES = 14;
 
 export const FEATURE_NAMES = [
   "elapsedFraction",      //  0: how far into the 15-min window (0→1)
@@ -19,6 +22,8 @@ export const FEATURE_NAMES = [
   "strikeProximityNorm",  //  9: |price-strike| / ATR14 / 3, clipped 0→1
   "atrNorm",              // 10: ATR14 as % of price / 2%, clipped 0→1
   "momentumDir",          // 11: 1=up drift, 0=flat, encoded 0/0.5/1
+  "windowPriceDriftNorm", // 12: (price-priceAtWindowOpen)/priceAtOpen*100/2%, clipped ±1
+  "recentMom2",           // 13: (lastCandle.close - prevCandle.close)/ATR14, clipped ±1
 ] as const;
 
 function clip(v: number, lo: number, hi: number): number {
@@ -27,17 +32,20 @@ function clip(v: number, lo: number, hi: number): number {
 }
 
 /**
- * Extract the normalized 12-element feature vector from a live coin snapshot.
- * @param coin         Full CoinPrediction (price + indicators)
- * @param kalshiTarget The Kalshi strike for the current 15-min window
+ * Extract the normalized 14-element feature vector from a live coin snapshot.
+ * @param coin          Full CoinPrediction (price + indicators + candles)
+ * @param kalshiTarget  The Kalshi strike for the current 15-min window
  * @param elapsedFraction  Time elapsed in window / 900s (0 at open, 1 at close)
+ * @param priceAtOpen   Coin price recorded when this window opened (from getKalshiWindowContext).
+ *                      Pass null/undefined if not yet available — features 12 will be 0.
  */
 export function extractMLFeatures(
   coin: CoinPrediction,
   kalshiTarget: number,
   elapsedFraction: number,
+  priceAtOpen?: number | null,
 ): number[] {
-  const { price, indicators } = coin;
+  const { price, indicators, candles } = coin;
   const {
     efficiencyRatio,
     bbPctB,
@@ -54,6 +62,24 @@ export function extractMLFeatures(
   const atrPct       = price > 0 ? (atr14 / price) * 100 : 0;
   const drift        = netDriftPct ?? 0;
 
+  // Feature 12: live drift from window-open price.
+  // A $300 BTC drop on a $60k open is -0.5% → normalized to -0.25.
+  // At ±2% normalization, a strong directional move fills the whole range.
+  const windowDrift =
+    priceAtOpen && priceAtOpen > 0
+      ? ((price - priceAtOpen) / priceAtOpen) * 100
+      : 0;
+
+  // Feature 13: 2-candle recent momentum relative to ATR.
+  // Positive = most recent 1-min candle moved up; negative = moved down.
+  // Captures instantaneous price velocity, not averaged over the whole window.
+  const lastCandle = candles[candles.length - 1];
+  const prevCandle = candles[candles.length - 2];
+  const recentMom2 =
+    lastCandle && prevCandle && atr14 > 0
+      ? (lastCandle.close - prevCandle.close) / atr14
+      : 0;
+
   return [
     clip(elapsedFraction, 0, 1),               //  0
     clip(pctVsStrike / 5, -1, 1),              //  1: ±5% → ±1
@@ -67,5 +93,7 @@ export function extractMLFeatures(
     clip(atrProximity / 3, 0, 1),              //  9
     clip(atrPct / 2, 0, 1),                    // 10
     drift > 0.1 ? 1 : drift < -0.1 ? 0 : 0.5, // 11
+    clip(windowDrift / 2, -1, 1),              // 12: ±2% → ±1
+    clip(recentMom2, -1, 1),                   // 13
   ];
 }

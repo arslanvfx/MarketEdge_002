@@ -9,7 +9,7 @@
 //   - SGD shuffle + multiple epochs converge reliably for N<10k examples.
 //   - MIN_TRAINING_WINDOWS = 30 keeps the model silent while data is thin.
 
-export const N_FEATURES       = 12;
+export const N_FEATURES       = 14;
 export const MIN_TRAINING_WINDOWS = 30;  // windows before predictions surface
 
 const LEARNING_RATE = 0.05;
@@ -28,7 +28,7 @@ export interface TrainingExample {
   label:    number;    // 1 = actual above strike, 0 = below
 }
 
-/** [bias, w1, …, w12] — length N_FEATURES + 1 */
+/** [bias, w1, …, w14] — length N_FEATURES + 1 */
 export type Weights = number[];
 
 export function initWeights(): Weights {
