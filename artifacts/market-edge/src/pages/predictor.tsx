@@ -223,6 +223,7 @@ interface TrackerWindowCall {
   predictedPrice: number;
   confidence: number;
   snappedAt: string;
+  strikeProximityPct?: number | null;
 }
 
 interface LiveDirectionResult {
@@ -1788,6 +1789,22 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                         <span>${formatPrice(rec.kalshiTarget!)}</span>
                       </div>
                     )}
+                    {hasTarget && rec.priceAtSnapshot != null && rec.kalshiTarget != null && (() => {
+                      const p = Math.abs(rec.priceAtSnapshot - rec.kalshiTarget) / rec.priceAtSnapshot * 100;
+                      const cls = p >= 0.2
+                        ? "text-emerald-400/70"
+                        : p >= 0.1
+                        ? "text-amber-400/70"
+                        : "text-red-400/70";
+                      const bucket = p >= 0.2 ? "edge" : p >= 0.1 ? "mod" : "line";
+                      return (
+                        <div className={`flex items-center gap-1 ${cls}`} title={`${p.toFixed(3)}% from Kalshi strike at snap`}>
+                          <span className="opacity-70">Prox</span>
+                          <span className="font-medium tabular-nums">{p.toFixed(2)}%</span>
+                          <span className="opacity-60 text-[9px]">{bucket}</span>
+                        </div>
+                      );
+                    })()}
                     <div className="flex items-center gap-1 text-muted-foreground">
                       <span className="opacity-60">Error</span>
                       {isPending ? (
@@ -3611,6 +3628,28 @@ function CoinDetail({
                               })} ET
                             </span>
                           </div>
+
+                          {/* Strike proximity chip — green=clear edge (>0.2%), amber=moderate (0.1-0.2%), red=on the line (<0.1%) */}
+                          {statSnapshot.strikeProximityPct != null && (() => {
+                            const p = statSnapshot.strikeProximityPct!;
+                            const isEdge = p >= 0.2;
+                            const isMod  = p >= 0.1 && p < 0.2;
+                            const cls = isEdge
+                              ? "bg-emerald-500/10 text-emerald-400 ring-emerald-500/25"
+                              : isMod
+                              ? "bg-amber-500/10 text-amber-400 ring-amber-500/25"
+                              : "bg-red-500/10 text-red-400/80 ring-red-500/20";
+                            const label = isEdge
+                              ? `${p.toFixed(2)}% from strike — clear edge`
+                              : isMod
+                              ? `${p.toFixed(2)}% from strike — moderate`
+                              : `${p.toFixed(2)}% from strike — on the line`;
+                            return (
+                              <div className={`inline-flex items-center rounded-md ring-1 px-2 py-1 text-[9px] font-medium shrink-0 ${cls}`}>
+                                {label}
+                              </div>
+                            );
+                          })()}
 
                           {openingStatAbove !== null && (
                             <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${

@@ -1202,8 +1202,16 @@ export function computeEnsemble(
   referencePrice: number,
 ): EnsembleCall {
   const weights = ensembleWeights(symbol, regime);
-  const predictedPrice = weights.stat * stat.predictedPrice + weights.claude * claude.predictedPrice;
-  const confidence = Math.round(weights.stat * stat.confidence + weights.claude * claude.confidence);
+  // Asymmetric down-weighting: Claude "down" calls are empirically weaker
+  // across coins (ETH claude-down: 36%, HYPE claude-down: 52%) vs "up" calls
+  // (ETH: 61%, HYPE: 76.5%). When Claude calls "down", reduce its blend share
+  // by 30% and redistribute the difference to stat, so the ensemble leans on
+  // the more reliable stat model for downside calls.
+  const claudeDownScale = claude.direction === "down" ? 0.70 : 1.0;
+  const effectiveClaudeW = weights.claude * claudeDownScale;
+  const effectiveStatW = weights.stat + (weights.claude - effectiveClaudeW);
+  const predictedPrice = effectiveStatW * stat.predictedPrice + effectiveClaudeW * claude.predictedPrice;
+  const confidence = Math.round(effectiveStatW * stat.confidence + effectiveClaudeW * claude.confidence);
   const changePct = referencePrice > 0 ? ((predictedPrice - referencePrice) / referencePrice) * 100 : 0;
   const direction: "up" | "down" | "flat" =
     changePct > 0.05 ? "up" : changePct < -0.05 ? "down" : "flat";
@@ -3290,6 +3298,7 @@ export interface TrackerWindowCall {
   predictedPrice: number;
   confidence: number;
   snappedAt: string;
+  strikeProximityPct: number | null;
 }
 
 // Returns the tracker's Claude record for the CURRENT window, if one has been
@@ -3306,12 +3315,17 @@ export function getTrackerWindowCall(symbol: string): TrackerWindowCall | null {
   const predPrice = Number(rec.predictedPrice);
   const aboveKalshi =
     rec.kalshiTarget != null ? predPrice >= Number(rec.kalshiTarget) : null;
+  const strikeProximityPct =
+    rec.kalshiTarget != null && rec.priceAtSnapshot != null && rec.priceAtSnapshot > 0
+      ? Math.abs(rec.priceAtSnapshot - rec.kalshiTarget) / rec.priceAtSnapshot * 100
+      : null;
   return {
     direction: rec.predictedDirection as "up" | "down" | "flat",
     aboveKalshi,
     predictedPrice: predPrice,
     confidence: rec.confidence,
     snappedAt: rec.snappedAt,
+    strikeProximityPct,
   };
 }
 
@@ -3319,8 +3333,20 @@ export function getTrackerWindowCall(symbol: string): TrackerWindowCall | null {
 // opening call, locked at first snap (30–90 s after window open). Used to show
 // a committed ABOVE/BELOW that doesn't flip with live candle jitter.
 export function getStatWindowCall(symbol: string): TrackerWindowCall | null {
+  const nowMs = Date.now();
   const records = historyStore.get(symbol.toUpperCase()) ?? [];
-  return computeStatWindowCall(records, Date.now());
+  const result = computeStatWindowCall(records, nowMs);
+  if (!result) return null;
+  // computeStatWindowCall operates on the minimal SnapRecord shape, so
+  // priceAtSnapshot (needed for proximity) is not in its result. Look up
+  // the raw record directly to compute it.
+  const targetISO = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS).toISOString();
+  const rec = records.find((r) => r.targetTime === targetISO && r.source === "stat");
+  const strikeProximityPct =
+    rec != null && rec.kalshiTarget != null && rec.priceAtSnapshot != null && rec.priceAtSnapshot > 0
+      ? Math.abs(rec.priceAtSnapshot - rec.kalshiTarget) / rec.priceAtSnapshot * 100
+      : null;
+  return { ...result, strikeProximityPct };
 }
 
 // ---------------------------------------------------------------------------
