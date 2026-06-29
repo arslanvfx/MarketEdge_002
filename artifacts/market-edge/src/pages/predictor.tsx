@@ -3554,7 +3554,16 @@ function CoinDetail({
                             ) : `${mlPred.windows}w · learning`}
                           </div>
                         </>
+                      ) : mlPred.ready ? (
+                        // Model is trained but window is expired or prediction not yet available
+                        <div className="text-[11px] text-muted-foreground/50 italic mt-1">
+                          Awaiting window…
+                          <div className="text-[10px] text-sky-400/40 mt-1 not-italic tabular-nums">
+                            {mlPred.windows}w collected
+                          </div>
+                        </div>
                       ) : (
+                        // Still accumulating training data
                         <>
                           <div className="text-[11px] text-muted-foreground/60 mb-2">Training…</div>
                           <div className="w-full bg-muted/30 rounded-full h-1.5 mx-auto max-w-[80px]">
