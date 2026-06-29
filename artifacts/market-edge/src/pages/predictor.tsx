@@ -3951,15 +3951,19 @@ function CoinDetail({
                       })();
                       const apFlippedMid = openingAutoPilotAbove !== null && autoPilotAbove !== null
                         && openingAutoPilotAbove !== autoPilotAbove;
-                      // openingMlAbove is locked at first ML reading per window — never flips
-                      const mlFlippedMid = openingMlAbove !== null && mlPred?.above !== null && mlPred?.above !== undefined
-                        && openingMlAbove !== mlPred.above;
+                      // ML opening call: prefer locked state, fall back to current mlPred if
+                      // the lock somehow missed (e.g. mlPred arrived before eventTicker).
+                      const mlAboveOpen = openingMlAbove
+                        ?? (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined
+                          ? mlPred.above : null);
+                      const mlFlippedMid = mlAboveOpen !== null && mlPred?.above !== null && mlPred?.above !== undefined
+                        && mlAboveOpen !== mlPred.above;
                       // Combined at-open: majority vote of all locked opening signals (stat + auto-pilot + claude + ML)
                       const atOpenSignals: boolean[] = [
                         ...(openingStatAbove       !== null ? [openingStatAbove]       : []),
                         ...(openingAutoPilotAbove  !== null ? [openingAutoPilotAbove]  : []),
                         ...(claudeAboveOpen        !== null ? [claudeAboveOpen]        : []),
-                        ...(openingMlAbove         !== null ? [openingMlAbove]         : []),
+                        ...(mlAboveOpen             !== null ? [mlAboveOpen]             : []),
                       ];
                       const atOpenAbove = atOpenSignals.filter(Boolean).length;
                       const atOpenBelow = atOpenSignals.length - atOpenAbove;
@@ -4053,13 +4057,13 @@ function CoinDetail({
                             </div>
                           )}
 
-                          {openingMlAbove !== null && (
+                          {mlAboveOpen !== null && (
                             <div className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-semibold ring-1 ${
-                              openingMlAbove
+                              mlAboveOpen
                                 ? "bg-emerald-500/6 text-emerald-400/70 ring-emerald-500/15"
                                 : "bg-red-500/6 text-red-400/70 ring-red-500/15"
                             }`}>
-                              {openingMlAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                              {mlAboveOpen ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
                               <span className="text-sky-300/80">ML</span>
                               {mlFlippedMid && (
                                 <span className="ml-0.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 rounded px-1">
