@@ -2875,8 +2875,12 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         //     at 1, 3, 6, 9, 12-minute marks.  Only written when a confirmed
         //     Kalshi target exists (stat record already snapped for this window).
         //     Keyed per-symbol so accuracy curves reflect each coin's volatility.
+        //     TOLERANCE: only write if we're within 90 s of the mark boundary
+        //     (2 tick periods).  This prevents a post-restart tick from writing
+        //     all elapsed marks with stale current prices.
         {
-          const TIMING_MARKS_S = [60, 180, 360, 540, 720];
+          const TIMING_MARKS_S    = [60, 180, 360, 540, 720];
+          const MARK_TOLERANCE_MS = 90_000; // max ms past the mark boundary to still record
           const timingWKey = new Date(windowStartMs).toISOString().slice(0, 16);
           const statRecTiming = records.find(
             (r) => r.source === "stat" && r.targetTime === targetISO && r.kalshiTarget != null,
@@ -2889,7 +2893,9 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
             const statAboveTiming = statRecTiming.predictedPrice >= kt;
             const ensAboveTiming  = ensRecTiming != null ? ensRecTiming.predictedPrice >= kt : null;
             for (const markS of TIMING_MARKS_S) {
-              if (timeIntoWindow >= markS * 1000) {
+              const markMs   = markS * 1000;
+              const lateness = timeIntoWindow - markMs;
+              if (lateness >= 0 && lateness <= MARK_TOLERANCE_MS) {
                 const timingKey = `${sym}:${timingWKey}:${markS}`;
                 if (!timingSnapshotWritten.has(timingKey)) {
                   timingSnapshotWritten.add(timingKey);

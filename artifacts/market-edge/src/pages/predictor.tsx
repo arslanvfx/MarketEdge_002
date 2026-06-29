@@ -2667,6 +2667,120 @@ export default function Predictor() {
           </div>
         )}
 
+        {/* ── ENTRY TIMING ANALYSIS ── */}
+        {kalshiAvailableTop && (() => {
+          const rows = timingAnalysisQuery.data ?? [];
+          const totalSamples = rows.reduce((s, r) => s + r.sampleCount, 0);
+          const MIN_WINDOWS = 10;
+          const collecting = totalSamples < MIN_WINDOWS;
+          // Best row = highest positive EV; fallback to highest accuracy when EV unavailable
+          const bestByEv = rows.reduce<TimingAnalysisRow | null>(
+            (acc, r) => (r.ev !== null && (acc === null || (acc.ev ?? -Infinity) < r.ev) ? r : acc),
+            null,
+          );
+          const bestByAcc = rows.reduce<TimingAnalysisRow | null>(
+            (acc, r) => (r.accuracy !== null && (acc === null || (acc.accuracy ?? 0) < r.accuracy) ? r : acc),
+            null,
+          );
+          const best = bestByEv ?? bestByAcc;
+          if (rows.length === 0 && !timingAnalysisQuery.isLoading) return null;
+          return (
+            <div className="mt-4 rounded-lg border border-purple-800/40 bg-purple-950/20 overflow-hidden">
+              <button
+                onClick={() => setTimingAnalysisOpen((v) => !v)}
+                className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-purple-900/20 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Timer className="h-4 w-4 text-purple-400" />
+                  <span className="text-sm font-semibold text-purple-300">Entry Timing Analysis</span>
+                  {collecting ? (
+                    <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-purple-900/40 text-purple-400">
+                      Collecting data… ({totalSamples}/{MIN_WINDOWS} windows)
+                    </span>
+                  ) : best !== null ? (
+                    <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-purple-900/60 text-purple-200">
+                      Best entry: ~{best.label} into window
+                    </span>
+                  ) : null}
+                  {timingAnalysisQuery.isLoading && (
+                    <Loader2 className="h-3 w-3 animate-spin text-purple-400 ml-1" />
+                  )}
+                </div>
+                {timingAnalysisOpen ? (
+                  <ChevronUp className="h-4 w-4 text-purple-400" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-purple-400" />
+                )}
+              </button>
+
+              {timingAnalysisOpen && (
+                <div className="px-4 pb-4 pt-1">
+                  <p className="text-xs text-purple-300/70 mb-3">
+                    How often the price-vs-strike direction at each minute mark matched the final outcome. Higher accuracy and positive EV indicate a reliable entry signal for {selected}.
+                  </p>
+                  {collecting ? (
+                    <p className="text-xs text-purple-300/50 italic">
+                      Evaluating windows — {totalSamples} of {MIN_WINDOWS} needed for reliable curves. Check back after a few more 15-minute windows close.
+                    </p>
+                  ) : rows.length === 0 ? (
+                    <p className="text-xs text-gray-500 italic">No evaluated windows yet.</p>
+                  ) : (
+                    <>
+                      {best && (
+                        <div className="mb-3 text-xs text-emerald-300/90 font-medium">
+                          Best entry: ~{best.label} into the window
+                          {best.accuracy !== null && ` (${Math.round(best.accuracy * 100)}% accurate`}
+                          {best.ev !== null ? `, EV ${best.ev > 0 ? "+" : ""}${(best.ev * 100).toFixed(1)}%)` : best.accuracy !== null ? ")" : ""}
+                        </div>
+                      )}
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-purple-400/70 border-b border-purple-800/30">
+                            <th className="text-left pb-1.5 font-medium">Mark</th>
+                            <th className="text-right pb-1.5 font-medium">Accuracy</th>
+                            <th className="text-right pb-1.5 font-medium">EV</th>
+                            <th className="text-right pb-1.5 font-medium">n</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rows.map((row) => {
+                            const acc = row.accuracy ?? 0;
+                            const pct = Math.round(acc * 100);
+                            const isPositive = acc >= 0.55;
+                            const isNegative = acc < 0.45;
+                            const isBest = row.minuteMark === best?.minuteMark;
+                            const evSign = row.ev !== null && row.ev > 0 ? "+" : "";
+                            return (
+                              <tr
+                                key={row.minuteMark}
+                                className={`border-b border-purple-900/20 last:border-0 ${isBest ? "bg-emerald-950/30" : ""}`}
+                              >
+                                <td className={`py-1.5 font-mono ${isBest ? "text-emerald-300 font-semibold" : "text-purple-200"}`}>
+                                  {row.label}{isBest && " ★"}
+                                </td>
+                                <td className={`py-1.5 text-right font-semibold ${isPositive ? "text-emerald-400" : isNegative ? "text-red-400" : "text-yellow-400"}`}>
+                                  {pct}%
+                                </td>
+                                <td className={`py-1.5 text-right ${row.ev === null ? "text-gray-600" : row.ev > 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                  {row.ev !== null ? `${evSign}${(row.ev * 100).toFixed(1)}%` : "—"}
+                                </td>
+                                <td className="py-1.5 text-right text-gray-500">{row.sampleCount}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                      <p className="text-xs text-purple-300/40 mt-2">
+                        EV requires Kalshi Yes price data (accumulates over time). Accuracy alone is useful for timing signals.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         <SelfLearningDashboard
           analytics={analyticsQuery.data?.analytics ?? []}
           autoPilot={autoPilot}
@@ -3638,94 +3752,6 @@ function CoinDetail({
                     </div>
                   );
                 })()}
-              </div>
-            );
-          })()}
-
-          {/* ── TIMING ANALYSIS — entry-timing accuracy by minute mark ── */}
-          {kalshiAvailableTop && (() => {
-            const rows = timingAnalysisQuery.data ?? [];
-            if (rows.length === 0 && !timingAnalysisQuery.isLoading) return null;
-            const best = rows.reduce<TimingAnalysisRow | null>(
-              (acc, r) => (r.accuracy !== null && (acc === null || r.accuracy > (acc.accuracy ?? 0)) ? r : acc),
-              null,
-            );
-            return (
-              <div className="mt-3 rounded-lg border border-purple-800/40 bg-purple-950/20 overflow-hidden">
-                <button
-                  onClick={() => setTimingAnalysisOpen((v) => !v)}
-                  className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-purple-900/20 transition-colors"
-                >
-                  <div className="flex items-center gap-2">
-                    <Timer className="h-4 w-4 text-purple-400" />
-                    <span className="text-sm font-semibold text-purple-300">Entry Timing Analysis</span>
-                    {best && best.accuracy !== null && (
-                      <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-purple-900/60 text-purple-200">
-                        Best: {best.label} — {Math.round(best.accuracy * 100)}% acc
-                      </span>
-                    )}
-                    {timingAnalysisQuery.isLoading && (
-                      <Loader2 className="h-3 w-3 animate-spin text-purple-400" />
-                    )}
-                  </div>
-                  {timingAnalysisOpen ? (
-                    <ChevronUp className="h-4 w-4 text-purple-400" />
-                  ) : (
-                    <ChevronDown className="h-4 w-4 text-purple-400" />
-                  )}
-                </button>
-
-                {timingAnalysisOpen && (
-                  <div className="px-4 pb-4 pt-1">
-                    <p className="text-xs text-purple-300/70 mb-3">
-                      How often the price-vs-strike direction at each minute mark matched the final window outcome.
-                      Higher accuracy = better entry timing signal. n = evaluated windows.
-                    </p>
-                    {rows.length === 0 ? (
-                      <p className="text-xs text-gray-500 italic">No evaluated windows yet — data accumulates over time.</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {rows.map((row) => {
-                          const acc = row.accuracy ?? 0;
-                          const pct = Math.round(acc * 100);
-                          const isPositive = acc >= 0.55;
-                          const isNegative = acc < 0.45;
-                          const barColor = isPositive
-                            ? "bg-emerald-500"
-                            : isNegative
-                            ? "bg-red-500"
-                            : "bg-yellow-500";
-                          const evSign = row.ev !== null ? (row.ev > 0 ? "+" : "") : "";
-                          return (
-                            <div key={`${row.symbol}-${row.minuteMark}`} className="flex items-center gap-3">
-                              <span className="text-xs font-mono text-purple-200 w-10 shrink-0">{row.label}</span>
-                              <div className="flex-1 bg-purple-950/60 rounded-full h-2 overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full ${barColor} transition-all`}
-                                  style={{ width: `${pct}%` }}
-                                />
-                              </div>
-                              <span className={`text-xs font-semibold w-10 text-right ${isPositive ? "text-emerald-400" : isNegative ? "text-red-400" : "text-yellow-400"}`}>
-                                {pct}%
-                              </span>
-                              {row.ev !== null ? (
-                                <span className={`text-xs w-14 text-right ${row.ev > 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                  EV {evSign}{(row.ev * 100).toFixed(1)}%
-                                </span>
-                              ) : (
-                                <span className="text-xs w-14 text-right text-gray-600">—</span>
-                              )}
-                              <span className="text-xs text-gray-500 w-8 text-right">n={row.sampleCount}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <p className="text-xs text-purple-300/50 mt-3">
-                      EV assumes flat Kalshi Yes price. Positive EV = edge at that entry minute.
-                    </p>
-                  </div>
-                )}
               </div>
             );
           })()}
