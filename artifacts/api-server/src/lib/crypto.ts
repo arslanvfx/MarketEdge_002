@@ -3646,12 +3646,24 @@ export async function fetchLiveDirection(symbol: string, force = false): Promise
   if (!coin) return null;
 
   try {
-    const [candles, stats, tickerPrice, kalshiTargetVal] = await Promise.all([
+    const [candles, stats, tickerPrice, kalshiTargetFresh] = await Promise.all([
       getCandles(coin.product),
       getStats(coin.product),
       getTicker(coin.product).catch(() => 0),
       KALSHI_SERIES[coin.symbol] ? fetchKalshiTarget(coin.symbol).catch(() => null) : Promise.resolve(null),
     ]);
+    // The Kalshi strike doesn't change mid-window, so a slightly stale cached
+    // value is just as accurate as a fresh one. If the 12-s TTL expired between
+    // polls, fall back to the raw cache entry — as long as the window's
+    // closeTime hasn't passed — so Claude always gets the strike in its prompt.
+    let kalshiTargetVal = kalshiTargetFresh;
+    if (kalshiTargetVal == null && KALSHI_SERIES[coin.symbol]) {
+      const stale = kalshiTargetCache.get(coin.symbol.toUpperCase());
+      if (stale?.value != null) {
+        const ct = stale.closeTime;
+        if (!ct || new Date(ct).getTime() > Date.now()) kalshiTargetVal = stale.value;
+      }
+    }
 
     const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
     const analysis = analyzeCoin(coin, candles, stats, new Date(), livePrice);

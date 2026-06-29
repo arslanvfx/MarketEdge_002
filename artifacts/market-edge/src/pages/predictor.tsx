@@ -2827,9 +2827,13 @@ function CoinDetail({
   const autoPilotAbove: boolean | null = (() => {
     if (!autoPilotDecision || kalshiTarget === null) return null;
     if (autoPilotDecision.active) {
-      return claudeAbove ?? (trackerSnapshot?.aboveKalshi ?? null);
+      // Priority: live mid-window Claude direction → opening Claude call →
+      // live price position (never fall back to a stale window-open snapshot).
+      return liveDirection?.aboveKalshi ?? claudeAbove ?? (livePrice > 0 ? livePrice >= kalshiTarget : null);
     }
-    return statHead ? statHead.predictedPrice >= kalshiTarget : null;
+    // Stat mode: stat model is only computed at window open, so prefer live
+    // price position as the most current signal; fall back to opening call.
+    return liveDirection?.aboveKalshi ?? (livePrice > 0 ? livePrice >= kalshiTarget : (statHead ? statHead.predictedPrice >= kalshiTarget : null));
   })();
   const autoPilotConf: number | null = autoPilotDecision
     ? (autoPilotDecision.active

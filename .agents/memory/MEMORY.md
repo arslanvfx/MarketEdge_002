@@ -19,6 +19,7 @@
 - [ML pipeline architecture](ml-pipeline-arch.md) — logistic regression in ml-model.ts, features in ml-features.ts, orchestration in ml-store.ts; 1 snapshot per window at snap time; 30-window gate; DB survives restarts; endpoint GET /api/crypto/ml-prediction/:symbol
 - [Kalshi route cache negative results](kalshi-cache-negative.md) — do NOT cache available:false in kalshiRouteCache; new window markets take 10-30s to publish; caching the miss hides the Kalshi hub for the full TTL
 - [KALSHI_TARGET_TTL deletion bug](kalshi-target-ttl-bug.md) — const deleted by a nearby edit caused ReferenceError only on cache-hit requests (first request short-circuits &&); silent in dev, 500 in prod
+- [Live direction aboveKalshi null](live-direction-above-null.md) — fetchLiveDirection uses 12s kalshiTargetCache; if TTL expires, Claude gets no strike → aboveKalshi:null; autopilot must use liveDirection first not stale opening snapshot
 - [Auto-pilot architecture](autopilot-architecture.md) — isCoinClaudeEnabled wraps claudeEnabledFor(); coin card badges show real auto-pilot state (Exploring/Claude on/Paused); non-training coins stat-only; autopilot.ts pure decision engine
 - [Soft-clear archivedAt pattern](soft-clear-archived-at.md) — predictionRecordsTable is shared by display AND analytics; never delete for soft-clear; use archivedAt UPDATE + filter only in getPredictionHeadlines()
 - [Proximity & time-of-day calibration](proximity-tod-calibration.md) — thresholds derived from 62+ evaluated records/coin; do NOT revert to old 0.2%/0.1% values
