@@ -3386,9 +3386,22 @@ function CoinDetail({
             const wbs: WindowBetSignal | null = windowBetSignal ?? null;
             if (!wbs) return null;
 
-            const minutesElapsed = wbs.minutesElapsed;
             const isReady = wbs.ready;
             const rec = wbs.recommendation;
+
+            // Client-side time: compute elapsed / remaining from ktd timestamps
+            // so the progress bar ticks every second (now is a 1s state tick)
+            // rather than waiting for the 15s server poll to update minutesElapsed.
+            const winOpenMs  = ktd?.openTime  ? new Date(ktd.openTime).getTime()  : null;
+            const winCloseMs = ktd?.closeTime ? new Date(ktd.closeTime).getTime() : null;
+            const WINDOW_DURATION_MS = 5 * 60_000;
+            const effectiveOpenMs = winOpenMs ?? (winCloseMs ? winCloseMs - WINDOW_DURATION_MS : null);
+            const clientElapsedMs  = effectiveOpenMs != null ? Math.max(0, now.getTime() - effectiveOpenMs) : null;
+            const clientElapsedMin = clientElapsedMs != null ? clientElapsedMs / 60_000 : wbs.minutesElapsed;
+            const clientProgressPct = Math.min(100, (clientElapsedMin / 5) * 100);
+            const clientSecsLeft = winCloseMs != null
+              ? Math.max(0, Math.round((winCloseMs - now.getTime()) / 1000))
+              : null;
 
             const badge = isReady
               ? rec === "bet"
@@ -3404,8 +3417,22 @@ function CoinDetail({
               : "text-amber-400/80"
               : "text-muted-foreground/60";
 
-            const progressPct = Math.min(100, (minutesElapsed / 5) * 100);
-            const minsLeft = Math.max(0, 5 - minutesElapsed);
+            // Elapsed label: show M:SS while monitoring, seconds only when < 60s left
+            const elapsedLabel = (() => {
+              if (clientSecsLeft === null) return `${Math.floor(clientElapsedMin)}/5 min`;
+              const totalSecs = Math.round(clientElapsedMs ?? 0) / 1000;
+              const m = Math.floor(totalSecs / 60);
+              const s = Math.floor(totalSecs % 60);
+              return `${m}:${String(s).padStart(2, "0")} / 5:00`;
+            })();
+            const timeLeftLabel = (() => {
+              if (clientSecsLeft === null) return null;
+              if (clientSecsLeft <= 0) return "almost ready";
+              if (clientSecsLeft < 60) return `${clientSecsLeft}s left`;
+              const m = Math.floor(clientSecsLeft / 60);
+              const s = clientSecsLeft % 60;
+              return s === 0 ? `${m}m left` : `${m}m ${s}s left`;
+            })();
 
             return (
               <div className="px-5 py-3 border-t border-[#00C805]/15">
@@ -3424,17 +3451,17 @@ function CoinDetail({
                   <>
                     <div className="text-[11px] text-muted-foreground/70 mb-2">
                       Watching first 5 min for flip-flopping…{" "}
-                      <span className="text-muted-foreground/50">{minsLeft === 0 ? "almost ready" : `${minsLeft}m left`}</span>
+                      <span className="text-muted-foreground/50">{timeLeftLabel ?? "calculating…"}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <div className="flex-1 h-1.5 rounded-full bg-muted/40 overflow-hidden">
                         <div
-                          className="h-full rounded-full bg-primary/50 transition-all duration-1000"
-                          style={{ width: `${progressPct}%` }}
+                          className="h-full rounded-full bg-primary/50"
+                          style={{ width: `${clientProgressPct}%`, transition: "width 0.9s linear" }}
                         />
                       </div>
                       <span className="text-[10px] text-muted-foreground/50 tabular-nums shrink-0">
-                        {minutesElapsed}/5 min
+                        {elapsedLabel}
                       </span>
                     </div>
                   </>
