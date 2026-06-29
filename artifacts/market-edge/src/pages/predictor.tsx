@@ -2845,7 +2845,6 @@ function CoinDetail({
   // trackerSnapshot.snappedAt changes). These are locked for the full window
   // so the "At open" row never flip-flops mid-window, and they match what the
   // accuracy log records (DB uses onConflictDoNothing — first write wins).
-  const prevSnappedAtRef = useRef<string | null>(null);
   // openingStatAbove is derived directly from statSnapshot (always available
   // within 30s, regardless of whether Claude is running). No state needed —
   // statSnapshot is already a locked DB value (onConflictDoNothing first-write).
@@ -2854,7 +2853,8 @@ function CoinDetail({
       ? statSnapshot.predictedPrice >= kalshiTarget
       : null;
   const [openingMlAbove,  setOpeningMlAbove]  = useState<boolean | null>(null);
-  const mlLockedRef = useRef<boolean>(false); // true once ML is locked for current window
+  const mlLockedRef    = useRef<boolean>(false);          // true once ML is locked for this window
+  const prevTickerRef  = useRef<string | undefined>(undefined); // tracks which Kalshi window we locked for
 
   // ── Force-refresh confirmation ────────────────────────────────────────────
   const [statJustRefreshed, setStatJustRefreshed] = useState(false);
@@ -2866,31 +2866,39 @@ function CoinDetail({
     statRefreshTimerRef.current = setTimeout(() => setStatJustRefreshed(false), 2000);
   }
 
-  // New window detected → reset ML lock. Key off statSnapshot (always present
-  // within 30 s regardless of whether Claude is running) instead of
-  // trackerSnapshot (Claude-only, null when Claude is paused by auto-pilot).
+  // New Kalshi window → reset the ML opening-call lock.
+  // Key off ktd.eventTicker (Kalshi's own stable window ID) NOT statSnapshot.snappedAt.
+  // snappedAt is an in-memory server value; a server restart mid-window creates a new
+  // snapshot with a new timestamp, falsely triggering a re-lock with whatever mlPred.above
+  // happens to be at that moment instead of the true opening call.
+  const eventTicker = ktd?.eventTicker;
   useEffect(() => {
-    if (!statSnapshot) return;
-    if (statSnapshot.snappedAt !== prevSnappedAtRef.current) {
-      prevSnappedAtRef.current = statSnapshot.snappedAt;
-      // Re-lock ML immediately if it's already resolved for this window.
-      if (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined) {
-        setOpeningMlAbove(mlPred.above);
-        mlLockedRef.current = true;
-      } else {
-        setOpeningMlAbove(null);
-        mlLockedRef.current = false;
-      }
+    if (!eventTicker) return;
+    if (eventTicker === prevTickerRef.current) return; // same window, nothing to do
+    prevTickerRef.current = eventTicker;
+    // New window: reset the lock, then immediately re-lock if ML is already ready.
+    mlLockedRef.current = false;
+    if (mlPred?.ready && mlPred.above !== null && mlPred.above !== undefined) {
+      setOpeningMlAbove(mlPred.above);
+      mlLockedRef.current = true;
+    } else {
+      setOpeningMlAbove(null);
     }
-  }, [statSnapshot, mlPred?.ready, mlPred?.above]);
+  // mlPred?.ready / mlPred?.above included so the immediate-lock fires when ML
+  // arrives slightly after the new ticker does, not just when the ticker itself changes.
+  }, [eventTicker, mlPred?.ready, mlPred?.above]);
 
-  // Lock ML direction the first time it's ready in this window
+  // Lock ML direction the FIRST time it becomes ready in the current window.
+  // Deliberately depends only on mlPred?.ready, NOT mlPred?.above — once the
+  // ML model fires its first verdict for a window that verdict is frozen.
+  // If we also depended on mlPred?.above, a mid-window re-prediction would
+  // re-run this effect and, if the guard somehow fails, overwrite the snapshot.
   useEffect(() => {
-    if (mlLockedRef.current) return;           // already locked for this window
+    if (mlLockedRef.current) return;  // already frozen for this window
     if (!mlPred?.ready || mlPred.above === null || mlPred.above === undefined) return;
     setOpeningMlAbove(mlPred.above);
     mlLockedRef.current = true;
-  }, [mlPred?.ready, mlPred?.above]);
+  }, [mlPred?.ready]); // ← only the ready flag; above changes never re-run this
 
   const combinedHead: CombinedCall | null =
     aiEntry?.ensembleWeights && claudeAiPred0 && statHead && livePrice > 0
