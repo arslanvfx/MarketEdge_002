@@ -3473,6 +3473,7 @@ export interface WindowBetSignal {
   minutesElapsed: number;
   recommendation: "bet" | "stay_away" | "caution";
   reason: string;              // one short sentence for the user
+  preWindowER: number | null;  // 90-min pre-window efficiency ratio (primary signal)
   factors: {
     efficiencyRatio: number;
     oscillationCount: number;
@@ -3502,15 +3503,15 @@ export function computeWindowBetSignal(
   const { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct,
           preWindowER, preWindowSpikeFlag } = metrics;
   const factors = { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct };
+  const pER = preWindowER ?? null;
 
   if (minutesElapsed < 5) {
-    return { ready: false, minutesElapsed, recommendation: "caution", reason: "Monitoring…", factors };
+    return { ready: false, minutesElapsed, recommendation: "caution", reason: "Monitoring…", preWindowER: pER, factors };
   }
 
   let recommendation: WindowBetSignal["recommendation"];
   let reason: string;
 
-  const pER = preWindowER ?? null;
   const pSpike = preWindowSpikeFlag ?? false;
 
   if (pER !== null) {
@@ -3558,7 +3559,7 @@ export function computeWindowBetSignal(
     }
   }
 
-  return { ready: true, minutesElapsed, recommendation, reason, factors };
+  return { ready: true, minutesElapsed, recommendation, reason, preWindowER: pER, factors };
 }
 
 // Returns the Window Monitor signal for a coin.  If ≥5 min have elapsed the

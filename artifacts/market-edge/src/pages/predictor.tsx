@@ -231,6 +231,7 @@ interface WindowBetSignal {
   minutesElapsed: number;
   recommendation: "bet" | "stay_away" | "caution";
   reason: string;
+  preWindowER: number | null;
   factors: {
     efficiencyRatio: number;
     oscillationCount: number;
@@ -3394,8 +3395,26 @@ function CoinDetail({
                   </div>
                 )}
 
-                <div className={`flex items-center gap-3 text-[10px] mt-1.5 ${factorColor}`}>
-                  <span>ER <span className="font-bold tabular-nums">{wbs.factors.efficiencyRatio.toFixed(2)}</span></span>
+                <div className={`flex items-center gap-3 text-[10px] mt-1.5 flex-wrap ${factorColor}`}>
+                  {wbs.preWindowER !== null && (
+                    <>
+                      <span className="flex items-center gap-1">
+                        <span className="opacity-60 font-medium">pre-window ER</span>{" "}
+                        <span className="font-bold tabular-nums">{wbs.preWindowER.toFixed(2)}</span>
+                        <span className={`ml-0.5 px-1 py-px rounded text-[9px] font-semibold ${
+                          wbs.preWindowER >= 0.30
+                            ? "bg-emerald-500/15 text-emerald-400"
+                            : wbs.preWindowER >= 0.25
+                            ? "bg-amber-500/15 text-amber-400"
+                            : "bg-red-500/15 text-red-400"
+                        }`}>
+                          {wbs.preWindowER >= 0.30 ? "trending" : wbs.preWindowER >= 0.25 ? "borderline" : "choppy"}
+                        </span>
+                      </span>
+                      <span className="opacity-40">·</span>
+                    </>
+                  )}
+                  <span className="opacity-70">window ER <span className="font-bold tabular-nums">{wbs.factors.efficiencyRatio.toFixed(2)}</span></span>
                   <span className="opacity-40">·</span>
                   <span><span className="font-bold tabular-nums">{wbs.factors.oscillationCount}</span> reversals</span>
                   <span className="opacity-40">·</span>
