@@ -356,7 +356,12 @@ const KALSHI_URL_SLUGS: Record<string, { path: string; label: string }> = {
 };
 
 const kalshiRouteCache = new Map<string, { data: KalshiTargetPayload; fetchedAt: number }>();
-const KALSHI_TARGET_TTL = 15_000; // 15s — catches new 15-min windows quickly
+
+// Per-window Kalshi target cache for the ML prediction endpoint.
+// Key: `${symbol}:${windowMs}` — automatically expires each 15-min boundary.
+// Prevents "Awaiting window…" flicker when the Kalshi API returns a transient
+// null (e.g. the new window's contract hasn't published yet for a few seconds).
+const mlKalshiCache = new Map<string, { target: number; windowMs: number }>();
 
 async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPayload> {
   const series = KALSHI_SERIES[symbol];
@@ -541,7 +546,17 @@ router.get("/crypto/ml-prediction/:symbol", async (req, res) => {
   const QUARTER_MS = 15 * 60_000;
   const windowMs   = Math.floor(now / QUARTER_MS) * QUARTER_MS;
   const nextBoundary = new Date(windowMs + QUARTER_MS);
-  const kalshiTarget = await fetchKalshiTarget(symbol, nextBoundary).catch(() => null);
+  let kalshiTarget = await fetchKalshiTarget(symbol, nextBoundary).catch(() => null);
+  if (kalshiTarget != null) {
+    // Cache the successful fetch for this window boundary.
+    mlKalshiCache.set(symbol, { target: kalshiTarget, windowMs });
+  } else {
+    // Fall back to the cached target if it belongs to the same window.
+    // This suppresses "Awaiting window…" flicker from transient API failures
+    // or the ~30s gap before a new Kalshi contract is published.
+    const cached = mlKalshiCache.get(symbol);
+    if (cached?.windowMs === windowMs) kalshiTarget = cached.target;
+  }
   if (kalshiTarget == null) return res.json(base);
 
   // Elapsed fraction in the current 15-min window.

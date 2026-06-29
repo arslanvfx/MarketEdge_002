@@ -13,7 +13,7 @@
 // Pure in-memory state lives in ml-core.ts (fully unit-testable without DB).
 
 import { db, mlWindowSnapshotsTable, mlModelStateTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { initWeights, type MLPrediction } from "./ml-model.ts";
 import {
   applyHydratedModel,
@@ -26,6 +26,7 @@ import {
   getStatus,
   getAllStatus,
   getCoinState,
+  resetAllState,
 } from "./ml-core.ts";
 
 // Re-export types that callers need
@@ -166,6 +167,38 @@ export async function backfillFromExamples(examples: MLTrainingExample[]): Promi
     const s = getCoinState(sym);
     if (s) await persistModelState(sym, s).catch(() => {});
   }
+}
+
+/**
+ * Returns true if any legacy v1 backfill rows (windowId LIKE 'backfill:%')
+ * exist in the DB.  These rows have degenerate features (elapsed=0.05, all
+ * drift=0) that bias the model.  Used by runMLBackfillIfNeeded to trigger a
+ * fresh re-backfill with improved mid-window features.
+ */
+export async function hasLegacyBackfillRows(): Promise<boolean> {
+  try {
+    const rows = await db
+      .select({ n: mlWindowSnapshotsTable.id })
+      .from(mlWindowSnapshotsTable)
+      .where(sql`window_id LIKE 'backfill:%' AND window_id NOT LIKE 'backfill_v2:%'`)
+      .limit(1);
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Wipe all ML training state from both DB and in-memory store.
+ * Called when stale/biased backfill data is detected so the model can
+ * re-learn from scratch with properly-formed training examples.
+ */
+export async function clearMLData(): Promise<void> {
+  await Promise.all([
+    db.delete(mlWindowSnapshotsTable).catch(() => {}),
+    db.delete(mlModelStateTable).catch(() => {}),
+  ]);
+  resetAllState();
 }
 
 // ── DB helpers ───────────────────────────────────────────────────────────────

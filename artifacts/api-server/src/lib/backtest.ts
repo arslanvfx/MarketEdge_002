@@ -328,10 +328,21 @@ async function backtestCoin(
       if (sig.ready) betSignal = sig.recommendation;
     }
 
-    // 14-feature vector at simulated snap time (elapsed=0.05 ≈ 45s into window).
-    // Feature 12 (windowPriceDriftNorm) = 0 since we're at the window open.
-    // Feature 13 (recentMom2) uses the last 2 pre-window candles — valid for training.
-    const mlFeatures = extractMLFeatures(cp, openPrice, 0.05, openPrice);
+    // Use a mid-window candle (~T+7min, elapsed≈0.47) so training features have
+    // real variance in priceVsStrike, aboveStrike and windowPriceDrift.
+    // Without this, all 96 backfill examples have those features ≈ 0 (degenerate)
+    // and the model can't react to intra-window price moves in live inference.
+    const SNAP_OFFSET_SEC = 7 * 60; // T+7min
+    const midT = open + SNAP_OFFSET_SEC;
+    // Tolerant lookup: try exact tick, then ±1 minute.
+    const midCandle = byT.get(midT) ?? byT.get(midT + 60) ?? byT.get(midT - 60);
+    const snapPrice   = midCandle ? midCandle.c : openPrice;
+    const snapElapsed = midCandle ? SNAP_OFFSET_SEC / WINDOW_SEC : 0.05;
+    // Synthetic snapshot: pre-window regime indicators + actual mid-window price.
+    // Mirrors live inference where indicators roll over the 90-min history but
+    // price is the live feed.
+    const cpSnap = { ...cp, price: snapPrice };
+    const mlFeatures = extractMLFeatures(cpSnap, openPrice, snapElapsed, openPrice);
 
     results.push({
       symbol: coin.symbol,
@@ -473,10 +484,12 @@ export async function generateMLTrainingExamples(
   const { results } = await runRawBacktest(opts);
   return results.map((r) => ({
     symbol: r.symbol,
-    windowId: `backfill:${r.symbol}:${r.windowIso}`,
+    // v2 prefix: distinguishes improved mid-window features from the old v1
+    // backfill that used window-open-only (elapsed=0.05, all-drift=0) features.
+    windowId: `backfill_v2:${r.symbol}:${r.windowIso}`,
     features: r.mlFeatures,
     outcome: r.actualAbove ? 1 : 0,
-    elapsedFraction: 0.05,
+    elapsedFraction: 7 / 15, // ~0.47 — matches SNAP_OFFSET_SEC / WINDOW_SEC
   }));
 }
 
