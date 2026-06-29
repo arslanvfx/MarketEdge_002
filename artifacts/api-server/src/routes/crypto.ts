@@ -24,10 +24,10 @@ import {
   getTrackerWindowCall,
   getStatWindowCall,
   getWindowBetSignal,
-  getKalshiWindowContext,
   fetchLiveDirection,
   getTradingWindows,
   getCachedPrediction,
+  getWindowMonitorAccuracy,
 } from "../lib/crypto";
 import { getMLPrediction, getMLStatus } from "../lib/ml-store";
 import { extractMLFeatures } from "../lib/ml-features";
@@ -536,6 +536,23 @@ router.get("/crypto/trading-windows", async (req, res) => {
     res.json(await getTradingWindows(symbol));
   } catch (err) {
     res.status(500).json({ error: "Failed to compute trading windows" });
+  }
+});
+
+// Window Monitor accuracy stats for a single coin over the last N days.
+// Returns per-recommendation counts and accuracy ratios.
+router.get("/crypto/window-monitor-accuracy/:symbol", async (req, res) => {
+  const symbol = (req.params.symbol ?? "").toUpperCase();
+  if (!CRYPTO_COINS.find((c) => c.symbol === symbol)) {
+    res.status(404).json({ error: "Unknown symbol" });
+    return;
+  }
+  try {
+    const days = Number(req.query.days ?? 7);
+    const stats = await getWindowMonitorAccuracy(symbol, isNaN(days) ? 7 : days);
+    res.json(stats);
+  } catch {
+    res.status(500).json({ error: "Failed to fetch window monitor accuracy" });
   }
 });
 

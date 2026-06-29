@@ -239,6 +239,14 @@ interface WindowBetSignal {
   };
 }
 
+interface WMAccuracyStats {
+  bet: { total: number; correct: number; accuracy: number | null };
+  stay_away: { total: number; correct: number; accuracy: number | null };
+  caution: { total: number; correct: number; accuracy: number | null };
+  totalSamples: number;
+  days: number;
+}
+
 interface LiveDirectionResult {
   aboveKalshi: boolean | null;
   direction: "up" | "down" | "flat";
@@ -2084,6 +2092,14 @@ export default function Predictor() {
     // Also enable for any coin with an active Kalshi window so the Window Monitor card works.
     enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected) || (autoPilotMap.get(selected)?.active ?? false) || kalshiAvailableTop,
   });
+
+  const wmAccuracyQuery = useQuery({
+    queryKey: ["wm-accuracy", selected],
+    queryFn: () => fetchJson<WMAccuracyStats>(`/crypto/window-monitor-accuracy/${selected}`),
+    refetchInterval: 5 * 60_000,
+    enabled: kalshiAvailableTop || trainingCoinsSet.has(selected),
+    staleTime: 4 * 60_000,
+  });
   const trackerSnapshot = trackerSnapshotQuery.data?.snapshot ?? null;
   const statSnapshot = trackerSnapshotQuery.data?.statSnapshot ?? null;
   const windowBetSignal = trackerSnapshotQuery.data?.windowBetSignal ?? null;
@@ -2510,6 +2526,7 @@ export default function Predictor() {
             driftAlert={driftAlerts[selected] ?? null}
             trackerSnapshot={trackerSnapshot}
             windowBetSignal={windowBetSignal}
+            wmAccuracy={wmAccuracyQuery.data ?? null}
             liveDirection={liveDirection}
             liveDirectionLoading={liveDirectionQuery.isFetching}
             onRefreshLiveDirection={() => {
@@ -2655,6 +2672,7 @@ function CoinDetail({
   driftAlert,
   trackerSnapshot,
   windowBetSignal,
+  wmAccuracy,
   statSnapshot,
   liveDirection,
   liveDirectionLoading,
@@ -2685,6 +2703,7 @@ function CoinDetail({
   driftAlert: DriftAlert | null;
   trackerSnapshot: TrackerWindowCall | null;
   windowBetSignal?: WindowBetSignal | null;
+  wmAccuracy?: WMAccuracyStats | null;
   statSnapshot?: TrackerWindowCall | null;
   liveDirection: LiveDirectionResult | null;
   liveDirectionLoading: boolean;
@@ -3382,6 +3401,32 @@ function CoinDetail({
                   <span className="opacity-40">·</span>
                   <span>{wbs.factors.spikeFlag ? "⚠ spike" : "no spike"}</span>
                 </div>
+
+                {wmAccuracy && (() => {
+                  const betAcc = wmAccuracy.bet.accuracy;
+                  const saAcc  = wmAccuracy.stay_away.accuracy;
+                  const betTotal = wmAccuracy.bet.total;
+                  const saTotal  = wmAccuracy.stay_away.total;
+                  if (betTotal === 0 && saTotal === 0) return null;
+                  return (
+                    <div className="flex items-center gap-3 text-[10px] mt-2 pt-2 border-t border-[#00C805]/10 text-muted-foreground/60">
+                      <span className="uppercase tracking-wide font-semibold text-muted-foreground/40">7d accuracy</span>
+                      {betTotal > 0 && (
+                        <span className={`${betAcc !== null && betAcc >= 0.55 ? "text-emerald-400/70" : "text-amber-400/60"}`}>
+                          BET <span className="font-bold tabular-nums">{betAcc !== null ? `${Math.round(betAcc * 100)}%` : "—"}</span>
+                          <span className="opacity-60"> ({betTotal})</span>
+                        </span>
+                      )}
+                      {betTotal > 0 && saTotal > 0 && <span className="opacity-40">·</span>}
+                      {saTotal > 0 && (
+                        <span className={`${saAcc !== null && saAcc >= 0.55 ? "text-emerald-400/70" : "text-amber-400/60"}`}>
+                          STAY AWAY <span className="font-bold tabular-nums">{saAcc !== null ? `${Math.round(saAcc * 100)}%` : "—"}</span>
+                          <span className="opacity-60"> ({saTotal})</span>
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             );
           })()}

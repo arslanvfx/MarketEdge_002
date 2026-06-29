@@ -35,6 +35,29 @@ async function runStartupMigrations(): Promise<void> {
         ALTER COLUMN raw_confidence TYPE DOUBLE PRECISION
           USING raw_confidence::DOUBLE PRECISION
     `);
+    // Window Monitor outcome tracking table — records each locked BET/STAY AWAY
+    // signal and fills in the actual ABOVE/BELOW result at window close so
+    // accuracy of the thresholds can be measured over time.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS window_monitor_outcomes (
+        id                  TEXT PRIMARY KEY,
+        symbol              TEXT NOT NULL,
+        window_key          TEXT NOT NULL,
+        target_time         TEXT NOT NULL,
+        recommendation      TEXT NOT NULL,
+        factors             JSONB NOT NULL,
+        kalshi_target       NUMERIC(16,6),
+        stat_predicted_above BOOLEAN,
+        actual_above        BOOLEAN,
+        outcome             TEXT,
+        locked_at           TIMESTAMPTZ NOT NULL,
+        evaluated_at        TIMESTAMPTZ
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS wmo_symbol_locked
+        ON window_monitor_outcomes (symbol, locked_at DESC)
+    `);
   } finally {
     client.release();
   }

@@ -1,6 +1,6 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
-import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable } from "@workspace/db";
-import { desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
+import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable } from "@workspace/db";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import { extractMLFeatures } from "./ml-features";
 import {
   captureMLSnapshot,
@@ -16,6 +16,7 @@ import {
   computeAutoPilotDecisions,
 } from "./autopilot";
 import { mlSnapPrice, computeStatWindowCall, SNAP_QUARTER_MS } from "./prediction-utils";
+import { logger } from "./logger";
 
 // Real-time crypto price predictor.
 //
@@ -176,6 +177,11 @@ const windowPredCache = new Map<string, { windowKey: string; predictions: Predic
 // 5 minutes of a window have been observed, the recommendation is locked for
 // the rest of that window so it never flip-flops mid-window.
 const windowBetSignalLockCache = new Map<string, { windowKey: string; signal: WindowBetSignal }>();
+
+// Tracks which window monitor signals have already been persisted to DB so the
+// tick loop doesn't insert duplicates.  Lost on restart — the DB insert uses
+// onConflictDoNothing, so a restart simply re-attempts the insert harmlessly.
+const wmRecordedKeys = new Set<string>();
 
 // Returns the ISO-minute string for the START of the current 15-min window,
 // e.g. "2026-06-25T15:30". Used as the window lock key.
@@ -2737,6 +2743,31 @@ export function startPredictionTracker(): void {
               rec.evaluatedAt = new Date().toISOString();
               rec.status = "evaluated";
               dbUpdateRecord(rec);
+
+              // Fill in the window monitor outcome for this window using the
+              // stat record's ABOVE/BELOW result (since BET/STAY AWAY is a
+              // signal about betting quality — its accuracy is measured by
+              // whether the stat model's directional call turned out correct).
+              if (rec.source === "stat" && rec.kalshiTarget != null) {
+                const wStartMs = new Date(rec.targetTime).getTime() - 15 * 60_000;
+                const wmKey = new Date(wStartMs).toISOString().slice(0, 16);
+                const wmId = `${sym}:${wmKey}`;
+                const wActualAbove = actual > rec.kalshiTarget;
+                const wActualBelow = actual < rec.kalshiTarget;
+                const wStatAbove = rec.predictedPrice >= rec.kalshiTarget;
+                // push: actual landed exactly on the strike (within float precision)
+                const wOutcome =
+                  !wActualAbove && !wActualBelow
+                    ? "push"
+                    : wStatAbove === wActualAbove
+                    ? "correct"
+                    : "wrong";
+                db.update(windowMonitorOutcomesTable)
+                  .set({ actualAbove: wActualAbove, outcome: wOutcome, evaluatedAt: new Date() })
+                  .where(eq(windowMonitorOutcomesTable.id, wmId))
+                  .execute()
+                  .catch(() => {});
+              }
             } catch {
               // retry on next tick
             }
@@ -3074,6 +3105,50 @@ export function startPredictionTracker(): void {
               fetchLiveDirection(sym, true)
                 .catch(() => {})
                 .finally(() => liveDirectionInFlight.delete(sym));
+            }
+          }
+        }
+
+        // 3. Record the Window Monitor signal once it locks (≥5 min elapsed).
+        //    We key by `${sym}:${windowKey}` so each window is written exactly
+        //    once.  The DB insert uses onConflictDoNothing for idempotency.
+        //    Only persisted when a Kalshi target is available (non-Kalshi
+        //    windows carry no meaningful ABOVE/BELOW result to evaluate against).
+        const wKeyMs = Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000);
+        const currentWKey = new Date(wKeyMs).toISOString().slice(0, 16);
+        const wmId = `${sym}:${currentWKey}`;
+        if (!wmRecordedKeys.has(wmId)) {
+          const wbs = getWindowBetSignal(sym);
+          if (wbs?.ready) {
+            const wTargetISO = nextBoundary.toISOString();
+            const statRec = records.find(
+              (r) => r.source === "stat" && r.targetTime === wTargetISO && r.kalshiTarget != null,
+            );
+            const wKalshiTarget = statRec?.kalshiTarget ?? null;
+            // Only persist when a Kalshi target is available — without one the
+            // outcome can never be evaluated (no strike to compare actual price
+            // against), so the row would sit unevaluated forever.
+            if (wKalshiTarget != null) {
+              wmRecordedKeys.add(wmId);
+              const wStatPredAbove = statRec!.predictedPrice >= wKalshiTarget;
+              db.insert(windowMonitorOutcomesTable)
+                .values({
+                  id: wmId,
+                  symbol: sym,
+                  windowKey: currentWKey,
+                  targetTime: wTargetISO,
+                  recommendation: wbs.recommendation,
+                  factors: wbs.factors,
+                  kalshiTarget: String(wKalshiTarget),
+                  statPredictedAbove: wStatPredAbove,
+                  actualAbove: null,
+                  outcome: null,
+                  lockedAt: new Date(nowMs),
+                  evaluatedAt: null,
+                })
+                .onConflictDoNothing()
+                .execute()
+                .catch(() => { wmRecordedKeys.delete(wmId); });
             }
           }
         }
@@ -3654,4 +3729,65 @@ JSON only: {"direction":"up","confidence":65}`;
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Window Monitor outcome accuracy
+// ---------------------------------------------------------------------------
+
+export interface WMAccuracyStats {
+  bet: { total: number; correct: number; accuracy: number | null };
+  stay_away: { total: number; correct: number; accuracy: number | null };
+  caution: { total: number; correct: number; accuracy: number | null };
+  totalSamples: number;
+  days: number;
+}
+
+export async function getWindowMonitorAccuracy(symbol: string, days = 7): Promise<WMAccuracyStats> {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const rows = await db
+    .select()
+    .from(windowMonitorOutcomesTable)
+    .where(
+      and(
+        eq(windowMonitorOutcomesTable.symbol, symbol.toUpperCase()),
+        gt(windowMonitorOutcomesTable.lockedAt, since),
+        isNotNull(windowMonitorOutcomesTable.outcome),
+      ),
+    );
+
+  const tally: Record<string, { total: number; correct: number }> = {
+    bet: { total: 0, correct: 0 },
+    stay_away: { total: 0, correct: 0 },
+    caution: { total: 0, correct: 0 },
+  };
+
+  for (const row of rows) {
+    const bucket = tally[row.recommendation];
+    if (!bucket || !row.outcome) continue;
+    bucket.total++;
+    if (row.outcome === "correct") bucket.correct++;
+  }
+
+  const betBucket = tally.bet;
+  if (betBucket.total >= 20) {
+    const betAcc = betBucket.correct / betBucket.total;
+    if (betAcc < 0.55) {
+      logger.warn(
+        { symbol, betAccuracy: betAcc.toFixed(3), samples: betBucket.total },
+        "Window Monitor BET threshold may need re-tuning: accuracy below 55%",
+      );
+    }
+  }
+
+  const acc = (b: { total: number; correct: number }) =>
+    b.total > 0 ? b.correct / b.total : null;
+
+  return {
+    bet:       { ...betBucket,       accuracy: acc(betBucket) },
+    stay_away: { ...tally.stay_away, accuracy: acc(tally.stay_away) },
+    caution:   { ...tally.caution,   accuracy: acc(tally.caution) },
+    totalSamples: rows.length,
+    days,
+  };
 }
