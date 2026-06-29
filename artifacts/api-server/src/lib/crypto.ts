@@ -172,6 +172,11 @@ const predCache = new Map<string, CacheEntry<CoinPrediction>>();
 // just because one new candle shifted the regression by a hair.
 const windowPredCache = new Map<string, { windowKey: string; predictions: Prediction[] }>();
 
+// Lock cache for the Window Monitor "BET / STAY AWAY" signal: once the first
+// 5 minutes of a window have been observed, the recommendation is locked for
+// the rest of that window so it never flip-flops mid-window.
+const windowBetSignalLockCache = new Map<string, { windowKey: string; signal: WindowBetSignal }>();
+
 // Returns the ISO-minute string for the START of the current 15-min window,
 // e.g. "2026-06-25T15:30". Used as the window lock key.
 function currentWindowKey(now: Date): string {
@@ -3380,6 +3385,105 @@ export function getStatWindowCall(symbol: string): TrackerWindowCall | null {
       ? Math.abs(rec.priceAtSnapshot - rec.kalshiTarget) / rec.priceAtSnapshot * 100
       : null;
   return { ...result, strikeProximityPct };
+}
+
+// ---------------------------------------------------------------------------
+// Window Monitor — BET / STAY AWAY / CAUTION signal at 5-min into window
+// ---------------------------------------------------------------------------
+
+export interface WindowBetSignal {
+  ready: boolean;              // true once ≥5 min have elapsed in the window
+  minutesElapsed: number;
+  recommendation: "bet" | "stay_away" | "caution";
+  reason: string;              // one short sentence for the user
+  factors: {
+    efficiencyRatio: number;
+    oscillationCount: number;
+    spikeFlag: boolean;
+    netDriftPct: number;
+  };
+}
+
+// Pure decision function: classifies the first-N-minutes behaviour of a window.
+function computeWindowBetSignal(
+  metrics: { efficiencyRatio: number; oscillationCount: number; spikeFlag: boolean; netDriftPct: number },
+  minutesElapsed: number,
+): WindowBetSignal {
+  const { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct } = metrics;
+  const factors = { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct };
+
+  if (minutesElapsed < 5) {
+    return { ready: false, minutesElapsed, recommendation: "caution", reason: "Monitoring…", factors };
+  }
+
+  let recommendation: WindowBetSignal["recommendation"];
+  let reason: string;
+
+  // Stay-away conditions: flip-flopping, highly choppy, or erratic spike.
+  if (er < 0.25 && osc >= 4) {
+    recommendation = "stay_away";
+    reason = "Price flip-flopping — no clear direction in first 5 min";
+  } else if (er < 0.3 && osc >= 5) {
+    recommendation = "stay_away";
+    reason = "Highly choppy — 5+ reversals with very low trend efficiency";
+  } else if (spikeFlag && osc >= 3) {
+    recommendation = "stay_away";
+    reason = "Erratic spike + reversals — unpredictable window";
+  // Bet conditions: clean, consistent directional movement.
+  } else if (er >= 0.55 && osc <= 2) {
+    recommendation = "bet";
+    reason = "Clean trend — price moving consistently with few reversals";
+  } else if (er >= 0.45 && osc <= 1) {
+    recommendation = "bet";
+    reason = "Very clean trend — almost no reversals";
+  // Catch-all: mixed evidence.
+  } else {
+    recommendation = "caution";
+    reason = "Mixed signals — moderate chop, proceed with reduced confidence";
+  }
+
+  return { ready: true, minutesElapsed, recommendation, reason, factors };
+}
+
+// Returns the Window Monitor signal for a coin.  If ≥5 min have elapsed the
+// result is locked for the remainder of the window — it won't flip later even
+// if the market suddenly goes choppy.  Returns null when no Kalshi window is
+// active or candle data isn't cached yet (UI should suppress the card).
+export function getWindowBetSignal(symbol: string): WindowBetSignal | null {
+  const winCtx = getKalshiWindowContext(symbol.toUpperCase());
+  if (!winCtx) return null;
+
+  const { minutesElapsed } = winCtx;
+  const wKey = currentWindowKey(new Date());
+  const sym = symbol.toUpperCase();
+
+  // Return the locked signal if it was already committed for this window.
+  const locked = windowBetSignalLockCache.get(sym);
+  if (locked?.windowKey === wKey && locked.signal.ready) {
+    // Carry forward the current minutesElapsed so the UI countdown stays live.
+    return { ...locked.signal, minutesElapsed };
+  }
+
+  // Need candles from the prediction cache to compute the 5-min IWM.
+  const pred = getCachedPrediction(sym);
+  if (!pred) return null;
+
+  // Use only as many candles as the window has been open (max 5).
+  const nCandles = Math.min(Math.max(minutesElapsed, 1), 5);
+  const iwm = intraWindowMetrics(pred.candles, nCandles);
+
+  const signal = computeWindowBetSignal(
+    { efficiencyRatio: iwm.efficiencyRatio, oscillationCount: iwm.oscillationCount,
+      spikeFlag: iwm.spikeFlag, netDriftPct: iwm.netDriftPct },
+    minutesElapsed,
+  );
+
+  // Lock once the observation window closes.
+  if (signal.ready) {
+    windowBetSignalLockCache.set(sym, { windowKey: wKey, signal });
+  }
+
+  return signal;
 }
 
 // ---------------------------------------------------------------------------

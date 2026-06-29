@@ -226,6 +226,19 @@ interface TrackerWindowCall {
   strikeProximityPct?: number | null;
 }
 
+interface WindowBetSignal {
+  ready: boolean;
+  minutesElapsed: number;
+  recommendation: "bet" | "stay_away" | "caution";
+  reason: string;
+  factors: {
+    efficiencyRatio: number;
+    oscillationCount: number;
+    spikeFlag: boolean;
+    netDriftPct: number;
+  };
+}
+
 interface LiveDirectionResult {
   aboveKalshi: boolean | null;
   direction: "up" | "down" | "flat";
@@ -2066,7 +2079,7 @@ export default function Predictor() {
   // Free (in-memory lookup on the server), safe to poll every 30s.
   const trackerSnapshotQuery = useQuery({
     queryKey: ["tracker-snapshot", selected],
-    queryFn: () => fetchJson<{ snapshot: TrackerWindowCall | null; statSnapshot: TrackerWindowCall | null }>(`/crypto/tracker-snapshot/${selected}`),
+    queryFn: () => fetchJson<{ snapshot: TrackerWindowCall | null; statSnapshot: TrackerWindowCall | null; windowBetSignal: WindowBetSignal | null }>(`/crypto/tracker-snapshot/${selected}`),
     refetchInterval: 30_000,
     // Also enable for coins auto-pilot is actively running Claude on.
     enabled: trainingCoinsSet.has(selected) || claudeEnabledSet.has(selected) || (autoPilotMap.get(selected)?.active ?? false),
@@ -3221,6 +3234,81 @@ function CoinDetail({
                 );
               })()}
             </div>
+
+            {/* ── Window Monitor ──────────────────────────────────── */}
+            {/* Show only when a Kalshi window is active */}
+            {kalshiTarget !== null && (() => {
+              const wbs: WindowBetSignal | null = trackerSnapshotQuery.data?.windowBetSignal ?? null;
+              if (!wbs) return null;
+
+              const minutesElapsed = wbs.minutesElapsed;
+              const isReady = wbs.ready;
+              const rec = wbs.recommendation;
+
+              const badge = isReady
+                ? rec === "bet"
+                  ? { label: "✓ BET", cls: "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30" }
+                  : rec === "stay_away"
+                  ? { label: "✕ STAY AWAY", cls: "bg-red-500/15 text-red-400 ring-1 ring-red-500/30" }
+                  : { label: "⚠ CAUTION", cls: "bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30" }
+                : { label: "MONITORING…", cls: "bg-muted/30 text-muted-foreground ring-1 ring-border/30" };
+
+              const factorColor = isReady
+                ? rec === "bet" ? "text-emerald-400/80"
+                : rec === "stay_away" ? "text-red-400/80"
+                : "text-amber-400/80"
+                : "text-muted-foreground/60";
+
+              // Progress bar for the 5-min monitoring window
+              const progressPct = Math.min(100, (minutesElapsed / 5) * 100);
+              const minsLeft = Math.max(0, 5 - minutesElapsed);
+
+              return (
+                <div className="px-5 py-3 border-t border-border/30">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 flex items-center gap-1.5">
+                      <Activity className="w-3 h-3" />
+                      Window Monitor
+                    </div>
+                    <div className={`px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide ${badge.cls}`}>
+                      {badge.label}
+                    </div>
+                  </div>
+
+                  {!isReady ? (
+                    <>
+                      <div className="text-[11px] text-muted-foreground/70 mb-2">
+                        Watching first 5 min for flip-flopping…{" "}
+                        <span className="text-muted-foreground/50">{minsLeft === 0 ? "almost ready" : `${minsLeft}m left`}</span>
+                      </div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="flex-1 h-1.5 rounded-full bg-muted/40 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-primary/50 transition-all duration-1000"
+                            style={{ width: `${progressPct}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] text-muted-foreground/50 tabular-nums shrink-0">
+                          {minutesElapsed}/5 min
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className={`text-[11px] mb-2 ${rec === "bet" ? "text-emerald-400/80" : rec === "stay_away" ? "text-red-400/80" : "text-amber-400/80"}`}>
+                      {wbs.reason}
+                    </div>
+                  )}
+
+                  <div className={`flex items-center gap-3 text-[10px] ${factorColor}`}>
+                    <span>ER <span className="font-bold tabular-nums">{wbs.factors.efficiencyRatio.toFixed(2)}</span></span>
+                    <span className="opacity-40">·</span>
+                    <span><span className="font-bold tabular-nums">{wbs.factors.oscillationCount}</span> reversals</span>
+                    <span className="opacity-40">·</span>
+                    <span>{wbs.factors.spikeFlag ? "⚠ spike" : "no spike"}</span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Claude's call */}
             <div className="px-5 py-4">

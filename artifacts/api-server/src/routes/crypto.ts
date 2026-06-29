@@ -23,6 +23,7 @@ import {
   isAiGloballyEnabled,
   getTrackerWindowCall,
   getStatWindowCall,
+  getWindowBetSignal,
   fetchLiveDirection,
   getTradingWindows,
   getCachedPrediction,
@@ -436,13 +437,15 @@ router.get("/crypto/kalshi-btc-call", async (req, res) => {
   }
 });
 
-// Claude's and stat model's opening calls for the current window.
-// Free — reads from in-memory historyStore, no new API call.
+// Claude's and stat model's opening calls for the current window, plus the
+// Window Monitor bet/stay-away signal derived from the first 5 minutes.
+// Free — reads from in-memory caches only, no new API call.
 router.get("/crypto/tracker-snapshot/:symbol", (req, res) => {
   const symbol = (req.params.symbol ?? "").toUpperCase();
   const snap = getTrackerWindowCall(symbol);
   const statSnap = getStatWindowCall(symbol);
-  res.json({ snapshot: snap ?? null, statSnapshot: statSnap ?? null });
+  const windowBetSignal = getWindowBetSignal(symbol);
+  res.json({ snapshot: snap ?? null, statSnapshot: statSnap ?? null, windowBetSignal: windowBetSignal ?? null });
 });
 
 // Lightweight mid-window Claude re-check — fast binary ABOVE/BELOW call.
