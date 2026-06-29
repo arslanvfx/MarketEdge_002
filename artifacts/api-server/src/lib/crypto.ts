@@ -1873,6 +1873,11 @@ export interface PredictionRecord {
   efficiencyRatio: number | null; // ER at snapshot — used to bucket by regime
   rawConfidence: number | null;   // Claude's pre-calibration confidence (claude only)
   archivedAt: string | null;      // set by soft-clear; hidden from display but counted in analytics
+  // Claude/ensemble only. Direct binary ABOVE/BELOW from fetchLiveDirection
+  // recorded at the "initial (stat snap ready)" trigger (~45-75s into window).
+  // Authoritative AT OPEN call for accuracy — avoids the price-to-binary
+  // rounding error near the boundary. null until liveDirection resolves.
+  liveDirectionAbove: boolean | null;
 }
 
 // Stable per-source record id. Legacy records (pre-multi-source) used a 2-part
@@ -2150,6 +2155,7 @@ function rowToRecord(row: typeof predictionRecordsTable.$inferSelect): Predictio
     efficiencyRatio: row.efficiencyRatio != null ? parseFloat(row.efficiencyRatio) : null,
     rawConfidence: row.rawConfidence ?? null,
     archivedAt: row.archivedAt ? row.archivedAt.toISOString() : null,
+    liveDirectionAbove: row.liveDirectionAbove ?? null,
   };
 }
 
@@ -2212,6 +2218,7 @@ function dbInsertRecord(rec: PredictionRecord): void {
       abstained: rec.abstained,
       efficiencyRatio: rec.efficiencyRatio != null ? String(rec.efficiencyRatio) : null,
       rawConfidence: rec.rawConfidence,
+      liveDirectionAbove: null,
     })
     .onConflictDoNothing()
     .catch((err) => console.error("[dbInsertRecord] failed:", err));
@@ -2228,6 +2235,26 @@ function dbUpdateRecord(rec: PredictionRecord): void {
     })
     .where(eq(predictionRecordsTable.id, rec.id))
     .catch((err) => console.error("[dbUpdateRecord] failed:", err));
+}
+
+// Write the liveDirection binary call back to the claude/ensemble DB records
+// for this window so accuracy evaluation uses the direct ABOVE/BELOW answer
+// rather than the price-prediction-to-binary mapping near the boundary.
+function dbUpdateLiveDirection(symbol: string, targetTime: string, aboveKalshi: boolean): void {
+  const sources: PredictionRecord["source"][] = ["claude", "ensemble"];
+  for (const source of sources) {
+    const id = recordId(symbol, targetTime, source);
+    db.update(predictionRecordsTable)
+      .set({ liveDirectionAbove: aboveKalshi })
+      .where(eq(predictionRecordsTable.id, id))
+      .catch((err) => console.error(`[dbUpdateLiveDirection] ${symbol} ${source} failed:`, err));
+    // Also update the in-memory record so the accuracy eval path uses the new
+    // value immediately without waiting for a DB round-trip.
+    const recs = historyStore.get(symbol.toUpperCase()) ?? [];
+    const rec = recs.find((r) => r.id === id);
+    if (rec) rec.liveDirectionAbove = aboveKalshi;
+  }
+  console.info(`[live-dir] ${symbol}: liveDirectionAbove=${aboveKalshi} written to DB (claude + ensemble)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2728,9 +2755,16 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                 Math.abs((actual - rec.predictedPrice) / rec.predictedPrice) * 100;
               let correct: boolean;
               if (rec.kalshiTarget !== null && rec.kalshiTarget !== undefined) {
-                // Kalshi target known: a "hit" = Claude predicted the same side of
-                // the target as where BTC actually landed (mirrors Kalshi YES/NO).
-                const predictedAbove = rec.predictedPrice >= rec.kalshiTarget;
+                // Kalshi target known: a "hit" = model predicted the same side of
+                // the target as where price actually landed (mirrors Kalshi YES/NO).
+                // For Claude/ensemble: prefer liveDirectionAbove (direct binary call
+                // from fetchLiveDirection, written after the stat snap) over the
+                // price-prediction-to-binary mapping — avoids boundary rounding error.
+                const predictedAbove =
+                  (rec.source === "claude" || rec.source === "ensemble") &&
+                  rec.liveDirectionAbove !== null && rec.liveDirectionAbove !== undefined
+                    ? rec.liveDirectionAbove
+                    : rec.predictedPrice >= rec.kalshiTarget;
                 const actualAbove    = actual >= rec.kalshiTarget;
                 correct = predictedAbove === actualAbove;
                 // ML: label this window's snapshot with the actual ABOVE/BELOW
@@ -2801,8 +2835,8 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         //   • After 60 s with no target, snap anyway (null target) so the
         //     window always has a prediction for model-accuracy tracking.
         //   • Never snap after 12 min (too far from window open).
-        const SNAP_DELAY_MS   = 30_000;       // min ms into window before first attempt
-        const SNAP_GIVE_UP_MS = 60_000;      // snap without Kalshi target after 60 s max
+        const SNAP_DELAY_MS   = 45_000;       // min ms into window before first attempt
+        const SNAP_GIVE_UP_MS = 90_000;      // snap without Kalshi target after 90 s max
         const SNAP_MAX_MS     = 12 * 60_000; // never snap this late in the window
         //   Extended from 6→12 min so a brief server restart (e.g. deployment)
         //   mid-window can still catch up on the next 30-s tick.  The timeToNext
@@ -2949,6 +2983,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                 abstained: null,
                 rawConfidence: null,
                 archivedAt: null,
+                liveDirectionAbove: null,
               });
 
               if (ai) {
@@ -2967,6 +3002,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                   abstained: null,
                   rawConfidence: ai.confidence,
                   archivedAt: null,
+                  liveDirectionAbove: null,   // filled in by fetchLiveDirection initial trigger
                 });
 
                 // Regime-weighted ensemble of the two calls above. Even when it
@@ -3008,6 +3044,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                   abstained: ens.abstained,
                   rawConfidence: null,
                   archivedAt: null,
+                  liveDirectionAbove: null,   // filled in by fetchLiveDirection initial trigger
                 });
               }
 
@@ -3039,6 +3076,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                       abstained: null,
                       rawConfidence: mlResult.prediction.prob ?? null,
                       archivedAt: null,
+                      liveDirectionAbove: null,
                     });
                   }
                 }
@@ -3110,10 +3148,20 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
             }
 
             if (triggerReason) {
+              const isInitialTrigger = triggerReason === "initial (stat snap ready)";
               liveDirectionInFlight.add(sym);
               liveDirectionLastAutoTrigger.set(sym, nowMs);
               console.info(`[live-dir] ${sym}: ${triggerReason} — re-checking Claude`);
               fetchLiveDirection(sym, true)
+                .then((result) => {
+                  // On the initial trigger only: write the direct binary ABOVE/BELOW
+                  // verdict back to the claude/ensemble DB records as liveDirectionAbove.
+                  // This becomes the authoritative AT OPEN call for accuracy evaluation,
+                  // avoiding the price-prediction-to-binary rounding error near the strike.
+                  if (isInitialTrigger && result && result.aboveKalshi !== null) {
+                    dbUpdateLiveDirection(sym, targetISO, result.aboveKalshi);
+                  }
+                })
                 .catch(() => {})
                 .finally(() => liveDirectionInFlight.delete(sym));
             }

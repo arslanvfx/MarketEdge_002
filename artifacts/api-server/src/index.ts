@@ -37,6 +37,14 @@ async function runStartupMigrations(): Promise<void> {
         ALTER COLUMN raw_confidence TYPE DOUBLE PRECISION
           USING raw_confidence::DOUBLE PRECISION
     `);
+    // Direct binary ABOVE/BELOW from fetchLiveDirection, recorded at the
+    // initial "stat snap ready" trigger.  Used as the authoritative AT OPEN
+    // call for Claude/ensemble accuracy evaluation — avoids the
+    // price-prediction-to-binary boundary rounding error near the strike.
+    await client.query(`
+      ALTER TABLE prediction_records
+        ADD COLUMN IF NOT EXISTS live_direction_above BOOLEAN
+    `);
     // Window Monitor outcome tracking table — records each locked BET/STAY AWAY
     // signal and fills in the actual ABOVE/BELOW result at window close so
     // accuracy of the thresholds can be measured over time.
@@ -73,24 +81,29 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 
-  // Apply additive schema migrations before initialising app state.
-  runStartupMigrations()
-    .catch((err) => logger.warn({ err }, "Startup migrations failed (non-fatal)"));
-
   // Pre-warm the market cache so the first user request is instant.
   fetchAllMarkets()
     .then((markets) => logger.info({ count: markets.length }, "Market cache warmed"))
     .catch((err) => logger.warn({ err }, "Market cache warm-up failed (non-fatal)"));
 
-  // Start the prediction accuracy tracker: snaps model predictions at each
-  // 15-min boundary and evaluates them against actual prices once the window closes.
-  // The onInitComplete callback runs after initMLFromDB() resolves — backfill
-  // runs at that point so it sees the true post-hydration warming status.
-  startPredictionTracker(() => {
-    runMLBackfillIfNeeded(96)
-      .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
-  });
-  logger.info("Prediction tracker started");
+  // Apply additive schema migrations FIRST, then start the prediction tracker.
+  // The tracker's initHistoryFromDB queries every column in prediction_records
+  // (including live_direction_above) so it must run after ALTER TABLE completes.
+  runStartupMigrations()
+    .catch((err) => {
+      logger.warn({ err }, "Startup migrations failed (non-fatal)");
+    })
+    .then(() => {
+      // Start the prediction accuracy tracker: snaps model predictions at each
+      // 15-min boundary and evaluates them against actual prices once the window closes.
+      // The onInitComplete callback runs after initMLFromDB() resolves — backfill
+      // runs at that point so it sees the true post-hydration warming status.
+      startPredictionTracker(() => {
+        runMLBackfillIfNeeded(96)
+          .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
+      });
+      logger.info("Prediction tracker started");
+    });
 
   // Daily threshold analysis: runs once at midnight UTC then every 24h.
   // Fetches 96 windows (~24h) of historical candles, buckets hit rates by

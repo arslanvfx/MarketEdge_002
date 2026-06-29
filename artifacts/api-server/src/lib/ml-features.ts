@@ -77,7 +77,7 @@ export function extractMLFeatures(
   const prevCandle = candles[candles.length - 2];
   const recentMom2 =
     lastCandle && prevCandle && atr14 > 0
-      ? (lastCandle.close - prevCandle.close) / atr14
+      ? (lastCandle.c - prevCandle.c) / atr14
       : 0;
 
   return [

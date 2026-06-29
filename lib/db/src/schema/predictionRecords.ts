@@ -36,4 +36,11 @@ export const predictionRecordsTable = pgTable("prediction_records", {
   // display log but still count toward analytics (best windows, auto-pilot
   // accuracy) so historical stats are never corrupted by a display clear.
   archivedAt: timestamp("archived_at", { withTimezone: true }),
+  // Claude/ensemble only. The direct binary ABOVE/BELOW verdict from
+  // fetchLiveDirection (fast Claude call, no extended thinking) recorded at
+  // the initial "stat snap ready" trigger (~45-75s into the window).
+  // This is the authoritative AT OPEN call for accuracy evaluation because
+  // it avoids the price-prediction-to-binary rounding error near the strike.
+  // null for stat/ml records or before liveDirection completes.
+  liveDirectionAbove: boolean("live_direction_above"),
 });
