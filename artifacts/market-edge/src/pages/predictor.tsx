@@ -2204,8 +2204,8 @@ export default function Predictor() {
   });
 
   const timingAnalysisQuery = useQuery({
-    queryKey: ["timing-analysis", selected],
-    queryFn: () => fetchJson<TimingAnalysisRow[]>(`/crypto/timing-analysis?symbol=${selected}`),
+    queryKey: ["timing-analysis"],
+    queryFn: () => fetchJson<TimingAnalysisRow[]>(`/crypto/timing-analysis`),
     refetchInterval: 15 * 60_000,
     enabled: kalshiAvailableTop,
     staleTime: 10 * 60_000,

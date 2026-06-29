@@ -1926,7 +1926,7 @@ export const KALSHI_SERIES: Record<string, string> = {
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
 // Stores the event ticker so window transitions can be detected by callers.
-const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number; closeTime?: string }>();
+const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number; closeTime?: string; yesPrice?: number | null }>();
 const KALSHI_TARGET_LIB_TTL = 12_000;
 
 // Returns the most-recently-seen event ticker for a symbol (e.g. "KXBTC15M-25JUN2026-B68000").
@@ -1998,7 +1998,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       return null;
     }
     const body = (await resp.json()) as {
-      markets?: { floor_strike?: number; ticker?: string; close_time?: string }[];
+      markets?: { floor_strike?: number; ticker?: string; close_time?: string; yes_ask?: number; last_price?: number }[];
     };
 
     const markets = (body.markets ?? []).filter(
@@ -2039,11 +2039,16 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     }
 
     if (selected) {
+      // yes_ask is in cents (0–100); convert to 0-1 fraction for EV calculations.
+      const yesAsk = typeof selected.yes_ask === "number" ? selected.yes_ask / 100 : null;
+      const lastP  = typeof selected.last_price === "number" ? selected.last_price / 100 : null;
+      const yesPrice = yesAsk ?? lastP ?? null;
       kalshiTargetCache.set(sym, {
         value: selected.floor_strike!,
         ticker: selected.ticker,
         at: Date.now(),
         closeTime: (selected as Record<string, unknown>).close_time as string | undefined,
+        yesPrice,
       });
       // Register the window ticker immediately so minutesElapsed is accurate from first sight.
       // priceAtOpen is filled in lazily by updateKalshiWindowPrice (first caller with coin price).
@@ -2821,7 +2826,8 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                 // correct = was price_above at that minute mark the same as the
                 // actual final outcome?  Uses >= (inclusive) consistent with the
                 // main prediction evaluation rule.
-                const timingActualAbove = actual >= rec.kalshiTarget;
+                // direction: strict `>` per spec (exact-strike = BELOW / push)
+                const timingActualAbove = actual > rec.kalshiTarget;
                 db.update(windowTimingSnapshotsTable)
                   .set({
                     actualAbove: timingActualAbove,
@@ -2890,8 +2896,9 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
             const ensRecTiming = records.find(
               (r) => r.source === "ensemble" && r.targetTime === targetISO,
             );
-            const statAboveTiming = statRecTiming.predictedPrice >= kt;
-            const ensAboveTiming  = ensRecTiming != null ? ensRecTiming.predictedPrice >= kt : null;
+            // direction: strict `>` per spec
+            const statAboveTiming = statRecTiming.predictedPrice > kt;
+            const ensAboveTiming  = ensRecTiming != null ? ensRecTiming.predictedPrice > kt : null;
             for (const markS of TIMING_MARKS_S) {
               const markMs   = markS * 1000;
               const lateness = timeIntoWindow - markMs;
@@ -2901,7 +2908,13 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                   timingSnapshotWritten.add(timingKey);
                   getTicker(coin.product)
                     .then((livePrice) => {
-                      const priceAbove = livePrice >= kt;
+                      // direction: strict `>` per spec (exact-strike = BELOW)
+                      const priceAbove = livePrice > kt;
+                      // Pull the cached Kalshi yes price (set by fetchKalshiTarget).
+                      const cachedKalshi = kalshiTargetCache.get(sym);
+                      const yesPrice = cachedKalshi?.yesPrice != null
+                        ? String(cachedKalshi.yesPrice)
+                        : null;
                       db.insert(windowTimingSnapshotsTable)
                         .values({
                           id: timingKey,
@@ -2912,7 +2925,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                           priceAbove,
                           kalshiTarget: String(kt),
                           currentPrice: String(livePrice),
-                          kalshiYesPrice: null,
+                          kalshiYesPrice: yesPrice,
                           statAbove: statAboveTiming,
                           ensembleAbove: ensAboveTiming,
                           actualAbove: null,
