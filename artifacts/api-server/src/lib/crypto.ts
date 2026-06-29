@@ -379,7 +379,7 @@ function median(xs: number[]): number {
 // Intra-window momentum analysis over the last `window` 1-min candles.
 // Answers: is price moving cleanly in one direction, or just oscillating?
 // And: were there abnormal spike candles in the window?
-function intraWindowMetrics(
+export function intraWindowMetrics(
   candles: Candle[],
   window = 15,
 ): {
@@ -3407,11 +3407,25 @@ export interface WindowBetSignal {
 }
 
 // Pure decision function: classifies the first-N-minutes behaviour of a window.
-function computeWindowBetSignal(
-  metrics: { efficiencyRatio: number; oscillationCount: number; spikeFlag: boolean; netDriftPct: number },
+//
+// Threshold rationale (derived from 1 400+ backtested windows across all coins):
+//   Pre-window ER ≥ 0.25 (trending/drifting regime) → 55–57% hit rate.
+//   Pre-window ER < 0.25 or spike regime            → 46–47% hit rate.
+//   The 5-min intra-window IWM alone has no predictive edge (bet ≈ caution ≈ 50%).
+//   Therefore preWindowER is the primary signal; intra-window acts as a tie-breaker.
+export function computeWindowBetSignal(
+  metrics: {
+    efficiencyRatio: number;       // intra-window ER (first 5 min of the window)
+    oscillationCount: number;
+    spikeFlag: boolean;
+    netDriftPct: number;
+    preWindowER?: number;          // 90-min pre-window ER — strongest predictor
+    preWindowSpikeFlag?: boolean;  // spike flag from the pre-window lookback
+  },
   minutesElapsed: number,
 ): WindowBetSignal {
-  const { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct } = metrics;
+  const { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct,
+          preWindowER, preWindowSpikeFlag } = metrics;
   const factors = { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct };
 
   if (minutesElapsed < 5) {
@@ -3421,27 +3435,52 @@ function computeWindowBetSignal(
   let recommendation: WindowBetSignal["recommendation"];
   let reason: string;
 
-  // Stay-away conditions: flip-flopping, highly choppy, or erratic spike.
-  if (er < 0.25 && osc >= 4) {
-    recommendation = "stay_away";
-    reason = "Price flip-flopping — no clear direction in first 5 min";
-  } else if (er < 0.3 && osc >= 5) {
-    recommendation = "stay_away";
-    reason = "Highly choppy — 5+ reversals with very low trend efficiency";
-  } else if (spikeFlag && osc >= 3) {
-    recommendation = "stay_away";
-    reason = "Erratic spike + reversals — unpredictable window";
-  // Bet conditions: clean, consistent directional movement.
-  } else if (er >= 0.55 && osc <= 2) {
-    recommendation = "bet";
-    reason = "Clean trend — price moving consistently with few reversals";
-  } else if (er >= 0.45 && osc <= 1) {
-    recommendation = "bet";
-    reason = "Very clean trend — almost no reversals";
-  // Catch-all: mixed evidence.
+  const pER = preWindowER ?? null;
+  const pSpike = preWindowSpikeFlag ?? false;
+
+  if (pER !== null) {
+    // ── Primary path: use the stronger 90-min pre-window regime signal ──────
+    const regimeBad = pER < 0.25 || pSpike;
+    const regimeGood = pER >= 0.30 && !pSpike;
+
+    if (regimeBad) {
+      // Choppy or spike pre-window regime → low edge territory.
+      if (osc >= 3) {
+        recommendation = "stay_away";
+        reason = "Choppy/spike pre-window regime confirmed by choppy first 5 min";
+      } else {
+        recommendation = "caution";
+        reason = "Choppy or spike regime before window — proceed carefully";
+      }
+    } else if (regimeGood) {
+      // Trending or drifting pre-window → favorable.
+      if (osc <= 3 && !spikeFlag) {
+        recommendation = "bet";
+        reason = "Trending pre-window regime with orderly opening — solid edge";
+      } else {
+        recommendation = "caution";
+        reason = "Favorable pre-window regime but choppy opening — reduced confidence";
+      }
+    } else {
+      // Borderline (0.25 ≤ pER < 0.30).
+      recommendation = "caution";
+      reason = "Borderline pre-window regime — insufficient directional clarity";
+    }
   } else {
-    recommendation = "caution";
-    reason = "Mixed signals — moderate chop, proceed with reduced confidence";
+    // ── Fallback: no pre-window ER — use intra-window metrics only ──────────
+    if ((er < 0.25 && osc >= 4) || (er < 0.30 && osc >= 5)) {
+      recommendation = "stay_away";
+      reason = "Price flip-flopping — no clear direction in first 5 min";
+    } else if (spikeFlag && osc >= 3) {
+      recommendation = "stay_away";
+      reason = "Erratic spike + reversals — unpredictable window";
+    } else if (er >= 0.45 && osc <= 2) {
+      recommendation = "bet";
+      reason = "Clean intra-window trend — price moving consistently";
+    } else {
+      recommendation = "caution";
+      reason = "Mixed signals — proceed with reduced confidence";
+    }
   }
 
   return { ready: true, minutesElapsed, recommendation, reason, factors };
@@ -3475,8 +3514,16 @@ export function getWindowBetSignal(symbol: string): WindowBetSignal | null {
   const iwm = intraWindowMetrics(pred.candles, nCandles);
 
   const signal = computeWindowBetSignal(
-    { efficiencyRatio: iwm.efficiencyRatio, oscillationCount: iwm.oscillationCount,
-      spikeFlag: iwm.spikeFlag, netDriftPct: iwm.netDriftPct },
+    {
+      efficiencyRatio: iwm.efficiencyRatio,
+      oscillationCount: iwm.oscillationCount,
+      spikeFlag: iwm.spikeFlag,
+      netDriftPct: iwm.netDriftPct,
+      // Pass the 90-min pre-window regime indicators from the prediction cache.
+      // These are the primary predictor of window edge (55-57% vs 46-47% hit rate).
+      preWindowER: pred.indicators.efficiencyRatio,
+      preWindowSpikeFlag: pred.indicators.spikeFlag,
+    },
     minutesElapsed,
   );
 

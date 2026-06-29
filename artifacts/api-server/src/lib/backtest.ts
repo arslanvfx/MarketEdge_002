@@ -33,7 +33,14 @@
 //             -d "{\"a\": $(cat before.json), \"b\": $(cat after.json)}"
 // ---------------------------------------------------------------------------
 
-import { CRYPTO_COINS, analyzeCoinAt, type Candle, type CoinDef } from "./crypto";
+import {
+  CRYPTO_COINS,
+  analyzeCoinAt,
+  intraWindowMetrics,
+  computeWindowBetSignal,
+  type Candle,
+  type CoinDef,
+} from "./crypto";
 import { logger } from "./logger";
 
 const COINBASE = "https://api.exchange.coinbase.com";
@@ -64,6 +71,13 @@ export interface CalibrationBin {
   hitRatePct: number | null;
 }
 
+export type BetSignalRec = "bet" | "caution" | "stay_away";
+
+export interface BetSignalSummary extends MetricSummary {
+  recommendation: BetSignalRec;
+  pct: number | null; // fraction of all windows that fell in this bucket
+}
+
 export interface BacktestReport {
   generatedAt: string;
   note: string;
@@ -77,6 +91,7 @@ export interface BacktestReport {
   byCoin: Record<string, MetricSummary>;
   byRegime: Record<Regime, MetricSummary>;
   calibration: CalibrationBin[];
+  byBetSignal: Record<BetSignalRec, BetSignalSummary>;
   errors?: Record<string, string>;
 }
 
@@ -96,6 +111,7 @@ interface WindowResult {
   signedErrPct: number;
   pAbove: number; // probability mass the model put on "above" (for Brier)
   actualAbove: boolean;
+  betSignal: BetSignalRec; // recommendation from computeWindowBetSignal at t=5
 }
 
 // Confidence bands aligned to the model's clamp range (20–92).
@@ -217,6 +233,30 @@ async function backtestCoin(
       : settlePrice < openPrice * 0.9998 ? "down"
       : "flat";
 
+    // Bet signal: simulate what computeWindowBetSignal would have returned at t=5.
+    // Grab the first 5 candles inside the window (open ≤ t < open+5min).
+    const firstFive = candles
+      .filter((c) => c.t >= open && c.t < open + 5 * 60)
+      .sort((a, b) => a.t - b.t)
+      .slice(0, 5);
+    let betSignal: BetSignalRec = "caution";
+    if (firstFive.length >= 3) {
+      const iwm = intraWindowMetrics(firstFive, 5);
+      const sig = computeWindowBetSignal(
+        {
+          efficiencyRatio: iwm.efficiencyRatio,
+          oscillationCount: iwm.oscillationCount,
+          spikeFlag: iwm.spikeFlag,
+          netDriftPct: iwm.netDriftPct,
+          // Pre-window regime from analyzeCoinAt (90-min lookback) — primary signal.
+          preWindowER: cp.indicators.efficiencyRatio,
+          preWindowSpikeFlag: cp.indicators.spikeFlag,
+        },
+        5, // minutesElapsed = 5 so the function treats this as a settled signal
+      );
+      if (sig.ready) betSignal = sig.recommendation;
+    }
+
     results.push({
       symbol: coin.symbol,
       regime: classifyRegime(cp.indicators),
@@ -227,6 +267,7 @@ async function backtestCoin(
       signedErrPct: ((pred.predictedPrice - settlePrice) / settlePrice) * 100,
       pAbove: predictedAbove ? pred.confidence / 100 : 1 - pred.confidence / 100,
       actualAbove,
+      betSignal,
     });
   }
   return results;
@@ -280,6 +321,22 @@ export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestRepo
     };
   });
 
+  const totalWindows = all.length;
+  const makeBetSummary = (rec: BetSignalRec): BetSignalSummary => {
+    const bin = all.filter((r) => r.betSignal === rec);
+    const base = aggregate(bin);
+    return {
+      ...base,
+      recommendation: rec,
+      pct: totalWindows > 0 ? round1((bin.length / totalWindows) * 100) : null,
+    };
+  };
+  const byBetSignal: Record<BetSignalRec, BetSignalSummary> = {
+    bet: makeBetSummary("bet"),
+    caution: makeBetSummary("caution"),
+    stay_away: makeBetSummary("stay_away"),
+  };
+
   const report: BacktestReport = {
     generatedAt: new Date().toISOString(),
     note:
@@ -295,6 +352,7 @@ export async function runBacktest(opts: BacktestOpts = {}): Promise<BacktestRepo
     byCoin,
     byRegime,
     calibration,
+    byBetSignal,
     ...(Object.keys(errors).length > 0 ? { errors } : {}),
   };
 
@@ -321,6 +379,13 @@ export function formatReport(r: BacktestReport): string {
   lines.push("  calibration (stated conf → actual hit rate):");
   for (const c of r.calibration) {
     lines.push(`    ${c.band.padEnd(8)} n=${String(c.windows).padStart(4)}  actual ${pct(c.hitRatePct)}`);
+  }
+  lines.push("  bet signal (t=5 recommendation → actual hit rate):");
+  for (const rec of ["bet", "caution", "stay_away"] as BetSignalRec[]) {
+    const s = r.byBetSignal[rec];
+    lines.push(
+      `    ${rec.padEnd(10)} n=${String(s.windows).padStart(4)} (${String(s.pct ?? "n/a").padStart(4)}% of windows)  hit ${pct(s.hitRatePct)}  dir ${pct(s.dirAccPct)}`,
+    );
   }
   return lines.join("\n");
 }
@@ -350,6 +415,14 @@ export function compareReports(a: BacktestReport, b: BacktestReport) {
     if (a.byCoin[sym] && b.byCoin[sym]) byCoin[sym] = cmp(a.byCoin[sym], b.byCoin[sym]);
   }
 
+  const betRecs: BetSignalRec[] = ["bet", "caution", "stay_away"];
+  const byBetSignal: Record<string, ReturnType<typeof cmp>> = {};
+  for (const rec of betRecs) {
+    if (a.byBetSignal?.[rec] && b.byBetSignal?.[rec]) {
+      byBetSignal[rec] = cmp(a.byBetSignal[rec], b.byBetSignal[rec]);
+    }
+  }
+
   return {
     note: "delta = after - before. Higher hit/dir = better; lower absErr/brier = better.",
     before: { generatedAt: a.generatedAt, params: a.params },
@@ -357,5 +430,6 @@ export function compareReports(a: BacktestReport, b: BacktestReport) {
     overall: cmp(a.overall, b.overall),
     byRegime,
     byCoin,
+    byBetSignal,
   };
 }
