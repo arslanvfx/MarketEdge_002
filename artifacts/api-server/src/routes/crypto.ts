@@ -29,6 +29,7 @@ import {
   getTradingWindows,
   getCachedPrediction,
   getWindowMonitorAccuracy,
+  getTimingAnalysis,
 } from "../lib/crypto";
 import { getMLPrediction, getMLStatus } from "../lib/ml-store";
 import { extractMLFeatures } from "../lib/ml-features";
@@ -596,6 +597,21 @@ router.get("/crypto/trading-windows", async (req, res) => {
     res.json(await getTradingWindows(symbol));
   } catch (err) {
     res.status(500).json({ error: "Failed to compute trading windows" });
+  }
+});
+
+// Intra-window timing analysis — per-symbol accuracy at 1,3,6,9,12-min marks.
+// ?symbol=BTC restricts to one coin; omit for all coins.
+router.get("/crypto/timing-analysis", async (req, res) => {
+  const symbol =
+    typeof req.query.symbol === "string" && req.query.symbol.length > 0
+      ? req.query.symbol.toUpperCase()
+      : undefined;
+  try {
+    const rows = await getTimingAnalysis(symbol);
+    res.json(rows);
+  } catch {
+    res.status(500).json({ error: "Failed to fetch timing analysis" });
   }
 });
 

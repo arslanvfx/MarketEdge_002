@@ -1,6 +1,6 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
-import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable } from "@workspace/db";
-import { and, desc, eq, gt, inArray, isNotNull, isNull, lt } from "drizzle-orm";
+import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { extractMLFeatures } from "./ml-features";
 import {
   captureMLSnapshot,
@@ -182,6 +182,10 @@ const windowBetSignalLockCache = new Map<string, { windowKey: string; signal: Wi
 // tick loop doesn't insert duplicates.  Lost on restart — the DB insert uses
 // onConflictDoNothing, so a restart simply re-attempts the insert harmlessly.
 const wmRecordedKeys = new Set<string>();
+
+// Tracks which intra-window timing snapshots have been written this session.
+// Lost on restart — onConflictDoNothing makes repeated inserts harmless.
+const timingSnapshotWritten = new Set<string>();
 
 // Returns the ISO-minute string for the START of the current 15-min window,
 // e.g. "2026-06-25T15:30". Used as the window lock key.
@@ -2812,6 +2816,27 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                   .where(eq(windowMonitorOutcomesTable.id, wmId))
                   .execute()
                   .catch(() => {});
+
+                // Score intra-window timing snapshots for this window.
+                // correct = was price_above at that minute mark the same as the
+                // actual final outcome?  Uses >= (inclusive) consistent with the
+                // main prediction evaluation rule.
+                const timingActualAbove = actual >= rec.kalshiTarget;
+                db.update(windowTimingSnapshotsTable)
+                  .set({
+                    actualAbove: timingActualAbove,
+                    correct: sql`price_above = ${timingActualAbove}`,
+                    evaluatedAt: new Date(),
+                  })
+                  .where(
+                    and(
+                      eq(windowTimingSnapshotsTable.symbol, sym),
+                      eq(windowTimingSnapshotsTable.windowKey, wmKey),
+                      isNull(windowTimingSnapshotsTable.actualAbove),
+                    ),
+                  )
+                  .execute()
+                  .catch(() => {});
               }
             } catch {
               // retry on next tick
@@ -2845,6 +2870,59 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         //   within 30 s; waiting 4 min was blocking the stat snap unnecessarily.
         const windowStartMs = nextBoundary.getTime() - 15 * 60_000;
         const timeIntoWindow = nowMs - windowStartMs;
+
+        // 2b. Intra-window timing snapshots — record price-vs-strike direction
+        //     at 1, 3, 6, 9, 12-minute marks.  Only written when a confirmed
+        //     Kalshi target exists (stat record already snapped for this window).
+        //     Keyed per-symbol so accuracy curves reflect each coin's volatility.
+        {
+          const TIMING_MARKS_S = [60, 180, 360, 540, 720];
+          const timingWKey = new Date(windowStartMs).toISOString().slice(0, 16);
+          const statRecTiming = records.find(
+            (r) => r.source === "stat" && r.targetTime === targetISO && r.kalshiTarget != null,
+          );
+          if (statRecTiming?.kalshiTarget != null) {
+            const kt = statRecTiming.kalshiTarget;
+            const ensRecTiming = records.find(
+              (r) => r.source === "ensemble" && r.targetTime === targetISO,
+            );
+            const statAboveTiming = statRecTiming.predictedPrice >= kt;
+            const ensAboveTiming  = ensRecTiming != null ? ensRecTiming.predictedPrice >= kt : null;
+            for (const markS of TIMING_MARKS_S) {
+              if (timeIntoWindow >= markS * 1000) {
+                const timingKey = `${sym}:${timingWKey}:${markS}`;
+                if (!timingSnapshotWritten.has(timingKey)) {
+                  timingSnapshotWritten.add(timingKey);
+                  getTicker(coin.product)
+                    .then((livePrice) => {
+                      const priceAbove = livePrice >= kt;
+                      db.insert(windowTimingSnapshotsTable)
+                        .values({
+                          id: timingKey,
+                          symbol: sym,
+                          windowKey: timingWKey,
+                          targetTime: nextBoundary,
+                          minuteMark: markS,
+                          priceAbove,
+                          kalshiTarget: String(kt),
+                          currentPrice: String(livePrice),
+                          kalshiYesPrice: null,
+                          statAbove: statAboveTiming,
+                          ensembleAbove: ensAboveTiming,
+                          actualAbove: null,
+                          correct: null,
+                          evaluatedAt: null,
+                        })
+                        .onConflictDoNothing()
+                        .execute()
+                        .catch(() => { timingSnapshotWritten.delete(timingKey); });
+                    })
+                    .catch(() => { timingSnapshotWritten.delete(timingKey); });
+                }
+              }
+            }
+          }
+        }
 
         if (
           !alreadySnapped &&
@@ -3870,4 +3948,80 @@ export async function getWindowMonitorAccuracy(symbol: string, days = 7): Promis
     totalSamples: rows.length,
     days,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Timing analysis — per-symbol accuracy at each intra-window minute mark
+// ---------------------------------------------------------------------------
+
+const TIMING_MARK_LABELS: Record<number, string> = {
+  60:  "1 min",
+  180: "3 min",
+  360: "6 min",
+  540: "9 min",
+  720: "12 min",
+};
+
+export interface TimingAnalysisRow {
+  symbol: string;
+  minuteMark: number;  // seconds into window
+  label: string;
+  sampleCount: number;
+  accuracy: number | null;   // 0-1 fraction
+  avgYesPrice: number | null;// Kalshi Yes price (0-1 fraction), null until collected
+  ev: number | null;         // expected value per $1 bet; positive = profitable
+}
+
+/**
+ * Returns per-symbol, per-minute-mark direction accuracy across all evaluated
+ * windows.  When `symbol` is provided only that coin is returned.
+ */
+export async function getTimingAnalysis(symbol?: string): Promise<TimingAnalysisRow[]> {
+  const rows = await db.execute(
+    symbol
+      ? sql`
+          SELECT symbol, minute_mark,
+            COUNT(*)::int                                       AS sample_count,
+            COUNT(*) FILTER (WHERE correct = true)::int        AS correct_count,
+            AVG(kalshi_yes_price::float)                        AS avg_yes_price
+          FROM window_timing_snapshots
+          WHERE actual_above IS NOT NULL AND symbol = ${symbol}
+          GROUP BY symbol, minute_mark
+          ORDER BY symbol, minute_mark
+        `
+      : sql`
+          SELECT symbol, minute_mark,
+            COUNT(*)::int                                       AS sample_count,
+            COUNT(*) FILTER (WHERE correct = true)::int        AS correct_count,
+            AVG(kalshi_yes_price::float)                        AS avg_yes_price
+          FROM window_timing_snapshots
+          WHERE actual_above IS NOT NULL
+          GROUP BY symbol, minute_mark
+          ORDER BY symbol, minute_mark
+        `,
+  );
+
+  return (rows.rows as Array<Record<string, unknown>>).map((row) => {
+    const sampleCount  = Number(row.sample_count);
+    const correctCount = Number(row.correct_count);
+    const accuracy     = sampleCount > 0 ? correctCount / sampleCount : null;
+    const avgYesPrice  = row.avg_yes_price != null ? Number(row.avg_yes_price) : null;
+    // EV per $1 risked: win (1/yesPrice - 1) with probability accuracy,
+    // lose $1 with probability (1-accuracy).
+    // Simplified: EV = accuracy/yesPrice - 1
+    const ev =
+      accuracy !== null && avgYesPrice !== null && avgYesPrice > 0
+        ? accuracy / avgYesPrice - 1
+        : null;
+    const markNum = Number(row.minute_mark);
+    return {
+      symbol:      String(row.symbol),
+      minuteMark:  markNum,
+      label:       TIMING_MARK_LABELS[markNum] ?? `${markNum / 60} min`,
+      sampleCount,
+      accuracy,
+      avgYesPrice,
+      ev,
+    };
+  });
 }

@@ -68,6 +68,31 @@ async function runStartupMigrations(): Promise<void> {
       CREATE INDEX IF NOT EXISTS wmo_symbol_locked
         ON window_monitor_outcomes (symbol, locked_at DESC)
     `);
+    // Per-symbol intra-window timing snapshots — records price-vs-strike
+    // direction at 1,3,6,9,12-minute marks so we can measure when the call
+    // reliably "locks in" to the final outcome for each coin.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS window_timing_snapshots (
+        id                 TEXT PRIMARY KEY,
+        symbol             TEXT NOT NULL,
+        window_key         TEXT NOT NULL,
+        target_time        TIMESTAMPTZ NOT NULL,
+        minute_mark        INTEGER NOT NULL,
+        price_above        BOOLEAN,
+        kalshi_target      NUMERIC(16,6),
+        current_price      NUMERIC(16,6),
+        kalshi_yes_price   NUMERIC(8,4),
+        stat_above         BOOLEAN,
+        ensemble_above     BOOLEAN,
+        actual_above       BOOLEAN,
+        correct            BOOLEAN,
+        evaluated_at       TIMESTAMPTZ
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS wts_symbol_window
+        ON window_timing_snapshots (symbol, window_key)
+    `);
   } finally {
     client.release();
   }
