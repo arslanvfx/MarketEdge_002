@@ -3969,64 +3969,72 @@ const TIMING_MARK_LABELS: Record<number, string> = {
 };
 
 export interface TimingAnalysisRow {
-  symbol: string;
-  minuteMark: number;  // seconds into window
+  symbol: string | null;     // null when aggregated across all symbols
+  minuteMark: number;        // seconds into window
   label: string;
   sampleCount: number;
-  accuracy: number | null;   // 0-1 fraction
+  accuracy: number | null;   // 0-1 fraction correct
   avgYesPrice: number | null;// Kalshi Yes price (0-1 fraction), null until collected
-  ev: number | null;         // expected value per $1 bet; positive = profitable
+  avgReturn: number | null;  // potential upside per $1 bet if correct: (1-p)/p
+  ev: number | null;         // EV per $1 bet = accuracy*(1/yesPrice) - (1-accuracy)
 }
 
 /**
- * Returns per-symbol, per-minute-mark direction accuracy across all evaluated
- * windows.  When `symbol` is provided only that coin is returned.
+ * Returns direction accuracy per minute mark for intra-window entry timing.
+ *
+ * When `symbol` is omitted: aggregates across ALL symbols, grouped by
+ * minute_mark only — the global recommendation curve.
+ * When `symbol` is provided: groups by symbol+minute_mark — per-coin curve.
  */
 export async function getTimingAnalysis(symbol?: string): Promise<TimingAnalysisRow[]> {
-  const rows = await db.execute(
+  const rawRows = await db.execute(
     symbol
       ? sql`
           SELECT symbol, minute_mark,
-            COUNT(*)::int                                       AS sample_count,
-            COUNT(*) FILTER (WHERE correct = true)::int        AS correct_count,
-            AVG(kalshi_yes_price::float)                        AS avg_yes_price
-          FROM window_timing_snapshots
-          WHERE actual_above IS NOT NULL AND symbol = ${symbol}
-          GROUP BY symbol, minute_mark
-          ORDER BY symbol, minute_mark
-        `
-      : sql`
-          SELECT symbol, minute_mark,
-            COUNT(*)::int                                       AS sample_count,
-            COUNT(*) FILTER (WHERE correct = true)::int        AS correct_count,
-            AVG(kalshi_yes_price::float)                        AS avg_yes_price
+            COUNT(*)::int                                            AS sample_count,
+            COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
+            AVG(kalshi_yes_price::float)                            AS avg_yes_price
           FROM window_timing_snapshots
           WHERE actual_above IS NOT NULL
+            AND symbol = ${symbol}
           GROUP BY symbol, minute_mark
-          ORDER BY symbol, minute_mark
+          ORDER BY minute_mark
+        `
+      : sql`
+          SELECT NULL AS symbol, minute_mark,
+            COUNT(*)::int                                            AS sample_count,
+            COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
+            AVG(kalshi_yes_price::float)                            AS avg_yes_price
+          FROM window_timing_snapshots
+          WHERE actual_above IS NOT NULL
+          GROUP BY minute_mark
+          ORDER BY minute_mark
         `,
   );
 
-  return (rows.rows as Array<Record<string, unknown>>).map((row) => {
+  return (rawRows.rows as Array<Record<string, unknown>>).map((row) => {
     const sampleCount  = Number(row.sample_count);
     const correctCount = Number(row.correct_count);
     const accuracy     = sampleCount > 0 ? correctCount / sampleCount : null;
     const avgYesPrice  = row.avg_yes_price != null ? Number(row.avg_yes_price) : null;
-    // EV per $1 risked: win (1/yesPrice - 1) with probability accuracy,
-    // lose $1 with probability (1-accuracy).
-    // Simplified: EV = accuracy/yesPrice - 1
+    // avgReturn: expected payout per $1 if the bet wins = (1 - yesPrice) / yesPrice
+    const avgReturn    =
+      avgYesPrice !== null && avgYesPrice > 0 ? (1 - avgYesPrice) / avgYesPrice : null;
+    // EV per $1 bet = accuracy × (1/yesPrice) - (1-accuracy)
+    // Positive means the bet has positive expected value at this entry minute.
     const ev =
       accuracy !== null && avgYesPrice !== null && avgYesPrice > 0
-        ? accuracy / avgYesPrice - 1
+        ? accuracy * (1 / avgYesPrice) - (1 - accuracy)
         : null;
     const markNum = Number(row.minute_mark);
     return {
-      symbol:      String(row.symbol),
-      minuteMark:  markNum,
-      label:       TIMING_MARK_LABELS[markNum] ?? `${markNum / 60} min`,
+      symbol:     row.symbol != null ? String(row.symbol) : null,
+      minuteMark: markNum,
+      label:      TIMING_MARK_LABELS[markNum] ?? `${markNum / 60} min`,
       sampleCount,
       accuracy,
       avgYesPrice,
+      avgReturn,
       ev,
     };
   });

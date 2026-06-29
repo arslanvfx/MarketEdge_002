@@ -287,15 +287,16 @@ interface TradingWindowsData {
   hasEnoughData: boolean;
 }
 
-// Per-symbol, per-minute-mark accuracy from the timing analysis endpoint
+// Per-symbol (or aggregate), per-minute-mark accuracy from the timing analysis endpoint
 interface TimingAnalysisRow {
-  symbol: string;
+  symbol: string | null;
   minuteMark: number;
   label: string;
   sampleCount: number;
   accuracy: number | null;
   avgYesPrice: number | null;
-  ev: number | null;
+  avgReturn: number | null;  // potential upside per $1 if correct: (1-p)/p
+  ev: number | null;         // EV = accuracy*(1/yesPrice) - (1-accuracy)
 }
 
 // ---------------------------------------------------------------------------
@@ -2670,9 +2671,12 @@ export default function Predictor() {
         {/* ── ENTRY TIMING ANALYSIS ── */}
         {kalshiAvailableTop && (() => {
           const rows = timingAnalysisQuery.data ?? [];
-          const totalSamples = rows.reduce((s, r) => s + r.sampleCount, 0);
+          // Use max sample count across marks as proxy for unique window count.
+          // Each evaluated window contributes exactly 1 snapshot per mark, so the
+          // mark with the highest count = most windows collected for this coin.
+          const windowsCollected = rows.length > 0 ? Math.max(...rows.map((r) => r.sampleCount)) : 0;
           const MIN_WINDOWS = 10;
-          const collecting = totalSamples < MIN_WINDOWS;
+          const collecting = windowsCollected < MIN_WINDOWS;
           // Best row = highest positive EV; fallback to highest accuracy when EV unavailable
           const bestByEv = rows.reduce<TimingAnalysisRow | null>(
             (acc, r) => (r.ev !== null && (acc === null || (acc.ev ?? -Infinity) < r.ev) ? r : acc),
@@ -2695,7 +2699,7 @@ export default function Predictor() {
                   <span className="text-sm font-semibold text-purple-300">Entry Timing Analysis</span>
                   {collecting ? (
                     <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-purple-900/40 text-purple-400">
-                      Collecting data… ({totalSamples}/{MIN_WINDOWS} windows)
+                      Collecting data… ({windowsCollected}/{MIN_WINDOWS} windows)
                     </span>
                   ) : best !== null ? (
                     <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-purple-900/60 text-purple-200">
@@ -2720,7 +2724,7 @@ export default function Predictor() {
                   </p>
                   {collecting ? (
                     <p className="text-xs text-purple-300/50 italic">
-                      Evaluating windows — {totalSamples} of {MIN_WINDOWS} needed for reliable curves. Check back after a few more 15-minute windows close.
+                      Evaluating windows — {windowsCollected} of {MIN_WINDOWS} needed for reliable curves. Check back after a few more 15-minute windows close.
                     </p>
                   ) : rows.length === 0 ? (
                     <p className="text-xs text-gray-500 italic">No evaluated windows yet.</p>
@@ -2736,9 +2740,10 @@ export default function Predictor() {
                       <table className="w-full text-xs">
                         <thead>
                           <tr className="text-purple-400/70 border-b border-purple-800/30">
-                            <th className="text-left pb-1.5 font-medium">Mark</th>
-                            <th className="text-right pb-1.5 font-medium">Accuracy</th>
-                            <th className="text-right pb-1.5 font-medium">EV</th>
+                            <th className="text-left pb-1.5 font-medium">Minute</th>
+                            <th className="text-right pb-1.5 font-medium">Accuracy %</th>
+                            <th className="text-right pb-1.5 font-medium">Avg Return</th>
+                            <th className="text-right pb-1.5 font-medium">EV Score</th>
                             <th className="text-right pb-1.5 font-medium">n</th>
                           </tr>
                         </thead>
@@ -2761,6 +2766,11 @@ export default function Predictor() {
                                 <td className={`py-1.5 text-right font-semibold ${isPositive ? "text-emerald-400" : isNegative ? "text-red-400" : "text-yellow-400"}`}>
                                   {pct}%
                                 </td>
+                                <td className="py-1.5 text-right text-purple-300/70">
+                                  {row.avgReturn !== null
+                                    ? `${(row.avgReturn * 100).toFixed(0)}%`
+                                    : "—"}
+                                </td>
                                 <td className={`py-1.5 text-right ${row.ev === null ? "text-gray-600" : row.ev > 0 ? "text-emerald-400" : "text-red-400"}`}>
                                   {row.ev !== null ? `${evSign}${(row.ev * 100).toFixed(1)}%` : "—"}
                                 </td>
@@ -2771,7 +2781,7 @@ export default function Predictor() {
                         </tbody>
                       </table>
                       <p className="text-xs text-purple-300/40 mt-2">
-                        EV requires Kalshi Yes price data (accumulates over time). Accuracy alone is useful for timing signals.
+                        Avg Return and EV require Kalshi Yes price data (accumulates over time). Accuracy alone is useful for timing.
                       </p>
                     </>
                   )}
