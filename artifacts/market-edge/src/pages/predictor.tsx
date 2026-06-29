@@ -1791,12 +1791,12 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                     )}
                     {hasTarget && rec.priceAtSnapshot != null && rec.kalshiTarget != null && (() => {
                       const p = Math.abs(rec.priceAtSnapshot - rec.kalshiTarget) / rec.priceAtSnapshot * 100;
-                      const cls = p >= 0.2
+                      const cls = p >= 0.1
                         ? "text-emerald-400/70"
-                        : p >= 0.1
+                        : p >= 0.03
                         ? "text-amber-400/70"
                         : "text-red-400/70";
-                      const bucket = p >= 0.2 ? "edge" : p >= 0.1 ? "mod" : "line";
+                      const bucket = p >= 0.1 ? "edge" : p >= 0.03 ? "mod" : "line";
                       return (
                         <div className={`flex items-center gap-1 ${cls}`} title={`${p.toFixed(3)}% from Kalshi strike at snap`}>
                           <span className="opacity-70">Prox</span>
@@ -3629,11 +3629,11 @@ function CoinDetail({
                             </span>
                           </div>
 
-                          {/* Strike proximity chip — green=clear edge (>0.2%), amber=moderate (0.1-0.2%), red=on the line (<0.1%) */}
+                          {/* Strike proximity chip — green=clear edge (>0.1%), amber=moderate (0.03-0.1%), red=on the line (<0.03%) */}
                           {statSnapshot.strikeProximityPct != null && (() => {
                             const p = statSnapshot.strikeProximityPct!;
-                            const isEdge = p >= 0.2;
-                            const isMod  = p >= 0.1 && p < 0.2;
+                            const isEdge = p >= 0.1;
+                            const isMod  = p >= 0.03 && p < 0.1;
                             const cls = isEdge
                               ? "bg-emerald-500/10 text-emerald-400 ring-emerald-500/25"
                               : isMod

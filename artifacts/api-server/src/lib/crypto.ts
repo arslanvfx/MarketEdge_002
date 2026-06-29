@@ -1191,6 +1191,36 @@ export function ensembleWeights(symbol: string, regime: PromptRegime): EnsembleW
   return ensembleWeightsFor(getPredictionAnalytics(symbol), regime);
 }
 
+// Per-coin data-driven Claude down-call weight scale.
+// Claude "down" accuracy varies enormously by coin — BNB (70.3% down, 42.9% up)
+// is the OPPOSITE of BTC/ETH/HYPE (36-50% down, 61-80% up). Applying a fixed
+// 30% penalty globally actively hurts BNB. This function computes the scale from
+// the coin's own evaluated history: ratio of down accuracy to up accuracy,
+// clamped to [0.5, 1.0]. BNB → 1.0 (no penalty); ETH → ~0.58; BTC → ~0.72.
+// Falls back to 0.85 (mild universal default) when direction samples are thin.
+const CLAUDE_DOWN_SCALE_MIN_DIR_SAMPLES = 5;
+function computeClaudeDownScale(symbol: string): number {
+  // historyStore is module-level — defined below snap logic but callable here
+  // since this function is only invoked at runtime (never at parse time).
+  const records = (historyStore as Map<string, PredictionRecord[]>).get(symbol.toUpperCase()) ?? [];
+  const claudeEval = records.filter(
+    (r) => r.source === "claude" && r.status === "evaluated"
+      && r.correct !== null && r.kalshiTarget != null,
+  );
+  const downRecs = claudeEval.filter((r) => r.predictedDirection === "down");
+  const upRecs   = claudeEval.filter((r) => r.predictedDirection === "up");
+  if (
+    downRecs.length < CLAUDE_DOWN_SCALE_MIN_DIR_SAMPLES ||
+    upRecs.length   < CLAUDE_DOWN_SCALE_MIN_DIR_SAMPLES
+  ) {
+    return 0.85; // insufficient direction samples → mild universal default
+  }
+  const downAcc = downRecs.filter((r) => r.correct === true).length / downRecs.length;
+  const upAcc   = upRecs.filter((r) => r.correct === true).length / upRecs.length;
+  if (upAcc <= 0) return 1.0; // edge: no up hits → don't penalise down
+  return clamp(downAcc / upAcc, 0.5, 1.0);
+}
+
 // Blend a stat call and a Claude call into one ensemble call, deciding whether
 // to bet or abstain. `referencePrice` is the live price the displayed directions
 // were derived from, so the blended direction stays consistent with the columns.
@@ -1202,12 +1232,12 @@ export function computeEnsemble(
   referencePrice: number,
 ): EnsembleCall {
   const weights = ensembleWeights(symbol, regime);
-  // Asymmetric down-weighting: Claude "down" calls are empirically weaker
-  // across coins (ETH claude-down: 36%, HYPE claude-down: 52%) vs "up" calls
-  // (ETH: 61%, HYPE: 76.5%). When Claude calls "down", reduce its blend share
-  // by 30% and redistribute the difference to stat, so the ensemble leans on
-  // the more reliable stat model for downside calls.
-  const claudeDownScale = claude.direction === "down" ? 0.70 : 1.0;
+  // Per-coin asymmetric down-weighting, derived from each coin's own evaluated
+  // history. BNB claude-down (70%) > claude-up (43%) → scale=1.0 (no penalty).
+  // ETH claude-down (39%) << claude-up (67%) → scale≈0.58 (stronger penalty).
+  // XRP (57% vs 60%) → scale≈0.94 (near-equal, almost no penalty).
+  // Falls back to 0.85 when direction samples are insufficient.
+  const claudeDownScale = claude.direction === "down" ? computeClaudeDownScale(symbol) : 1.0;
   const effectiveClaudeW = weights.claude * claudeDownScale;
   const effectiveStatW = weights.stat + (weights.claude - effectiveClaudeW);
   const predictedPrice = effectiveStatW * stat.predictedPrice + effectiveClaudeW * claude.predictedPrice;
@@ -2824,38 +2854,41 @@ export function startPredictionTracker(): void {
               const newRecs: PredictionRecord[] = [];
 
               // ── Proximity + time-of-day confidence adjustment (stat only) ──
-              // Applied to the stat record before storage. Claude and ensemble
-              // manage their own confidence paths.
+              // Calibrated from per-coin DB analysis across 61+ evaluated records
+              // per coin. Applied to the stat record before storage.
               //
-              // Strike proximity: price distance from Kalshi strike correlates
-              // strongly with accuracy — >0.2% from strike → 85-100% accuracy;
-              // <0.1% from strike ("on the line") → ~50-57% (coin flip).
-              // Boost/reduce the base confidence proportionally.
+              // Strike proximity: Kalshi sets the strike at the current market
+              // price when the window opens, so snap happens 30-90s later with
+              // average proximity of only 0.04-0.09% — NOT 0.2%+ as originally
+              // coded. Re-calibrated thresholds from actual data:
+              //   >0.1%  → 64-83% accuracy (clear edge)     → +boost
+              //   0.03-0.1% → 33-73% (mixed / baseline)     → no change
+              //   <0.03% → 47-57% accuracy (coin-flip zone)  → -penalty
               //
-              // Time-of-day (UTC): 17-19 UTC (1-3 PM ET, mid-US-session) →
-              // 90% empirical accuracy. 20-22 UTC (4-6 PM ET, equity close) →
-              // 30-40% accuracy. These are clean clock-based multipliers.
+              // Time-of-day (UTC): UTC 19 (3 PM ET) is the only clean cross-coin
+              // signal (75-100% across all 6 coins, n=4 each). UTC 17 is
+              // unconfirmed; UTC 20-22 reduce was removed because BNB/SOL show
+              // 75% accuracy there — it was helping BTC/ETH but hurting others.
               let adjustedStatConf = basePred.confidence;
               if (kalshiTarget != null) {
                 const proximityPct =
                   Math.abs(analysis.price - kalshiTarget) / analysis.price * 100;
-                if (proximityPct > 0.2) {
-                  // Clear edge: proportional boost, capped at +6 pts.
-                  const boost = Math.round(Math.min((proximityPct - 0.2) * 20, 6));
+                if (proximityPct > 0.1) {
+                  // Clear edge: proportional boost from 0.1%, capped at +6 pts.
+                  const boost = Math.round(Math.min((proximityPct - 0.1) * 20, 6));
                   adjustedStatConf = Math.min(68, adjustedStatConf + boost);
-                } else if (proximityPct < 0.1) {
-                  // On the line: reduce confidence toward coin-flip level.
+                } else if (proximityPct < 0.03) {
+                  // Coin-flip zone: reduce confidence toward fair-bet level.
                   adjustedStatConf = Math.max(50, adjustedStatConf - 4);
                 }
+                // 0.03-0.1% (modal range): no adjustment — mixed evidence.
               }
               const snapHourUTC = new Date(nowMs).getUTCHours();
-              if (snapHourUTC === 17 || snapHourUTC === 19) {
-                // Peak accuracy windows (90% empirical) — small boost.
+              if (snapHourUTC === 19) {
+                // UTC 19 (3 PM ET): 75-100% accuracy across all 6 coins — boost.
                 adjustedStatConf = Math.min(68, adjustedStatConf + 4);
-              } else if (snapHourUTC >= 20 && snapHourUTC <= 22) {
-                // Equity close / afterhours (30-40% accuracy) — reduce.
-                adjustedStatConf = Math.max(50, adjustedStatConf - 8);
               }
+              // UTC 20-22 reduce removed: too coin-specific (BNB/SOL 75% there).
 
               // Statistical baseline — always stored (free, no Claude needed).
               newRecs.push({
