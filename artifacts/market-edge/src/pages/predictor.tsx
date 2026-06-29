@@ -3441,22 +3441,39 @@ function CoinDetail({
             const wbs: WindowBetSignal | null = windowBetSignal ?? null;
             if (!wbs) return null;
 
-            const isReady = wbs.ready;
             const rec = wbs.recommendation;
 
-            // Client-side time: compute elapsed / remaining from ktd timestamps
-            // so the progress bar ticks every second (now is a 1s state tick)
-            // rather than waiting for the 15s server poll to update minutesElapsed.
+            // ── Client-side time tracking ─────────────────────────────────
+            // Use ktd timestamps + the 1s `now` ticker so everything ticks
+            // every second without waiting for the 15s server poll.
+            //
+            // The monitoring period is the FIRST 5 min of the Kalshi window.
+            // Kalshi windows are 15 min long, so the fallback open time is
+            // closeTime - 15 min (NOT 5 min).
+            const KALSHI_WINDOW_MS  = 15 * 60_000;
+            const MONITOR_PERIOD_MS =  5 * 60_000;
             const winOpenMs  = ktd?.openTime  ? new Date(ktd.openTime).getTime()  : null;
             const winCloseMs = ktd?.closeTime ? new Date(ktd.closeTime).getTime() : null;
-            const WINDOW_DURATION_MS = 5 * 60_000;
-            const effectiveOpenMs = winOpenMs ?? (winCloseMs ? winCloseMs - WINDOW_DURATION_MS : null);
-            const clientElapsedMs  = effectiveOpenMs != null ? Math.max(0, now.getTime() - effectiveOpenMs) : null;
-            const clientElapsedMin = clientElapsedMs != null ? clientElapsedMs / 60_000 : wbs.minutesElapsed;
-            const clientProgressPct = Math.min(100, (clientElapsedMin / 5) * 100);
-            const clientSecsLeft = winCloseMs != null
-              ? Math.max(0, Math.round((winCloseMs - now.getTime()) / 1000))
+            // Best-effort open: prefer explicit openTime, fall back to closeTime − 15 min.
+            const effectiveOpenMs = winOpenMs ?? (winCloseMs ? winCloseMs - KALSHI_WINDOW_MS : null);
+            // End of the 5-min monitoring period.
+            const monitorEndMs = effectiveOpenMs != null ? effectiveOpenMs + MONITOR_PERIOD_MS : null;
+            // Seconds until monitoring ends (counts to monitorEndMs, NOT winCloseMs).
+            const secsUntilReady = monitorEndMs != null
+              ? Math.max(0, Math.round((monitorEndMs - now.getTime()) / 1000))
               : null;
+            // Progress bar: 0→100% over the 5-min monitoring window.
+            const clientElapsedMs = effectiveOpenMs != null
+              ? Math.max(0, now.getTime() - effectiveOpenMs)
+              : null;
+            const clientProgressPct = monitorEndMs != null && clientElapsedMs != null
+              ? Math.min(100, (clientElapsedMs / MONITOR_PERIOD_MS) * 100)
+              : Math.min(100, (wbs.minutesElapsed / 5) * 100);
+            // isReady: server OR client clock says ≥5 min elapsed.
+            // Client override handles server restarts mid-window (openedAt resets
+            // → minutesElapsed drops to 0 → wbs.ready stays false indefinitely).
+            const clientIsReady = monitorEndMs != null && now.getTime() >= monitorEndMs;
+            const isReady = wbs.ready || clientIsReady;
 
             const badge = isReady
               ? rec === "bet"
@@ -3472,22 +3489,21 @@ function CoinDetail({
               : "text-amber-400/80"
               : "text-muted-foreground/60";
 
-            // Elapsed label: show M:SS while monitoring, seconds only when < 60s left
-            const elapsedLabel = (() => {
-              if (clientSecsLeft === null) return `${Math.floor(clientElapsedMin)}/5 min`;
-              const totalSecs = Math.round(clientElapsedMs ?? 0) / 1000;
-              const m = Math.floor(totalSecs / 60);
-              const s = Math.floor(totalSecs % 60);
-              return `${m}:${String(s).padStart(2, "0")} / 5:00`;
-            })();
+            // Time-left label counts to the end of the 5-min monitoring period.
             const timeLeftLabel = (() => {
-              if (clientSecsLeft === null) return null;
-              if (clientSecsLeft <= 0) return "almost ready";
-              if (clientSecsLeft < 60) return `${clientSecsLeft}s left`;
-              const m = Math.floor(clientSecsLeft / 60);
-              const s = clientSecsLeft % 60;
+              if (secsUntilReady === null) return null;
+              if (secsUntilReady <= 0) return "almost ready";
+              if (secsUntilReady < 60) return `${secsUntilReady}s left`;
+              const m = Math.floor(secsUntilReady / 60);
+              const s = secsUntilReady % 60;
               return s === 0 ? `${m}m left` : `${m}m ${s}s left`;
             })();
+            // Elapsed counter: capped at 5:00 once monitoring is done.
+            const elapsedSecs = Math.min(
+              Math.round((clientElapsedMs ?? 0) / 1000),
+              5 * 60,
+            );
+            const elapsedLabel = `${Math.floor(elapsedSecs / 60)}:${String(elapsedSecs % 60).padStart(2, "0")} / 5:00`;
 
             return (
               <div className="px-5 py-3 border-t border-[#00C805]/15">
