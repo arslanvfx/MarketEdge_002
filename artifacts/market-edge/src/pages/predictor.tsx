@@ -2146,6 +2146,39 @@ export default function Predictor() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kalshiEventTicker]);
 
+  // Restore a manual re-analysis result that survived a hard refresh.
+  // sessionStorage is preserved across hard refreshes (Ctrl+Shift+R) but
+  // cleared when the tab closes.  The key includes eventTicker so a stored
+  // result from the previous window is silently ignored.
+  useEffect(() => {
+    if (!kalshiEventTicker || !selected) return;
+    // Only restore if we don't already have a result for this coin.
+    if (aiData[selected]) return;
+    const key = `ai-enhance:${selected.toUpperCase()}:${kalshiEventTicker}`;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as AiEntry & { at: string };
+      setAiData((prev) => {
+        if (prev[selected]) return prev; // raced — already set
+        return {
+          ...prev,
+          [selected]: {
+            preds: parsed.preds,
+            at: new Date(parsed.at),
+            priceAtRun: parsed.priceAtRun,
+            eventTickerAtRun: parsed.eventTickerAtRun,
+            ensembleWeights: parsed.ensembleWeights,
+            abstainMinConf: parsed.abstainMinConf,
+          },
+        };
+      });
+    } catch { /* corrupt entry — ignore */ }
+  // aiData intentionally excluded — we only want to restore once (on first
+  // load / ticker arrival), not re-run every time aiData changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kalshiEventTicker, selected]);
+
   const wmAccuracyQuery = useQuery({
     queryKey: ["wm-accuracy", selected],
     queryFn: () => fetchJson<WMAccuracyStats>(`/crypto/window-monitor-accuracy/${selected}`),
@@ -2237,17 +2270,25 @@ export default function Predictor() {
       if (!Array.isArray(data.predictions) || data.predictions.length === 0) {
         throw new Error("Unexpected response from AI endpoint");
       }
-      setAiData((prev) => ({
-        ...prev,
-        [sym]: {
-          preds: data.predictions,
-          at: new Date(data.generatedAt),
-          priceAtRun: priceSnapshot,
-          eventTickerAtRun: tickerSnapshot,
-          ensembleWeights: data.ensembleWeights,
-          abstainMinConf: data.abstainMinConf,
-        },
-      }));
+      const newEntry: AiEntry = {
+        preds: data.predictions,
+        at: new Date(data.generatedAt),
+        priceAtRun: priceSnapshot,
+        eventTickerAtRun: tickerSnapshot,
+        ensembleWeights: data.ensembleWeights,
+        abstainMinConf: data.abstainMinConf,
+      };
+      setAiData((prev) => ({ ...prev, [sym]: newEntry }));
+      // Persist across hard refreshes — keyed by (symbol, eventTicker) so
+      // the stored result is automatically ignored for a different window.
+      if (tickerSnapshot) {
+        try {
+          sessionStorage.setItem(
+            `ai-enhance:${sym}:${tickerSnapshot}`,
+            JSON.stringify({ ...newEntry, at: data.generatedAt }),
+          );
+        } catch { /* quota exceeded — silently skip */ }
+      }
       // ── Drift detection ──────────────────────────────────────────────────
       // Compare Claude's fresh call against the locked window-open prediction.
       // If they disagree on ABOVE/BELOW (or direction for non-Kalshi), alert.
