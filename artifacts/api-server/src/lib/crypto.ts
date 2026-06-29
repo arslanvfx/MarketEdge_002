@@ -1944,7 +1944,7 @@ export function getKalshiWindowContext(symbol: string): { priceAtOpen: number | 
   if (!entry) return null;
   return {
     priceAtOpen: entry.priceAtOpen,
-    minutesElapsed: Math.max(0, Math.round((Date.now() - entry.openedAt) / 60_000)),
+    minutesElapsed: Math.max(0, Math.floor((Date.now() - entry.openedAt) / 60_000)),
   };
 }
 
