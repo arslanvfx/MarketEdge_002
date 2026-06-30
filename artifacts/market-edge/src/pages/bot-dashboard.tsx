@@ -188,8 +188,8 @@ export default function BotDashboard() {
 
   const { data: historyData } = useQuery<{ history: HistoryRecord[] }>({
     queryKey: ["bot-all-history"],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=100`).then(r => r.json()),
-    refetchInterval: 30_000,
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=500`).then(r => r.json()),
+    refetchInterval: 15_000,
   });
 
   const { data: statsData } = useQuery<BotStats>({
@@ -864,12 +864,19 @@ export default function BotDashboard() {
                 const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
                 const xp = r.exitPrice != null ? parseFloat(r.exitPrice) : null;
                 const isOpen = r.action === "bet";
+                const isPendingEval = !isOpen && r.outcome == null;
                 const isWin = r.outcome === "win";
                 const isLoss = r.outcome === "loss";
-                const closePx = (r.signals as Record<string, unknown> | null)?.closePriceAtEval as number | null ?? null;
+                const sigs = r.signals as Record<string, unknown> | null;
+                const closePx = sigs?.closePriceAtEval as number | null ?? null;
                 const endPx = closePx ?? (r.cryptoPriceAtExit != null ? parseFloat(r.cryptoPriceAtExit) : null);
                 const strike = r.kalshiTarget != null ? parseFloat(r.kalshiTarget) : null;
                 const endAboveStrike = endPx != null && strike != null ? endPx >= strike : null;
+
+                const statAbove = sigs?.statAbove as boolean | null ?? null;
+                const claudeAbove = sigs?.claudeAbove as boolean | null ?? null;
+                const mlAbove = sigs?.mlAbove as boolean | null ?? null;
+                const agreementTarget = sigs?.agreementTarget as string | null ?? null;
 
                 const cardBg = isOpen
                   ? "border-sky-500/30 bg-sky-950/10"
@@ -877,7 +884,9 @@ export default function BotDashboard() {
                     ? "border-emerald-500/30 bg-emerald-950/10"
                     : isLoss
                       ? "border-red-500/30 bg-red-950/10"
-                      : "border-border bg-card/60";
+                      : isPendingEval
+                        ? "border-amber-500/20 bg-amber-950/5"
+                        : "border-border bg-card/60";
 
                 return (
                   <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
@@ -888,7 +897,7 @@ export default function BotDashboard() {
                       {r.direction && (
                         <span className={`flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${r.direction === "yes" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
                           {r.direction === "yes" ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                          {r.direction.toUpperCase()}
+                          {r.direction === "yes" ? "ABOVE" : "BELOW"}
                         </span>
                       )}
 
@@ -904,10 +913,29 @@ export default function BotDashboard() {
                         <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-300">
                           <XCircle className="w-3 h-3" /> LOSS
                         </span>
+                      ) : isPendingEval ? (
+                        <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 animate-pulse">
+                          <Activity className="w-3 h-3" /> EVALUATING
+                        </span>
                       ) : (
                         <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
                           {r.action.replace(/_/g, " ").toUpperCase()}
                         </span>
+                      )}
+
+                      {/* Signal agreement pills */}
+                      {agreementTarget != null && (
+                        <div className="flex items-center gap-1 ml-1">
+                          {([["S", statAbove], ["C", claudeAbove], ["ML", mlAbove]] as [string, boolean | null][]).map(([label, val]) => (
+                            val != null ? (
+                              <span key={label} className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                (agreementTarget === "BET_YES" ? val === true : val === false)
+                                  ? "bg-emerald-500/20 text-emerald-400"
+                                  : "bg-red-500/15 text-red-400"
+                              }`}>{label}</span>
+                            ) : null
+                          ))}
+                        </div>
                       )}
 
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
@@ -976,20 +1004,31 @@ export default function BotDashboard() {
 
                     {/* Footer row */}
                     <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">
-                      {!isOpen && (
+                      {!isOpen && r.exitedAt && (
                         <span className="flex items-center gap-1">
                           <Clock className="w-3 h-3" />
                           {fmtDuration(r.createdAt, r.exitedAt)}
                         </span>
                       )}
                       <span className="font-mono">{r.windowKey?.slice(11, 16)} window</span>
+                      {(() => {
+                        const conf = sigs?.confidence as number | null ?? sigs?.statConfidence as number | null ?? null;
+                        return conf != null ? (
+                          <span className={`font-semibold ${conf >= 60 ? "text-emerald-400" : conf >= 52 ? "text-amber-400" : "text-muted-foreground"}`}>
+                            {Math.round(conf)}% conf
+                          </span>
+                        ) : null;
+                      })()}
                       {r.exitReason && (
-                        <span className="truncate max-w-[200px]" title={r.exitReason}>
+                        <span className="truncate max-w-[220px]" title={r.exitReason}>
                           · {r.exitReason.replace(/_/g, " ")}
                         </span>
                       )}
                       {r.phase2Activated && (
                         <span className="text-amber-400 font-medium">· Phase 2</span>
+                      )}
+                      {isPendingEval && (
+                        <span className="text-amber-400/70">· awaiting window close price</span>
                       )}
                     </div>
                   </div>

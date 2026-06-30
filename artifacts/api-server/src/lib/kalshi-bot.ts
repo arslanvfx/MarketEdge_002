@@ -1288,6 +1288,7 @@ export async function evalClosedBets(): Promise<void> {
     for (const row of rows) {
       let outcome: "win" | "loss" | "push";
       let correctedPnl: number | null = null;
+      let closePrice: number | null = null;
 
       if (row.action === "expired") {
         // ── Settlement evaluation: fetch actual candle close at window end ──
@@ -1318,7 +1319,7 @@ export async function evalClosedBets(): Promise<void> {
           continue;
         }
 
-        const closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
+        closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
         if (closePrice === null) {
           if (noCoinPriceAtExit && pastDeferWindow) {
             // Past the deferral window and Coinbase is still unavailable.

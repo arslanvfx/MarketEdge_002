@@ -96,7 +96,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   betSize: 0.50,
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry
-  minConfidence: 60,
+  minConfidence: 52,
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
   // Entry is only allowed between t+45s and t+5:00 of each 15-min window.
