@@ -88,6 +88,9 @@ let dailyDate = todayUTC();
 let accountBalance: number | null = null;
 let lastGuardStates: GuardStates | null = null;
 let lastGuardReason: string | null = null;
+// Tracks the last window key for which a decision (SKIP or BET) was logged per symbol.
+// Prevents duplicate SKIP records across successive 30s ticks within the same window.
+const lastDecisionWindowKey: Map<string, string> = new Map();
 
 // Timing analysis cache (refreshed every 5 min)
 let timingCache: Map<string, number | null> = new Map();
@@ -332,17 +335,21 @@ async function _runBotTick(
   );
 
   if (decision.action === "SKIP") {
-    // Log skip decisions for transparency
-    await persistBetRecord({
-      symbol: sym,
-      windowKey,
-      ticker: kalshiTicker,
-      direction: null,
-      action: "skip",
-      signals: decision.signals,
-      entryPrice: null,
-      kalshiTarget,
-    });
+    // Log at most one SKIP per (symbol, window) to avoid flooding audit logs
+    // with repeated SKIP records from successive 30-second ticks
+    if (lastDecisionWindowKey.get(sym) !== windowKey) {
+      lastDecisionWindowKey.set(sym, windowKey);
+      await persistBetRecord({
+        symbol: sym,
+        windowKey,
+        ticker: kalshiTicker,
+        direction: null,
+        action: "skip",
+        signals: decision.signals,
+        entryPrice: null,
+        kalshiTarget,
+      });
+    }
     return;
   }
 
@@ -399,7 +406,11 @@ async function _runBotTick(
     kalshiTarget,
     contractCount,
     betAmount,
+    // Pass the same id used for openPosition so the exit UPDATE finds this row
+    existingId: id,
   });
+  // Mark this window as having a recorded decision so SKIP dedup works correctly
+  lastDecisionWindowKey.set(sym, windowKey);
 
   logger.info({ sym, direction, fillPrice, contractCount }, "[kalshi-bot] bet placed");
 }

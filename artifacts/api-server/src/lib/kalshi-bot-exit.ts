@@ -19,8 +19,9 @@ export interface Phase1State {
 }
 
 export interface Phase2State {
-  activatedAt: number | null;  // ms timestamp when Phase 2 first activated
-  recentLow: number | null;    // lowest yes price seen since Phase 2 activated
+  activatedAt: number | null;   // ms timestamp when Phase 2 first activated
+  recentLow: number | null;     // lowest yes price since activation (used for YES positions)
+  recentHigh: number | null;    // highest yes price since activation (used for NO positions)
   lastYesPrice: number | null;
 }
 
@@ -139,41 +140,67 @@ export function runExitGuard(
 
   if (shouldActivatePhase2 && state.phase2.activatedAt === null) {
     state.phase2.activatedAt = Date.now();
-    state.phase2.recentLow = yp;
+    // Seed the tracking extreme for this direction
+    if (direction === "yes") {
+      state.phase2.recentLow = yp;
+    } else {
+      state.phase2.recentHigh = yp;
+    }
   }
 
   const phase2Active = state.phase2.activatedAt !== null;
 
   if (phase2Active) {
-    // Update running low
-    if (yp !== null && (state.phase2.recentLow === null || yp < state.phase2.recentLow)) {
-      state.phase2.recentLow = yp;
+    // YES positions track the lowest yes price seen (recovery = price rises back)
+    // NO  positions track the highest yes price seen (recovery = price falls back)
+    if (direction === "yes") {
+      if (yp !== null && (state.phase2.recentLow === null || yp < state.phase2.recentLow)) {
+        state.phase2.recentLow = yp;
+      }
+    } else {
+      if (yp !== null && (state.phase2.recentHigh === null || yp > state.phase2.recentHigh)) {
+        state.phase2.recentHigh = yp;
+      }
     }
     state.phase2.lastYesPrice = yp;
 
     const phase2ElapsedMs = Date.now() - (state.phase2.activatedAt ?? Date.now());
     const phase2Timeout = phase2ElapsedMs >= 2 * 60_000;
 
-    // Uptick: yes price recovered ≥5pp from recent low
-    const recentLow = state.phase2.recentLow ?? yp ?? entryPrice;
-    const uptickDetected = yp !== null && recentLow !== null
-      ? (yp - recentLow) * 100 >= 5
-      : false;
+    // Recovery signal: position is no longer bleeding as badly
+    // YES: yes price rose ≥5pp from its recent low      → EXIT (salvage what's left)
+    // NO:  yes price fell ≥5pp from its recent high     → EXIT
+    let recoveryDetected = false;
+    let recoveryMagnitudePp = 0;
+    if (direction === "yes") {
+      const recentLow = state.phase2.recentLow ?? yp ?? entryPrice;
+      recoveryMagnitudePp = yp !== null ? (yp - recentLow) * 100 : 0;
+      recoveryDetected = yp !== null && recoveryMagnitudePp >= 5;
+    } else {
+      const recentHigh = state.phase2.recentHigh ?? yp ?? entryPrice;
+      recoveryMagnitudePp = yp !== null ? (recentHigh - yp) * 100 : 0;
+      recoveryDetected = yp !== null && recoveryMagnitudePp >= 5;
+    }
+
+    const recentExtreme = direction === "yes"
+      ? (state.phase2.recentLow ?? yp)
+      : (state.phase2.recentHigh ?? yp);
 
     const guardStates: GuardStates = {
       holdDurationOk: false, flipConfirmed: false, magnitudeOk: false,
       consensusOk: false, timingOverride: false, erOk: false,
       phase2Active: true,
-      phase2UptickDetected: uptickDetected,
+      phase2UptickDetected: recoveryDetected,
       phase2Timeout,
       phase2YesPrice: yp,
-      phase2RecentLow: recentLow,
+      phase2RecentLow: recentExtreme,
     };
 
-    if (uptickDetected) {
+    if (recoveryDetected) {
+      const dir = direction === "yes" ? "rose" : "fell";
       return {
         recommendation: "EXIT",
-        reason: `Phase 2: Yes price recovered ${((yp! - recentLow!) * 100).toFixed(1)}pp from low — best available exit`,
+        reason: `Phase 2: Yes price ${dir} ${recoveryMagnitudePp.toFixed(1)}pp from extreme — best available exit`,
         phase: 2,
         guardStates,
       };
@@ -188,7 +215,7 @@ export function runExitGuard(
     }
     return {
       recommendation: "HOLD",
-      reason: "Phase 2 active — watching for uptick before exiting",
+      reason: "Phase 2 active — watching for recovery before exiting",
       phase: 2,
       guardStates,
     };
@@ -274,6 +301,7 @@ export function makeInitialExitState(entryPrice: number): ExitState {
     phase2: {
       activatedAt: null,
       recentLow: null,
+      recentHigh: null,
       lastYesPrice: null,
     },
   };
