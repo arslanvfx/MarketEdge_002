@@ -64,6 +64,7 @@ interface WindowEval {
   symbol: string; action: "BET_YES" | "BET_NO" | "SKIP";
   confidence: number; score: number; reason: string;
   windowKey: string; selected: boolean; evaluatedAt: string;
+  trendStability: "clean" | "choppy" | "reversing" | null;
 }
 
 interface BotStats {
@@ -357,6 +358,7 @@ export default function BotDashboard() {
                     <th className="px-3 py-2">Decision</th>
                     <th className="px-3 py-2">Confidence</th>
                     <th className="px-3 py-2">Score</th>
+                    <th className="px-3 py-2">Trend</th>
                     <th className="px-3 py-2">Reason</th>
                     <th className="px-3 py-2">Selected</th>
                   </tr>
@@ -379,6 +381,17 @@ export default function BotDashboard() {
                       </td>
                       <td className="px-3 py-2.5">
                         {e.action !== "SKIP" ? <span className="font-mono">{e.score.toFixed(2)}</span> : <span className="text-muted-foreground">—</span>}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {e.trendStability ? (
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                            e.trendStability === "clean" ? "bg-emerald-500/15 text-emerald-400" :
+                            e.trendStability === "reversing" ? "bg-red-500/15 text-red-400" :
+                            "bg-amber-500/15 text-amber-400"
+                          }`}>
+                            {e.trendStability}
+                          </span>
+                        ) : <span className="text-muted-foreground text-xs">—</span>}
                       </td>
                       <td className="px-3 py-2.5 text-muted-foreground text-xs max-w-[200px] truncate">{e.reason}</td>
                       <td className="px-3 py-2.5">

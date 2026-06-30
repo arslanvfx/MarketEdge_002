@@ -31,8 +31,10 @@ import {
   getKalshiCachedData,
   fetchKalshiTarget,
   fetchLiveDirection,
+  fetchTrendStabilityForBot,
   CRYPTO_COINS,
   KALSHI_SERIES,
+  type TrendStability,
 } from "./crypto";
 
 // ---------------------------------------------------------------------------
@@ -86,11 +88,12 @@ export interface WindowCoinEvaluation {
   symbol: string;
   action: "BET_YES" | "BET_NO" | "SKIP";
   confidence: number;          // 0-100 from makeBotDecision
-  score: number;               // composite: confidence × timingAcc / 100
+  score: number;               // composite: confidence × timingAcc / 100 × stabilityMultiplier
   reason: string;              // short human-readable explanation
   windowKey: string;
   selected: boolean;           // true for the coin chosen for the bet
   evaluatedAt: string;         // ISO timestamp
+  trendStability: TrendStability | null; // from window-open Claude analysis (null = not yet ready)
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +120,13 @@ const lastDecisionWindowKey: Map<string, string> = new Map();
 // by symbol.  Fires when a *new ticker* first appears (true ticker transition), not at
 // local window-key rollover — so the prefetch is not wasted on a stale market.
 const prefetchedTicker: Map<string, string> = new Map();
+
+// Tracks the windowKey for which the window-open parallel trend-stability analysis
+// was fired. Reset on window transition so each window gets exactly one batch call.
+let lastStabilityWindowKey = "";
+// Per-symbol trend stability result from the latest window-open Claude analysis.
+// Cleared on each window transition. Populated async — may be null on the first tick.
+const windowStabilityCache = new Map<string, TrendStability>();
 
 // Warmup duration (ms) at the start of each window before the bot can enter.
 // 45s allows the Kalshi market to stabilise and the Claude opening call to complete.
@@ -1356,6 +1366,27 @@ export async function runBotLoopTick(): Promise<void> {
     await fetchKalshiTarget(coin.symbol).catch(() => null);
   }
 
+  // Window-open stability analysis: fire parallel Claude trend-stability calls for all
+  // Kalshi coins on each new window. The cache is cleared so stale results from the
+  // previous window don't carry over. Calls are fire-and-forget; they complete during
+  // the 45s warmup so Phase 3 can read them before the bot is eligible to enter.
+  const newWindowKey = currentWindowKey();
+  if (newWindowKey !== lastStabilityWindowKey) {
+    lastStabilityWindowKey = newWindowKey;
+    windowStabilityCache.clear();
+    const kCoins = CRYPTO_COINS.filter(c => KALSHI_SERIES[c.symbol]);
+    void Promise.all(
+      kCoins.map(c =>
+        fetchTrendStabilityForBot(c.symbol.toUpperCase(), newWindowKey)
+          .then(r => {
+            if (r) windowStabilityCache.set(c.symbol.toUpperCase(), r.trendStability);
+          })
+          .catch(() => {}),
+      ),
+    );
+    logger.info({ windowKey: newWindowKey, coins: kCoins.map(c => c.symbol) }, "[kalshi-bot] window-open trend stability analysis fired");
+  }
+
   // Phase 2: manage exit for the open position (if any), then return.
   // One position at a time — never enter a new position in the same tick as an exit.
   if (openPosition !== null) {
@@ -1394,16 +1425,16 @@ export async function runBotLoopTick(): Promise<void> {
     const now = new Date().toISOString();
 
     if (!kalshiData?.ticker || kalshiData.value === null) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null });
       continue;
     }
     if (secondsElapsed < WARMUP_MS / 1_000) {
       const remaining = Math.ceil(WARMUP_MS / 1_000 - secondsElapsed);
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `warming up (${remaining}s)`, windowKey, selected: false, evaluatedAt: now });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `warming up (${remaining}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null });
       continue;
     }
     if (secondsElapsed > config.maxEntryMinutes * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "past entry ceiling", windowKey, selected: false, evaluatedAt: now });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "past entry ceiling", windowKey, selected: false, evaluatedAt: now, trendStability: null });
       continue;
     }
 
@@ -1414,9 +1445,29 @@ export async function runBotLoopTick(): Promise<void> {
     const timingAcc = timingCache.get(`${sym}:${closest * 60}`) ?? timingCache.get(`ALL:${closest * 60}`) ?? null;
 
     const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, timingAcc);
-    const score = decision.confidence * ((timingAcc ?? 50) / 100);
+    const stability = windowStabilityCache.get(sym) ?? null;
     const rawReason = (decision.signals as unknown as Record<string, unknown>)?.reasoning;
     const reason = typeof rawReason === "string" ? rawReason : decision.action;
+
+    // Reversing: skip this coin regardless of other signals — trend is working against us
+    if (stability === "reversing") {
+      evalResults.push({
+        symbol: sym,
+        action: "SKIP",
+        confidence: decision.confidence,
+        score: 0,
+        reason: `trend reversing — ${reason.slice(0, 60)}`,
+        windowKey,
+        selected: false,
+        evaluatedAt: now,
+        trendStability: "reversing",
+      });
+      continue;
+    }
+
+    // clean → ×1.2 bonus for stable directional momentum; choppy/unknown → ×1.0
+    const stabilityMultiplier = stability === "clean" ? 1.2 : 1.0;
+    const score = decision.confidence * ((timingAcc ?? 50) / 100) * stabilityMultiplier;
 
     evalResults.push({
       symbol: sym,
@@ -1427,6 +1478,7 @@ export async function runBotLoopTick(): Promise<void> {
       windowKey,
       selected: false,
       evaluatedAt: now,
+      trendStability: stability,
     });
   }
 

@@ -3937,6 +3937,155 @@ JSON only: {"direction":"up","confidence":65}`;
 }
 
 // ---------------------------------------------------------------------------
+// Trend Stability — bot window-open cross-coin analysis
+// ---------------------------------------------------------------------------
+
+export type TrendStability = "clean" | "choppy" | "reversing";
+
+export interface TrendStabilityResult {
+  aboveKalshi: boolean | null;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  trendStability: TrendStability;
+  at: string;
+  windowKey: string;
+}
+
+// Cache keyed by "${symbol}:${windowKey}" — auto-expires each window.
+const trendStabilityCache = new Map<string, TrendStabilityResult>();
+
+/**
+ * Enhanced Claude call fired at window-open for the bot's cross-coin ranking pass.
+ * Includes last-15 candle closes and asks Claude to classify trend stability
+ * ("clean"/"choppy"/"reversing") alongside the normal ABOVE/BELOW call.
+ * Results are cached per (symbol, windowKey) — safe to call from multiple ticks.
+ */
+export async function fetchTrendStabilityForBot(
+  symbol: string,
+  windowKey: string,
+): Promise<TrendStabilityResult | null> {
+  const sym = symbol.toUpperCase();
+  const cacheKey = `${sym}:${windowKey}`;
+  const cached = trendStabilityCache.get(cacheKey);
+  if (cached) return cached;
+
+  const coin = CRYPTO_COINS.find((c) => c.symbol === sym);
+  if (!coin) return null;
+
+  try {
+    const [candles, stats, tickerPrice, kalshiTargetFresh] = await Promise.all([
+      getCandles(coin.product),
+      getStats(coin.product),
+      getTicker(coin.product).catch(() => 0),
+      KALSHI_SERIES[coin.symbol]
+        ? fetchKalshiTarget(coin.symbol).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    let kalshiTargetVal = kalshiTargetFresh;
+    if (kalshiTargetVal == null && KALSHI_SERIES[coin.symbol]) {
+      const stale = kalshiTargetCache.get(sym);
+      if (stale?.value != null) {
+        const ct = stale.closeTime;
+        if (!ct || new Date(ct).getTime() > Date.now()) kalshiTargetVal = stale.value;
+      }
+    }
+
+    const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
+    const analysis = analyzeCoin(coin, candles, stats, new Date(), livePrice);
+    const price = livePrice ?? analysis.price;
+    const dp = price >= 100 ? 2 : price >= 1 ? 4 : 6;
+    const ind = analysis.indicators;
+
+    const last15 = candles.slice(-15);
+    const closesStr = last15.map((c) => `$${c.c.toFixed(dp)}`).join(" → ");
+    const regime =
+      ind.efficiencyRatio >= 0.4 ? "trending" : ind.efficiencyRatio >= 0.15 ? "drifting" : "choppy";
+
+    let prompt: string;
+    if (kalshiTargetVal) {
+      const side = price >= kalshiTargetVal ? "ABOVE" : "BELOW";
+      const gapPct = (Math.abs(price - kalshiTargetVal) / kalshiTargetVal * 100).toFixed(3);
+      prompt = `${sym} window-open trend analysis — Kalshi strike $${kalshiTargetVal.toFixed(dp)}.
+Now: $${price.toFixed(dp)} — ${gapPct}% ${side} strike.
+Last 15 one-minute closes (oldest→newest): ${closesStr}
+ER ${ind.efficiencyRatio.toFixed(2)} (${regime}) | RSI ${ind.rsi.toFixed(0)} | oscillations ${ind.oscillationCount} | net drift ${ind.netDriftPct >= 0 ? "+" : ""}${ind.netDriftPct.toFixed(3)}%
+
+Classify trend stability from the 15 closes:
+  "clean"     = steady directional momentum, low noise
+  "choppy"    = oscillating without clear direction
+  "reversing" = clear reversal of prior trend in the most recent candles
+
+Will ${sym} close ABOVE or BELOW $${kalshiTargetVal.toFixed(dp)} at window close?
+JSON only: {"above":true,"confidence":70,"stability":"clean"}`;
+    } else {
+      prompt = `${sym} window-open trend analysis.
+Now: $${price.toFixed(dp)}
+Last 15 one-minute closes (oldest→newest): ${closesStr}
+ER ${ind.efficiencyRatio.toFixed(2)} (${regime}) | RSI ${ind.rsi.toFixed(0)} | oscillations ${ind.oscillationCount} | net drift ${ind.netDriftPct >= 0 ? "+" : ""}${ind.netDriftPct.toFixed(3)}%
+
+Classify trend stability from the 15 closes:
+  "clean"     = steady directional momentum, low noise
+  "choppy"    = oscillating without clear direction
+  "reversing" = clear reversal of prior trend in the most recent candles
+
+Will price be higher (up) or lower (down) in 15 min?
+JSON only: {"direction":"up","confidence":65,"stability":"choppy"}`;
+    }
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 40,
+      system:
+        "Return ONLY valid compact JSON. Kalshi format: {\"above\":true,\"confidence\":70,\"stability\":\"clean\"}. Direction format: {\"direction\":\"up\",\"confidence\":65,\"stability\":\"choppy\"}. stability must be one of: clean, choppy, reversing. No markdown, no prose.",
+      messages: [{ role: "user", content: prompt }],
+    } as Parameters<typeof anthropic.messages.create>[0]);
+
+    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("")
+      .trim();
+    const parsed = JSON.parse(raw) as {
+      above?: boolean;
+      direction?: string;
+      confidence?: number;
+      stability?: string;
+    };
+
+    const confidence = Math.min(90, Math.max(20, parsed.confidence ?? 60));
+    const validStabilities: TrendStability[] = ["clean", "choppy", "reversing"];
+    const trendStability: TrendStability = validStabilities.includes(parsed.stability as TrendStability)
+      ? (parsed.stability as TrendStability)
+      : "choppy";
+
+    let aboveKalshi: boolean | null = null;
+    let direction: "up" | "down" | "flat" = "flat";
+    if (kalshiTargetVal) {
+      aboveKalshi = parsed.above ?? null;
+      direction = aboveKalshi === null ? "flat" : aboveKalshi ? "up" : "down";
+    } else {
+      direction = (["up", "down", "flat"].includes(parsed.direction ?? "")
+        ? parsed.direction
+        : "flat") as "up" | "down" | "flat";
+    }
+
+    const result: TrendStabilityResult = {
+      aboveKalshi,
+      direction,
+      confidence,
+      trendStability,
+      at: new Date().toISOString(),
+      windowKey,
+    };
+    trendStabilityCache.set(cacheKey, result);
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Window Monitor outcome accuracy
 // ---------------------------------------------------------------------------
 
