@@ -96,6 +96,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableMomentumFilter,
     momentumWindowCount,
     enableAutoTuning,
+    autoTuneWindowSize,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -115,6 +116,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableMomentumFilter?: boolean;
     momentumWindowCount?: number;
     enableAutoTuning?: boolean;
+    autoTuneWindowSize?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -164,6 +166,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.momentumWindowCount = momentumWindowCount;
   }
   if (typeof enableAutoTuning === "boolean") partial.enableAutoTuning = enableAutoTuning;
+  if (typeof autoTuneWindowSize === "number" && autoTuneWindowSize >= 20 && autoTuneWindowSize <= 500) {
+    partial.autoTuneWindowSize = autoTuneWindowSize;
+  }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
   res.json({ ok: true, config: updated, persisted });

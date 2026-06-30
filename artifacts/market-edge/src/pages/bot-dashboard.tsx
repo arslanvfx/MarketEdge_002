@@ -32,6 +32,7 @@ interface BotConfig {
   enableMomentumFilter: boolean;
   momentumWindowCount: number;
   enableAutoTuning: boolean;
+  autoTuneWindowSize: number;
 }
 
 interface OpenPosition {
@@ -102,12 +103,16 @@ interface DirectionStats {
 
 interface PerformanceReport {
   totalBets: number; wins: number; losses: number;
-  overallWinRate: number | null; last30WinRate: number | null; last24hWinRate: number | null;
+  overallWinRate: number | null;
+  last10WinRate: number | null;
+  last30WinRate: number | null;
+  last24hWinRate: number | null;
   bySymbol: Record<string, SymbolStats>;
   byHourBand: Record<string, HourBandStats>;
   byDirection: { yes: DirectionStats; no: DirectionStats };
   avgConfidenceWinners: number | null; avgConfidenceLosers: number | null;
   exitReasonBreakdown: Record<string, number>;
+  circuitBreakerTriggers: number;
   recommendations: string[];
   computedAt: string;
 }
@@ -712,6 +717,17 @@ export default function BotDashboard() {
                       {(merged.enableAutoTuning ?? true) ? "Enabled" : "Disabled"}
                     </span>
                   </div>
+                </label>
+
+                {/* Auto-Tune Window Size */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Auto-Tune Window (bets, 20–500)</span>
+                  <input
+                    type="number" min={20} max={500} step={10}
+                    value={merged.autoTuneWindowSize ?? 100}
+                    onChange={e => setConfigDraft(d => ({ ...d, autoTuneWindowSize: parseInt(e.target.value) }))}
+                    className="bg-background border border-border rounded-md px-3 py-1.5 text-sm w-full focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  />
                 </label>
 
                 {/* Master Enable */}
