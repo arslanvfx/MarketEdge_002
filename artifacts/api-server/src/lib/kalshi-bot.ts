@@ -587,8 +587,15 @@ async function _runBotTick(
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
 
   // Hard ceiling: precise seconds check so the limit is exact.
-  // e.g. maxEntryMinutes=3 → no entry after t+3:00, not t+3:59.
+  // e.g. maxEntryMinutes=5 → no entry after t+5:00, not t+5:59.
   if (secondsElapsed > config.maxEntryMinutes * 60) return;
+  // Hard late-entry floor: never enter if fewer than MIN_REMAINING_MINUTES_FOR_ENTRY
+  // minutes remain, regardless of the maxEntryMinutes setting. Enforced here at
+  // execution time (Phase 3 evaluation also skips, but this is the authoritative guard).
+  if (15 * 60 - secondsElapsed < MIN_REMAINING_MINUTES_FOR_ENTRY * 60) {
+    logger.debug({ sym, secondsElapsed }, "[kalshi-bot] hard late-entry floor — skipping");
+    return;
+  }
   if (!kalshiTicker || kalshiTarget === null) return;
 
   // Eager Claude prefetch: fire when a *new Kalshi ticker* is first seen per symbol.
