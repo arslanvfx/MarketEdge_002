@@ -118,7 +118,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   quietHoursEnd: 18,     // 18:00 UTC (no entries 12:00–17:59 UTC by default)
   maxConsecutiveLosses: 3,
   circuitBreakerPauseWindows: 2,
-  enableDirectionCap: true,
+  enableDirectionCap: false,
   maxSameDirectionBets: 3,
   enableMomentumFilter: true,
   momentumWindowCount: 3,
