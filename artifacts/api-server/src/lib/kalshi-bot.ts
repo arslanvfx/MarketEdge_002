@@ -30,6 +30,7 @@ import {
   getCachedPrediction,
   getKalshiCachedData,
   fetchKalshiTarget,
+  fetchLiveDirection,
   CRYPTO_COINS,
   KALSHI_SERIES,
 } from "./crypto";
@@ -73,6 +74,9 @@ export interface BotStateSnapshot {
   lastGuardStates: GuardStates | null;
   lastGuardReason: string | null;
   configured: boolean;      // KALSHI_API_KEY present
+  // Seconds remaining in the 45-second warmup period at the start of each window.
+  // null when not in warmup (elapsed ≥ 45s), or when a position is already open.
+  warmupSecondsRemaining: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,14 @@ let lastGuardReason: string | null = null;
 // Tracks the last window key for which a decision (SKIP or BET) was logged per symbol.
 // Prevents duplicate SKIP records across successive 30s ticks within the same window.
 const lastDecisionWindowKey: Map<string, string> = new Map();
+
+// Tracks the last window for which the eager Claude prefetch was fired per symbol.
+// Prevents re-firing the prefetch on every tick of the same window.
+const prefetchedWindowKey: Map<string, string> = new Map();
+
+// Warmup duration (ms) at the start of each window before the bot can enter.
+// 45s allows the Kalshi market to stabilise and the Claude opening call to complete.
+const WARMUP_MS = 45_000;
 
 // Timing analysis cache (refreshed every 5 min)
 let timingCache: Map<string, number | null> = new Map();
@@ -141,6 +153,23 @@ export function getBotState(): BotStateSnapshot {
     }
   }
 
+  // Compute warmup state: how many seconds remain before the bot can enter the
+  // current window. null when a position is already open or warmup is over.
+  let warmupSecondsRemaining: number | null = null;
+  if (openPosition === null && !paused) {
+    for (const coin of CRYPTO_COINS) {
+      if (!KALSHI_SERIES[coin.symbol]) continue;
+      const winCtx = getKalshiWindowContext(coin.symbol);
+      if (!winCtx) continue;
+      const remaining = Math.max(0, WARMUP_MS / 1_000 - winCtx.secondsElapsed);
+      if (remaining > 0) {
+        // Use the longest remaining warmup so the UI clears only when all coins are ready
+        warmupSecondsRemaining = Math.max(warmupSecondsRemaining ?? 0, remaining);
+      }
+      break; // All coins share the same window timing — one is enough
+    }
+  }
+
   return {
     mode: botMode,
     status,
@@ -162,6 +191,7 @@ export function getBotState(): BotStateSnapshot {
     lastGuardStates,
     lastGuardReason,
     configured: isKalshiConfigured(),
+    warmupSecondsRemaining,
   };
 }
 
@@ -324,9 +354,22 @@ async function _runBotTick(
 
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
 
-  // Only consider entering in the first few minutes of a window
-  if (minutesElapsed > 5) return;
+  // Hard ceiling: don't enter after maxEntryMinutes into the window
+  if (minutesElapsed > config.maxEntryMinutes) return;
   if (!kalshiTicker || kalshiTarget === null) return;
+
+  const secondsElapsed = winCtx?.secondsElapsed ?? 0;
+
+  // Eager Claude prefetch: fire once per (symbol, window) as soon as the bot
+  // detects the new window, so the analysis is warm by the time warmup ends.
+  if (prefetchedWindowKey.get(sym) !== windowKey) {
+    prefetchedWindowKey.set(sym, windowKey);
+    fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget
+  }
+
+  // 45-second warmup: let the Kalshi market stabilise and the Claude opening
+  // call complete before the bot commits to an entry.
+  if (secondsElapsed < WARMUP_MS / 1_000) return;
 
   const timingAcc = await getTimingAccuracy(sym, minutesElapsed);
   const decision = makeBotDecision(

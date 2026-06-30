@@ -1952,14 +1952,20 @@ function updateKalshiWindowPrice(ticker: string | undefined, coinPrice: number):
   }
 }
 
-export function getKalshiWindowContext(symbol: string): { priceAtOpen: number | null; minutesElapsed: number } | null {
+export function getKalshiWindowContext(symbol: string): {
+  priceAtOpen: number | null;
+  minutesElapsed: number;
+  secondsElapsed: number;
+} | null {
   const ticker = getLastKalshiTicker(symbol);
   if (!ticker) return null;
   const entry = kalshiWindowStore.get(ticker);
   if (!entry) return null;
+  const msElapsed = Math.max(0, Date.now() - entry.openedAt);
   return {
     priceAtOpen: entry.priceAtOpen,
-    minutesElapsed: Math.max(0, Math.floor((Date.now() - entry.openedAt) / 60_000)),
+    minutesElapsed: Math.floor(msElapsed / 60_000),
+    secondsElapsed: Math.floor(msElapsed / 1_000),
   };
 }
 

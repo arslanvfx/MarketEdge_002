@@ -310,6 +310,7 @@ interface BotConfig {
   minConfidence: number;
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number;
+  maxEntryMinutes: number;
   enabled: boolean;
 }
 
@@ -357,6 +358,7 @@ interface BotStateSnapshot {
   lastGuardStates: BotGuardStates | null;
   lastGuardReason: string | null;
   configured: boolean;
+  warmupSecondsRemaining: number | null;
 }
 
 interface BotBetRecord {
@@ -2141,6 +2143,7 @@ function KalshiBotPanel() {
   const [localDailyLimit, setLocalDailyLimit] = useState<number>(20);
   const [localPhase2Pp, setLocalPhase2Pp] = useState<number>(30);
   const [localMinConfidence, setLocalMinConfidence] = useState<number>(60);
+  const [localMaxEntryMinutes, setLocalMaxEntryMinutes] = useState<number>(3);
 
   const botQuery = useQuery<BotStateSnapshot>({
     queryKey: ["bot-status"],
@@ -2196,6 +2199,7 @@ function KalshiBotPanel() {
       dailyLossLimit: localDailyLimit,
       phase2ThresholdPp: localPhase2Pp,
       minConfidence: localMinConfidence,
+      maxEntryMinutes: localMaxEntryMinutes,
     });
     void botQuery.refetch();
   }
@@ -2207,6 +2211,7 @@ function KalshiBotPanel() {
       setLocalDailyLimit(bot.config.dailyLossLimit);
       setLocalPhase2Pp(bot.config.phase2ThresholdPp);
       setLocalMinConfidence(bot.config.minConfidence ?? 60);
+      setLocalMaxEntryMinutes(bot.config.maxEntryMinutes ?? 3);
     }
   }, [bot?.config, configOpen]);
 
@@ -2257,6 +2262,8 @@ function KalshiBotPanel() {
                 ? "Daily limit hit"
                 : bot.status === "paused"
                 ? "Paused"
+                : bot.warmupSecondsRemaining != null && bot.warmupSecondsRemaining > 0
+                ? `Warming up — entry in ${Math.ceil(bot.warmupSecondsRemaining)}s`
                 : "Idle"}
             </span>
           )}
@@ -2551,6 +2558,21 @@ function KalshiBotPanel() {
                   />
                   <div className="flex justify-between text-[10px] text-slate-600">
                     <span>40%</span><span>100%</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">
+                    Max entry time: <span className="text-slate-200 font-medium">{localMaxEntryMinutes} min</span>
+                    <span className="text-slate-600 ml-1">(don't enter after this many minutes into the window; warmup always 45s)</span>
+                  </label>
+                  <input
+                    type="range" min={1} max={7} step={1}
+                    value={localMaxEntryMinutes}
+                    onChange={(e) => setLocalMaxEntryMinutes(parseInt(e.target.value))}
+                    className="w-full accent-cyan-400"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-600">
+                    <span>1 min</span><span>7 min</span>
                   </div>
                 </div>
                 <div className="flex gap-2">

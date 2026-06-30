@@ -25,10 +25,11 @@ import {
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
-  signalThreshold: number;   // min signals agreeing: 2 | 3 | 4 (default 3)
+  signalThreshold: number;   // min signals agreeing: 2 | 3 | 4 (default 2)
   minConfidence: number;     // 0-100; skip bet when engine confidence is below this (default 60)
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
+  maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 3)
   enabled: boolean;          // master kill-switch
 }
 
@@ -41,6 +42,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   minConfidence: 60,
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
+  // Entry is only allowed between t+45s and t+3:00 of each 15-min window.
+  // 45s warmup = Kalshi market stabilises + Claude opening call completes.
+  // 3-min ceiling = signals get noisier as the window ages.
+  maxEntryMinutes: 3,
   enabled: true,
 };
 
