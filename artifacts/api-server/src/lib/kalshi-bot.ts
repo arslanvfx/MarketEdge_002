@@ -8,7 +8,7 @@
 // Live mode: requires KALSHI_API_KEY secret and explicit user toggle.
 
 import { db, kalshiBotBetsTable } from "@workspace/db";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import {
   DEFAULT_BOT_CONFIG,
@@ -698,6 +698,165 @@ async function persistBetRecord(args: BetRecordArgs): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Closed-bet evaluator — wires outcome + evaluatedAt for settled positions
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the 1-minute close price at the END of a 15-minute window from
+ * Coinbase historical candles.  The window key is "YYYY-MM-DDTHH:mm" (UTC).
+ * The window ends at windowStart + 15 min; the last 1-min candle in that window
+ * starts at windowEnd - 60 s (Coinbase reports `t` = candle start time).
+ * Returns null on any error so the caller can retry next cycle.
+ */
+async function fetchWindowClosePrice(product: string, windowKey: string): Promise<number | null> {
+  try {
+    const COINBASE = "https://api.exchange.coinbase.com";
+    const UA = "MarketEdge/1.0 (crypto-predictor)";
+
+    const windowStartMs = new Date(windowKey + ":00Z").getTime();
+    if (isNaN(windowStartMs)) return null;
+
+    const windowEndMs   = windowStartMs + 15 * 60_000;
+    const candleStartMs = windowEndMs - 60_000; // last 1-min candle in the window
+
+    const url =
+      `${COINBASE}/products/${encodeURIComponent(product)}/candles?granularity=60` +
+      `&start=${new Date(candleStartMs).toISOString()}` +
+      `&end=${new Date(windowEndMs).toISOString()}`;
+
+    const res = await fetch(url, {
+      headers: { "User-Agent": UA, Accept: "application/json" },
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!res.ok) return null;
+
+    // Coinbase format (newest-first): [time, low, high, open, close, volume]
+    const raw = (await res.json()) as number[][];
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+
+    // Prefer the candle whose start time matches the expected slot; fall back
+    // to the first returned candle (Coinbase may return a candle slightly off).
+    const targetT = Math.floor(candleStartMs / 1000);
+    const candle = raw.find((c) => c[0] === targetT) ?? raw[0];
+    return candle[4]; // close price
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * For every closed bet row that has not yet been evaluated (evaluatedAt IS NULL
+ * and exitedAt IS NOT NULL), determine the true outcome and write outcome +
+ * corrected pnl + evaluatedAt to the DB.
+ *
+ * - "expired" bets: fetch the actual candle close price from Coinbase at the
+ *   window settlement boundary, compare against the Kalshi strike, and compute
+ *   the correct pnl based on contract settlement ($1 per contract if won, $0 if lost).
+ * - "exit" / "late_recovery_exit" bets: pnl was already derived from the real
+ *   Kalshi exit price at trade time, so it is authoritative.  We only need to
+ *   stamp outcome and evaluatedAt.
+ *
+ * Rows that cannot be resolved this cycle (missing price data, Coinbase error,
+ * etc.) are skipped and retried on the next 30-second tick.
+ */
+export async function evalClosedBets(): Promise<void> {
+  try {
+    const rows = await db
+      .select({
+        id: kalshiBotBetsTable.id,
+        symbol: kalshiBotBetsTable.symbol,
+        windowKey: kalshiBotBetsTable.windowKey,
+        direction: kalshiBotBetsTable.direction,
+        action: kalshiBotBetsTable.action,
+        pnl: kalshiBotBetsTable.pnl,
+        kalshiTarget: kalshiBotBetsTable.kalshiTarget,
+        contractCount: kalshiBotBetsTable.contractCount,
+        entryPrice: kalshiBotBetsTable.entryPrice,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNotNull(kalshiBotBetsTable.exitedAt),
+          isNull(kalshiBotBetsTable.evaluatedAt),
+          sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`,
+        ),
+      )
+      .limit(20); // process in small batches — each expired row makes a network call
+
+    if (rows.length === 0) return;
+
+    let evaluated = 0;
+    for (const row of rows) {
+      let outcome: "win" | "loss" | "push";
+      let correctedPnl: number | null = null;
+
+      if (row.action === "expired") {
+        // ── Settlement evaluation: fetch actual candle close at window end ──
+        const coin = CRYPTO_COINS.find((c) => c.symbol === row.symbol);
+        if (!coin || !row.windowKey || row.direction == null) continue;
+
+        const strike = row.kalshiTarget != null ? parseFloat(String(row.kalshiTarget)) : null;
+        const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
+        const count = row.contractCount ?? 1;
+        if (strike == null || entryPrice == null) continue;
+
+        const closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
+        if (closePrice === null) {
+          // Coinbase unavailable — retry next cycle
+          logger.debug({ sym: row.symbol, id: row.id }, "[kalshi-bot] evalClosedBets: Coinbase unavailable, will retry");
+          continue;
+        }
+
+        const priceAboveStrike = closePrice >= strike;
+        const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
+        outcome = won ? "win" : "loss";
+
+        // Recompute pnl from settlement: winning contract pays $1, losing pays $0
+        if (won) {
+          correctedPnl = row.direction === "yes"
+            ? (1 - entryPrice) * count   // YES win: received $1, paid entryYesPrice
+            : entryPrice * count;        // NO win: received $1, paid (1-entryYesPrice)
+        } else {
+          correctedPnl = row.direction === "yes"
+            ? -entryPrice * count        // YES loss: paid entryYesPrice, received $0
+            : -(1 - entryPrice) * count; // NO loss: paid (1-entryYesPrice), received $0
+        }
+
+        logger.info(
+          { sym: row.symbol, windowKey: row.windowKey, closePrice, strike, direction: row.direction, outcome, pnl: correctedPnl },
+          "[kalshi-bot] evalClosedBets: expired bet settled",
+        );
+      } else {
+        // ── Mid-window exit: pnl already computed from real exit price ────────
+        const pnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
+        if (pnl == null) continue; // pnl not yet written; skip
+        outcome = pnl > 0 ? "win" : pnl < 0 ? "loss" : "push";
+      }
+
+      if (correctedPnl !== null) {
+        await db
+          .update(kalshiBotBetsTable)
+          .set({ outcome, pnl: String(correctedPnl), evaluatedAt: new Date() })
+          .where(eq(kalshiBotBetsTable.id, row.id));
+      } else {
+        await db
+          .update(kalshiBotBetsTable)
+          .set({ outcome, evaluatedAt: new Date() })
+          .where(eq(kalshiBotBetsTable.id, row.id));
+      }
+
+      evaluated++;
+    }
+
+    if (evaluated > 0) {
+      logger.info({ evaluated }, "[kalshi-bot] evalClosedBets — outcomes stamped");
+    }
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] evalClosedBets error (non-fatal)");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
 
@@ -746,6 +905,10 @@ export async function getBotStats(filterSymbol?: string): Promise<{
   totalPnl: number;
   paperBets: number;
   liveBets: number;
+  paperWins: number;
+  paperLosses: number;
+  liveWins: number;
+  liveLosses: number;
   bySymbol: CoinBotStats[];
 }> {
   try {
@@ -759,33 +922,62 @@ export async function getBotStats(filterSymbol?: string): Promise<{
         symbol: kalshiBotBetsTable.symbol,
         mode: kalshiBotBetsTable.mode,
         pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
+        outcome: kalshiBotBetsTable.outcome,
       })
       .from(kalshiBotBetsTable)
       .where(whereClause);
 
-    let totalBets = 0, wins = 0, losses = 0, totalPnl = 0, paperBets = 0, liveBets = 0;
+    let totalBets = 0, wins = 0, losses = 0, totalPnl = 0;
+    let paperBets = 0, liveBets = 0;
+    let paperWins = 0, paperLosses = 0, liveWins = 0, liveLosses = 0;
     const coinMap = new Map<string, CoinBotStats>();
 
     for (const r of rows) {
       const p = parseFloat(r.pnl ?? "0");
+      const isPaper = r.mode === "paper";
+      // Use persisted outcome when available; fall back to pnl sign for rows
+      // that haven't been evaluated yet.
+      const isWin  = r.outcome ? r.outcome === "win"  : p > 0;
+      const isLoss = r.outcome ? r.outcome === "loss" : p < 0;
+
       totalBets++;
       totalPnl += p;
-      if (p > 0) wins++; else if (p < 0) losses++;
-      if (r.mode === "paper") paperBets++; else liveBets++;
+      if (isWin)  wins++;
+      if (isLoss) losses++;
+      if (isPaper) {
+        paperBets++;
+        if (isWin)  paperWins++;
+        if (isLoss) paperLosses++;
+      } else {
+        liveBets++;
+        if (isWin)  liveWins++;
+        if (isLoss) liveLosses++;
+      }
 
       const sym = r.symbol ?? "UNKNOWN";
       const coin = coinMap.get(sym) ?? { symbol: sym, bets: 0, wins: 0, losses: 0, pnl: 0 };
       coin.bets++;
       coin.pnl += p;
-      if (p > 0) coin.wins++; else if (p < 0) coin.losses++;
+      if (isWin)  coin.wins++;
+      if (isLoss) coin.losses++;
       coinMap.set(sym, coin);
     }
 
     const bySymbol = Array.from(coinMap.values()).sort((a, b) => b.bets - a.bets);
 
-    return { totalBets, wins, losses, totalPnl, paperBets, liveBets, bySymbol };
+    return {
+      totalBets, wins, losses, totalPnl,
+      paperBets, liveBets,
+      paperWins, paperLosses, liveWins, liveLosses,
+      bySymbol,
+    };
   } catch {
-    return { totalBets: 0, wins: 0, losses: 0, totalPnl: 0, paperBets: 0, liveBets: 0, bySymbol: [] };
+    return {
+      totalBets: 0, wins: 0, losses: 0, totalPnl: 0,
+      paperBets: 0, liveBets: 0,
+      paperWins: 0, paperLosses: 0, liveWins: 0, liveLosses: 0,
+      bySymbol: [],
+    };
   }
 }
 
@@ -798,6 +990,10 @@ export async function getBotStats(filterSymbol?: string): Promise<{
 // the bot tick for each coin.  The Kalshi market-data endpoint is public and
 // requires no API key, so this works in both paper and live modes.
 export async function runBotLoopTick(): Promise<void> {
+  // Evaluate any closed bets that haven't been stamped with outcome yet.
+  // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
+  evalClosedBets().catch(() => {});
+
   // Always run window-expiry check, even when paused or disabled.
   // If the 15-minute window rolls over while a position is still open (e.g.
   // the bot was paused, or the tick was slow), we must mark it expired and

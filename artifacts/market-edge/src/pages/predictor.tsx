@@ -393,6 +393,10 @@ interface BotStats {
   totalPnl: number;
   paperBets: number;
   liveBets: number;
+  paperWins: number;
+  paperLosses: number;
+  liveWins: number;
+  liveLosses: number;
   bySymbol: CoinBotStats[];
 }
 
@@ -2405,14 +2409,37 @@ function KalshiBotPanel() {
           {/* Stats bar */}
           {statsQuery.data && (
             <div className="border-t border-slate-800/60 pt-2 space-y-2">
-              <div className="flex gap-4 text-xs text-slate-400">
+              <div className="flex flex-wrap gap-3 text-xs text-slate-400">
                 <span>Bets: <span className="text-slate-200">{statsQuery.data.totalBets}</span></span>
                 <span className="text-emerald-400">{statsQuery.data.wins}W</span>
                 <span className="text-red-400">{statsQuery.data.losses}L</span>
                 <span className={statsQuery.data.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}>
                   P&L: {statsQuery.data.totalPnl >= 0 ? "+" : ""}${statsQuery.data.totalPnl.toFixed(2)}
                 </span>
-                <span className="ml-auto">Paper: {statsQuery.data.paperBets} / Live: {statsQuery.data.liveBets}</span>
+              </div>
+              {/* Paper vs Live breakdown */}
+              <div className="flex flex-wrap gap-3 text-[10px] text-slate-500">
+                {statsQuery.data.paperBets > 0 && (
+                  <span>
+                    Paper: {statsQuery.data.paperBets} bets
+                    {" · "}
+                    <span className="text-emerald-500">{statsQuery.data.paperWins}W</span>
+                    {" / "}
+                    <span className="text-red-500">{statsQuery.data.paperLosses}L</span>
+                  </span>
+                )}
+                {statsQuery.data.liveBets > 0 && (
+                  <span>
+                    Live: {statsQuery.data.liveBets} bets
+                    {" · "}
+                    <span className="text-emerald-400">{statsQuery.data.liveWins}W</span>
+                    {" / "}
+                    <span className="text-red-400">{statsQuery.data.liveLosses}L</span>
+                  </span>
+                )}
+                {statsQuery.data.paperBets === 0 && statsQuery.data.liveBets === 0 && (
+                  <span>Paper: 0 bets / Live: 0 bets</span>
+                )}
               </div>
               {statsQuery.data.bySymbol.length > 0 && (
                 <PerCoinBreakdown rows={statsQuery.data.bySymbol} />
