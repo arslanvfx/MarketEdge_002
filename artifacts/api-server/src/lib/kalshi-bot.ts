@@ -1646,6 +1646,10 @@ export async function runBotLoopTick(): Promise<void> {
   // open-position slot. Other coins follow for SKIP record deduplication.
   const windowKey = currentWindowKey();
   const evalResults: WindowCoinEvaluation[] = [];
+  // Symbols blocked by the new regime-aware guards (momentum override, directional cap).
+  // These must be excluded from Phase-4 orderedSymbols so runBotTickForCoin cannot
+  // independently place a bet that the Phase-3 filter just blocked.
+  const filteredByNewGuards = new Set<string>();
 
   for (const coin of CRYPTO_COINS) {
     if (!KALSHI_SERIES[coin.symbol]) continue;
@@ -1722,11 +1726,13 @@ export async function runBotLoopTick(): Promise<void> {
     }
 
     // Momentum override filter: skip when price trend opposes the proposed direction.
+    // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
     if (decision.action !== "SKIP" && config.enableMomentumFilter) {
       const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
       if (checkMomentumOverride(proposedDir, recentStrikes, 0.5, config.momentumWindowCount)) {
         logger.info({ sym, proposedDir, recentStrikes, windowCount: config.momentumWindowCount },
           `[kalshi-bot] momentum override — ${sym} trending against ${proposedDir.toUpperCase()} entry`);
+        filteredByNewGuards.add(sym);
         evalResults.push({
           symbol: sym,
           action: "SKIP",
@@ -1744,12 +1750,14 @@ export async function runBotLoopTick(): Promise<void> {
     }
 
     // Directional-cap filter: skip when too many same-direction bets already placed this window.
+    // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
     if (decision.action !== "SKIP" && config.enableDirectionCap) {
       const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
       const dirCount = windowDirectionCounts.get(proposedDir) ?? 0;
       if (config.maxSameDirectionBets > 0 && dirCount >= config.maxSameDirectionBets) {
         logger.info({ sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
           `[kalshi-bot] directional cap reached — skipping ${proposedDir.toUpperCase()} entry for ${sym}`);
+        filteredByNewGuards.add(sym);
         evalResults.push({
           symbol: sym,
           action: "SKIP",
@@ -1831,7 +1839,12 @@ export async function runBotLoopTick(): Promise<void> {
   // trendStability="reversing" and are filtered out of execution to avoid double-entry.
   const orderedSymbols = [
     ...bets.map(e => e.symbol),
-    ...skips.filter(e => e.trendStability !== "reversing").map(e => e.symbol),
+    // Exclude: reversing-caution soft-skips (handled separately) AND symbols blocked by
+    // momentum override / directional-cap so runBotTickForCoin cannot bypass Phase-3 filters.
+    ...skips.filter(e =>
+      e.trendStability !== "reversing" &&
+      !filteredByNewGuards.has(e.symbol)
+    ).map(e => e.symbol),
   ];
   for (const sym of orderedSymbols) {
     const kalshiData = getKalshiCachedData(sym);
