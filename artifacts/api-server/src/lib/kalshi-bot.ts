@@ -7,7 +7,7 @@
 // Paper mode: all trade calls are simulated; DB records are written with mode="paper".
 // Live mode: requires KALSHI_API_KEY secret and explicit user toggle.
 
-import { db, kalshiBotBetsTable, botConfigTable } from "@workspace/db";
+import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
 import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import {
@@ -44,6 +44,13 @@ import {
   KALSHI_SERIES,
   type TrendStability,
 } from "./crypto";
+import {
+  computePerformanceReport,
+  runAutoTuneRules,
+  type PerformanceReport,
+  type AutoTuneMutation,
+  type SettledBetRecord,
+} from "./kalshi-bot-performance";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -150,6 +157,15 @@ const windowBetCounts: Map<string, number> = new Map();
 // Direction-cap tracking: counts YES and NO bets placed in the current 15-min window
 // across all symbols. Reset on each window transition. Key: "yes" | "no".
 const windowDirectionCounts: Map<"yes" | "no", number> = new Map();
+
+// Per-coin auto-pause: coins with ≥5 consecutive losses are paused for 4
+// windows by the auto-tune job. Maps symbol → windows remaining paused.
+// Decremented on each window transition; deleted when it reaches 0.
+const pausedCoins: Map<string, number> = new Map();
+
+// Cached performance report from the most recent auto-tune run (null before
+// the first run fires, typically ~15 min after startup).
+let cachedPerformanceReport: PerformanceReport | null = null;
 
 // Recent Kalshi strike prices per symbol (chronological, oldest first).
 // Maintained from DB on startup and updated after each position close.
@@ -1620,6 +1636,16 @@ export async function runBotLoopTick(): Promise<void> {
         "[kalshi-bot] circuit breaker countdown — windows remaining",
       );
     }
+    // Decrement per-coin auto-tune pause counters; remove coins whose pause expires.
+    for (const [sym, remaining] of Array.from(pausedCoins.entries())) {
+      if (remaining <= 1) {
+        pausedCoins.delete(sym);
+        logger.info({ sym }, "[kalshi-bot] auto-tune per-coin pause expired — resuming");
+      } else {
+        pausedCoins.set(sym, remaining - 1);
+        logger.info({ sym, remaining: remaining - 1 }, "[kalshi-bot] auto-tune per-coin pause countdown");
+      }
+    }
   }
 
   if (!config.enabled || paused) return;
@@ -1732,6 +1758,14 @@ export async function runBotLoopTick(): Promise<void> {
     const regime: PriceRegime | null = recentStrikes.length >= 2
       ? deriveRegime(recentStrikes, config.momentumWindowCount)
       : null;
+
+    // Per-coin auto-tune pause guard: skip entry when this coin has been
+    // suspended by the auto-tune engine (5 consecutive losses).
+    if (pausedCoins.has(sym)) {
+      const remaining = pausedCoins.get(sym) ?? 0;
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `auto-tune paused (${remaining} windows remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      continue;
+    }
 
     if (!kalshiData?.ticker || kalshiData.value === null) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -1944,6 +1978,125 @@ export async function runBotLoopTick(): Promise<void> {
 
 export function getWindowEvaluation(): WindowCoinEvaluation[] {
   return lastWindowEvaluation;
+}
+
+// ---------------------------------------------------------------------------
+// Performance report & auto-tune job
+// ---------------------------------------------------------------------------
+
+export function getPerformanceReport(): PerformanceReport | null {
+  return cachedPerformanceReport;
+}
+
+export function getPausedCoinState(): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [sym, rem] of pausedCoins.entries()) out[sym] = rem;
+  return out;
+}
+
+export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
+  try {
+    return await db
+      .select()
+      .from(botAutoTuneLogTable)
+      .orderBy(desc(botAutoTuneLogTable.createdAt))
+      .limit(limit);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch the last 200 settled bets from the DB, compute a PerformanceReport,
+ * run auto-tune rules, apply safe config mutations, and log every mutation.
+ * Should be called once every 15 min (e.g. from index.ts setInterval).
+ */
+export async function runAutoTuneJob(): Promise<void> {
+  try {
+    // Fetch settled bets (oldest first so last-30 slice is correct)
+    const rows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        direction: kalshiBotBetsTable.direction,
+        pnl: kalshiBotBetsTable.pnl,
+        exitReason: kalshiBotBetsTable.exitReason,
+        createdAt: kalshiBotBetsTable.createdAt,
+        exitedAt: kalshiBotBetsTable.exitedAt,
+        signals: kalshiBotBetsTable.signals,
+        outcome: kalshiBotBetsTable.outcome,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+          AND ${kalshiBotBetsTable.outcome} IS NOT NULL`,
+      )
+      .orderBy(kalshiBotBetsTable.createdAt) // oldest first
+      .limit(200);
+
+    const bets: SettledBetRecord[] = rows.map(r => ({
+      symbol: r.symbol,
+      direction: r.direction,
+      pnl: r.pnl,
+      exitReason: r.exitReason,
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+      exitedAt: r.exitedAt instanceof Date ? r.exitedAt.toISOString()
+              : r.exitedAt != null ? String(r.exitedAt) : null,
+      signals: (r.signals as Record<string, unknown>) ?? null,
+      outcome: r.outcome,
+    }));
+
+    const report = computePerformanceReport(bets);
+    cachedPerformanceReport = report;
+
+    const tuneConfig = {
+      minConfidence: config.minConfidence,
+      quietHoursStart: config.quietHoursStart,
+      quietHoursEnd: config.quietHoursEnd,
+      enableAutoTuning: config.enableAutoTuning ?? true,
+    };
+
+    const mutations: AutoTuneMutation[] = runAutoTuneRules(report, tuneConfig, pausedCoins);
+
+    if (mutations.length === 0) {
+      logger.info({ totalBets: report.totalBets, overallWinRate: report.overallWinRate },
+        "[auto-tune] report computed — no parameter changes warranted");
+      return;
+    }
+
+    for (const mutation of mutations) {
+      logger.info({ ruleName: mutation.ruleName, oldValue: mutation.oldValue, newValue: mutation.newValue, reason: mutation.triggerReason },
+        "[auto-tune] applying mutation");
+
+      // Persist the log entry to DB
+      try {
+        await db.insert(botAutoTuneLogTable).values({
+          ruleName: mutation.ruleName,
+          oldValue: mutation.oldValue,
+          newValue: mutation.newValue,
+          triggerReason: mutation.triggerReason,
+          createdAt: new Date(),
+        });
+      } catch (err) {
+        logger.warn({ err }, "[auto-tune] failed to write log entry (non-fatal)");
+      }
+
+      // Apply config mutations
+      if (mutation.configMutation) {
+        config = { ...config, ...mutation.configMutation };
+        // Persist new config to DB (fire-and-forget)
+        updateBotConfig(mutation.configMutation).catch(() => {});
+      }
+
+      // Apply per-coin pause
+      if (mutation.pauseCoin) {
+        const { symbol: pauseSym, windows } = mutation.pauseCoin;
+        pausedCoins.set(pauseSym.toUpperCase(), windows);
+        logger.info({ sym: pauseSym, windows }, "[auto-tune] per-coin pause applied");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "[auto-tune] job failed (non-fatal)");
+  }
 }
 
 // ---------------------------------------------------------------------------

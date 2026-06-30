@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, getBotState } from "./lib/kalshi-bot";
+import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, getBotState, runAutoTuneJob } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -139,6 +139,22 @@ async function runStartupMigrations(): Promise<void> {
         ADD COLUMN IF NOT EXISTS crypto_price_at_entry NUMERIC(16,2),
         ADD COLUMN IF NOT EXISTS crypto_price_at_exit  NUMERIC(16,2)
     `);
+    // Auto-tune mutation log: records every parameter change applied by the
+    // self-learning performance analytics job.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bot_auto_tune_log (
+        id             SERIAL PRIMARY KEY,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        rule_name      TEXT NOT NULL,
+        old_value      TEXT,
+        new_value      TEXT,
+        trigger_reason TEXT NOT NULL
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS bat_log_created
+        ON bot_auto_tune_log (created_at DESC)
+    `);
   } finally {
     client.release();
   }
@@ -211,6 +227,14 @@ app.listen(port, (err) => {
           logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
         );
       }, 30_000);
+
+      // Auto-tune performance analytics: runs every 15 min to analyse recent
+      // bot performance and apply safe parameter adjustments automatically.
+      setInterval(() => {
+        runAutoTuneJob().catch((err) =>
+          logger.warn({ err }, "[auto-tune] scheduled job failed (non-fatal)"),
+        );
+      }, 15 * 60_000);
     });
 
   // Daily threshold analysis: runs once at midnight UTC then every 24h.

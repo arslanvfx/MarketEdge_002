@@ -10,6 +10,9 @@ import {
   getBotStats,
   getBotTrend,
   getWindowEvaluation,
+  getPerformanceReport,
+  getBotAutoTuneLog,
+  getPausedCoinState,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 
@@ -92,6 +95,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxSameDirectionBets,
     enableMomentumFilter,
     momentumWindowCount,
+    enableAutoTuning,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -110,6 +114,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxSameDirectionBets?: number;
     enableMomentumFilter?: boolean;
     momentumWindowCount?: number;
+    enableAutoTuning?: boolean;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -158,6 +163,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof momentumWindowCount === "number" && momentumWindowCount >= 2 && momentumWindowCount <= 8) {
     partial.momentumWindowCount = momentumWindowCount;
   }
+  if (typeof enableAutoTuning === "boolean") partial.enableAutoTuning = enableAutoTuning;
 
   const { config: updated, persisted } = await updateBotConfig(partial);
   res.json({ ok: true, config: updated, persisted });
@@ -218,6 +224,29 @@ router.get("/crypto/bot/trend", async (req, res) => {
 router.get("/crypto/bot/window-eval", (_req, res) => {
   try {
     res.json({ evaluation: getWindowEvaluation() });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/performance-report — latest cached analytics report (public)
+router.get("/crypto/bot/performance-report", (_req, res) => {
+  try {
+    const report = getPerformanceReport();
+    res.json({ report, pausedCoins: getPausedCoinState() });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/auto-tune-log?limit=20 — recent auto-tune mutations (public)
+router.get("/crypto/bot/auto-tune-log", async (req, res) => {
+  const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
+  try {
+    const entries = await getBotAutoTuneLog(limit);
+    res.json({ entries });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

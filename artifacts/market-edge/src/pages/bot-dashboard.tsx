@@ -5,7 +5,7 @@ import {
   Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign,
   BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus,
-  Settings, ChevronDown, ChevronUp, Activity,
+  Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -31,6 +31,7 @@ interface BotConfig {
   maxSameDirectionBets: number;
   enableMomentumFilter: boolean;
   momentumWindowCount: number;
+  enableAutoTuning: boolean;
 }
 
 interface OpenPosition {
@@ -86,6 +87,37 @@ interface BotStats {
   bySymbol: Array<{ symbol: string; bets: number; wins: number; losses: number; pnl: number }>;
 }
 
+interface SymbolStats {
+  wins: number; losses: number; betCount: number; winRate: number | null;
+  currentConsecutiveLosses: number;
+}
+
+interface HourBandStats {
+  band: string; wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
+interface DirectionStats {
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
+interface PerformanceReport {
+  totalBets: number; wins: number; losses: number;
+  overallWinRate: number | null; last30WinRate: number | null; last24hWinRate: number | null;
+  bySymbol: Record<string, SymbolStats>;
+  byHourBand: Record<string, HourBandStats>;
+  byDirection: { yes: DirectionStats; no: DirectionStats };
+  avgConfidenceWinners: number | null; avgConfidenceLosers: number | null;
+  exitReasonBreakdown: Record<string, number>;
+  recommendations: string[];
+  computedAt: string;
+}
+
+interface AutoTuneLogEntry {
+  id: number; createdAt: string;
+  ruleName: string; oldValue: string | null; newValue: string | null;
+  triggerReason: string;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const fmt$ = (n: number | string | null | undefined, decimals = 2) => {
@@ -139,6 +171,8 @@ export default function BotDashboard() {
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
+  const [perfOpen, setPerfOpen] = useState(true);
+  const [tuneLogOpen, setTuneLogOpen] = useState(true);
 
   // ── Data fetching ────────────────────────────────────────────────────────
   const { data: status, isLoading } = useQuery<BotStatus>({
@@ -163,6 +197,18 @@ export default function BotDashboard() {
     queryKey: ["bot-window-eval"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/window-eval`).then(r => r.json()),
     refetchInterval: 30_000,
+  });
+
+  const { data: perfReportData } = useQuery<{ report: PerformanceReport | null; pausedCoins: Record<string, number> }>({
+    queryKey: ["bot-performance-report"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/performance-report`).then(r => r.json()),
+    refetchInterval: 5 * 60_000,
+  });
+
+  const { data: autoTuneLogData } = useQuery<{ entries: AutoTuneLogEntry[] }>({
+    queryKey: ["bot-auto-tune-log"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/auto-tune-log`).then(r => r.json()),
+    refetchInterval: 5 * 60_000,
   });
 
   // ── Mutations ────────────────────────────────────────────────────────────
@@ -653,6 +699,21 @@ export default function BotDashboard() {
                   </select>
                 </label>
 
+                {/* Auto-Tuning */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Self-Learning Auto-Tune</span>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <button
+                      onClick={() => setConfigDraft(d => ({ ...d, enableAutoTuning: !(merged.enableAutoTuning ?? true) }))}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${(merged.enableAutoTuning ?? true) ? "bg-sky-500" : "bg-muted"}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${(merged.enableAutoTuning ?? true) ? "translate-x-5" : ""}`} />
+                    </button>
+                    <span className={`text-xs font-medium ${(merged.enableAutoTuning ?? true) ? "text-sky-400" : "text-muted-foreground"}`}>
+                      {(merged.enableAutoTuning ?? true) ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                </label>
+
                 {/* Master Enable */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Bot Master Switch</span>
@@ -872,6 +933,204 @@ export default function BotDashboard() {
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+
+        {/* ── Performance Insights ── */}
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
+          <button
+            className="w-full px-5 py-3 border-b border-border flex items-center gap-2 hover:bg-muted/30 transition-colors"
+            onClick={() => setPerfOpen(o => !o)}
+          >
+            <Brain className="w-4 h-4 text-sky-400" />
+            <h2 className="font-semibold text-sm">Performance Insights</h2>
+            {perfReportData?.report && (
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {perfReportData.report.totalBets} bets analysed
+              </span>
+            )}
+            {perfOpen ? <ChevronUp className="w-4 h-4 ml-1 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 ml-1 text-muted-foreground" />}
+          </button>
+          {perfOpen && (
+            <div className="p-5 space-y-5">
+              {!perfReportData?.report ? (
+                <p className="text-sm text-muted-foreground">
+                  No report yet — the first analysis runs 15 minutes after startup.
+                </p>
+              ) : (() => {
+                const r = perfReportData.report;
+                const paused = perfReportData.pausedCoins ?? {};
+                const pct = (v: number | null) => v == null ? "—" : `${Math.round(v * 100)}%`;
+
+                return (
+                  <>
+                    {/* Top stats */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {[
+                        { label: "Total Bets", value: String(r.totalBets) },
+                        { label: "Overall Win Rate", value: pct(r.overallWinRate) },
+                        { label: "Last-30 Win Rate", value: pct(r.last30WinRate) },
+                        { label: "Last-24h Win Rate", value: pct(r.last24hWinRate) },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="bg-background/40 rounded-lg p-3 text-center">
+                          <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">{label}</div>
+                          <div className="text-base font-bold">{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Confidence */}
+                    {(r.avgConfidenceWinners != null || r.avgConfidenceLosers != null) && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-emerald-500/10 rounded-lg p-3 text-center">
+                          <div className="text-[10px] uppercase tracking-wide text-emerald-400 mb-1">Avg Confidence — Winners</div>
+                          <div className="text-base font-bold text-emerald-400">{r.avgConfidenceWinners != null ? `${r.avgConfidenceWinners.toFixed(0)}%` : "—"}</div>
+                        </div>
+                        <div className="bg-red-500/10 rounded-lg p-3 text-center">
+                          <div className="text-[10px] uppercase tracking-wide text-red-400 mb-1">Avg Confidence — Losers</div>
+                          <div className="text-base font-bold text-red-400">{r.avgConfidenceLosers != null ? `${r.avgConfidenceLosers.toFixed(0)}%` : "—"}</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Per-symbol breakdown */}
+                    {Object.keys(r.bySymbol).length > 0 && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">By Coin</div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {Object.entries(r.bySymbol).map(([sym, s]) => {
+                            const isPaused = paused[sym] != null;
+                            return (
+                              <div key={sym} className={`rounded-lg p-3 bg-background/40 border ${isPaused ? "border-amber-500/50" : "border-transparent"}`}>
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="text-xs font-bold">{sym}</span>
+                                  {isPaused && (
+                                    <span className="text-[9px] bg-amber-500/20 text-amber-400 px-1 rounded">
+                                      paused {paused[sym]}w
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground">
+                                  {s.wins}W / {s.losses}L · {pct(s.winRate)} WR
+                                </div>
+                                {s.currentConsecutiveLosses >= 3 && (
+                                  <div className="text-[9px] text-red-400 mt-0.5">
+                                    {s.currentConsecutiveLosses} consecutive losses
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Hour band heatmap */}
+                    {Object.keys(r.byHourBand).length > 0 && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Win Rate by Hour Band (UTC)</div>
+                        <div className="flex flex-wrap gap-2">
+                          {Object.values(r.byHourBand)
+                            .sort((a, b) => a.band.localeCompare(b.band))
+                            .map(b => {
+                              const wr = b.winRate ?? 0;
+                              const color = b.betCount < 5 ? "bg-muted/40 text-muted-foreground"
+                                : wr >= 0.6 ? "bg-emerald-500/20 text-emerald-400"
+                                : wr >= 0.4 ? "bg-yellow-500/20 text-yellow-400"
+                                : "bg-red-500/20 text-red-400";
+                              return (
+                                <div key={b.band} className={`rounded-lg px-3 py-2 text-center min-w-[70px] ${color}`}>
+                                  <div className="text-[9px] font-mono mb-0.5">{b.band}</div>
+                                  <div className="text-xs font-bold">{pct(b.winRate)}</div>
+                                  <div className="text-[9px] opacity-70">{b.betCount} bets</div>
+                                </div>
+                              );
+                            })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Recommendations */}
+                    {r.recommendations.length > 0 && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Recommendations</div>
+                        <div className="space-y-1.5">
+                          {r.recommendations.map((rec, i) => (
+                            <div key={i} className="flex items-start gap-2 text-sm bg-sky-500/10 text-sky-300 rounded-lg px-3 py-2">
+                              <Zap className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                              {rec}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="text-[10px] text-muted-foreground">
+                      Last computed: {r.computedAt ? new Date(r.computedAt).toLocaleString() : "—"}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+
+        {/* ── Auto-Tune History ── */}
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
+          <button
+            className="w-full px-5 py-3 border-b border-border flex items-center gap-2 hover:bg-muted/30 transition-colors"
+            onClick={() => setTuneLogOpen(o => !o)}
+          >
+            <Sliders className="w-4 h-4 text-violet-400" />
+            <h2 className="font-semibold text-sm">Auto-Tune History</h2>
+            {(autoTuneLogData?.entries?.length ?? 0) > 0 && (
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {autoTuneLogData!.entries.length} mutations
+              </span>
+            )}
+            {tuneLogOpen ? <ChevronUp className="w-4 h-4 ml-1 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 ml-1 text-muted-foreground" />}
+          </button>
+          {tuneLogOpen && (
+            <div className="p-5">
+              {(autoTuneLogData?.entries?.length ?? 0) === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No parameter changes yet — auto-tune mutations will appear here once the rules trigger.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {autoTuneLogData!.entries.map(entry => {
+                    const ruleColor = entry.ruleName === "confidence_floor_raise"
+                      ? "text-amber-400"
+                      : entry.ruleName === "per_coin_pause"
+                      ? "text-red-400"
+                      : "text-sky-400";
+                    const ruleLabel = entry.ruleName === "confidence_floor_raise"
+                      ? "Confidence Raised"
+                      : entry.ruleName === "per_coin_pause"
+                      ? "Coin Paused"
+                      : entry.ruleName === "quiet_hours_expand"
+                      ? "Quiet Hours Expanded"
+                      : entry.ruleName;
+                    return (
+                      <div key={entry.id} className="bg-background/40 rounded-lg px-4 py-3 flex flex-col gap-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-xs font-semibold ${ruleColor}`}>{ruleLabel}</span>
+                          {entry.oldValue && entry.newValue && (
+                            <span className="text-xs text-muted-foreground font-mono">
+                              {entry.oldValue} → {entry.newValue}
+                            </span>
+                          )}
+                          <span className="ml-auto text-[10px] text-muted-foreground">
+                            {new Date(entry.createdAt).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-muted-foreground">{entry.triggerReason}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>

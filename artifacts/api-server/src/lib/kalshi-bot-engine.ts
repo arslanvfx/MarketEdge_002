@@ -86,6 +86,9 @@ export interface BotConfig {
   // Set enableMomentumFilter=false to disable.
   enableMomentumFilter: boolean; // (default true)
   momentumWindowCount: number;   // consecutive windows required to trigger (default 3)
+  // Self-learning auto-tune: when enabled the bot periodically analyses its own
+  // recent performance and applies safe parameter adjustments automatically.
+  enableAutoTuning: boolean;     // (default true)
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -114,6 +117,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxSameDirectionBets: 3,
   enableMomentumFilter: true,
   momentumWindowCount: 3,
+  enableAutoTuning: true,
 };
 
 export interface SignalSnapshot {
