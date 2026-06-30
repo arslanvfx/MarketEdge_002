@@ -983,9 +983,16 @@ async function closePosition(
   // For mid-window exits: pnl = (exitYesPrice - entryYesPrice) × contractCount
   //   YES bet profits when exitYesPrice > entryYesPrice
   //   NO  bet profits when exitYesPrice < entryYesPrice (they go inverse)
-  // For expiry: use cached coin price vs kalshiTarget to estimate settlement
+  // For expiry: TEMP paper simulation uses fixed return rate (see PAPER_WIN_RETURN_RATE).
+  //   In live mode this path is replaced by evalClosedBets using real candle data.
+
+  // TEMPORARY: paper-mode win return for test-drive (50¢ profit per $1 bet).
+  // Remove / set to null when going live — evalClosedBets will use real contract PnL.
+  const PAPER_WIN_RETURN_RATE = 0.50;
+
   let pnl = 0;
   if (fillPrice !== null) {
+    // Mid-window exit: price-based PnL (kept as-is for live accuracy)
     const priceDelta = pos.direction === "yes"
       ? fillPrice - pos.entryYesPrice
       : pos.entryYesPrice - fillPrice;
@@ -998,24 +1005,11 @@ async function closePosition(
     if (lastCoinPrice !== null) {
       const priceAboveStrike = lastCoinPrice >= strike;
       const won = pos.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
-      if (won) {
-        // YES win: receive $1, paid yesPrice → profit = (1 - entryYesPrice) × count
-        // NO  win: receive $1, paid (1-yesPrice) → profit = entryYesPrice × count
-        pnl = pos.direction === "yes"
-          ? (1 - pos.entryYesPrice) * pos.contractCount
-          : pos.entryYesPrice * pos.contractCount;
-      } else {
-        // YES loss: paid yesPrice, receives $0 → loss = -entryYesPrice × count
-        // NO  loss: paid (1-yesPrice), receives $0 → loss = -(1-entryYesPrice) × count
-        pnl = pos.direction === "yes"
-          ? -pos.entryYesPrice * pos.contractCount
-          : -(1 - pos.entryYesPrice) * pos.contractCount;
-      }
+      // TEMP paper simulation: win = +50% of bet, loss = -100% of bet
+      pnl = won ? pos.betAmount * PAPER_WIN_RETURN_RATE : -pos.betAmount;
     } else {
       // No price data — book conservatively as full loss
-      pnl = pos.direction === "yes"
-        ? -pos.entryYesPrice * pos.contractCount
-        : -(1 - pos.entryYesPrice) * pos.contractCount;
+      pnl = -pos.betAmount;
     }
   }
 
@@ -1286,8 +1280,10 @@ export async function evalClosedBets(): Promise<void> {
         kalshiTarget: kalshiBotBetsTable.kalshiTarget,
         contractCount: kalshiBotBetsTable.contractCount,
         entryPrice: kalshiBotBetsTable.entryPrice,
+        betAmount: kalshiBotBetsTable.betAmount,
         exitedAt: kalshiBotBetsTable.exitedAt,
         cryptoPriceAtExit: kalshiBotBetsTable.cryptoPriceAtExit,
+        signals: kalshiBotBetsTable.signals,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -1367,16 +1363,12 @@ export async function evalClosedBets(): Promise<void> {
         const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
         outcome = won ? "win" : "loss";
 
-        // Recompute pnl from actual settlement: winning contract pays $1, losing $0
-        if (won) {
-          correctedPnl = row.direction === "yes"
-            ? (1 - entryPrice) * count   // YES win: received $1, paid entryYesPrice
-            : entryPrice * count;        // NO win: received $1, paid (1-entryYesPrice)
-        } else {
-          correctedPnl = row.direction === "yes"
-            ? -entryPrice * count        // YES loss: paid entryYesPrice, received $0
-            : -(1 - entryPrice) * count; // NO loss: paid (1-entryYesPrice), received $0
-        }
+        // TEMPORARY: paper-mode fixed return (50¢ profit per $1 bet, full loss on lose).
+        // Remove when connecting to live Kalshi — replace with real contract PnL:
+        //   win:  (1 - entryPrice) * count  (YES) / entryPrice * count  (NO)
+        //   loss: -entryPrice * count        (YES) / -(1-entryPrice) * count (NO)
+        const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : entryPrice * count;
+        correctedPnl = won ? betAmt * 0.50 : -betAmt;
 
         logger.info(
           { sym: row.symbol, windowKey: row.windowKey, closePrice, strike, direction: row.direction, outcome, pnl: correctedPnl },

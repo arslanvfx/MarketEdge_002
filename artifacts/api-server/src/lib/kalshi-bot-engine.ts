@@ -97,7 +97,7 @@ export interface BotConfig {
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
-  betSize: 0.50,
+  betSize: 1.00, // TEMP: raised from $0.50 for test-drive; revert before live trading
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry
   minConfidence: 52,
