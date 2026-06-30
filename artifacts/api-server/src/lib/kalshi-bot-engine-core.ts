@@ -171,6 +171,10 @@ export interface CircuitBreakerState {
  * Returns updated circuit-breaker state after a single bet outcome.
  * A win resets the consecutive-loss streak; a loss increments it and triggers
  * the breaker when maxConsecutiveLosses is first reached.
+ *
+ * Disable modes:
+ *   maxConsecutiveLosses <= 0  → breaker never triggers (streak still tracked)
+ *   pauseWindows === 0         → breaker never triggers
  */
 export function applyBetOutcome(
   state: CircuitBreakerState,
@@ -182,7 +186,8 @@ export function applyBetOutcome(
     return { consecutiveLosses: 0, circuitBreakerWindowsRemaining: state.circuitBreakerWindowsRemaining };
   }
   const newConsecutive = state.consecutiveLosses + 1;
-  const shouldTrigger = newConsecutive >= maxConsecutiveLosses && pauseWindows > 0;
+  const canTrigger = maxConsecutiveLosses > 0 && pauseWindows > 0;
+  const shouldTrigger = canTrigger && newConsecutive >= maxConsecutiveLosses;
   return {
     consecutiveLosses: newConsecutive,
     circuitBreakerWindowsRemaining: shouldTrigger

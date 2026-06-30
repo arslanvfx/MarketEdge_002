@@ -1483,17 +1483,12 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
-  // Circuit breaker: decrement the countdown on each new 15-minute window.
-  // Runs even when paused/disabled so the counter keeps advancing.
-  {
-    const cbWindowNow = currentWindowKey();
-    if (cbWindowNow !== lastCircuitBreakerWindowKey) {
-      lastCircuitBreakerWindowKey = cbWindowNow;
-      if (cbState.circuitBreakerWindowsRemaining > 0) {
-        cbState = tickCircuitBreakerWindow(cbState);
-        logger.info({ cbState, window: cbWindowNow }, "[kalshi-bot] circuit breaker countdown — windows remaining");
-      }
-    }
+  // Track new-window boundary for circuit-breaker decrement.
+  // The variable is used later in the entry gate to decrement exactly once per window.
+  const cbWindowNow = currentWindowKey();
+  const isCBNewWindow = cbWindowNow !== lastCircuitBreakerWindowKey;
+  if (isCBNewWindow) {
+    lastCircuitBreakerWindowKey = cbWindowNow;
   }
 
   if (!config.enabled || paused) return;
@@ -1571,11 +1566,16 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   // Circuit breaker gate: skip new entries while the cooldown is active.
+  // Decrement happens HERE (after the check) so that N configured pause windows
+  // reliably blocks exactly N consecutive windows (not N-1).
   if (cbState.circuitBreakerWindowsRemaining > 0) {
-    logger.info(
-      { circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining },
-      "[kalshi-bot] circuit breaker active — skipping new entry",
-    );
+    if (isCBNewWindow) {
+      cbState = tickCircuitBreakerWindow(cbState);
+      logger.info(
+        { circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining },
+        "[kalshi-bot] circuit breaker countdown — windows remaining",
+      );
+    }
     return;
   }
 

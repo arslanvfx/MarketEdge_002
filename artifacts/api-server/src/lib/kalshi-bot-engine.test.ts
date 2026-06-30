@@ -311,6 +311,12 @@ test("applyBetOutcome: pauseWindows=0 means breaker never triggers", () => {
   assert.equal(s.circuitBreakerWindowsRemaining, 0);
 });
 
+test("applyBetOutcome: maxConsecutiveLosses=0 disables the circuit breaker entirely", () => {
+  let s = zeroCB;
+  for (let i = 0; i < 10; i++) s = applyBetOutcome(s, false, 0, 2);
+  assert.equal(s.circuitBreakerWindowsRemaining, 0, "breaker must not trigger when maxConsecutiveLosses=0");
+});
+
 // ---------------------------------------------------------------------------
 // tickCircuitBreakerWindow — countdown decrement
 // ---------------------------------------------------------------------------

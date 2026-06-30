@@ -555,6 +555,7 @@ export default function BotDashboard() {
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={merged.maxConsecutiveLosses ?? 3}
                     onChange={e => setConfigDraft(d => ({ ...d, maxConsecutiveLosses: parseInt(e.target.value) }))}>
+                    <option value={0}>Disabled</option>
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
                       <option key={n} value={n}>{n} consecutive loss{n > 1 ? "es" : ""}</option>
                     ))}
