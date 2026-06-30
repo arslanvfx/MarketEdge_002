@@ -8,6 +8,7 @@ import {
   getBotHistory,
   getBotAllHistory,
   getBotStats,
+  getBotTrend,
   getWindowEvaluation,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
@@ -154,6 +155,18 @@ router.get("/crypto/bot/stats", async (req, res) => {
   try {
     const stats = await getBotStats(symbol);
     res.json(stats);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/trend?limit=50 — chronological win/loss sequence with rolling win rate
+router.get("/crypto/bot/trend", async (req, res) => {
+  const limit = Math.min(100, Math.max(2, parseInt(String(req.query.limit ?? "50"), 10) || 50));
+  try {
+    const points = await getBotTrend(limit);
+    res.json(points);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

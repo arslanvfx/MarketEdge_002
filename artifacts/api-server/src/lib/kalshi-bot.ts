@@ -906,6 +906,54 @@ export async function getBotHistory(limit = 20): Promise<unknown[]> {
   }
 }
 
+// Returns the last `limit` completed bets in chronological order (oldest → newest)
+// with a rolling 10-bet win rate pre-computed so the frontend can render a sparkline
+// without any extra processing.
+export interface TrendPoint {
+  betNumber: number;
+  outcome: "win" | "loss";
+  symbol: string;
+  pnl: number;
+  createdAt: string;
+  rollingWinRate: number;  // 10-bet rolling window, 0–1
+}
+
+export async function getBotTrend(limit = 50): Promise<TrendPoint[]> {
+  try {
+    const rows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
+        outcome: kalshiBotBetsTable.outcome,
+        createdAt: kalshiBotBetsTable.createdAt,
+      })
+      .from(kalshiBotBetsTable)
+      .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+        AND ${kalshiBotBetsTable.outcome} IS NOT NULL`)
+      .orderBy(desc(kalshiBotBetsTable.createdAt))
+      .limit(limit);
+
+    // Reverse so the array runs oldest-first for the chart.
+    rows.reverse();
+
+    const WINDOW = 10;
+    return rows.map((r, i) => {
+      const slice = rows.slice(Math.max(0, i - WINDOW + 1), i + 1);
+      const wins = slice.filter(s => s.outcome === "win").length;
+      return {
+        betNumber: i + 1,
+        outcome: (r.outcome ?? "loss") as "win" | "loss",
+        symbol: r.symbol,
+        pnl: parseFloat(r.pnl ?? "0"),
+        createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+        rollingWinRate: slice.length > 0 ? wins / slice.length : 0,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 // Returns ALL records for the bot dashboard — includes bets (active/closed), skips,
 // and warmup records, ordered newest-first with pagination.
 export async function getBotAllHistory(limit = 100, offset = 0): Promise<unknown[]> {

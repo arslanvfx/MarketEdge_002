@@ -400,6 +400,15 @@ interface BotStats {
   bySymbol: CoinBotStats[];
 }
 
+interface TrendPoint {
+  betNumber: number;
+  outcome: "win" | "loss";
+  symbol: string;
+  pnl: number;
+  createdAt: string;
+  rollingWinRate: number;
+}
+
 // ---------------------------------------------------------------------------
 // Bet signal — intra-window momentum read on whether the last 15 minutes are
 // trending cleanly, just drifting, choppy, or showing an abnormal spike.
@@ -2089,6 +2098,85 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Win-rate sparkline — rolling 10-bet win rate rendered as dots + SVG line
+// ---------------------------------------------------------------------------
+
+function WinRateTrend({ points }: { points: TrendPoint[] }) {
+  if (points.length < 2) return null;
+  const H = 36;
+  const PAD = 2;
+  const n = points.length;
+
+  const pts = points.map((p, i) => ({
+    x: (i / (n - 1)) * 100,
+    y: H - PAD - p.rollingWinRate * (H - PAD * 2),
+    ...p,
+  }));
+
+  const pathD = pts
+    .map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+    .join(" ");
+  const midY = H - PAD - 0.5 * (H - PAD * 2);
+  const last = pts[pts.length - 1];
+  const lineColor = (last?.rollingWinRate ?? 0) >= 0.5 ? "#34d399" : "#f87171";
+
+  return (
+    <div>
+      {/* Dot row: last 20 bets, oldest → newest */}
+      <div className="flex gap-px mb-1.5">
+        {points.slice(-20).map((p, i) => (
+          <div
+            key={i}
+            title={`${p.symbol}: ${p.outcome} (${p.pnl >= 0 ? "+" : ""}$${p.pnl.toFixed(2)})`}
+            className={`w-2 h-2 rounded-sm flex-shrink-0 ${
+              p.outcome === "win" ? "bg-emerald-400" : "bg-red-500"
+            }`}
+          />
+        ))}
+      </div>
+      {/* Rolling win-rate line */}
+      <svg
+        viewBox={`0 0 100 ${H}`}
+        preserveAspectRatio="none"
+        className="w-full h-9"
+        aria-label="Win rate trend"
+      >
+        <line
+          x1="0" y1={midY} x2="100" y2={midY}
+          stroke="#334155" strokeWidth="0.5" strokeDasharray="2,2"
+        />
+        <path
+          d={pathD}
+          fill="none"
+          stroke={lineColor}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity="0.9"
+        />
+        {last && (
+          <circle
+            cx={last.x.toFixed(1)}
+            cy={last.y.toFixed(1)}
+            r="2"
+            fill={lineColor}
+          />
+        )}
+      </svg>
+      <div className="flex justify-between text-[9px] text-slate-600">
+        <span>{points.length} bets</span>
+        <span>
+          rolling win rate:{" "}
+          <span style={{ color: lineColor }}>
+            {((last?.rollingWinRate ?? 0) * 100).toFixed(0)}%
+          </span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Per-coin breakdown table (collapsible) — used inside KalshiBotPanel
 // ---------------------------------------------------------------------------
 
@@ -2165,6 +2253,13 @@ function KalshiBotPanel() {
   const statsQuery = useQuery<BotStats>({
     queryKey: ["bot-stats"],
     queryFn: () => fetchJson<BotStats>("/crypto/bot/stats"),
+    refetchInterval: 60_000,
+    enabled: open,
+  });
+
+  const trendQuery = useQuery<TrendPoint[]>({
+    queryKey: ["bot-trend"],
+    queryFn: () => fetchJson<TrendPoint[]>("/crypto/bot/trend?limit=50"),
     refetchInterval: 60_000,
     enabled: open,
   });
@@ -2443,6 +2538,13 @@ function KalshiBotPanel() {
               </div>
               {statsQuery.data.bySymbol.length > 0 && (
                 <PerCoinBreakdown rows={statsQuery.data.bySymbol} />
+              )}
+              {/* Win-rate trend sparkline */}
+              {trendQuery.data && trendQuery.data.length >= 2 && (
+                <div className="pt-1">
+                  <p className="text-[10px] text-slate-500 mb-1">Win-rate trend (rolling 10)</p>
+                  <WinRateTrend points={trendQuery.data} />
+                </div>
               )}
             </div>
           )}
