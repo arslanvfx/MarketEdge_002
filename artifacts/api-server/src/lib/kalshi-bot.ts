@@ -619,35 +619,61 @@ export async function getBotHistory(limit = 20): Promise<unknown[]> {
   }
 }
 
-export async function getBotStats(): Promise<{
+export interface CoinBotStats {
+  symbol: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+}
+
+export async function getBotStats(filterSymbol?: string): Promise<{
   totalBets: number;
   wins: number;
   losses: number;
   totalPnl: number;
   paperBets: number;
   liveBets: number;
+  bySymbol: CoinBotStats[];
 }> {
   try {
+    const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`;
+    const whereClause = filterSymbol
+      ? sql`${baseWhere} AND ${kalshiBotBetsTable.symbol} = ${filterSymbol.toUpperCase()}`
+      : baseWhere;
+
     const rows = await db
       .select({
+        symbol: kalshiBotBetsTable.symbol,
         mode: kalshiBotBetsTable.mode,
-        action: kalshiBotBetsTable.action,
         pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
       })
       .from(kalshiBotBetsTable)
-      .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`);
+      .where(whereClause);
 
     let totalBets = 0, wins = 0, losses = 0, totalPnl = 0, paperBets = 0, liveBets = 0;
+    const coinMap = new Map<string, CoinBotStats>();
+
     for (const r of rows) {
       const p = parseFloat(r.pnl ?? "0");
       totalBets++;
       totalPnl += p;
       if (p > 0) wins++; else if (p < 0) losses++;
       if (r.mode === "paper") paperBets++; else liveBets++;
+
+      const sym = r.symbol ?? "UNKNOWN";
+      const coin = coinMap.get(sym) ?? { symbol: sym, bets: 0, wins: 0, losses: 0, pnl: 0 };
+      coin.bets++;
+      coin.pnl += p;
+      if (p > 0) coin.wins++; else if (p < 0) coin.losses++;
+      coinMap.set(sym, coin);
     }
-    return { totalBets, wins, losses, totalPnl, paperBets, liveBets };
+
+    const bySymbol = Array.from(coinMap.values()).sort((a, b) => b.bets - a.bets);
+
+    return { totalBets, wins, losses, totalPnl, paperBets, liveBets, bySymbol };
   } catch {
-    return { totalBets: 0, wins: 0, losses: 0, totalPnl: 0, paperBets: 0, liveBets: 0 };
+    return { totalBets: 0, wins: 0, losses: 0, totalPnl: 0, paperBets: 0, liveBets: 0, bySymbol: [] };
   }
 }
 

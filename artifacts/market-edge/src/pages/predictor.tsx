@@ -376,6 +376,14 @@ interface BotBetRecord {
   exitedAt: string | null;
 }
 
+interface CoinBotStats {
+  symbol: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+}
+
 interface BotStats {
   totalBets: number;
   wins: number;
@@ -383,6 +391,7 @@ interface BotStats {
   totalPnl: number;
   paperBets: number;
   liveBets: number;
+  bySymbol: CoinBotStats[];
 }
 
 // ---------------------------------------------------------------------------
@@ -2074,6 +2083,53 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-coin breakdown table (collapsible) — used inside KalshiBotPanel
+// ---------------------------------------------------------------------------
+
+function PerCoinBreakdown({ rows }: { rows: CoinBotStats[] }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+      >
+        {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+        Per-coin breakdown
+      </button>
+      {expanded && (
+        <div className="mt-1.5 overflow-x-auto">
+          <table className="w-full text-[10px]">
+            <thead>
+              <tr className="text-slate-500 border-b border-slate-800/50">
+                <th className="text-left pb-1 font-medium">Coin</th>
+                <th className="text-right pb-1 font-medium">Bets</th>
+                <th className="text-right pb-1 font-medium text-emerald-500">W</th>
+                <th className="text-right pb-1 font-medium text-red-500">L</th>
+                <th className="text-right pb-1 font-medium">P&L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.symbol} className="border-b border-slate-800/20">
+                  <td className="py-0.5 font-semibold text-slate-200">{r.symbol}</td>
+                  <td className="py-0.5 text-right text-slate-300 tabular-nums">{r.bets}</td>
+                  <td className="py-0.5 text-right text-emerald-400 tabular-nums">{r.wins}</td>
+                  <td className="py-0.5 text-right text-red-400 tabular-nums">{r.losses}</td>
+                  <td className={`py-0.5 text-right font-medium tabular-nums ${r.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {r.pnl >= 0 ? "+" : ""}${r.pnl.toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Kalshi Bot Panel
 // ---------------------------------------------------------------------------
 
@@ -2341,14 +2397,19 @@ function KalshiBotPanel() {
 
           {/* Stats bar */}
           {statsQuery.data && (
-            <div className="flex gap-4 text-xs text-slate-400 border-t border-slate-800/60 pt-2">
-              <span>Bets: <span className="text-slate-200">{statsQuery.data.totalBets}</span></span>
-              <span className="text-emerald-400">{statsQuery.data.wins}W</span>
-              <span className="text-red-400">{statsQuery.data.losses}L</span>
-              <span className={statsQuery.data.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}>
-                P&L: {statsQuery.data.totalPnl >= 0 ? "+" : ""}${statsQuery.data.totalPnl.toFixed(2)}
-              </span>
-              <span className="ml-auto">Paper: {statsQuery.data.paperBets} / Live: {statsQuery.data.liveBets}</span>
+            <div className="border-t border-slate-800/60 pt-2 space-y-2">
+              <div className="flex gap-4 text-xs text-slate-400">
+                <span>Bets: <span className="text-slate-200">{statsQuery.data.totalBets}</span></span>
+                <span className="text-emerald-400">{statsQuery.data.wins}W</span>
+                <span className="text-red-400">{statsQuery.data.losses}L</span>
+                <span className={statsQuery.data.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}>
+                  P&L: {statsQuery.data.totalPnl >= 0 ? "+" : ""}${statsQuery.data.totalPnl.toFixed(2)}
+                </span>
+                <span className="ml-auto">Paper: {statsQuery.data.paperBets} / Live: {statsQuery.data.liveBets}</span>
+              </div>
+              {statsQuery.data.bySymbol.length > 0 && (
+                <PerCoinBreakdown rows={statsQuery.data.bySymbol} />
+              )}
             </div>
           )}
 

@@ -126,10 +126,13 @@ router.get("/crypto/bot/history", async (req, res) => {
   }
 });
 
-// GET /crypto/bot/stats (public — read only)
-router.get("/crypto/bot/stats", async (_req, res) => {
+// GET /crypto/bot/stats?symbol=BTC (public — read only)
+router.get("/crypto/bot/stats", async (req, res) => {
+  const symbol = typeof req.query.symbol === "string" && req.query.symbol.trim()
+    ? req.query.symbol.trim()
+    : undefined;
   try {
-    const stats = await getBotStats();
+    const stats = await getBotStats(symbol);
     res.json(stats);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
