@@ -78,6 +78,7 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
     minConfidence,
     midExitSensitivity,
     phase2ThresholdPp,
+    maxEntryMinutes,
     enabled,
   } = req.body as {
     betSize?: number;
@@ -86,6 +87,7 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
     minConfidence?: number;
     midExitSensitivity?: "conservative" | "balanced" | "aggressive";
     phase2ThresholdPp?: number;
+    maxEntryMinutes?: number;
     enabled?: boolean;
   };
 
@@ -107,6 +109,9 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
   }
   if (typeof phase2ThresholdPp === "number" && phase2ThresholdPp >= 10 && phase2ThresholdPp <= 50) {
     partial.phase2ThresholdPp = phase2ThresholdPp;
+  }
+  if (typeof maxEntryMinutes === "number" && maxEntryMinutes >= 1 && maxEntryMinutes <= 7) {
+    partial.maxEntryMinutes = maxEntryMinutes;
   }
   if (typeof enabled === "boolean") partial.enabled = enabled;
 

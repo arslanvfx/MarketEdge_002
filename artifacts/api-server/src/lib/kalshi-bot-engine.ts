@@ -67,6 +67,9 @@ export interface SignalSnapshot {
   statConfidence: number | null;
   claudeConfidence: number | null;
   mlConfidence: number | null;
+  // true when this record was produced during the 45-second warmup guard;
+  // false for all normal SKIP/BET decisions after warmup has cleared.
+  warmupActive: boolean;
 }
 
 export interface BotDecision {
@@ -126,6 +129,7 @@ export function makeBotDecision(
       statConfidence: statCall?.confidence ?? null,
       claudeConfidence: claudeCall?.confidence ?? null,
       mlConfidence,
+      warmupActive: false,
     };
   }
 
@@ -192,6 +196,7 @@ export function makeBotDecision(
     statConfidence: statCall?.confidence ?? null,
     claudeConfidence: claudeCall?.confidence ?? null,
     mlConfidence,
+    warmupActive: false,
   };
 
   // Negative EV skip

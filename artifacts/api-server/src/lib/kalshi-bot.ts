@@ -301,6 +301,7 @@ async function _runBotTick(
 
   const winCtx = getKalshiWindowContext(sym);
   const minutesElapsed = winCtx?.minutesElapsed ?? 0;
+  const secondsElapsed = winCtx?.secondsElapsed ?? 0;
   const windowKey = currentWindowKey();
 
   // ── POSITION MANAGEMENT ──────────────────────────────────────────────────
@@ -354,11 +355,10 @@ async function _runBotTick(
 
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
 
-  // Hard ceiling: don't enter after maxEntryMinutes into the window
-  if (minutesElapsed > config.maxEntryMinutes) return;
+  // Hard ceiling: precise seconds check so the limit is exact.
+  // e.g. maxEntryMinutes=3 → no entry after t+3:00, not t+3:59.
+  if (secondsElapsed > config.maxEntryMinutes * 60) return;
   if (!kalshiTicker || kalshiTarget === null) return;
-
-  const secondsElapsed = winCtx?.secondsElapsed ?? 0;
 
   // Eager Claude prefetch: fire once per (symbol, window) as soon as the bot
   // detects the new window, so the analysis is warm by the time warmup ends.
@@ -369,7 +369,23 @@ async function _runBotTick(
 
   // 45-second warmup: let the Kalshi market stabilise and the Claude opening
   // call complete before the bot commits to an entry.
-  if (secondsElapsed < WARMUP_MS / 1_000) return;
+  // Log a single SKIP with reason "warmup" per (symbol, window) for audit visibility.
+  if (secondsElapsed < WARMUP_MS / 1_000) {
+    if (lastDecisionWindowKey.get(sym) !== `warmup:${windowKey}`) {
+      lastDecisionWindowKey.set(sym, `warmup:${windowKey}`);
+      await persistBetRecord({
+        symbol: sym,
+        windowKey,
+        ticker: kalshiTicker,
+        direction: null,
+        action: "skip",
+        signals: { warmupActive: true, secondsElapsed, minutesElapsed, reason: "warmup" },
+        entryPrice: null,
+        kalshiTarget,
+      });
+    }
+    return;
+  }
 
   const timingAcc = await getTimingAccuracy(sym, minutesElapsed);
   const decision = makeBotDecision(
