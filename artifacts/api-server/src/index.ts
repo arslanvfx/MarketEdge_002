@@ -202,9 +202,7 @@ app.listen(port, (err) => {
           mode: s.mode,
           dailyPnl: s.dailyPnl,
           dailyLossCount: s.dailyLossCount,
-          openPosition: s.openPosition
-            ? { symbol: s.openPosition.symbol, windowKey: s.openPosition.windowKey, direction: s.openPosition.direction }
-            : null,
+          openPositions: s.openPositions.map(p => ({ symbol: p.symbol, windowKey: p.windowKey, direction: p.direction })),
         },
         "[kalshi-bot] startup state restored",
       );

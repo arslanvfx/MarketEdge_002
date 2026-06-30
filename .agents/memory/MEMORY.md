@@ -26,3 +26,4 @@
 - [Claude per-coin down-scale](claude-down-scale.md) — computeClaudeDownScale reads historyStore; BNB down>up so scale=1.0; use clamp(downAcc/upAcc, 0.5, 1.0) not a fixed 0.70
 - [Bot trend stability analysis](bot-trend-stability.md) — window-open parallel Claude calls; cached per (sym, windowKey); clean=×1.2, choppy=×1.0, reversing=force SKIP in Phase 3
 - [ML-primary bot entry architecture](ml-primary-entry.md) — three-path decision: A=stat+claude agree (unchanged), B=ML tiebreaker on conflict, C=ML solo when no core signals; ML_PRIMARY_MIN_CONFIDENCE=58, ML_SIGNAL_BOOST=6
+- [Multi-position bot architecture](multi-position-bot.md) — openPositions Map replaces single openPosition; each coin fully independent; Phase 2 iterates all open slots; Phase 4 no break; BotStateSnapshot.openPositions is an array

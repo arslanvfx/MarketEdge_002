@@ -77,27 +77,31 @@ export interface OpenPosition {
   phase2Activated: boolean;
 }
 
+// OpenPosition augmented with live display data (P&L, guard states) for the
+// dashboard.  Only used in the outbound API snapshot — not stored in DB.
+export interface OpenPositionDisplay extends OpenPosition {
+  currentYesPrice: number | null;   // live Kalshi yes-price for mark-to-market
+  unrealizedPnl: number | null;     // estimated P&L at current mark
+  guardStates: GuardStates | null;  // most-recent exit-guard evaluation for this position
+  guardReason: string | null;
+}
+
 export interface BotStateSnapshot {
   mode: BotMode;
   status: BotStatus;
   paused: boolean;
   config: BotConfig;
-  openPosition: OpenPosition | null;
-  openPositionCurrentYesPrice: number | null; // live market price for the open position
-  openPositionUnrealizedPnl: number | null;   // estimated P&L at current mark
+  openPositions: OpenPositionDisplay[];  // one entry per symbol with an open bet
   dailyPnl: number;
   dailyLossCount: number;
   dailyDate: string;        // YYYY-MM-DD in UTC
   accountBalance: number | null;
   lastUpdatedAt: string;
-  lastGuardStates: GuardStates | null;
-  lastGuardReason: string | null;
   configured: boolean;      // KALSHI_API_KEY present
   // Seconds remaining in the 45-second warmup period at the start of each window.
-  // null when not in warmup (elapsed ≥ 45s), or when a position is already open.
+  // null when warmup is over or positions are already open.
   warmupSecondsRemaining: number | null;
   // Circuit breaker: how many windows remain before new entries are re-enabled.
-  // 0 = not triggered (normal operation).
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;
   // Whether the current UTC hour falls within the configured quiet-hours window.
@@ -126,15 +130,17 @@ export interface WindowCoinEvaluation {
 let botMode: BotMode = "paper";
 let paused = false;
 let config: BotConfig = { ...DEFAULT_BOT_CONFIG };
-let openPosition: OpenPosition | null = null;
+// Keyed by symbol — each coin that has an open bet gets its own slot.
+const openPositions = new Map<string, OpenPosition>();
 let dailyPnl = 0;
 let dailyLossCount = 0;
 let dailyDate = todayUTC();
 // Paper mode starts with a simulated $100 balance so the dashboard can display
 // it immediately.  Live mode reads the real account balance from Kalshi.
 let accountBalance: number | null = 100;
-let lastGuardStates: GuardStates | null = null;
-let lastGuardReason: string | null = null;
+// Per-symbol exit-guard diagnostics — updated every tick a position is managed.
+const lastGuardStatesMap = new Map<string, GuardStates>();
+const lastGuardReasonMap = new Map<string, string>();
 
 // Circuit breaker state — persists across windows (not just daily).
 // Restored from recent bet history on startup via loadDailyPnlFromDB.
@@ -225,29 +231,37 @@ export function getBotState(): BotStateSnapshot {
     ? "paused"
     : dailyPnl <= -config.dailyLossLimit
     ? "daily_limit_hit"
-    : openPosition !== null
+    : openPositions.size > 0
     ? "position_open"
     : "idle";
 
-  // Compute unrealized P&L for open position using live Kalshi yes-price
-  let openPositionCurrentYesPrice: number | null = null;
-  let openPositionUnrealizedPnl: number | null = null;
-  if (openPosition !== null) {
-    const liveKalshi = getKalshiCachedData(openPosition.symbol);
+  // Build display objects for every open position with live P&L and guard diagnostics.
+  const openPositionsList: OpenPositionDisplay[] = Array.from(openPositions.values()).map((pos) => {
+    const liveKalshi = getKalshiCachedData(pos.symbol);
+    let currentYesPrice: number | null = null;
+    let unrealizedPnl: number | null = null;
     if (liveKalshi?.yesPrice != null) {
-      openPositionCurrentYesPrice = liveKalshi.yesPrice;
+      currentYesPrice = liveKalshi.yesPrice;
       // YES bet: profits when yesPrice rises; NO bet: profits when yesPrice falls
-      const priceDelta = openPosition.direction === "yes"
-        ? liveKalshi.yesPrice - openPosition.entryYesPrice
-        : openPosition.entryYesPrice - liveKalshi.yesPrice;
-      openPositionUnrealizedPnl = priceDelta * openPosition.contractCount;
+      const priceDelta = pos.direction === "yes"
+        ? liveKalshi.yesPrice - pos.entryYesPrice
+        : pos.entryYesPrice - liveKalshi.yesPrice;
+      unrealizedPnl = priceDelta * pos.contractCount;
     }
-  }
+    return {
+      ...pos,
+      exitState: pos.exitState, // reference — callers must not mutate
+      currentYesPrice,
+      unrealizedPnl,
+      guardStates: lastGuardStatesMap.get(pos.symbol) ?? null,
+      guardReason: lastGuardReasonMap.get(pos.symbol) ?? null,
+    };
+  });
 
   // Compute warmup state: how many seconds remain before the bot can enter the
-  // current window. null when a position is already open or warmup is over.
+  // current window. null when warmup is over.
   let warmupSecondsRemaining: number | null = null;
-  if (openPosition === null && !paused) {
+  if (!paused) {
     for (const coin of CRYPTO_COINS) {
       if (!KALSHI_SERIES[coin.symbol]) continue;
       const winCtx = getKalshiWindowContext(coin.symbol);
@@ -266,21 +280,12 @@ export function getBotState(): BotStateSnapshot {
     status,
     paused,
     config: { ...config },
-    openPosition: openPosition
-      ? {
-          ...openPosition,
-          exitState: openPosition.exitState, // reference — callers should not mutate
-        }
-      : null,
-    openPositionCurrentYesPrice,
-    openPositionUnrealizedPnl,
+    openPositions: openPositionsList,
     dailyPnl,
     dailyLossCount,
     dailyDate,
     accountBalance,
     lastUpdatedAt: new Date().toISOString(),
-    lastGuardStates,
-    lastGuardReason,
     configured: isKalshiConfigured(),
     warmupSecondsRemaining,
     circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining,
@@ -461,12 +466,11 @@ export async function loadDailyPnlFromDB(): Promise<void> {
  * Looks for the most recent 'bet' row with no exitedAt within the last 24 hours
  * (24h covers midnight-UTC boundaries so a position opened late in one day is
  * still found on a post-midnight restart). If found:
- *   - Window still active → restores openPosition so the exit guard resumes on
- *     the next tick. No double-entry can occur because the existing
- *     `openPosition !== null` guard in the loop already prevents it.
- *   - Window expired → leaves openPosition null; the evalClosedBets evaluator
- *     will eventually settle the row once the position is properly closed by
- *     the next bot-loop window-expiry check.
+ *   - Window still active → restores the position into openPositions so the
+ *     exit guard resumes on the next tick. No double-entry can occur because
+ *     _runBotTick returns early when a position slot is already occupied.
+ *   - Window expired → skips restoration; evalClosedBets will settle the row
+ *     once the bot-loop window-expiry check closes it.
  */
 export async function loadOpenPositionFromDB(): Promise<void> {
   try {
@@ -482,75 +486,79 @@ export async function loadOpenPositionFromDB(): Promise<void> {
           sql`${kalshiBotBetsTable.createdAt} >= NOW() - INTERVAL '24 hours'`,
         ),
       )
-      .orderBy(desc(kalshiBotBetsTable.createdAt))
-      .limit(1);
+      .orderBy(desc(kalshiBotBetsTable.createdAt));
 
     if (rows.length === 0) {
-      logger.info("[kalshi-bot] no open position found in DB");
+      logger.info("[kalshi-bot] no open positions found in DB");
       return;
     }
 
-    const row = rows[0];
-
-    // Validate required fields before reconstructing in-memory position.
-    if (
-      !row.direction ||
-      !row.ticker ||
-      row.entryPrice == null ||
-      row.contractCount == null ||
-      row.betAmount == null ||
-      row.kalshiTarget == null
-    ) {
-      logger.warn({ id: row.id }, "[kalshi-bot] open position row missing required fields — skipping restore");
-      return;
-    }
-
-    const windowKey = row.windowKey;
     const currentKey = currentWindowKey();
+    let restored = 0;
 
-    if (windowKey !== currentKey) {
-      // Window has already expired — leave openPosition null per task spec.
-      // The bot loop's window-expiry check will close the row on the next tick
-      // once the position is restored; evalClosedBets will settle it thereafter.
+    for (const row of rows) {
+      // Validate required fields before reconstructing in-memory position.
+      if (
+        !row.direction ||
+        !row.ticker ||
+        row.entryPrice == null ||
+        row.contractCount == null ||
+        row.betAmount == null ||
+        row.kalshiTarget == null
+      ) {
+        logger.warn({ id: row.id }, "[kalshi-bot] open position row missing required fields — skipping restore");
+        continue;
+      }
+
+      const windowKey = row.windowKey;
+
+      if (windowKey !== currentKey) {
+        // Window has already expired — skip; evalClosedBets will settle it.
+        logger.info(
+          { id: row.id, symbol: row.symbol, windowKey, currentKey },
+          "[kalshi-bot] recovered position window has expired — leaving for normal evaluator flow",
+        );
+        continue;
+      }
+
+      const entryYesPrice = parseFloat(String(row.entryPrice));
+      const direction = row.direction as "yes" | "no";
+
+      openPositions.set(row.symbol, {
+        id: row.id,
+        symbol: row.symbol,
+        windowKey,
+        ticker: row.ticker,
+        direction,
+        entryYesPrice,
+        contractCount: row.contractCount,
+        betAmount: parseFloat(String(row.betAmount)),
+        kalshiTarget: parseFloat(String(row.kalshiTarget)),
+        openedAt: row.createdAt instanceof Date ? row.createdAt.getTime() : new Date(String(row.createdAt)).getTime(),
+        cryptoPriceAtEntry: (row as Record<string, unknown>)["cryptoPriceAtEntry"] != null
+          ? parseFloat(String((row as Record<string, unknown>)["cryptoPriceAtEntry"]))
+          : null,
+        exitState: makeInitialExitState(entryYesPrice),
+        entryDecision: {
+          action: direction === "yes" ? "BET_YES" : "BET_NO",
+          confidence: 0, // not stored; the exit guard only needs direction + price
+          signals: (row.signals ?? {}) as Record<string, unknown>,
+        } as unknown as BotDecision,
+        phase2Activated: row.phase2Activated ?? false,
+      });
+
       logger.info(
-        { id: row.id, symbol: row.symbol, windowKey, currentKey },
-        "[kalshi-bot] recovered position window has expired — leaving for normal evaluator flow",
+        { id: row.id, symbol: row.symbol, windowKey, direction, entryYesPrice },
+        "[kalshi-bot] open position restored from DB — exit guard will resume on next tick",
       );
-      return;
+      restored++;
     }
 
-    const entryYesPrice = parseFloat(String(row.entryPrice));
-    const direction = row.direction as "yes" | "no";
-
-    openPosition = {
-      id: row.id,
-      symbol: row.symbol,
-      windowKey,
-      ticker: row.ticker,
-      direction,
-      entryYesPrice,
-      contractCount: row.contractCount,
-      betAmount: parseFloat(String(row.betAmount)),
-      kalshiTarget: parseFloat(String(row.kalshiTarget)),
-      openedAt: row.createdAt instanceof Date ? row.createdAt.getTime() : new Date(String(row.createdAt)).getTime(),
-      cryptoPriceAtEntry: (row as Record<string, unknown>)["cryptoPriceAtEntry"] != null
-        ? parseFloat(String((row as Record<string, unknown>)["cryptoPriceAtEntry"]))
-        : null,
-      exitState: makeInitialExitState(entryYesPrice),
-      entryDecision: {
-        action: direction === "yes" ? "BET_YES" : "BET_NO",
-        confidence: 0, // not stored; the exit guard only needs direction + price
-        signals: (row.signals ?? {}) as Record<string, unknown>,
-      } as unknown as BotDecision,
-      phase2Activated: row.phase2Activated ?? false,
-    };
-
-    logger.info(
-      { id: row.id, symbol: row.symbol, windowKey, direction, entryYesPrice },
-      "[kalshi-bot] open position restored from DB — exit guard will resume on next tick",
-    );
+    if (restored > 0) {
+      logger.info({ restored }, "[kalshi-bot] open positions restored from DB");
+    }
   } catch (err) {
-    logger.warn({ err }, "[kalshi-bot] failed to restore open position from DB (non-fatal)");
+    logger.warn({ err }, "[kalshi-bot] failed to restore open positions from DB (non-fatal)");
   }
 }
 
@@ -626,10 +634,11 @@ async function _runBotTick(
 
   // Daily loss limit check
   if (dailyPnl <= -config.dailyLossLimit) {
-    if (openPosition !== null && openPosition.symbol === sym) {
+    const limitPos = openPositions.get(sym);
+    if (limitPos) {
       logger.warn({ sym }, "[kalshi-bot] daily limit hit — closing position");
-      await closePosition(openPosition, yesPrice, kalshiTarget, "daily_loss_limit_hit");
-      openPosition = null;
+      await closePosition(limitPos, yesPrice, kalshiTarget, "daily_loss_limit_hit");
+      openPositions.delete(sym);
     }
     return;
   }
@@ -646,62 +655,61 @@ async function _runBotTick(
   const windowKey = currentWindowKey();
 
   // ── POSITION MANAGEMENT ──────────────────────────────────────────────────
+  // Each coin's tick independently manages its own position slot.  There is no
+  // cross-symbol guard — coins are fully independent of one another.
 
-  if (openPosition !== null) {
-    // Cross-symbol guard: only manage exit logic for the symbol that owns the position.
-    // Other coins iterate through this function too — they must skip without touching state.
-    if (openPosition.symbol !== sym) return;
-
+  const pos = openPositions.get(sym);
+  if (pos) {
     // Check if the window has changed (expired)
-    if (openPosition.windowKey !== windowKey) {
-      await closePosition(openPosition, yesPrice, kalshiTarget, "window_expired");
-      openPosition = null;
+    if (pos.windowKey !== windowKey) {
+      await closePosition(pos, yesPrice, kalshiTarget, "window_expired");
+      openPositions.delete(sym);
     } else {
       // Use last known yes-price as fallback when the live cache returns null.
       // lastYesPrice is seeded from entryPrice and updated each tick where yesPrice
       // is non-null, so this prevents the exit guard from running blind on a stale cache miss.
-      const effectiveYesPrice = yesPrice ?? openPosition.exitState.phase1.lastYesPrice;
+      const effectiveYesPrice = yesPrice ?? pos.exitState.phase1.lastYesPrice;
 
       // Verbose per-tick diagnostics so Phase-2 / exit-guard decisions are observable in logs.
       const rawMovePp = effectiveYesPrice !== null
-        ? (openPosition.direction === "yes"
-            ? (openPosition.entryYesPrice - effectiveYesPrice) * 100
-            : (effectiveYesPrice - openPosition.entryYesPrice) * 100)
+        ? (pos.direction === "yes"
+            ? (pos.entryYesPrice - effectiveYesPrice) * 100
+            : (effectiveYesPrice - pos.entryYesPrice) * 100)
         : null;
       logger.debug({
         sym,
         currentYesPrice: effectiveYesPrice,
-        entryYesPrice: openPosition.entryYesPrice,
+        entryYesPrice: pos.entryYesPrice,
         movePp: rawMovePp?.toFixed(2),
         phase2ThresholdPp: config.phase2ThresholdPp,
         minutesElapsed,
-        direction: openPosition.direction,
+        direction: pos.direction,
       }, "[kalshi-bot] exit-tick price check");
 
       // Run exit guard for the current position
       const timingAcc = await getTimingAccuracy(sym, minutesElapsed);
       const guard = runExitGuard(
         sym,
-        openPosition.direction,
+        pos.direction,
         minutesElapsed,
         effectiveYesPrice,
-        openPosition.exitState,
+        pos.exitState,
         timingAcc,
         erValue,
         config.midExitSensitivity,
         config.phase2ThresholdPp,
       );
 
-      lastGuardStates = guard.guardStates;
-      lastGuardReason = guard.reason;
+      lastGuardStatesMap.set(sym, guard.guardStates);
+      lastGuardReasonMap.set(sym, guard.reason);
 
-      if (guard.guardStates.phase2Active && !openPosition.phase2Activated) {
-        openPosition.phase2Activated = true;
+      if (guard.guardStates.phase2Active && !pos.phase2Activated) {
+        pos.phase2Activated = true;
         logger.info(
           {
             sym,
             yesPrice: effectiveYesPrice,
-            entryYesPrice: openPosition.entryYesPrice,
+            entryYesPrice: pos.entryYesPrice,
             movePp: rawMovePp?.toFixed(2),
           },
           "[kalshi-bot] phase2 activated for position",
@@ -724,21 +732,21 @@ async function _runBotTick(
         const isLateRecovery = guard.phase === 2;
         const exitReason = guard.phase === 2 ? "mid_exit_phase2" : "mid_exit_phase1";
         logger.info({ sym, exitReason, guardReason: guard.reason }, "[kalshi-bot] mid-exit triggered");
-        await closePosition(openPosition, effectiveYesPrice, kalshiTarget, exitReason, isLateRecovery);
-        openPosition = null;
+        await closePosition(pos, effectiveYesPrice, kalshiTarget, exitReason, isLateRecovery);
+        openPositions.delete(sym);
       }
 
       // Guaranteed time-stop: if < 2 minutes remain in the 15-min window AND the
       // position is losing (crypto price on the wrong side of the Kalshi strike),
       // exit immediately rather than riding to expiry at maximum loss.
       // This caps maximum hold to ~13 minutes regardless of exit-guard state.
-      if (openPosition !== null) {
+      if (openPositions.has(sym)) {
         const minutesRemaining = 15 - minutesElapsed;
         if (minutesRemaining < 2) {
           const cryptoPrice = getCachedPrediction(sym)?.price ?? null;
           const isPositionLosing = cryptoPrice !== null && (
-            (openPosition.direction === "yes" && cryptoPrice < openPosition.kalshiTarget) ||
-            (openPosition.direction === "no"  && cryptoPrice >= openPosition.kalshiTarget)
+            (pos.direction === "yes" && cryptoPrice < pos.kalshiTarget) ||
+            (pos.direction === "no"  && cryptoPrice >= pos.kalshiTarget)
           );
           if (isPositionLosing) {
             logger.info(
@@ -746,19 +754,19 @@ async function _runBotTick(
                 sym,
                 minutesRemaining,
                 cryptoPrice,
-                strike: openPosition.kalshiTarget,
-                direction: openPosition.direction,
+                strike: pos.kalshiTarget,
+                direction: pos.direction,
                 yesPrice: effectiveYesPrice,
               },
               "[kalshi-bot] time-stop triggered — exiting losing position before expiry",
             );
-            await closePosition(openPosition, effectiveYesPrice, kalshiTarget, "mid_exit_time");
-            openPosition = null;
+            await closePosition(pos, effectiveYesPrice, kalshiTarget, "mid_exit_time");
+            openPositions.delete(sym);
           }
         }
       }
     }
-    return; // one active position per tick — don't also try to open a new one
+    return; // managed position this tick — check re-entry on next tick
   }
 
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
@@ -884,7 +892,7 @@ async function _runBotTick(
   const id = `${sym}:${windowKey}:${Date.now()}`;
   // Capture the live coin price at the moment the bet is placed.
   const cryptoPriceAtEntry = getCachedPrediction(sym)?.price ?? null;
-  openPosition = {
+  const newPosition: OpenPosition = {
     id,
     symbol: sym,
     windowKey,
@@ -900,6 +908,7 @@ async function _runBotTick(
     entryDecision: decision,
     phase2Activated: false,
   };
+  openPositions.set(sym, newPosition);
 
   await persistBetRecord({
     symbol: sym,
@@ -908,7 +917,7 @@ async function _runBotTick(
     direction,
     action: "bet",
     signals: decision.signals,
-    entryPrice: openPosition.entryYesPrice,
+    entryPrice: newPosition.entryYesPrice,
     kalshiTarget,
     contractCount,
     betAmount,
@@ -1594,27 +1603,29 @@ export async function runBotLoopTick(): Promise<void> {
   // If the 15-minute window rolls over while a position is still open (e.g.
   // the bot was paused, or the tick was slow), we must mark it expired and
   // clear in-memory state so the next window starts fresh.
-  if (openPosition !== null) {
+  if (openPositions.size > 0) {
     const currentKey = currentWindowKey();
-    if (openPosition.windowKey !== currentKey) {
-      logger.info(
-        { sym: openPosition.symbol, oldKey: openPosition.windowKey, newKey: currentKey },
-        "[kalshi-bot] window expired — auto-closing open position",
-      );
-      const stalePosition = openPosition;
-      // Clear immediately so a concurrent tick (unlikely but possible) does
-      // not double-close the same position.
-      openPosition = null;
-      try {
-        const kalshiData = getKalshiCachedData(stalePosition.symbol);
-        await closePosition(
-          stalePosition,
-          kalshiData?.yesPrice ?? null,
-          kalshiData?.value ?? null,
-          "window_expired",
+    // Snapshot entries before iterating — deletes inside the loop are safe on a Map,
+    // but a snapshot makes the control flow easier to reason about.
+    for (const [posSymbol, stalePos] of Array.from(openPositions.entries())) {
+      if (stalePos.windowKey !== currentKey) {
+        logger.info(
+          { sym: posSymbol, oldKey: stalePos.windowKey, newKey: currentKey },
+          "[kalshi-bot] window expired — auto-closing open position",
         );
-      } catch (err) {
-        logger.warn({ err, sym: stalePosition.symbol }, "[kalshi-bot] window-expiry close error (non-fatal)");
+        // Clear immediately so a concurrent tick cannot double-close the same position.
+        openPositions.delete(posSymbol);
+        try {
+          const kalshiData = getKalshiCachedData(posSymbol);
+          await closePosition(
+            stalePos,
+            kalshiData?.yesPrice ?? null,
+            kalshiData?.value ?? null,
+            "window_expired",
+          );
+        } catch (err) {
+          logger.warn({ err, sym: posSymbol }, "[kalshi-bot] window-expiry close error (non-fatal)");
+        }
       }
     }
   }
@@ -1699,24 +1710,25 @@ export async function runBotLoopTick(): Promise<void> {
     logger.info({ windowKey: newWindowKey, coins: pendingCoins.map(c => c.symbol) }, "[kalshi-bot] window-open trend stability analysis fired");
   }
 
-  // Phase 2: manage exit for the open position (if any), then return.
-  // One position at a time — never enter a new position in the same tick as an exit.
-  if (openPosition !== null) {
-    const sym = openPosition.symbol;
-    const kalshiData = getKalshiCachedData(sym);
-    const prediction = getCachedPrediction(sym);
-    try {
-      await runBotTickForCoin(
-        sym,
-        kalshiData?.ticker ?? null,
-        kalshiData?.value ?? null,
-        kalshiData?.yesPrice ?? null,
-        prediction?.candles ?? [],
-      );
-    } catch (err) {
-      logger.warn({ err, sym }, "[kalshi-bot] exit tick error (non-fatal)");
+  // Phase 2: manage exit for every open position (one tick per symbol).
+  // _runBotTick returns early after managing an existing position so the
+  // same coin does not immediately re-enter in Phase 4 of this tick.
+  if (openPositions.size > 0) {
+    for (const [sym] of Array.from(openPositions.entries())) {
+      const kalshiData = getKalshiCachedData(sym);
+      const prediction = getCachedPrediction(sym);
+      try {
+        await runBotTickForCoin(
+          sym,
+          kalshiData?.ticker ?? null,
+          kalshiData?.value ?? null,
+          kalshiData?.yesPrice ?? null,
+          prediction?.candles ?? [],
+        );
+      } catch (err) {
+        logger.warn({ err, sym }, "[kalshi-bot] exit tick error (non-fatal)");
+      }
     }
-    return;
   }
 
   // Quiet-hours gate: skip new entries during the configured UTC hour range.
@@ -1740,9 +1752,9 @@ export async function runBotLoopTick(): Promise<void> {
 
   // Phase 3: best-market selection.
   // Speculatively evaluate all eligible coins with makeBotDecision to rank
-  // candidates. The highest-scoring coin (confidence × timing accuracy / 100)
-  // gets its full runBotTickForCoin called first so it wins the single
-  // open-position slot. Other coins follow for SKIP record deduplication.
+  // candidates. Coins that already have an open position (managed above in
+  // Phase 2) will skip entry in _runBotTick so only genuinely idle symbols
+  // compete for a new position. Other coins follow for SKIP record deduplication.
   const windowKey = currentWindowKey();
   const evalResults: WindowCoinEvaluation[] = [];
   // Symbols blocked by the new regime-aware guards (momentum override, directional cap).
@@ -1956,8 +1968,8 @@ export async function runBotLoopTick(): Promise<void> {
   for (const sym of orderedSymbols) {
     const kalshiData = getKalshiCachedData(sym);
     const prediction = getCachedPrediction(sym);
-    // Capture before-state so we can detect a fresh bet placement inside the tick.
-    const positionWasNull = openPosition === null;
+    // Capture before-state so we can detect a fresh bet placement for this symbol.
+    const hadPositionBefore = openPositions.has(sym);
     try {
       await runBotTickForCoin(
         sym,
@@ -1970,11 +1982,11 @@ export async function runBotLoopTick(): Promise<void> {
       logger.warn({ err, sym }, "[kalshi-bot] loop tick error (non-fatal)");
     }
     // Track direction counts for the directional-cap filter across the window.
-    if (openPosition !== null && positionWasNull) {
-      const dir = openPosition.direction;
+    if (!hadPositionBefore && openPositions.has(sym)) {
+      const dir = openPositions.get(sym)!.direction;
       windowDirectionCounts.set(dir, (windowDirectionCounts.get(dir) ?? 0) + 1);
     }
-    if (openPosition !== null) break; // bet placed — stop entering more
+    // No break — with multi-position support each coin enters independently.
   }
 }
 
