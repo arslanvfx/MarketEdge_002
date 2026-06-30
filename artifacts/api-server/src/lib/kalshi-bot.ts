@@ -1229,13 +1229,15 @@ export async function getBotTrend(limit = 50): Promise<TrendPoint[]> {
   }
 }
 
-// Returns ALL records for the bot dashboard — includes bets (active/closed), skips,
-// and warmup records, ordered newest-first with pagination.
+// Returns bet-action records for the bot dashboard — excludes skip/warmup audit
+// rows which are internal-only and would otherwise crowd out real bet records
+// within the pagination limit.
 export async function getBotAllHistory(limit = 100, offset = 0): Promise<unknown[]> {
   try {
     return await db
       .select()
       .from(kalshiBotBetsTable)
+      .where(sql`${kalshiBotBetsTable.action} NOT IN ('skip', 'warmup')`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit)
       .offset(offset);
