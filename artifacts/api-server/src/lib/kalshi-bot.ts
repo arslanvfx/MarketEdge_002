@@ -227,9 +227,10 @@ export function setBotPaused(p: boolean): void {
   logger.info({ paused }, "[kalshi-bot] paused changed");
 }
 
-export async function updateBotConfig(partial: Partial<BotConfig>): Promise<BotConfig> {
+export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean }> {
   config = { ...config, ...partial };
   const snapshot = { ...config };
+  let persisted = false;
   try {
     await db
       .insert(botConfigTable)
@@ -238,10 +239,11 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<BotC
         target: botConfigTable.id,
         set: { config: snapshot, updatedAt: new Date() },
       });
+    persisted = true;
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to persist config to DB (non-fatal)");
   }
-  return snapshot;
+  return { config: snapshot, persisted };
 }
 
 export async function loadBotConfigFromDB(): Promise<void> {

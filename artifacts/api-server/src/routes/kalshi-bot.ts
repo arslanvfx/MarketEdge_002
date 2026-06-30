@@ -118,8 +118,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof enabled === "boolean") partial.enabled = enabled;
 
-  const updated = await updateBotConfig(partial);
-  res.json({ ok: true, config: updated });
+  const { config: updated, persisted } = await updateBotConfig(partial);
+  res.json({ ok: true, config: updated, persisted });
 });
 
 // GET /crypto/bot/history?limit=20 (public — read only, terminal outcomes only)

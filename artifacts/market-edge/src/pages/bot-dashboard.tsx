@@ -123,6 +123,7 @@ export default function BotDashboard() {
   const [confirmLive, setConfirmLive] = useState(false);
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
+  const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
 
   // ── Data fetching ────────────────────────────────────────────────────────
   const { data: status, isLoading } = useQuery<BotStatus>({
@@ -176,8 +177,10 @@ export default function BotDashboard() {
   async function saveConfig() {
     setSaving(true);
     try {
-      await authPost("/crypto/bot/config", configDraft);
+      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
       setConfigDraft({});
+      setPersistMsg(result.persisted ? "saved" : "failed");
+      setTimeout(() => setPersistMsg(null), 3000);
     } finally {
       setSaving(false);
     }
@@ -497,8 +500,14 @@ export default function BotDashboard() {
                   {saving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
                   {saving ? "Saving…" : "Save Configuration"}
                 </Button>
-                {hasDraft && (
+                {hasDraft && !saving && (
                   <Button size="sm" variant="outline" onClick={() => setConfigDraft({})}>Reset</Button>
+                )}
+                {persistMsg === "saved" && (
+                  <span className="text-xs text-emerald-400">✓ Settings saved</span>
+                )}
+                {persistMsg === "failed" && (
+                  <span className="text-xs text-yellow-400">⚠ Applied (not persisted)</span>
                 )}
               </div>
             </div>

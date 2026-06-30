@@ -2237,6 +2237,7 @@ function KalshiBotPanel() {
   const [localPhase2Pp, setLocalPhase2Pp] = useState<number>(30);
   const [localMinConfidence, setLocalMinConfidence] = useState<number>(60);
   const [localMaxEntryMinutes, setLocalMaxEntryMinutes] = useState<number>(3);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
 
   const botQuery = useQuery<BotStateSnapshot>({
     queryKey: ["bot-status"],
@@ -2294,14 +2295,21 @@ function KalshiBotPanel() {
   }
 
   async function saveConfig() {
-    await postJson("/crypto/bot/config", {
-      betSize: localBetSize,
-      dailyLossLimit: localDailyLimit,
-      phase2ThresholdPp: localPhase2Pp,
-      minConfidence: localMinConfidence,
-      maxEntryMinutes: localMaxEntryMinutes,
-    });
-    void botQuery.refetch();
+    setSaveStatus("saving");
+    try {
+      const result = await postJson("/crypto/bot/config", {
+        betSize: localBetSize,
+        dailyLossLimit: localDailyLimit,
+        phase2ThresholdPp: localPhase2Pp,
+        minConfidence: localMinConfidence,
+        maxEntryMinutes: localMaxEntryMinutes,
+      }) as { ok: boolean; persisted: boolean };
+      setSaveStatus(result.persisted ? "saved" : "failed");
+      void botQuery.refetch();
+    } catch {
+      setSaveStatus("failed");
+    }
+    setTimeout(() => setSaveStatus("idle"), 3000);
   }
 
   // Sync local sliders with server state on first load
@@ -2717,13 +2725,20 @@ function KalshiBotPanel() {
                     <span>1 min</span><span>7 min</span>
                   </div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-2">
                   <button
                     onClick={() => void saveConfig()}
-                    className="text-xs px-3 py-1.5 rounded bg-cyan-700/40 text-cyan-200 hover:bg-cyan-700/60"
+                    disabled={saveStatus === "saving"}
+                    className="text-xs px-3 py-1.5 rounded bg-cyan-700/40 text-cyan-200 hover:bg-cyan-700/60 disabled:opacity-50"
                   >
-                    Save
+                    {saveStatus === "saving" ? "Saving…" : "Save"}
                   </button>
+                  {saveStatus === "saved" && (
+                    <span className="text-xs text-emerald-400">✓ Settings saved</span>
+                  )}
+                  {saveStatus === "failed" && (
+                    <span className="text-xs text-yellow-400">⚠ Applied (not persisted)</span>
+                  )}
                 </div>
               </div>
             )}
