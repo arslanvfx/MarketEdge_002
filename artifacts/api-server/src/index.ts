@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick } from "./lib/kalshi-bot";
+import { runBotLoopTick, loadBotConfigFromDB } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -124,6 +124,21 @@ async function runStartupMigrations(): Promise<void> {
       CREATE INDEX IF NOT EXISTS kbb_symbol_created
         ON kalshi_bot_bets (symbol, created_at DESC)
     `);
+    // Single-row bot config store — survives server restarts.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bot_config (
+        id          TEXT PRIMARY KEY,
+        config      JSONB NOT NULL,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    // Add crypto_price columns to kalshi_bot_bets if not yet present
+    // (added after the table was first created; idempotent).
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ADD COLUMN IF NOT EXISTS crypto_price_at_entry NUMERIC(16,2),
+        ADD COLUMN IF NOT EXISTS crypto_price_at_exit  NUMERIC(16,2)
+    `);
   } finally {
     client.release();
   }
@@ -149,7 +164,13 @@ app.listen(port, (err) => {
     .catch((err) => {
       logger.warn({ err }, "Startup migrations failed (non-fatal)");
     })
-    .then(() => {
+    .then(async () => {
+      // Load persisted bot config before the loop starts so any user-saved
+      // settings are applied before the first tick.
+      await loadBotConfigFromDB().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] config load failed (non-fatal)"),
+      );
+
       // Start the prediction accuracy tracker: snaps model predictions at each
       // 15-min boundary and evaluates them against actual prices once the window closes.
       // The onInitComplete callback runs after initMLFromDB() resolves — backfill

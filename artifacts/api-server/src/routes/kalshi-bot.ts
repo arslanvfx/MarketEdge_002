@@ -72,7 +72,7 @@ router.post("/crypto/bot/pause", requireAuth, (req, res) => {
 });
 
 // POST /crypto/bot/config  — update one or more config fields
-router.post("/crypto/bot/config", requireAuth, (req, res) => {
+router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   const {
     betSize,
     dailyLossLimit,
@@ -117,7 +117,7 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
   }
   if (typeof enabled === "boolean") partial.enabled = enabled;
 
-  const updated = updateBotConfig(partial);
+  const updated = await updateBotConfig(partial);
   res.json({ ok: true, config: updated });
 });
 

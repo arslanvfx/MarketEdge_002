@@ -7,7 +7,7 @@
 // Paper mode: all trade calls are simulated; DB records are written with mode="paper".
 // Live mode: requires KALSHI_API_KEY secret and explicit user toggle.
 
-import { db, kalshiBotBetsTable } from "@workspace/db";
+import { db, kalshiBotBetsTable, botConfigTable } from "@workspace/db";
 import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import {
@@ -227,9 +227,40 @@ export function setBotPaused(p: boolean): void {
   logger.info({ paused }, "[kalshi-bot] paused changed");
 }
 
-export function updateBotConfig(partial: Partial<BotConfig>): BotConfig {
+export async function updateBotConfig(partial: Partial<BotConfig>): Promise<BotConfig> {
   config = { ...config, ...partial };
-  return { ...config };
+  const snapshot = { ...config };
+  try {
+    await db
+      .insert(botConfigTable)
+      .values({ id: "default", config: snapshot, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: botConfigTable.id,
+        set: { config: snapshot, updatedAt: new Date() },
+      });
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to persist config to DB (non-fatal)");
+  }
+  return snapshot;
+}
+
+export async function loadBotConfigFromDB(): Promise<void> {
+  try {
+    const rows = await db
+      .select()
+      .from(botConfigTable)
+      .where(eq(botConfigTable.id, "default"))
+      .limit(1);
+    if (rows.length > 0 && rows[0].config) {
+      const saved = rows[0].config as Partial<BotConfig>;
+      config = { ...DEFAULT_BOT_CONFIG, ...saved };
+      logger.info({ config }, "[kalshi-bot] config loaded from DB");
+    } else {
+      logger.info("[kalshi-bot] no saved config in DB — using defaults");
+    }
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to load config from DB — using defaults (non-fatal)");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,7 +1121,7 @@ export async function runBotLoopTick(): Promise<void> {
 
     const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, timingAcc);
     const score = decision.confidence * ((timingAcc ?? 50) / 100);
-    const rawReason = (decision.signals as Record<string, unknown>)?.reasoning;
+    const rawReason = (decision.signals as unknown as Record<string, unknown>)?.reasoning;
     const reason = typeof rawReason === "string" ? rawReason : decision.action;
 
     evalResults.push({
