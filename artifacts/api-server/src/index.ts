@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, loadBotConfigFromDB } from "./lib/kalshi-bot";
+import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, getBotState } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -165,10 +165,32 @@ app.listen(port, (err) => {
       logger.warn({ err }, "Startup migrations failed (non-fatal)");
     })
     .then(async () => {
-      // Load persisted bot config before the loop starts so any user-saved
-      // settings are applied before the first tick.
+      // Load persisted bot state before the loop starts so restarts are seamless:
+      // 1. config + mode from bot_config table
+      // 2. daily P&L reconstructed from today's kalshi_bot_bets rows
+      // 3. open position restored if its window is still active
       await loadBotConfigFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] config load failed (non-fatal)"),
+      );
+      await loadDailyPnlFromDB().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] daily P&L load failed (non-fatal)"),
+      );
+      await loadOpenPositionFromDB().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] open position restore failed (non-fatal)"),
+      );
+
+      // Single consolidated summary so operators can confirm state at a glance.
+      const s = getBotState();
+      logger.info(
+        {
+          mode: s.mode,
+          dailyPnl: s.dailyPnl,
+          dailyLossCount: s.dailyLossCount,
+          openPosition: s.openPosition
+            ? { symbol: s.openPosition.symbol, windowKey: s.openPosition.windowKey, direction: s.openPosition.direction }
+            : null,
+        },
+        "[kalshi-bot] startup state restored",
       );
 
       // Start the prediction accuracy tracker: snaps model predictions at each

@@ -220,6 +220,23 @@ export function setBotMode(mode: BotMode): void {
   }
   botMode = mode;
   logger.info({ mode }, "[kalshi-bot] mode changed");
+  // Fire-and-forget — persist mode so it survives server restarts.
+  _persistModeToConfig().catch(() => {});
+}
+
+async function _persistModeToConfig(): Promise<void> {
+  try {
+    const snapshot = { ...config, mode: botMode } as Record<string, unknown>;
+    await db
+      .insert(botConfigTable)
+      .values({ id: "default", config: snapshot, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: botConfigTable.id,
+        set: { config: snapshot, updatedAt: new Date() },
+      });
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to persist mode to DB (non-fatal)");
+  }
 }
 
 export function setBotPaused(p: boolean): void {
@@ -232,12 +249,14 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   const snapshot = { ...config };
   let persisted = false;
   try {
+    // Include mode in the persisted JSON so restarts recover the correct mode.
+    const stored = { ...snapshot, mode: botMode } as Record<string, unknown>;
     await db
       .insert(botConfigTable)
-      .values({ id: "default", config: snapshot, updatedAt: new Date() })
+      .values({ id: "default", config: stored, updatedAt: new Date() })
       .onConflictDoUpdate({
         target: botConfigTable.id,
-        set: { config: snapshot, updatedAt: new Date() },
+        set: { config: stored, updatedAt: new Date() },
       });
     persisted = true;
   } catch (err) {
@@ -254,14 +273,155 @@ export async function loadBotConfigFromDB(): Promise<void> {
       .where(eq(botConfigTable.id, "default"))
       .limit(1);
     if (rows.length > 0 && rows[0].config) {
-      const saved = rows[0].config as Partial<BotConfig>;
+      const saved = rows[0].config as Partial<BotConfig> & { mode?: BotMode };
       config = { ...DEFAULT_BOT_CONFIG, ...saved };
+      if (saved.mode === "paper" || saved.mode === "live") {
+        botMode = saved.mode;
+        logger.info({ mode: botMode }, "[kalshi-bot] mode restored from DB");
+      }
       logger.info({ config }, "[kalshi-bot] config loaded from DB");
     } else {
       logger.info("[kalshi-bot] no saved config in DB — using defaults");
     }
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load config from DB — using defaults (non-fatal)");
+  }
+}
+
+/**
+ * Reconstruct dailyPnl and dailyLossCount from today's evaluated bet rows.
+ * Called once at startup after loadBotConfigFromDB() so the loss-limit guard
+ * has correct state even after a crash or restart mid-day.
+ */
+export async function loadDailyPnlFromDB(): Promise<void> {
+  try {
+    const today = todayUTC();
+    // Filter by exitedAt date to match runtime behaviour: dailyPnl is incremented
+    // in closePosition() (i.e. at exit time), so reconstruction must use the same
+    // day bucket — exitedAt UTC date — not createdAt. This keeps daily state correct
+    // even when a position opened before midnight and was closed after.
+    const rows = await db
+      .select({ pnl: kalshiBotBetsTable.pnl })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNotNull(kalshiBotBetsTable.exitedAt),
+          sql`DATE(${kalshiBotBetsTable.exitedAt} AT TIME ZONE 'UTC') = ${today}`,
+          sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
+        ),
+      );
+
+    let pnlSum = 0;
+    let lossCount = 0;
+    for (const r of rows) {
+      const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
+      pnlSum += p;
+      if (p < 0) lossCount++;
+    }
+    dailyPnl = pnlSum;
+    dailyLossCount = lossCount;
+    dailyDate = today;
+    logger.info({ dailyPnl, dailyLossCount, date: today }, "[kalshi-bot] daily P&L loaded from DB");
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to load daily P&L from DB (non-fatal)");
+  }
+}
+
+/**
+ * Recover an open position from the DB after a server restart.
+ * Looks for the most recent 'bet' row with no exitedAt within the last 24 hours
+ * (24h covers midnight-UTC boundaries so a position opened late in one day is
+ * still found on a post-midnight restart). If found:
+ *   - Window still active → restores openPosition so the exit guard resumes on
+ *     the next tick. No double-entry can occur because the existing
+ *     `openPosition !== null` guard in the loop already prevents it.
+ *   - Window expired → leaves openPosition null; the evalClosedBets evaluator
+ *     will eventually settle the row once the position is properly closed by
+ *     the next bot-loop window-expiry check.
+ */
+export async function loadOpenPositionFromDB(): Promise<void> {
+  try {
+    // Use a 24-hour rolling window instead of a DATE equality so a position
+    // opened just before UTC midnight is still found after a post-midnight restart.
+    const rows = await db
+      .select()
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNull(kalshiBotBetsTable.exitedAt),
+          eq(kalshiBotBetsTable.action, "bet"),
+          sql`${kalshiBotBetsTable.createdAt} >= NOW() - INTERVAL '24 hours'`,
+        ),
+      )
+      .orderBy(desc(kalshiBotBetsTable.createdAt))
+      .limit(1);
+
+    if (rows.length === 0) {
+      logger.info("[kalshi-bot] no open position found in DB");
+      return;
+    }
+
+    const row = rows[0];
+
+    // Validate required fields before reconstructing in-memory position.
+    if (
+      !row.direction ||
+      !row.ticker ||
+      row.entryPrice == null ||
+      row.contractCount == null ||
+      row.betAmount == null ||
+      row.kalshiTarget == null
+    ) {
+      logger.warn({ id: row.id }, "[kalshi-bot] open position row missing required fields — skipping restore");
+      return;
+    }
+
+    const windowKey = row.windowKey;
+    const currentKey = currentWindowKey();
+
+    if (windowKey !== currentKey) {
+      // Window has already expired — leave openPosition null per task spec.
+      // The bot loop's window-expiry check will close the row on the next tick
+      // once the position is restored; evalClosedBets will settle it thereafter.
+      logger.info(
+        { id: row.id, symbol: row.symbol, windowKey, currentKey },
+        "[kalshi-bot] recovered position window has expired — leaving for normal evaluator flow",
+      );
+      return;
+    }
+
+    const entryYesPrice = parseFloat(String(row.entryPrice));
+    const direction = row.direction as "yes" | "no";
+
+    openPosition = {
+      id: row.id,
+      symbol: row.symbol,
+      windowKey,
+      ticker: row.ticker,
+      direction,
+      entryYesPrice,
+      contractCount: row.contractCount,
+      betAmount: parseFloat(String(row.betAmount)),
+      kalshiTarget: parseFloat(String(row.kalshiTarget)),
+      openedAt: row.createdAt instanceof Date ? row.createdAt.getTime() : new Date(String(row.createdAt)).getTime(),
+      cryptoPriceAtEntry: (row as Record<string, unknown>)["cryptoPriceAtEntry"] != null
+        ? parseFloat(String((row as Record<string, unknown>)["cryptoPriceAtEntry"]))
+        : null,
+      exitState: makeInitialExitState(entryYesPrice),
+      entryDecision: {
+        action: direction === "yes" ? "BET_YES" : "BET_NO",
+        confidence: 0, // not stored; the exit guard only needs direction + price
+        signals: (row.signals ?? {}) as Record<string, unknown>,
+      } as unknown as BotDecision,
+      phase2Activated: row.phase2Activated ?? false,
+    };
+
+    logger.info(
+      { id: row.id, symbol: row.symbol, windowKey, direction, entryYesPrice },
+      "[kalshi-bot] open position restored from DB — exit guard will resume on next tick",
+    );
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to restore open position from DB (non-fatal)");
   }
 }
 
@@ -801,6 +961,42 @@ export async function evalClosedBets(): Promise<void> {
   const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
 
   try {
+    // ── Step 0: transition orphaned open-bet rows from expired windows ────────
+    // A row with action='bet' and exitedAt IS NULL whose windowKey is older than
+    // the current window is an orphaned position — it was open when the server
+    // restarted during an active window but the window has since expired.
+    // These rows are invisible to the main evaluation query (which requires
+    // exitedAt IS NOT NULL), so we must first mark them as 'expired' to make
+    // them eligible for outcome evaluation on the next cycle.
+    // windowKey strings are ISO-formatted ("YYYY-MM-DDTHH:mm") so lexicographic
+    // ordering gives correct chronological ordering.
+    const currentKey = currentWindowKey();
+    const orphanedBets = await db
+      .select({
+        id: kalshiBotBetsTable.id,
+        symbol: kalshiBotBetsTable.symbol,
+        windowKey: kalshiBotBetsTable.windowKey,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNull(kalshiBotBetsTable.exitedAt),
+          eq(kalshiBotBetsTable.action, "bet"),
+          sql`${kalshiBotBetsTable.windowKey} < ${currentKey}`,
+        ),
+      );
+
+    for (const orphan of orphanedBets) {
+      logger.info(
+        { id: orphan.id, symbol: orphan.symbol, windowKey: orphan.windowKey, currentKey },
+        "[kalshi-bot] evalClosedBets: transitioning orphaned expired bet row",
+      );
+      await db
+        .update(kalshiBotBetsTable)
+        .set({ action: "expired", exitedAt: new Date() })
+        .where(eq(kalshiBotBetsTable.id, orphan.id));
+    }
+
     const rows = await db
       .select({
         id: kalshiBotBetsTable.id,
