@@ -84,6 +84,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxEntryMinutes,
     maxBetsPerWindow,
     enabled,
+    quietHoursStart,
+    quietHoursEnd,
+    maxConsecutiveLosses,
+    circuitBreakerPauseWindows,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -94,6 +98,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxEntryMinutes?: number;
     maxBetsPerWindow?: number;
     enabled?: boolean;
+    quietHoursStart?: number;
+    quietHoursEnd?: number;
+    maxConsecutiveLosses?: number;
+    circuitBreakerPauseWindows?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -122,6 +130,18 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.maxBetsPerWindow = maxBetsPerWindow;
   }
   if (typeof enabled === "boolean") partial.enabled = enabled;
+  if (typeof quietHoursStart === "number" && quietHoursStart >= 0 && quietHoursStart <= 23) {
+    partial.quietHoursStart = quietHoursStart;
+  }
+  if (typeof quietHoursEnd === "number" && quietHoursEnd >= 0 && quietHoursEnd <= 23) {
+    partial.quietHoursEnd = quietHoursEnd;
+  }
+  if (typeof maxConsecutiveLosses === "number" && maxConsecutiveLosses >= 1 && maxConsecutiveLosses <= 10) {
+    partial.maxConsecutiveLosses = maxConsecutiveLosses;
+  }
+  if (typeof circuitBreakerPauseWindows === "number" && circuitBreakerPauseWindows >= 0 && circuitBreakerPauseWindows <= 20) {
+    partial.circuitBreakerPauseWindows = circuitBreakerPauseWindows;
+  }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
   res.json({ ok: true, config: updated, persisted });

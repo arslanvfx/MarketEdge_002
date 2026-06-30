@@ -23,6 +23,10 @@ interface BotConfig {
   maxEntryMinutes: number;
   maxBetsPerWindow: number;
   enabled: boolean;
+  quietHoursStart: number;
+  quietHoursEnd: number;
+  maxConsecutiveLosses: number;
+  circuitBreakerPauseWindows: number;
 }
 
 interface OpenPosition {
@@ -46,6 +50,9 @@ interface BotStatus {
   dailyPnl: number; accountBalance: number | null;
   lastGuardStates: GuardStates | null; lastGuardReason: string | null;
   warmupSecondsRemaining: number | null; configured: boolean;
+  circuitBreakerWindowsRemaining: number;
+  consecutiveLosses: number;
+  isInQuietHours: boolean;
 }
 
 interface HistoryRecord {
@@ -237,6 +244,18 @@ export default function BotDashboard() {
           <span className={`text-xs px-2 py-1 rounded-full ${status?.paused ? "bg-muted text-muted-foreground" : pos ? "bg-emerald-500/15 text-emerald-400" : "bg-sky-500/10 text-sky-400"}`}>
             {statusLabel()}
           </span>
+          {(status?.circuitBreakerWindowsRemaining ?? 0) > 0 && (
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-red-500/15 text-red-400 border border-red-500/30" title={`Circuit breaker active — ${status!.circuitBreakerWindowsRemaining} window(s) remaining`}>
+              <AlertTriangle className="w-3 h-3" />
+              CB {status!.circuitBreakerWindowsRemaining}w
+            </span>
+          )}
+          {status?.isInQuietHours && (
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title={`Quiet hours active (${cfg?.quietHoursStart}:00–${cfg?.quietHoursEnd}:00 UTC) — no new entries`}>
+              <Clock className="w-3 h-3" />
+              Quiet
+            </span>
+          )}
           <Button size="sm" variant="outline" onClick={togglePause} className="h-7 gap-1">
             {status?.paused ? <><Play className="w-3 h-3" />Resume</> : <><Pause className="w-3 h-3" />Pause</>}
           </Button>
@@ -502,6 +521,55 @@ export default function BotDashboard() {
                     onChange={e => setConfigDraft(d => ({ ...d, maxBetsPerWindow: parseInt(e.target.value) }))}>
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
                       <option key={n} value={n}>{n} bet{n > 1 ? "s" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Quiet Hours Start */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Quiet Hours Start (UTC)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.quietHoursStart ?? 12}
+                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursStart: parseInt(e.target.value) }))}>
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 UTC</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Quiet Hours End */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Quiet Hours End (UTC)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.quietHoursEnd ?? 18}
+                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursEnd: parseInt(e.target.value) }))}>
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 UTC{i === (merged.quietHoursStart ?? 12) ? " (disabled)" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Max Consecutive Losses */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Circuit Breaker Trigger (losses)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxConsecutiveLosses ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxConsecutiveLosses: parseInt(e.target.value) }))}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n} consecutive loss{n > 1 ? "es" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Circuit Breaker Pause Windows */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Circuit Breaker Pause (windows)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.circuitBreakerPauseWindows ?? 2}
+                    onChange={e => setConfigDraft(d => ({ ...d, circuitBreakerPauseWindows: parseInt(e.target.value) }))}>
+                    <option value={0}>Disabled</option>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+                      <option key={n} value={n}>Pause {n} window{n > 1 ? "s" : ""}</option>
                     ))}
                   </select>
                 </label>

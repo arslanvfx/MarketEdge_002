@@ -34,9 +34,13 @@ import {
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
   CONFIDENCE_BOOST_PER_SIGNAL,
+  isInQuietHours,
+  applyBetOutcome,
+  tickCircuitBreakerWindow,
   type BotDecisionAction,
   type CorePairInputs,
   type CorePairResult,
+  type CircuitBreakerState,
 } from "./kalshi-bot-engine-core";
 
 // Re-export constants and types so callers only import from this file.
@@ -45,9 +49,13 @@ export {
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
   CONFIDENCE_BOOST_PER_SIGNAL,
+  isInQuietHours,
+  applyBetOutcome,
+  tickCircuitBreakerWindow,
   type BotDecisionAction,
   type CorePairInputs,
   type CorePairResult,
+  type CircuitBreakerState,
 };
 
 export interface BotConfig {
@@ -60,6 +68,10 @@ export interface BotConfig {
   maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 5)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
+  quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
+  quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
+  maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
+  circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -80,6 +92,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // behaviour.
   maxBetsPerWindow: 3,
   enabled: true,
+  quietHoursStart: 12,   // 12:00 UTC
+  quietHoursEnd: 18,     // 18:00 UTC (no entries 12:00–17:59 UTC by default)
+  maxConsecutiveLosses: 3,
+  circuitBreakerPauseWindows: 2,
 };
 
 export interface SignalSnapshot {

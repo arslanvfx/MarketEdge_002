@@ -142,3 +142,62 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
     reasoning: `core pair: ${corePairDesc}${boosterDesc} → ${action} (${confidence}%)${evDesc}`,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Quiet-hours gate (pure, testable)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the given UTC hour falls within the quiet-hours window.
+ * When start === end, quiet hours are disabled (always returns false).
+ * Handles midnight wrap (e.g. start=22, end=6 blocks 22:00–05:59).
+ */
+export function isInQuietHours(utcHour: number, start: number, end: number): boolean {
+  if (start === end) return false;
+  if (start < end) return utcHour >= start && utcHour < end;
+  return utcHour >= start || utcHour < end;
+}
+
+// ---------------------------------------------------------------------------
+// Circuit-breaker state helpers (pure, testable)
+// ---------------------------------------------------------------------------
+
+export interface CircuitBreakerState {
+  consecutiveLosses: number;
+  circuitBreakerWindowsRemaining: number;
+}
+
+/**
+ * Returns updated circuit-breaker state after a single bet outcome.
+ * A win resets the consecutive-loss streak; a loss increments it and triggers
+ * the breaker when maxConsecutiveLosses is first reached.
+ */
+export function applyBetOutcome(
+  state: CircuitBreakerState,
+  won: boolean,
+  maxConsecutiveLosses: number,
+  pauseWindows: number,
+): CircuitBreakerState {
+  if (won) {
+    return { consecutiveLosses: 0, circuitBreakerWindowsRemaining: state.circuitBreakerWindowsRemaining };
+  }
+  const newConsecutive = state.consecutiveLosses + 1;
+  const shouldTrigger = newConsecutive >= maxConsecutiveLosses && pauseWindows > 0;
+  return {
+    consecutiveLosses: newConsecutive,
+    circuitBreakerWindowsRemaining: shouldTrigger
+      ? pauseWindows
+      : state.circuitBreakerWindowsRemaining,
+  };
+}
+
+/**
+ * Decrements the circuit-breaker window countdown by 1 (clamped at 0).
+ * Called once per new 15-minute window when the breaker is active.
+ */
+export function tickCircuitBreakerWindow(state: CircuitBreakerState): CircuitBreakerState {
+  return {
+    ...state,
+    circuitBreakerWindowsRemaining: Math.max(0, state.circuitBreakerWindowsRemaining - 1),
+  };
+}

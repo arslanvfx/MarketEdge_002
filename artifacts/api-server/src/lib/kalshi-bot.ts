@@ -13,8 +13,12 @@ import { logger } from "./logger";
 import {
   DEFAULT_BOT_CONFIG,
   makeBotDecision,
+  isInQuietHours,
+  applyBetOutcome,
+  tickCircuitBreakerWindow,
   type BotConfig,
   type BotDecision,
+  type CircuitBreakerState,
 } from "./kalshi-bot-engine";
 import {
   makeInitialExitState,
@@ -81,6 +85,12 @@ export interface BotStateSnapshot {
   // Seconds remaining in the 45-second warmup period at the start of each window.
   // null when not in warmup (elapsed ≥ 45s), or when a position is already open.
   warmupSecondsRemaining: number | null;
+  // Circuit breaker: how many windows remain before new entries are re-enabled.
+  // 0 = not triggered (normal operation).
+  circuitBreakerWindowsRemaining: number;
+  consecutiveLosses: number;
+  // Whether the current UTC hour falls within the configured quiet-hours window.
+  isInQuietHours: boolean;
 }
 
 // Per-coin evaluation result from the best-market selection pass.
@@ -113,6 +123,12 @@ let dailyDate = todayUTC();
 let accountBalance: number | null = 100;
 let lastGuardStates: GuardStates | null = null;
 let lastGuardReason: string | null = null;
+
+// Circuit breaker state — persists across windows (not just daily).
+// Restored from recent bet history on startup via loadDailyPnlFromDB.
+let cbState: CircuitBreakerState = { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 };
+// Last window key seen for circuit-breaker countdown decrement.
+let lastCircuitBreakerWindowKey = "";
 // Tracks the last window key for which a decision (SKIP or BET) was logged per symbol.
 // Prevents duplicate SKIP records across successive 30s ticks within the same window.
 const lastDecisionWindowKey: Map<string, string> = new Map();
@@ -236,6 +252,9 @@ export function getBotState(): BotStateSnapshot {
     lastGuardReason,
     configured: isKalshiConfigured(),
     warmupSecondsRemaining,
+    circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining,
+    consecutiveLosses: cbState.consecutiveLosses,
+    isInQuietHours: isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd),
   };
 }
 
@@ -346,7 +365,34 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     dailyPnl = pnlSum;
     dailyLossCount = lossCount;
     dailyDate = today;
-    logger.info({ dailyPnl, dailyLossCount, date: today }, "[kalshi-bot] daily P&L loaded from DB");
+
+    // Restore consecutive-loss streak from the most recent completed bets
+    // (any time, not just today — a streak carries across midnight).
+    const recentRows = await db
+      .select({ pnl: kalshiBotBetsTable.pnl })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')
+          AND ${kalshiBotBetsTable.exitedAt} IS NOT NULL`,
+      )
+      .orderBy(desc(kalshiBotBetsTable.exitedAt))
+      .limit(20);
+
+    let streak = 0;
+    for (const r of recentRows) {
+      const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
+      if (p < 0) streak++;
+      else break; // first non-loss resets the streak
+    }
+    // Preserve any already-active circuit breaker windows remaining.
+    cbState = {
+      consecutiveLosses: streak,
+      circuitBreakerWindowsRemaining: streak >= config.maxConsecutiveLosses
+        ? Math.max(cbState.circuitBreakerWindowsRemaining, config.circuitBreakerPauseWindows)
+        : cbState.circuitBreakerWindowsRemaining,
+    };
+
+    logger.info({ dailyPnl, dailyLossCount, date: today, cbState }, "[kalshi-bot] daily P&L loaded from DB");
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load daily P&L from DB (non-fatal)");
   }
@@ -833,6 +879,28 @@ async function closePosition(
 
   dailyPnl += pnl;
   if (pnl < 0) dailyLossCount++;
+
+  // Circuit breaker: update consecutive-loss streak and trigger if needed.
+  cbState = applyBetOutcome(
+    cbState,
+    pnl >= 0,
+    config.maxConsecutiveLosses,
+    config.circuitBreakerPauseWindows,
+  );
+  if (pnl >= 0 && cbState.consecutiveLosses === 0) {
+    logger.info({ cbState }, "[kalshi-bot] win — consecutive loss streak reset");
+  } else if (pnl < 0) {
+    logger.info(
+      { cbState, maxConsecutiveLosses: config.maxConsecutiveLosses },
+      "[kalshi-bot] loss — consecutive loss count updated",
+    );
+    if (cbState.circuitBreakerWindowsRemaining > 0 && cbState.consecutiveLosses === config.maxConsecutiveLosses) {
+      logger.warn(
+        { cbState },
+        "[kalshi-bot] ⚡ circuit breaker TRIGGERED — new entries paused for this many windows",
+      );
+    }
+  }
 
   // Recover account balance
   if (botMode === "live") {
@@ -1415,6 +1483,19 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
+  // Circuit breaker: decrement the countdown on each new 15-minute window.
+  // Runs even when paused/disabled so the counter keeps advancing.
+  {
+    const cbWindowNow = currentWindowKey();
+    if (cbWindowNow !== lastCircuitBreakerWindowKey) {
+      lastCircuitBreakerWindowKey = cbWindowNow;
+      if (cbState.circuitBreakerWindowsRemaining > 0) {
+        cbState = tickCircuitBreakerWindow(cbState);
+        logger.info({ cbState, window: cbWindowNow }, "[kalshi-bot] circuit breaker countdown — windows remaining");
+      }
+    }
+  }
+
   if (!config.enabled || paused) return;
 
   // Phase 1: refresh market data for all Kalshi-enabled coins.
@@ -1477,6 +1558,24 @@ export async function runBotLoopTick(): Promise<void> {
     } catch (err) {
       logger.warn({ err, sym }, "[kalshi-bot] exit tick error (non-fatal)");
     }
+    return;
+  }
+
+  // Quiet-hours gate: skip new entries during the configured UTC hour range.
+  if (isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd)) {
+    logger.debug(
+      { utcHour: new Date().getUTCHours(), quietHoursStart: config.quietHoursStart, quietHoursEnd: config.quietHoursEnd },
+      "[kalshi-bot] quiet hours — skipping new entry",
+    );
+    return;
+  }
+
+  // Circuit breaker gate: skip new entries while the cooldown is active.
+  if (cbState.circuitBreakerWindowsRemaining > 0) {
+    logger.info(
+      { circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining },
+      "[kalshi-bot] circuit breaker active — skipping new entry",
+    );
     return;
   }
 

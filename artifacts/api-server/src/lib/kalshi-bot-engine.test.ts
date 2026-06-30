@@ -30,7 +30,11 @@ import {
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
   CONFIDENCE_BOOST_PER_SIGNAL,
+  isInQuietHours,
+  applyBetOutcome,
+  tickCircuitBreakerWindow,
   type CorePairInputs,
+  type CircuitBreakerState,
 } from "./kalshi-bot-engine-core.ts";
 
 const DEFAULT_MIN_CONFIDENCE = 60;
@@ -225,4 +229,119 @@ test("Reasoning string shows booster contributions", () => {
   const r = computeCorePairDecision(inp({ statAbove: true, claudeAbove: true, mlAbove: true, wmDriftAbove: false, wmRec: "bet", wmReady: true }));
   assert.match(r.reasoning, /ML:\+8/);
   assert.match(r.reasoning, /WM:—/);
+});
+
+// ---------------------------------------------------------------------------
+// isInQuietHours — pure UTC gate
+// ---------------------------------------------------------------------------
+
+test("isInQuietHours: disabled when start === end", () => {
+  // Any hour is allowed when start equals end
+  for (const h of [0, 8, 12, 18, 23]) {
+    assert.equal(isInQuietHours(h, 12, 12), false, `hour ${h} should not be blocked`);
+  }
+});
+
+test("isInQuietHours: normal range (start < end) blocks hours in range", () => {
+  // Range 12–18: blocks 12, 13, 14, 15, 16, 17; allows 0–11 and 18–23
+  assert.equal(isInQuietHours(12, 12, 18), true);
+  assert.equal(isInQuietHours(17, 12, 18), true);
+  assert.equal(isInQuietHours(11, 12, 18), false);
+  assert.equal(isInQuietHours(18, 12, 18), false);
+  assert.equal(isInQuietHours(0,  12, 18), false);
+  assert.equal(isInQuietHours(23, 12, 18), false);
+});
+
+test("isInQuietHours: midnight-wrap range (start > end) blocks hours in range", () => {
+  // Range 22–6: blocks 22,23,0,1,2,3,4,5; allows 6–21
+  assert.equal(isInQuietHours(22, 22, 6), true);
+  assert.equal(isInQuietHours(23, 22, 6), true);
+  assert.equal(isInQuietHours(0,  22, 6), true);
+  assert.equal(isInQuietHours(5,  22, 6), true);
+  assert.equal(isInQuietHours(6,  22, 6), false);
+  assert.equal(isInQuietHours(21, 22, 6), false);
+});
+
+// ---------------------------------------------------------------------------
+// applyBetOutcome — circuit breaker trigger logic
+// ---------------------------------------------------------------------------
+
+const zeroCB: CircuitBreakerState = { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 };
+
+test("applyBetOutcome: win resets consecutive losses to 0", () => {
+  const s: CircuitBreakerState = { consecutiveLosses: 2, circuitBreakerWindowsRemaining: 0 };
+  const next = applyBetOutcome(s, true, 3, 2);
+  assert.equal(next.consecutiveLosses, 0);
+});
+
+test("applyBetOutcome: win does not change remaining circuit-breaker windows", () => {
+  const s: CircuitBreakerState = { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 2 };
+  const next = applyBetOutcome(s, true, 3, 2);
+  assert.equal(next.circuitBreakerWindowsRemaining, 2);
+});
+
+test("applyBetOutcome: loss increments consecutive count", () => {
+  const next = applyBetOutcome(zeroCB, false, 3, 2);
+  assert.equal(next.consecutiveLosses, 1);
+  assert.equal(next.circuitBreakerWindowsRemaining, 0);
+});
+
+test("applyBetOutcome: triggers circuit breaker at maxConsecutiveLosses", () => {
+  let s = zeroCB;
+  s = applyBetOutcome(s, false, 3, 2); // 1 loss
+  s = applyBetOutcome(s, false, 3, 2); // 2 losses
+  assert.equal(s.circuitBreakerWindowsRemaining, 0, "not triggered yet");
+  s = applyBetOutcome(s, false, 3, 2); // 3rd loss → trigger
+  assert.equal(s.consecutiveLosses, 3);
+  assert.equal(s.circuitBreakerWindowsRemaining, 2, "circuit breaker should fire");
+});
+
+test("applyBetOutcome: circuit breaker does not re-trigger past max (stays at pauseWindows)", () => {
+  // Already triggered (windows=2), another loss: does NOT reset to pauseWindows again
+  const s: CircuitBreakerState = { consecutiveLosses: 3, circuitBreakerWindowsRemaining: 2 };
+  const next = applyBetOutcome(s, false, 3, 2);
+  // consecutive goes to 4; 4 >= max(3) but circuitBreaker should not change (already active)
+  assert.equal(next.consecutiveLosses, 4);
+  assert.equal(next.circuitBreakerWindowsRemaining, 2);
+});
+
+test("applyBetOutcome: pauseWindows=0 means breaker never triggers", () => {
+  let s = zeroCB;
+  for (let i = 0; i < 10; i++) s = applyBetOutcome(s, false, 3, 0);
+  assert.equal(s.circuitBreakerWindowsRemaining, 0);
+});
+
+// ---------------------------------------------------------------------------
+// tickCircuitBreakerWindow — countdown decrement
+// ---------------------------------------------------------------------------
+
+test("tickCircuitBreakerWindow: decrements remaining by 1", () => {
+  const s: CircuitBreakerState = { consecutiveLosses: 3, circuitBreakerWindowsRemaining: 2 };
+  const next = tickCircuitBreakerWindow(s);
+  assert.equal(next.circuitBreakerWindowsRemaining, 1);
+});
+
+test("tickCircuitBreakerWindow: clamps at 0 — does not go negative", () => {
+  const s: CircuitBreakerState = { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 };
+  const next = tickCircuitBreakerWindow(s);
+  assert.equal(next.circuitBreakerWindowsRemaining, 0);
+});
+
+test("tickCircuitBreakerWindow: two ticks from 2 → 0", () => {
+  let s: CircuitBreakerState = { consecutiveLosses: 3, circuitBreakerWindowsRemaining: 2 };
+  s = tickCircuitBreakerWindow(s);
+  s = tickCircuitBreakerWindow(s);
+  assert.equal(s.circuitBreakerWindowsRemaining, 0);
+});
+
+test("Full circuit-breaker lifecycle: 3 losses → trigger → 2 ticks → re-enable", () => {
+  let s = zeroCB;
+  s = applyBetOutcome(s, false, 3, 2);
+  s = applyBetOutcome(s, false, 3, 2);
+  s = applyBetOutcome(s, false, 3, 2); // trigger
+  assert.equal(s.circuitBreakerWindowsRemaining, 2, "breaker active");
+  s = tickCircuitBreakerWindow(s); // window passes
+  assert.equal(s.circuitBreakerWindowsRemaining, 1);
+  s = tickCircuitBreakerWindow(s); // second window passes
+  assert.equal(s.circuitBreakerWindowsRemaining, 0, "breaker cleared");
 });
