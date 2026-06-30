@@ -35,7 +35,9 @@ export interface BotConfig {
 export const DEFAULT_BOT_CONFIG: BotConfig = {
   betSize: 0.50,
   dailyLossLimit: 20,
-  signalThreshold: 3,
+  // Default 2 so the bot can act on stat + Claude agreement alone.
+  // Raise to 3-4 once the ML model and Window Monitor are warm (20+ windows).
+  signalThreshold: 2,
   minConfidence: 60,
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,

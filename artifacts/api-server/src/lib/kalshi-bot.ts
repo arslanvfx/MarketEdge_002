@@ -29,6 +29,7 @@ import {
   intraWindowMetrics,
   getCachedPrediction,
   getKalshiCachedData,
+  fetchKalshiTarget,
   CRYPTO_COINS,
   KALSHI_SERIES,
 } from "./crypto";
@@ -85,7 +86,9 @@ let openPosition: OpenPosition | null = null;
 let dailyPnl = 0;
 let dailyLossCount = 0;
 let dailyDate = todayUTC();
-let accountBalance: number | null = null;
+// Paper mode starts with a simulated $100 balance so the dashboard can display
+// it immediately.  Live mode reads the real account balance from Kalshi.
+let accountBalance: number | null = 100;
 let lastGuardStates: GuardStates | null = null;
 let lastGuardReason: string | null = null;
 // Tracks the last window key for which a decision (SKIP or BET) was logged per symbol.
@@ -652,8 +655,10 @@ export async function getBotStats(): Promise<{
 // Bot loop — called from index.ts every 30 s
 // ---------------------------------------------------------------------------
 
-// Iterates over all Kalshi-enabled coins, reads from cached state (populated
-// by the main prediction tracker), and runs the bot tick for each.
+// Iterates over all Kalshi-enabled coins, ensures fresh Kalshi market data is
+// available (fetching from the public API if the cache is stale), then runs
+// the bot tick for each coin.  The Kalshi market-data endpoint is public and
+// requires no API key, so this works in both paper and live modes.
 export async function runBotLoopTick(): Promise<void> {
   if (!config.enabled || paused) return;
 
@@ -661,6 +666,11 @@ export async function runBotLoopTick(): Promise<void> {
     if (!KALSHI_SERIES[coin.symbol]) continue;
 
     try {
+      // Always refresh Kalshi market data for each coin on every tick so the
+      // bot has a fresh yes price, ticker, and target — even for coins the
+      // prediction tracker is not currently fetching.
+      await fetchKalshiTarget(coin.symbol).catch(() => null);
+
       const prediction = getCachedPrediction(coin.symbol);
       const kalshiData = getKalshiCachedData(coin.symbol);
 
