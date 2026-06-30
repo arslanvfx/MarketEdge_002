@@ -1918,52 +1918,58 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                 {/* Card body */}
                 <div className="px-4 py-3 space-y-3">
 
-                  {/* Kalshi layout: side-by-side predicted vs actual */}
-                  {hasTarget ? (
-                    <div className="grid grid-cols-2 gap-3">
-                      {/* Predicted */}
-                      <div className="bg-background/30 rounded-lg px-3 py-2.5">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1">
-                          Predicted
+                  {/* Side-by-side predicted vs actual — unified layout for all cards.
+                      With Kalshi target: "↑ Above target" / "↓ Below target".
+                      Without target: direction-based "↑ Up" / "↓ Down" labels. */}
+                  {(() => {
+                    // Direction label when no Kalshi target available
+                    const dirSideLabel = (dir: "up" | "down" | "flat") => (
+                      <span className={`font-bold ${dir === "up" ? "text-emerald-400" : dir === "down" ? "text-red-400" : "text-muted-foreground"}`}>
+                        {dir === "up" ? "↑ Up" : dir === "down" ? "↓ Down" : "— Flat"}
+                      </span>
+                    );
+                    // Infer actual direction vs predicted price when no target
+                    const actualDir = (): "up" | "down" | "flat" => {
+                      if (rec.actualPrice == null || rec.priceAtSnapshot == null) return "flat";
+                      const ch = (rec.actualPrice - rec.priceAtSnapshot) / rec.priceAtSnapshot * 100;
+                      return ch > 0.05 ? "up" : ch < -0.05 ? "down" : "flat";
+                    };
+                    return (
+                      <div className="grid grid-cols-2 gap-3">
+                        {/* Predicted */}
+                        <div className="bg-background/30 rounded-lg px-3 py-2.5">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1">
+                            Predicted
+                          </div>
+                          <div className="text-sm">
+                            {hasTarget ? sideLabel(predictedAbove) : dirSideLabel(rec.predictedDirection)}
+                          </div>
+                          <div className="text-xs tabular-nums text-muted-foreground mt-0.5">
+                            ${fmtPrice(rec.predictedPrice)}
+                          </div>
                         </div>
-                        <div className="text-sm">{sideLabel(predictedAbove)}</div>
-                        <div className="text-xs tabular-nums text-muted-foreground mt-0.5">
-                          ${fmtPrice(rec.predictedPrice)}
-                        </div>
-                      </div>
 
-                      {/* Actual */}
-                      <div className="bg-background/30 rounded-lg px-3 py-2.5">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1">
-                          Actual
+                        {/* Actual */}
+                        <div className="bg-background/30 rounded-lg px-3 py-2.5">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1">
+                            Actual
+                          </div>
+                          {isPending ? (
+                            <div className="text-sm text-muted-foreground/50 italic">TBD</div>
+                          ) : (
+                            <>
+                              <div className="text-sm">
+                                {hasTarget ? sideLabel(actualAbove) : dirSideLabel(actualDir())}
+                              </div>
+                              <div className="text-xs tabular-nums text-muted-foreground mt-0.5">
+                                ${fmtPrice(rec.actualPrice!)}
+                              </div>
+                            </>
+                          )}
                         </div>
-                        {isPending ? (
-                          <div className="text-sm text-muted-foreground/50 italic">TBD</div>
-                        ) : (
-                          <>
-                            <div className="text-sm">{sideLabel(actualAbove)}</div>
-                            <div className="text-xs tabular-nums text-muted-foreground mt-0.5">
-                              ${fmtPrice(rec.actualPrice!)}
-                            </div>
-                          </>
-                        )}
                       </div>
-                    </div>
-                  ) : (
-                    /* Non-Kalshi layout: predicted price + direction → actual */
-                    <div className="flex items-center gap-3 text-sm tabular-nums">
-                      <div>
-                        {dirLabel(rec.predictedDirection)}
-                      </div>
-                      <span className="text-muted-foreground">${fmtPrice(rec.predictedPrice)}</span>
-                      {!isPending && (
-                        <>
-                          <span className="text-muted-foreground/40">→</span>
-                          <span className="font-medium">${fmtPrice(rec.actualPrice!)}</span>
-                        </>
-                      )}
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Footer stats row */}
                   <div className="flex items-center gap-4 flex-wrap text-[11px]">
@@ -2077,6 +2083,21 @@ function PredictionHistory({ symbol, tz }: { symbol: string; tz: string }) {
                             </div>
                           );
                         })}
+                        {/* ML stub — shown when no ML record was stored for this window
+                            (happens when Kalshi target was unavailable at snap time, so
+                            the ML feature extraction couldn't run). */}
+                        {!wgRecs.some((r) => r.source === "ml") && (
+                          <div
+                            className="flex items-center gap-1 text-[10px] cursor-default opacity-40"
+                            title="ML model verdict not available for this window — Kalshi strike was not published when the snapshot was taken"
+                          >
+                            <span className="font-semibold text-teal-300">ML</span>
+                            <span className="text-muted-foreground">—</span>
+                            <span className="text-[9px] font-semibold text-muted-foreground/60 bg-muted/20 border border-border/40 rounded px-1 py-0.5 leading-none">
+                              N/A
+                            </span>
+                          </div>
+                        )}
                       </div>
                     );
                   })()}
