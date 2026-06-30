@@ -2,6 +2,24 @@
 //
 // No imports from ./crypto or any DB/API module — this file is intentionally
 // isolated so it can be unit-tested without any I/O setup.
+//
+// Entry paths:
+//
+//   PATH A — Core pair (Stat+Claude agree):
+//     Both signals present and agree → BET.  Base 65%.
+//     Single signal present → BET with half-pair base 60%.
+//     ML and WM are boosters: each adds +8% when they agree.
+//
+//   PATH B — ML tiebreaker (Stat+Claude disagree):
+//     ML model must be ready with mlConfidence ≥ ML_PRIMARY_MIN_CONFIDENCE.
+//     ML decides the direction; each agreeing signal (stat/claude/WM) adds
+//     ML_SIGNAL_BOOST (6%).
+//
+//   PATH C — ML primary (no core signals available):
+//     ML model must be ready with mlConfidence ≥ ML_PRIMARY_MIN_CONFIDENCE.
+//     ML decides direction; WM agreement adds ML_SIGNAL_BOOST.
+//
+// Final gates applied to all paths: EV gate, minConfidence gate.
 
 export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP";
 
@@ -9,8 +27,12 @@ export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP";
 export const BASE_CONFIDENCE_FULL_PAIR = 65;
 // Base confidence when only one core signal is available (other still null).
 export const BASE_CONFIDENCE_HALF_PAIR = 60;
-// Each supporting signal (ML, WM) adds this amount when it agrees.
+// Each supporting signal (ML, WM) adds this amount when it agrees — Path A only.
 export const CONFIDENCE_BOOST_PER_SIGNAL = 8;
+// Minimum ML confidence required for ML to lead (Path B or C).
+export const ML_PRIMARY_MIN_CONFIDENCE = 58;
+// Each agreeing signal (stat/claude/WM) adds this when ML leads (Paths B & C).
+export const ML_SIGNAL_BOOST = 6;
 
 export interface CorePairInputs {
   statAbove: boolean | null;
@@ -38,108 +60,171 @@ export interface CorePairResult {
   ev: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+function computeEV(yesPrice: number | null, signalAccuracyPct: number | null): number | null {
+  if (yesPrice == null || yesPrice <= 0 || signalAccuracyPct == null) return null;
+  const accFrac = signalAccuracyPct / 100;
+  const winPayoff = (1 - yesPrice) / yesPrice;
+  return accFrac * winPayoff - (1 - accFrac);
+}
+
+function countSignals(
+  direction: boolean,
+  statAbove: boolean | null,
+  claudeAbove: boolean | null,
+  mlAbove: boolean | null,
+  wmDriftAbove: boolean | null,
+): { signalsTotal: number; signalsAgreeing: number } {
+  const all = [statAbove, claudeAbove, mlAbove, wmDriftAbove];
+  return {
+    signalsTotal:    all.filter((x) => x !== null).length,
+    signalsAgreeing: all.filter((x) => x === direction).length,
+  };
+}
+
 /**
  * Pure decision function — all inputs are values, no I/O.
  *
- * Entry gate:
- *   - At least one of Stat/Claude must be non-null.
- *   - All non-null core signals must agree (Stat vs Claude disagree → SKIP).
- *   - ML and WM are confidence boosters only; they cannot block entry.
- *
- * Confidence:
- *   - Base: 65% (both Stat+Claude present) or 60% (only one present).
- *   - Each booster that agrees adds +8%.
- *
- * EV gate:
- *   - Uses signalAccuracyPct (from prediction_records) — not bot win rate.
- *   - ev = accFrac × winPayoff − (1 − accFrac). Skips if ev < −0.05.
+ * See module header for the three entry paths (A / B / C).
  */
 export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
-  const skip = (reason: string): CorePairResult => ({
+  const skip = (reason: string, ev: number | null = null): CorePairResult => ({
     action: "SKIP", confidence: 0, reasoning: reason,
-    signalsAgreeing: 0, signalsTotal: 0, ev: null,
+    signalsAgreeing: 0, signalsTotal: 0, ev,
   });
 
   if (!inp.kalshiTicker) {
     return skip("No active Kalshi market for this symbol");
   }
 
+  const ev = computeEV(inp.yesPrice, inp.signalAccuracyPct);
+
+  // EV gate — applied to all paths
+  if (ev !== null && ev < -0.05) {
+    return {
+      action: "SKIP", confidence: 0,
+      reasoning: `Negative EV (${ev.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}%`,
+      signalsAgreeing: 0, signalsTotal: 0, ev,
+    };
+  }
+
+  // Whether the ML model is ready to lead an entry
+  const mlLeadReady =
+    inp.mlAbove !== null &&
+    inp.mlConfidence != null &&
+    inp.mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE;
+
   // ── CORE-PAIR GATE ────────────────────────────────────────────────────────
   const corePair = ([inp.statAbove, inp.claudeAbove] as (boolean | null)[]).filter(
     (x): x is boolean => x !== null,
   );
 
-  if (corePair.length === 0) {
-    return skip("No core signals (Stat/Claude) available");
-  }
+  if (corePair.length >= 1) {
+    const coreDirection = corePair[0];
+    const coreAgree = corePair.every((x) => x === coreDirection);
 
-  const coreDirection = corePair[0];
-  if (!corePair.every((x) => x === coreDirection)) {
-    return skip(
-      `Core signals disagree: Stat=${inp.statAbove} vs Claude=${inp.claudeAbove}`,
-    );
-  }
+    if (coreAgree) {
+      // ── PATH A: Stat+Claude agree ─────────────────────────────────────────
+      const action: BotDecisionAction = coreDirection ? "BET_YES" : "BET_NO";
+      const base = corePair.length >= 2 ? BASE_CONFIDENCE_FULL_PAIR : BASE_CONFIDENCE_HALF_PAIR;
+      let confidence = base;
 
-  const action: BotDecisionAction = coreDirection ? "BET_YES" : "BET_NO";
+      if (inp.mlAbove !== null && inp.mlAbove === coreDirection) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
+      if (inp.wmDriftAbove !== null && inp.wmDriftAbove === coreDirection) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
 
-  // ── CONFIDENCE BOOSTERS ───────────────────────────────────────────────────
-  const base = corePair.length >= 2 ? BASE_CONFIDENCE_FULL_PAIR : BASE_CONFIDENCE_HALF_PAIR;
-  let confidence = base;
+      if (confidence < inp.minConfidence) {
+        const { signalsAgreeing, signalsTotal } = countSignals(coreDirection, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
+        return {
+          action: "SKIP", confidence,
+          reasoning: `Confidence ${confidence}% below minimum ${inp.minConfidence}%`,
+          signalsAgreeing, signalsTotal, ev,
+        };
+      }
 
-  if (inp.mlAbove !== null && inp.mlAbove === coreDirection) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
-  if (inp.wmDriftAbove !== null && inp.wmDriftAbove === coreDirection) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
+      const { signalsAgreeing, signalsTotal } = countSignals(coreDirection, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
 
-  // Agree/total counts (for dashboard display)
-  const allDirectional: (boolean | null)[] = [
-    inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove,
-  ];
-  const signalsTotal    = allDirectional.filter((x) => x !== null).length;
-  const signalsAgreeing = allDirectional.filter((x) => x === coreDirection).length;
+      const corePairDesc = [
+        inp.statAbove !== null ? `Stat:${inp.statAbove === coreDirection ? "✓" : "✗"}` : "Stat:—",
+        inp.claudeAbove !== null ? `Claude:${inp.claudeAbove === coreDirection ? "✓" : "✗"}` : "Claude:—",
+      ].join(" ");
+      const boosterParts: string[] = [];
+      if (inp.mlAbove !== null) boosterParts.push(`ML:${inp.mlAbove === coreDirection ? `+${CONFIDENCE_BOOST_PER_SIGNAL}` : "—"}`);
+      if (inp.wmDriftAbove !== null) boosterParts.push(`WM:${inp.wmDriftAbove === coreDirection ? `+${CONFIDENCE_BOOST_PER_SIGNAL}` : "—"}`);
+      const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
+      const boosterDesc = boosterParts.length ? ` | ${boosterParts.join(" ")}` : "";
 
-  // ── EV CALCULATION ────────────────────────────────────────────────────────
-  let ev: number | null = null;
-  if (inp.yesPrice !== null && inp.yesPrice > 0 && inp.signalAccuracyPct !== null) {
-    const accFrac = inp.signalAccuracyPct / 100;
-    const winPayoff = (1 - inp.yesPrice) / inp.yesPrice;
-    ev = accFrac * winPayoff - (1 - accFrac);
-  }
+      return {
+        action, confidence, ev, signalsAgreeing, signalsTotal,
+        reasoning: `core pair: ${corePairDesc}${boosterDesc} → ${action} (${confidence}%)${evDesc}`,
+      };
+    }
 
-  if (ev !== null && ev < -0.05) {
+    // ── PATH B: Stat+Claude disagree — ML tiebreaker ──────────────────────
+    if (!mlLeadReady) {
+      return skip(
+        `Core signals disagree: Stat=${inp.statAbove} vs Claude=${inp.claudeAbove}`,
+        ev,
+      );
+    }
+
+    const mlDir = inp.mlAbove as boolean;
+    const action: BotDecisionAction = mlDir ? "BET_YES" : "BET_NO";
+    let confidence = inp.mlConfidence as number;
+    if (inp.statAbove === mlDir)    confidence += ML_SIGNAL_BOOST;
+    if (inp.claudeAbove === mlDir)  confidence += ML_SIGNAL_BOOST;
+    if (inp.wmDriftAbove === mlDir) confidence += ML_SIGNAL_BOOST;
+
+    if (confidence < inp.minConfidence) {
+      const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
+      return {
+        action: "SKIP", confidence,
+        reasoning: `Confidence ${confidence}% below minimum ${inp.minConfidence}% (ML tiebreaker)`,
+        signalsAgreeing, signalsTotal, ev,
+      };
+    }
+
+    const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
+    const agreeDesc = [
+      `ML:✓(${Math.round(inp.mlConfidence as number)}%)`,
+      inp.statAbove === mlDir ? "Stat:✓" : `Stat:✗(${inp.statAbove})`,
+      inp.claudeAbove === mlDir ? "Claude:✓" : `Claude:✗(${inp.claudeAbove})`,
+    ].join(" ");
+    const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
+
     return {
-      action: "SKIP", confidence: 0,
-      reasoning: `Negative EV (${ev.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}%`,
-      signalsAgreeing, signalsTotal, ev,
+      action, confidence, ev, signalsAgreeing, signalsTotal,
+      reasoning: `ML tiebreaker: ${agreeDesc} → ${action} (${confidence}%)${evDesc}`,
     };
   }
 
-  // Minimum confidence gate
+  // ── PATH C: No core signals — ML leads solo ───────────────────────────────
+  if (!mlLeadReady) {
+    return skip("No core signals (Stat/Claude) available", ev);
+  }
+
+  const mlDir = inp.mlAbove as boolean;
+  const action: BotDecisionAction = mlDir ? "BET_YES" : "BET_NO";
+  let confidence = inp.mlConfidence as number;
+  if (inp.wmDriftAbove === mlDir) confidence += ML_SIGNAL_BOOST;
+
   if (confidence < inp.minConfidence) {
+    const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
     return {
       action: "SKIP", confidence,
-      reasoning: `Confidence ${confidence}% below minimum ${inp.minConfidence}%`,
+      reasoning: `Confidence ${confidence}% below minimum ${inp.minConfidence}% (ML primary)`,
       signalsAgreeing, signalsTotal, ev,
     };
   }
 
-  // ── REASONING STRING ──────────────────────────────────────────────────────
-  const corePairDesc = [
-    inp.statAbove !== null ? `Stat:${inp.statAbove === coreDirection ? "✓" : "✗"}` : "Stat:—",
-    inp.claudeAbove !== null ? `Claude:${inp.claudeAbove === coreDirection ? "✓" : "✗"}` : "Claude:—",
-  ].join(" ");
-
-  const boosterParts: string[] = [];
-  if (inp.mlAbove !== null) {
-    boosterParts.push(`ML:${inp.mlAbove === coreDirection ? `+${CONFIDENCE_BOOST_PER_SIGNAL}` : "—"}`);
-  }
-  if (inp.wmDriftAbove !== null) {
-    boosterParts.push(`WM:${inp.wmDriftAbove === coreDirection ? `+${CONFIDENCE_BOOST_PER_SIGNAL}` : "—"}`);
-  }
-
+  const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
   const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
-  const boosterDesc = boosterParts.length ? ` | ${boosterParts.join(" ")}` : "";
+
   return {
     action, confidence, ev, signalsAgreeing, signalsTotal,
-    reasoning: `core pair: ${corePairDesc}${boosterDesc} → ${action} (${confidence}%)${evDesc}`,
+    reasoning: `ML primary: ML:✓(${Math.round(confidence)}%) Stat:— Claude:— → ${action}${evDesc}`,
   };
 }
 
@@ -183,7 +268,6 @@ export function applyBetOutcome(
   pauseWindows: number,
 ): CircuitBreakerState {
   if (won) {
-    // Win clears the streak AND cancels any active circuit-breaker cooldown.
     return { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 };
   }
   const newConsecutive = state.consecutiveLosses + 1;
@@ -236,16 +320,6 @@ export function deriveRegime(recentStrikes: number[], windowCount: number = 3): 
  * Returns true when the proposed bet direction is clearly opposed by multi-window
  * momentum — i.e., the price has moved consistently against the bet direction for
  * `windowCount` consecutive windows AND the cumulative move exceeds the threshold.
- *
- * Use case: prevent fighting a clear trend.
- *   - Proposing NO (price ends below strike) when price has been consistently rising → override
- *   - Proposing YES (price ends above strike) when price has been consistently falling → override
- *
- * @param proposedDirection      "yes" | "no"
- * @param recentStrikes          Chronological Kalshi strike prices (oldest first).
- *                               Needs at least windowCount+1 values; fewer → false.
- * @param cumulativeThresholdPct Minimum absolute % move to qualify as momentum (default 0.5).
- * @param windowCount            Consecutive windows required (default 3).
  */
 export function checkMomentumOverride(
   proposedDirection: "yes" | "no",
@@ -256,22 +330,20 @@ export function checkMomentumOverride(
   if (recentStrikes.length < windowCount + 1) return false;
   const relevant = recentStrikes.slice(-(windowCount + 1));
 
-  // All consecutive window-to-window moves must be in the same direction.
   let allUp = true;
   let allDown = true;
   for (let i = 1; i < relevant.length; i++) {
     if (relevant[i] <= relevant[i - 1]) allUp = false;
     if (relevant[i] >= relevant[i - 1]) allDown = false;
   }
-  if (!allUp && !allDown) return false; // mixed direction — no clear trend
+  if (!allUp && !allDown) return false;
 
   const oldest = relevant[0];
   const newest = relevant[relevant.length - 1];
   const pctMove = Math.abs((newest - oldest) / oldest * 100);
-  if (pctMove < cumulativeThresholdPct) return false; // insufficient magnitude
+  if (pctMove < cumulativeThresholdPct) return false;
 
-  // Trend opposes the proposed direction → momentum override
-  if (allUp && proposedDirection === "no") return true;   // price rising → don't bet NO
-  if (allDown && proposedDirection === "yes") return true; // price falling → don't bet YES
+  if (allUp && proposedDirection === "no") return true;
+  if (allDown && proposedDirection === "yes") return true;
   return false;
 }
