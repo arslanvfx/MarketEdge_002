@@ -244,10 +244,15 @@ export default function BotDashboard() {
           <span className={`text-xs px-2 py-1 rounded-full ${status?.paused ? "bg-muted text-muted-foreground" : pos ? "bg-emerald-500/15 text-emerald-400" : "bg-sky-500/10 text-sky-400"}`}>
             {statusLabel()}
           </span>
-          {(status?.circuitBreakerWindowsRemaining ?? 0) > 0 && (
+          {(status?.circuitBreakerWindowsRemaining ?? 0) > 0 ? (
             <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-red-500/15 text-red-400 border border-red-500/30" title={`Circuit breaker active — ${status!.circuitBreakerWindowsRemaining} window(s) remaining`}>
               <AlertTriangle className="w-3 h-3" />
               CB {status!.circuitBreakerWindowsRemaining}w
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title="Circuit breaker inactive">
+              <AlertTriangle className="w-3 h-3" />
+              CB off
             </span>
           )}
           {status?.isInQuietHours && (

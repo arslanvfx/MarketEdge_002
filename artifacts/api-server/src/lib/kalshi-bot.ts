@@ -384,13 +384,19 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       if (p < 0) streak++;
       else break; // first non-loss resets the streak
     }
-    // Preserve any already-active circuit breaker windows remaining.
-    cbState = {
-      consecutiveLosses: streak,
-      circuitBreakerWindowsRemaining: streak >= config.maxConsecutiveLosses
+    // Restore circuit-breaker state from the recovered streak.
+    // Guard against the disabled mode (maxConsecutiveLosses=0 or pauseWindows=0):
+    // when the feature is off, circuitBreakerWindowsRemaining must be 0 regardless
+    // of streak length (0 >= 0 is always true, so the unguarded condition would
+    // falsely activate the breaker every restart when the feature is disabled).
+    const canActivateCB = config.maxConsecutiveLosses > 0 && config.circuitBreakerPauseWindows > 0;
+    let restoredRemaining = 0;
+    if (canActivateCB) {
+      restoredRemaining = streak >= config.maxConsecutiveLosses
         ? Math.max(cbState.circuitBreakerWindowsRemaining, config.circuitBreakerPauseWindows)
-        : cbState.circuitBreakerWindowsRemaining,
-    };
+        : cbState.circuitBreakerWindowsRemaining;
+    }
+    cbState = { consecutiveLosses: streak, circuitBreakerWindowsRemaining: restoredRemaining };
 
     logger.info({ dailyPnl, dailyLossCount, date: today, cbState }, "[kalshi-bot] daily P&L loaded from DB");
   } catch (err) {
