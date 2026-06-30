@@ -14,6 +14,13 @@
 //   7. High-conviction reversing window: confidence 81−20=61 ≥ 60 clears penalty
 //   8. Reasoning string correctness
 //
+// NOTE: The "Claude-pending" guard (training coin + claudeAbove=null + <90 s elapsed →
+// SKIP "Claude opening call pending") lives in `makeBotDecision` in
+// kalshi-bot-engine.ts — the I/O wrapper layer — rather than in this pure
+// function.  It is not tested here because testing it requires mocking the
+// in-memory stores from crypto.ts.  The guard condition itself is a simple
+// three-way boolean that doesn't warrant a mock-heavy integration test.
+//
 // Run with:  pnpm --filter @workspace/api-server test
 import { test } from "node:test";
 import assert from "node:assert/strict";

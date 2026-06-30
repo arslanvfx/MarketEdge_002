@@ -20,6 +20,7 @@ import {
   getStatWindowCall,
   getWindowBetSignal,
   getCachedPrediction,
+  TRAINING_COINS,
   type TrackerWindowCall,
   type WindowBetSignal,
 } from "./crypto";
@@ -119,6 +120,33 @@ export function makeBotDecision(
   const claudeAbove: boolean | null = claudeCall?.aboveKalshi ?? null;
   const wmRec = wmSignal?.recommendation ?? null;
   const wmReady = wmSignal?.ready ?? false;
+
+  // Guard: training coins always run Claude. If Claude hasn't responded yet and
+  // we're within the first 90 s of the window, hold off rather than entering on
+  // stat alone — Claude's opening call takes 15–60 s after the snapshot fires at
+  // t+45 s, so the first bot tick (t+60 s) can race ahead of Claude's response.
+  const CLAUDE_PENDING_THRESHOLD_MIN = 1.5; // 90 s expressed in minutes
+  if (
+    TRAINING_COINS.has(sym) &&
+    claudeAbove === null &&
+    minutesElapsed < CLAUDE_PENDING_THRESHOLD_MIN
+  ) {
+    const pendingSnapshot: SignalSnapshot = {
+      statAbove, claudeAbove: null, mlAbove: null,
+      windowMonitor: wmRec, windowMonitorReady: wmReady,
+      yesPrice, ev: null, signalAccuracyPct, minutesElapsed,
+      signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
+      statConfidence: statCall?.confidence ?? null,
+      claudeConfidence: null, mlConfidence: null,
+      warmupActive: true,
+    };
+    return {
+      action: "SKIP",
+      confidence: 0,
+      reasoning: "Claude opening call pending — waiting up to 90 s before evaluating entry",
+      signals: pendingSnapshot,
+    };
+  }
 
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
