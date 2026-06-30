@@ -124,6 +124,10 @@ const prefetchedTicker: Map<string, string> = new Map();
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
 // was fired. Reset on window transition so each window gets exactly one batch call.
 let lastStabilityWindowKey = "";
+// Tracks which coin symbols have already had stability analysis fired for the
+// current window. Reset on every window change. Allows subsequent ticks to
+// pick up coins whose Kalshi data wasn't ready on the first tick of the window.
+let stabilityFiredForCoins = new Set<string>();
 // Per-symbol trend stability result from the latest window-open Claude analysis.
 // Cleared on each window transition. Populated async — may be null on the first tick.
 const windowStabilityCache = new Map<string, TrendStability>();
@@ -1366,36 +1370,41 @@ export async function runBotLoopTick(): Promise<void> {
     await fetchKalshiTarget(coin.symbol).catch(() => null);
   }
 
-  // Window-open stability analysis: fire parallel Claude trend-stability calls for all
-  // Kalshi coins on each new window. The cache is cleared so stale results from the
-  // previous window don't carry over. Calls are fire-and-forget; they complete during
-  // the 45s warmup so Phase 3 can read them before the bot is eligible to enter.
+  // Window-open stability analysis: fire Claude trend-stability for every Kalshi coin
+  // that now has valid strike + yes price data. Tracks per-coin dispatch so that coins
+  // whose markets publish later (10-30s delay) get picked up on subsequent ticks within
+  // the same window rather than being silently skipped.
   const newWindowKey = currentWindowKey();
   if (newWindowKey !== lastStabilityWindowKey) {
     lastStabilityWindowKey = newWindowKey;
+    stabilityFiredForCoins.clear();
     windowStabilityCache.clear();
-    // Only include coins that already have a valid Kalshi strike + yes price for the
-    // new window. Coins whose market hasn't published yet are excluded — they will be
-    // caught on subsequent ticks once their data arrives.
-    const kCoins = CRYPTO_COINS.filter(c => {
-      if (!KALSHI_SERIES[c.symbol]) return false;
-      const kd = getKalshiCachedData(c.symbol.toUpperCase());
-      return kd?.value != null && kd.yesPrice != null;
-    });
-    if (kCoins.length > 0) {
-      void Promise.all(
-        kCoins.map(c =>
-          fetchTrendStabilityForBot(c.symbol.toUpperCase(), newWindowKey)
-            .then(r => {
-              if (r) windowStabilityCache.set(c.symbol.toUpperCase(), r.trendStability);
-            })
-            .catch(() => {}),
-        ),
-      );
-      logger.info({ windowKey: newWindowKey, coins: kCoins.map(c => c.symbol) }, "[kalshi-bot] window-open trend stability analysis fired");
-    } else {
-      logger.debug({ windowKey: newWindowKey }, "[kalshi-bot] window-open stability skipped — no valid Kalshi data yet");
-    }
+  }
+  // Re-check every tick for coins that weren't ready on earlier ticks of this window.
+  const pendingCoins = CRYPTO_COINS.filter(c => {
+    if (!KALSHI_SERIES[c.symbol]) return false;
+    const sym = c.symbol.toUpperCase();
+    if (stabilityFiredForCoins.has(sym)) return false;  // already dispatched
+    const kd = getKalshiCachedData(sym);
+    return kd?.value != null && kd.yesPrice != null;
+  });
+  if (pendingCoins.length > 0) {
+    // Mark synchronously before any await to prevent double-dispatch on overlapping ticks.
+    pendingCoins.forEach(c => stabilityFiredForCoins.add(c.symbol.toUpperCase()));
+    void Promise.all(
+      pendingCoins.map(c => {
+        const sym = c.symbol.toUpperCase();
+        return fetchTrendStabilityForBot(sym, newWindowKey)
+          .then(r => {
+            if (r) windowStabilityCache.set(sym, r.trendStability);
+          })
+          .catch(() => {
+            // Remove from dispatched set so the next tick retries for this coin.
+            stabilityFiredForCoins.delete(sym);
+          });
+      }),
+    );
+    logger.info({ windowKey: newWindowKey, coins: pendingCoins.map(c => c.symbol) }, "[kalshi-bot] window-open trend stability analysis fired");
   }
 
   // Phase 2: manage exit for the open position (if any), then return.
@@ -1517,7 +1526,12 @@ export async function runBotLoopTick(): Promise<void> {
 
   // Phase 4: run ticks in priority order — best BET candidate first.
   // Once a position is opened, break so only one bet is placed per tick.
-  const orderedSymbols = [...bets.map(e => e.symbol), ...skips.map(e => e.symbol)];
+  // Phase 4 must never run runBotTickForCoin for "reversing" coins — task spec requires
+  // hard exclusion from entry for the entire window even when confidence is high.
+  const orderedSymbols = [
+    ...bets.map(e => e.symbol),
+    ...skips.filter(e => e.trendStability !== "reversing").map(e => e.symbol),
+  ];
   for (const sym of orderedSymbols) {
     const kalshiData = getKalshiCachedData(sym);
     const prediction = getCachedPrediction(sym);
