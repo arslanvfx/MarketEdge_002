@@ -558,3 +558,231 @@ test("rule4: lower rule floors at defaultMinConfidence (never below default)", (
   assert.ok(r4, "lower rule should fire");
   assert.equal(r4.configMutation?.minConfidence, 60, "should floor at defaultMinConfidence");
 });
+
+// ---------------------------------------------------------------------------
+// Realistic-volume validation (100–200 synthetic bets)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a batch of bets all exiting within a given UTC hour.
+ * Returns `wins` win records followed by `losses` loss records.
+ */
+function makeBetsInBand(
+  utcHour: number,
+  wins: number,
+  losses: number,
+  symbol = "BTC",
+): SettledBetRecord[] {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const exitedAt = `2026-01-15T${pad(utcHour)}:30:00Z`;
+  const out: SettledBetRecord[] = [];
+  for (let i = 0; i < wins; i++) out.push(makeBet({ symbol, outcome: "win", exitedAt }));
+  for (let i = 0; i < losses; i++) out.push(makeBet({ symbol, outcome: "loss", exitedAt }));
+  return out;
+}
+
+test("realistic 150-bet session: rule1 fires for bad band, not for good band", () => {
+  // Band 14-16: 40 bets, ~32% win rate (bad) → rule 1 should fire
+  // Band 10-12: 47 bets, ~76% win rate (good) → rule 1 should NOT fire
+  // Remaining bands below 20-bet threshold
+  const bets = [
+    ...makeBetsInBand(15, 7, 18, "BTC"),   // 14-16: 25 bets, 28% win
+    ...makeBetsInBand(15, 6, 9, "ETH"),    // 14-16: +15 bets, 40% win → total 40 bets, 32.5% win
+    ...makeBetsInBand(11, 16, 6, "ETH"),   // 10-12: 22 bets, 72.7% win
+    ...makeBetsInBand(11, 20, 5, "BTC"),   // 10-12: +25 bets → total 47 bets, 76.6% win
+    ...makeBetsInBand(9,  8,  7, "BTC"),   // 08-10: 15 bets (below threshold)
+    ...makeBetsInBand(21, 5,  5, "SOL"),   // 20-22: 10 bets (below threshold)
+    ...Array.from({ length: 8 }, () =>     // loose bets in 06-08 (already in quiet window)
+      makeBet({ outcome: "win", exitedAt: "2026-01-15T07:30:00Z" })),
+  ];
+  // Total: 40+47+15+10+8 = 120 bets; add 30 more scattered wins to reach ~150
+  const extra = Array.from({ length: 30 }, () =>
+    makeBet({ outcome: "win", exitedAt: "2026-01-15T13:30:00Z" })); // 12-14 band
+  const allBets = [...bets, ...extra];
+  assert.ok(allBets.length >= 100, `need ≥100 bets, got ${allBets.length}`);
+
+  const report = computePerformanceReport(allBets, NOW);
+
+  const band1416 = report.byHourBand["14-16"];
+  assert.ok(band1416, "14-16 band must exist");
+  assert.ok(band1416.betCount >= 20, `14-16 band needs ≥20 bets, got ${band1416.betCount}`);
+  assert.ok((band1416.winRate ?? 1) < 0.40,
+    `14-16 band win rate should be <40%, got ${band1416.winRate}`);
+
+  const band1012 = report.byHourBand["10-12"];
+  assert.ok(band1012, "10-12 band must exist");
+  assert.ok(band1012.betCount >= 20, `10-12 band needs ≥20 bets, got ${band1012.betCount}`);
+  assert.ok((band1012.winRate ?? 0) > 0.60,
+    `10-12 band win rate should be >60%, got ${band1012.winRate}`);
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  const r1 = mutations.find(m => m.ruleName === "quiet_hours_expand");
+  assert.ok(r1, "quiet_hours_expand should fire for the bad 14-16 band");
+  assert.ok(r1.triggerReason.includes("14-16"), "trigger reason should cite 14-16");
+});
+
+test("realistic 150-bet session: rule3 fires when last-30 win rate is genuinely poor", () => {
+  // 120 wins (oldest) then 30 consecutive losses → last30 = 0% win rate
+  const bets = [
+    ...Array.from({ length: 120 }, () => makeBet({ outcome: "win" })),
+    ...Array.from({ length: 30 }, () => makeBet({ outcome: "loss" })),
+  ];
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.totalBets, 150);
+  assert.equal(report.last30WinRate, 0);
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  const r3 = mutations.find(m => m.ruleName === "confidence_floor_raise");
+  assert.ok(r3, "confidence_floor_raise should fire with 150 bets and 0% last-30 win rate");
+  assert.equal(r3.configMutation?.minConfidence, 65);
+});
+
+test("edge case: only 1 hour band populated with <20 bets — rule1 must NOT fire", () => {
+  // 18 bets all in the 10-12 band with a terrible 11% win rate
+  // Quiet window is 02-08, so 10-12 is outside and would normally be a candidate
+  const bets = makeBetsInBand(11, 2, 16, "BTC"); // 18 bets, 11.1% win rate
+  assert.equal(bets.length, 18);
+
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(Object.keys(report.byHourBand).length, 1, "exactly one band should exist");
+  assert.equal(report.byHourBand["10-12"]?.betCount, 18);
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  const r1 = mutations.find(m => m.ruleName === "quiet_hours_expand");
+  assert.equal(r1, undefined,
+    "rule1 must not fire — only 18 bets in that band, below the 20-bet minimum");
+});
+
+test("edge case: only 1 hour band populated, fires at exactly 20 bets", () => {
+  // Same scenario but bumped to exactly 20 bets — now the rule should fire
+  const bets = makeBetsInBand(15, 6, 14, "BTC"); // 20 bets, 30% win rate (in 14-16 band)
+  assert.equal(bets.length, 20);
+
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.byHourBand["14-16"]?.betCount, 20);
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  const r1 = mutations.find(m => m.ruleName === "quiet_hours_expand");
+  assert.ok(r1, "rule1 should fire at exactly 20 bets");
+});
+
+test("edge case: consecutive losses cross symbol boundaries — per-coin pause must not fire", () => {
+  // Each coin has losses, but none individually reaches 5 consecutive losses.
+  // BTC streak=3, ETH streak=3, SOL streak=2.
+  // The per-coin logic must NOT treat these as a combined streak.
+  const bets = [
+    makeBet({ symbol: "BTC", outcome: "win" }),
+    makeBet({ symbol: "BTC", outcome: "loss" }),
+    makeBet({ symbol: "BTC", outcome: "loss" }),
+    makeBet({ symbol: "BTC", outcome: "loss" }),  // BTC streak=3
+    makeBet({ symbol: "ETH", outcome: "win" }),
+    makeBet({ symbol: "ETH", outcome: "loss" }),
+    makeBet({ symbol: "ETH", outcome: "loss" }),
+    makeBet({ symbol: "ETH", outcome: "loss" }),  // ETH streak=3
+    makeBet({ symbol: "SOL", outcome: "win" }),
+    makeBet({ symbol: "SOL", outcome: "loss" }),
+    makeBet({ symbol: "SOL", outcome: "loss" }),  // SOL streak=2
+  ];
+
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.bySymbol["BTC"]?.currentConsecutiveLosses, 3, "BTC streak should be 3");
+  assert.equal(report.bySymbol["ETH"]?.currentConsecutiveLosses, 3, "ETH streak should be 3");
+  assert.equal(report.bySymbol["SOL"]?.currentConsecutiveLosses, 2, "SOL streak should be 2");
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  const r2 = mutations.find(m => m.ruleName === "per_coin_pause");
+  assert.equal(r2, undefined,
+    "per_coin_pause must not fire — no individual coin has ≥5 consecutive losses");
+});
+
+test("edge case: consecutive losses cross symbols — only the qualifying coin triggers pause", () => {
+  // ETH has 4 losses then a win (streak resets to 0).
+  // BTC then runs 5 straight losses.
+  // Only BTC should be paused.
+  const bets = [
+    makeBet({ symbol: "ETH", outcome: "loss" }),
+    makeBet({ symbol: "ETH", outcome: "loss" }),
+    makeBet({ symbol: "ETH", outcome: "loss" }),
+    makeBet({ symbol: "ETH", outcome: "loss" }),
+    makeBet({ symbol: "ETH", outcome: "win" }), // resets ETH streak to 0
+    makeBet({ symbol: "BTC", outcome: "loss" }),
+    makeBet({ symbol: "BTC", outcome: "loss" }),
+    makeBet({ symbol: "BTC", outcome: "loss" }),
+    makeBet({ symbol: "BTC", outcome: "loss" }),
+    makeBet({ symbol: "BTC", outcome: "loss" }), // BTC streak=5
+  ];
+
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.bySymbol["BTC"]?.currentConsecutiveLosses, 5);
+  assert.equal(report.bySymbol["ETH"]?.currentConsecutiveLosses, 0,
+    "ETH streak should be 0 after the win reset");
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  const pauses = mutations.filter(m => m.ruleName === "per_coin_pause");
+  assert.equal(pauses.length, 1, "exactly one coin should be paused");
+  assert.equal(pauses[0].pauseCoin?.symbol, "BTC", "BTC should be the paused coin");
+});
+
+test("edge case: all 200 bets are pushes — zero settled bets, no rules fire", () => {
+  const bets = Array.from({ length: 200 }, () => makeBet({ outcome: "push" }));
+  const report = computePerformanceReport(bets, NOW);
+
+  assert.equal(report.totalBets, 0, "all pushes → zero settled bets");
+  assert.equal(report.overallWinRate, null);
+  assert.equal(report.last30WinRate, null);
+  assert.deepEqual(report.byHourBand, {}, "no hour-band entries when no settled bets");
+  assert.deepEqual(report.bySymbol, {}, "no symbol entries when no settled bets");
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  assert.equal(mutations.length, 0,
+    "no rules should fire when all 200 bets are pushes");
+});
+
+test("edge case: mixed pushes in 150-bet corpus — thresholds use settled count only", () => {
+  // 30 losses + 90 wins + 30 pushes = 150 total, 120 settled
+  // Losses are oldest so the last 30 settled are wins → last30WinRate = 100% (>55%)
+  // All exit at 15:30 UTC → lands in 14-16 band
+  const exitedAt = "2026-01-15T15:30:00Z";
+  const bets = [
+    ...Array.from({ length: 30 }, () => makeBet({ outcome: "loss", exitedAt })),
+    ...Array.from({ length: 90 }, () => makeBet({ outcome: "win",  exitedAt })),
+    ...Array.from({ length: 30 }, () => makeBet({ outcome: "push", exitedAt })),
+  ];
+
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.totalBets, 120, "30 pushes excluded → 120 settled");
+
+  const band = report.byHourBand["14-16"];
+  assert.ok(band, "14-16 band should exist");
+  assert.equal(band.betCount, 120, "band count reflects only settled bets");
+  assert.ok(Math.abs((band.winRate ?? 0) - 0.75) < 1e-9,
+    `expected 75% win rate, got ${band.winRate}`);
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  // 75% win rate → rule1 should NOT fire (needs <40%)
+  assert.equal(mutations.find(m => m.ruleName === "quiet_hours_expand"), undefined,
+    "rule1 must not fire for a 75% win-rate band");
+  // rule3 should NOT fire (75% > 55%)
+  assert.equal(mutations.find(m => m.ruleName === "confidence_floor_raise"), undefined,
+    "rule3 must not fire for a 75% overall win rate");
+});
+
+test("threshold boundary: 19-bet bad band skipped, adjacent 20-bet bad band fires", () => {
+  // Band 18-20: 19 bets, ~26% win rate → below the 20-bet minimum, should NOT fire
+  // Band 14-16: 20 bets, 30% win rate → meets the threshold, should fire
+  const bets = [
+    ...makeBetsInBand(19, 5, 14, "ETH"),  // 18-20: 19 bets, 26.3% win
+    ...makeBetsInBand(15, 6, 14, "BTC"),  // 14-16: 20 bets, 30% win
+  ];
+
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.byHourBand["18-20"]?.betCount, 19);
+  assert.equal(report.byHourBand["14-16"]?.betCount, 20);
+
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
+  const r1 = mutations.find(m => m.ruleName === "quiet_hours_expand");
+  assert.ok(r1, "rule1 should fire for the 20-bet 14-16 band");
+  // 18-20 has 19 bets so it doesn't qualify; 14-16 (30% win) is the worst qualifying band
+  assert.ok(r1.triggerReason.includes("14-16"),
+    "trigger reason must cite 14-16, not the 19-bet 18-20 band");
+});
