@@ -2080,6 +2080,7 @@ function KalshiBotPanel() {
   const [confirmLive, setConfirmLive] = useState(false);
   const [localBetSize, setLocalBetSize] = useState<number>(0.5);
   const [localDailyLimit, setLocalDailyLimit] = useState<number>(20);
+  const [localPhase2Pp, setLocalPhase2Pp] = useState<number>(30);
 
   const botQuery = useQuery<BotStateSnapshot>({
     queryKey: ["bot-status"],
@@ -2133,6 +2134,7 @@ function KalshiBotPanel() {
     await postJson("/crypto/bot/config", {
       betSize: localBetSize,
       dailyLossLimit: localDailyLimit,
+      phase2ThresholdPp: localPhase2Pp,
     });
     void botQuery.refetch();
   }
@@ -2142,6 +2144,7 @@ function KalshiBotPanel() {
     if (bot?.config && !configOpen) {
       setLocalBetSize(bot.config.betSize);
       setLocalDailyLimit(bot.config.dailyLossLimit);
+      setLocalPhase2Pp(bot.config.phase2ThresholdPp);
     }
   }, [bot?.config, configOpen]);
 
@@ -2440,6 +2443,21 @@ function KalshiBotPanel() {
                       {s}
                     </button>
                   ))}
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">
+                    Phase 2 threshold: <span className="text-slate-200 font-medium">{localPhase2Pp}pp below entry</span>
+                    <span className="text-slate-600 ml-1">(activates damage-control exit when losing by this much)</span>
+                  </label>
+                  <input
+                    type="range" min={10} max={50} step={5}
+                    value={localPhase2Pp}
+                    onChange={(e) => setLocalPhase2Pp(parseInt(e.target.value))}
+                    className="w-full accent-cyan-400"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-600">
+                    <span>10pp</span><span>50pp</span>
+                  </div>
                 </div>
                 <div className="flex gap-2">
                   <button

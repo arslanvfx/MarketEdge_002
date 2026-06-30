@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { getAuth } from "@clerk/express";
 import {
   getBotState,
   setBotMode,
@@ -11,7 +12,19 @@ import type { BotMode } from "../lib/kalshi-bot";
 
 const router = Router();
 
-// GET /crypto/bot/status — full bot state
+// Shared auth guard — bot control actions require a logged-in Clerk user.
+// Read-only status/history/stats endpoints remain public so the dashboard can
+// render even for anonymous visitors.
+function requireAuth(req: any, res: any, next: any) {
+  const auth = getAuth(req);
+  if (!auth?.userId) {
+    res.status(401).json({ error: "Unauthorized — must be signed in to control the bot" });
+    return;
+  }
+  next();
+}
+
+// GET /crypto/bot/status — full bot state (public — read only)
 router.get("/crypto/bot/status", (_req, res) => {
   try {
     res.json(getBotState());
@@ -22,7 +35,7 @@ router.get("/crypto/bot/status", (_req, res) => {
 });
 
 // POST /crypto/bot/mode  { mode: "paper" | "live" }
-router.post("/crypto/bot/mode", (req, res) => {
+router.post("/crypto/bot/mode", requireAuth, (req, res) => {
   const { mode } = req.body as { mode?: string };
   if (mode !== "paper" && mode !== "live") {
     res.status(400).json({ error: "mode must be 'paper' or 'live'" });
@@ -38,7 +51,7 @@ router.post("/crypto/bot/mode", (req, res) => {
 });
 
 // POST /crypto/bot/pause  { paused: boolean }
-router.post("/crypto/bot/pause", (req, res) => {
+router.post("/crypto/bot/pause", requireAuth, (req, res) => {
   const { paused } = req.body as { paused?: boolean };
   if (typeof paused !== "boolean") {
     res.status(400).json({ error: "paused must be a boolean" });
@@ -49,7 +62,7 @@ router.post("/crypto/bot/pause", (req, res) => {
 });
 
 // POST /crypto/bot/config  — update one or more config fields
-router.post("/crypto/bot/config", (req, res) => {
+router.post("/crypto/bot/config", requireAuth, (req, res) => {
   const {
     betSize,
     dailyLossLimit,
@@ -88,7 +101,7 @@ router.post("/crypto/bot/config", (req, res) => {
   res.json({ ok: true, config: updated });
 });
 
-// GET /crypto/bot/history?limit=20
+// GET /crypto/bot/history?limit=20 (public — read only)
 router.get("/crypto/bot/history", async (req, res) => {
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
   try {
@@ -100,7 +113,7 @@ router.get("/crypto/bot/history", async (req, res) => {
   }
 });
 
-// GET /crypto/bot/stats
+// GET /crypto/bot/stats (public — read only)
 router.get("/crypto/bot/stats", async (_req, res) => {
   try {
     const stats = await getBotStats();

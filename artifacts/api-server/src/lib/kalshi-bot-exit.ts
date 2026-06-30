@@ -103,24 +103,31 @@ export function runExitGuard(
   // Activate when: yes price far below entry, all models agree wrong direction,
   // ER momentum confirms, and fewer than 4 minutes remain
 
-  const isPhase2Time = minutesElapsed >= 11;
+  // "fewer than 4 minutes remain" in a 15-min window: 15 - minutesElapsed < 4 → minutesElapsed > 11
+  const isPhase2Time = minutesElapsed > 11;
   const isLossBeyondThreshold = priceMovePp >= phase2ThresholdPp;
   const isLowYesPrice = direction === "yes"
     ? (yp !== null && yp < 0.35)
     : (yp !== null && yp > 0.65);
 
-  // All models agree on reversal
+  // All models agree on reversal — stat + Claude + WM drift must all point against position
   const statCall = getStatWindowCall(symbol.toUpperCase());
   const claudeCall = getTrackerWindowCall(symbol.toUpperCase());
+  const wmSignal = getWindowBetSignal(symbol.toUpperCase());
+  const wmDriftAbove = wmSignal?.factors != null ? wmSignal.factors.netDriftPct > 0 : null;
 
   let modelsAgreeWrong = false;
   if (statCall != null && claudeCall != null && statCall.aboveKalshi !== null && claudeCall.aboveKalshi !== null) {
-    // For YES bets: both should say BELOW (aboveKalshi=false) to confirm we're losing
-    // For NO bets: both should say ABOVE (aboveKalshi=true) to confirm we're losing
+    // For YES bets: stat + Claude both say BELOW; WM drift (if available) is also down
+    // For NO bets:  stat + Claude both say ABOVE; WM drift (if available) is also up
     if (direction === "yes") {
-      modelsAgreeWrong = statCall.aboveKalshi === false && claudeCall.aboveKalshi === false;
+      const coreAgree = statCall.aboveKalshi === false && claudeCall.aboveKalshi === false;
+      const wmAgree   = wmDriftAbove === null || wmDriftAbove === false;
+      modelsAgreeWrong = coreAgree && wmAgree;
     } else {
-      modelsAgreeWrong = statCall.aboveKalshi === true && claudeCall.aboveKalshi === true;
+      const coreAgree = statCall.aboveKalshi === true && claudeCall.aboveKalshi === true;
+      const wmAgree   = wmDriftAbove === null || wmDriftAbove === true;
+      modelsAgreeWrong = coreAgree && wmAgree;
     }
   }
 
@@ -194,13 +201,17 @@ export function runExitGuard(
   const flipConfirmed = state.phase1.adverseTickCount >= adverseTicks;
   const magnitudeOk = priceMovePp >= magnitudePp;
 
-  // Model consensus: both stat and Claude must agree on the adverse direction
+  // Model consensus: stat + Claude + WM all must agree on adverse direction
   let consensusOk = false;
   if (statCall != null && claudeCall != null && statCall.aboveKalshi !== null && claudeCall.aboveKalshi !== null) {
     if (direction === "yes") {
-      consensusOk = statCall.aboveKalshi === false && claudeCall.aboveKalshi === false;
+      const coreAgree = statCall.aboveKalshi === false && claudeCall.aboveKalshi === false;
+      const wmAgree   = wmDriftAbove === null || wmDriftAbove === false;
+      consensusOk = coreAgree && wmAgree;
     } else {
-      consensusOk = statCall.aboveKalshi === true && claudeCall.aboveKalshi === true;
+      const coreAgree = statCall.aboveKalshi === true && claudeCall.aboveKalshi === true;
+      const wmAgree   = wmDriftAbove === null || wmDriftAbove === true;
+      consensusOk = coreAgree && wmAgree;
     }
   }
 

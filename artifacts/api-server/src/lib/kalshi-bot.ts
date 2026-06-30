@@ -388,8 +388,12 @@ async function closePosition(
   reason: string,
   isLateRecovery = false,
 ): Promise<void> {
-  let fillPrice = currentYesPrice;
   const isExpiry = reason === "window_expired";
+  // When the window expires the currentYesPrice is from the NEW window — do not
+  // use it for P&L.  The contract will settle at $1 or $0; we conservatively
+  // book the outcome as a full loss (position held to expiry = paid nothing back).
+  // An evaluator job (task #112) will later correct this using Kalshi settlement.
+  let fillPrice: number | null = isExpiry ? null : currentYesPrice;
 
   if (botMode === "live" && !isExpiry) {
     try {

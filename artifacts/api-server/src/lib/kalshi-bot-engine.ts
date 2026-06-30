@@ -2,11 +2,22 @@
 //
 // Reads all available prediction signals for the current window and returns a
 // BET_YES / BET_NO / SKIP decision with full reasoning logged.
+//
+// Signal sources (in priority order):
+//   1. Stat model  (getStatWindowCall)     — short-term statistical regression
+//   2. Claude AI   (getTrackerWindowCall)  — LLM directional read
+//   3. ML model    (getCachedPrediction)   — online logistic regression
+//   4. Window BetSignal (getWindowBetSignal) — intra-window momentum regime
+//
+// CAUTION from Window Monitor = hard SKIP (same as STAY_AWAY for the bot).
+// The bot needs a clean, directional regime to operate — "caution" conditions
+// (choppy/drifting) are statistically unfavourable enough to block entry.
 
 import {
   getTrackerWindowCall,
   getStatWindowCall,
   getWindowBetSignal,
+  getCachedPrediction,
   type TrackerWindowCall,
   type WindowBetSignal,
 } from "./crypto";
@@ -34,6 +45,7 @@ export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP";
 export interface SignalSnapshot {
   statAbove: boolean | null;
   claudeAbove: boolean | null;
+  mlAbove: boolean | null;
   windowMonitor: "bet" | "stay_away" | "caution" | null;
   windowMonitorReady: boolean;
   yesPrice: number | null;       // Kalshi Yes price fraction 0-1
@@ -45,6 +57,7 @@ export interface SignalSnapshot {
   agreementTarget: BotDecisionAction | null;
   statConfidence: number | null;
   claudeConfidence: number | null;
+  mlConfidence: number | null;
 }
 
 export interface BotDecision {
@@ -78,94 +91,106 @@ export function makeBotDecision(
   const wmRec = wmSignal?.recommendation ?? null;
   const wmReady = wmSignal?.ready ?? false;
 
+  // Ensemble direction: the cached coin prediction's nearest forecast aggregates
+  // the stat + Claude + ML models into a single directional signal. "up" = price
+  // expected above the Kalshi strike → aboveKalshi=true.
+  let mlAbove: boolean | null = null;
+  let mlConfidence: number | null = null;
+  const cached = getCachedPrediction(sym);
+  if (cached?.predictions) {
+    // predictions[0] is the nearest time bucket — the one that covers the current window
+    const nearestPred = cached.predictions[0];
+    if (nearestPred && nearestPred.direction !== "flat") {
+      mlAbove = nearestPred.direction === "up";
+      mlConfidence = nearestPred.confidence ?? null;
+    }
+  }
+
+  const baseSignals = { statAbove, claudeAbove, mlAbove };
+
+  function makeEmptySnapshot(): SignalSnapshot {
+    return {
+      statAbove, claudeAbove, mlAbove,
+      windowMonitor: wmRec, windowMonitorReady: wmReady,
+      yesPrice, ev: null, timingAccuracyPct, minutesElapsed,
+      signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
+      statConfidence: statCall?.confidence ?? null,
+      claudeConfidence: claudeCall?.confidence ?? null,
+      mlConfidence,
+    };
+  }
+
   // If no Kalshi ticker/market, we can't bet
   if (!kalshiTicker) {
-    return skip("No active Kalshi market for this symbol", {
-      statAbove, claudeAbove, windowMonitor: wmRec, windowMonitorReady: wmReady,
-      yesPrice, ev: null, timingAccuracyPct, minutesElapsed,
-      signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
-      statConfidence: statCall?.confidence ?? null,
-      claudeConfidence: claudeCall?.confidence ?? null,
-    });
+    return skip("No active Kalshi market for this symbol", makeEmptySnapshot());
   }
 
-  // Window monitor override: stay_away = hard skip
-  if (wmReady && wmRec === "stay_away") {
-    return skip("Window Monitor says STAY AWAY — choppy/spike conditions", {
-      statAbove, claudeAbove, windowMonitor: wmRec, windowMonitorReady: wmReady,
-      yesPrice, ev: null, timingAccuracyPct, minutesElapsed,
-      signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
-      statConfidence: statCall?.confidence ?? null,
-      claudeConfidence: claudeCall?.confidence ?? null,
-    });
+  // Window monitor override — both STAY_AWAY and CAUTION are hard skips.
+  // CAUTION signals choppy/drifting conditions that statistically erode edge;
+  // the bot only enters on clean "bet" regime from the window monitor.
+  if (wmReady && (wmRec === "stay_away" || wmRec === "caution")) {
+    return skip(
+      `Window Monitor says ${wmRec?.toUpperCase()} — skipping (noisy/choppy regime)`,
+      makeEmptySnapshot(),
+    );
   }
 
-  // Count signal agreements
-  const candidates: Array<{ above: boolean | null; weight: number }> = [
-    { above: statAbove, weight: 1 },
-    { above: claudeAbove, weight: 1 },
+  // Count signal agreements across all four directional sources
+  const candidates: Array<{ above: boolean | null; weight: number; label: string }> = [
+    { above: statAbove,   weight: 1, label: "stat" },
+    { above: claudeAbove, weight: 1, label: "claude" },
+    { above: mlAbove,     weight: 1, label: "ml" },
   ];
 
-  // Window monitor as a directional signal only if it says "bet" and there's a drift direction
+  // Window monitor directional vote (only when recommending "bet")
   const wmFactors = wmSignal?.factors;
   const wmDriftAbove = wmFactors
     ? wmFactors.netDriftPct > 0   // net drift direction as a proxy signal
     : null;
   if (wmReady && wmRec === "bet" && wmDriftAbove !== null) {
-    candidates.push({ above: wmDriftAbove, weight: 1 });
-  }
-
-  // Timing accuracy as a meta-signal: if accuracy <45%, slight disagreement signal
-  if (timingAccuracyPct !== null) {
-    if (timingAccuracyPct < 45) {
-      // Low accuracy minute mark — add a null vote (uncertainty)
-      candidates.push({ above: null, weight: 1 });
-    }
+    candidates.push({ above: wmDriftAbove, weight: 1, label: "wm_drift" });
   }
 
   const yesAboveCount = candidates.filter((c) => c.above === true).length;
-  const noAboveCount = candidates.filter((c) => c.above === false).length;
-  const total = candidates.filter((c) => c.above !== null).length;
+  const noAboveCount  = candidates.filter((c) => c.above === false).length;
+  const total         = candidates.filter((c) => c.above !== null).length;
 
-  let agreementTarget: BotDecisionAction | null = null;
+  let agreementTarget: "BET_YES" | "BET_NO" | null = null;
   let signalsAgreeing = 0;
-  if (yesAboveCount >= noAboveCount) {
-    agreementTarget = "BET_YES";
-    signalsAgreeing = yesAboveCount;
-  } else {
-    agreementTarget = "BET_NO";
-    signalsAgreeing = noAboveCount;
+  if (total > 0) {
+    if (yesAboveCount >= noAboveCount) {
+      agreementTarget = "BET_YES";
+      signalsAgreeing = yesAboveCount;
+    } else {
+      agreementTarget = "BET_NO";
+      signalsAgreeing = noAboveCount;
+    }
   }
 
   // EV calculation
   let ev: number | null = null;
   if (yesPrice !== null && yesPrice > 0 && timingAccuracyPct !== null) {
     const accFrac = timingAccuracyPct / 100;
-    // EV per $1 bet on YES: win (1-p)/p or lose 1
-    // p = yes price fraction (0-1)
     const winPayoff = (1 - yesPrice) / yesPrice;
     ev = accFrac * winPayoff - (1 - accFrac);
   }
 
-  // Negative EV skip
-  if (ev !== null && ev < -0.05) {
-    return skip(`Negative EV (${ev.toFixed(3)}) at current yes price ${yesPrice?.toFixed(2)}`, {
-      statAbove, claudeAbove, windowMonitor: wmRec, windowMonitorReady: wmReady,
-      yesPrice, ev, timingAccuracyPct, minutesElapsed,
-      signalsAgreeing, signalsTotal: total, agreementTarget,
-      statConfidence: statCall?.confidence ?? null,
-      claudeConfidence: claudeCall?.confidence ?? null,
-    });
-  }
-
-  const threshold = config.signalThreshold;
   const signals: SignalSnapshot = {
-    statAbove, claudeAbove, windowMonitor: wmRec, windowMonitorReady: wmReady,
+    ...baseSignals,
+    windowMonitor: wmRec, windowMonitorReady: wmReady,
     yesPrice, ev, timingAccuracyPct, minutesElapsed,
     signalsAgreeing, signalsTotal: total, agreementTarget,
     statConfidence: statCall?.confidence ?? null,
     claudeConfidence: claudeCall?.confidence ?? null,
+    mlConfidence,
   };
+
+  // Negative EV skip
+  if (ev !== null && ev < -0.05) {
+    return skip(`Negative EV (${ev.toFixed(3)}) at current yes price ${yesPrice?.toFixed(2)}`, signals);
+  }
+
+  const threshold = config.signalThreshold;
 
   if (signalsAgreeing < threshold) {
     return skip(
@@ -174,18 +199,15 @@ export function makeBotDecision(
     );
   }
 
-  // caution from Window Monitor is a confidence reducer but not a hard block
-  const cautionPenalty = wmReady && wmRec === "caution" ? 10 : 0;
-  const baseConfidence =
-    total > 0 ? Math.round((signalsAgreeing / total) * 100) : 50;
-  const confidence = Math.max(40, baseConfidence - cautionPenalty);
-
   if (agreementTarget === null) return skip("Could not determine direction", signals);
   const action = agreementTarget;
+
+  const confidence = total > 0 ? Math.max(40, Math.round((signalsAgreeing / total) * 100)) : 50;
 
   const parts: string[] = [];
   if (statAbove !== null) parts.push(`Stat: ${statAbove ? "ABOVE" : "BELOW"}`);
   if (claudeAbove !== null) parts.push(`Claude: ${claudeAbove ? "ABOVE" : "BELOW"}`);
+  if (mlAbove !== null) parts.push(`ML: ${mlAbove ? "ABOVE" : "BELOW"}`);
   if (wmRec) parts.push(`WM: ${wmRec.toUpperCase()}`);
   if (yesPrice !== null) parts.push(`Yes@${(yesPrice * 100).toFixed(0)}¢`);
   if (ev !== null) parts.push(`EV=${ev.toFixed(3)}`);
