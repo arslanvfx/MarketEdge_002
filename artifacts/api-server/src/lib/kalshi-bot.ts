@@ -53,6 +53,7 @@ export interface OpenPosition {
   betAmount: number;        // $ spent
   kalshiTarget: number;
   openedAt: number;         // ms timestamp
+  cryptoPriceAtEntry: number | null; // spot price of the coin when the bet was placed
   exitState: ExitState;
   entryDecision: BotDecision;
   phase2Activated: boolean;
@@ -77,6 +78,19 @@ export interface BotStateSnapshot {
   // Seconds remaining in the 45-second warmup period at the start of each window.
   // null when not in warmup (elapsed ≥ 45s), or when a position is already open.
   warmupSecondsRemaining: number | null;
+}
+
+// Per-coin evaluation result from the best-market selection pass.
+// Populated by runBotLoopTick and exposed via getWindowEvaluation().
+export interface WindowCoinEvaluation {
+  symbol: string;
+  action: "BET_YES" | "BET_NO" | "SKIP";
+  confidence: number;          // 0-100 from makeBotDecision
+  score: number;               // composite: confidence × timingAcc / 100
+  reason: string;              // short human-readable explanation
+  windowKey: string;
+  selected: boolean;           // true for the coin chosen for the bet
+  evaluatedAt: string;         // ISO timestamp
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +126,10 @@ const WARMUP_MS = 45_000;
 let timingCache: Map<string, number | null> = new Map();
 let timingCacheAt = 0;
 const TIMING_CACHE_TTL = 5 * 60_000;
+
+// Last per-coin evaluation from the best-market selection pass in runBotLoopTick.
+// Cleared on each new tick; exposed via getWindowEvaluation() for the dashboard.
+let lastWindowEvaluation: WindowCoinEvaluation[] = [];
 
 function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
@@ -444,6 +462,8 @@ async function _runBotTick(
   }
 
   const id = `${sym}:${windowKey}:${Date.now()}`;
+  // Capture the live coin price at the moment the bet is placed.
+  const cryptoPriceAtEntry = getCachedPrediction(sym)?.price ?? null;
   openPosition = {
     id,
     symbol: sym,
@@ -455,6 +475,7 @@ async function _runBotTick(
     betAmount,
     kalshiTarget,
     openedAt: Date.now(),
+    cryptoPriceAtEntry,
     exitState: makeInitialExitState(fillPrice ?? yesPrice ?? 0.5),
     entryDecision: decision,
     phase2Activated: false,
@@ -471,8 +492,10 @@ async function _runBotTick(
     kalshiTarget,
     contractCount,
     betAmount,
-    // Pass the same id used for openPosition so the exit UPDATE finds this row
-    existingId: id,
+    // Use insertId (not existingId) so persistBetRecord INSERTs this row.
+    // The exit UPDATE will find it later via existingId: pos.id.
+    insertId: id,
+    cryptoPriceAtEntry,
   });
   // Mark this window as having a recorded decision so SKIP dedup works correctly
   lastDecisionWindowKey.set(sym, windowKey);
@@ -573,6 +596,9 @@ async function closePosition(
     ? pnl - (-pos.betAmount)  // how much we recovered vs riding to zero
     : null;
 
+  // Capture the live coin price at the moment the position is closed.
+  const cryptoPriceAtExit = getCachedPrediction(pos.symbol)?.price ?? null;
+
   await persistBetRecord({
     symbol: pos.symbol,
     windowKey: pos.windowKey,
@@ -590,6 +616,7 @@ async function closePosition(
     phase2Activated: pos.phase2Activated,
     phase2RecoveredAmount: phase2RecoveredAmount ?? undefined,
     existingId: pos.id,
+    cryptoPriceAtExit,
   });
 
   logger.info(
@@ -618,12 +645,18 @@ interface BetRecordArgs {
   exitReason?: string;
   phase2Activated?: boolean;
   phase2RecoveredAmount?: number;
+  // insertId: use this specific ID when inserting a new record (e.g. bets, where
+  //   the id must match openPosition.id so the exit UPDATE can find the row).
+  insertId?: string;
+  // existingId: UPDATE the row with this id instead of inserting.
   existingId?: string;
+  cryptoPriceAtEntry?: number | null;
+  cryptoPriceAtExit?: number | null;
 }
 
 async function persistBetRecord(args: BetRecordArgs): Promise<void> {
   try {
-    const id = args.existingId ?? `${args.symbol}:${args.windowKey}:${Date.now()}`;
+    const id = args.existingId ?? args.insertId ?? `${args.symbol}:${args.windowKey}:${Date.now()}`;
     if (args.existingId) {
       // Update existing record (exit/expiry)
       await db
@@ -636,11 +669,12 @@ async function persistBetRecord(args: BetRecordArgs): Promise<void> {
           phase2Activated: args.phase2Activated,
           phase2RecoveredAmount:
             args.phase2RecoveredAmount != null ? String(args.phase2RecoveredAmount) : undefined,
+          cryptoPriceAtExit: args.cryptoPriceAtExit != null ? String(args.cryptoPriceAtExit) : undefined,
           exitedAt: new Date(),
         })
         .where(eq(kalshiBotBetsTable.id, id));
     } else {
-      // Insert new record
+      // Insert new record (bet entry, skip, warmup)
       await db.insert(kalshiBotBetsTable).values({
         id,
         symbol: args.symbol,
@@ -654,6 +688,7 @@ async function persistBetRecord(args: BetRecordArgs): Promise<void> {
         kalshiTarget: String(args.kalshiTarget),
         contractCount: args.contractCount,
         betAmount: args.betAmount != null ? String(args.betAmount) : undefined,
+        cryptoPriceAtEntry: args.cryptoPriceAtEntry != null ? String(args.cryptoPriceAtEntry) : undefined,
         createdAt: new Date(),
       }).onConflictDoNothing();
     }
@@ -676,6 +711,21 @@ export async function getBotHistory(limit = 20): Promise<unknown[]> {
       .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit);
+  } catch {
+    return [];
+  }
+}
+
+// Returns ALL records for the bot dashboard — includes bets (active/closed), skips,
+// and warmup records, ordered newest-first with pagination.
+export async function getBotAllHistory(limit = 100, offset = 0): Promise<unknown[]> {
+  try {
+    return await db
+      .select()
+      .from(kalshiBotBetsTable)
+      .orderBy(desc(kalshiBotBetsTable.createdAt))
+      .limit(limit)
+      .offset(offset);
   } catch {
     return [];
   }
@@ -779,29 +829,119 @@ export async function runBotLoopTick(): Promise<void> {
 
   if (!config.enabled || paused) return;
 
+  // Phase 1: refresh market data for all Kalshi-enabled coins.
   for (const coin of CRYPTO_COINS) {
     if (!KALSHI_SERIES[coin.symbol]) continue;
+    await fetchKalshiTarget(coin.symbol).catch(() => null);
+  }
 
+  // Phase 2: manage exit for the open position (if any), then return.
+  // One position at a time — never enter a new position in the same tick as an exit.
+  if (openPosition !== null) {
+    const sym = openPosition.symbol;
+    const kalshiData = getKalshiCachedData(sym);
+    const prediction = getCachedPrediction(sym);
     try {
-      // Always refresh Kalshi market data for each coin on every tick so the
-      // bot has a fresh yes price, ticker, and target — even for coins the
-      // prediction tracker is not currently fetching.
-      await fetchKalshiTarget(coin.symbol).catch(() => null);
-
-      const prediction = getCachedPrediction(coin.symbol);
-      const kalshiData = getKalshiCachedData(coin.symbol);
-
       await runBotTickForCoin(
-        coin.symbol,
+        sym,
         kalshiData?.ticker ?? null,
         kalshiData?.value ?? null,
         kalshiData?.yesPrice ?? null,
         prediction?.candles ?? [],
       );
     } catch (err) {
-      logger.warn({ err, symbol: coin.symbol }, "[kalshi-bot] loop tick error (non-fatal)");
+      logger.warn({ err, sym }, "[kalshi-bot] exit tick error (non-fatal)");
     }
+    return;
   }
+
+  // Phase 3: best-market selection.
+  // Speculatively evaluate all eligible coins with makeBotDecision to rank
+  // candidates. The highest-scoring coin (confidence × timing accuracy / 100)
+  // gets its full runBotTickForCoin called first so it wins the single
+  // open-position slot. Other coins follow for SKIP record deduplication.
+  const windowKey = currentWindowKey();
+  const evalResults: WindowCoinEvaluation[] = [];
+
+  for (const coin of CRYPTO_COINS) {
+    if (!KALSHI_SERIES[coin.symbol]) continue;
+    const sym = coin.symbol.toUpperCase();
+    const kalshiData = getKalshiCachedData(sym);
+    const winCtx = getKalshiWindowContext(sym);
+    const secondsElapsed = winCtx?.secondsElapsed ?? 0;
+    const minutesElapsed = winCtx?.minutesElapsed ?? 0;
+    const now = new Date().toISOString();
+
+    if (!kalshiData?.ticker || kalshiData.value === null) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now });
+      continue;
+    }
+    if (secondsElapsed < WARMUP_MS / 1_000) {
+      const remaining = Math.ceil(WARMUP_MS / 1_000 - secondsElapsed);
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `warming up (${remaining}s)`, windowKey, selected: false, evaluatedAt: now });
+      continue;
+    }
+    if (secondsElapsed > config.maxEntryMinutes * 60) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "past entry ceiling", windowKey, selected: false, evaluatedAt: now });
+      continue;
+    }
+
+    // Reuse cached timing accuracy to avoid extra DB queries in the hot path.
+    const marks = [1, 3, 6, 9, 12];
+    const elapsedMin = Math.floor(minutesElapsed);
+    const closest = marks.reduce((p, m) => Math.abs(m - elapsedMin) < Math.abs(p - elapsedMin) ? m : p, marks[0]);
+    const timingAcc = timingCache.get(`${sym}:${closest * 60}`) ?? timingCache.get(`ALL:${closest * 60}`) ?? null;
+
+    const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, timingAcc);
+    const score = decision.confidence * ((timingAcc ?? 50) / 100);
+    const rawReason = (decision.signals as Record<string, unknown>)?.reasoning;
+    const reason = typeof rawReason === "string" ? rawReason : decision.action;
+
+    evalResults.push({
+      symbol: sym,
+      action: decision.action as "BET_YES" | "BET_NO" | "SKIP",
+      confidence: decision.confidence,
+      score,
+      reason,
+      windowKey,
+      selected: false,
+      evaluatedAt: now,
+    });
+  }
+
+  // Sort: BET candidates descending by composite score, then SKIP coins.
+  const bets = evalResults.filter(e => e.action !== "SKIP").sort((a, b) => b.score - a.score);
+  const skips = evalResults.filter(e => e.action === "SKIP");
+  if (bets.length > 0) bets[0].selected = true;
+  lastWindowEvaluation = [...bets, ...skips];
+
+  // Phase 4: run ticks in priority order — best BET candidate first.
+  // Once a position is opened, break so only one bet is placed per tick.
+  const orderedSymbols = [...bets.map(e => e.symbol), ...skips.map(e => e.symbol)];
+  for (const sym of orderedSymbols) {
+    const kalshiData = getKalshiCachedData(sym);
+    const prediction = getCachedPrediction(sym);
+    try {
+      await runBotTickForCoin(
+        sym,
+        kalshiData?.ticker ?? null,
+        kalshiData?.value ?? null,
+        kalshiData?.yesPrice ?? null,
+        prediction?.candles ?? [],
+      );
+    } catch (err) {
+      logger.warn({ err, sym }, "[kalshi-bot] loop tick error (non-fatal)");
+    }
+    if (openPosition !== null) break; // bet placed — stop entering more
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Window evaluation accessor (for the bot dashboard)
+// ---------------------------------------------------------------------------
+
+export function getWindowEvaluation(): WindowCoinEvaluation[] {
+  return lastWindowEvaluation;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useUser, useClerk, Show } from "@clerk/react";
-import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, TrendingUp } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, TrendingUp, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -39,6 +39,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { name: "Portfolio", href: "/portfolio", icon: LayoutDashboard },
   ];
 
+  const adminNavigation = [
+    { name: "Bot Dashboard", href: "/bot", icon: Bot },
+  ];
+
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col md:flex-row">
       {/* Sidebar */}
@@ -68,6 +72,30 @@ export function Layout({ children }: { children: React.ReactNode }) {
               </Link>
             );
           })}
+
+          <Show when="signed-in">
+            <div className="pt-2 mt-2 border-t border-border/50">
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground/50 font-semibold px-3 mb-1">Admin</p>
+              {adminNavigation.map((item) => {
+                const Icon = item.icon;
+                const isActive = location === item.href || location.startsWith(`${item.href}/`);
+                return (
+                  <Link key={item.name} href={item.href}>
+                    <span
+                      className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors cursor-pointer ${
+                        isActive
+                          ? "bg-cyan-500/15 text-cyan-400 font-medium"
+                          : "text-cyan-600/70 hover:bg-cyan-500/10 hover:text-cyan-400"
+                      }`}
+                    >
+                      <Icon className="w-5 h-5" />
+                      {item.name}
+                    </span>
+                  </Link>
+                );
+              })}
+            </div>
+          </Show>
         </nav>
 
         {/* Global AI mode toggle — controls all AI spend across the app */}

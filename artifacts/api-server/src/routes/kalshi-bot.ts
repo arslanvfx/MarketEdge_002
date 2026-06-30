@@ -6,7 +6,9 @@ import {
   setBotPaused,
   updateBotConfig,
   getBotHistory,
+  getBotAllHistory,
   getBotStats,
+  getWindowEvaluation,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 
@@ -119,11 +121,24 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
   res.json({ ok: true, config: updated });
 });
 
-// GET /crypto/bot/history?limit=20 (public — read only)
+// GET /crypto/bot/history?limit=20 (public — read only, terminal outcomes only)
 router.get("/crypto/bot/history", async (req, res) => {
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
   try {
     const history = await getBotHistory(limit);
+    res.json({ history });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/all-history?limit=100&offset=0 (public — all records for dashboard)
+router.get("/crypto/bot/all-history", async (req, res) => {
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
+  const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
+  try {
+    const history = await getBotAllHistory(limit, offset);
     res.json({ history });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -139,6 +154,16 @@ router.get("/crypto/bot/stats", async (req, res) => {
   try {
     const stats = await getBotStats(symbol);
     res.json(stats);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/window-eval (public — last market evaluation results)
+router.get("/crypto/bot/window-eval", (_req, res) => {
+  try {
+    res.json({ evaluation: getWindowEvaluation() });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

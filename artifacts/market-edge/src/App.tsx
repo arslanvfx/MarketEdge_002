@@ -14,6 +14,7 @@ import Portfolio from "./pages/portfolio";
 import ComboDetail from "./pages/combo-detail";
 import SmartPicks from "./pages/picks";
 import Predictor from "./pages/predictor";
+import BotDashboard from "./pages/bot-dashboard";
 import { Layout } from "./components/layout";
 import { BuilderProvider } from "./lib/builder-context";
 import { AlertsNotifier } from "./components/alerts-notifier";
@@ -143,6 +144,12 @@ function ClerkProviderWithRoutes() {
             </Route>
             <Route path="/builder">
               <Layout><Builder /></Layout>
+            </Route>
+            <Route path="/bot">
+              <Layout>
+                <Show when="signed-in"><BotDashboard /></Show>
+                <Show when="signed-out"><Redirect to="/sign-in" /></Show>
+              </Layout>
             </Route>
             <Route path="/portfolio">
               <Layout>

@@ -19,6 +19,8 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   phase2RecoveredAmount: numeric("phase2_recovered_amount", { precision: 10, scale: 4 }),
   outcome: text("outcome"),                 // "win" | "loss" | "push" | null
   kalshiTarget: numeric("kalshi_target", { precision: 16, scale: 6 }),
+  cryptoPriceAtEntry: numeric("crypto_price_at_entry", { precision: 16, scale: 2 }),
+  cryptoPriceAtExit: numeric("crypto_price_at_exit", { precision: 16, scale: 2 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   exitedAt: timestamp("exited_at", { withTimezone: true }),
   evaluatedAt: timestamp("evaluated_at", { withTimezone: true }),
