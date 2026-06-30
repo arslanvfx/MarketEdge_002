@@ -2676,20 +2676,36 @@ export default function Predictor() {
           </div>
         )}
 
+        <SelfLearningDashboard
+          analytics={analyticsQuery.data?.analytics ?? []}
+          autoPilot={autoPilot}
+          autoPilotMap={autoPilotMap}
+          trainingCoins={trainingCoinsSet}
+          loading={analyticsQuery.isLoading}
+          onToggleAutoPilot={(enabled) => void handleToggleAutoPilot(enabled)}
+        />
+
+        <TradingWindowsPanel
+          currentEtHour={(() => {
+            const parts = new Intl.DateTimeFormat("en-US", {
+              timeZone: "America/New_York",
+              hour: "numeric",
+              hour12: false,
+            }).formatToParts(now);
+            const raw = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0");
+            return raw === 24 ? 0 : raw;
+          })()}
+        />
+
         {/* ── ENTRY TIMING ANALYSIS ── */}
         {kalshiAvailableTop && (() => {
           const rows = timingAnalysisQuery.data ?? [];
           const rows7d = timingAnalysis7dQuery.data ?? [];
-          // Build a lookup map from minuteMark → 7-day row for easy side-by-side access
           const map7d = new Map(rows7d.map((r) => [r.minuteMark, r]));
-          // Use max sample count across marks as proxy for unique window count.
-          // Each evaluated window contributes exactly 1 snapshot per mark, so the
-          // mark with the highest count = most windows collected for this coin.
           const windowsCollected = rows.length > 0 ? Math.max(...rows.map((r) => r.sampleCount)) : 0;
           const windows7dCollected = rows7d.length > 0 ? Math.max(...rows7d.map((r) => r.sampleCount)) : 0;
           const MIN_WINDOWS = 10;
           const collecting = windowsCollected < MIN_WINDOWS;
-          // Best row = highest positive EV; fallback to highest accuracy when EV unavailable
           const bestByEv = rows.reduce<TimingAnalysisRow | null>(
             (acc, r) => (r.ev !== null && (acc === null || (acc.ev ?? -Infinity) < r.ev) ? r : acc),
             null,
@@ -2699,7 +2715,6 @@ export default function Predictor() {
             null,
           );
           const best = bestByEv ?? bestByAcc;
-          // Has enough 7-day data to show a meaningful comparison?
           const has7d = rows7d.length > 0 && windows7dCollected >= 3;
           if (rows.length === 0 && !timingAnalysisQuery.isLoading) return null;
           return (
@@ -2785,7 +2800,6 @@ export default function Predictor() {
                             const pct7 = acc7 !== null ? Math.round(acc7 * 100) : null;
                             const isPositive7 = acc7 !== null && acc7 >= 0.55;
                             const isNegative7 = acc7 !== null && acc7 < 0.45;
-                            // Trend: difference between 7-day and all-time accuracy
                             const trendDiff = acc7 !== null ? Math.round((acc7 - acc) * 100) : null;
                             const trendUp = trendDiff !== null && trendDiff >= 3;
                             const trendDown = trendDiff !== null && trendDiff <= -3;
@@ -2839,27 +2853,6 @@ export default function Predictor() {
             </div>
           );
         })()}
-
-        <SelfLearningDashboard
-          analytics={analyticsQuery.data?.analytics ?? []}
-          autoPilot={autoPilot}
-          autoPilotMap={autoPilotMap}
-          trainingCoins={trainingCoinsSet}
-          loading={analyticsQuery.isLoading}
-          onToggleAutoPilot={(enabled) => void handleToggleAutoPilot(enabled)}
-        />
-
-        <TradingWindowsPanel
-          currentEtHour={(() => {
-            const parts = new Intl.DateTimeFormat("en-US", {
-              timeZone: "America/New_York",
-              hour: "numeric",
-              hour12: false,
-            }).formatToParts(now);
-            const raw = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0");
-            return raw === 24 ? 0 : raw;
-          })()}
-        />
 
         <PredictionHistory symbol={selected} tz={tz} />
       </div>
