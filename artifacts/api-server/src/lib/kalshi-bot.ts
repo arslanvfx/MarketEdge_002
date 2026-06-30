@@ -1374,17 +1374,28 @@ export async function runBotLoopTick(): Promise<void> {
   if (newWindowKey !== lastStabilityWindowKey) {
     lastStabilityWindowKey = newWindowKey;
     windowStabilityCache.clear();
-    const kCoins = CRYPTO_COINS.filter(c => KALSHI_SERIES[c.symbol]);
-    void Promise.all(
-      kCoins.map(c =>
-        fetchTrendStabilityForBot(c.symbol.toUpperCase(), newWindowKey)
-          .then(r => {
-            if (r) windowStabilityCache.set(c.symbol.toUpperCase(), r.trendStability);
-          })
-          .catch(() => {}),
-      ),
-    );
-    logger.info({ windowKey: newWindowKey, coins: kCoins.map(c => c.symbol) }, "[kalshi-bot] window-open trend stability analysis fired");
+    // Only include coins that already have a valid Kalshi strike + yes price for the
+    // new window. Coins whose market hasn't published yet are excluded — they will be
+    // caught on subsequent ticks once their data arrives.
+    const kCoins = CRYPTO_COINS.filter(c => {
+      if (!KALSHI_SERIES[c.symbol]) return false;
+      const kd = getKalshiCachedData(c.symbol.toUpperCase());
+      return kd?.value != null && kd.yesPrice != null;
+    });
+    if (kCoins.length > 0) {
+      void Promise.all(
+        kCoins.map(c =>
+          fetchTrendStabilityForBot(c.symbol.toUpperCase(), newWindowKey)
+            .then(r => {
+              if (r) windowStabilityCache.set(c.symbol.toUpperCase(), r.trendStability);
+            })
+            .catch(() => {}),
+        ),
+      );
+      logger.info({ windowKey: newWindowKey, coins: kCoins.map(c => c.symbol) }, "[kalshi-bot] window-open trend stability analysis fired");
+    } else {
+      logger.debug({ windowKey: newWindowKey }, "[kalshi-bot] window-open stability skipped — no valid Kalshi data yet");
+    }
   }
 
   // Phase 2: manage exit for the open position (if any), then return.
@@ -1485,7 +1496,23 @@ export async function runBotLoopTick(): Promise<void> {
   // Sort: BET candidates descending by composite score, then SKIP coins.
   const bets = evalResults.filter(e => e.action !== "SKIP").sort((a, b) => b.score - a.score);
   const skips = evalResults.filter(e => e.action === "SKIP");
-  if (bets.length > 0) bets[0].selected = true;
+  if (bets.length > 0) {
+    bets[0].selected = true;
+    const winner = bets[0];
+    const multiplierDesc =
+      winner.trendStability === "clean" ? "×1.2 (clean)" :
+      winner.trendStability === "choppy" ? "×1.0 (choppy)" :
+      winner.trendStability === null ? "×1.0 (pending)" : "×1.0";
+    logger.info({
+      symbol: winner.symbol,
+      action: winner.action,
+      confidence: winner.confidence,
+      score: winner.score.toFixed(2),
+      trendStability: winner.trendStability ?? "pending",
+      multiplier: multiplierDesc,
+      windowKey,
+    }, "[kalshi-bot] best-market selected");
+  }
   lastWindowEvaluation = [...bets, ...skips];
 
   // Phase 4: run ticks in priority order — best BET candidate first.

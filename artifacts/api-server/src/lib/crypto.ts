@@ -3947,6 +3947,7 @@ export interface TrendStabilityResult {
   direction: "up" | "down" | "flat";
   confidence: number;
   trendStability: TrendStability;
+  reasoning: string;   // 2-4 word rationale from Claude
   at: string;
   windowKey: string;
 }
@@ -3997,6 +3998,40 @@ export async function fetchTrendStabilityForBot(
     const dp = price >= 100 ? 2 : price >= 1 ? 4 : 6;
     const ind = analysis.indicators;
 
+    // ── Kalshi yes price (updated by fetchKalshiTarget above) ──────────────
+    const yesPrice = kalshiTargetCache.get(sym)?.yesPrice ?? null;
+
+    // ── Stat-model direction from in-memory history store ──────────────────
+    const statRecords = historyStore.get(sym) ?? [];
+    const statCall = computeStatWindowCall(statRecords, Date.now());
+    const statDir = statCall?.aboveKalshi != null
+      ? (statCall.aboveKalshi ? "above" : "below")
+      : "unknown";
+
+    // ── ML direction + confidence ──────────────────────────────────────────
+    let mlDir = "unknown";
+    let mlConf: number | null = null;
+    const mlStatus = getMLStatus(sym);
+    if (mlStatus.ready && kalshiTargetVal) {
+      try {
+        const winCtx = getKalshiWindowContext(sym);
+        const priceAtOpen = winCtx?.priceAtOpen ?? null;
+        const windowStartMs = new Date(windowKey + ":00Z").getTime();
+        const elapsed = Math.min(
+          !isNaN(windowStartMs) ? (Date.now() - windowStartMs) / (15 * 60_000) : 0,
+          1,
+        );
+        const mlFeatures = extractMLFeatures(analysis, kalshiTargetVal, elapsed, priceAtOpen);
+        const mlResult = getMLPrediction(sym, mlFeatures);
+        if (mlResult.prediction?.above != null) {
+          mlDir = mlResult.prediction.above ? "above" : "below";
+          mlConf = mlResult.prediction.confidence ?? 50;
+        }
+      } catch {
+        // ML unavailable — proceed without it
+      }
+    }
+
     const last15 = candles.slice(-15);
     const closesStr = last15.map((c) => `$${c.c.toFixed(dp)}`).join(" → ");
     const regime =
@@ -4006,10 +4041,15 @@ export async function fetchTrendStabilityForBot(
     if (kalshiTargetVal) {
       const side = price >= kalshiTargetVal ? "ABOVE" : "BELOW";
       const gapPct = (Math.abs(price - kalshiTargetVal) / kalshiTargetVal * 100).toFixed(3);
+      const yesPriceStr = yesPrice != null ? `${Math.round(yesPrice * 100)}¢` : "n/a";
+      const mlStr = mlConf != null
+        ? `ML: ${mlDir} (${mlConf.toFixed(0)}% conf)`
+        : `ML: ${mlDir}`;
       prompt = `${sym} window-open trend analysis — Kalshi strike $${kalshiTargetVal.toFixed(dp)}.
-Now: $${price.toFixed(dp)} — ${gapPct}% ${side} strike.
-Last 15 one-minute closes (oldest→newest): ${closesStr}
+Now: $${price.toFixed(dp)} — ${gapPct}% ${side} strike. Yes price: ${yesPriceStr}.
+Stat model: ${statDir} | ${mlStr}
 ER ${ind.efficiencyRatio.toFixed(2)} (${regime}) | RSI ${ind.rsi.toFixed(0)} | oscillations ${ind.oscillationCount} | net drift ${ind.netDriftPct >= 0 ? "+" : ""}${ind.netDriftPct.toFixed(3)}%
+Last 15 one-minute closes (oldest→newest): ${closesStr}
 
 Classify trend stability from the 15 closes:
   "clean"     = steady directional momentum, low noise
@@ -4017,12 +4057,16 @@ Classify trend stability from the 15 closes:
   "reversing" = clear reversal of prior trend in the most recent candles
 
 Will ${sym} close ABOVE or BELOW $${kalshiTargetVal.toFixed(dp)} at window close?
-JSON only: {"above":true,"confidence":70,"stability":"clean"}`;
+JSON only: {"above":true,"confidence":70,"stability":"clean","reasoning":"momentum up"}`;
     } else {
+      const mlStr = mlConf != null
+        ? `ML: ${mlDir} (${mlConf.toFixed(0)}% conf)`
+        : `ML: ${mlDir}`;
       prompt = `${sym} window-open trend analysis.
 Now: $${price.toFixed(dp)}
-Last 15 one-minute closes (oldest→newest): ${closesStr}
+Stat model: ${statDir} | ${mlStr}
 ER ${ind.efficiencyRatio.toFixed(2)} (${regime}) | RSI ${ind.rsi.toFixed(0)} | oscillations ${ind.oscillationCount} | net drift ${ind.netDriftPct >= 0 ? "+" : ""}${ind.netDriftPct.toFixed(3)}%
+Last 15 one-minute closes (oldest→newest): ${closesStr}
 
 Classify trend stability from the 15 closes:
   "clean"     = steady directional momentum, low noise
@@ -4030,14 +4074,14 @@ Classify trend stability from the 15 closes:
   "reversing" = clear reversal of prior trend in the most recent candles
 
 Will price be higher (up) or lower (down) in 15 min?
-JSON only: {"direction":"up","confidence":65,"stability":"choppy"}`;
+JSON only: {"direction":"up","confidence":65,"stability":"choppy","reasoning":"noisy oscillation"}`;
     }
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 40,
+      max_tokens: 80,
       system:
-        "Return ONLY valid compact JSON. Kalshi format: {\"above\":true,\"confidence\":70,\"stability\":\"clean\"}. Direction format: {\"direction\":\"up\",\"confidence\":65,\"stability\":\"choppy\"}. stability must be one of: clean, choppy, reversing. No markdown, no prose.",
+        "Return ONLY valid compact JSON. Kalshi format: {\"above\":true,\"confidence\":70,\"stability\":\"clean\",\"reasoning\":\"momentum up\"}. Direction format: {\"direction\":\"up\",\"confidence\":65,\"stability\":\"choppy\",\"reasoning\":\"noisy\"}. stability: clean|choppy|reversing. reasoning: 2-4 words. No markdown, no prose.",
       messages: [{ role: "user", content: prompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
@@ -4051,6 +4095,7 @@ JSON only: {"direction":"up","confidence":65,"stability":"choppy"}`;
       direction?: string;
       confidence?: number;
       stability?: string;
+      reasoning?: string;
     };
 
     const confidence = Math.min(90, Math.max(20, parsed.confidence ?? 60));
@@ -4058,6 +4103,7 @@ JSON only: {"direction":"up","confidence":65,"stability":"choppy"}`;
     const trendStability: TrendStability = validStabilities.includes(parsed.stability as TrendStability)
       ? (parsed.stability as TrendStability)
       : "choppy";
+    const reasoning = typeof parsed.reasoning === "string" ? parsed.reasoning : "";
 
     let aboveKalshi: boolean | null = null;
     let direction: "up" | "down" | "flat" = "flat";
@@ -4075,6 +4121,7 @@ JSON only: {"direction":"up","confidence":65,"stability":"choppy"}`;
       direction,
       confidence,
       trendStability,
+      reasoning,
       at: new Date().toISOString(),
       windowKey,
     };
