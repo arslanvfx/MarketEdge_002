@@ -213,7 +213,7 @@ export default function BotDashboard() {
   const { data: autoTuneLogData } = useQuery<{ entries: AutoTuneLogEntry[] }>({
     queryKey: ["bot-auto-tune-log"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/auto-tune-log`).then(r => r.json()),
-    refetchInterval: 5 * 60_000,
+    refetchInterval: 60_000,
   });
 
   // ── Mutations ────────────────────────────────────────────────────────────
@@ -274,6 +274,12 @@ export default function BotDashboard() {
     return "Watching Markets";
   };
 
+  const tuneEntries = autoTuneLogData?.entries ?? [];
+  const tuneCount = tuneEntries.length;
+  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  const recentTuneEntry = tuneEntries.find(e => new Date(e.createdAt).getTime() > oneHourAgo) ?? null;
+  const pausedCoins = perfReportData?.pausedCoins ?? {};
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -317,6 +323,23 @@ export default function BotDashboard() {
               Quiet
             </span>
           )}
+          {recentTuneEntry && (() => {
+            const ruleLabel =
+              recentTuneEntry.ruleName === "confidence_floor_raise" ? "Confidence raised" :
+              recentTuneEntry.ruleName === "per_coin_pause" ? "Coin paused" :
+              recentTuneEntry.ruleName === "quiet_hours_expand" ? "Quiet hrs expanded" :
+              recentTuneEntry.ruleName;
+            const minutesAgo = Math.round((Date.now() - new Date(recentTuneEntry.createdAt).getTime()) / 60000);
+            return (
+              <span
+                className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30 animate-pulse"
+                title={`Auto-tune fired ${minutesAgo}m ago: ${recentTuneEntry.triggerReason}`}
+              >
+                <Sliders className="w-3 h-3" />
+                {ruleLabel} · {minutesAgo}m ago
+              </span>
+            );
+          })()}
           <Button size="sm" variant="outline" onClick={togglePause} className="h-7 gap-1">
             {status?.paused ? <><Play className="w-3 h-3" />Resume</> : <><Pause className="w-3 h-3" />Pause</>}
           </Button>
@@ -355,6 +378,29 @@ export default function BotDashboard() {
             </div>
           ))}
         </div>
+
+        {/* ── Paused Coins Banner ── */}
+        {Object.keys(pausedCoins).length > 0 && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3 flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm flex-shrink-0">
+              <Pause className="w-4 h-4" />
+              Auto-paused coins
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(pausedCoins).map(([sym, windowsRemaining]) => (
+                <span
+                  key={sym}
+                  className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  title={`${sym} is paused by auto-tune for ${windowsRemaining} more window(s)`}
+                >
+                  {sym}
+                  <span className="font-mono text-amber-400/70">· {windowsRemaining}w left</span>
+                </span>
+              ))}
+            </div>
+            <span className="text-[11px] text-amber-400/60 ml-auto hidden sm:block">Auto-tune paused these coins due to underperformance</span>
+          </div>
+        )}
 
         {/* ── Active Position ── */}
         {pos && (
@@ -1162,12 +1208,18 @@ export default function BotDashboard() {
           >
             <Sliders className="w-4 h-4 text-violet-400" />
             <h2 className="font-semibold text-sm">Auto-Tune History</h2>
-            {(autoTuneLogData?.entries?.length ?? 0) > 0 && (
-              <span className="ml-auto text-[10px] text-muted-foreground">
-                {autoTuneLogData!.entries.length} mutations
+            {tuneCount > 0 && (
+              <span className={`inline-flex items-center justify-center text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[20px] ${recentTuneEntry ? "bg-violet-500/30 text-violet-300 border border-violet-500/50" : "bg-muted text-muted-foreground border border-border"}`}>
+                {tuneCount}
               </span>
             )}
-            {tuneLogOpen ? <ChevronUp className="w-4 h-4 ml-1 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 ml-1 text-muted-foreground" />}
+            {recentTuneEntry && (
+              <span className="text-[10px] text-violet-400 font-medium flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-violet-400 inline-block animate-pulse" />
+                last {Math.round((Date.now() - new Date(recentTuneEntry.createdAt).getTime()) / 60000)}m ago
+              </span>
+            )}
+            {tuneLogOpen ? <ChevronUp className="w-4 h-4 ml-auto text-muted-foreground" /> : <ChevronDown className="w-4 h-4 ml-auto text-muted-foreground" />}
           </button>
           {tuneLogOpen && (
             <div className="p-5">
