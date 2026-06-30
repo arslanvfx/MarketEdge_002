@@ -347,6 +347,8 @@ interface BotStateSnapshot {
   paused: boolean;
   config: BotConfig;
   openPosition: BotOpenPosition | null;
+  openPositionCurrentYesPrice: number | null;
+  openPositionUnrealizedPnl: number | null;
   dailyPnl: number;
   dailyLossCount: number;
   dailyDate: string;
@@ -2288,13 +2290,25 @@ function KalshiBotPanel() {
                   <span className="text-xs text-slate-400">
                     {bot.openPosition.contractCount}× @ {(bot.openPosition.entryYesPrice * 100).toFixed(0)}¢
                   </span>
+                  {bot.openPositionCurrentYesPrice != null && (
+                    <span className="text-xs text-slate-400">
+                      → <span className="text-slate-200">{(bot.openPositionCurrentYesPrice * 100).toFixed(0)}¢</span>
+                    </span>
+                  )}
                 </div>
-                <span className="text-xs text-slate-400">
-                  {bot.lastGuardStates?.phase2Active
-                    ? <span className="text-orange-400 font-semibold">⚠ Phase 2 — Recovery Mode</span>
-                    : <span className="text-slate-400">Phase 1 — Mid-window</span>
-                  }
-                </span>
+                <div className="flex items-center gap-2">
+                  {bot.openPositionUnrealizedPnl != null && (
+                    <span className={`text-xs font-semibold ${bot.openPositionUnrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {bot.openPositionUnrealizedPnl >= 0 ? "+" : ""}${bot.openPositionUnrealizedPnl.toFixed(2)} unrlzd
+                    </span>
+                  )}
+                  <span className="text-xs text-slate-400">
+                    {bot.lastGuardStates?.phase2Active
+                      ? <span className="text-orange-400 font-semibold">⚠ Phase 2 — Recovery Mode</span>
+                      : <span className="text-slate-400">Phase 1 — Mid-window</span>
+                    }
+                  </span>
+                </div>
               </div>
               {bot.lastGuardReason && (
                 <p className="text-[10px] text-slate-400 italic">{bot.lastGuardReason}</p>

@@ -62,6 +62,8 @@ export interface BotStateSnapshot {
   paused: boolean;
   config: BotConfig;
   openPosition: OpenPosition | null;
+  openPositionCurrentYesPrice: number | null; // live market price for the open position
+  openPositionUnrealizedPnl: number | null;   // estimated P&L at current mark
   dailyPnl: number;
   dailyLossCount: number;
   dailyDate: string;        // YYYY-MM-DD in UTC
@@ -118,6 +120,21 @@ export function getBotState(): BotStateSnapshot {
     ? "position_open"
     : "idle";
 
+  // Compute unrealized P&L for open position using live Kalshi yes-price
+  let openPositionCurrentYesPrice: number | null = null;
+  let openPositionUnrealizedPnl: number | null = null;
+  if (openPosition !== null) {
+    const liveKalshi = getKalshiCachedData(openPosition.symbol);
+    if (liveKalshi?.yesPrice != null) {
+      openPositionCurrentYesPrice = liveKalshi.yesPrice;
+      // YES bet: profits when yesPrice rises; NO bet: profits when yesPrice falls
+      const priceDelta = openPosition.direction === "yes"
+        ? liveKalshi.yesPrice - openPosition.entryYesPrice
+        : openPosition.entryYesPrice - liveKalshi.yesPrice;
+      openPositionUnrealizedPnl = priceDelta * openPosition.contractCount;
+    }
+  }
+
   return {
     mode: botMode,
     status,
@@ -129,6 +146,8 @@ export function getBotState(): BotStateSnapshot {
           exitState: openPosition.exitState, // reference — callers should not mutate
         }
       : null,
+    openPositionCurrentYesPrice,
+    openPositionUnrealizedPnl,
     dailyPnl,
     dailyLossCount,
     dailyDate,
@@ -415,7 +434,10 @@ async function closePosition(
         : await sellNo(pos.ticker, pos.contractCount);
       fillPrice = result.avgPrice ?? currentYesPrice;
     } catch (err) {
-      logger.error({ err, sym: pos.symbol }, "[kalshi-bot] exit order failed");
+      logger.error({ err, sym: pos.symbol }, "[kalshi-bot] exit order failed — position remains OPEN; will retry next tick");
+      // Do NOT proceed: openPosition stays live so the next tick retries the exit.
+      // Throwing here prevents the caller from clearing openPosition.
+      throw err;
     }
   }
 
@@ -439,15 +461,23 @@ async function closePosition(
       const priceAboveStrike = lastCoinPrice >= strike;
       const won = pos.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
       if (won) {
-        // Win: each YES contract pays $1, we paid entryYesPrice per contract
-        pnl = (1 - pos.entryYesPrice) * pos.contractCount;
+        // YES win: receive $1, paid yesPrice → profit = (1 - entryYesPrice) × count
+        // NO  win: receive $1, paid (1-yesPrice) → profit = entryYesPrice × count
+        pnl = pos.direction === "yes"
+          ? (1 - pos.entryYesPrice) * pos.contractCount
+          : pos.entryYesPrice * pos.contractCount;
       } else {
-        // Loss: contract expires worthless
-        pnl = -pos.entryYesPrice * pos.contractCount;
+        // YES loss: paid yesPrice, receives $0 → loss = -entryYesPrice × count
+        // NO  loss: paid (1-yesPrice), receives $0 → loss = -(1-entryYesPrice) × count
+        pnl = pos.direction === "yes"
+          ? -pos.entryYesPrice * pos.contractCount
+          : -(1 - pos.entryYesPrice) * pos.contractCount;
       }
     } else {
       // No price data — book conservatively as full loss
-      pnl = -pos.betAmount;
+      pnl = pos.direction === "yes"
+        ? -pos.entryYesPrice * pos.contractCount
+        : -(1 - pos.entryYesPrice) * pos.contractCount;
     }
   }
 
@@ -562,9 +592,12 @@ async function persistBetRecord(args: BetRecordArgs): Promise<void> {
 
 export async function getBotHistory(limit = 20): Promise<unknown[]> {
   try {
+    // Only return terminal outcomes for the recent table — bet entries and
+    // intermediate marks (e.g. exit_failed) are excluded for fidelity.
     return await db
       .select()
       .from(kalshiBotBetsTable)
+      .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit);
   } catch {
