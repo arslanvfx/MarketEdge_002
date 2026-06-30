@@ -2907,10 +2907,17 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                 if (!timingSnapshotWritten.has(timingKey)) {
                   timingSnapshotWritten.add(timingKey);
                   getTicker(coin.product)
-                    .then((livePrice) => {
+                    .then(async (livePrice) => {
                       // direction: strict `>` per spec (exact-strike = BELOW)
                       const priceAbove = livePrice > kt;
-                      // Pull the cached Kalshi yes price (set by fetchKalshiTarget).
+                      // Refresh the Kalshi yes price. fetchKalshiTarget (no targetTime)
+                      // uses the 12-second shared cache so it only hits the API when
+                      // the cached entry is stale — which is the common case here
+                      // because timing marks fire independently of the snap flow that
+                      // normally populates the cache.
+                      if (KALSHI_SERIES[sym]) {
+                        await fetchKalshiTarget(sym).catch(() => null);
+                      }
                       const cachedKalshi = kalshiTargetCache.get(sym);
                       const yesPrice = cachedKalshi?.yesPrice != null
                         ? String(cachedKalshi.yesPrice)
