@@ -790,7 +790,14 @@ async function fetchWindowClosePrice(product: string, windowKey: string): Promis
  * Rows that cannot be resolved this cycle (missing price data, Coinbase error,
  * etc.) are skipped and retried on the next 30-second tick.
  */
+// How long to wait before committing the full-loss fallback for expired rows
+// where closePosition() had no cached coin price.  Gives the Coinbase candle
+// time to finalise and the local prediction cache time to repopulate.
+const EVAL_DEFER_MS = 5 * 60_000; // 5 minutes
+
 export async function evalClosedBets(): Promise<void> {
+  const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
+
   try {
     const rows = await db
       .select({
@@ -803,6 +810,8 @@ export async function evalClosedBets(): Promise<void> {
         kalshiTarget: kalshiBotBetsTable.kalshiTarget,
         contractCount: kalshiBotBetsTable.contractCount,
         entryPrice: kalshiBotBetsTable.entryPrice,
+        exitedAt: kalshiBotBetsTable.exitedAt,
+        cryptoPriceAtExit: kalshiBotBetsTable.cryptoPriceAtExit,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -831,9 +840,48 @@ export async function evalClosedBets(): Promise<void> {
         const count = row.contractCount ?? 1;
         if (strike == null || entryPrice == null) continue;
 
+        // Detect rows where closePosition() had no cached coin price and fell
+        // back to a full-loss estimate (cryptoPriceAtExit === null for expired).
+        // These are ambiguous: the bot might actually have won.
+        const noCoinPriceAtExit = row.cryptoPriceAtExit == null;
+        const exitedAt = row.exitedAt instanceof Date
+          ? row.exitedAt
+          : row.exitedAt != null ? new Date(row.exitedAt as string) : null;
+        const pastDeferWindow = exitedAt == null || exitedAt <= deferCutoff;
+
+        if (noCoinPriceAtExit && !pastDeferWindow) {
+          // Still within the 5-minute deferral — wait for the candle to finalise
+          // and the prediction cache to repopulate before committing.
+          logger.debug(
+            { sym: row.symbol, id: row.id, exitedAt },
+            "[kalshi-bot] evalClosedBets: deferring ambiguous expiry row (within 5-min window)",
+          );
+          continue;
+        }
+
         const closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
         if (closePrice === null) {
-          // Coinbase unavailable — retry next cycle
+          if (noCoinPriceAtExit && pastDeferWindow) {
+            // Past the deferral window and Coinbase is still unavailable.
+            // Commit the full-loss fallback recorded by closePosition() so
+            // the row doesn't stay unevaluated forever.  Log a warning so
+            // the operator knows this outcome may be inaccurate.
+            const fallbackPnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
+            if (fallbackPnl == null) continue;
+            const fallbackOutcome: "win" | "loss" | "push" =
+              fallbackPnl > 0 ? "win" : fallbackPnl < 0 ? "loss" : "push";
+            logger.warn(
+              { sym: row.symbol, id: row.id, windowKey: row.windowKey, pnl: fallbackPnl },
+              "[kalshi-bot] evalClosedBets: committing full-loss fallback — Coinbase unavailable after 5-min deferral; outcome may be inaccurate",
+            );
+            await db
+              .update(kalshiBotBetsTable)
+              .set({ outcome: fallbackOutcome, evaluatedAt: new Date() })
+              .where(eq(kalshiBotBetsTable.id, row.id));
+            evaluated++;
+            continue;
+          }
+          // Coinbase unavailable but row is not ambiguous (or still in defer window) — retry next cycle.
           logger.debug({ sym: row.symbol, id: row.id }, "[kalshi-bot] evalClosedBets: Coinbase unavailable, will retry");
           continue;
         }
@@ -842,7 +890,7 @@ export async function evalClosedBets(): Promise<void> {
         const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
         outcome = won ? "win" : "loss";
 
-        // Recompute pnl from settlement: winning contract pays $1, losing pays $0
+        // Recompute pnl from actual settlement: winning contract pays $1, losing $0
         if (won) {
           correctedPnl = row.direction === "yes"
             ? (1 - entryPrice) * count   // YES win: received $1, paid entryYesPrice
