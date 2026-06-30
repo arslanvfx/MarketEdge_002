@@ -99,9 +99,10 @@ let lastGuardReason: string | null = null;
 // Prevents duplicate SKIP records across successive 30s ticks within the same window.
 const lastDecisionWindowKey: Map<string, string> = new Map();
 
-// Tracks the last window for which the eager Claude prefetch was fired per symbol.
-// Prevents re-firing the prefetch on every tick of the same window.
-const prefetchedWindowKey: Map<string, string> = new Map();
+// Tracks the last Kalshi ticker for which the eager Claude prefetch was fired, keyed
+// by symbol.  Fires when a *new ticker* first appears (true ticker transition), not at
+// local window-key rollover — so the prefetch is not wasted on a stale market.
+const prefetchedTicker: Map<string, string> = new Map();
 
 // Warmup duration (ms) at the start of each window before the bot can enter.
 // 45s allows the Kalshi market to stabilise and the Claude opening call to complete.
@@ -360,10 +361,11 @@ async function _runBotTick(
   if (secondsElapsed > config.maxEntryMinutes * 60) return;
   if (!kalshiTicker || kalshiTarget === null) return;
 
-  // Eager Claude prefetch: fire once per (symbol, window) as soon as the bot
-  // detects the new window, so the analysis is warm by the time warmup ends.
-  if (prefetchedWindowKey.get(sym) !== windowKey) {
-    prefetchedWindowKey.set(sym, windowKey);
+  // Eager Claude prefetch: fire when a *new Kalshi ticker* is first seen per symbol.
+  // Keyed on the actual ticker string (not the local window key) so we don't prefetch
+  // against a stale market if the new ticker hasn't published yet at window rollover.
+  if (prefetchedTicker.get(sym) !== kalshiTicker) {
+    prefetchedTicker.set(sym, kalshiTicker);
     fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget
   }
 
