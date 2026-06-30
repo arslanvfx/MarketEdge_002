@@ -54,6 +54,7 @@ export interface BotConfig {
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
   maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 5)
+  maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
 }
 
@@ -69,6 +70,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // 5-min ceiling = signals get noisier as the window ages.
   // Hard floor: entry is never allowed if fewer than 4 minutes remain (see kalshi-bot.ts).
   maxEntryMinutes: 5,
+  // Allow up to 3 re-entries per window.  Each entry is independent — the bot
+  // exits, re-evaluates, and re-enters only when signals still agree.  Raise to
+  // 4-5 for more aggressive testing; set to 1 to revert to the old one-per-window
+  // behaviour.
+  maxBetsPerWindow: 3,
   enabled: true,
 };
 

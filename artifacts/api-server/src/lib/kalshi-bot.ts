@@ -22,7 +22,7 @@ import {
   type ExitState,
   type GuardStates,
 } from "./kalshi-bot-exit";
-import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured } from "./kalshi-trader";
+import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry } from "./kalshi-trader";
 import {
   getKalshiWindowContext,
   getTimingAnalysis,
@@ -121,6 +121,11 @@ const lastDecisionWindowKey: Map<string, string> = new Map();
 // by symbol.  Fires when a *new ticker* first appears (true ticker transition), not at
 // local window-key rollover — so the prefetch is not wasted on a stale market.
 const prefetchedTicker: Map<string, string> = new Map();
+
+// Tracks how many bets have been placed per (symbol, windowKey) in the current window.
+// Key format: "${sym}:${windowKey}".  Bounded by config.maxBetsPerWindow.
+// Old entries are purged lazily when a new window key is seen for a symbol.
+const windowBetCounts: Map<string, number> = new Map();
 
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
 // was fired. Reset on window transition so each window gets exactly one batch call.
@@ -587,6 +592,20 @@ async function _runBotTick(
 
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
 
+  // Multi-bet guard: purge stale window entries then check the per-window cap.
+  // Purge any entry for this symbol that belongs to an older window key.
+  for (const [k] of windowBetCounts) {
+    if (k.startsWith(`${sym}:`) && k !== `${sym}:${windowKey}`) {
+      windowBetCounts.delete(k);
+    }
+  }
+  const windowBetKey = `${sym}:${windowKey}`;
+  const betsThisWindow = windowBetCounts.get(windowBetKey) ?? 0;
+  if (betsThisWindow >= config.maxBetsPerWindow) {
+    logger.debug({ sym, betsThisWindow, max: config.maxBetsPerWindow }, "[kalshi-bot] maxBetsPerWindow reached — skipping entry");
+    return;
+  }
+
   // Hard ceiling: precise seconds check so the limit is exact.
   // e.g. maxEntryMinutes=5 → no entry after t+5:00, not t+5:59.
   if (secondsElapsed > config.maxEntryMinutes * 60) return;
@@ -672,9 +691,17 @@ async function _runBotTick(
 
   if (botMode === "live") {
     try {
-      const result = direction === "yes"
-        ? await buyYes(kalshiTicker, contractCount)
-        : await buyNo(kalshiTicker, contractCount);
+      const result = await placeOrderWithRetry({
+        ticker: kalshiTicker,
+        side: direction,
+        action: "buy",
+        count: contractCount,
+        type: "market",
+      });
+      if (result.filledCount === 0) {
+        logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] order not filled after retries — skipping entry");
+        return;
+      }
       fillPrice = result.avgPrice ?? yesPrice;
       orderId = result.orderId;
     } catch (err) {
@@ -721,8 +748,10 @@ async function _runBotTick(
   });
   // Mark this window as having a recorded decision so SKIP dedup works correctly
   lastDecisionWindowKey.set(sym, windowKey);
+  // Increment the per-window bet counter so subsequent ticks respect maxBetsPerWindow.
+  windowBetCounts.set(windowBetKey, betsThisWindow + 1);
 
-  logger.info({ sym, direction, fillPrice, contractCount }, "[kalshi-bot] bet placed");
+  logger.info({ sym, direction, fillPrice, contractCount, betsThisWindow: betsThisWindow + 1 }, "[kalshi-bot] bet placed");
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,15 +1168,22 @@ export async function evalClosedBets(): Promise<void> {
         outcome = pnl > 0 ? "win" : pnl < 0 ? "loss" : "push";
       }
 
+      // Merge closePrice into the signals JSONB so the dashboard can display it
+      // without needing a separate column or an extra API call.
+      const updatedSignals = {
+        ...(row.signals as Record<string, unknown> ?? {}),
+        ...(closePrice != null ? { closePriceAtEval: closePrice } : {}),
+      };
+
       if (correctedPnl !== null) {
         await db
           .update(kalshiBotBetsTable)
-          .set({ outcome, pnl: String(correctedPnl), evaluatedAt: new Date() })
+          .set({ outcome, pnl: String(correctedPnl), evaluatedAt: new Date(), signals: updatedSignals })
           .where(eq(kalshiBotBetsTable.id, row.id));
       } else {
         await db
           .update(kalshiBotBetsTable)
-          .set({ outcome, evaluatedAt: new Date() })
+          .set({ outcome, evaluatedAt: new Date(), signals: updatedSignals })
           .where(eq(kalshiBotBetsTable.id, row.id));
       }
 

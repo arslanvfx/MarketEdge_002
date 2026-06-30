@@ -159,6 +159,77 @@ export async function cancelOrder(orderId: string): Promise<void> {
   await kalshiFetch("DELETE", `/portfolio/orders/${orderId}`);
 }
 
+// Fetch current fill status for an existing order.
+export async function getOrder(
+  orderId: string,
+  side: "yes" | "no",
+): Promise<{ filledCount: number; status: string; avgPrice: number | null }> {
+  if (!getApiKey()) throw new Error("KALSHI_API_KEY not configured");
+  const data = await kalshiFetch<{
+    order?: {
+      status?: string;
+      yes_count?: number;
+      no_count?: number;
+      avg_price?: number;
+    };
+  }>("GET", `/portfolio/orders/${orderId}`);
+  const o = data.order ?? {};
+  const filled = side === "yes" ? (o.yes_count ?? 0) : (o.no_count ?? 0);
+  return {
+    filledCount: filled,
+    status: o.status ?? "unknown",
+    avgPrice: o.avg_price != null ? o.avg_price / 100 : null,
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Place an order and retry up to maxRetries times if it doesn't fill.
+// Between each attempt: waits retryDelayMs, polls the order for a late fill,
+// cancels it if still empty, then places a fresh order.  Prevents duplicate
+// open orders by always cancelling the previous attempt before retrying.
+export async function placeOrderWithRetry(
+  params: PlaceOrderParams,
+  maxRetries = 3,
+  retryDelayMs = 1_500,
+): Promise<PlaceOrderResult> {
+  let lastResult: PlaceOrderResult = { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null };
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    lastResult = await placeOrder(params);
+
+    if (lastResult.filledCount > 0) {
+      return lastResult; // filled on first try (most common case)
+    }
+
+    // Not filled — wait to give Kalshi time to match the order.
+    await sleep(retryDelayMs);
+
+    // Poll for a late fill before cancelling.
+    if (lastResult.orderId) {
+      try {
+        const current = await getOrder(lastResult.orderId, params.side);
+        if (current.filledCount > 0) {
+          return { ...lastResult, filledCount: current.filledCount, avgPrice: current.avgPrice };
+        }
+        // Still unfilled — cancel so we don't hold a resting order.
+        await cancelOrder(lastResult.orderId).catch(() => {});
+      } catch {
+        // Ignore status-check errors; fall through to retry.
+      }
+    }
+
+    if (attempt < maxRetries - 1) {
+      // Brief extra pause before the next attempt to avoid hammering the API.
+      await sleep(500);
+    }
+  }
+
+  return lastResult;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

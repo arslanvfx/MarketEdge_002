@@ -21,6 +21,7 @@ interface BotConfig {
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number;
   maxEntryMinutes: number;
+  maxBetsPerWindow: number;
   enabled: boolean;
 }
 
@@ -493,6 +494,18 @@ export default function BotDashboard() {
                   </select>
                 </label>
 
+                {/* Max Bets Per Window */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max Bets / Window</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxBetsPerWindow ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxBetsPerWindow: parseInt(e.target.value) }))}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n} bet{n > 1 ? "s" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
                 {/* Master Enable */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Bot Master Switch</span>
@@ -566,7 +579,7 @@ export default function BotDashboard() {
           <div className="px-5 py-3 border-b border-border flex items-center gap-2">
             <Clock className="w-4 h-4 text-muted-foreground" />
             <h2 className="font-semibold text-sm">Transaction History</h2>
-            <span className="ml-auto text-xs text-muted-foreground">{bets.length} records</span>
+            <span className="ml-auto text-xs text-muted-foreground">{bets.length} record{bets.length !== 1 ? "s" : ""}</span>
           </div>
 
           {bets.length === 0 ? (
@@ -575,75 +588,143 @@ export default function BotDashboard() {
               <p className="text-sm text-muted-foreground">No bets placed yet. The bot is watching the markets.</p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="text-xs whitespace-nowrap">
-                <thead>
-                  <tr className="text-left text-[10px] uppercase tracking-wide text-muted-foreground bg-muted/30 border-b border-border">
-                    {[
-                      "Entry Time", "Coin", "Mode", "Status", "Dir",
-                      "Yes% @Entry", "No% @Entry", "Strike Price",
-                      "Crypto @Entry", "Crypto @Exit",
-                      "Contracts", "Bet ($)", "Exit Yes%", "P&L",
-                      "Duration", "Exit Reason", "Outcome",
-                    ].map(h => (
-                      <th key={h} className="px-3 py-2.5 font-semibold">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {bets.map((r) => {
-                    const pnlNum = r.pnl != null ? parseFloat(r.pnl) : null;
-                    const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
-                    const xp = r.exitPrice != null ? parseFloat(r.exitPrice) : null;
-                    const isOpen = r.action === "bet";
-                    const isWin = r.outcome === "win";
-                    const isLoss = r.outcome === "loss";
-                    return (
-                      <tr key={r.id} className={`border-b border-border/40 hover:bg-muted/20 ${isOpen ? "bg-sky-950/20" : ""}`}>
-                        <td className="px-3 py-2">{fmtDateTime(r.createdAt)}</td>
-                        <td className="px-3 py-2 font-bold">{r.symbol}</td>
-                        <td className="px-3 py-2">
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
-                            {r.mode?.toUpperCase()}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2">
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${isOpen ? "bg-sky-500/15 text-sky-400" : "bg-muted text-muted-foreground"}`}>
-                            {isOpen ? "ACTIVE" : r.action.replace(/_/g, " ").toUpperCase()}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2">
-                          {r.direction ? (
-                            <span className={`flex items-center gap-0.5 font-bold ${r.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
-                              {r.direction === "yes" ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-                              {r.direction.toUpperCase()}
-                            </span>
-                          ) : <span className="text-muted-foreground">—</span>}
-                        </td>
-                        <td className="px-3 py-2 font-mono">{ep != null ? `${(ep * 100).toFixed(0)}¢` : "—"}</td>
-                        <td className="px-3 py-2 font-mono">{ep != null ? `${((1 - ep) * 100).toFixed(0)}¢` : "—"}</td>
-                        <td className="px-3 py-2 font-mono">{fmtCrypto(r.kalshiTarget)}</td>
-                        <td className="px-3 py-2 font-mono">{fmtCrypto(r.cryptoPriceAtEntry)}</td>
-                        <td className="px-3 py-2 font-mono">{fmtCrypto(r.cryptoPriceAtExit)}</td>
-                        <td className="px-3 py-2 text-center">{r.contractCount ?? "—"}</td>
-                        <td className="px-3 py-2 font-mono">{fmt$(r.betAmount)}</td>
-                        <td className="px-3 py-2 font-mono">{xp != null ? `${(xp * 100).toFixed(0)}¢` : "—"}</td>
-                        <td className={`px-3 py-2 font-bold font-mono ${pnlNum == null ? "" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+            <div className="p-4 space-y-3">
+              {bets.map((r) => {
+                const pnlNum = r.pnl != null ? parseFloat(r.pnl) : null;
+                const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
+                const xp = r.exitPrice != null ? parseFloat(r.exitPrice) : null;
+                const isOpen = r.action === "bet";
+                const isWin = r.outcome === "win";
+                const isLoss = r.outcome === "loss";
+                const closePx = (r.signals as Record<string, unknown> | null)?.closePriceAtEval as number | null ?? null;
+                const endPx = closePx ?? (r.cryptoPriceAtExit != null ? parseFloat(r.cryptoPriceAtExit) : null);
+                const strike = r.kalshiTarget != null ? parseFloat(r.kalshiTarget) : null;
+                const endAboveStrike = endPx != null && strike != null ? endPx >= strike : null;
+
+                const cardBg = isOpen
+                  ? "border-sky-500/30 bg-sky-950/10"
+                  : isWin
+                    ? "border-emerald-500/30 bg-emerald-950/10"
+                    : isLoss
+                      ? "border-red-500/30 bg-red-950/10"
+                      : "border-border bg-card/60";
+
+                return (
+                  <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
+                    {/* Card header */}
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                      <span className="text-base font-black tracking-tight text-foreground">{r.symbol}</span>
+
+                      {r.direction && (
+                        <span className={`flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${r.direction === "yes" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
+                          {r.direction === "yes" ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                          {r.direction.toUpperCase()}
+                        </span>
+                      )}
+
+                      {isOpen ? (
+                        <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 animate-pulse">
+                          <Activity className="w-3 h-3" /> ACTIVE
+                        </span>
+                      ) : isWin ? (
+                        <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
+                          <Trophy className="w-3 h-3" /> WIN
+                        </span>
+                      ) : isLoss ? (
+                        <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-300">
+                          <XCircle className="w-3 h-3" /> LOSS
+                        </span>
+                      ) : (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                          {r.action.replace(/_/g, " ").toUpperCase()}
+                        </span>
+                      )}
+
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
+                        {r.mode?.toUpperCase()}
+                      </span>
+
+                      <span className="ml-auto text-xs text-muted-foreground">{fmtDateTime(r.createdAt)}</span>
+                    </div>
+
+                    {/* Key metrics grid */}
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
+                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Strike</div>
+                        <div className="text-xs font-semibold font-mono">{fmtCrypto(r.kalshiTarget)}</div>
+                      </div>
+
+                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">
+                          {closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
+                        </div>
+                        <div className="text-xs font-semibold font-mono flex items-center gap-1">
+                          {endPx != null ? (
+                            <>
+                              {fmtCrypto(endPx)}
+                              {endAboveStrike !== null && (
+                                <span className={endAboveStrike ? "text-emerald-400" : "text-red-400"}>
+                                  {endAboveStrike ? <ArrowUp className="w-3 h-3 inline" /> : <ArrowDown className="w-3 h-3 inline" />}
+                                </span>
+                              )}
+                            </>
+                          ) : "—"}
+                        </div>
+                        {closePx == null && endPx != null && (
+                          <div className="text-[9px] text-muted-foreground mt-0.5">at exit</div>
+                        )}
+                      </div>
+
+                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Entry</div>
+                        <div className="text-xs font-mono">
+                          {ep != null ? (
+                            <span>{(ep * 100).toFixed(0)}¢ YES · {((1 - ep) * 100).toFixed(0)}¢ NO</span>
+                          ) : "—"}
+                        </div>
+                      </div>
+
+                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Exit</div>
+                        <div className="text-xs font-mono">
+                          {xp != null ? `${(xp * 100).toFixed(0)}¢ YES` : isOpen ? <span className="text-sky-400 text-[9px]">in play…</span> : "—"}
+                        </div>
+                      </div>
+
+                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Size</div>
+                        <div className="text-xs font-semibold">{r.contractCount ?? "—"} × {fmt$(r.betAmount)}</div>
+                      </div>
+
+                      <div className={`rounded-lg p-2.5 col-span-1 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">P&L</div>
+                        <div className={`text-sm font-bold font-mono ${pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
-                        </td>
-                        <td className="px-3 py-2 text-muted-foreground">{fmtDuration(r.createdAt, r.exitedAt)}</td>
-                        <td className="px-3 py-2 text-muted-foreground max-w-[160px] truncate" title={r.exitReason ?? ""}>{r.exitReason ?? "—"}</td>
-                        <td className="px-3 py-2">
-                          {isWin ? <span className="flex items-center gap-0.5 text-emerald-400 font-bold"><Trophy className="w-3 h-3" />WIN</span>
-                            : isLoss ? <span className="flex items-center gap-0.5 text-red-400 font-bold"><XCircle className="w-3 h-3" />LOSS</span>
-                            : isOpen ? <span className="text-sky-400">Open</span>
-                            : <span className="text-muted-foreground">—</span>}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Footer row */}
+                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">
+                      {!isOpen && (
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {fmtDuration(r.createdAt, r.exitedAt)}
+                        </span>
+                      )}
+                      <span className="font-mono">{r.windowKey?.slice(11, 16)} window</span>
+                      {r.exitReason && (
+                        <span className="truncate max-w-[200px]" title={r.exitReason}>
+                          · {r.exitReason.replace(/_/g, " ")}
+                        </span>
+                      )}
+                      {r.phase2Activated && (
+                        <span className="text-amber-400 font-medium">· Phase 2</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

@@ -82,6 +82,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     midExitSensitivity,
     phase2ThresholdPp,
     maxEntryMinutes,
+    maxBetsPerWindow,
     enabled,
   } = req.body as {
     betSize?: number;
@@ -91,6 +92,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     midExitSensitivity?: "conservative" | "balanced" | "aggressive";
     phase2ThresholdPp?: number;
     maxEntryMinutes?: number;
+    maxBetsPerWindow?: number;
     enabled?: boolean;
   };
 
@@ -115,6 +117,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof maxEntryMinutes === "number" && maxEntryMinutes >= 1 && maxEntryMinutes <= 7) {
     partial.maxEntryMinutes = maxEntryMinutes;
+  }
+  if (typeof maxBetsPerWindow === "number" && maxBetsPerWindow >= 1 && maxBetsPerWindow <= 10) {
+    partial.maxBetsPerWindow = maxBetsPerWindow;
   }
   if (typeof enabled === "boolean") partial.enabled = enabled;
 
