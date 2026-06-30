@@ -640,13 +640,34 @@ async function _runBotTick(
       await closePosition(openPosition, yesPrice, kalshiTarget, "window_expired");
       openPosition = null;
     } else {
+      // Use last known yes-price as fallback when the live cache returns null.
+      // lastYesPrice is seeded from entryPrice and updated each tick where yesPrice
+      // is non-null, so this prevents the exit guard from running blind on a stale cache miss.
+      const effectiveYesPrice = yesPrice ?? openPosition.exitState.phase1.lastYesPrice;
+
+      // Verbose per-tick diagnostics so Phase-2 / exit-guard decisions are observable in logs.
+      const rawMovePp = effectiveYesPrice !== null
+        ? (openPosition.direction === "yes"
+            ? (openPosition.entryYesPrice - effectiveYesPrice) * 100
+            : (effectiveYesPrice - openPosition.entryYesPrice) * 100)
+        : null;
+      logger.debug({
+        sym,
+        currentYesPrice: effectiveYesPrice,
+        entryYesPrice: openPosition.entryYesPrice,
+        movePp: rawMovePp?.toFixed(2),
+        phase2ThresholdPp: config.phase2ThresholdPp,
+        minutesElapsed,
+        direction: openPosition.direction,
+      }, "[kalshi-bot] exit-tick price check");
+
       // Run exit guard for the current position
       const timingAcc = await getTimingAccuracy(sym, minutesElapsed);
       const guard = runExitGuard(
         sym,
         openPosition.direction,
         minutesElapsed,
-        yesPrice,
+        effectiveYesPrice,
         openPosition.exitState,
         timingAcc,
         erValue,
@@ -659,19 +680,65 @@ async function _runBotTick(
 
       if (guard.guardStates.phase2Active && !openPosition.phase2Activated) {
         openPosition.phase2Activated = true;
-        logger.info({ sym, reason: guard.reason }, "[kalshi-bot] Phase 2 activated");
+        logger.info(
+          {
+            sym,
+            yesPrice: effectiveYesPrice,
+            entryYesPrice: openPosition.entryYesPrice,
+            movePp: rawMovePp?.toFixed(2),
+          },
+          "[kalshi-bot] phase2 activated for position",
+        );
       }
+
+      logger.debug({
+        sym,
+        recommendation: guard.recommendation,
+        guardReason: guard.reason,
+        phase2Active: guard.guardStates.phase2Active,
+        flipConfirmed: guard.guardStates.flipConfirmed,
+        magnitudeOk: guard.guardStates.magnitudeOk,
+        consensusOk: guard.guardStates.consensusOk,
+        erOk: guard.guardStates.erOk,
+        holdDurationOk: guard.guardStates.holdDurationOk,
+      }, "[kalshi-bot] exit-guard result");
 
       if (guard.recommendation === "EXIT") {
         const isLateRecovery = guard.phase === 2;
-        await closePosition(
-          openPosition,
-          yesPrice,
-          kalshiTarget,
-          guard.reason,
-          isLateRecovery,
-        );
+        const exitReason = guard.phase === 2 ? "mid_exit_phase2" : "mid_exit_phase1";
+        logger.info({ sym, exitReason, guardReason: guard.reason }, "[kalshi-bot] mid-exit triggered");
+        await closePosition(openPosition, effectiveYesPrice, kalshiTarget, exitReason, isLateRecovery);
         openPosition = null;
+      }
+
+      // Guaranteed time-stop: if < 2 minutes remain in the 15-min window AND the
+      // position is losing (crypto price on the wrong side of the Kalshi strike),
+      // exit immediately rather than riding to expiry at maximum loss.
+      // This caps maximum hold to ~13 minutes regardless of exit-guard state.
+      if (openPosition !== null) {
+        const minutesRemaining = 15 - minutesElapsed;
+        if (minutesRemaining < 2) {
+          const cryptoPrice = getCachedPrediction(sym)?.price ?? null;
+          const isPositionLosing = cryptoPrice !== null && (
+            (openPosition.direction === "yes" && cryptoPrice < openPosition.kalshiTarget) ||
+            (openPosition.direction === "no"  && cryptoPrice >= openPosition.kalshiTarget)
+          );
+          if (isPositionLosing) {
+            logger.info(
+              {
+                sym,
+                minutesRemaining,
+                cryptoPrice,
+                strike: openPosition.kalshiTarget,
+                direction: openPosition.direction,
+                yesPrice: effectiveYesPrice,
+              },
+              "[kalshi-bot] time-stop triggered — exiting losing position before expiry",
+            );
+            await closePosition(openPosition, effectiveYesPrice, kalshiTarget, "mid_exit_time");
+            openPosition = null;
+          }
+        }
       }
     }
     return; // one active position per tick — don't also try to open a new one
