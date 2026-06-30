@@ -258,6 +258,7 @@ async function _runBotTick(
     if (openPosition !== null && openPosition.symbol === sym) {
       logger.warn({ sym }, "[kalshi-bot] daily limit hit — closing position");
       await closePosition(openPosition, yesPrice, kalshiTarget, "daily_loss_limit_hit");
+      openPosition = null;
     }
     return;
   }
@@ -686,6 +687,35 @@ export async function getBotStats(filterSymbol?: string): Promise<{
 // the bot tick for each coin.  The Kalshi market-data endpoint is public and
 // requires no API key, so this works in both paper and live modes.
 export async function runBotLoopTick(): Promise<void> {
+  // Always run window-expiry check, even when paused or disabled.
+  // If the 15-minute window rolls over while a position is still open (e.g.
+  // the bot was paused, or the tick was slow), we must mark it expired and
+  // clear in-memory state so the next window starts fresh.
+  if (openPosition !== null) {
+    const currentKey = currentWindowKey();
+    if (openPosition.windowKey !== currentKey) {
+      logger.info(
+        { sym: openPosition.symbol, oldKey: openPosition.windowKey, newKey: currentKey },
+        "[kalshi-bot] window expired — auto-closing open position",
+      );
+      const stalePosition = openPosition;
+      // Clear immediately so a concurrent tick (unlikely but possible) does
+      // not double-close the same position.
+      openPosition = null;
+      try {
+        const kalshiData = getKalshiCachedData(stalePosition.symbol);
+        await closePosition(
+          stalePosition,
+          kalshiData?.yesPrice ?? null,
+          kalshiData?.value ?? null,
+          "window_expired",
+        );
+      } catch (err) {
+        logger.warn({ err, sym: stalePosition.symbol }, "[kalshi-bot] window-expiry close error (non-fatal)");
+      }
+    }
+  }
+
   if (!config.enabled || paused) return;
 
   for (const coin of CRYPTO_COINS) {
