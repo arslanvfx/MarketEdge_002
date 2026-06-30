@@ -102,6 +102,16 @@ interface DirectionStats {
   wins: number; losses: number; betCount: number; winRate: number | null;
 }
 
+interface ConfidenceBandStats {
+  band: string; lowerBound: number;
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
+interface AgreementLevelStats {
+  level: string; agreeing: number; total: number;
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
 interface PerformanceReport {
   totalBets: number; wins: number; losses: number;
   overallWinRate: number | null;
@@ -111,6 +121,9 @@ interface PerformanceReport {
   bySymbol: Record<string, SymbolStats>;
   byHourBand: Record<string, HourBandStats>;
   byDirection: { yes: DirectionStats; no: DirectionStats };
+  byConfidenceBand: Record<string, ConfidenceBandStats>;
+  byAgreementLevel: Record<string, AgreementLevelStats>;
+  optimalConfidenceThreshold: number | null;
   avgConfidenceWinners: number | null; avgConfidenceLosers: number | null;
   exitReasonBreakdown: Record<string, number>;
   circuitBreakerTriggers: number;
@@ -1154,7 +1167,7 @@ export default function BotDashboard() {
                       );
                     })()}
 
-                    {/* Confidence */}
+                    {/* Confidence avg W vs L */}
                     {(r.avgConfidenceWinners != null || r.avgConfidenceLosers != null) && (
                       <div className="grid grid-cols-2 gap-3">
                         <div className="bg-emerald-500/10 rounded-lg p-3 text-center">
@@ -1167,6 +1180,97 @@ export default function BotDashboard() {
                         </div>
                       </div>
                     )}
+
+                    {/* Confidence-band win-rate breakdown */}
+                    {(() => {
+                      const bands = r.byConfidenceBand
+                        ? Object.values(r.byConfidenceBand).filter(b => b.betCount > 0)
+                        : [];
+                      if (bands.length === 0) return null;
+                      const maxBets = Math.max(...bands.map(b => b.betCount));
+                      return (
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Win Rate by Confidence Level</span>
+                            {r.optimalConfidenceThreshold != null && (
+                              <span className="text-[10px] text-emerald-400 font-medium bg-emerald-500/10 px-2 py-0.5 rounded-full">
+                                Optimal floor: {r.optimalConfidenceThreshold}%
+                              </span>
+                            )}
+                          </div>
+                          <div className="space-y-1.5">
+                            {Object.values(r.byConfidenceBand ?? {})
+                              .sort((a, b) => a.lowerBound - b.lowerBound)
+                              .map(b => {
+                                const wr = b.winRate ?? 0;
+                                const isOptimal = r.optimalConfidenceThreshold === b.lowerBound;
+                                const barColor = b.betCount < 5 ? "bg-muted/50"
+                                  : wr >= 0.65 ? "bg-emerald-500"
+                                  : wr >= 0.50 ? "bg-yellow-500"
+                                  : "bg-red-500";
+                                const textColor = b.betCount < 5 ? "text-muted-foreground"
+                                  : wr >= 0.65 ? "text-emerald-400"
+                                  : wr >= 0.50 ? "text-yellow-400"
+                                  : "text-red-400";
+                                const barWidth = maxBets > 0 ? Math.max(4, Math.round((b.betCount / maxBets) * 100)) : 4;
+                                return (
+                                  <div key={b.band} className={`flex items-center gap-2 rounded-lg px-3 py-1.5 ${isOptimal ? "bg-emerald-500/10 ring-1 ring-emerald-500/40" : "bg-background/30"}`}>
+                                    <span className="text-[10px] font-mono w-12 flex-shrink-0 text-muted-foreground">{b.band}%</span>
+                                    <div className="flex-1 h-3 bg-muted/30 rounded-full overflow-hidden">
+                                      <div className={`h-full rounded-full transition-all ${barColor} opacity-70`} style={{ width: `${barWidth}%` }} />
+                                    </div>
+                                    <span className={`text-[10px] font-bold w-8 text-right ${textColor}`}>
+                                      {b.betCount < 5 ? "—" : `${Math.round(wr * 100)}%`}
+                                    </span>
+                                    <span className="text-[9px] text-muted-foreground w-12 text-right">{b.betCount} bet{b.betCount !== 1 ? "s" : ""}</span>
+                                    {isOptimal && <span className="text-[9px] text-emerald-400 font-bold">★</span>}
+                                  </div>
+                                );
+                              })}
+                          </div>
+                          {Object.values(r.byConfidenceBand ?? {}).every(b => b.betCount < 5) && (
+                            <p className="text-[10px] text-muted-foreground mt-1.5">Need ≥ 5 bets per band to show reliable win rates</p>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Signal agreement breakdown */}
+                    {(() => {
+                      const levels = r.byAgreementLevel
+                        ? Object.values(r.byAgreementLevel).filter(l => l.betCount > 0)
+                        : [];
+                      if (levels.length === 0) return null;
+                      return (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Win Rate by Signal Agreement</div>
+                          <div className="grid grid-cols-3 gap-2">
+                            {levels
+                              .sort((a, b) => b.agreeing - a.agreeing)
+                              .map(l => {
+                                const wr = l.winRate ?? 0;
+                                const color = l.betCount < 3 ? "text-muted-foreground"
+                                  : wr >= 0.60 ? "text-emerald-400"
+                                  : wr >= 0.45 ? "text-yellow-400"
+                                  : "text-red-400";
+                                const bg = l.betCount < 3 ? "bg-muted/20"
+                                  : wr >= 0.60 ? "bg-emerald-500/10"
+                                  : wr >= 0.45 ? "bg-yellow-500/10"
+                                  : "bg-red-500/10";
+                                return (
+                                  <div key={l.level} className={`rounded-lg p-3 text-center ${bg}`}>
+                                    <div className="text-xs font-bold mb-0.5">{l.level} signals</div>
+                                    <div className={`text-base font-bold ${color}`}>
+                                      {l.betCount < 3 ? "—" : `${Math.round(wr * 100)}%`}
+                                    </div>
+                                    <div className="text-[9px] text-muted-foreground">{l.wins}W / {l.losses}L</div>
+                                  </div>
+                                );
+                              })}
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Per-symbol breakdown */}
                     {Object.keys(r.bySymbol).length > 0 && (

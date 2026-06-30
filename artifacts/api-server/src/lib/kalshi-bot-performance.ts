@@ -38,6 +38,25 @@ export interface DirectionStats {
   winRate: number | null;
 }
 
+export interface ConfidenceBandStats {
+  band: string;
+  lowerBound: number;
+  wins: number;
+  losses: number;
+  betCount: number;
+  winRate: number | null;
+}
+
+export interface AgreementLevelStats {
+  level: string;
+  agreeing: number;
+  total: number;
+  wins: number;
+  losses: number;
+  betCount: number;
+  winRate: number | null;
+}
+
 export interface PerformanceReport {
   totalBets: number;
   wins: number;
@@ -49,6 +68,9 @@ export interface PerformanceReport {
   bySymbol: Record<string, SymbolStats>;
   byHourBand: Record<string, HourBandStats>;
   byDirection: { yes: DirectionStats; no: DirectionStats };
+  byConfidenceBand: Record<string, ConfidenceBandStats>;
+  byAgreementLevel: Record<string, AgreementLevelStats>;
+  optimalConfidenceThreshold: number | null;
   avgConfidenceWinners: number | null;
   avgConfidenceLosers: number | null;
   exitReasonBreakdown: Record<string, number>;
@@ -101,11 +123,20 @@ function isHourInQuietRange(hour: number, start: number, end: number): boolean {
   return hour >= start || hour < end;
 }
 
-function extractConfidence(signals: Record<string, unknown> | null): number | null {
+function extractEffectiveConfidence(signals: Record<string, unknown> | null): number | null {
   if (!signals) return null;
+  // Prefer the stored effectiveConfidence (composite post-penalty score logged at bet time)
+  const ec = signals["effectiveConfidence"];
+  if (typeof ec === "number") return ec;
+  // Fall back to individual model confidences
   const c = signals["statConfidence"] ?? signals["claudeConfidence"] ?? signals["confidence"];
   if (typeof c === "number") return c;
   return null;
+}
+
+// Kept for backwards compatibility in existing call sites
+function extractConfidence(signals: Record<string, unknown> | null): number | null {
+  return extractEffectiveConfidence(signals);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,14 +238,69 @@ export function computePerformanceReport(
   byDirection.no.winRate = byDirection.no.betCount > 0
     ? byDirection.no.wins / byDirection.no.betCount : null;
 
+  // Confidence band breakdown — 5-point buckets; needs ≥ 5 samples to be meaningful
+  const CONF_BANDS = [
+    { label: "50-55", lo: 50, hi: 55 },
+    { label: "55-60", lo: 55, hi: 60 },
+    { label: "60-65", lo: 60, hi: 65 },
+    { label: "65-70", lo: 65, hi: 70 },
+    { label: "70-75", lo: 70, hi: 75 },
+    { label: "75+",   lo: 75, hi: 101 },
+  ];
+  const byConfidenceBand: Record<string, ConfidenceBandStats> = {};
+  for (const { label, lo } of CONF_BANDS) {
+    byConfidenceBand[label] = { band: label, lowerBound: lo, wins: 0, losses: 0, betCount: 0, winRate: null };
+  }
+  for (const b of settled) {
+    const conf = extractEffectiveConfidence(b.signals);
+    if (conf === null) continue;
+    const band = CONF_BANDS.find(({ lo, hi }) => conf >= lo && conf < hi);
+    if (!band) continue;
+    const s = byConfidenceBand[band.label];
+    s.betCount++;
+    if (b.outcome === "win") s.wins++;
+    else s.losses++;
+  }
+  for (const s of Object.values(byConfidenceBand)) {
+    s.winRate = s.betCount > 0 ? s.wins / s.betCount : null;
+  }
+
+  // Optimal threshold: lowest band with ≥ 5 bets AND ≥ 55% win rate
+  // Used by the auto-tuner to jump directly to a data-validated floor
+  const optimalBand = CONF_BANDS.find(({ label }) => {
+    const s = byConfidenceBand[label];
+    return s.betCount >= 5 && s.winRate !== null && s.winRate >= 0.55;
+  });
+  const optimalConfidenceThreshold = optimalBand ? optimalBand.lo : null;
+
+  // Signal agreement breakdown: how many signals agreed when the bet was placed
+  const byAgreementLevel: Record<string, AgreementLevelStats> = {};
+  for (const b of settled) {
+    const signals = b.signals;
+    if (!signals) continue;
+    const agreeing = typeof signals["signalsAgreeing"] === "number" ? signals["signalsAgreeing"] : null;
+    const total = typeof signals["signalsTotal"] === "number" ? signals["signalsTotal"] : null;
+    if (agreeing === null || total === null || total === 0) continue;
+    const key = `${agreeing}/${total}`;
+    if (!byAgreementLevel[key]) {
+      byAgreementLevel[key] = { level: key, agreeing, total, wins: 0, losses: 0, betCount: 0, winRate: null };
+    }
+    byAgreementLevel[key].betCount++;
+    if (b.outcome === "win") byAgreementLevel[key].wins++;
+    else byAgreementLevel[key].losses++;
+  }
+  for (const s of Object.values(byAgreementLevel)) {
+    s.winRate = s.betCount > 0 ? s.wins / s.betCount : null;
+  }
+
   // Average confidence for winners vs losers
   const winnerConfs = settled
     .filter(b => b.outcome === "win")
-    .map(b => extractConfidence(b.signals))
+    .map(b => extractEffectiveConfidence(b.signals))
     .filter((c): c is number => c !== null);
   const loserConfs = settled
     .filter(b => b.outcome === "loss")
-    .map(b => extractConfidence(b.signals))
+    .map(b => extractEffectiveConfidence(b.signals))
     .filter((c): c is number => c !== null);
   const avgConfidenceWinners = winnerConfs.length > 0
     ? winnerConfs.reduce((a, v) => a + v, 0) / winnerConfs.length : null;
@@ -247,8 +333,18 @@ export function computePerformanceReport(
     }
   }
 
-  // Human-readable recommendations (top 3)
+  // Human-readable recommendations (top 4)
   const recommendations: string[] = [];
+
+  // Confidence-band insight: if we have a clear winning band, surface it
+  const bestConfBand = Object.values(byConfidenceBand)
+    .filter(s => s.betCount >= 5 && s.winRate !== null && s.winRate >= 0.60)
+    .sort((a, b) => (b.winRate ?? 0) - (a.winRate ?? 0))[0];
+  if (bestConfBand) {
+    recommendations.push(
+      `Best confidence zone: ${bestConfBand.band}% → ${Math.round((bestConfBand.winRate ?? 0) * 100)}% win rate (${bestConfBand.betCount} bets) — raise confidence floor to ${bestConfBand.lowerBound}%`,
+    );
+  }
 
   const worstBands = Object.values(byHourBand)
     .filter(b => b.betCount >= 5 && b.winRate !== null && b.winRate < 0.4)
@@ -278,9 +374,12 @@ export function computePerformanceReport(
     );
   }
 
-  if (last30WinRate !== null && last30.length >= 10 && last30WinRate < 0.55 && recommendations.length < 3) {
+  if (last30WinRate !== null && last30.length >= 10 && last30WinRate < 0.55 && recommendations.length < 4) {
+    const confHint = optimalConfidenceThreshold !== null
+      ? ` — data suggests raising floor to ${optimalConfidenceThreshold}%`
+      : " — consider raising confidence floor";
     recommendations.push(
-      `Win rate ${Math.round(last30WinRate * 100)}% over last ${last30.length} bets — consider raising confidence floor`,
+      `Win rate ${Math.round(last30WinRate * 100)}% over last ${last30.length} bets${confHint}`,
     );
   }
 
@@ -295,11 +394,14 @@ export function computePerformanceReport(
     bySymbol,
     byHourBand,
     byDirection,
+    byConfidenceBand,
+    byAgreementLevel,
+    optimalConfidenceThreshold,
     avgConfidenceWinners,
     avgConfidenceLosers,
     exitReasonBreakdown,
     circuitBreakerTriggers,
-    recommendations: recommendations.slice(0, 3),
+    recommendations: recommendations.slice(0, 4),
     computedAt,
   };
 }
@@ -444,9 +546,10 @@ export function runAutoTuneRules(
   }
 
   // Rule 3 — Confidence-floor auto-raise
-  // Overall win rate over last 30 bets < 55% → raise minConfidence +5 (cap 80).
-  // Guarded by a 6-hour cooldown so two consecutive bad windows don't keep
-  // ratcheting confidence up without giving the lower rule a chance to respond.
+  // Overall win rate over last 30 bets < 55% → raise floor. Prefers jumping directly
+  // to the data-validated optimal threshold (lowest 5-pt band with ≥ 55% win rate and
+  // ≥ 5 samples) over a blind +5 so the bot reaches the right level in one step.
+  // Guarded by a 6-hour cooldown to prevent thrashing.
   if (
     report.last30WinRate !== null &&
     report.totalBets >= 30 &&
@@ -454,13 +557,22 @@ export function runAutoTuneRules(
     config.minConfidence < 80 &&
     !isOnCooldown("confidence_floor_raise")
   ) {
-    const newConfidence = Math.min(80, config.minConfidence + 5);
+    // Prefer the data-driven optimal threshold over blind +5 when available and higher
+    const dataTarget = report.optimalConfidenceThreshold;
+    const blindTarget = config.minConfidence + 5;
+    const newConfidence = Math.min(
+      80,
+      dataTarget !== null && dataTarget > config.minConfidence ? dataTarget : blindTarget,
+    );
+    const triggerReason = dataTarget !== null && dataTarget > config.minConfidence
+      ? `Data-driven: ${dataTarget}% is lowest confidence band with ≥55% win rate ` +
+        `(last-30 WR: ${Math.round(report.last30WinRate * 100)}%)`
+      : `Win rate ${Math.round(report.last30WinRate * 100)}% over last 30 bets is below 55% — raising +5`;
     mutations.push({
       ruleName: "confidence_floor_raise",
       oldValue: String(config.minConfidence),
       newValue: String(newConfidence),
-      triggerReason:
-        `Win rate ${Math.round(report.last30WinRate * 100)}% over last 30 bets is below 55% threshold`,
+      triggerReason,
       configMutation: { minConfidence: newConfidence },
     });
   }

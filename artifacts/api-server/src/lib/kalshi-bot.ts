@@ -910,13 +910,21 @@ async function _runBotTick(
   };
   openPositions.set(sym, newPosition);
 
+  // Enrich signals with effectiveConfidence (the composite score that gated this bet)
+  // so analytics can build accurate confidence-band win-rate breakdowns without relying
+  // on statConfidence/claudeConfidence alone, which are per-model not per-decision.
+  const enrichedSignals = {
+    ...(decision.signals as Record<string, unknown>),
+    effectiveConfidence: decision.confidence,
+  };
+
   await persistBetRecord({
     symbol: sym,
     windowKey,
     ticker: kalshiTicker,
     direction,
     action: "bet",
-    signals: decision.signals,
+    signals: enrichedSignals,
     entryPrice: newPosition.entryYesPrice,
     kalshiTarget,
     contractCount,

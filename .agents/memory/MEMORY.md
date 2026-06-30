@@ -27,3 +27,4 @@
 - [Bot trend stability analysis](bot-trend-stability.md) — window-open parallel Claude calls; cached per (sym, windowKey); clean=×1.2, choppy=×1.0, reversing=force SKIP in Phase 3
 - [ML-primary bot entry architecture](ml-primary-entry.md) — three-path decision: A=stat+claude agree (unchanged), B=ML tiebreaker on conflict, C=ML solo when no core signals; ML_PRIMARY_MIN_CONFIDENCE=58, ML_SIGNAL_BOOST=6
 - [Multi-position bot architecture](multi-position-bot.md) — openPositions Map replaces single openPosition; each coin fully independent; Phase 2 iterates all open slots; Phase 4 no break; BotStateSnapshot.openPositions is an array
+- [Self-learning analytics architecture](self-learning-analytics.md) — effectiveConfidence stored per bet; confidence-band/agreement-level breakdowns in PerformanceReport; Rule 3 data-driven jump to optimalConfidenceThreshold
