@@ -2060,9 +2060,29 @@ export async function runAutoTuneJob(): Promise<void> {
       quietHoursStart: config.quietHoursStart,
       quietHoursEnd: config.quietHoursEnd,
       enableAutoTuning: config.enableAutoTuning ?? true,
+      defaultMinConfidence: DEFAULT_BOT_CONFIG.minConfidence,
     };
 
-    const mutations: AutoTuneMutation[] = runAutoTuneRules(report, tuneConfig, pausedCoins);
+    // Build a per-rule "last fired at" map from the log table so the cooldown
+    // check in runAutoTuneRules survives server restarts.
+    const lastFiredAt = new Map<string, Date>();
+    try {
+      const logRows = await db
+        .select({ ruleName: botAutoTuneLogTable.ruleName, createdAt: botAutoTuneLogTable.createdAt })
+        .from(botAutoTuneLogTable)
+        .orderBy(desc(botAutoTuneLogTable.createdAt))
+        .limit(50); // enough to find the most-recent entry for each distinct rule
+
+      for (const row of logRows) {
+        if (row.ruleName && row.createdAt && !lastFiredAt.has(row.ruleName)) {
+          lastFiredAt.set(row.ruleName, row.createdAt instanceof Date ? row.createdAt : new Date(String(row.createdAt)));
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, "[auto-tune] failed to load last-fired timestamps (non-fatal — cooldown skipped)");
+    }
+
+    const mutations: AutoTuneMutation[] = runAutoTuneRules(report, tuneConfig, pausedCoins, lastFiredAt);
 
     if (mutations.length === 0) {
       logger.info({ totalBets: report.totalBets, overallWinRate: report.overallWinRate },

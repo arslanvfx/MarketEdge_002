@@ -9,6 +9,7 @@ import {
   runAutoTuneRules,
   mergeQuietWindow,
   decrementPausedCoins,
+  CONFIDENCE_FLOOR_COOLDOWN_MS,
   type SettledBetRecord,
   type PerformanceReport,
   type AutoTuneBotConfig,
@@ -39,6 +40,7 @@ const DEFAULT_CONFIG: AutoTuneBotConfig = {
   quietHoursStart: 2,
   quietHoursEnd: 8,
   enableAutoTuning: true,
+  defaultMinConfidence: 60,
 };
 
 // ---------------------------------------------------------------------------
@@ -477,4 +479,82 @@ test("all three rules can fire simultaneously", () => {
   assert.ok(mutations.find(m => m.ruleName === "quiet_hours_expand"));
   assert.ok(mutations.find(m => m.ruleName === "per_coin_pause"));
   assert.ok(mutations.find(m => m.ruleName === "confidence_floor_raise"));
+});
+
+// ---------------------------------------------------------------------------
+// Cooldown tests (Rule 3 + Rule 4)
+// ---------------------------------------------------------------------------
+
+test("rule3: confidence_floor_raise is suppressed when within 6-hour cooldown", () => {
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.50 });
+  const recentFire = new Date(NOW.getTime() - 2 * 60 * 60 * 1_000); // 2 hours ago
+  const lastFiredAt = new Map([["confidence_floor_raise", recentFire]]);
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map(), lastFiredAt, NOW);
+  const r3 = mutations.find(m => m.ruleName === "confidence_floor_raise");
+  assert.equal(r3, undefined, "raise rule should be suppressed while on cooldown");
+});
+
+test("rule3: confidence_floor_raise fires after cooldown has elapsed", () => {
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.50 });
+  const oldFire = new Date(NOW.getTime() - CONFIDENCE_FLOOR_COOLDOWN_MS - 60_000); // just expired
+  const lastFiredAt = new Map([["confidence_floor_raise", oldFire]]);
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map(), lastFiredAt, NOW);
+  const r3 = mutations.find(m => m.ruleName === "confidence_floor_raise");
+  assert.ok(r3, "raise rule should fire once cooldown has elapsed");
+});
+
+test("rule4: confidence_floor_lower fires when win rate > 70% and floor above default", () => {
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.75 });
+  const config = { ...DEFAULT_CONFIG, minConfidence: 70 }; // raised above default 60
+  const mutations = runAutoTuneRules(report, config, new Map(), new Map(), NOW);
+  const r4 = mutations.find(m => m.ruleName === "confidence_floor_lower");
+  assert.ok(r4, "confidence_floor_lower should fire");
+  assert.equal(r4.configMutation?.minConfidence, 65);
+  assert.equal(r4.oldValue, "70");
+  assert.equal(r4.newValue, "65");
+});
+
+test("rule4: confidence_floor_lower does not fire when floor equals default", () => {
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.80 });
+  const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map(), new Map(), NOW);
+  const r4 = mutations.find(m => m.ruleName === "confidence_floor_lower");
+  assert.equal(r4, undefined, "lower rule should not fire when floor is already at default");
+});
+
+test("rule4: confidence_floor_lower does not fire when win rate is exactly 70%", () => {
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.70 });
+  const config = { ...DEFAULT_CONFIG, minConfidence: 70 };
+  const mutations = runAutoTuneRules(report, config, new Map(), new Map(), NOW);
+  const r4 = mutations.find(m => m.ruleName === "confidence_floor_lower");
+  assert.equal(r4, undefined, "lower rule requires strictly > 70%");
+});
+
+test("rule4: confidence_floor_lower does not fire when raise rule is on cooldown", () => {
+  // If raise fired recently, lower should also be blocked (cross-cooldown guard)
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.75 });
+  const config = { ...DEFAULT_CONFIG, minConfidence: 70 };
+  const recentFire = new Date(NOW.getTime() - 1 * 60 * 60 * 1_000); // 1 hour ago
+  const lastFiredAt = new Map([["confidence_floor_raise", recentFire]]);
+  const mutations = runAutoTuneRules(report, config, new Map(), lastFiredAt, NOW);
+  const r4 = mutations.find(m => m.ruleName === "confidence_floor_lower");
+  assert.equal(r4, undefined, "lower rule blocked when raise is on cooldown");
+});
+
+test("rule4: confidence_floor_lower does not fire when lower rule itself is on cooldown", () => {
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.75 });
+  const config = { ...DEFAULT_CONFIG, minConfidence: 70 };
+  const recentFire = new Date(NOW.getTime() - 3 * 60 * 60 * 1_000); // 3 hours ago
+  const lastFiredAt = new Map([["confidence_floor_lower", recentFire]]);
+  const mutations = runAutoTuneRules(report, config, new Map(), lastFiredAt, NOW);
+  const r4 = mutations.find(m => m.ruleName === "confidence_floor_lower");
+  assert.equal(r4, undefined, "lower rule blocked by its own cooldown");
+});
+
+test("rule4: lower rule floors at defaultMinConfidence (never below default)", () => {
+  const report = makeReport({ totalBets: 40, last30WinRate: 0.80 });
+  const config = { ...DEFAULT_CONFIG, minConfidence: 63 }; // only 3 above default
+  const mutations = runAutoTuneRules(report, config, new Map(), new Map(), NOW);
+  const r4 = mutations.find(m => m.ruleName === "confidence_floor_lower");
+  assert.ok(r4, "lower rule should fire");
+  assert.equal(r4.configMutation?.minConfidence, 60, "should floor at defaultMinConfidence");
 });

@@ -62,7 +62,15 @@ export interface AutoTuneBotConfig {
   quietHoursStart: number;
   quietHoursEnd: number;
   enableAutoTuning: boolean;
+  /** The factory-default minConfidence value — used to gate the lower rule. */
+  defaultMinConfidence: number;
 }
+
+/**
+ * How long (ms) must elapse before the same confidence-floor rule can fire again.
+ * 6 hours prevents oscillating up-then-down in back-to-back windows.
+ */
+export const CONFIDENCE_FLOOR_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
 
 export interface AutoTuneMutation {
   ruleName: string;
@@ -355,14 +363,36 @@ export function mergeQuietWindow(
 // runAutoTuneRules
 // ---------------------------------------------------------------------------
 
+/**
+ * runAutoTuneRules
+ *
+ * @param lastFiredAt  Map of ruleName → most-recent Date that rule was applied
+ *                     (sourced from bot_auto_tune_log). Used to enforce the
+ *                     6-hour cooldown on confidence-floor rules so they cannot
+ *                     thrash up-then-down in back-to-back 15-min windows.
+ * @param nowOverride  Optional clock override for unit tests.
+ */
 export function runAutoTuneRules(
   report: PerformanceReport,
   config: AutoTuneBotConfig,
   currentPausedCoins: ReadonlyMap<string, number>,
+  lastFiredAt: ReadonlyMap<string, Date> = new Map(),
+  nowOverride?: Date,
 ): AutoTuneMutation[] {
   if (!config.enableAutoTuning) return [];
 
+  const now = nowOverride ?? new Date();
   const mutations: AutoTuneMutation[] = [];
+
+  /**
+   * Returns true when the named rule is still within its cooldown window.
+   * A rule is on cooldown if it was last applied less than CONFIDENCE_FLOOR_COOLDOWN_MS ago.
+   */
+  function isOnCooldown(ruleName: string): boolean {
+    const last = lastFiredAt.get(ruleName);
+    if (!last) return false;
+    return now.getTime() - last.getTime() < CONFIDENCE_FLOOR_COOLDOWN_MS;
+  }
 
   // Rule 1 — Quiet-hours auto-expand
   // Any 2-hour UTC band with ≥ 20 bets and < 40% win rate gets flagged for
@@ -415,11 +445,14 @@ export function runAutoTuneRules(
 
   // Rule 3 — Confidence-floor auto-raise
   // Overall win rate over last 30 bets < 55% → raise minConfidence +5 (cap 80).
+  // Guarded by a 6-hour cooldown so two consecutive bad windows don't keep
+  // ratcheting confidence up without giving the lower rule a chance to respond.
   if (
     report.last30WinRate !== null &&
     report.totalBets >= 30 &&
     report.last30WinRate < 0.55 &&
-    config.minConfidence < 80
+    config.minConfidence < 80 &&
+    !isOnCooldown("confidence_floor_raise")
   ) {
     const newConfidence = Math.min(80, config.minConfidence + 5);
     mutations.push({
@@ -428,6 +461,29 @@ export function runAutoTuneRules(
       newValue: String(newConfidence),
       triggerReason:
         `Win rate ${Math.round(report.last30WinRate * 100)}% over last 30 bets is below 55% threshold`,
+      configMutation: { minConfidence: newConfidence },
+    });
+  }
+
+  // Rule 4 — Confidence-floor auto-lower (symmetrical to Rule 3)
+  // Win rate over last 30 bets > 70% AND current floor is above the factory
+  // default → lower minConfidence -5 (floor: defaultMinConfidence).
+  // Also guarded by a 6-hour cooldown shared with the raise rule so the two
+  // rules cannot fire in alternating windows and thrash the floor value.
+  const canLower =
+    report.last30WinRate !== null &&
+    report.totalBets >= 30 &&
+    report.last30WinRate > 0.70 &&
+    config.minConfidence > config.defaultMinConfidence;
+
+  if (canLower && !isOnCooldown("confidence_floor_raise") && !isOnCooldown("confidence_floor_lower")) {
+    const newConfidence = Math.max(config.defaultMinConfidence, config.minConfidence - 5);
+    mutations.push({
+      ruleName: "confidence_floor_lower",
+      oldValue: String(config.minConfidence),
+      newValue: String(newConfidence),
+      triggerReason:
+        `Win rate ${Math.round((report.last30WinRate ?? 0) * 100)}% over last 30 bets exceeds 70% threshold — relaxing confidence floor`,
       configMutation: { minConfidence: newConfidence },
     });
   }
