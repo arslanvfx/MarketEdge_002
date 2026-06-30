@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import {
   computePerformanceReport,
   runAutoTuneRules,
+  mergeQuietWindow,
+  decrementPausedCoins,
   type SettledBetRecord,
   type PerformanceReport,
   type AutoTuneBotConfig,
@@ -192,6 +194,90 @@ test("exitReasonBreakdown counts exit reasons", () => {
 });
 
 // ---------------------------------------------------------------------------
+// last10WinRate
+// ---------------------------------------------------------------------------
+
+test("last10WinRate uses only the last 10 bets", () => {
+  // 25 losses followed by 10 wins → last10 is 100%, overall is 10/35
+  const bets = [
+    ...Array.from({ length: 25 }, () => makeBet({ outcome: "loss" })),
+    ...Array.from({ length: 10 }, () => makeBet({ outcome: "win" })),
+  ];
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.last10WinRate, 1.0);
+  assert.ok(Math.abs((report.overallWinRate ?? 0) - 10 / 35) < 1e-9);
+});
+
+test("last10WinRate is null when no settled bets", () => {
+  const report = computePerformanceReport([], NOW);
+  assert.equal(report.last10WinRate, null);
+});
+
+// ---------------------------------------------------------------------------
+// mergeQuietWindow
+// ---------------------------------------------------------------------------
+
+test("mergeQuietWindow extends end for non-wrapping window when band is after end", () => {
+  // qS=2, qE=8; band [14-16) → extend end: fwd(8,16)=8 < fwd(14,2)=12
+  const r = mergeQuietWindow(2, 8, 14, 16);
+  assert.equal(r.quietHoursStart, 2);
+  assert.equal(r.quietHoursEnd, 16);
+});
+
+test("mergeQuietWindow extends start for non-wrapping window when band is before start", () => {
+  // qS=10, qE=18; band [2-4) → extend start: fwd(4,10)=6 > fwd(2,10)=8... wait
+  // fwd(qE=18, bE=4) = (4-18+24)%24 = 10 → costEnd=10
+  // fwd(bS=2, qS=10) = (10-2+24)%24 = 8 → costStart=8
+  // costStart < costEnd → extend start: newStart = (10-8+24)%24 = 2
+  const r = mergeQuietWindow(10, 18, 2, 4);
+  assert.equal(r.quietHoursStart, 2);
+  assert.equal(r.quietHoursEnd, 18);
+});
+
+test("mergeQuietWindow handles wrapping window (e.g. 22-06) extending end", () => {
+  // qS=22, qE=4; band [4-6) → fwd(4,6)=2 < fwd(4,22)=18 → extend end
+  const r = mergeQuietWindow(22, 4, 4, 6);
+  assert.equal(r.quietHoursStart, 22);
+  assert.equal(r.quietHoursEnd, 6);
+});
+
+test("mergeQuietWindow handles wrapping window (e.g. 22-06) extending start", () => {
+  // qS=22, qE=4; band [20-22) → fwd(4,22)=18 > fwd(20,22)=2 → extend start
+  const r = mergeQuietWindow(22, 4, 20, 22);
+  assert.equal(r.quietHoursStart, 20);
+  assert.equal(r.quietHoursEnd, 4);
+});
+
+// ---------------------------------------------------------------------------
+// decrementPausedCoins
+// ---------------------------------------------------------------------------
+
+test("decrementPausedCoins decrements remaining windows by 1", () => {
+  const input = new Map([["BTC", 4], ["ETH", 2]]);
+  const result = decrementPausedCoins(input);
+  assert.equal(result.get("BTC"), 3);
+  assert.equal(result.get("ETH"), 1);
+});
+
+test("decrementPausedCoins removes coins whose countdown reaches 0", () => {
+  const input = new Map([["BTC", 1], ["ETH", 3]]);
+  const result = decrementPausedCoins(input);
+  assert.equal(result.has("BTC"), false, "BTC should be removed when remaining=1");
+  assert.equal(result.get("ETH"), 2);
+});
+
+test("decrementPausedCoins does not mutate the input map", () => {
+  const input = new Map([["SOL", 2]]);
+  decrementPausedCoins(input);
+  assert.equal(input.get("SOL"), 2, "original map should be unchanged");
+});
+
+test("decrementPausedCoins returns empty map for empty input", () => {
+  const result = decrementPausedCoins(new Map());
+  assert.equal(result.size, 0);
+});
+
+// ---------------------------------------------------------------------------
 // runAutoTuneRules
 // ---------------------------------------------------------------------------
 
@@ -201,6 +287,7 @@ function makeReport(overrides: Partial<PerformanceReport> = {}): PerformanceRepo
     wins: 0,
     losses: 0,
     overallWinRate: null,
+    last10WinRate: null,
     last30WinRate: null,
     last24hWinRate: null,
     bySymbol: {},

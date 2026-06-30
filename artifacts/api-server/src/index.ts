@@ -228,13 +228,22 @@ app.listen(port, (err) => {
         );
       }, 30_000);
 
-      // Auto-tune performance analytics: runs every 15 min to analyse recent
-      // bot performance and apply safe parameter adjustments automatically.
-      setInterval(() => {
+      // Auto-tune performance analytics: runs every 15 min, aligned to UTC
+      // 15-minute window boundaries (00, 15, 30, 45) so the analytics window
+      // matches the same cadence as the Kalshi bet windows.
+      const msToNext15MinBoundary = (): number => {
+        const now = Date.now();
+        const boundary = Math.ceil((now + 1) / (15 * 60_000)) * (15 * 60_000);
+        return Math.max(5_000, boundary - now); // at least 5s
+      };
+      const runAutoTune = () =>
         runAutoTuneJob().catch((err) =>
           logger.warn({ err }, "[auto-tune] scheduled job failed (non-fatal)"),
         );
-      }, 15 * 60_000);
+      setTimeout(() => {
+        runAutoTune();
+        setInterval(runAutoTune, 15 * 60_000);
+      }, msToNext15MinBoundary());
     });
 
   // Daily threshold analysis: runs once at midnight UTC then every 24h.

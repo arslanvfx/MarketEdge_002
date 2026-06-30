@@ -89,6 +89,7 @@ export interface BotConfig {
   // Self-learning auto-tune: when enabled the bot periodically analyses its own
   // recent performance and applies safe parameter adjustments automatically.
   enableAutoTuning: boolean;     // (default true)
+  autoTuneWindowSize: number;    // number of most-recent settled bets to analyse (default 100)
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -118,6 +119,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableMomentumFilter: true,
   momentumWindowCount: 3,
   enableAutoTuning: true,
+  autoTuneWindowSize: 100,
 };
 
 export interface SignalSnapshot {

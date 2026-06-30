@@ -966,15 +966,13 @@ export default function BotDashboard() {
                 return (
                   <>
                     {/* Top stats */}
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       {[
                         { label: "Total Bets", value: String(r.totalBets) },
                         { label: "Overall Win Rate", value: pct(r.overallWinRate) },
-                        { label: "Last-30 Win Rate", value: pct(r.last30WinRate) },
                         { label: "Last-24h Win Rate", value: pct(r.last24hWinRate) },
                         { label: "CB Triggers", value: String(r.circuitBreakerTriggers),
                           color: r.circuitBreakerTriggers >= 3 ? "text-red-400" : r.circuitBreakerTriggers >= 1 ? "text-amber-400" : "" },
-                        { label: "YES / NO", value: `${r.byDirection.yes.betCount} / ${r.byDirection.no.betCount}` },
                       ].map(({ label, value, color }) => (
                         <div key={label} className="bg-background/40 rounded-lg p-3 text-center">
                           <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">{label}</div>
@@ -982,6 +980,67 @@ export default function BotDashboard() {
                         </div>
                       ))}
                     </div>
+
+                    {/* Win-rate trend sparkline */}
+                    {r.totalBets > 0 && (() => {
+                      const points = [
+                        { label: "Last 10", wr: r.last10WinRate },
+                        { label: "Last 30", wr: r.last30WinRate },
+                        { label: "Last 24h", wr: r.last24hWinRate },
+                        { label: "All-time", wr: r.overallWinRate },
+                      ].filter(p => p.wr !== null);
+                      if (points.length === 0) return null;
+                      return (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Win-Rate Trend</div>
+                          <div className="flex items-end gap-2 h-16">
+                            {points.map(({ label, wr }) => {
+                              const pctVal = Math.round((wr ?? 0) * 100);
+                              const barH = Math.max(4, Math.round((pctVal / 100) * 64));
+                              const color = pctVal >= 60 ? "bg-emerald-500" : pctVal >= 45 ? "bg-yellow-500" : "bg-red-500";
+                              return (
+                                <div key={label} className="flex flex-col items-center gap-1 flex-1">
+                                  <span className="text-[9px] font-medium" style={{ color: pctVal >= 60 ? "#10b981" : pctVal >= 45 ? "#eab308" : "#ef4444" }}>{pctVal}%</span>
+                                  <div className={`w-full rounded-t ${color} opacity-80 transition-all`} style={{ height: `${barH}px` }} />
+                                  <span className="text-[8px] text-muted-foreground text-center leading-tight">{label}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Direction balance bar */}
+                    {(r.byDirection.yes.betCount + r.byDirection.no.betCount) > 0 && (() => {
+                      const total = r.byDirection.yes.betCount + r.byDirection.no.betCount;
+                      const yesPct = Math.round((r.byDirection.yes.betCount / total) * 100);
+                      const noPct = 100 - yesPct;
+                      return (
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Direction Balance</span>
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              YES {r.byDirection.yes.betCount} · NO {r.byDirection.no.betCount}
+                            </span>
+                          </div>
+                          <div className="flex rounded-full overflow-hidden h-4">
+                            <div
+                              className="bg-sky-500 flex items-center justify-center text-[9px] font-bold text-white"
+                              style={{ width: `${yesPct}%` }}
+                            >{yesPct >= 20 ? `${yesPct}%` : ""}</div>
+                            <div
+                              className="bg-violet-500 flex items-center justify-center text-[9px] font-bold text-white"
+                              style={{ width: `${noPct}%` }}
+                            >{noPct >= 20 ? `${noPct}%` : ""}</div>
+                          </div>
+                          <div className="flex justify-between mt-1">
+                            <span className="text-[9px] text-sky-400 font-medium">▲ YES · {pct(r.byDirection.yes.winRate)} WR</span>
+                            <span className="text-[9px] text-violet-400 font-medium">▼ NO · {pct(r.byDirection.no.winRate)} WR</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Confidence */}
                     {(r.avgConfidenceWinners != null || r.avgConfidenceLosers != null) && (

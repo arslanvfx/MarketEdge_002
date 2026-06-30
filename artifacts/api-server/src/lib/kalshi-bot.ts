@@ -47,6 +47,7 @@ import {
 import {
   computePerformanceReport,
   runAutoTuneRules,
+  decrementPausedCoins,
   type PerformanceReport,
   type AutoTuneMutation,
   type SettledBetRecord,
@@ -1637,14 +1638,18 @@ export async function runBotLoopTick(): Promise<void> {
       );
     }
     // Decrement per-coin auto-tune pause counters; remove coins whose pause expires.
-    for (const [sym, remaining] of Array.from(pausedCoins.entries())) {
-      if (remaining <= 1) {
-        pausedCoins.delete(sym);
+    const nextPausedCoins = decrementPausedCoins(pausedCoins);
+    for (const [sym] of pausedCoins.entries()) {
+      if (!nextPausedCoins.has(sym)) {
         logger.info({ sym }, "[kalshi-bot] auto-tune per-coin pause expired — resuming");
       } else {
-        pausedCoins.set(sym, remaining - 1);
-        logger.info({ sym, remaining: remaining - 1 }, "[kalshi-bot] auto-tune per-coin pause countdown");
+        logger.info({ sym, remaining: nextPausedCoins.get(sym) }, "[kalshi-bot] auto-tune per-coin pause countdown");
       }
+    }
+    // Sync in-memory map with the decremented state
+    for (const sym of Array.from(pausedCoins.keys())) {
+      if (!nextPausedCoins.has(sym)) pausedCoins.delete(sym);
+      else pausedCoins.set(sym, nextPausedCoins.get(sym)!);
     }
   }
 
@@ -2031,7 +2036,7 @@ export async function runAutoTuneJob(): Promise<void> {
           AND ${kalshiBotBetsTable.outcome} IS NOT NULL`,
       )
       .orderBy(desc(kalshiBotBetsTable.createdAt)) // most-recent first → reverse below
-      .limit(200);
+      .limit(config.autoTuneWindowSize ?? 100);
 
     rows.reverse(); // convert to oldest-first so slice(-30) gives the most recent 30
 

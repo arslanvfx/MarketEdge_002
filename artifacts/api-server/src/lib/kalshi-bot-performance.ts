@@ -43,6 +43,7 @@ export interface PerformanceReport {
   wins: number;
   losses: number;
   overallWinRate: number | null;
+  last10WinRate: number | null;
   last30WinRate: number | null;
   last24hWinRate: number | null;
   bySymbol: Record<string, SymbolStats>;
@@ -117,9 +118,11 @@ export function computePerformanceReport(
   const losses = settled.filter(b => b.outcome === "loss").length;
   const overallWinRate = totalBets > 0 ? wins / totalBets : null;
 
-  // Last-30 win rate (uses slice from the end — caller should pass bets sorted
-  // oldest-first; if sorted newest-first the last-30 are the oldest, which is
-  // still valid for a sample-based estimate)
+  // Sliding-window win rates (bets must be sorted oldest-first by caller)
+  const last10 = settled.slice(-10);
+  const last10Wins = last10.filter(b => b.outcome === "win").length;
+  const last10WinRate = last10.length > 0 ? last10Wins / last10.length : null;
+
   const last30 = settled.slice(-30);
   const last30Wins = last30.filter(b => b.outcome === "win").length;
   const last30WinRate = last30.length > 0 ? last30Wins / last30.length : null;
@@ -278,6 +281,7 @@ export function computePerformanceReport(
     wins,
     losses,
     overallWinRate,
+    last10WinRate,
     last30WinRate,
     last24hWinRate,
     bySymbol,
@@ -290,6 +294,61 @@ export function computePerformanceReport(
     recommendations: recommendations.slice(0, 3),
     computedAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// decrementPausedCoins — pure helper for per-coin pause countdown
+// ---------------------------------------------------------------------------
+
+/**
+ * Advance the pause countdown by one window for every paused coin.
+ * Coins whose counter reaches 0 are removed (they resume).
+ * Returns a new Map — the input is not mutated.
+ */
+export function decrementPausedCoins(
+  pausedCoins: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const next = new Map<string, number>();
+  for (const [sym, remaining] of pausedCoins.entries()) {
+    if (remaining > 1) {
+      next.set(sym, remaining - 1);
+    }
+    // remaining <= 1 → coin resumes; omit from output map
+  }
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// mergeQuietWindow — wrap-around-safe quiet-hour expansion helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the minimal expansion of the quiet window [qS, qE) that also covers
+ * the bad band [bS, bE) on a 24-hour clock.  Handles both non-wrapping and
+ * midnight-wrapping windows by choosing whichever edge (start or end) requires
+ * the smaller angular extension.
+ */
+export function mergeQuietWindow(
+  qS: number, qE: number,
+  bS: number, bE: number,
+): { quietHoursStart: number; quietHoursEnd: number } {
+  // Forward angular distance from a to b on [0, 24)
+  const fwd = (a: number, b: number) => (b - a + 24) % 24;
+
+  // Cost to extend the END of the quiet window forward to cover bE
+  const costEnd = fwd(qE, bE);
+  // Cost to extend the START of the quiet window backward to cover bS
+  const costStart = fwd(bS, qS);
+
+  if (costEnd <= costStart) {
+    // Extend end forward
+    const newEnd = (qE + costEnd) % 24;
+    return { quietHoursStart: qS, quietHoursEnd: newEnd };
+  } else {
+    // Extend start backward
+    const newStart = (qS - costStart + 24) % 24;
+    return { quietHoursStart: newStart, quietHoursEnd: qE };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -322,18 +381,19 @@ export function runAutoTuneRules(
     if (h0Covered && h1Covered) continue;
 
     // Expand the current quiet window to absorb this band.
-    // Simple linear merge: extend whichever edge is closer.
-    // (Works correctly for non-wrap-around windows which is the common case.)
-    const newStart = Math.min(config.quietHoursStart, bandStart);
-    const newEnd = Math.max(config.quietHoursEnd, bandEnd === 0 ? 24 : bandEnd);
+    // Use mergeQuietWindow which correctly handles midnight-wrapping windows.
+    const newWindow = mergeQuietWindow(
+      config.quietHoursStart, config.quietHoursEnd,
+      bandStart, bandEnd,
+    );
 
     mutations.push({
       ruleName: "quiet_hours_expand",
       oldValue: `${config.quietHoursStart}-${config.quietHoursEnd}`,
-      newValue: `${newStart}-${newEnd}`,
+      newValue: `${newWindow.quietHoursStart}-${newWindow.quietHoursEnd}`,
       triggerReason:
         `Hour band ${stats.band} UTC: ${Math.round((stats.winRate ?? 0) * 100)}% win rate over ${stats.betCount} bets (< 40% threshold)`,
-      configMutation: { quietHoursStart: newStart, quietHoursEnd: newEnd },
+      configMutation: newWindow,
     });
     break;
   }
