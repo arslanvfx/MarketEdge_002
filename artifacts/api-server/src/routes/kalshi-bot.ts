@@ -12,13 +12,21 @@ import type { BotMode } from "../lib/kalshi-bot";
 
 const router = Router();
 
-// Shared auth guard — bot control actions require a logged-in Clerk user.
-// Read-only status/history/stats endpoints remain public so the dashboard can
-// render even for anonymous visitors.
+// Bot admin guard.
+// Requires an authenticated Clerk user. If the BOT_ADMIN_CLERK_USER_ID
+// environment variable is set (a Clerk user_XXXX ID), only that specific user
+// may mutate bot state — preventing any other signed-in user from toggling
+// live mode or changing config in a multi-tenant deployment.
+// When unset, any authenticated user is allowed (single-user / dev mode).
 function requireAuth(req: any, res: any, next: any) {
   const auth = getAuth(req);
   if (!auth?.userId) {
     res.status(401).json({ error: "Unauthorized — must be signed in to control the bot" });
+    return;
+  }
+  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
+  if (adminId && auth.userId !== adminId) {
+    res.status(403).json({ error: "Forbidden — not authorized to control the bot" });
     return;
   }
   next();
@@ -67,6 +75,7 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
     betSize,
     dailyLossLimit,
     signalThreshold,
+    minConfidence,
     midExitSensitivity,
     phase2ThresholdPp,
     enabled,
@@ -74,6 +83,7 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
     betSize?: number;
     dailyLossLimit?: number;
     signalThreshold?: number;
+    minConfidence?: number;
     midExitSensitivity?: "conservative" | "balanced" | "aggressive";
     phase2ThresholdPp?: number;
     enabled?: boolean;
@@ -84,6 +94,9 @@ router.post("/crypto/bot/config", requireAuth, (req, res) => {
   if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;
   if (typeof signalThreshold === "number" && [2, 3, 4].includes(signalThreshold)) {
     partial.signalThreshold = signalThreshold;
+  }
+  if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
+    partial.minConfidence = minConfidence;
   }
   if (
     midExitSensitivity === "conservative" ||

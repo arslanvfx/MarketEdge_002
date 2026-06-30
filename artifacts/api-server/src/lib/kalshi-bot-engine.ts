@@ -26,6 +26,7 @@ export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
   signalThreshold: number;   // min signals agreeing: 2 | 3 | 4 (default 3)
+  minConfidence: number;     // 0-100; skip bet when engine confidence is below this (default 60)
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
   enabled: boolean;          // master kill-switch
@@ -35,6 +36,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   betSize: 0.50,
   dailyLossLimit: 20,
   signalThreshold: 3,
+  minConfidence: 60,
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
   enabled: true,
@@ -203,6 +205,14 @@ export function makeBotDecision(
   const action = agreementTarget;
 
   const confidence = total > 0 ? Math.max(40, Math.round((signalsAgreeing / total) * 100)) : 50;
+
+  // Confidence threshold gate: skip if the signal agreement isn't strong enough
+  if (confidence < config.minConfidence) {
+    return skip(
+      `Confidence ${confidence}% below threshold ${config.minConfidence}% — skipping`,
+      { ...signals, signalsAgreeing, signalsTotal: total, agreementTarget },
+    );
+  }
 
   const parts: string[] = [];
   if (statAbove !== null) parts.push(`Stat: ${statAbove ? "ABOVE" : "BELOW"}`);

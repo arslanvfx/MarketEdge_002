@@ -230,9 +230,9 @@ async function _runBotTick(
 
   // Daily loss limit check
   if (dailyPnl <= -config.dailyLossLimit) {
-    if (openPosition !== null) {
+    if (openPosition !== null && openPosition.symbol === sym) {
       logger.warn({ sym }, "[kalshi-bot] daily limit hit — closing position");
-      await closePosition(openPosition, yesPrice, "daily_loss_limit_hit");
+      await closePosition(openPosition, yesPrice, kalshiTarget, "daily_loss_limit_hit");
     }
     return;
   }
@@ -250,9 +250,13 @@ async function _runBotTick(
   // ── POSITION MANAGEMENT ──────────────────────────────────────────────────
 
   if (openPosition !== null) {
+    // Cross-symbol guard: only manage exit logic for the symbol that owns the position.
+    // Other coins iterate through this function too — they must skip without touching state.
+    if (openPosition.symbol !== sym) return;
+
     // Check if the window has changed (expired)
     if (openPosition.windowKey !== windowKey) {
-      await closePosition(openPosition, yesPrice, "window_expired");
+      await closePosition(openPosition, yesPrice, kalshiTarget, "window_expired");
       openPosition = null;
     } else {
       // Run exit guard for the current position
@@ -282,6 +286,7 @@ async function _runBotTick(
         await closePosition(
           openPosition,
           yesPrice,
+          kalshiTarget,
           guard.reason,
           isLateRecovery,
         );
@@ -324,8 +329,10 @@ async function _runBotTick(
 
   // Place the bet
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
-  const contractCount = Math.max(1, Math.round(config.betSize / (yesPrice ?? 0.5)));
-  const betAmount = config.betSize;
+  // Cost per contract: YES contracts cost yesPrice per $1 face; NO contracts cost (1-yesPrice)
+  const sideCost = direction === "yes" ? (yesPrice ?? 0.5) : (1 - (yesPrice ?? 0.5));
+  const contractCount = Math.max(1, Math.round(config.betSize / sideCost));
+  const betAmount = contractCount * sideCost; // actual dollars risked (may differ slightly from configured betSize)
 
   logger.info({ sym, direction, decision: decision.action, confidence: decision.confidence }, "[kalshi-bot] placing bet");
 
@@ -385,14 +392,20 @@ async function _runBotTick(
 async function closePosition(
   pos: OpenPosition,
   currentYesPrice: number | null,
+  currentKalshiTarget: number | null,
   reason: string,
   isLateRecovery = false,
 ): Promise<void> {
   const isExpiry = reason === "window_expired";
-  // When the window expires the currentYesPrice is from the NEW window — do not
-  // use it for P&L.  The contract will settle at $1 or $0; we conservatively
-  // book the outcome as a full loss (position held to expiry = paid nothing back).
-  // An evaluator job (task #112) will later correct this using Kalshi settlement.
+
+  // When the window expires, currentYesPrice belongs to the NEW window — never
+  // use it for P&L. Instead, estimate settlement using the last known price of
+  // the COIN vs the Kalshi target to determine win/loss.
+  // Convention: YES contract pays $1 if price ends ≥ target, $0 otherwise.
+  //             NO  contract pays $1 if price ends <  target, $0 otherwise.
+  // We use the position's kalshiTarget (recorded at entry) and the last coin
+  // price before window change to compute estimated settlement.
+  // This will be corrected by the evaluator job (task #112) once Kalshi settles.
   let fillPrice: number | null = isExpiry ? null : currentYesPrice;
 
   if (botMode === "live" && !isExpiry) {
@@ -403,23 +416,39 @@ async function closePosition(
       fillPrice = result.avgPrice ?? currentYesPrice;
     } catch (err) {
       logger.error({ err, sym: pos.symbol }, "[kalshi-bot] exit order failed");
-      // Still update state locally even if the API call fails
     }
   }
 
   // P&L calculation (paper or real)
-  // YES bet: pnl = (exitPrice - entryPrice) * contractCount * 100 (cents to dollars)
-  // NO bet:  pnl = (entryPrice - exitPrice) * contractCount * 100 (inverse)
+  // For mid-window exits: pnl = (exitYesPrice - entryYesPrice) × contractCount
+  //   YES bet profits when exitYesPrice > entryYesPrice
+  //   NO  bet profits when exitYesPrice < entryYesPrice (they go inverse)
+  // For expiry: use cached coin price vs kalshiTarget to estimate settlement
   let pnl = 0;
   if (fillPrice !== null) {
     const priceDelta = pos.direction === "yes"
       ? fillPrice - pos.entryYesPrice
       : pos.entryYesPrice - fillPrice;
-    // Each contract is $1 face value; price is 0-1 fraction
     pnl = priceDelta * pos.contractCount;
   } else if (isExpiry) {
-    // Expiry with no price: assume we lost the bet amount
-    pnl = -pos.betAmount;
+    // Estimate settlement from last known coin price vs strike
+    const cachedCoin = getCachedPrediction(pos.symbol);
+    const lastCoinPrice = cachedCoin?.price ?? null;
+    const strike = currentKalshiTarget ?? pos.kalshiTarget;
+    if (lastCoinPrice !== null) {
+      const priceAboveStrike = lastCoinPrice >= strike;
+      const won = pos.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
+      if (won) {
+        // Win: each YES contract pays $1, we paid entryYesPrice per contract
+        pnl = (1 - pos.entryYesPrice) * pos.contractCount;
+      } else {
+        // Loss: contract expires worthless
+        pnl = -pos.entryYesPrice * pos.contractCount;
+      }
+    } else {
+      // No price data — book conservatively as full loss
+      pnl = -pos.betAmount;
+    }
   }
 
   dailyPnl += pnl;

@@ -307,6 +307,7 @@ interface BotConfig {
   betSize: number;
   dailyLossLimit: number;
   signalThreshold: number;
+  minConfidence: number;
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number;
   enabled: boolean;
@@ -2081,6 +2082,7 @@ function KalshiBotPanel() {
   const [localBetSize, setLocalBetSize] = useState<number>(0.5);
   const [localDailyLimit, setLocalDailyLimit] = useState<number>(20);
   const [localPhase2Pp, setLocalPhase2Pp] = useState<number>(30);
+  const [localMinConfidence, setLocalMinConfidence] = useState<number>(60);
 
   const botQuery = useQuery<BotStateSnapshot>({
     queryKey: ["bot-status"],
@@ -2135,6 +2137,7 @@ function KalshiBotPanel() {
       betSize: localBetSize,
       dailyLossLimit: localDailyLimit,
       phase2ThresholdPp: localPhase2Pp,
+      minConfidence: localMinConfidence,
     });
     void botQuery.refetch();
   }
@@ -2145,6 +2148,7 @@ function KalshiBotPanel() {
       setLocalBetSize(bot.config.betSize);
       setLocalDailyLimit(bot.config.dailyLossLimit);
       setLocalPhase2Pp(bot.config.phase2ThresholdPp);
+      setLocalMinConfidence(bot.config.minConfidence ?? 60);
     }
   }, [bot?.config, configOpen]);
 
@@ -2457,6 +2461,21 @@ function KalshiBotPanel() {
                   />
                   <div className="flex justify-between text-[10px] text-slate-600">
                     <span>10pp</span><span>50pp</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">
+                    Min confidence: <span className="text-slate-200 font-medium">{localMinConfidence}%</span>
+                    <span className="text-slate-600 ml-1">(skip bet if signal agreement is below this)</span>
+                  </label>
+                  <input
+                    type="range" min={40} max={100} step={5}
+                    value={localMinConfidence}
+                    onChange={(e) => setLocalMinConfidence(parseInt(e.target.value))}
+                    className="w-full accent-cyan-400"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-600">
+                    <span>40%</span><span>100%</span>
                   </div>
                 </div>
                 <div className="flex gap-2">
