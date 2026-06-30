@@ -321,6 +321,7 @@ interface BotGuardStates {
   consensusOk: boolean;
   timingOverride: boolean;
   erOk: boolean;
+  mlFlipped?: boolean;
   phase2Active: boolean;
   phase2UptickDetected: boolean;
   phase2Timeout: boolean;

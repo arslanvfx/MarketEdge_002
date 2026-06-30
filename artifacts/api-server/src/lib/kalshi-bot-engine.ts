@@ -42,10 +42,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   minConfidence: 60,
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
-  // Entry is only allowed between t+45s and t+3:00 of each 15-min window.
+  // Entry is only allowed between t+45s and t+5:00 of each 15-min window.
   // 45s warmup = Kalshi market stabilises + Claude opening call completes.
-  // 3-min ceiling = signals get noisier as the window ages.
-  maxEntryMinutes: 3,
+  // 5-min ceiling = signals get noisier as the window ages.
+  // Hard floor: entry is never allowed if fewer than 4 minutes remain (see kalshi-bot.ts).
+  maxEntryMinutes: 5,
   enabled: true,
 };
 

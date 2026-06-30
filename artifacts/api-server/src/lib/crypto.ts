@@ -1952,6 +1952,15 @@ function updateKalshiWindowPrice(ticker: string | undefined, coinPrice: number):
   }
 }
 
+// Cache of the most recently computed ML above/below prediction per symbol.
+// Updated whenever the per-coin processing loop computes an ML prediction.
+// Consumed by the exit guard to incorporate ML direction as an exit signal.
+const lastMLAboveCache = new Map<string, boolean | null>();
+
+export function getLastMLAbove(symbol: string): boolean | null {
+  return lastMLAboveCache.get(symbol.toUpperCase()) ?? null;
+}
+
 export function getKalshiWindowContext(symbol: string): {
   priceAtOpen: number | null;
   minutesElapsed: number;
@@ -3184,6 +3193,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                   const mlResult = getMLPrediction(sym, mlFeatures);
                   if (mlResult.prediction?.above !== null && mlResult.prediction?.above !== undefined) {
                     const mlAbove = mlResult.prediction.above;
+                    lastMLAboveCache.set(sym, mlAbove);
                     // Synthetic price: 0.1% above/below strike encodes direction
                     // and evaluates correctly against the actual close price.
                     const mlPredPrice = mlSnapPrice(mlAbove, kalshiTarget);
@@ -4026,6 +4036,7 @@ export async function fetchTrendStabilityForBot(
         if (mlResult.prediction?.above != null) {
           mlDir = mlResult.prediction.above ? "above" : "below";
           mlConf = mlResult.prediction.confidence ?? 50;
+          lastMLAboveCache.set(sym, mlResult.prediction.above);
         }
       } catch {
         // ML unavailable — proceed without it

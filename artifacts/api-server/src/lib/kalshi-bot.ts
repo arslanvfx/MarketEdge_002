@@ -136,6 +136,11 @@ const windowStabilityCache = new Map<string, TrendStability>();
 // 45s allows the Kalshi market to stabilise and the Claude opening call to complete.
 const WARMUP_MS = 45_000;
 
+// Hard late-entry floor: never open a new position if fewer than this many minutes
+// remain in the 15-min window. This is a non-configurable safety rail — late entries
+// leave almost no time for the position to resolve and are consistently losing plays.
+const MIN_REMAINING_MINUTES_FOR_ENTRY = 4;
+
 // Timing analysis cache (refreshed every 5 min)
 let timingCache: Map<string, number | null> = new Map();
 let timingCacheAt = 0;
@@ -1455,6 +1460,12 @@ export async function runBotLoopTick(): Promise<void> {
     }
     if (secondsElapsed > config.maxEntryMinutes * 60) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "past entry ceiling", windowKey, selected: false, evaluatedAt: now, trendStability: null });
+      continue;
+    }
+    // Hard late-entry floor: always skip if fewer than MIN_REMAINING_MINUTES_FOR_ENTRY
+    // minutes remain, regardless of the maxEntryMinutes setting.
+    if (15 * 60 - secondsElapsed < MIN_REMAINING_MINUTES_FOR_ENTRY * 60) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `late-entry floor (<${MIN_REMAINING_MINUTES_FOR_ENTRY}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null });
       continue;
     }
 

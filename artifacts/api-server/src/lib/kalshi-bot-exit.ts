@@ -7,7 +7,7 @@
 // path back, actively hunt for the best available exit price rather than riding
 // to near-zero at expiry.
 
-import { getStatWindowCall, getTrackerWindowCall, getWindowBetSignal } from "./crypto";
+import { getStatWindowCall, getTrackerWindowCall, getWindowBetSignal, getLastMLAbove } from "./crypto";
 
 export type ExitRecommendation = "HOLD" | "EXIT";
 
@@ -45,6 +45,7 @@ export interface GuardStates {
   consensusOk: boolean;        // stat + Claude both agree reversal
   timingOverride: boolean;     // current minute has ≥70% accuracy → force hold
   erOk: boolean;               // ER ≥ 0.3 (not pure chop)
+  mlFlipped: boolean;          // ML direction opposes open position (supports exit)
   // Phase 2
   phase2Active: boolean;
   phase2UptickDetected: boolean;
@@ -118,6 +119,13 @@ export function runExitGuard(
   const claudeCall = getTrackerWindowCall(symbol.toUpperCase());
   const wmSignal = getWindowBetSignal(symbol.toUpperCase());
   const wmDriftAbove = wmSignal?.factors != null ? wmSignal.factors.netDriftPct > 0 : null;
+
+  // ML direction signal — true when the ML model predicts the position is going wrong.
+  const mlAbove = getLastMLAbove(symbol);
+  const mlFlipped = mlAbove !== null && (
+    (direction === "yes" && mlAbove === false) ||
+    (direction === "no"  && mlAbove === true)
+  );
 
   let modelsAgreeWrong = false;
   const hasAnyStat = statCall != null && statCall.aboveKalshi !== null;
@@ -208,6 +216,7 @@ export function runExitGuard(
       phase2Timeout,
       phase2YesPrice: yp,
       phase2RecentLow: recentExtreme,
+      mlFlipped,
     };
 
     if (recoveryDetected) {
@@ -242,24 +251,31 @@ export function runExitGuard(
   const flipConfirmed = state.phase1.adverseTickCount >= adverseTicks;
   const magnitudeOk = priceMovePp >= magnitudePp;
 
-  // Model consensus: either stat OR Claude must agree on adverse direction.
-  // Previously required both — which prevented exit when Claude lagged a price crash.
-  let consensusOk = false;
-  if (hasAnyStat || hasAnyClaude) {
-    if (direction === "yes") {
-      const statSaysBelow   = hasAnyStat   && statCall!.aboveKalshi === false;
-      const claudeSaysBelow = hasAnyClaude && claudeCall!.aboveKalshi === false;
-      const coreAgree = statSaysBelow || claudeSaysBelow;
-      const wmAgree   = wmDriftAbove === null || wmDriftAbove === false;
-      consensusOk = coreAgree && wmAgree;
-    } else {
-      const statSaysAbove   = hasAnyStat   && statCall!.aboveKalshi === true;
-      const claudeSaysAbove = hasAnyClaude && claudeCall!.aboveKalshi === true;
-      const coreAgree = statSaysAbove || claudeSaysAbove;
-      const wmAgree   = wmDriftAbove === null || wmDriftAbove === true;
-      consensusOk = coreAgree && wmAgree;
-    }
+  // Model consensus: vote-based across stat, Claude, WM, and ML (one vote each).
+  // Requires ≥2 adverse votes AND at least one core model (stat or Claude) voting
+  // adverse. ML can count as a second vote (strengthens consensus) but cannot
+  // trigger exit alone. ML disagreeing does not block exit if ≥2 others agree.
+  let statSaysAdverse = false;
+  let claudeSaysAdverse = false;
+  let adverseVotes = 0;
+  if (hasAnyStat) {
+    statSaysAdverse = direction === "yes"
+      ? statCall!.aboveKalshi === false
+      : statCall!.aboveKalshi === true;
+    if (statSaysAdverse) adverseVotes++;
   }
+  if (hasAnyClaude) {
+    claudeSaysAdverse = direction === "yes"
+      ? claudeCall!.aboveKalshi === false
+      : claudeCall!.aboveKalshi === true;
+    if (claudeSaysAdverse) adverseVotes++;
+  }
+  if (mlAbove !== null && mlFlipped) adverseVotes++;
+  if (wmDriftAbove !== null) {
+    const wmSaysAdverse = direction === "yes" ? !wmDriftAbove : wmDriftAbove;
+    if (wmSaysAdverse) adverseVotes++;
+  }
+  const consensusOk = adverseVotes >= 2 && (statSaysAdverse || claudeSaysAdverse);
 
   // Timing accuracy override: if ≥70% accuracy at this minute, hold
   const timingOverride = timingAccuracyPct !== null && timingAccuracyPct >= 70;
@@ -269,6 +285,7 @@ export function runExitGuard(
 
   const guardStates: GuardStates = {
     holdDurationOk, flipConfirmed, magnitudeOk, consensusOk, timingOverride, erOk,
+    mlFlipped,
     phase2Active: false, phase2UptickDetected: false, phase2Timeout: false,
     phase2YesPrice: yp, phase2RecentLow: null,
   };

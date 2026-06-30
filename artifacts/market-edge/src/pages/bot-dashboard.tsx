@@ -113,6 +113,7 @@ const fmtDuration = (start: string | null, end: string | null) => {
 const GUARD_LABELS: Record<string, string> = {
   holdDurationMet: "Hold", flipConfirmed: "Flip",
   erSupports: "ER", timingSupports: "Timing", phase2Active: "Phase2",
+  mlFlipped: "ML",
 };
 
 // ─── Main Component ──────────────────────────────────────────────────────────
@@ -482,7 +483,7 @@ export default function BotDashboard() {
 
                 {/* Max Entry Time */}
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Max Entry Time</span>
+                  <span className="text-xs text-muted-foreground">Max Entry Time (never in last 4 min)</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={merged.maxEntryMinutes ?? 3}
                     onChange={e => setConfigDraft(d => ({ ...d, maxEntryMinutes: parseInt(e.target.value) }))}>
