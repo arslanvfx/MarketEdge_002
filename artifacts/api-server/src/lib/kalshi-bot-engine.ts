@@ -3,15 +3,17 @@
 // Reads all available prediction signals for the current window and returns a
 // BET_YES / BET_NO / SKIP decision with full reasoning logged.
 //
-// Signal sources (in priority order):
-//   1. Stat model  (getStatWindowCall)     — short-term statistical regression
-//   2. Claude AI   (getTrackerWindowCall)  — LLM directional read
-//   3. ML model    (getCachedPrediction)   — online logistic regression
-//   4. Window BetSignal (getWindowBetSignal) — intra-window momentum regime
+// Signal sources:
+//   Core pair (both must agree for entry):
+//     1. Stat model  (getStatWindowCall)     — short-term statistical regression
+//     2. Claude AI   (getTrackerWindowCall)  — LLM directional read
+//   Confidence boosters (+8% each when they agree with core direction):
+//     3. ML model    (getCachedPrediction)   — online logistic regression
+//     4. Window BetSignal (getWindowBetSignal) — intra-window momentum regime
 //
-// CAUTION from Window Monitor = hard SKIP (same as STAY_AWAY for the bot).
-// The bot needs a clean, directional regime to operate — "caution" conditions
-// (choppy/drifting) are statistically unfavourable enough to block entry.
+// Core-pair gate: at least one of Stat/Claude must be non-null, and all
+// non-null core signals must agree. ML and WM can never block an entry —
+// they only raise or leave unchanged the base confidence of 65%.
 
 import {
   getTrackerWindowCall,
@@ -22,23 +24,42 @@ import {
   type WindowBetSignal,
 } from "./crypto";
 
+import {
+  computeCorePairDecision,
+  BASE_CONFIDENCE_FULL_PAIR,
+  BASE_CONFIDENCE_HALF_PAIR,
+  CONFIDENCE_BOOST_PER_SIGNAL,
+  type BotDecisionAction,
+  type CorePairInputs,
+  type CorePairResult,
+} from "./kalshi-bot-engine-core";
+
+// Re-export constants and types so callers only import from this file.
+export {
+  computeCorePairDecision,
+  BASE_CONFIDENCE_FULL_PAIR,
+  BASE_CONFIDENCE_HALF_PAIR,
+  CONFIDENCE_BOOST_PER_SIGNAL,
+  type BotDecisionAction,
+  type CorePairInputs,
+  type CorePairResult,
+};
+
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
-  signalThreshold: number;   // min signals agreeing: 2 | 3 | 4 (default 2)
+  signalThreshold: number;   // kept for config compat — not used for entry gating (see core-pair gate)
   minConfidence: number;     // 0-100; skip bet when engine confidence is below this (default 60)
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
-  maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 3)
+  maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 5)
   enabled: boolean;          // master kill-switch
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
   betSize: 0.50,
   dailyLossLimit: 20,
-  // Default 2 so the bot can act on stat + Claude agreement alone.
-  // Raise to 3-4 once the ML model and Window Monitor are warm (20+ windows).
-  signalThreshold: 2,
+  signalThreshold: 2,    // legacy field — core-pair gate now governs entry
   minConfidence: 60,
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
@@ -50,17 +71,15 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enabled: true,
 };
 
-export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP";
-
 export interface SignalSnapshot {
   statAbove: boolean | null;
   claudeAbove: boolean | null;
   mlAbove: boolean | null;
   windowMonitor: "bet" | "stay_away" | "caution" | null;
   windowMonitorReady: boolean;
-  yesPrice: number | null;       // Kalshi Yes price fraction 0-1
-  ev: number | null;             // EV per $1 at current yes price and timing accuracy
-  timingAccuracyPct: number | null;
+  yesPrice: number | null;
+  ev: number | null;
+  signalAccuracyPct: number | null;
   minutesElapsed: number;
   signalsAgreeing: number;
   signalsTotal: number;
@@ -68,20 +87,18 @@ export interface SignalSnapshot {
   statConfidence: number | null;
   claudeConfidence: number | null;
   mlConfidence: number | null;
-  // true when this record was produced during the 45-second warmup guard;
-  // false for all normal SKIP/BET decisions after warmup has cleared.
   warmupActive: boolean;
 }
 
 export interface BotDecision {
   action: BotDecisionAction;
-  confidence: number;  // 0-100
+  confidence: number;
   reasoning: string;
   signals: SignalSnapshot;
 }
 
 // ---------------------------------------------------------------------------
-// Decision engine
+// Public decision engine — gathers live signals then calls the pure core
 // ---------------------------------------------------------------------------
 
 export function makeBotDecision(
@@ -90,11 +107,10 @@ export function makeBotDecision(
   kalshiTicker: string | null,
   yesPrice: number | null,
   minutesElapsed: number,
-  timingAccuracyPct: number | null,
+  signalAccuracyPct: number | null,
 ): BotDecision {
   const sym = symbol.toUpperCase();
 
-  // Gather signals
   const statCall: TrackerWindowCall | null = getStatWindowCall(sym);
   const claudeCall: TrackerWindowCall | null = getTrackerWindowCall(sym);
   const wmSignal: WindowBetSignal | null = getWindowBetSignal(sym);
@@ -104,14 +120,10 @@ export function makeBotDecision(
   const wmRec = wmSignal?.recommendation ?? null;
   const wmReady = wmSignal?.ready ?? false;
 
-  // Ensemble direction: the cached coin prediction's nearest forecast aggregates
-  // the stat + Claude + ML models into a single directional signal. "up" = price
-  // expected above the Kalshi strike → aboveKalshi=true.
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
   const cached = getCachedPrediction(sym);
   if (cached?.predictions) {
-    // predictions[0] is the nearest time bucket — the one that covers the current window
     const nearestPred = cached.predictions[0];
     if (nearestPred && nearestPred.direction !== "flat") {
       mlAbove = nearestPred.direction === "up";
@@ -119,132 +131,37 @@ export function makeBotDecision(
     }
   }
 
-  const baseSignals = { statAbove, claudeAbove, mlAbove };
-
-  function makeEmptySnapshot(): SignalSnapshot {
-    return {
-      statAbove, claudeAbove, mlAbove,
-      windowMonitor: wmRec, windowMonitorReady: wmReady,
-      yesPrice, ev: null, timingAccuracyPct, minutesElapsed,
-      signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
-      statConfidence: statCall?.confidence ?? null,
-      claudeConfidence: claudeCall?.confidence ?? null,
-      mlConfidence,
-      warmupActive: false,
-    };
-  }
-
-  // If no Kalshi ticker/market, we can't bet
-  if (!kalshiTicker) {
-    return skip("No active Kalshi market for this symbol", makeEmptySnapshot());
-  }
-
-  // Window monitor override — both STAY_AWAY and CAUTION are hard skips.
-  // CAUTION signals choppy/drifting conditions that statistically erode edge;
-  // the bot only enters on clean "bet" regime from the window monitor.
-  if (wmReady && (wmRec === "stay_away" || wmRec === "caution")) {
-    return skip(
-      `Window Monitor says ${wmRec?.toUpperCase()} — skipping (noisy/choppy regime)`,
-      makeEmptySnapshot(),
-    );
-  }
-
-  // Count signal agreements across all four directional sources
-  const candidates: Array<{ above: boolean | null; weight: number; label: string }> = [
-    { above: statAbove,   weight: 1, label: "stat" },
-    { above: claudeAbove, weight: 1, label: "claude" },
-    { above: mlAbove,     weight: 1, label: "ml" },
-  ];
-
-  // Window monitor directional vote (only when recommending "bet")
   const wmFactors = wmSignal?.factors;
-  const wmDriftAbove = wmFactors
-    ? wmFactors.netDriftPct > 0   // net drift direction as a proxy signal
-    : null;
-  if (wmReady && wmRec === "bet" && wmDriftAbove !== null) {
-    candidates.push({ above: wmDriftAbove, weight: 1, label: "wm_drift" });
-  }
+  const wmDriftAbove: boolean | null =
+    wmReady && wmRec === "bet" && wmFactors != null ? wmFactors.netDriftPct > 0 : null;
 
-  const yesAboveCount = candidates.filter((c) => c.above === true).length;
-  const noAboveCount  = candidates.filter((c) => c.above === false).length;
-  const total         = candidates.filter((c) => c.above !== null).length;
+  const result = computeCorePairDecision({
+    statAbove, claudeAbove, mlAbove, wmDriftAbove,
+    wmRec, wmReady, yesPrice, signalAccuracyPct, minutesElapsed,
+    statConfidence: statCall?.confidence ?? null,
+    claudeConfidence: claudeCall?.confidence ?? null,
+    mlConfidence,
+    kalshiTicker,
+    minConfidence: config.minConfidence,
+  });
 
-  let agreementTarget: "BET_YES" | "BET_NO" | null = null;
-  let signalsAgreeing = 0;
-  if (total > 0) {
-    if (yesAboveCount > noAboveCount) {
-      // Strict majority required — a tie is not a signal to bet
-      agreementTarget = "BET_YES";
-      signalsAgreeing = yesAboveCount;
-    } else if (noAboveCount > yesAboveCount) {
-      agreementTarget = "BET_NO";
-      signalsAgreeing = noAboveCount;
-    }
-    // Equal split → agreementTarget stays null → will produce SKIP downstream
-  }
-
-  // EV calculation
-  let ev: number | null = null;
-  if (yesPrice !== null && yesPrice > 0 && timingAccuracyPct !== null) {
-    const accFrac = timingAccuracyPct / 100;
-    const winPayoff = (1 - yesPrice) / yesPrice;
-    ev = accFrac * winPayoff - (1 - accFrac);
-  }
-
-  const signals: SignalSnapshot = {
-    ...baseSignals,
+  const snapshot: SignalSnapshot = {
+    statAbove, claudeAbove, mlAbove,
     windowMonitor: wmRec, windowMonitorReady: wmReady,
-    yesPrice, ev, timingAccuracyPct, minutesElapsed,
-    signalsAgreeing, signalsTotal: total, agreementTarget,
+    yesPrice, ev: result.ev, signalAccuracyPct, minutesElapsed,
+    signalsAgreeing: result.signalsAgreeing,
+    signalsTotal: result.signalsTotal,
+    agreementTarget: result.action !== "SKIP" ? result.action : null,
     statConfidence: statCall?.confidence ?? null,
     claudeConfidence: claudeCall?.confidence ?? null,
     mlConfidence,
     warmupActive: false,
   };
 
-  // Negative EV skip
-  if (ev !== null && ev < -0.05) {
-    return skip(`Negative EV (${ev.toFixed(3)}) at current yes price ${yesPrice?.toFixed(2)}`, signals);
-  }
-
-  const threshold = config.signalThreshold;
-
-  if (signalsAgreeing < threshold) {
-    return skip(
-      `Only ${signalsAgreeing}/${total} signals agree (need ${threshold})`,
-      signals,
-    );
-  }
-
-  if (agreementTarget === null) return skip("Could not determine direction", signals);
-  const action = agreementTarget;
-
-  const confidence = total > 0 ? Math.max(40, Math.round((signalsAgreeing / total) * 100)) : 50;
-
-  // Confidence threshold gate: skip if the signal agreement isn't strong enough
-  if (confidence < config.minConfidence) {
-    return skip(
-      `Confidence ${confidence}% below threshold ${config.minConfidence}% — skipping`,
-      { ...signals, signalsAgreeing, signalsTotal: total, agreementTarget },
-    );
-  }
-
-  const parts: string[] = [];
-  if (statAbove !== null) parts.push(`Stat: ${statAbove ? "ABOVE" : "BELOW"}`);
-  if (claudeAbove !== null) parts.push(`Claude: ${claudeAbove ? "ABOVE" : "BELOW"}`);
-  if (mlAbove !== null) parts.push(`ML: ${mlAbove ? "ABOVE" : "BELOW"}`);
-  if (wmRec) parts.push(`WM: ${wmRec.toUpperCase()}`);
-  if (yesPrice !== null) parts.push(`Yes@${(yesPrice * 100).toFixed(0)}¢`);
-  if (ev !== null) parts.push(`EV=${ev.toFixed(3)}`);
-
   return {
-    action,
-    confidence,
-    reasoning: `${signalsAgreeing}/${total} signals → ${action}. ${parts.join(", ")}`,
-    signals,
+    action: result.action,
+    confidence: result.confidence,
+    reasoning: result.reasoning,
+    signals: snapshot,
   };
-}
-
-function skip(reasoning: string, signals: SignalSnapshot): BotDecision {
-  return { action: "SKIP", confidence: 0, reasoning, signals };
 }

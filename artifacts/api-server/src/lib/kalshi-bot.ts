@@ -32,6 +32,7 @@ import {
   fetchKalshiTarget,
   fetchLiveDirection,
   fetchTrendStabilityForBot,
+  getPredictionAnalytics,
   CRYPTO_COINS,
   KALSHI_SERIES,
   type TrendStability,
@@ -626,14 +627,16 @@ async function _runBotTick(
     return;
   }
 
-  const timingAcc = await getTimingAccuracy(sym, minutesElapsed);
+  // Use ensemble signal accuracy (from prediction_records historyStore) for the
+  // EV gate — not the bot's own win rate, which is contaminated by exit decisions.
+  const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
   const decision = makeBotDecision(
     sym,
     config,
     kalshiTicker,
     yesPrice,
     minutesElapsed,
-    timingAcc,
+    signalAcc,
   );
 
   if (decision.action === "SKIP") {
@@ -1476,39 +1479,49 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
-    // Reuse cached timing accuracy to avoid extra DB queries in the hot path.
+    // Cached bot-timing accuracy is used for composite score ranking only.
+    // Signal accuracy (from prediction_records) is passed separately to makeBotDecision
+    // for the EV gate so it reflects signal quality rather than bot win rate.
     const marks = [1, 3, 6, 9, 12];
     const elapsedMin = Math.floor(minutesElapsed);
     const closest = marks.reduce((p, m) => Math.abs(m - elapsedMin) < Math.abs(p - elapsedMin) ? m : p, marks[0]);
     const timingAcc = timingCache.get(`${sym}:${closest * 60}`) ?? timingCache.get(`ALL:${closest * 60}`) ?? null;
 
-    const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, timingAcc);
+    const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
+    const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc);
     const stability = windowStabilityCache.get(sym) ?? null;
-    const rawReason = (decision.signals as unknown as Record<string, unknown>)?.reasoning;
-    const reason = typeof rawReason === "string" ? rawReason : decision.action;
+    const reason = decision.reasoning;
 
-    // Reversing: skip this coin regardless of other signals — trend is working against us
-    if (stability === "reversing") {
-      evalResults.push({
-        symbol: sym,
-        action: "SKIP",
-        confidence: decision.confidence,
-        score: 0,
-        reason: `trend reversing — ${reason.slice(0, 60)}`,
-        windowKey,
-        selected: false,
-        evaluatedAt: now,
-        trendStability: "reversing",
-      });
-      continue;
+    // Reversing: apply a -20% confidence penalty instead of a hard skip.
+    // Only very high-conviction entries (base 65% + boosters = 73–81%) survive the
+    // penalty and still clear minConfidence. Low-conviction reversing windows are
+    // still skipped, but high-agreement signals can proceed with a caution tag.
+    let effectiveConfidence = decision.confidence;
+    let reversingCaution = false;
+    if (stability === "reversing" && decision.action !== "SKIP") {
+      effectiveConfidence = decision.confidence - 20;
+      reversingCaution = true;
+      if (effectiveConfidence < config.minConfidence) {
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `reversing-caution (${decision.confidence}%→${effectiveConfidence}%) — ${reason.slice(0, 40)}`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: "reversing",
+        });
+        continue;
+      }
     }
 
     // clean → ×1.2 bonus for stable directional momentum; choppy/unknown → ×1.0
     const stabilityMultiplier = stability === "clean" ? 1.2 : 1.0;
 
     // Blend vote-agreement confidence with per-model certainty to differentiate coins
-    // that share the same signal ratio. Without this, all coins with 2/4 agreeing
-    // score identically when timingAcc is null (defaults to 50 for all).
+    // that share the same signal ratio.
     const sigs = decision.signals as {
       statConfidence?: number | null;
       claudeConfidence?: number | null;
@@ -1518,16 +1531,20 @@ export async function runBotLoopTick(): Promise<void> {
       .filter((v): v is number => typeof v === "number");
     const avgModelConf = modelConfs.length > 0
       ? modelConfs.reduce((a, b) => a + b, 0) / modelConfs.length
-      : decision.confidence;
-    const blendedConf = decision.confidence * 0.6 + avgModelConf * 0.4;
+      : effectiveConfidence;
+    const blendedConf = effectiveConfidence * 0.6 + avgModelConf * 0.4;
     const score = blendedConf * ((timingAcc ?? 50) / 100) * stabilityMultiplier;
+
+    const finalReason = reversingCaution
+      ? `[reversing-caution] ${reason.slice(0, 60)}`
+      : reason;
 
     evalResults.push({
       symbol: sym,
       action: decision.action as "BET_YES" | "BET_NO" | "SKIP",
-      confidence: decision.confidence,
+      confidence: effectiveConfidence,
       score,
-      reason,
+      reason: finalReason,
       windowKey,
       selected: false,
       evaluatedAt: now,
@@ -1559,8 +1576,9 @@ export async function runBotLoopTick(): Promise<void> {
 
   // Phase 4: run ticks in priority order — best BET candidate first.
   // Once a position is opened, break so only one bet is placed per tick.
-  // Phase 4 must never run runBotTickForCoin for "reversing" coins — task spec requires
-  // hard exclusion from entry for the entire window even when confidence is high.
+  // Reversing coins that survived the confidence penalty appear in bets[] and
+  // execute normally. Reversing coins that were soft-skipped are in skips[] with
+  // trendStability="reversing" and are filtered out of execution to avoid double-entry.
   const orderedSymbols = [
     ...bets.map(e => e.symbol),
     ...skips.filter(e => e.trendStability !== "reversing").map(e => e.symbol),
