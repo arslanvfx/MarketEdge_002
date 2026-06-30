@@ -4,6 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
+import { runBotLoopTick } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -93,6 +94,36 @@ async function runStartupMigrations(): Promise<void> {
       CREATE INDEX IF NOT EXISTS wts_symbol_window
         ON window_timing_snapshots (symbol, window_key)
     `);
+    // Kalshi auto-betting bot bets log table.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kalshi_bot_bets (
+        id                       TEXT PRIMARY KEY,
+        symbol                   TEXT NOT NULL,
+        window_key               TEXT NOT NULL,
+        ticker                   TEXT,
+        direction                TEXT,
+        action                   TEXT NOT NULL,
+        mode                     TEXT NOT NULL,
+        signals                  JSONB,
+        entry_price              NUMERIC(8,4),
+        exit_price               NUMERIC(8,4),
+        contract_count           INTEGER,
+        bet_amount               NUMERIC(10,4),
+        pnl                      NUMERIC(10,4),
+        exit_reason              TEXT,
+        phase2_activated         BOOLEAN DEFAULT FALSE,
+        phase2_recovered_amount  NUMERIC(10,4),
+        outcome                  TEXT,
+        kalshi_target            NUMERIC(16,6),
+        created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        exited_at                TIMESTAMPTZ,
+        evaluated_at             TIMESTAMPTZ
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS kbb_symbol_created
+        ON kalshi_bot_bets (symbol, created_at DESC)
+    `);
   } finally {
     client.release();
   }
@@ -128,6 +159,15 @@ app.listen(port, (err) => {
           .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
       });
       logger.info("Prediction tracker started");
+
+      // Kalshi bot loop — runs every 30 s alongside the main tracker.
+      // Reads from the cached state that the main tracker populates, so no
+      // extra network calls are made when the caches are warm.
+      setInterval(() => {
+        runBotLoopTick().catch((err) =>
+          logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
+        );
+      }, 30_000);
     });
 
   // Daily threshold analysis: runs once at midnight UTC then every 24h.

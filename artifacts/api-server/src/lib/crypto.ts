@@ -1963,6 +1963,17 @@ export function getKalshiWindowContext(symbol: string): { priceAtOpen: number | 
   };
 }
 
+// Returns the current in-memory Kalshi target cache entry for a symbol.
+// Used by the bot loop to read ticker, yes price, and target without re-fetching.
+export function getKalshiCachedData(symbol: string): {
+  value: number | null;
+  ticker?: string;
+  yesPrice?: number | null;
+  closeTime?: string;
+} | null {
+  return kalshiTargetCache.get(symbol.toUpperCase()) ?? null;
+}
+
 export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Promise<number | null> {
   const sym = symbol.toUpperCase();
   const series = KALSHI_SERIES[sym];
