@@ -111,32 +111,46 @@ export function runExitGuard(
     ? (yp !== null && yp < 0.35)
     : (yp !== null && yp > 0.65);
 
-  // All models agree on reversal — stat + Claude + WM drift must all point against position
+  // Reversal signal: at least one of stat or Claude must agree reversal is underway.
+  // Previously required both — but when Claude lags (stays bullish while market crashes),
+  // the exit guard never clears. "Either" is more responsive while still filtering noise.
   const statCall = getStatWindowCall(symbol.toUpperCase());
   const claudeCall = getTrackerWindowCall(symbol.toUpperCase());
   const wmSignal = getWindowBetSignal(symbol.toUpperCase());
   const wmDriftAbove = wmSignal?.factors != null ? wmSignal.factors.netDriftPct > 0 : null;
 
   let modelsAgreeWrong = false;
-  if (statCall != null && claudeCall != null && statCall.aboveKalshi !== null && claudeCall.aboveKalshi !== null) {
-    // For YES bets: stat + Claude both say BELOW; WM drift (if available) is also down
-    // For NO bets:  stat + Claude both say ABOVE; WM drift (if available) is also up
+  const hasAnyStat = statCall != null && statCall.aboveKalshi !== null;
+  const hasAnyClaude = claudeCall != null && claudeCall.aboveKalshi !== null;
+  if (hasAnyStat || hasAnyClaude) {
     if (direction === "yes") {
-      const coreAgree = statCall.aboveKalshi === false && claudeCall.aboveKalshi === false;
+      // Either stat OR Claude sees BELOW → reversal confirmed
+      const statSaysBelow   = hasAnyStat   && statCall!.aboveKalshi === false;
+      const claudeSaysBelow = hasAnyClaude && claudeCall!.aboveKalshi === false;
+      const coreAgree = statSaysBelow || claudeSaysBelow;
       const wmAgree   = wmDriftAbove === null || wmDriftAbove === false;
       modelsAgreeWrong = coreAgree && wmAgree;
     } else {
-      const coreAgree = statCall.aboveKalshi === true && claudeCall.aboveKalshi === true;
+      const statSaysAbove   = hasAnyStat   && statCall!.aboveKalshi === true;
+      const claudeSaysAbove = hasAnyClaude && claudeCall!.aboveKalshi === true;
+      const coreAgree = statSaysAbove || claudeSaysAbove;
       const wmAgree   = wmDriftAbove === null || wmDriftAbove === true;
       modelsAgreeWrong = coreAgree && wmAgree;
     }
   }
 
+  // Emergency magnitude exit: if loss is extreme (≥40pp) regardless of model consensus,
+  // activate Phase 2 damage control. Prevents catastrophic losses when models lag.
+  const isEmergencyLoss = priceMovePp >= 40;
+
   // ER momentum confirms (>0.3 means directional, not random chop)
   const erConfirms = erValue !== null && erValue >= 0.3;
 
+  // Phase 2 activates on normal conditions OR emergency loss (≥40pp), even mid-window,
+  // so the bot doesn't ride a clear bleed-out to zero.
   const shouldActivatePhase2 =
-    isPhase2Time && isLossBeyondThreshold && isLowYesPrice && modelsAgreeWrong && erConfirms;
+    (isPhase2Time && isLossBeyondThreshold && isLowYesPrice && modelsAgreeWrong && erConfirms)
+    || (isEmergencyLoss && isLowYesPrice);
 
   if (shouldActivatePhase2 && state.phase2.activatedAt === null) {
     state.phase2.activatedAt = Date.now();
@@ -228,15 +242,20 @@ export function runExitGuard(
   const flipConfirmed = state.phase1.adverseTickCount >= adverseTicks;
   const magnitudeOk = priceMovePp >= magnitudePp;
 
-  // Model consensus: stat + Claude + WM all must agree on adverse direction
+  // Model consensus: either stat OR Claude must agree on adverse direction.
+  // Previously required both — which prevented exit when Claude lagged a price crash.
   let consensusOk = false;
-  if (statCall != null && claudeCall != null && statCall.aboveKalshi !== null && claudeCall.aboveKalshi !== null) {
+  if (hasAnyStat || hasAnyClaude) {
     if (direction === "yes") {
-      const coreAgree = statCall.aboveKalshi === false && claudeCall.aboveKalshi === false;
+      const statSaysBelow   = hasAnyStat   && statCall!.aboveKalshi === false;
+      const claudeSaysBelow = hasAnyClaude && claudeCall!.aboveKalshi === false;
+      const coreAgree = statSaysBelow || claudeSaysBelow;
       const wmAgree   = wmDriftAbove === null || wmDriftAbove === false;
       consensusOk = coreAgree && wmAgree;
     } else {
-      const coreAgree = statCall.aboveKalshi === true && claudeCall.aboveKalshi === true;
+      const statSaysAbove   = hasAnyStat   && statCall!.aboveKalshi === true;
+      const claudeSaysAbove = hasAnyClaude && claudeCall!.aboveKalshi === true;
+      const coreAgree = statSaysAbove || claudeSaysAbove;
       const wmAgree   = wmDriftAbove === null || wmDriftAbove === true;
       consensusOk = coreAgree && wmAgree;
     }

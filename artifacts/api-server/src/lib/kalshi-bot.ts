@@ -1487,7 +1487,22 @@ export async function runBotLoopTick(): Promise<void> {
 
     // clean → ×1.2 bonus for stable directional momentum; choppy/unknown → ×1.0
     const stabilityMultiplier = stability === "clean" ? 1.2 : 1.0;
-    const score = decision.confidence * ((timingAcc ?? 50) / 100) * stabilityMultiplier;
+
+    // Blend vote-agreement confidence with per-model certainty to differentiate coins
+    // that share the same signal ratio. Without this, all coins with 2/4 agreeing
+    // score identically when timingAcc is null (defaults to 50 for all).
+    const sigs = decision.signals as {
+      statConfidence?: number | null;
+      claudeConfidence?: number | null;
+      mlConfidence?: number | null;
+    };
+    const modelConfs = [sigs.statConfidence, sigs.claudeConfidence, sigs.mlConfidence]
+      .filter((v): v is number => typeof v === "number");
+    const avgModelConf = modelConfs.length > 0
+      ? modelConfs.reduce((a, b) => a + b, 0) / modelConfs.length
+      : decision.confidence;
+    const blendedConf = decision.confidence * 0.6 + avgModelConf * 0.4;
+    const score = blendedConf * ((timingAcc ?? 50) / 100) * stabilityMultiplier;
 
     evalResults.push({
       symbol: sym,

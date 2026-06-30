@@ -171,13 +171,15 @@ export function makeBotDecision(
   let agreementTarget: "BET_YES" | "BET_NO" | null = null;
   let signalsAgreeing = 0;
   if (total > 0) {
-    if (yesAboveCount >= noAboveCount) {
+    if (yesAboveCount > noAboveCount) {
+      // Strict majority required — a tie is not a signal to bet
       agreementTarget = "BET_YES";
       signalsAgreeing = yesAboveCount;
-    } else {
+    } else if (noAboveCount > yesAboveCount) {
       agreementTarget = "BET_NO";
       signalsAgreeing = noAboveCount;
     }
+    // Equal split → agreementTarget stays null → will produce SKIP downstream
   }
 
   // EV calculation
