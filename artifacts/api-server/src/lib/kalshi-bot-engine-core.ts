@@ -183,7 +183,8 @@ export function applyBetOutcome(
   pauseWindows: number,
 ): CircuitBreakerState {
   if (won) {
-    return { consecutiveLosses: 0, circuitBreakerWindowsRemaining: state.circuitBreakerWindowsRemaining };
+    // Win clears the streak AND cancels any active circuit-breaker cooldown.
+    return { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 };
   }
   const newConsecutive = state.consecutiveLosses + 1;
   const canTrigger = maxConsecutiveLosses > 0 && pauseWindows > 0;

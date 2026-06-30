@@ -274,10 +274,10 @@ test("applyBetOutcome: win resets consecutive losses to 0", () => {
   assert.equal(next.consecutiveLosses, 0);
 });
 
-test("applyBetOutcome: win does not change remaining circuit-breaker windows", () => {
-  const s: CircuitBreakerState = { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 2 };
+test("applyBetOutcome: win resets circuit-breaker windows remaining to 0", () => {
+  const s: CircuitBreakerState = { consecutiveLosses: 2, circuitBreakerWindowsRemaining: 2 };
   const next = applyBetOutcome(s, true, 3, 2);
-  assert.equal(next.circuitBreakerWindowsRemaining, 2);
+  assert.equal(next.circuitBreakerWindowsRemaining, 0, "win must cancel active cooldown");
 });
 
 test("applyBetOutcome: loss increments consecutive count", () => {

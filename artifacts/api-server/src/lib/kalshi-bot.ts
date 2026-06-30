@@ -1483,12 +1483,23 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
-  // Track new-window boundary for circuit-breaker decrement.
-  // The variable is used later in the entry gate to decrement exactly once per window.
+  // Circuit-breaker countdown: decrement once per 15-min window at the TOP of the loop
+  // so the counter advances even when the bot is paused or in quiet hours.
+  // The pre-decrement value is captured in `cbWindowsAtStart` so the gate below can
+  // check it accurately — this ensures N configured pause windows = N windows actually
+  // skipped (gate fires on the pre-decrement value, not the already-decremented one).
   const cbWindowNow = currentWindowKey();
   const isCBNewWindow = cbWindowNow !== lastCircuitBreakerWindowKey;
+  const cbWindowsAtStart = cbState.circuitBreakerWindowsRemaining;
   if (isCBNewWindow) {
     lastCircuitBreakerWindowKey = cbWindowNow;
+    if (cbState.circuitBreakerWindowsRemaining > 0) {
+      cbState = tickCircuitBreakerWindow(cbState);
+      logger.info(
+        { circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining },
+        "[kalshi-bot] circuit breaker countdown — windows remaining",
+      );
+    }
   }
 
   if (!config.enabled || paused) return;
@@ -1565,17 +1576,13 @@ export async function runBotLoopTick(): Promise<void> {
     return;
   }
 
-  // Circuit breaker gate: skip new entries while the cooldown is active.
-  // Decrement happens HERE (after the check) so that N configured pause windows
-  // reliably blocks exactly N consecutive windows (not N-1).
-  if (cbState.circuitBreakerWindowsRemaining > 0) {
-    if (isCBNewWindow) {
-      cbState = tickCircuitBreakerWindow(cbState);
-      logger.info(
-        { circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining },
-        "[kalshi-bot] circuit breaker countdown — windows remaining",
-      );
-    }
+  // Circuit breaker gate: gate on the PRE-decrement snapshot so that N pause windows
+  // = N windows where new entries are blocked (countdown already advanced at top of loop).
+  if (cbWindowsAtStart > 0) {
+    logger.info(
+      { circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining },
+      "[kalshi-bot] circuit breaker active — skipping new entry",
+    );
     return;
   }
 
