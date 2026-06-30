@@ -3325,6 +3325,10 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
     initHistoryFromDB().catch(() => {}),
     initMLFromDB().catch(() => {}),
   ]).finally(() => {
+    // Recover any timing snapshots from closed windows that were never evaluated
+    // (e.g. written before a server restart — the normal evaluation block only
+    // fires for windows that close *while the server is running*).
+    recoverUnevaluatedTimingSnapshots().catch(() => {});
     tick().catch(() => {});
     setInterval(() => tick().catch(() => {}), 30_000);
     onInitComplete?.();
@@ -3997,6 +4001,77 @@ export interface TimingAnalysisRow {
   avgYesPrice: number | null;// Kalshi Yes price (0-1 fraction), null until collected
   avgReturn: number | null;  // potential upside per $1 bet if correct: (1-p)/p
   ev: number | null;         // EV per $1 bet = accuracy*(1/yesPrice) - (1-accuracy)
+}
+
+/**
+ * Startup recovery: evaluates any timing snapshots from already-closed windows
+ * that were never scored (e.g. written before a server restart).
+ *
+ * The normal evaluation block only fires when a window closes *while the server
+ * is running*. Any snapshot written before a restart stays unevaluated forever
+ * unless we back-fill it here using the actual closing price already stored in
+ * prediction_records.
+ */
+async function recoverUnevaluatedTimingSnapshots(): Promise<void> {
+  try {
+    // Find distinct closed windows with at least one unevaluated snapshot.
+    const pendingRows = await db.execute(sql`
+      SELECT DISTINCT symbol, window_key, target_time, kalshi_target
+      FROM   window_timing_snapshots
+      WHERE  actual_above IS NULL
+        AND  target_time < NOW()
+    `);
+
+    if (pendingRows.rows.length === 0) return;
+
+    let recovered = 0;
+
+    for (const row of pendingRows.rows as Array<Record<string, unknown>>) {
+      const sym         = String(row.symbol);
+      const windowKey   = String(row.window_key);
+      const targetISO   = new Date(row.target_time as string).toISOString();
+      const kalshiTarget = Number(row.kalshi_target);
+
+      // Look up the actual closing price stored in prediction_records for this
+      // symbol + window boundary — any evaluated record with actual_price works.
+      const priceRes = await db.execute(sql`
+        SELECT actual_price
+        FROM   prediction_records
+        WHERE  symbol      = ${sym}
+          AND  target_time = ${targetISO}::timestamptz
+          AND  actual_price IS NOT NULL
+        LIMIT 1
+      `);
+
+      if (priceRes.rows.length === 0) continue; // no closing price yet — skip
+
+      const actualPrice = Number((priceRes.rows[0] as Record<string, unknown>).actual_price);
+      if (!actualPrice || actualPrice <= 0) continue;
+
+      // Strict `>` consistent with the live evaluation rule.
+      const actualAbove = actualPrice > kalshiTarget;
+
+      await db.execute(sql`
+        UPDATE window_timing_snapshots
+        SET  actual_above  = ${actualAbove},
+             correct       = (price_above = ${actualAbove}),
+             evaluated_at  = NOW()
+        WHERE symbol      = ${sym}
+          AND window_key  = ${windowKey}
+          AND actual_above IS NULL
+      `);
+
+      recovered++;
+    }
+
+    if (recovered > 0) {
+      console.info(
+        `[timing-recovery] back-filled ${recovered} unevaluated timing window(s) from closed prediction records`,
+      );
+    }
+  } catch (err) {
+    console.warn("[timing-recovery] failed (non-fatal):", err);
+  }
 }
 
 /**
