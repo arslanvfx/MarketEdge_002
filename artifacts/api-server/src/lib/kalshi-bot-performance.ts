@@ -51,6 +51,7 @@ export interface PerformanceReport {
   avgConfidenceWinners: number | null;
   avgConfidenceLosers: number | null;
   exitReasonBreakdown: Record<string, number>;
+  circuitBreakerTriggers: number;
   recommendations: string[];
   computedAt: string;
 }
@@ -216,6 +217,25 @@ export function computePerformanceReport(
     exitReasonBreakdown[r] = (exitReasonBreakdown[r] ?? 0) + 1;
   }
 
+  // Circuit breaker trigger count — proxy: count each distinct run where
+  // consecutive losses first reach the hard-coded CB threshold of 3.
+  const CB_THRESHOLD = 3;
+  let cbStreak = 0;
+  let cbFiredForStreak = false;
+  let circuitBreakerTriggers = 0;
+  for (const b of settled) {
+    if (b.outcome === "loss") {
+      cbStreak++;
+      if (!cbFiredForStreak && cbStreak >= CB_THRESHOLD) {
+        circuitBreakerTriggers++;
+        cbFiredForStreak = true;
+      }
+    } else {
+      cbStreak = 0;
+      cbFiredForStreak = false;
+    }
+  }
+
   // Human-readable recommendations (top 3)
   const recommendations: string[] = [];
 
@@ -266,6 +286,7 @@ export function computePerformanceReport(
     avgConfidenceWinners,
     avgConfidenceLosers,
     exitReasonBreakdown,
+    circuitBreakerTriggers,
     recommendations: recommendations.slice(0, 3),
     computedAt,
   };
@@ -300,12 +321,19 @@ export function runAutoTuneRules(
     const h1Covered = isHourInQuietRange((bandStart + 1) % 24, config.quietHoursStart, config.quietHoursEnd);
     if (h0Covered && h1Covered) continue;
 
+    // Expand the current quiet window to absorb this band.
+    // Simple linear merge: extend whichever edge is closer.
+    // (Works correctly for non-wrap-around windows which is the common case.)
+    const newStart = Math.min(config.quietHoursStart, bandStart);
+    const newEnd = Math.max(config.quietHoursEnd, bandEnd === 0 ? 24 : bandEnd);
+
     mutations.push({
       ruleName: "quiet_hours_expand",
       oldValue: `${config.quietHoursStart}-${config.quietHoursEnd}`,
-      newValue: `${bandStart}-${bandEnd}`,
+      newValue: `${newStart}-${newEnd}`,
       triggerReason:
         `Hour band ${stats.band} UTC: ${Math.round((stats.winRate ?? 0) * 100)}% win rate over ${stats.betCount} bets (< 40% threshold)`,
+      configMutation: { quietHoursStart: newStart, quietHoursEnd: newEnd },
     });
     break;
   }

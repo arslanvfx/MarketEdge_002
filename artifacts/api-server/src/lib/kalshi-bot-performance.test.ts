@@ -212,6 +212,7 @@ function makeReport(overrides: Partial<PerformanceReport> = {}): PerformanceRepo
     avgConfidenceWinners: null,
     avgConfidenceLosers: null,
     exitReasonBreakdown: {},
+    circuitBreakerTriggers: 0,
     recommendations: [],
     computedAt: NOW.toISOString(),
     ...overrides,
@@ -235,6 +236,11 @@ test("rule1: quiet_hours_expand fires when band has ≥20 bets and <40% win rate
   const r1 = mutations.find(m => m.ruleName === "quiet_hours_expand");
   assert.ok(r1, "quiet_hours_expand mutation should be present");
   assert.ok(r1.triggerReason.includes("14-16"), "reason should mention the band");
+  // configMutation must be present with expanded quiet window
+  assert.ok(r1.configMutation, "configMutation should be set so the rule is applied");
+  // DEFAULT_CONFIG quietHoursEnd=8, band end=16 → new end=16; start stays 2
+  assert.equal(r1.configMutation!.quietHoursStart, 2);
+  assert.equal(r1.configMutation!.quietHoursEnd, 16);
 });
 
 test("rule1: quiet_hours_expand skips band already inside quiet window", () => {
@@ -335,6 +341,38 @@ test("rule3: does not fire when win rate is exactly 55%", () => {
   const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
   const r3 = mutations.find(m => m.ruleName === "confidence_floor_raise");
   assert.equal(r3, undefined);
+});
+
+test("circuitBreakerTriggers counts distinct CB-threshold crossings", () => {
+  // 2 losses, 1 win, then 3 more losses → 1 trigger (streak=3)
+  // then 1 win resets, then 4 losses → 1 more trigger at loss #3
+  const bets = [
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "win" }),
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "loss" }), // streak hits 3 → trigger #1
+    makeBet({ outcome: "loss" }), // continues streak, no double count
+    makeBet({ outcome: "win" }),
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "loss" }), // streak hits 3 → trigger #2
+  ];
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.circuitBreakerTriggers, 2);
+});
+
+test("circuitBreakerTriggers is zero when no streak reaches threshold", () => {
+  const bets = [
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "win" }),
+    makeBet({ outcome: "loss" }),
+    makeBet({ outcome: "win" }),
+  ];
+  const report = computePerformanceReport(bets, NOW);
+  assert.equal(report.circuitBreakerTriggers, 0);
 });
 
 test("all three rules can fire simultaneously", () => {

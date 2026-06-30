@@ -2030,8 +2030,10 @@ export async function runAutoTuneJob(): Promise<void> {
         sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
           AND ${kalshiBotBetsTable.outcome} IS NOT NULL`,
       )
-      .orderBy(kalshiBotBetsTable.createdAt) // oldest first
+      .orderBy(desc(kalshiBotBetsTable.createdAt)) // most-recent first → reverse below
       .limit(200);
+
+    rows.reverse(); // convert to oldest-first so slice(-30) gives the most recent 30
 
     const bets: SettledBetRecord[] = rows.map(r => ({
       symbol: r.symbol,

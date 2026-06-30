@@ -966,16 +966,19 @@ export default function BotDashboard() {
                 return (
                   <>
                     {/* Top stats */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       {[
                         { label: "Total Bets", value: String(r.totalBets) },
                         { label: "Overall Win Rate", value: pct(r.overallWinRate) },
                         { label: "Last-30 Win Rate", value: pct(r.last30WinRate) },
                         { label: "Last-24h Win Rate", value: pct(r.last24hWinRate) },
-                      ].map(({ label, value }) => (
+                        { label: "CB Triggers", value: String(r.circuitBreakerTriggers),
+                          color: r.circuitBreakerTriggers >= 3 ? "text-red-400" : r.circuitBreakerTriggers >= 1 ? "text-amber-400" : "" },
+                        { label: "YES / NO", value: `${r.byDirection.yes.betCount} / ${r.byDirection.no.betCount}` },
+                      ].map(({ label, value, color }) => (
                         <div key={label} className="bg-background/40 rounded-lg p-3 text-center">
                           <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">{label}</div>
-                          <div className="text-base font-bold">{value}</div>
+                          <div className={`text-base font-bold ${color ?? ""}`}>{value}</div>
                         </div>
                       ))}
                     </div>
