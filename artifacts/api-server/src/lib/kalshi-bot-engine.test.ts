@@ -161,6 +161,13 @@ test("Negative EV fires when signalAccuracyPct is low (40% at 50¢ yes)", () => 
   assert.match(r.reasoning, /Negative EV/);
 });
 
+test("Negative EV fires at 45% accuracy at 50¢ yes (borderline negative EV)", () => {
+  // accFrac=0.45, winPayoff=(1-0.50)/0.50=1.0 → EV = 0.45*1 - 0.55 = -0.10 < -0.05
+  const r = computeCorePairDecision(inp({ statAbove: true, claudeAbove: true, yesPrice: 0.50, signalAccuracyPct: 45 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /Negative EV/);
+});
+
 test("EV gate passes when signalAccuracyPct is 60% at 50¢ yes", () => {
   // accFrac=0.60, winPayoff=1.0 → EV = 0.60*1 - 0.40 = +0.20 ≥ -0.05
   const r = computeCorePairDecision(inp({ statAbove: true, claudeAbove: true, yesPrice: 0.50, signalAccuracyPct: 60 }));

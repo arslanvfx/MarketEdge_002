@@ -8,8 +8,8 @@
 //     1. Stat model  (getStatWindowCall)     — short-term statistical regression
 //     2. Claude AI   (getTrackerWindowCall)  — LLM directional read
 //   Confidence boosters (+8% each when they agree with core direction):
-//     3. ML model    (getCachedPrediction)   — online logistic regression
-//     4. Window BetSignal (getWindowBetSignal) — intra-window momentum regime
+//     3. ML model    (getMLPrediction)       — online logistic regression (14-feature vector)
+//     4. Window BetSignal (getWindowBetSignal) — pre-window regime + intra-window momentum
 //
 // Core-pair gate: at least one of Stat/Claude must be non-null, and all
 // non-null core signals must agree. ML and WM can never block an entry —
@@ -20,10 +20,14 @@ import {
   getStatWindowCall,
   getWindowBetSignal,
   getCachedPrediction,
+  getKalshiWindowContext,
   TRAINING_COINS,
   type TrackerWindowCall,
   type WindowBetSignal,
 } from "./crypto";
+
+import { extractMLFeatures } from "./ml-features";
+import { getMLPrediction } from "./ml-store";
 
 import {
   computeCorePairDecision,
@@ -154,14 +158,23 @@ export function makeBotDecision(
     };
   }
 
+  // ML logistic-regression prediction.
+  // getCachedPrediction gives the live CoinPrediction (price + indicators + candles).
+  // extractMLFeatures converts it into the 14-element feature vector; getMLPrediction
+  // runs inference on the in-memory trained weights.  Returns null when the model
+  // hasn't accumulated ≥30 labeled windows yet (minWindows gate).
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
-  const cached = getCachedPrediction(sym);
-  if (cached?.predictions) {
-    const nearestPred = cached.predictions[0];
-    if (nearestPred && nearestPred.direction !== "flat") {
-      mlAbove = nearestPred.direction === "up";
-      mlConfidence = nearestPred.confidence ?? null;
+  const pred = getCachedPrediction(sym);
+  const mlKalshiTarget = pred?.kalshiTarget ?? null;
+  if (pred && mlKalshiTarget != null) {
+    const winCtx = getKalshiWindowContext(sym);
+    const elapsedFraction = Math.min(minutesElapsed / 15, 1);
+    const features = extractMLFeatures(pred, mlKalshiTarget, elapsedFraction, winCtx?.priceAtOpen);
+    const mlResult = getMLPrediction(sym, features);
+    if (mlResult.ready && mlResult.prediction) {
+      mlAbove = mlResult.prediction.above;
+      mlConfidence = mlResult.prediction.confidence ?? null;
     }
   }
 

@@ -2024,7 +2024,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       return null;
     }
     const body = (await resp.json()) as {
-      markets?: { floor_strike?: number; ticker?: string; close_time?: string; yes_ask?: number; last_price?: number }[];
+      markets?: { floor_strike?: number; ticker?: string; close_time?: string; yes_ask?: number; yes_bid?: number; last_price?: number }[];
     };
 
     const markets = (body.markets ?? []).filter(
@@ -2065,10 +2065,17 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     }
 
     if (selected) {
-      // yes_ask is in cents (0–100); convert to 0-1 fraction for EV calculations.
-      const yesAsk = typeof selected.yes_ask === "number" ? selected.yes_ask / 100 : null;
-      const lastP  = typeof selected.last_price === "number" ? selected.last_price / 100 : null;
-      const yesPrice = yesAsk ?? lastP ?? null;
+      // yes_ask / yes_bid / last_price are integers in cents (1–99); 0 means no quote.
+      // Prefer the bid/ask midpoint for the most accurate yes probability estimate.
+      // Fall back: ask only → bid only → last traded price → null (no price available).
+      const toFrac = (v: number | undefined | null) =>
+        typeof v === "number" && v > 0 ? v / 100 : null;
+      const yesAsk   = toFrac(selected.yes_ask);
+      const yesBid   = toFrac(selected.yes_bid);
+      const lastP    = toFrac(selected.last_price);
+      const yesPrice =
+        yesAsk !== null && yesBid !== null ? (yesAsk + yesBid) / 2
+        : yesAsk ?? yesBid ?? lastP ?? null;
       kalshiTargetCache.set(sym, {
         value: selected.floor_strike!,
         ticker: selected.ticker,
@@ -3700,7 +3707,12 @@ export function computeWindowBetSignal(
   const factors = { efficiencyRatio: er, oscillationCount: osc, spikeFlag, netDriftPct };
   const pER = preWindowER ?? null;
 
-  if (minutesElapsed < 5) {
+  // When preWindowER is available it is the PRIMARY signal (55-57% hit rate vs 46-47%).
+  // It is computed from the 90-min pre-window lookback and is usable from minute 1.
+  // We only need 2 minutes of intra-window candles for the IWM secondary check.
+  // Without preWindowER the intra-window fallback path needs 5 min of data.
+  const readyThreshold = pER !== null ? 2 : 5;
+  if (minutesElapsed < readyThreshold) {
     return { ready: false, minutesElapsed, recommendation: "caution", reason: "Monitoring…", preWindowER: pER, factors };
   }
 
