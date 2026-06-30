@@ -88,6 +88,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     quietHoursEnd,
     maxConsecutiveLosses,
     circuitBreakerPauseWindows,
+    enableDirectionCap,
+    maxSameDirectionBets,
+    enableMomentumFilter,
+    momentumWindowCount,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -102,6 +106,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     quietHoursEnd?: number;
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
+    enableDirectionCap?: boolean;
+    maxSameDirectionBets?: number;
+    enableMomentumFilter?: boolean;
+    momentumWindowCount?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -141,6 +149,14 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof circuitBreakerPauseWindows === "number" && circuitBreakerPauseWindows >= 0 && circuitBreakerPauseWindows <= 20) {
     partial.circuitBreakerPauseWindows = circuitBreakerPauseWindows;
+  }
+  if (typeof enableDirectionCap === "boolean") partial.enableDirectionCap = enableDirectionCap;
+  if (typeof maxSameDirectionBets === "number" && maxSameDirectionBets >= 1 && maxSameDirectionBets <= 10) {
+    partial.maxSameDirectionBets = maxSameDirectionBets;
+  }
+  if (typeof enableMomentumFilter === "boolean") partial.enableMomentumFilter = enableMomentumFilter;
+  if (typeof momentumWindowCount === "number" && momentumWindowCount >= 2 && momentumWindowCount <= 8) {
+    partial.momentumWindowCount = momentumWindowCount;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

@@ -207,3 +207,71 @@ export function tickCircuitBreakerWindow(state: CircuitBreakerState): CircuitBre
     circuitBreakerWindowsRemaining: Math.max(0, state.circuitBreakerWindowsRemaining - 1),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Regime detection — momentum / price-trend helpers
+// ---------------------------------------------------------------------------
+
+export type PriceRegime = "trending_up" | "trending_down" | "ranging";
+
+/**
+ * Derives a simple price regime from a chronological list of recent strike prices.
+ * Requires at least 2 data points; returns "ranging" when insufficient data.
+ */
+export function deriveRegime(recentStrikes: number[], windowCount: number = 3): PriceRegime {
+  if (recentStrikes.length < 2) return "ranging";
+  const relevant = recentStrikes.slice(-Math.max(2, windowCount));
+  let allUp = true;
+  let allDown = true;
+  for (let i = 1; i < relevant.length; i++) {
+    if (relevant[i] <= relevant[i - 1]) allUp = false;
+    if (relevant[i] >= relevant[i - 1]) allDown = false;
+  }
+  if (allUp) return "trending_up";
+  if (allDown) return "trending_down";
+  return "ranging";
+}
+
+/**
+ * Returns true when the proposed bet direction is clearly opposed by multi-window
+ * momentum — i.e., the price has moved consistently against the bet direction for
+ * `windowCount` consecutive windows AND the cumulative move exceeds the threshold.
+ *
+ * Use case: prevent fighting a clear trend.
+ *   - Proposing NO (price ends below strike) when price has been consistently rising → override
+ *   - Proposing YES (price ends above strike) when price has been consistently falling → override
+ *
+ * @param proposedDirection      "yes" | "no"
+ * @param recentStrikes          Chronological Kalshi strike prices (oldest first).
+ *                               Needs at least windowCount+1 values; fewer → false.
+ * @param cumulativeThresholdPct Minimum absolute % move to qualify as momentum (default 0.5).
+ * @param windowCount            Consecutive windows required (default 3).
+ */
+export function checkMomentumOverride(
+  proposedDirection: "yes" | "no",
+  recentStrikes: number[],
+  cumulativeThresholdPct: number = 0.5,
+  windowCount: number = 3,
+): boolean {
+  if (recentStrikes.length < windowCount + 1) return false;
+  const relevant = recentStrikes.slice(-(windowCount + 1));
+
+  // All consecutive window-to-window moves must be in the same direction.
+  let allUp = true;
+  let allDown = true;
+  for (let i = 1; i < relevant.length; i++) {
+    if (relevant[i] <= relevant[i - 1]) allUp = false;
+    if (relevant[i] >= relevant[i - 1]) allDown = false;
+  }
+  if (!allUp && !allDown) return false; // mixed direction — no clear trend
+
+  const oldest = relevant[0];
+  const newest = relevant[relevant.length - 1];
+  const pctMove = Math.abs((newest - oldest) / oldest * 100);
+  if (pctMove < cumulativeThresholdPct) return false; // insufficient magnitude
+
+  // Trend opposes the proposed direction → momentum override
+  if (allUp && proposedDirection === "no") return true;   // price rising → don't bet NO
+  if (allDown && proposedDirection === "yes") return true; // price falling → don't bet YES
+  return false;
+}

@@ -27,6 +27,10 @@ interface BotConfig {
   quietHoursEnd: number;
   maxConsecutiveLosses: number;
   circuitBreakerPauseWindows: number;
+  enableDirectionCap: boolean;
+  maxSameDirectionBets: number;
+  enableMomentumFilter: boolean;
+  momentumWindowCount: number;
 }
 
 interface OpenPosition {
@@ -73,6 +77,7 @@ interface WindowEval {
   confidence: number; score: number; reason: string;
   windowKey: string; selected: boolean; evaluatedAt: string;
   trendStability: "clean" | "choppy" | "reversing" | null;
+  regime: "trending_up" | "trending_down" | "ranging" | null;
 }
 
 interface BotStats {
@@ -385,6 +390,7 @@ export default function BotDashboard() {
                     <th className="px-3 py-2">Confidence</th>
                     <th className="px-3 py-2">Score</th>
                     <th className="px-3 py-2">Trend</th>
+                    <th className="px-3 py-2">Regime</th>
                     <th className="px-3 py-2">Reason</th>
                     <th className="px-3 py-2">Selected</th>
                   </tr>
@@ -416,6 +422,19 @@ export default function BotDashboard() {
                             "bg-amber-500/15 text-amber-400"
                           }`}>
                             {e.trendStability}
+                          </span>
+                        ) : <span className="text-muted-foreground text-xs">—</span>}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {e.regime ? (
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                            e.regime === "trending_up" ? "bg-sky-500/15 text-sky-400" :
+                            e.regime === "trending_down" ? "bg-orange-500/15 text-orange-400" :
+                            "bg-zinc-500/15 text-zinc-400"
+                          }`}>
+                            {e.regime === "trending_up" ? "↑ trending" :
+                             e.regime === "trending_down" ? "↓ trending" :
+                             "↔ ranging"}
                           </span>
                         ) : <span className="text-muted-foreground text-xs">—</span>}
                       </td>
@@ -576,6 +595,60 @@ export default function BotDashboard() {
                     <option value={0}>Disabled</option>
                     {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
                       <option key={n} value={n}>Pause {n} window{n > 1 ? "s" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Direction Cap Enable */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Directional Balance Filter</span>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <button
+                      onClick={() => setConfigDraft(d => ({ ...d, enableDirectionCap: !(merged.enableDirectionCap ?? true) }))}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${(merged.enableDirectionCap ?? true) ? "bg-emerald-500" : "bg-muted"}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${(merged.enableDirectionCap ?? true) ? "translate-x-5" : ""}`} />
+                    </button>
+                    <span className={`text-xs font-medium ${(merged.enableDirectionCap ?? true) ? "text-emerald-400" : "text-muted-foreground"}`}>
+                      {(merged.enableDirectionCap ?? true) ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                </label>
+
+                {/* Max Same-Direction Bets */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max Same-Direction Bets / Window</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxSameDirectionBets ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxSameDirectionBets: parseInt(e.target.value) }))}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n} bet{n > 1 ? "s" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Momentum Filter Enable */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Momentum Override Filter</span>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <button
+                      onClick={() => setConfigDraft(d => ({ ...d, enableMomentumFilter: !(merged.enableMomentumFilter ?? true) }))}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${(merged.enableMomentumFilter ?? true) ? "bg-emerald-500" : "bg-muted"}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${(merged.enableMomentumFilter ?? true) ? "translate-x-5" : ""}`} />
+                    </button>
+                    <span className={`text-xs font-medium ${(merged.enableMomentumFilter ?? true) ? "text-emerald-400" : "text-muted-foreground"}`}>
+                      {(merged.enableMomentumFilter ?? true) ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                </label>
+
+                {/* Momentum Window Count */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Momentum Windows Required</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.momentumWindowCount ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, momentumWindowCount: parseInt(e.target.value) }))}>
+                    {[2, 3, 4, 5, 6, 7, 8].map(n => (
+                      <option key={n} value={n}>{n} consecutive windows</option>
                     ))}
                   </select>
                 </label>

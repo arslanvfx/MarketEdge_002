@@ -37,10 +37,13 @@ import {
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
+  checkMomentumOverride,
+  deriveRegime,
   type BotDecisionAction,
   type CorePairInputs,
   type CorePairResult,
   type CircuitBreakerState,
+  type PriceRegime,
 } from "./kalshi-bot-engine-core";
 
 // Re-export constants and types so callers only import from this file.
@@ -52,10 +55,13 @@ export {
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
+  checkMomentumOverride,
+  deriveRegime,
   type BotDecisionAction,
   type CorePairInputs,
   type CorePairResult,
   type CircuitBreakerState,
+  type PriceRegime,
 };
 
 export interface BotConfig {
@@ -72,6 +78,14 @@ export interface BotConfig {
   quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
   circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
+  // Directional balance filter: caps correlated exposure by limiting same-direction
+  // bets in one window. Set enableDirectionCap=false or maxSameDirectionBets=0 to disable.
+  enableDirectionCap: boolean;   // (default true)
+  maxSameDirectionBets: number;  // max YES or NO bets per 15-min window (default 3)
+  // Momentum filter: prevents betting against a clear multi-window price trend.
+  // Set enableMomentumFilter=false to disable.
+  enableMomentumFilter: boolean; // (default true)
+  momentumWindowCount: number;   // consecutive windows required to trigger (default 3)
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -96,6 +110,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   quietHoursEnd: 18,     // 18:00 UTC (no entries 12:00–17:59 UTC by default)
   maxConsecutiveLosses: 3,
   circuitBreakerPauseWindows: 2,
+  enableDirectionCap: true,
+  maxSameDirectionBets: 3,
+  enableMomentumFilter: true,
+  momentumWindowCount: 3,
 };
 
 export interface SignalSnapshot {

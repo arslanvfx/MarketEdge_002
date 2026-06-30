@@ -351,3 +351,91 @@ test("Full circuit-breaker lifecycle: 3 losses → trigger → 2 ticks → re-en
   s = tickCircuitBreakerWindow(s); // second window passes
   assert.equal(s.circuitBreakerWindowsRemaining, 0, "breaker cleared");
 });
+
+// ---------------------------------------------------------------------------
+// checkMomentumOverride tests
+// ---------------------------------------------------------------------------
+
+import { checkMomentumOverride, deriveRegime } from "./kalshi-bot-engine-core.ts";
+
+test("checkMomentumOverride: returns false when insufficient data (fewer than windowCount+1 points)", () => {
+  // Only 3 points, windowCount=3 requires 4
+  const strikes = [100, 101, 102];
+  assert.equal(checkMomentumOverride("no", strikes, 0.5, 3), false);
+  assert.equal(checkMomentumOverride("yes", strikes, 0.5, 3), false);
+});
+
+test("checkMomentumOverride: returns false when no clear trend (mixed moves)", () => {
+  // Up, down, up — no consistent direction
+  const strikes = [100, 102, 101, 103];
+  assert.equal(checkMomentumOverride("no", strikes, 0.5, 3), false);
+  assert.equal(checkMomentumOverride("yes", strikes, 0.5, 3), false);
+});
+
+test("checkMomentumOverride: returns false when move is below threshold", () => {
+  // All rising but only 0.1% total move — below 0.5% threshold
+  const strikes = [100.00, 100.03, 100.07, 100.10];
+  assert.equal(checkMomentumOverride("no", strikes, 0.5, 3), false);
+});
+
+test("checkMomentumOverride: triggers for NO bet when price is trending UP", () => {
+  // Consistently rising over 3 windows, >0.5% move
+  const strikes = [100, 101, 102, 103];
+  assert.equal(checkMomentumOverride("no", strikes, 0.5, 3), true,
+    "NO bet should be overridden when price is trending up");
+  assert.equal(checkMomentumOverride("yes", strikes, 0.5, 3), false,
+    "YES bet should NOT be overridden when price is trending up");
+});
+
+test("checkMomentumOverride: triggers for YES bet when price is trending DOWN", () => {
+  // Consistently falling over 3 windows, >0.5% move
+  const strikes = [103, 102, 101, 100];
+  assert.equal(checkMomentumOverride("yes", strikes, 0.5, 3), true,
+    "YES bet should be overridden when price is trending down");
+  assert.equal(checkMomentumOverride("no", strikes, 0.5, 3), false,
+    "NO bet should NOT be overridden when price is trending down");
+});
+
+test("checkMomentumOverride: uses only last windowCount+1 elements (ignores older data)", () => {
+  // First 2 values are a downtrend, but last 4 are a clear uptrend
+  // With windowCount=3, only last 4 points matter → uptrend → override NO
+  const strikes = [200, 190, 100, 101, 102, 103];
+  assert.equal(checkMomentumOverride("no", strikes, 0.5, 3), true,
+    "should look only at last windowCount+1 points");
+});
+
+test("checkMomentumOverride: exactly windowCount+1 points passes the length check", () => {
+  // 4 points = exactly windowCount+1 for windowCount=3
+  const strikes = [100, 100.6, 101.2, 101.8];
+  assert.equal(checkMomentumOverride("no", strikes, 0.5, 3), true);
+});
+
+// ---------------------------------------------------------------------------
+// deriveRegime tests
+// ---------------------------------------------------------------------------
+
+test("deriveRegime: returns ranging when fewer than 2 data points", () => {
+  assert.equal(deriveRegime([]), "ranging");
+  assert.equal(deriveRegime([100]), "ranging");
+});
+
+test("deriveRegime: returns trending_up when all moves are upward", () => {
+  assert.equal(deriveRegime([100, 101, 102], 3), "trending_up");
+  assert.equal(deriveRegime([50, 51, 52, 53, 54], 3), "trending_up");
+});
+
+test("deriveRegime: returns trending_down when all moves are downward", () => {
+  assert.equal(deriveRegime([103, 102, 101], 3), "trending_down");
+  assert.equal(deriveRegime([200, 195, 190, 185], 3), "trending_down");
+});
+
+test("deriveRegime: returns ranging when moves are mixed", () => {
+  assert.equal(deriveRegime([100, 102, 101, 103], 3), "ranging");
+  assert.equal(deriveRegime([100, 99, 101, 100], 3), "ranging");
+});
+
+test("deriveRegime: uses last max(2, windowCount) elements", () => {
+  // First 2 values going down, last 3 going up → with windowCount=3, uses last 3 → trending_up
+  const strikes = [200, 190, 100, 101, 102];
+  assert.equal(deriveRegime(strikes, 3), "trending_up");
+});

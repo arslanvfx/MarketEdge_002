@@ -16,9 +16,12 @@ import {
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
+  checkMomentumOverride,
+  deriveRegime,
   type BotConfig,
   type BotDecision,
   type CircuitBreakerState,
+  type PriceRegime,
 } from "./kalshi-bot-engine";
 import {
   makeInitialExitState,
@@ -105,6 +108,7 @@ export interface WindowCoinEvaluation {
   selected: boolean;           // true for the coin chosen for the bet
   evaluatedAt: string;         // ISO timestamp
   trendStability: TrendStability | null; // from window-open Claude analysis (null = not yet ready)
+  regime: PriceRegime | null;  // price-trend regime derived from recent Kalshi strikes
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +146,16 @@ const prefetchedTicker: Map<string, string> = new Map();
 // Key format: "${sym}:${windowKey}".  Bounded by config.maxBetsPerWindow.
 // Old entries are purged lazily when a new window key is seen for a symbol.
 const windowBetCounts: Map<string, number> = new Map();
+
+// Direction-cap tracking: counts YES and NO bets placed in the current 15-min window
+// across all symbols. Reset on each window transition. Key: "yes" | "no".
+const windowDirectionCounts: Map<"yes" | "no", number> = new Map();
+
+// Recent Kalshi strike prices per symbol (chronological, oldest first).
+// Maintained from DB on startup and updated after each position close.
+// Used for momentum filter and regime indicator.
+const recentKalshiTargets: Map<string, number[]> = new Map();
+const REGIME_STRIKES_MAX = 6; // keep last 6 strike prices per symbol
 
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
 // was fired. Reset on window transition so each window gets exactly one batch call.
@@ -366,23 +380,44 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     dailyLossCount = lossCount;
     dailyDate = today;
 
-    // Restore consecutive-loss streak from the most recent completed bets
-    // (any time, not just today — a streak carries across midnight).
+    // Restore consecutive-loss streak and recent Kalshi strike prices from recent bets.
+    // Both are needed on startup: streak → circuit-breaker restore; strikes → momentum filter.
+    // Rows ordered newest-first so we can walk the streak forward from the most recent bet.
     const recentRows = await db
-      .select({ pnl: kalshiBotBetsTable.pnl })
+      .select({
+        pnl: kalshiBotBetsTable.pnl,
+        symbol: kalshiBotBetsTable.symbol,
+        kalshiTarget: kalshiBotBetsTable.kalshiTarget,
+      })
       .from(kalshiBotBetsTable)
       .where(
         sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')
           AND ${kalshiBotBetsTable.exitedAt} IS NOT NULL`,
       )
       .orderBy(desc(kalshiBotBetsTable.exitedAt))
-      .limit(20);
+      .limit(REGIME_STRIKES_MAX * 8); // fetch enough to populate targets for all coins
 
+    // Streak: count consecutive losses from most-recent row backwards.
     let streak = 0;
     for (const r of recentRows) {
       const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
       if (p < 0) streak++;
       else break; // first non-loss resets the streak
+    }
+
+    // Targets: collect all records (newest-first) and reverse to chronological order.
+    const targetsBySymbol: Map<string, number[]> = new Map();
+    for (const r of recentRows) {
+      const sym = (r.symbol ?? "").toUpperCase();
+      if (sym && r.kalshiTarget != null) {
+        if (!targetsBySymbol.has(sym)) targetsBySymbol.set(sym, []);
+        const t = parseFloat(String(r.kalshiTarget));
+        if (!isNaN(t)) targetsBySymbol.get(sym)!.push(t);
+      }
+    }
+    for (const [sym, targets] of targetsBySymbol.entries()) {
+      // DB returned newest-first; reverse for chronological order then cap size.
+      recentKalshiTargets.set(sym, targets.reverse().slice(-REGIME_STRIKES_MAX));
     }
     // Restore circuit-breaker state from the recovered streak.
     // Guard against the disabled mode (maxConsecutiveLosses=0 or pauseWindows=0):
@@ -944,6 +979,16 @@ async function closePosition(
     cryptoPriceAtExit,
   });
 
+  // Update recent Kalshi strike history for momentum/regime tracking.
+  // We record the target price from the closed position (oldest-first order).
+  const closedSym = pos.symbol.toUpperCase();
+  if (pos.kalshiTarget != null) {
+    const existing = recentKalshiTargets.get(closedSym) ?? [];
+    existing.push(pos.kalshiTarget);
+    if (existing.length > REGIME_STRIKES_MAX) existing.splice(0, existing.length - REGIME_STRIKES_MAX);
+    recentKalshiTargets.set(closedSym, existing);
+  }
+
   logger.info(
     { sym: pos.symbol, pnl, reason, isLateRecovery, dailyPnl },
     "[kalshi-bot] position closed",
@@ -1499,6 +1544,8 @@ export async function runBotLoopTick(): Promise<void> {
   const cbWindowsAtStart = cbState.circuitBreakerWindowsRemaining;
   if (isCBNewWindow) {
     lastCircuitBreakerWindowKey = cbWindowNow;
+    // Reset per-window direction counts so the cap applies fresh each 15-min window.
+    windowDirectionCounts.clear();
     if (cbState.circuitBreakerWindowsRemaining > 0) {
       cbState = tickCircuitBreakerWindow(cbState);
       logger.info(
@@ -1609,23 +1656,29 @@ export async function runBotLoopTick(): Promise<void> {
     const minutesElapsed = winCtx?.minutesElapsed ?? 0;
     const now = new Date().toISOString();
 
+    // Derive regime from recent Kalshi strikes for this symbol (always computed).
+    const recentStrikes = recentKalshiTargets.get(sym) ?? [];
+    const regime: PriceRegime | null = recentStrikes.length >= 2
+      ? deriveRegime(recentStrikes, config.momentumWindowCount)
+      : null;
+
     if (!kalshiData?.ticker || kalshiData.value === null) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     if (secondsElapsed < WARMUP_MS / 1_000) {
       const remaining = Math.ceil(WARMUP_MS / 1_000 - secondsElapsed);
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `warming up (${remaining}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `warming up (${remaining}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     if (secondsElapsed > config.maxEntryMinutes * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "past entry ceiling", windowKey, selected: false, evaluatedAt: now, trendStability: null });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "past entry ceiling", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     // Hard late-entry floor: always skip if fewer than MIN_REMAINING_MINUTES_FOR_ENTRY
     // minutes remain, regardless of the maxEntryMinutes setting.
     if (15 * 60 - secondsElapsed < MIN_REMAINING_MINUTES_FOR_ENTRY * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `late-entry floor (<${MIN_REMAINING_MINUTES_FOR_ENTRY}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `late-entry floor (<${MIN_REMAINING_MINUTES_FOR_ENTRY}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
 
@@ -1662,6 +1715,52 @@ export async function runBotLoopTick(): Promise<void> {
           selected: false,
           evaluatedAt: now,
           trendStability: "reversing",
+          regime,
+        });
+        continue;
+      }
+    }
+
+    // Momentum override filter: skip when price trend opposes the proposed direction.
+    if (decision.action !== "SKIP" && config.enableMomentumFilter) {
+      const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
+      if (checkMomentumOverride(proposedDir, recentStrikes, 0.5, config.momentumWindowCount)) {
+        logger.info({ sym, proposedDir, recentStrikes, windowCount: config.momentumWindowCount },
+          `[kalshi-bot] momentum override — ${sym} trending against ${proposedDir.toUpperCase()} entry`);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `momentum override — trending against ${proposedDir.toUpperCase()} entry`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
+        });
+        continue;
+      }
+    }
+
+    // Directional-cap filter: skip when too many same-direction bets already placed this window.
+    if (decision.action !== "SKIP" && config.enableDirectionCap) {
+      const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
+      const dirCount = windowDirectionCounts.get(proposedDir) ?? 0;
+      if (config.maxSameDirectionBets > 0 && dirCount >= config.maxSameDirectionBets) {
+        logger.info({ sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
+          `[kalshi-bot] directional cap reached — skipping ${proposedDir.toUpperCase()} entry for ${sym}`);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `directional cap reached — skipping ${proposedDir.toUpperCase()} entry`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
         });
         continue;
       }
@@ -1699,6 +1798,7 @@ export async function runBotLoopTick(): Promise<void> {
       selected: false,
       evaluatedAt: now,
       trendStability: stability,
+      regime,
     });
   }
 
@@ -1736,6 +1836,8 @@ export async function runBotLoopTick(): Promise<void> {
   for (const sym of orderedSymbols) {
     const kalshiData = getKalshiCachedData(sym);
     const prediction = getCachedPrediction(sym);
+    // Capture before-state so we can detect a fresh bet placement inside the tick.
+    const positionWasNull = openPosition === null;
     try {
       await runBotTickForCoin(
         sym,
@@ -1746,6 +1848,11 @@ export async function runBotLoopTick(): Promise<void> {
       );
     } catch (err) {
       logger.warn({ err, sym }, "[kalshi-bot] loop tick error (non-fatal)");
+    }
+    // Track direction counts for the directional-cap filter across the window.
+    if (openPosition !== null && positionWasNull) {
+      const dir = openPosition.direction;
+      windowDirectionCounts.set(dir, (windowDirectionCounts.get(dir) ?? 0) + 1);
     }
     if (openPosition !== null) break; // bet placed — stop entering more
   }
