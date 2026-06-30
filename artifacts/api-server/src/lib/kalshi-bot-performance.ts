@@ -57,6 +57,23 @@ export interface AgreementLevelStats {
   winRate: number | null;
 }
 
+export interface DayOfWeekStats {
+  day: number;         // 0=Sun, 1=Mon … 6=Sat (JS getUTCDay)
+  dayName: string;     // "Sun", "Mon", …
+  wins: number;
+  losses: number;
+  betCount: number;
+  winRate: number | null;
+}
+
+export interface HourOfDayStats {
+  hour: number;        // 0-23 UTC
+  wins: number;
+  losses: number;
+  betCount: number;
+  winRate: number | null;
+}
+
 export interface PerformanceReport {
   totalBets: number;
   wins: number;
@@ -70,6 +87,8 @@ export interface PerformanceReport {
   byDirection: { yes: DirectionStats; no: DirectionStats };
   byConfidenceBand: Record<string, ConfidenceBandStats>;
   byAgreementLevel: Record<string, AgreementLevelStats>;
+  byDayOfWeek: Record<number, DayOfWeekStats>;
+  byHourOfDay: Record<number, HourOfDayStats>;
   optimalConfidenceThreshold: number | null;
   avgConfidenceWinners: number | null;
   avgConfidenceLosers: number | null;
@@ -218,6 +237,39 @@ export function computePerformanceReport(
   }
   for (const stats of Object.values(byHourBand)) {
     stats.winRate = stats.betCount > 0 ? stats.wins / stats.betCount : null;
+  }
+
+  // Per-day-of-week stats (UTC day, 0=Sun … 6=Sat)
+  const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const byDayOfWeek: Record<number, DayOfWeekStats> = {};
+  for (let d = 0; d < 7; d++) {
+    byDayOfWeek[d] = { day: d, dayName: DAY_NAMES[d], wins: 0, losses: 0, betCount: 0, winRate: null };
+  }
+  for (const b of settled) {
+    const ts = b.createdAt;
+    const day = toDate(ts).getUTCDay();
+    byDayOfWeek[day].betCount++;
+    if (b.outcome === "win") byDayOfWeek[day].wins++;
+    else byDayOfWeek[day].losses++;
+  }
+  for (const s of Object.values(byDayOfWeek)) {
+    s.winRate = s.betCount > 0 ? s.wins / s.betCount : null;
+  }
+
+  // Per-hour-of-day stats (UTC hour, 0-23)
+  const byHourOfDay: Record<number, HourOfDayStats> = {};
+  for (let h = 0; h < 24; h++) {
+    byHourOfDay[h] = { hour: h, wins: 0, losses: 0, betCount: 0, winRate: null };
+  }
+  for (const b of settled) {
+    const ts = b.createdAt;
+    const hour = toDate(ts).getUTCHours();
+    byHourOfDay[hour].betCount++;
+    if (b.outcome === "win") byHourOfDay[hour].wins++;
+    else byHourOfDay[hour].losses++;
+  }
+  for (const s of Object.values(byHourOfDay)) {
+    s.winRate = s.betCount > 0 ? s.wins / s.betCount : null;
   }
 
   // Per-direction stats
@@ -396,6 +448,8 @@ export function computePerformanceReport(
     byDirection,
     byConfidenceBand,
     byAgreementLevel,
+    byDayOfWeek,
+    byHourOfDay,
     optimalConfidenceThreshold,
     avgConfidenceWinners,
     avgConfidenceLosers,
