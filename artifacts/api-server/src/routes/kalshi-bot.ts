@@ -97,6 +97,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     momentumWindowCount,
     enableAutoTuning,
     autoTuneWindowSize,
+    enableBorderGuard,
+    borderProximityPct,
+    borderLookbackBets,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -117,6 +120,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     momentumWindowCount?: number;
     enableAutoTuning?: boolean;
     autoTuneWindowSize?: number;
+    enableBorderGuard?: boolean;
+    borderProximityPct?: number;
+    borderLookbackBets?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -168,6 +174,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof enableAutoTuning === "boolean") partial.enableAutoTuning = enableAutoTuning;
   if (typeof autoTuneWindowSize === "number" && autoTuneWindowSize >= 20 && autoTuneWindowSize <= 500) {
     partial.autoTuneWindowSize = autoTuneWindowSize;
+  }
+  if (typeof enableBorderGuard === "boolean") partial.enableBorderGuard = enableBorderGuard;
+  if (typeof borderProximityPct === "number" && borderProximityPct >= 0.05 && borderProximityPct <= 2.0) {
+    partial.borderProximityPct = borderProximityPct;
+  }
+  if (typeof borderLookbackBets === "number" && borderLookbackBets >= 1 && borderLookbackBets <= 10) {
+    partial.borderLookbackBets = borderLookbackBets;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

@@ -178,6 +178,12 @@ let cachedPerformanceReport: PerformanceReport | null = null;
 // Maintained from DB on startup and updated after each position close.
 // Used for momentum filter and regime indicator.
 const recentKalshiTargets: Map<string, number[]> = new Map();
+
+// Border-proximity guard cache: sym → avg |closePrice−strike|/strike × 100 (%)
+// Refreshed once per window from DB. Used to skip bets when price has been
+// hovering within a noise band around the strike across recent settled bets.
+let borderProximityCache: Map<string, number> = new Map();
+let borderProximityCacheWindow = "";
 const REGIME_STRIKES_MAX = 6; // keep last 6 strike prices per symbol
 
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
@@ -560,6 +566,51 @@ export async function loadOpenPositionFromDB(): Promise<void> {
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to restore open positions from DB (non-fatal)");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Border-proximity guard helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Queries the last `lookback` evaluated bets per symbol and returns a map of
+ * sym → avg |closePrice−kalshiTarget| / kalshiTarget × 100 (as a percentage).
+ * Only rows that have closePriceAtEval stored in their signals JSONB are counted.
+ */
+async function loadBorderProximityCache(symbols: string[], lookback: number): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (symbols.length === 0 || lookback <= 0) return result;
+  try {
+    const rows = await db.execute(sql`
+      WITH ranked AS (
+        SELECT
+          symbol,
+          kalshi_target::numeric                          AS target,
+          (signals->>'closePriceAtEval')::numeric         AS close_price,
+          ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY evaluated_at DESC) AS rn
+        FROM kalshi_bot_bets
+        WHERE outcome IS NOT NULL
+          AND evaluated_at IS NOT NULL
+          AND signals->>'closePriceAtEval' IS NOT NULL
+          AND kalshi_target IS NOT NULL
+          AND symbol = ANY(${symbols})
+      )
+      SELECT
+        symbol,
+        AVG(ABS(close_price - target) / target * 100)::numeric AS avg_proximity_pct,
+        COUNT(*)::int                                           AS sample_count
+      FROM ranked
+      WHERE rn <= ${lookback}
+      GROUP BY symbol
+    `);
+    for (const row of rows.rows as { symbol: string; avg_proximity_pct: string; sample_count: number }[]) {
+      const pct = parseFloat(row.avg_proximity_pct);
+      if (!isNaN(pct)) result.set(row.symbol, pct);
+    }
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] loadBorderProximityCache: query failed — guard disabled this tick");
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1757,10 +1808,21 @@ export async function runBotLoopTick(): Promise<void> {
   // compete for a new position. Other coins follow for SKIP record deduplication.
   const windowKey = currentWindowKey();
   const evalResults: WindowCoinEvaluation[] = [];
-  // Symbols blocked by the new regime-aware guards (momentum override, directional cap).
+  // Symbols blocked by the new regime-aware guards (momentum override, directional cap, border guard).
   // These must be excluded from Phase-4 orderedSymbols so runBotTickForCoin cannot
   // independently place a bet that the Phase-3 filter just blocked.
   const filteredByNewGuards = new Set<string>();
+
+  // Refresh border-proximity cache once per window transition.
+  if (config.enableBorderGuard && windowKey !== borderProximityCacheWindow) {
+    const syms = CRYPTO_COINS
+      .filter(c => KALSHI_SERIES[c.symbol])
+      .map(c => c.symbol.toUpperCase());
+    borderProximityCache = await loadBorderProximityCache(syms, config.borderLookbackBets);
+    borderProximityCacheWindow = windowKey;
+    logger.debug({ borderProximityCache: Object.fromEntries(borderProximityCache) },
+      "[kalshi-bot] border-proximity cache refreshed");
+  }
 
   for (const coin of CRYPTO_COINS) {
     if (!KALSHI_SERIES[coin.symbol]) continue;
@@ -1883,6 +1945,33 @@ export async function runBotLoopTick(): Promise<void> {
           confidence: effectiveConfidence,
           score: 0,
           reason: `directional cap reached — skipping ${proposedDir.toUpperCase()} entry`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
+        });
+        continue;
+      }
+    }
+
+    // Border-proximity guard: skip when the coin's close prices have been landing
+    // within config.borderProximityPct % of the strike over the last N settled bets.
+    // These windows are essentially noise — near-50/50 regardless of signal direction.
+    if (decision.action !== "SKIP" && config.enableBorderGuard) {
+      const proximity = borderProximityCache.get(sym);
+      if (proximity !== undefined && proximity < config.borderProximityPct) {
+        logger.info(
+          { sym, avgProximityPct: proximity.toFixed(3), threshold: config.borderProximityPct },
+          `[kalshi-bot] border guard — ${sym} price hovering near strike avg ${proximity.toFixed(2)}% gap`,
+        );
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `border guard — avg ${proximity.toFixed(2)}% from strike (last ${config.borderLookbackBets} bets)`,
           windowKey,
           selected: false,
           evaluatedAt: now,

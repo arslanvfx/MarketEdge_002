@@ -94,6 +94,11 @@ export interface BotConfig {
   // recent performance and applies safe parameter adjustments automatically.
   enableAutoTuning: boolean;     // (default true)
   autoTuneWindowSize: number;    // number of most-recent settled bets to analyse (default 100)
+  // Border-proximity guard: skip bets when price has been hovering too close to the
+  // Kalshi strike in recent settled windows (high-noise, near-50/50 outcome territory).
+  enableBorderGuard: boolean;    // (default true)
+  borderProximityPct: number;    // skip if avg |closePrice−strike|/strike < this % (default 0.3)
+  borderLookbackBets: number;    // how many most-recent settled bets to examine per coin (default 3)
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -117,13 +122,16 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   quietHoursStart: 12,   // 12:00 UTC
   quietHoursEnd: 18,     // 18:00 UTC (no entries 12:00–17:59 UTC by default)
   maxConsecutiveLosses: 3,
-  circuitBreakerPauseWindows: 2,
+  circuitBreakerPauseWindows: 0, // disabled — keep betting through losses during test-drive
   enableDirectionCap: false,
   maxSameDirectionBets: 3,
   enableMomentumFilter: true,
   momentumWindowCount: 3,
   enableAutoTuning: true,
   autoTuneWindowSize: 100,
+  enableBorderGuard: true,
+  borderProximityPct: 0.3,  // skip when avg settlement gap < 0.3% of strike
+  borderLookbackBets: 3,    // examine last 3 settled bets per coin
 };
 
 export interface SignalSnapshot {

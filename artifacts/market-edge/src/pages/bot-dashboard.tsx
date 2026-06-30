@@ -33,6 +33,9 @@ interface BotConfig {
   momentumWindowCount: number;
   enableAutoTuning: boolean;
   autoTuneWindowSize: number;
+  enableBorderGuard: boolean;
+  borderProximityPct: number;
+  borderLookbackBets: number;
 }
 
 interface OpenPosition {
@@ -770,6 +773,52 @@ export default function BotDashboard() {
                     onChange={e => setConfigDraft(d => ({ ...d, momentumWindowCount: parseInt(e.target.value) }))}>
                     {[2, 3, 4, 5, 6, 7, 8].map(n => (
                       <option key={n} value={n}>{n} consecutive windows</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Border Proximity Guard */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Border Proximity Guard</span>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <button
+                      onClick={() => setConfigDraft(d => ({ ...d, enableBorderGuard: !(merged.enableBorderGuard ?? true) }))}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${(merged.enableBorderGuard ?? true) ? "bg-amber-500" : "bg-muted"}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${(merged.enableBorderGuard ?? true) ? "translate-x-5" : ""}`} />
+                    </button>
+                    <span className={`text-xs font-medium ${(merged.enableBorderGuard ?? true) ? "text-amber-400" : "text-muted-foreground"}`}>
+                      {(merged.enableBorderGuard ?? true) ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight mt-0.5">
+                    Skips bets when price has been hovering within X% of the strike in recent settled windows.
+                  </span>
+                </label>
+
+                {/* Border Proximity Threshold */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Proximity Threshold — {((merged.borderProximityPct ?? 0.3)).toFixed(2)}% of strike
+                  </span>
+                  <input
+                    type="range" min={0.05} max={1.0} step={0.05}
+                    value={merged.borderProximityPct ?? 0.3}
+                    onChange={e => setConfigDraft(d => ({ ...d, borderProximityPct: parseFloat(e.target.value) }))}
+                    className="w-full accent-amber-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0.05% (tight)</span><span>1.0% (wide)</span>
+                  </div>
+                </label>
+
+                {/* Border Lookback Bets */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Proximity Lookback (bets)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.borderLookbackBets ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, borderLookbackBets: parseInt(e.target.value) }))}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>Last {n} settled bet{n > 1 ? "s" : ""}</option>
                     ))}
                   </select>
                 </label>
