@@ -376,6 +376,7 @@ interface BotBetRecord {
   phase2Activated: boolean | null;
   createdAt: string;
   exitedAt: string | null;
+  outcome: "win" | "loss" | "push" | null;
 }
 
 interface CoinBotStats {
@@ -2562,6 +2563,7 @@ function KalshiBotPanel() {
                       <th className="text-right pb-1 font-medium">Entry</th>
                       <th className="text-right pb-1 font-medium">Exit</th>
                       <th className="text-right pb-1 font-medium">P&L</th>
+                      <th className="text-right pb-1 font-medium">Result</th>
                       <th className="text-right pb-1 font-medium">Reason</th>
                     </tr>
                   </thead>
@@ -2582,6 +2584,17 @@ function KalshiBotPanel() {
                           </td>
                           <td className={`py-1 text-right font-medium tabular-nums ${pnl === null ? "text-slate-600" : pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                             {pnl !== null ? `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}` : "—"}
+                          </td>
+                          <td className="py-1 text-right">
+                            {b.outcome === "win" ? (
+                              <span className="inline-flex items-center justify-center w-4 h-4 rounded-sm bg-emerald-500/20 text-emerald-400 font-bold text-[9px]">W</span>
+                            ) : b.outcome === "loss" ? (
+                              <span className="inline-flex items-center justify-center w-4 h-4 rounded-sm bg-red-500/20 text-red-400 font-bold text-[9px]">L</span>
+                            ) : b.outcome === "push" ? (
+                              <span className="inline-flex items-center justify-center w-4 h-4 rounded-sm bg-slate-700/60 text-slate-400 font-bold text-[9px]">P</span>
+                            ) : (
+                              <span className="text-slate-700 text-[9px]">…</span>
+                            )}
                           </td>
                           <td className="py-1 text-right text-slate-600 max-w-[120px] truncate">
                             {b.phase2Activated && <span className="text-orange-400 mr-1">P2</span>}
