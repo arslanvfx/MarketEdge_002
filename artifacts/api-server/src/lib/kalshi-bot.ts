@@ -172,6 +172,13 @@ const windowDirectionCounts: Map<"yes" | "no", number> = new Map();
 // Decremented on each window transition; deleted when it reaches 0.
 const pausedCoins: Map<string, number> = new Map();
 
+// Per-window outcome tracking for the doubt-penalty signal.
+// Key: windowKey (ISO string "YYYY-MM-DDTHH:mm"), Value: { wins, losses }.
+// Populated at startup from DB and updated live as bets settle in evalClosedBets.
+// When the last 1-2 completed windows had <40% win rate the bot raises its
+// effective confidence floor to filter out marginal signals that may be noise.
+const recentWindowOutcomes: Map<string, { wins: number; losses: number }> = new Map();
+
 // Cached performance report from the most recent auto-tune run (null before
 // the first run fires, typically ~15 min after startup).
 let cachedPerformanceReport: PerformanceReport | null = null;
@@ -430,6 +437,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
         pnl: kalshiBotBetsTable.pnl,
         symbol: kalshiBotBetsTable.symbol,
         kalshiTarget: kalshiBotBetsTable.kalshiTarget,
+        windowKey: kalshiBotBetsTable.windowKey,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -485,6 +493,19 @@ export async function loadDailyPnlFromDB(): Promise<void> {
           "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive losses",
         );
       }
+    }
+
+    // Populate per-window outcome tracking from recent settled rows.
+    // recentRows is newest-first; we just iterate and bucket by windowKey.
+    recentWindowOutcomes.clear();
+    for (const r of recentRows) {
+      const wk = r.windowKey;
+      if (!wk || r.pnl == null) continue;
+      const p = parseFloat(String(r.pnl));
+      const wo = recentWindowOutcomes.get(wk) ?? { wins: 0, losses: 0 };
+      if (p > 0) wo.wins++;
+      else if (p < 0) wo.losses++;
+      recentWindowOutcomes.set(wk, wo);
     }
 
     // Restore circuit-breaker state from the recovered streak.
@@ -1593,6 +1614,15 @@ export async function evalClosedBets(): Promise<void> {
           .where(eq(kalshiBotBetsTable.id, row.id));
       }
 
+      // Update in-memory window outcome map for the doubt-penalty signal.
+      const wk = row.windowKey;
+      if (wk && correctedPnl !== null) {
+        const wo = recentWindowOutcomes.get(wk) ?? { wins: 0, losses: 0 };
+        if (correctedPnl > 0) wo.wins++;
+        else if (correctedPnl < 0) wo.losses++;
+        recentWindowOutcomes.set(wk, wo);
+      }
+
       evaluated++;
     }
 
@@ -1950,6 +1980,33 @@ export async function runBotLoopTick(): Promise<void> {
   // compete for a new position. Other coins follow for SKIP record deduplication.
   const windowKey = currentWindowKey();
   const evalResults: WindowCoinEvaluation[] = [];
+
+  // --- Window-doubt penalty ---
+  // If the last 1-2 completed windows had a poor win rate (<40%) the market
+  // is in an uncertain/choppy regime. Raise the effective confidence floor
+  // by 4pp (one bad window) or 8pp (two consecutive bad windows) to avoid
+  // over-betting into noise. We inspect completed windows only (wk < windowKey).
+  const DOUBT_WIN_RATE_THRESHOLD = 0.4;
+  const completedWindowKeys = [...recentWindowOutcomes.keys()]
+    .filter(wk => wk < windowKey)
+    .sort()
+    .reverse()
+    .slice(0, 2);
+  let windowDoubtPenalty = 0;
+  let weakWindowCount = 0;
+  for (const wk of completedWindowKeys) {
+    const wo = recentWindowOutcomes.get(wk)!;
+    const total = wo.wins + wo.losses;
+    if (total >= 2 && wo.wins / total < DOUBT_WIN_RATE_THRESHOLD) weakWindowCount++;
+  }
+  if (weakWindowCount >= 2) windowDoubtPenalty = 8;
+  else if (weakWindowCount === 1) windowDoubtPenalty = 4;
+  if (windowDoubtPenalty > 0) {
+    logger.info(
+      { windowDoubtPenalty, weakWindowCount, checkedWindows: completedWindowKeys },
+      `[kalshi-bot] doubt penalty: ${weakWindowCount} recent window(s) <${DOUBT_WIN_RATE_THRESHOLD * 100}% win rate — confidence floor +${windowDoubtPenalty}pp`,
+    );
+  }
   // Symbols blocked by the new regime-aware guards (momentum override, directional cap, border guard).
   // These must be excluded from Phase-4 orderedSymbols so runBotTickForCoin cannot
   // independently place a bet that the Phase-3 filter just blocked.
@@ -2160,6 +2217,26 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
+    // Window-doubt filter: if recent windows had poor win rates, require higher conviction
+    // for both YES and NO bets. This prevents the bot from over-betting during choppy
+    // uncertain regimes when all signals are marginal.
+    if (windowDoubtPenalty > 0 && effectiveConfidence < config.minConfidence + windowDoubtPenalty) {
+      filteredByNewGuards.add(sym);
+      evalResults.push({
+        symbol: sym,
+        action: "SKIP",
+        confidence: effectiveConfidence,
+        score: 0,
+        reason: `doubt filter — ${weakWindowCount} weak recent window(s), ${effectiveConfidence}% < ${config.minConfidence + windowDoubtPenalty}% floor (+${windowDoubtPenalty}pp)`,
+        windowKey,
+        selected: false,
+        evaluatedAt: now,
+        trendStability: stability,
+        regime: regimeCache.get(sym) as "above" | "below" | "neutral" | null ?? null,
+      });
+      continue;
+    }
+
     // Border-proximity guard: skip when the coin's close prices have been landing
     // within config.borderProximityPct % of the strike over the last N settled bets.
     // These windows are essentially noise — near-50/50 regardless of signal direction.
@@ -2226,6 +2303,29 @@ export async function runBotLoopTick(): Promise<void> {
   // Sort: BET candidates descending by composite score, then SKIP coins.
   const bets = evalResults.filter(e => e.action !== "SKIP").sort((a, b) => b.score - a.score);
   const skips = evalResults.filter(e => e.action === "SKIP");
+
+  // Cross-coin chop detection: when 4 or more eligible coins are all in the
+  // "low conviction" confidence band (≤58%), the market is indecisive across
+  // the board. Cap the bet count to 2 — the top two ranked candidates — to
+  // avoid scattering capital into marginal signals that all look like noise.
+  // Excess bets are downgraded to SKIP so Phase 4 cannot place them.
+  const LOW_CONVICTION_BAND = 58;
+  const CHOP_MIN_COINS = 4;
+  const lowConvCount = bets.filter(e => e.confidence <= LOW_CONVICTION_BAND).length;
+  if (lowConvCount >= CHOP_MIN_COINS) {
+    const capped = bets.splice(2); // keep top 2, remove the rest
+    for (const e of capped) {
+      e.action = "SKIP";
+      e.reason = `chop filter — ${lowConvCount} coins ≤${LOW_CONVICTION_BAND}% confidence, capped at 2 bets`;
+      filteredByNewGuards.add(e.symbol);
+      skips.push(e);
+    }
+    logger.info(
+      { lowConvCount, cappedSymbols: capped.map(e => e.symbol) },
+      `[kalshi-bot] chop filter: ${lowConvCount} low-confidence coins — capping to 2 bets this window`,
+    );
+  }
+
   if (bets.length > 0) {
     bets[0].selected = true;
     const winner = bets[0];

@@ -10,10 +10,16 @@
 // window-monitor recommendation; null/unknown → 0.5 (neutral/abstain).
 // Training distribution now matches inference: stat/claude are passed at both
 // snapshot capture time (in the prediction tracker) and at inference time (bot engine).
+//
+// v4 (19 features): added volumeDirectionBias and candleReversalSignal.
+// volumeDirectionBias captures net buying/selling pressure from the last 8 candles.
+// candleReversalSignal detects shooting-star / bearish-engulfing reversal patterns.
+// These let the model learn to down-score bets that precede a directional reversal
+// — the pattern that caused correlated losses in choppy/uncertain windows.
 
 import type { CoinPrediction } from "./crypto";
 
-export const N_FEATURES = 17;
+export const N_FEATURES = 19;
 
 export const FEATURE_NAMES = [
   "elapsedFraction",      //  0: how far into the 15-min window (0→1)
@@ -33,6 +39,8 @@ export const FEATURE_NAMES = [
   "statAbove",            // 14: stat model direction — 1=above, 0=below, 0.5=unknown/null
   "claudeAbove",          // 15: claude model direction — 1=above, 0=below, 0.5=unknown/null
   "wmRec",                // 16: window monitor — 1=bet, 0=stay_away, 0.5=caution/unknown
+  "volumeDirectionBias",  // 17: net bullish/bearish volume pressure, last 8 candles, [-1, 1]
+  "candleReversalSignal", // 18: -1=bearish reversal pattern, 0=none, 1=bullish reversal
 ] as const;
 
 function clip(v: number, lo: number, hi: number): number {
@@ -101,6 +109,59 @@ export function extractMLFeatures(
   // Features 14-16: other model signals (encoded via the shared helper below).
   const [statFeat, claudeFeat, wmFeat] = encodeSignalFeatures(statAbove, claudeAbove, wmRec);
 
+  // Feature 17: volume direction bias — net buying vs selling pressure over last 8 candles.
+  // A bullish candle (close > open) contributes +volume; bearish contributes -volume.
+  // Normalized by total volume so it's scale-independent across coins. Range [-1, 1].
+  const volWindow = candles.slice(-8);
+  let netVolume = 0;
+  let totalVolume = 0;
+  for (const c of volWindow) {
+    const v = c.v ?? 0;
+    netVolume += c.c >= c.o ? v : -v;
+    totalVolume += v;
+  }
+  const volumeDirectionBias = totalVolume > 0 ? clip(netVolume / totalVolume, -1, 1) : 0;
+
+  // Feature 18: candle reversal signal — detects single-candle reversal patterns.
+  // Bearish patterns (−1): shooting star (long upper wick, small body near lows) or
+  //   bearish engulfing (current red candle fully engulfs previous green candle).
+  // Bullish patterns (+1): hammer (long lower wick, small body near highs) or
+  //   bullish engulfing (current green candle fully engulfs previous red candle).
+  // No pattern → 0.
+  let candleReversalSignal = 0;
+  if (lastCandle && prevCandle) {
+    const range = lastCandle.h - lastCandle.l;
+    const body  = Math.abs(lastCandle.c - lastCandle.o);
+    if (range > 0) {
+      const upperWick = lastCandle.h - Math.max(lastCandle.o, lastCandle.c);
+      const lowerWick = Math.min(lastCandle.o, lastCandle.c) - lastCandle.l;
+      // Shooting star: small body, upper wick > 2× body, body in lower 40% of range
+      const bodyBottom = Math.min(lastCandle.o, lastCandle.c) - lastCandle.l;
+      if (body > 0 && upperWick >= 2 * body && bodyBottom / range < 0.4) {
+        candleReversalSignal = -1; // bearish reversal
+      // Hammer: small body, lower wick > 2× body, body in upper 40% of range
+      } else if (body > 0 && lowerWick >= 2 * body && bodyBottom / range > 0.6) {
+        candleReversalSignal = 1;  // bullish reversal
+      // Bearish engulfing: prev was green, current is red and engulfs it
+      } else if (
+        prevCandle.c > prevCandle.o &&
+        lastCandle.c < lastCandle.o &&
+        lastCandle.o >= prevCandle.c &&
+        lastCandle.c <= prevCandle.o
+      ) {
+        candleReversalSignal = -1;
+      // Bullish engulfing: prev was red, current is green and engulfs it
+      } else if (
+        prevCandle.c < prevCandle.o &&
+        lastCandle.c > lastCandle.o &&
+        lastCandle.o <= prevCandle.c &&
+        lastCandle.c >= prevCandle.o
+      ) {
+        candleReversalSignal = 1;
+      }
+    }
+  }
+
   return [
     clip(elapsedFraction, 0, 1),               //  0
     clip(pctVsStrike / 5, -1, 1),              //  1: ±5% → ±1
@@ -119,6 +180,8 @@ export function extractMLFeatures(
     statFeat,                                  // 14: stat direction
     claudeFeat,                                // 15: claude direction
     wmFeat,                                    // 16: window-monitor rec
+    volumeDirectionBias,                       // 17: net volume pressure
+    candleReversalSignal,                      // 18: reversal pattern signal
   ];
 }
 

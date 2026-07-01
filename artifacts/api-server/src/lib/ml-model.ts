@@ -9,7 +9,7 @@
 //   - SGD shuffle + multiple epochs converge reliably for N<10k examples.
 //   - MIN_TRAINING_WINDOWS = 30 keeps the model silent while data is thin.
 
-export const N_FEATURES       = 17;
+export const N_FEATURES       = 19;
 export const MIN_TRAINING_WINDOWS = 30;  // windows before predictions surface
 
 const LEARNING_RATE = 0.05;
