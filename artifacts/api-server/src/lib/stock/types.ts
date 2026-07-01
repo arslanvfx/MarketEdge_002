@@ -123,4 +123,5 @@ export interface StockBotConfig {
   earningsBlackout: boolean;     // avoid entries within blackout window
   earningsBlackoutHours: number;
   newsSensitivity: number;       // 1-5 magnitude threshold that moves confidence
+  autoStartStop: boolean;        // auto-enable at market open, disable at close
 }

@@ -132,6 +132,7 @@ export interface StockBotConfig {
   earningsBlackout: boolean;
   earningsBlackoutHours: number;
   newsSensitivity: number;
+  autoStartStop: boolean;
 }
 
 export interface AlpacaAccount {

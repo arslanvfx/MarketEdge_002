@@ -139,7 +139,11 @@ export default function StockBot() {
   function toggleMode(m: TradingMode) {
     const cur = merged.tradingModes ?? [];
     const next = cur.includes(m) ? cur.filter((x) => x !== m) : [...cur, m];
-    setDraft((d) => ({ ...d, tradingModes: next }));
+    patchSafe({ tradingModes: next });
+  }
+
+  function saveSlider(k: "maxDayPositions" | "maxSwingPositions" | "maxLongPositions", v: number) {
+    patchSafe({ [k]: v });
   }
 
   const setField = <K extends keyof StockBotConfig>(k: K, v: StockBotConfig[K]) =>
@@ -228,7 +232,7 @@ export default function StockBot() {
             { label: "Equity", value: fmtUsd(account?.equity), icon: DollarSign, color: "text-sky-400" },
             { label: "Cash", value: fmtUsd(account?.cash), icon: Wallet, color: "text-emerald-400" },
             { label: "Buying Power", value: fmtUsd(account?.buyingPower), icon: Zap, color: "text-violet-400" },
-            { label: "Day Trades", value: account ? `${account.daytradeCount}/3` : "—", sub: account?.patternDayTrader ? "PDT flagged" : undefined, icon: ShieldAlert, color: account?.patternDayTrader ? "text-red-400" : "text-amber-400" },
+            { label: "Day Trades", value: account ? `${account.daytradeCount}/${cfg?.maxDayPositions ?? 3}` : "—", sub: account?.patternDayTrader ? "PDT flagged" : undefined, icon: ShieldAlert, color: account?.patternDayTrader ? "text-red-400" : "text-amber-400" },
           ].map(({ label, value, sub, icon: Icon, color }) => (
             <div key={label} className="bg-card border border-border rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
@@ -348,6 +352,8 @@ export default function StockBot() {
                   <label className="text-[11px] text-muted-foreground">Max positions: <span className="text-foreground font-semibold">{cap ?? 0}</span></label>
                   <input type="range" min={0} max={10} value={cap ?? 0}
                     onChange={(e) => setField(capKey as keyof StockBotConfig, Number(e.target.value) as never)}
+                    onPointerUp={(e) => saveSlider(capKey as "maxDayPositions" | "maxSwingPositions" | "maxLongPositions", Number((e.target as HTMLInputElement).value))}
+                    onMouseUp={(e) => saveSlider(capKey as "maxDayPositions" | "maxSwingPositions" | "maxLongPositions", Number((e.target as HTMLInputElement).value))}
                     className="w-full mt-1 accent-emerald-500" />
                 </div>
               );
@@ -383,6 +389,16 @@ export default function StockBot() {
               <button onClick={() => setField("earningsBlackout", !merged.earningsBlackout)}
                 className={`w-9 h-5 rounded-full relative transition-colors ${merged.earningsBlackout ? "bg-emerald-500" : "bg-muted"}`}>
                 <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${merged.earningsBlackout ? "translate-x-4" : "translate-x-0.5"}`} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between md:col-span-2 pt-1 border-t border-border mt-1">
+              <div>
+                <span className="text-sm text-foreground">Auto-start at market open</span>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Bot starts at 9:30 AM ET and stops at 4:00 PM ET automatically</p>
+              </div>
+              <button onClick={() => patchSafe({ autoStartStop: !merged.autoStartStop })}
+                className={`ml-4 flex-shrink-0 w-9 h-5 rounded-full relative transition-colors ${merged.autoStartStop ? "bg-emerald-500" : "bg-muted"}`}>
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${merged.autoStartStop ? "translate-x-4" : "translate-x-0.5"}`} />
               </button>
             </div>
           </div>

@@ -21,7 +21,7 @@ import {
   placeOrder,
   closePosition,
 } from "./alpaca";
-import { getConfig } from "./config";
+import { getConfig, saveConfig } from "./config";
 import { getCandles } from "./data";
 import { buildSignals } from "./ai";
 import { buildFeatures, recordOutcome } from "./ml";
@@ -314,9 +314,28 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
 /** One full bot cycle. Safe to call on an interval; self-guards re-entry. */
 export async function runBotCycle(): Promise<{ ran: boolean; summary: string }> {
   if (running) return { ran: false, summary: "cycle already running" };
-  const cfg = getConfig();
-  if (!cfg.enabled) return { ran: false, summary: "bot disabled" };
   if (!alpacaConfigured()) return { ran: false, summary: "alpaca not configured" };
+
+  let cfg = getConfig();
+
+  // Auto-start/stop: enable the bot when the market opens, disable when it closes.
+  // This runs even when the bot is disabled, so it can auto-enable at open.
+  if (cfg.autoStartStop) {
+    try {
+      const clock = await getClock(cfg.mode);
+      if (clock.isOpen && !cfg.enabled) {
+        cfg = await saveConfig({ enabled: true });
+        logger.info("[stock-bot] auto-start: market opened");
+      } else if (!clock.isOpen && cfg.enabled) {
+        cfg = await saveConfig({ enabled: false });
+        logger.info("[stock-bot] auto-stop: market closed");
+      }
+    } catch (err) {
+      logger.warn({ err }, "[stock-bot] auto-start/stop clock check failed");
+    }
+  }
+
+  if (!cfg.enabled) return { ran: false, summary: "bot disabled" };
 
   running = true;
   try {

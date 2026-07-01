@@ -28,6 +28,7 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   earningsBlackout: true,
   earningsBlackoutHours: 24,
   newsSensitivity: 3,
+  autoStartStop: true,
 };
 
 let current: StockBotConfig = { ...DEFAULT_CONFIG };
