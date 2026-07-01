@@ -293,4 +293,16 @@ export const sentimentColor = (s: Sentiment): string =>
       ? "text-red-400 bg-red-500/10 border-red-500/30"
       : "text-muted-foreground bg-muted border-border";
 
-export const SECTORS = ["Technology", "Energy", "Healthcare", "Finance", "Consumer"] as const;
+export const SECTORS = [
+  "Technology",
+  "Healthcare",
+  "Financials",
+  "Consumer Discretionary",
+  "Consumer Staples",
+  "Communication Services",
+  "Industrials",
+  "Energy",
+  "Real Estate",
+  "Utilities",
+  "Materials",
+] as const;

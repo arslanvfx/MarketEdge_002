@@ -20,7 +20,7 @@ import { watchlistTickers } from "./watchlist";
 import { getConfig } from "./config";
 import type { Candle, Direction, ScannerRow, Sentiment } from "./types";
 
-const TOP_PER_SECTOR = 4;      // how many movers per sector get full scoring
+const TOP_PER_SECTOR = 6;      // how many movers per sector get full scoring
 let lastScanAt = 0;
 let scanning = false;
 

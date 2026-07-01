@@ -30,7 +30,7 @@ export function StocksShell({ children }: { children: React.ReactNode }) {
             <div>
               <h1 className="text-lg font-bold tracking-tight text-foreground">Stock Trading</h1>
               <p className="text-xs text-muted-foreground">
-                Automated equities engine · {meta?.universeSize ?? "—"} stocks across 5 sectors
+                Automated equities engine · {meta?.universeSize ?? "—"} stocks across {meta?.sectors?.length ?? 11} sectors
               </p>
             </div>
           </div>
