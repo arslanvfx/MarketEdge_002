@@ -180,7 +180,7 @@ export async function hasLegacyBackfillRows(): Promise<boolean> {
     const rows = await db
       .select({ n: mlWindowSnapshotsTable.id })
       .from(mlWindowSnapshotsTable)
-      .where(sql`window_id LIKE 'backfill:%' AND window_id NOT LIKE 'backfill_v3:%'`)
+      .where(sql`window_id LIKE 'backfill%' AND window_id NOT LIKE 'backfill_v3:%'`)
       .limit(1);
     return rows.length > 0;
   } catch {

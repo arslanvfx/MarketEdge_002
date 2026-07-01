@@ -21,7 +21,7 @@ Features 14-16 were added to make ML a true synthesis model:
 
 **Training distribution fix:** ML snapshot is captured AFTER stat+claude compute (in crypto.ts prediction tracker), not before. This means features 14-16 have real values at training time, matching inference (bot engine also passes live stat/claude/wmRec).
 
-**Backfill:** v3 backfill (prefix `backfill_v3:`) queries prediction_records to populate features 14-15 from historical stat/claude records. Feature 16=0.5 (wmRec not stored historically). `hasLegacyBackfillRows` now detects both v1 and v2 as legacy (NOT LIKE `backfill_v3:`).
+**Backfill:** v3 backfill (prefix `backfill_v3:`) queries prediction_records to populate features 14-15 from historical stat/claude records. Feature 16=0.5 (wmRec not stored historically). `extractMLFeatures` already returns 17-element arrays (N_FEATURES=17), so ml-backfill.ts OVERWRITES indices 14/15/16 — never pushes. `hasLegacyBackfillRows` SQL uses `LIKE 'backfill%'` (no colon) so it matches BOTH `backfill:` (v1) AND `backfill_v2:` (v2); combined with `NOT LIKE 'backfill_v3:%'` this correctly detects all legacy variants.
 
 ## Checklist for a feature bump
 1. Change `N_FEATURES` in `ml-model.ts`

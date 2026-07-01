@@ -123,31 +123,31 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
         }
       }
 
+      // generateMLTrainingExamples already calls extractMLFeatures (N_FEATURES=17),
+      // so each example has 17 elements with features 14-16 = 0.5 (unknown).
+      // We OVERWRITE those 3 slots with real historical values — never push.
       let augmented = 0;
       for (const ex of examples) {
+        if (ex.features.length !== 17) continue; // defensive: skip malformed
         // Reconstruct targetISO from windowId: "backfill_v3:SYM:ISO"
         const parts = ex.windowId.split(":");
         const targetISO = parts.slice(2).join(":");
         const key = `${ex.symbol}:${targetISO}`;
         const sig = signalMap.get(key);
-        const statFeat   = sig?.statAbove   === true ? 1 : sig?.statAbove   === false ? 0 : 0.5;
-        const claudeFeat = sig?.claudeAbove === true ? 1 : sig?.claudeAbove === false ? 0 : 0.5;
-        ex.features.push(statFeat, claudeFeat, 0.5); // 0.5 = wmRec unknown for historical data
-        if (sig?.statAbove !== null || sig?.claudeAbove !== null) augmented++;
+        ex.features[14] = sig?.statAbove   === true ? 1 : sig?.statAbove   === false ? 0 : 0.5;
+        ex.features[15] = sig?.claudeAbove === true ? 1 : sig?.claudeAbove === false ? 0 : 0.5;
+        ex.features[16] = 0.5; // wmRec not stored historically — keep neutral
+        if (sig?.statAbove != null || sig?.claudeAbove != null) augmented++;
       }
       logger.info(
         { total: examples.length, withSignals: augmented },
         "[ml-backfill] augmented examples with historical stat/claude signals",
       );
     } catch (augErr) {
-      // Augmentation failure is non-fatal: features 14-16 will all be 0.5 (unknown).
-      // The model will still train on features 0-13 correctly.
-      logger.warn({ err: augErr }, "[ml-backfill] stat/claude augmentation failed — using 0.5 for features 14-16");
-      for (const ex of examples) {
-        if (ex.features.length === 14) {
-          ex.features.push(0.5, 0.5, 0.5);
-        }
-      }
+      // Augmentation failure is non-fatal: features 14-16 remain 0.5 (already set
+      // by extractMLFeatures defaults). Log and continue — model still trains on
+      // features 0-13 plus the neutral synthesis placeholders.
+      logger.warn({ err: augErr }, "[ml-backfill] stat/claude augmentation failed — features 14-16 stay at 0.5");
     }
 
     await backfillFromExamples(examples);
