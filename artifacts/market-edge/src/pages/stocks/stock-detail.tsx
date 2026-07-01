@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import {
   stockGet, closeStockPosition, fmtUsd, fmtPct, fmtSignedUsd, sentimentColor,
-  type StockAnalysis, type Candle, type BotStatus, type Direction,
+  type AnalystRating, type StockAnalysis, type Candle, type BotStatus, type Direction,
 } from "@/lib/stocks-api";
 
 // ─── Bollinger Bands over close prices (period 20, 2σ) ───────────────────────
@@ -122,8 +122,21 @@ function DirBadge({ dir, confidence }: { dir: Direction; confidence: number }) {
   );
 }
 
-function ConfidenceBar({ label, icon: Icon, dir, confidence, reasoning, muted }: {
-  label: string; icon: typeof Brain; dir?: Direction; confidence?: number; reasoning?: string; muted?: string;
+function RatingBadge({ rating }: { rating: AnalystRating }) {
+  const cfg = {
+    buy:  { cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400", label: "BUY" },
+    sell: { cls: "border-red-500/40 bg-red-500/10 text-red-400",             label: "SELL" },
+    hold: { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400",       label: "HOLD" },
+  }[rating];
+  return (
+    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${cfg.cls}`}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function ConfidenceBar({ label, icon: Icon, dir, confidence, reasoning, muted, rating }: {
+  label: string; icon: typeof Brain; dir?: Direction; confidence?: number; reasoning?: string; muted?: string; rating?: AnalystRating;
 }) {
   return (
     <div className="rounded-lg border border-border bg-card/50 p-3">
@@ -132,8 +145,11 @@ function ConfidenceBar({ label, icon: Icon, dir, confidence, reasoning, muted }:
           <Icon className="w-3.5 h-3.5 text-muted-foreground" />
           {label}
         </span>
-        {muted ? <span className="text-[11px] text-muted-foreground">{muted}</span>
-          : dir && confidence != null ? <DirBadge dir={dir} confidence={confidence} /> : null}
+        <div className="flex items-center gap-1.5">
+          {rating && <RatingBadge rating={rating} />}
+          {muted ? <span className="text-[11px] text-muted-foreground">{muted}</span>
+            : dir && confidence != null ? <DirBadge dir={dir} confidence={confidence} /> : null}
+        </div>
       </div>
       {!muted && confidence != null && (
         <div className="h-1.5 rounded-full bg-muted overflow-hidden">
@@ -278,6 +294,7 @@ export function StockDetail({ ticker, onClose }: { ticker: string | null; onClos
                 <ConfidenceBar label="Statistical" icon={LineIcon} dir={data.stat.direction} confidence={data.stat.confidence} reasoning={data.stat.reasoning} />
                 <ConfidenceBar label="Claude AI" icon={Brain}
                   dir={data.claude?.direction} confidence={data.claude?.confidence} reasoning={data.claude?.reasoning}
+                  rating={data.claude?.rating}
                   muted={data.claude ? undefined : "not run"} />
                 <ConfidenceBar label="Machine Learning" icon={Cpu}
                   dir={data.ml?.direction} confidence={data.ml?.confidence}

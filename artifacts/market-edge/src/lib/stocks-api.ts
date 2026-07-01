@@ -73,10 +73,13 @@ export interface StatSignal {
   reasoning: string;
 }
 
+export type AnalystRating = "buy" | "sell" | "hold";
+
 export interface ClaudeSignal {
   direction: Direction;
   confidence: number;
   reasoning: string;
+  rating: AnalystRating;
   cached: boolean;
 }
 

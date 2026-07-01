@@ -15,7 +15,7 @@ import { STOCK_UNIVERSE, SECTORS, lookupUniverse } from "./universe";
 import { statSignal } from "./ai";
 import { getScoredNews, aggregateSentiment } from "./news";
 import { getEarnings } from "./earnings";
-import { efficiencyRatio } from "./indicators";
+import { efficiencyRatio, sma } from "./indicators";
 import { watchlistTickers } from "./watchlist";
 import { getConfig } from "./config";
 import type { Candle, Direction, ScannerRow, Sentiment } from "./types";
@@ -103,7 +103,10 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
 
       if (shortlist.has(ticker)) {
         try {
-          const candles: Candle[] = await getBars(ticker, "5Min", 78);
+          const [candles, dailyCandles] = await Promise.all([
+            getBars(ticker, "5Min", 78),
+            getBars(ticker, "1Day", 200),
+          ]);
           if (candles.length > 20) {
             const stat = statSignal(candles);
             const news = await getScoredNews(ticker);
@@ -114,6 +117,17 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
             direction = stat.direction;
             confidence = stat.confidence;
             const er = efficiencyRatio(candles.map((c) => c.c), 14);
+
+            // Daily MA alignment: 21-day SMA above both 50-day and 180-day SMA.
+            const dailyCloses = dailyCandles.map((c) => c.c);
+            const sma21 = sma(dailyCloses, 21);
+            const sma50 = sma(dailyCloses, 50);
+            const sma180 = sma(dailyCloses, 180);
+            const maAlignment =
+              dailyCandles.length >= 180 &&
+              !isNaN(sma21) && !isNaN(sma50) && !isNaN(sma180) &&
+              sma21 > sma50 && sma21 > sma180;
+
             // Composite: conviction × trend cleanliness + news alignment − earnings risk.
             const newsAlign =
               (agg.sentiment === "bullish" && stat.direction === "up") ||
@@ -134,6 +148,10 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
               volumeBias: Number(stat.volumeBias.toFixed(2)),
               newsCount: news.length,
               reasoning: stat.reasoning,
+              maAlignment,
+              sma21: isNaN(sma21) ? null : Number(sma21.toFixed(2)),
+              sma50: isNaN(sma50) ? null : Number(sma50.toFixed(2)),
+              sma180: isNaN(sma180) ? null : Number(sma180.toFixed(2)),
             };
             scored++;
           }

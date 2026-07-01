@@ -16,6 +16,7 @@ import {
 import { buildFeatures, predictStock } from "./ml";
 import { aggregateSentiment } from "./news";
 import type {
+  AnalystRating,
   Candle,
   ClaudeSignal,
   Direction,
@@ -117,8 +118,13 @@ ${newsLines}
 
 Weigh momentum, mean-reversion risk (RSI ${stat.rsi.toFixed(0)}), and news. Be skeptical; avoid overconfidence in choppy tape.
 
+Also provide an analyst-style rating:
+- "buy"  — clear upside edge; would initiate or add to a long position now
+- "sell" — clear downside edge; would initiate a short or exit a long now
+- "hold" — no clear edge, choppy tape, or conflicting signals; stand aside
+
 Respond with ONLY JSON:
-{"direction":"up"|"down","confidence":50-95,"reasoning":"one short sentence"}
+{"direction":"up"|"down","confidence":50-95,"reasoning":"one short sentence","rating":"buy"|"sell"|"hold"}
 No prose, no markdown fences.`;
 
   try {
@@ -133,18 +139,23 @@ No prose, no markdown fences.`;
       direction: Direction;
       confidence: number;
       reasoning: string;
+      rating?: string;
     };
+    const rawRating = parsed.rating?.toLowerCase();
+    const rating: AnalystRating =
+      rawRating === "buy" ? "buy" : rawRating === "sell" ? "sell" : "hold";
     const sig: ClaudeSignal = {
       direction: parsed.direction === "down" ? "down" : "up",
       confidence: Math.max(50, Math.min(95, Math.round(parsed.confidence ?? 50))),
       reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
+      rating,
       cached: false,
     };
     claudeCache.set(T, { sig, at: Date.now() });
     return sig;
   } catch (err) {
     logger.warn({ err, ticker: T }, "[stock-ai] claude signal failed (non-fatal)");
-    return { direction: stat.direction, confidence: 50, reasoning: "Claude unavailable — using statistical read.", cached: false };
+    return { direction: stat.direction, confidence: 50, reasoning: "Claude unavailable — using statistical read.", rating: "hold", cached: false };
   }
 }
 

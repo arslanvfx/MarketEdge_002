@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Search, RefreshCw, Star, TrendingUp, TrendingDown, CalendarClock, Loader2, ArrowUpDown,
+  Search, RefreshCw, Star, TrendingUp, TrendingDown, CalendarClock, Loader2, ArrowUpDown, BarChart2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
@@ -24,6 +24,7 @@ export default function StockScanner() {
   const [sortKey, setSortKey] = useState<SortKey>("score");
   const [detail, setDetail] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [maAlignOnly, setMaAlignOnly] = useState(false);
 
   const { data: scanData, isLoading } = useQuery<{ results: ScannerRow[]; lastScanAt: number }>({
     queryKey: ["stocks-scanner"],
@@ -49,6 +50,7 @@ export default function StockScanner() {
     let rows = results.filter((r) => {
       if (sector !== "All" && r.sector !== sector) return false;
       if (q && !r.ticker.includes(q) && !r.companyName.toUpperCase().includes(q)) return false;
+      if (maAlignOnly && !(r.details?.maAlignment as boolean)) return false;
       return true;
     });
     rows = [...rows].sort((a, b) => {
@@ -131,8 +133,8 @@ export default function StockScanner() {
           </Button>
         </div>
 
-        {/* Sector tabs */}
-        <div className="flex flex-wrap gap-2">
+        {/* Sector tabs + MA filter */}
+        <div className="flex flex-wrap gap-2 items-center">
           {["All", ...SECTORS].map((s) => (
             <button
               key={s}
@@ -146,6 +148,18 @@ export default function StockScanner() {
               {s}
             </button>
           ))}
+          <div className="h-4 w-px bg-border mx-0.5" />
+          <button
+            onClick={() => setMaAlignOnly(!maAlignOnly)}
+            title="Show only stocks where the 21-day MA is above the 50-day and 180-day MA"
+            className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors flex items-center gap-1.5 ${
+              maAlignOnly
+                ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
+                : "border-border text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <BarChart2 className="w-3 h-3" /> 21D &gt; 50D &amp; 180D MA
+          </button>
         </div>
 
         {isLoading ? (
@@ -225,6 +239,11 @@ function ScannerCard({ row, watched, onOpen, onToggleWatch }: {
           </span>
         )}
         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${sentimentColor(row.newsSentiment)}`}>{row.newsSentiment}</span>
+        {(row.details?.maAlignment as boolean) && (
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-400" title="21-day MA above 50-day and 180-day MA — bullish trend structure">
+            <BarChart2 className="w-3 h-3" /> 21MA↑
+          </span>
+        )}
         {row.earningsSoon && (
           <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-400" title="Earnings within blackout window">
             <CalendarClock className="w-3 h-3" /> earnings
