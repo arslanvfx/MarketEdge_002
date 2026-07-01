@@ -6,6 +6,7 @@ import {
   BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus,
   Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders,
+  ChevronLeft, ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -209,6 +210,7 @@ export default function BotDashboard() {
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
   const [perfOpen, setPerfOpen] = useState(true);
   const [tuneLogOpen, setTuneLogOpen] = useState(true);
+  const [histPage, setHistPage] = useState(0);
 
   // ── Data fetching ────────────────────────────────────────────────────────
   const { data: status, isLoading } = useQuery<BotStatus>({
@@ -289,6 +291,11 @@ export default function BotDashboard() {
   const hasDraft = Object.keys(configDraft).length > 0;
   const history = historyData?.history ?? [];
   const bets = history.filter(r => r.action === "bet" || r.action === "exit" || r.action === "late_recovery_exit" || r.action === "expired");
+
+  const HIST_PAGE_SIZE = 20;
+  const totalHistPages = Math.max(1, Math.ceil(bets.length / HIST_PAGE_SIZE));
+  const clampedHistPage = Math.min(histPage, totalHistPages - 1);
+  const pagedBets = bets.slice(clampedHistPage * HIST_PAGE_SIZE, (clampedHistPage + 1) * HIST_PAGE_SIZE);
   const evaluation = evalData?.evaluation ?? [];
   const stats = statsData;
   const openPosList = status?.openPositions ?? [];
@@ -933,10 +940,31 @@ export default function BotDashboard() {
 
         {/* ── Transaction Log ── */}
         <div className="bg-card border border-border rounded-xl overflow-hidden">
-          <div className="px-5 py-3 border-b border-border flex items-center gap-2">
+          <div className="px-5 py-3 border-b border-border flex items-center gap-2 flex-wrap">
             <Clock className="w-4 h-4 text-muted-foreground" />
             <h2 className="font-semibold text-sm">Transaction History</h2>
-            <span className="ml-auto text-xs text-muted-foreground">{bets.length} record{bets.length !== 1 ? "s" : ""}</span>
+            <span className="text-xs text-muted-foreground">{bets.length} record{bets.length !== 1 ? "s" : ""}</span>
+            {totalHistPages > 1 && (
+              <div className="ml-auto flex items-center gap-1">
+                <button
+                  onClick={() => setHistPage(p => Math.max(0, p - 1))}
+                  disabled={clampedHistPage === 0}
+                  className="p-1 rounded hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="text-xs text-muted-foreground tabular-nums px-1">
+                  {clampedHistPage + 1} / {totalHistPages}
+                </span>
+                <button
+                  onClick={() => setHistPage(p => Math.min(totalHistPages - 1, p + 1))}
+                  disabled={clampedHistPage === totalHistPages - 1}
+                  className="p-1 rounded hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
 
           {bets.length === 0 ? (
@@ -946,7 +974,12 @@ export default function BotDashboard() {
             </div>
           ) : (
             <div className="p-4 space-y-3">
-              {bets.map((r) => {
+              {totalHistPages > 1 && (
+                <div className="flex items-center justify-between text-xs text-muted-foreground pb-1">
+                  <span>Showing {clampedHistPage * HIST_PAGE_SIZE + 1}–{Math.min((clampedHistPage + 1) * HIST_PAGE_SIZE, bets.length)} of {bets.length}</span>
+                </div>
+              )}
+              {pagedBets.map((r) => {
                 const pnlNum = r.pnl != null ? parseFloat(r.pnl) : null;
                 const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
                 const xp = r.exitPrice != null ? parseFloat(r.exitPrice) : null;
@@ -1121,6 +1154,27 @@ export default function BotDashboard() {
                   </div>
                 );
               })}
+              {totalHistPages > 1 && (
+                <div className="flex items-center justify-center gap-2 pt-2 border-t border-border mt-1">
+                  <button
+                    onClick={() => setHistPage(p => Math.max(0, p - 1))}
+                    disabled={clampedHistPage === 0}
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                  </button>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    Page {clampedHistPage + 1} of {totalHistPages}
+                  </span>
+                  <button
+                    onClick={() => setHistPage(p => Math.min(totalHistPages - 1, p + 1))}
+                    disabled={clampedHistPage === totalHistPages - 1}
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Next <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
