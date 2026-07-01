@@ -444,6 +444,6 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableAutoTuning: true,
   autoTuneWindowSize: 100,
   enableBorderGuard: true,
-  borderProximityPct: 0.3,  // skip when avg settlement gap < 0.3% of strike
+  borderProximityPct: 0.1,  // skip when avg settlement gap < 0.1% of strike (0.3% was blocking normal windows)
   borderLookbackBets: 3,    // examine last 3 settled bets per coin
 };
