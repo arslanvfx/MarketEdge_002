@@ -107,10 +107,13 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
           isNotNull(predictionRecordsTable.kalshiTarget),
         ));
 
+      // Key the map by window OPEN time because that's what r.windowIso records.
+      // prediction_records.targetTime = window close (open + 15 min), so subtract.
       type SignalEntry = { statAbove: boolean | null; claudeAbove: boolean | null };
       const signalMap = new Map<string, SignalEntry>();
       for (const row of predRows) {
-        const key = `${row.symbol}:${new Date(row.targetTime).toISOString()}`;
+        const windowOpenMs = new Date(row.targetTime).getTime() - 15 * 60 * 1000;
+        const key = `${row.symbol}:${new Date(windowOpenMs).toISOString()}`;
         if (!signalMap.has(key)) signalMap.set(key, { statAbove: null, claudeAbove: null });
         const entry = signalMap.get(key)!;
         if (row.kalshiTarget != null && row.predictedPrice != null) {
