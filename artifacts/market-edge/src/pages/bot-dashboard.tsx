@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -243,6 +243,20 @@ export default function BotDashboard() {
     queryFn: () => fetch(`${API_BASE}/crypto/bot/status`).then(r => r.json()),
     refetchInterval: 5_000,
   });
+
+  // ── Sync draft with backend ───────────────────────────────────────────────
+  // When the backend config changes (e.g. server restart resets to defaults),
+  // clear any stale local draft so the UI always reflects reality.
+  const prevCfgRef = useRef<BotConfig | undefined>(undefined);
+  useEffect(() => {
+    const cfg = status?.config;
+    if (!cfg) return;
+    const prev = prevCfgRef.current;
+    if (prev && JSON.stringify(prev) !== JSON.stringify(cfg)) {
+      setConfigDraft({});
+    }
+    prevCfgRef.current = cfg;
+  }, [status?.config]);
 
   const { data: historyData } = useQuery<{ history: HistoryRecord[] }>({
     queryKey: ["bot-all-history"],

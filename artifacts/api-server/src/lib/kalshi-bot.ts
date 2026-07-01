@@ -329,13 +329,11 @@ export function setBotMode(mode: BotMode): void {
 async function _persistModeToConfig(): Promise<void> {
   try {
     const snapshot = { ...config, mode: botMode } as Record<string, unknown>;
-    await db
-      .insert(botConfigTable)
-      .values({ id: "default", config: snapshot, updatedAt: new Date() })
-      .onConflictDoUpdate({
-        target: botConfigTable.id,
-        set: { config: snapshot, updatedAt: new Date() },
-      });
+    await db.execute(sql`
+      INSERT INTO bot_config (id, config, updated_at)
+      VALUES ('default', ${JSON.stringify(snapshot)}::jsonb, NOW())
+      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+    `);
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to persist mode to DB (non-fatal)");
   }
@@ -353,16 +351,14 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   try {
     // Include mode in the persisted JSON so restarts recover the correct mode.
     const stored = { ...snapshot, mode: botMode } as Record<string, unknown>;
-    await db
-      .insert(botConfigTable)
-      .values({ id: "default", config: stored, updatedAt: new Date() })
-      .onConflictDoUpdate({
-        target: botConfigTable.id,
-        set: { config: stored, updatedAt: new Date() },
-      });
+    await db.execute(sql`
+      INSERT INTO bot_config (id, config, updated_at)
+      VALUES ('default', ${JSON.stringify(stored)}::jsonb, NOW())
+      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+    `);
     persisted = true;
   } catch (err) {
-    logger.warn({ err }, "[kalshi-bot] failed to persist config to DB (non-fatal)");
+    logger.error({ err }, "[kalshi-bot] failed to persist config to DB");
   }
   return { config: snapshot, persisted };
 }
