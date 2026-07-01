@@ -14,11 +14,14 @@ const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+type DecisionMode = "classic" | "ml_gate" | "consensus" | "ml_primary";
+
 interface BotConfig {
   betSize: number;
   dailyLossLimit: number;
   signalThreshold: number;
   minConfidence: number;
+  decisionMode: DecisionMode;
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number;
   maxEntryMinutes: number;
@@ -37,6 +40,16 @@ interface BotConfig {
   enableBorderGuard: boolean;
   borderProximityPct: number;
   borderLookbackBets: number;
+}
+
+interface LogicModeStats {
+  mode: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  avgPnlPerBet: number | null;
 }
 
 interface OpenPosition {
@@ -247,6 +260,12 @@ export default function BotDashboard() {
     queryKey: ["bot-auto-tune-log"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/auto-tune-log`).then(r => r.json()),
     refetchInterval: 60_000,
+  });
+
+  const { data: logicPerfData } = useQuery<{ modes: LogicModeStats[] }>({
+    queryKey: ["bot-logic-performance"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/logic-performance`).then(r => r.json()),
+    refetchInterval: 5 * 60_000,
   });
 
   // ── Mutations ────────────────────────────────────────────────────────────
@@ -649,6 +668,25 @@ export default function BotDashboard() {
                     onChange={e => setConfigDraft(d => ({ ...d, minConfidence: parseInt(e.target.value) }))} />
                 </label>
 
+                {/* Decision Mode */}
+                <label className="flex flex-col gap-1.5 col-span-2 md:col-span-1">
+                  <span className="text-xs text-muted-foreground">Decision Mode</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.decisionMode ?? "classic"}
+                    onChange={e => setConfigDraft(d => ({ ...d, decisionMode: e.target.value as DecisionMode }))}>
+                    <option value="classic">Classic (Stat → Claude → ML cascade)</option>
+                    <option value="ml_gate">ML Gate (ML veto on disagreement)</option>
+                    <option value="consensus">Consensus (2/3 majority vote)</option>
+                    <option value="ml_primary">ML Primary (ML must lead)</option>
+                  </select>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    {(merged.decisionMode ?? "classic") === "classic" && "Classic 3-path cascade: ML primary if ready, else Claude+Stat, else Stat alone."}
+                    {(merged.decisionMode ?? "classic") === "ml_gate" && "Classic decides direction; if ML is available and disagrees, the bet is vetoed."}
+                    {(merged.decisionMode ?? "classic") === "consensus" && "At least 2 of [Stat, Claude, ML] must agree on the same direction."}
+                    {(merged.decisionMode ?? "classic") === "ml_primary" && "ML model must be confident (≥62%) before any bet is placed."}
+                  </span>
+                </label>
+
                 {/* Exit Sensitivity */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Exit Sensitivity</span>
@@ -904,6 +942,109 @@ export default function BotDashboard() {
             </div>
           )}
         </div>
+
+        {/* ── Logic Mode Performance ── */}
+        {(() => {
+          const modes = logicPerfData?.modes ?? [];
+          const totalBets = modes.reduce((s, m) => s + m.bets, 0);
+          const activeMode = status?.config?.decisionMode ?? "classic";
+
+          const MODE_META: Record<string, { label: string; desc: string; color: string; accent: string }> = {
+            classic:    { label: "Classic",     desc: "Stat → Claude → ML cascade", color: "border-sky-500/40 bg-sky-950/10",     accent: "text-sky-400" },
+            ml_gate:    { label: "ML Gate",     desc: "ML veto on disagreement",    color: "border-violet-500/40 bg-violet-950/10", accent: "text-violet-400" },
+            consensus:  { label: "Consensus",   desc: "2/3 majority vote",          color: "border-amber-500/40 bg-amber-950/10",  accent: "text-amber-400" },
+            ml_primary: { label: "ML Primary",  desc: "ML must lead",               color: "border-emerald-500/40 bg-emerald-950/10", accent: "text-emerald-400" },
+          };
+
+          return (
+            <div className="bg-card border border-border rounded-xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-border flex items-center gap-2">
+                <Brain className="w-4 h-4 text-violet-400" />
+                <h2 className="font-semibold text-sm">Logic Mode Performance</h2>
+                <span className="text-xs text-muted-foreground">win/loss per decision strategy</span>
+                <span className="ml-auto text-[10px] text-muted-foreground">{totalBets} total settled bets</span>
+              </div>
+              <div className="p-5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {modes.map(m => {
+                    const meta = MODE_META[m.mode] ?? { label: m.mode, desc: "", color: "border-border bg-card/60", accent: "text-foreground" };
+                    const isActive = m.mode === activeMode;
+                    const wr = m.winRate;
+                    const wrPct = wr != null ? Math.round(wr * 100) : null;
+                    const wrColor = wrPct == null ? "" : wrPct >= 60 ? "text-emerald-400" : wrPct >= 45 ? "text-amber-400" : "text-red-400";
+                    const pnlColor = m.pnl >= 0 ? "text-emerald-400" : "text-red-400";
+                    const fmt$ = (v: number) => `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+                    return (
+                      <div key={m.mode} className={`border rounded-xl p-4 relative ${meta.color} ${isActive ? "ring-2 ring-offset-1 ring-offset-card ring-current" : ""}`} style={isActive ? { ["--tw-ring-color" as string]: "rgb(99 102 241 / 0.5)" } : {}}>
+                        {isActive && (
+                          <span className={`absolute top-2.5 right-2.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-current/20 ${meta.accent}`}>
+                            ACTIVE
+                          </span>
+                        )}
+                        <div className={`text-sm font-bold ${meta.accent} mb-0.5`}>{meta.label}</div>
+                        <div className="text-[10px] text-muted-foreground/70 mb-3 leading-tight">{meta.desc}</div>
+
+                        {m.bets === 0 ? (
+                          <div className="text-xs text-muted-foreground italic">No bets yet</div>
+                        ) : (
+                          <>
+                            <div className="flex items-baseline gap-2 mb-2">
+                              <span className={`text-2xl font-black ${wrColor}`}>
+                                {wrPct != null ? `${wrPct}%` : "—"}
+                              </span>
+                              <span className="text-[10px] text-muted-foreground">win rate</span>
+                            </div>
+
+                            <div className="flex items-center gap-1 mb-2">
+                              <div className="flex-1 h-2 bg-muted/30 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${wrPct != null && wrPct >= 50 ? "bg-emerald-500" : "bg-red-500"} opacity-70 transition-all`}
+                                  style={{ width: `${wrPct ?? 0}%` }}
+                                />
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-1 text-center">
+                              <div className="bg-background/30 rounded p-1.5">
+                                <div className="text-[9px] text-muted-foreground uppercase">Bets</div>
+                                <div className="text-xs font-bold">{m.bets}</div>
+                              </div>
+                              <div className="bg-emerald-500/10 rounded p-1.5">
+                                <div className="text-[9px] text-emerald-400 uppercase">Wins</div>
+                                <div className="text-xs font-bold text-emerald-400">{m.wins}</div>
+                              </div>
+                              <div className="bg-red-500/10 rounded p-1.5">
+                                <div className="text-[9px] text-red-400 uppercase">Losses</div>
+                                <div className="text-xs font-bold text-red-400">{m.losses}</div>
+                              </div>
+                            </div>
+
+                            <div className="mt-2 flex items-center justify-between">
+                              <div className="text-[10px] text-muted-foreground">Total P&L</div>
+                              <div className={`text-xs font-bold ${pnlColor}`}>{m.pnl >= 0 ? "+" : ""}{fmt$(m.pnl)}</div>
+                            </div>
+                            {m.avgPnlPerBet != null && (
+                              <div className="flex items-center justify-between">
+                                <div className="text-[10px] text-muted-foreground">Avg / bet</div>
+                                <div className={`text-xs font-semibold ${m.avgPnlPerBet >= 0 ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                                  {m.avgPnlPerBet >= 0 ? "+" : ""}{fmt$(m.avgPnlPerBet)}
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-3">
+                  Historical bets placed before this feature was added are attributed to Classic mode. Switch modes in Bot Configuration above and save to start tracking a new strategy.
+                </p>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ── Per-Coin Stats ── */}
         {(stats?.bySymbol?.length ?? 0) > 0 && (

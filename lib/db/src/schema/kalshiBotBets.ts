@@ -29,4 +29,7 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   // but are KEPT in the DB so operational queries (momentum filter seeding,
   // border proximity guard, evalClosedBets, auto-tune) continue to work correctly.
   archivedAt: timestamp("archived_at", { withTimezone: true }),
+  // Decision mode active when the bet was placed: "classic" | "ml_gate" | "consensus" | "ml_primary".
+  // Null for bets placed before this field was added (treated as "classic").
+  decisionMode: text("decision_mode"),
 });

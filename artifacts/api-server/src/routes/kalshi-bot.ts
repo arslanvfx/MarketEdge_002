@@ -14,6 +14,7 @@ import {
   getBotAutoTuneLog,
   getPausedCoinState,
   clearBetHistoryOld,
+  getBotLogicPerformance,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 
@@ -83,6 +84,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     dailyLossLimit,
     signalThreshold,
     minConfidence,
+    decisionMode,
     midExitSensitivity,
     phase2ThresholdPp,
     maxEntryMinutes,
@@ -106,6 +108,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     dailyLossLimit?: number;
     signalThreshold?: number;
     minConfidence?: number;
+    decisionMode?: string;
     midExitSensitivity?: "conservative" | "balanced" | "aggressive";
     phase2ThresholdPp?: number;
     maxEntryMinutes?: number;
@@ -134,6 +137,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
+  }
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "ml_primary") {
+    partial.decisionMode = decisionMode;
   }
   if (
     midExitSensitivity === "conservative" ||
@@ -266,6 +272,17 @@ router.get("/crypto/bot/auto-tune-log", async (req, res) => {
   try {
     const entries = await getBotAutoTuneLog(limit);
     res.json({ entries });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/logic-performance — per-decision-mode win/loss/accuracy stats (public)
+router.get("/crypto/bot/logic-performance", async (_req, res) => {
+  try {
+    const modes = await getBotLogicPerformance();
+    res.json({ modes });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

@@ -22,6 +22,7 @@ import {
   type BotDecision,
   type CircuitBreakerState,
   type PriceRegime,
+  type DecisionMode,
 } from "./kalshi-bot-engine";
 import {
   makeInitialExitState,
@@ -1077,6 +1078,7 @@ async function _runBotTick(
     // The exit UPDATE will find it later via existingId: pos.id.
     insertId: id,
     cryptoPriceAtEntry,
+    decisionMode: config.decisionMode ?? "classic",
   });
   // Mark this window as having a recorded decision so SKIP dedup works correctly
   lastDecisionWindowKey.set(sym, windowKey);
@@ -1269,6 +1271,8 @@ interface BetRecordArgs {
   existingId?: string;
   cryptoPriceAtEntry?: number | null;
   cryptoPriceAtExit?: number | null;
+  // Active decision mode at the time of bet placement. Null on exit/expiry updates.
+  decisionMode?: DecisionMode | null;
 }
 
 async function persistBetRecord(args: BetRecordArgs): Promise<void> {
@@ -1306,6 +1310,7 @@ async function persistBetRecord(args: BetRecordArgs): Promise<void> {
         contractCount: args.contractCount,
         betAmount: args.betAmount != null ? String(args.betAmount) : undefined,
         cryptoPriceAtEntry: args.cryptoPriceAtEntry != null ? String(args.cryptoPriceAtEntry) : undefined,
+        decisionMode: args.decisionMode ?? null,
         createdAt: new Date(),
       }).onConflictDoNothing();
     }
@@ -2266,6 +2271,88 @@ export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
       .from(botAutoTuneLogTable)
       .orderBy(desc(botAutoTuneLogTable.createdAt))
       .limit(limit);
+  } catch {
+    return [];
+  }
+}
+
+export interface LogicModeStats {
+  mode: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  avgPnlPerBet: number | null;
+}
+
+/**
+ * Returns per-decision-mode win/loss/accuracy stats from settled bets.
+ * Historical bets with a null decision_mode are bucketed as "classic".
+ */
+export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
+  try {
+    const rows = await db
+      .select({
+        decisionMode: kalshiBotBetsTable.decisionMode,
+        pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
+        outcome: kalshiBotBetsTable.outcome,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+          AND ${kalshiBotBetsTable.archivedAt} IS NULL`,
+      );
+
+    const modeMap = new Map<string, { bets: number; wins: number; losses: number; pnl: number }>();
+
+    for (const r of rows) {
+      const mode = r.decisionMode ?? "classic";
+      const p = parseFloat(r.pnl ?? "0");
+      const isWin  = r.outcome ? r.outcome === "win"  : p > 0;
+      const isLoss = r.outcome ? r.outcome === "loss" : p < 0;
+
+      const entry = modeMap.get(mode) ?? { bets: 0, wins: 0, losses: 0, pnl: 0 };
+      entry.bets++;
+      entry.pnl += p;
+      if (isWin)  entry.wins++;
+      if (isLoss) entry.losses++;
+      modeMap.set(mode, entry);
+    }
+
+    const ALL_MODES: DecisionMode[] = ["classic", "ml_gate", "consensus", "ml_primary"];
+    const result: LogicModeStats[] = [];
+
+    // Emit results in a fixed order, always including all known modes (even if 0 bets)
+    for (const m of ALL_MODES) {
+      const e = modeMap.get(m) ?? { bets: 0, wins: 0, losses: 0, pnl: 0 };
+      result.push({
+        mode: m,
+        bets: e.bets,
+        wins: e.wins,
+        losses: e.losses,
+        pnl: e.pnl,
+        winRate: e.bets > 0 ? e.wins / e.bets : null,
+        avgPnlPerBet: e.bets > 0 ? e.pnl / e.bets : null,
+      });
+    }
+
+    // Also include any unknown modes stored in the DB
+    for (const [m, e] of modeMap.entries()) {
+      if (!(ALL_MODES as string[]).includes(m)) {
+        result.push({
+          mode: m,
+          bets: e.bets,
+          wins: e.wins,
+          losses: e.losses,
+          pnl: e.pnl,
+          winRate: e.bets > 0 ? e.wins / e.bets : null,
+          avgPnlPerBet: e.bets > 0 ? e.pnl / e.bets : null,
+        });
+      }
+    }
+
+    return result;
   } catch {
     return [];
   }

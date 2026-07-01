@@ -69,11 +69,14 @@ export {
   type PriceRegime,
 };
 
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "ml_primary";
+
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
   signalThreshold: number;   // kept for config compat — not used for entry gating (see core-pair gate)
   minConfidence: number;     // 0-100; skip bet when engine confidence is below this (default 60)
+  decisionMode: DecisionMode; // which signal-combination logic to use (default "classic")
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
   maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 5)
@@ -107,6 +110,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry
   minConfidence: 52,
+  decisionMode: "classic",
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
   // Entry is only allowed between t+45s and t+5:00 of each 15-min window.
@@ -242,6 +246,81 @@ export function makeBotDecision(
   const wmDriftAbove: boolean | null =
     wmReady && wmRec === "bet" && wmFactors != null ? wmFactors.netDriftPct > 0 : null;
 
+  // Helper to build a signal snapshot
+  const buildSnapshot = (ev: number | null, signalsAgreeing = 0, signalsTotal = 0, agreementTarget: BotDecisionAction | null = null): SignalSnapshot => ({
+    statAbove, claudeAbove, mlAbove,
+    windowMonitor: wmRec, windowMonitorReady: wmReady,
+    yesPrice, ev, signalAccuracyPct, minutesElapsed,
+    signalsAgreeing, signalsTotal, agreementTarget,
+    statConfidence: statCall?.confidence ?? null,
+    claudeConfidence: claudeCall?.confidence ?? null,
+    mlConfidence,
+    warmupActive: false,
+  });
+
+  const decisionMode: DecisionMode = config.decisionMode ?? "classic";
+
+  // ── Decision Mode: ml_primary ──────────────────────────────────────────────
+  // Require ML to be ready before taking any position. If ML is not ready → skip.
+  if (decisionMode === "ml_primary") {
+    if (mlAbove === null || mlConfidence == null || mlConfidence < ML_PRIMARY_MIN_CONFIDENCE) {
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `ml_primary: ML not ready (conf=${mlConfidence?.toFixed(0) ?? "—"}) — skipping`,
+        signals: buildSnapshot(null),
+      };
+    }
+    // ML is ready → fall through to classic; PATH A will take over
+  }
+
+  // ── Decision Mode: consensus ──────────────────────────────────────────────
+  // Require at least 2 out of [Stat, Claude, ML] to agree on the same direction.
+  if (decisionMode === "consensus") {
+    const votes: Array<{ above: boolean; conf: number }> = [];
+    if (statAbove !== null)  votes.push({ above: statAbove,  conf: statCall?.confidence ?? 55 });
+    if (claudeAbove !== null) votes.push({ above: claudeAbove, conf: claudeCall?.confidence ?? 55 });
+    if (mlAbove !== null && mlConfidence != null) votes.push({ above: mlAbove, conf: mlConfidence });
+
+    const yesVotes = votes.filter(v => v.above);
+    const noVotes  = votes.filter(v => !v.above);
+    const majorityDir: boolean | null =
+      yesVotes.length > noVotes.length ? true :
+      noVotes.length  > yesVotes.length ? false : null;
+    const majorityCount = majorityDir === null ? 0 : Math.max(yesVotes.length, noVotes.length);
+
+    if (majorityDir === null || majorityCount < 2) {
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `consensus: no 2/${votes.length} majority (yes=${yesVotes.length} no=${noVotes.length} total=${votes.length}) — skipping`,
+        signals: buildSnapshot(null),
+      };
+    }
+
+    const agreeingVotes = majorityDir ? yesVotes : noVotes;
+    const avgConf = agreeingVotes.reduce((s, v) => s + v.conf, 0) / agreeingVotes.length;
+    const confidence = Math.round(Math.max(avgConf, BASE_CONFIDENCE_HALF_PAIR));
+    const action: BotDecisionAction = majorityDir ? "BET_YES" : "BET_NO";
+
+    if (confidence < config.minConfidence) {
+      return {
+        action: "SKIP",
+        confidence,
+        reasoning: `consensus: confidence ${confidence}% below minimum ${config.minConfidence}%`,
+        signals: buildSnapshot(null, agreeingVotes.length, votes.length),
+      };
+    }
+
+    return {
+      action,
+      confidence,
+      reasoning: `consensus: ${agreeingVotes.length}/${votes.length} agree ${majorityDir ? "YES" : "NO"} (avg conf ${confidence}%)`,
+      signals: buildSnapshot(null, agreeingVotes.length, votes.length, action),
+    };
+  }
+
+  // ── Classic path (also used by ml_primary and ml_gate pre-decision) ────────
   const result = computeCorePairDecision({
     statAbove, claudeAbove, mlAbove, wmDriftAbove,
     wmRec, wmReady, yesPrice, signalAccuracyPct, minutesElapsed,
@@ -252,18 +331,26 @@ export function makeBotDecision(
     minConfidence: config.minConfidence,
   });
 
-  const snapshot: SignalSnapshot = {
-    statAbove, claudeAbove, mlAbove,
-    windowMonitor: wmRec, windowMonitorReady: wmReady,
-    yesPrice, ev: result.ev, signalAccuracyPct, minutesElapsed,
-    signalsAgreeing: result.signalsAgreeing,
-    signalsTotal: result.signalsTotal,
-    agreementTarget: result.action !== "SKIP" ? result.action : null,
-    statConfidence: statCall?.confidence ?? null,
-    claudeConfidence: claudeCall?.confidence ?? null,
-    mlConfidence,
-    warmupActive: false,
-  };
+  // ── Decision Mode: ml_gate ────────────────────────────────────────────────
+  // Classic decision is taken first, but ML may veto if it disagrees.
+  if (decisionMode === "ml_gate" && result.action !== "SKIP" && mlAbove !== null) {
+    const proposedDir = result.action === "BET_YES";
+    if (mlAbove !== proposedDir) {
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `ml_gate: ML veto (ML=${mlAbove ? "above" : "below"} opposes ${result.action}) — skipping`,
+        signals: buildSnapshot(result.ev),
+      };
+    }
+  }
+
+  const snapshot = buildSnapshot(
+    result.ev,
+    result.signalsAgreeing,
+    result.signalsTotal,
+    result.action !== "SKIP" ? result.action : null,
+  );
 
   return {
     action: result.action,
