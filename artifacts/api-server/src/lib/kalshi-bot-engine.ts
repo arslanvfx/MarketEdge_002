@@ -20,6 +20,7 @@ import {
   getStatWindowCall,
   getWindowBetSignal,
   getCachedPrediction,
+  getKalshiCachedData,
   getKalshiWindowContext,
   TRAINING_COINS,
   type TrackerWindowCall,
@@ -215,10 +216,14 @@ export function makeBotDecision(
   // extractMLFeatures converts it into the 14-element feature vector; getMLPrediction
   // runs inference on the in-memory trained weights.  Returns null when the model
   // hasn't accumulated ≥30 labeled windows yet (minWindows gate).
+  //
+  // ML fix: the CoinPrediction.kalshiTarget field may be null even when the Kalshi
+  // route cache has the strike; fall back to getKalshiCachedData so ML always gets
+  // the current window's numeric strike when available.
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
   const pred = getCachedPrediction(sym);
-  const mlKalshiTarget = pred?.kalshiTarget ?? null;
+  const mlKalshiTarget = pred?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
   if (pred && mlKalshiTarget != null) {
     const winCtx = getKalshiWindowContext(sym);
     const elapsedFraction = Math.min(minutesElapsed / 15, 1);

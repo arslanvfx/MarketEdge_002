@@ -184,6 +184,14 @@ const recentKalshiTargets: Map<string, number[]> = new Map();
 // hovering within a noise band around the strike across recent settled bets.
 let borderProximityCache: Map<string, number> = new Map();
 let borderProximityCacheWindow = "";
+
+// Regime cache: sym → "above" | "below" | "neutral"
+// Tracks whether the last N settled bets for each coin closed above or below
+// the Kalshi strike. Used to penalise against-regime bets.
+let regimeCache: Map<string, "above" | "below" | "neutral"> = new Map();
+let regimeCacheWindow = "";
+// Confidence penalty applied when betting against the recent settlement regime.
+const REGIME_AGAINST_PENALTY = 10;
 const REGIME_STRIKES_MAX = 6; // keep last 6 strike prices per symbol
 
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
@@ -577,6 +585,57 @@ export async function loadOpenPositionFromDB(): Promise<void> {
  * sym → avg |closePrice−kalshiTarget| / kalshiTarget × 100 (as a percentage).
  * Only rows that have closePriceAtEval stored in their signals JSONB are counted.
  */
+/**
+ * Queries the last `lookback` settled bets per symbol and determines whether
+ * the close price consistently settled above or below the Kalshi strike.
+ * Returns "above" / "below" / "neutral" per symbol.
+ * "above" means ALL recent closes were above the strike (lean YES regime).
+ * "below" means ALL recent closes were below the strike (lean NO regime).
+ */
+async function loadRegimeCache(symbols: string[], lookback: number): Promise<Map<string, "above" | "below" | "neutral">> {
+  const result = new Map<string, "above" | "below" | "neutral">();
+  if (symbols.length === 0 || lookback <= 0) return result;
+  try {
+    const rows = await db.execute(sql`
+      WITH ranked AS (
+        SELECT
+          symbol,
+          kalshi_target::numeric                          AS target,
+          (signals->>'closePriceAtEval')::numeric         AS close_price,
+          ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY evaluated_at DESC) AS rn
+        FROM kalshi_bot_bets
+        WHERE outcome IS NOT NULL
+          AND evaluated_at IS NOT NULL
+          AND signals->>'closePriceAtEval' IS NOT NULL
+          AND kalshi_target IS NOT NULL
+          AND symbol = ANY(${symbols})
+      )
+      SELECT
+        symbol,
+        COUNT(*) FILTER (WHERE close_price > target)::int  AS above_count,
+        COUNT(*) FILTER (WHERE close_price < target)::int  AS below_count,
+        COUNT(*)::int                                       AS sample_count
+      FROM ranked
+      WHERE rn <= ${lookback}
+      GROUP BY symbol
+    `);
+    for (const row of rows.rows as { symbol: string; above_count: number; below_count: number; sample_count: number }[]) {
+      if (row.sample_count < lookback) {
+        result.set(row.symbol, "neutral");
+      } else if (row.above_count === row.sample_count) {
+        result.set(row.symbol, "above");
+      } else if (row.below_count === row.sample_count) {
+        result.set(row.symbol, "below");
+      } else {
+        result.set(row.symbol, "neutral");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] loadRegimeCache: query failed — regime filter disabled this tick");
+  }
+  return result;
+}
+
 async function loadBorderProximityCache(symbols: string[], lookback: number): Promise<Map<string, number>> {
   const result = new Map<string, number>();
   if (symbols.length === 0 || lookback <= 0) return result;
@@ -1813,15 +1872,21 @@ export async function runBotLoopTick(): Promise<void> {
   // independently place a bet that the Phase-3 filter just blocked.
   const filteredByNewGuards = new Set<string>();
 
-  // Refresh border-proximity cache once per window transition.
-  if (config.enableBorderGuard && windowKey !== borderProximityCacheWindow) {
+  // Refresh border-proximity and regime caches once per window transition.
+  if (windowKey !== borderProximityCacheWindow) {
     const syms = CRYPTO_COINS
       .filter(c => KALSHI_SERIES[c.symbol])
       .map(c => c.symbol.toUpperCase());
-    borderProximityCache = await loadBorderProximityCache(syms, config.borderLookbackBets);
+    if (config.enableBorderGuard) {
+      borderProximityCache = await loadBorderProximityCache(syms, config.borderLookbackBets);
+      logger.debug({ borderProximityCache: Object.fromEntries(borderProximityCache) },
+        "[kalshi-bot] border-proximity cache refreshed");
+    }
+    regimeCache = await loadRegimeCache(syms, config.borderLookbackBets);
+    regimeCacheWindow = windowKey;
     borderProximityCacheWindow = windowKey;
-    logger.debug({ borderProximityCache: Object.fromEntries(borderProximityCache) },
-      "[kalshi-bot] border-proximity cache refreshed");
+    logger.debug({ regimeCache: Object.fromEntries(regimeCache) },
+      "[kalshi-bot] regime cache refreshed");
   }
 
   for (const coin of CRYPTO_COINS) {
@@ -1952,6 +2017,40 @@ export async function runBotLoopTick(): Promise<void> {
           regime,
         });
         continue;
+      }
+    }
+
+    // Regime filter: if recent settlements consistently closed on one side of the strike,
+    // penalise bets going against that regime by raising the minimum confidence bar.
+    // This prevents the bot from fighting a persistent directional bias.
+    if (decision.action !== "SKIP") {
+      const regime = regimeCache.get(sym);
+      const isAgainstRegime =
+        (regime === "above" && decision.action === "BET_NO") ||
+        (regime === "below" && decision.action === "BET_YES");
+      if (isAgainstRegime) {
+        const penalised = effectiveConfidence - REGIME_AGAINST_PENALTY;
+        logger.info(
+          { sym, regime, action: decision.action, confidence: effectiveConfidence, penalised },
+          `[kalshi-bot] regime filter — ${sym} regime=${regime} vs ${decision.action}: confidence ${effectiveConfidence}→${penalised}`,
+        );
+        if (penalised < config.minConfidence) {
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `regime filter — ${regime} regime, against-direction penalty → ${penalised}% < ${config.minConfidence}%`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime: regimeCache.get(sym) as "above" | "below" | "neutral" | null ?? null,
+          });
+          continue;
+        }
+        effectiveConfidence = penalised;
       }
     }
 
