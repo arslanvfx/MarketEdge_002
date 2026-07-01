@@ -1,0 +1,107 @@
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import {
+  ChevronLeft, ChevronRight, Loader2, CheckCircle2, XCircle, Minus,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { StocksShell } from "./stocks-shell";
+import {
+  stockGet, fmtUsd, fmtSignedUsd, fmtDateTime,
+  type HistoryRow,
+} from "@/lib/stocks-api";
+
+const PAGE_SIZE = 20;
+
+export default function StockHistory() {
+  const [page, setPage] = useState(0);
+
+  const { data, isLoading } = useQuery<{ history: HistoryRow[] }>({
+    queryKey: ["stocks-bot-history"],
+    queryFn: () => stockGet("/bot/history?limit=500"),
+    refetchInterval: 15_000,
+  });
+
+  const rows = data?.history ?? [];
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const clamped = Math.min(page, totalPages - 1);
+  const paged = useMemo(
+    () => rows.slice(clamped * PAGE_SIZE, (clamped + 1) * PAGE_SIZE),
+    [rows, clamped],
+  );
+
+  return (
+    <StocksShell>
+      <div className="p-6 space-y-4">
+        {isLoading ? (
+          <div className="h-40 flex items-center justify-center text-muted-foreground">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading history…
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="h-40 flex flex-col items-center justify-center text-center text-muted-foreground text-sm">
+            <p>No trade history yet.</p>
+            <p className="text-xs mt-1">Trades appear here once the bot starts executing.</p>
+          </div>
+        ) : (
+          <>
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-sm">
+                <thead className="bg-muted/40 text-xs text-muted-foreground">
+                  <tr>
+                    {["Time", "Ticker", "Mode", "Action", "Conf.", "Entry", "Exit", "P&L", "Reason", "Outcome"].map((h) => (
+                      <th key={h} className="text-left font-medium px-3 py-2 whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {paged.map((r) => {
+                    const pnl = r.pnl == null ? null : Number(r.pnl);
+                    return (
+                      <tr key={r.id} className="border-t border-border" data-testid={`history-row-${r.id}`}>
+                        <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{fmtDateTime(r.created_at)}</td>
+                        <td className="px-3 py-2 font-bold text-foreground">{r.ticker}</td>
+                        <td className="px-3 py-2 text-muted-foreground capitalize">{r.trading_mode ?? "—"}</td>
+                        <td className="px-3 py-2 text-foreground capitalize">{r.action}</td>
+                        <td className="px-3 py-2 text-muted-foreground">{r.confidence != null ? `${Math.round(Number(r.confidence))}%` : "—"}</td>
+                        <td className="px-3 py-2 text-foreground">{fmtUsd(r.entry_price)}</td>
+                        <td className="px-3 py-2 text-foreground">{fmtUsd(r.exit_price)}</td>
+                        <td className={`px-3 py-2 font-semibold ${pnl == null ? "text-muted-foreground" : pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          {pnl == null ? "—" : fmtSignedUsd(pnl)}
+                        </td>
+                        <td className="px-3 py-2 text-muted-foreground text-xs">{r.exit_reason ?? "—"}</td>
+                        <td className="px-3 py-2">
+                          {r.outcome === "win" ? (
+                            <span className="inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="w-3.5 h-3.5" />win</span>
+                          ) : r.outcome === "loss" ? (
+                            <span className="inline-flex items-center gap-1 text-xs text-red-400"><XCircle className="w-3.5 h-3.5" />loss</span>
+                          ) : r.outcome === "push" ? (
+                            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground"><Minus className="w-3.5 h-3.5" />push</span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">open</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">
+                {rows.length} trades · page {clamped + 1} of {totalPages}
+              </span>
+              <div className="flex gap-1.5">
+                <Button size="sm" variant="outline" className="h-8 gap-1" disabled={clamped === 0} onClick={() => setPage(clamped - 1)}>
+                  <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                </Button>
+                <Button size="sm" variant="outline" className="h-8 gap-1" disabled={clamped >= totalPages - 1} onClick={() => setPage(clamped + 1)}>
+                  Next <ChevronRight className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </StocksShell>
+  );
+}

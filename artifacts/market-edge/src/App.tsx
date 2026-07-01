@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, lazy, Suspense } from "react";
 import { ClerkProvider, SignIn, SignUp, Show, useClerk } from '@clerk/react';
 import { publishableKeyFromHost } from '@clerk/react/internal';
 import { shadcn } from '@clerk/themes';
@@ -18,6 +18,20 @@ import BotDashboard from "./pages/bot-dashboard";
 import { Layout } from "./components/layout";
 import { BuilderProvider } from "./lib/builder-context";
 import { AlertsNotifier } from "./components/alerts-notifier";
+
+const StockScanner = lazy(() => import("./pages/stocks/scanner"));
+const StockWatchlist = lazy(() => import("./pages/stocks/watchlist"));
+const StockBot = lazy(() => import("./pages/stocks/bot"));
+const StockHistory = lazy(() => import("./pages/stocks/history"));
+const StockPerformance = lazy(() => import("./pages/stocks/performance"));
+
+function StocksFallback() {
+  return (
+    <div className="flex h-full items-center justify-center text-muted-foreground">
+      Loading…
+    </div>
+  );
+}
 
 const queryClient = new QueryClient();
 const clerkPubKey = publishableKeyFromHost(window.location.hostname, import.meta.env.VITE_CLERK_PUBLISHABLE_KEY);
@@ -164,6 +178,29 @@ function ClerkProviderWithRoutes() {
                   <Show when="signed-out"><Redirect to="/sign-in" /></Show>
                 </Layout>
               )}
+            </Route>
+
+            <Route path="/stocks" component={() => <Redirect to="/stocks/scanner" />} />
+            <Route path="/stocks/scanner">
+              <Layout><Suspense fallback={<StocksFallback />}><StockScanner /></Suspense></Layout>
+            </Route>
+            <Route path="/stocks/watchlist">
+              <Layout><Suspense fallback={<StocksFallback />}><StockWatchlist /></Suspense></Layout>
+            </Route>
+            <Route path="/stocks/performance">
+              <Layout><Suspense fallback={<StocksFallback />}><StockPerformance /></Suspense></Layout>
+            </Route>
+            <Route path="/stocks/history">
+              <Layout>
+                <Show when="signed-in"><Suspense fallback={<StocksFallback />}><StockHistory /></Suspense></Show>
+                <Show when="signed-out"><Redirect to="/sign-in" /></Show>
+              </Layout>
+            </Route>
+            <Route path="/stocks/bot">
+              <Layout>
+                <Show when="signed-in"><Suspense fallback={<StocksFallback />}><StockBot /></Suspense></Show>
+                <Show when="signed-out"><Redirect to="/sign-in" /></Show>
+              </Layout>
             </Route>
             
             <Route>

@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useUser, useClerk, Show } from "@clerk/react";
-import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, TrendingUp, Bot } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, TrendingUp, Bot, Radar, Star, BarChart3, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -39,6 +39,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { name: "Portfolio", href: "/portfolio", icon: LayoutDashboard },
   ];
 
+  const stocksNavigation = [
+    { name: "Stock Scanner", href: "/stocks/scanner", icon: Radar },
+    { name: "Stock Watchlist", href: "/stocks/watchlist", icon: Star },
+    { name: "Stock Bot", href: "/stocks/bot", icon: Bot },
+    { name: "Stock History", href: "/stocks/history", icon: History },
+    { name: "Stock Performance", href: "/stocks/performance", icon: BarChart3 },
+  ];
+
   const adminNavigation = [
     { name: "Bot Dashboard", href: "/bot", icon: Bot },
   ];
@@ -72,6 +80,29 @@ export function Layout({ children }: { children: React.ReactNode }) {
               </Link>
             );
           })}
+
+          <div className="pt-2 mt-2 border-t border-border/50">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/50 font-semibold px-3 mb-1">Stocks</p>
+            {stocksNavigation.map((item) => {
+              const Icon = item.icon;
+              const isActive = location === item.href || location.startsWith(`${item.href}/`);
+              return (
+                <Link key={item.name} href={item.href}>
+                  <span
+                    data-testid={`nav-${item.name.toLowerCase().replace(/\s+/g, "-")}`}
+                    className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors cursor-pointer ${
+                      isActive
+                        ? "bg-emerald-500/15 text-emerald-400 font-medium"
+                        : "text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-400"
+                    }`}
+                  >
+                    <Icon className="w-5 h-5" />
+                    {item.name}
+                  </span>
+                </Link>
+              );
+            })}
+          </div>
 
           <Show when="signed-in">
             <div className="pt-2 mt-2 border-t border-border/50">
