@@ -215,11 +215,24 @@ export async function placeOrder(
   };
 }
 
-/** Liquidate an entire position at market. */
+/**
+ * Liquidate an entire position at market.
+ *
+ * A 404 means the broker is already flat for this symbol — treated as success
+ * so the caller can safely reconcile its DB row. Any other error is re-thrown
+ * so the caller can keep the position open and retry, rather than marking the
+ * DB flat while the broker may still hold live exposure.
+ */
 export async function closePosition(mode: "paper" | "live", symbol: string): Promise<void> {
-  await req(`${tradingBase(mode)}/v2/positions/${encodeURIComponent(symbol)}`, {
-    method: "DELETE",
-  });
+  try {
+    await req(`${tradingBase(mode)}/v2/positions/${encodeURIComponent(symbol)}`, {
+      method: "DELETE",
+    });
+  } catch (err) {
+    // Alpaca returns 404 when there is no open position for the symbol.
+    if (err instanceof Error && /Alpaca 404\b/.test(err.message)) return;
+    throw err;
+  }
 }
 
 export interface MarketClock {

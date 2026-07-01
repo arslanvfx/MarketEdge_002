@@ -10,7 +10,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { logger } from "../logger";
-import { alpacaConfigured, getSnapshots, getBars } from "./alpaca";
+import { alpacaConfigured, getSnapshots, getBars, getClock } from "./alpaca";
 import { STOCK_UNIVERSE, SECTORS, lookupUniverse } from "./universe";
 import { statSignal } from "./ai";
 import { getScoredNews, aggregateSentiment } from "./news";
@@ -40,6 +40,20 @@ export async function runScan(): Promise<{ scanned: number; scored: number }> {
   scanning = true;
   try {
     const cfg = getConfig();
+
+    // Market-hours gate: skip scans when the market is closed so we don't burn
+    // data-rate limits producing stale off-hours results. A clock fetch failure
+    // is non-fatal — we proceed rather than silently stop scanning forever.
+    try {
+      const clock = await getClock(cfg.mode);
+      if (!clock.isOpen) {
+        logger.info("[stock-scanner] skipped — market closed");
+        return { scanned: 0, scored: 0 };
+      }
+    } catch (err) {
+      logger.warn({ err }, "[stock-scanner] clock check failed — scanning anyway");
+    }
+
     const watch = new Set(await watchlistTickers());
     const tickers = Array.from(new Set([...STOCK_UNIVERSE.map((e) => e.ticker), ...watch]));
 

@@ -96,10 +96,17 @@ async function exitPosition(
   exitPrice: number,
   reason: string,
 ): Promise<void> {
+  // Broker close must succeed (or confirm already-flat via 404) before we mark
+  // the DB row exited. If it fails we leave the row open so the next cycle
+  // retries — the DB must never say flat while the broker still holds risk.
   try {
     await closePosition(mode, bet.ticker);
   } catch (err) {
-    logger.warn({ err, ticker: bet.ticker }, "[stock-bot] closePosition failed (may already be flat)");
+    logger.warn(
+      { err, ticker: bet.ticker },
+      "[stock-bot] closePosition failed — keeping position open for retry",
+    );
+    throw err;
   }
   const pnl = (exitPrice - bet.entryPrice) * bet.qty;
   const outcome = pnl > 0 ? "win" : pnl < 0 ? "loss" : "push";
@@ -139,8 +146,13 @@ async function managePositions(cfg: StockBotConfig, marketOpen: boolean): Promis
     if (reason) {
       // Exits require an open market (except forced EOD which we still attempt).
       if (!marketOpen && reason !== "eod_close") continue;
-      await exitPosition(bet, cfg.mode, price, reason);
-      exits++;
+      try {
+        await exitPosition(bet, cfg.mode, price, reason);
+        exits++;
+      } catch (err) {
+        // Broker close failed — position stays open and is retried next cycle.
+        logger.warn({ err, ticker: bet.ticker }, "[stock-bot] exit failed; will retry");
+      }
     }
   }
   return exits;
