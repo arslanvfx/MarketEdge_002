@@ -108,10 +108,11 @@ export interface BotDecision {
 // ROI gate — skip when the payout on our chosen side is below the minimum
 // ---------------------------------------------------------------------------
 
-// Minimum net return required to place a bet.  At 1.50 %, a YES bet needs
-// yesPrice ≤ 98.52 ¢ and a NO bet needs yesPrice ≥ 1.48 ¢.  When yesPrice is
-// unknown the gate is bypassed so the bot can still operate without live prices.
-const MIN_ROI_PCT = 1.5;
+// Minimum net return required to place a bet.  Set to 1.4 % as a loose ~1.5 %
+// floor — values like 1.45 % and 1.48 % are acceptable; hard-losing plays
+// (< 1.4 %) are skipped.  A YES bet needs yesPrice ≤ 98.62 ¢; a NO bet needs
+// yesPrice ≥ 1.38 ¢.  Gate is bypassed when yesPrice is unknown.
+const MIN_ROI_PCT = 1.4;
 
 function calcROI(action: BotDecisionAction, yesPrice: number): number {
   return action === "BET_YES"
