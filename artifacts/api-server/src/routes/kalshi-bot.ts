@@ -272,22 +272,15 @@ router.get("/crypto/bot/auto-tune-log", async (req, res) => {
   }
 });
 
-// DELETE /crypto/bot/bets/old — delete bet history older than `hours` hours
-// (default 2). Also reloads in-memory daily P&L so the running bot reflects
-// the trimmed history immediately. Requires X-Clear-Password header.
+// DELETE /crypto/bot/bets/old — admin-only maintenance endpoint.
+// Deletes kalshi_bot_bets records older than `hours` hours (1–24, default 2)
+// and reloads in-memory daily P&L so the running bot reflects the clean slate.
 // prediction_records (learning data) are NEVER touched.
-router.delete("/crypto/bot/bets/old", async (req, res) => {
-  const expected = process.env["CLEAR_LOGS_PASSWORD"];
-  if (!expected) {
-    res.status(503).json({ error: "Clear password not configured on server" });
-    return;
-  }
-  if (req.headers["x-clear-password"] !== expected) {
-    res.status(401).json({ error: "Invalid password" });
-    return;
-  }
+// Gated by requireAuth (Clerk admin guard) — same protection as all other bot
+// mutation endpoints. hours is capped to 24 to prevent accidental full wipes.
+router.delete("/crypto/bot/bets/old", requireAuth, async (req, res) => {
   const hoursRaw = req.query.hours;
-  const hours = hoursRaw != null ? Math.max(1, parseInt(String(hoursRaw), 10) || 2) : 2;
+  const hours = Math.min(24, Math.max(1, parseInt(String(hoursRaw ?? "2"), 10) || 2));
   try {
     const result = await clearBetHistoryOld(hours);
     res.json({ ok: true, deleted: result.deleted, hours });
