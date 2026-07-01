@@ -1,4 +1,4 @@
-import { useGetMarketHistory } from "@workspace/api-client-react";
+import { useGetMarketHistory, getGetMarketHistoryQueryKey } from "@workspace/api-client-react";
 import { LineChart, Line, ResponsiveContainer, Tooltip, ReferenceLine } from "recharts";
 
 interface MarketSparklineProps {
@@ -26,6 +26,7 @@ function TrendIndicator({ points }: { points: { yesOdds: number }[] }) {
 export function MarketSparkline({ platform, marketId, currentOdds }: MarketSparklineProps) {
   const { data, isLoading } = useGetMarketHistory(platform, marketId, {
     query: {
+      queryKey: getGetMarketHistoryQueryKey(platform, marketId),
       staleTime: 60 * 60 * 1000,
       retry: false,
     },

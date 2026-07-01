@@ -88,6 +88,10 @@ interface BotStatus {
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;
   isInQuietHours: boolean;
+  mlStatus?: {
+    ready: boolean; readyCount: number; totalCount: number;
+    minWindows: number; minRequired: number;
+  };
 }
 
 interface HistoryRecord {
