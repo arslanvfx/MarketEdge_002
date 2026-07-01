@@ -289,6 +289,18 @@ router.get("/crypto/bot/logic-performance", async (_req, res) => {
   }
 });
 
+// GET /crypto/bot/backtest-modes — replay settled bets through each mode's logic (public)
+router.get("/crypto/bot/backtest-modes", async (_req, res) => {
+  try {
+    const { getBacktestModes } = await import("../lib/kalshi-bot.js");
+    const modes = await getBacktestModes();
+    res.json({ modes });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
 // DELETE /crypto/bot/bets/old — admin maintenance endpoint.
 // Deletes kalshi_bot_bets records older than `hours` hours (1–24, default 2)
 // and reloads in-memory daily P&L so the running bot reflects the clean slate.

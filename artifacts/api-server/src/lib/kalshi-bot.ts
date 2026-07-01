@@ -2360,6 +2360,115 @@ export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Decision mode backtest
+// ---------------------------------------------------------------------------
+
+export interface BacktestModeStats {
+  mode: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  /** Fraction of total settled bets this mode would have taken (0–1). */
+  coverage: number;
+}
+
+/**
+ * Replays all settled bets through each mode's gating logic using the stored
+ * signals snapshot (statAbove / claudeAbove / mlAbove) and returns projected
+ * win-rate, P&L, and coverage for each mode.
+ *
+ * classic  — approves every existing bet (the cascade placed them all)
+ * ml_gate  — approves unless ML was available AND disagreed with the direction
+ * consensus — approves only when ≥2 of [stat, claude, ml] agree; falls back
+ *             to classic when fewer than 2 signals are available
+ */
+export async function getBacktestModes(): Promise<BacktestModeStats[]> {
+  try {
+    const rows = await db
+      .select({
+        direction: kalshiBotBetsTable.direction,
+        pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
+        outcome: kalshiBotBetsTable.outcome,
+        signals: kalshiBotBetsTable.signals,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+          AND ${kalshiBotBetsTable.archivedAt} IS NULL`,
+      );
+
+    const ALL_MODES = ["classic", "ml_gate", "consensus"] as const;
+    const modeAcc = new Map<string, { bets: number; wins: number; losses: number; pnl: number }>(
+      ALL_MODES.map(m => [m, { bets: 0, wins: 0, losses: 0, pnl: 0 }]),
+    );
+    const total = rows.length;
+
+    for (const r of rows) {
+      const dir = r.direction as string | null;
+      if (!dir) continue;
+
+      const sigs = r.signals as Record<string, unknown> | null;
+      const statAbove   = typeof sigs?.statAbove   === "boolean" ? sigs.statAbove   : null;
+      const claudeAbove = typeof sigs?.claudeAbove === "boolean" ? sigs.claudeAbove : null;
+      const mlAbove     = typeof sigs?.mlAbove     === "boolean" ? sigs.mlAbove     : null;
+
+      const p      = parseFloat(r.pnl ?? "0");
+      const isWin  = r.outcome ? r.outcome === "win"  : p > 0;
+      const isLoss = r.outcome ? r.outcome === "loss" : p < 0;
+
+      // Does a signal agree with the actual bet direction?
+      const aboveExpected = dir === "yes";
+      const statA   = statAbove   !== null ? statAbove   === aboveExpected : null;
+      const claudeA = claudeAbove !== null ? claudeAbove === aboveExpected : null;
+      const mlA     = mlAbove     !== null ? mlAbove     === aboveExpected : null;
+
+      for (const mode of ALL_MODES) {
+        let approved = false;
+
+        if (mode === "classic") {
+          approved = true; // all placed bets passed the classic cascade
+        } else if (mode === "ml_gate") {
+          // ML veto: reject only when ML was available and disagreed
+          approved = mlA !== false;
+        } else if (mode === "consensus") {
+          const votes = ([statA, claudeA, mlA] as Array<boolean | null>).filter(v => v !== null) as boolean[];
+          if (votes.length < 2) {
+            approved = true; // not enough signals to form a consensus → fall back to classic
+          } else {
+            approved = votes.filter(v => v).length >= 2;
+          }
+        }
+
+        if (approved) {
+          const e = modeAcc.get(mode)!;
+          e.bets++;
+          e.pnl += p;
+          if (isWin)  e.wins++;
+          if (isLoss) e.losses++;
+        }
+      }
+    }
+
+    return ALL_MODES.map(mode => {
+      const e = modeAcc.get(mode)!;
+      return {
+        mode,
+        bets: e.bets,
+        wins: e.wins,
+        losses: e.losses,
+        pnl: e.pnl,
+        winRate: e.bets > 0 ? e.wins / e.bets : null,
+        coverage: total > 0 ? e.bets / total : 1,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Fetch the last 200 settled bets from the DB, compute a PerformanceReport,
  * run auto-tune rules, apply safe config mutations, and log every mutation.
