@@ -414,36 +414,35 @@ export interface BotConfig {
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
-  betSize: 1.00, // TEMP: raised from $0.50 for test-drive; revert before live trading
+  betSize: 1.00,
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry
   minConfidence: 52,
   decisionMode: "classic",
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
-  // Ceiling: 0 = disabled (no ceiling — enter at any point subject to floor).
-  // 11 = enter only in the first 11 min of the 15-min window (4 min remaining).
-  maxEntryMinutes: 11,
-  // Floor: 0 = disabled (no floor — ROI gate is the only late-entry filter).
-  // 2 = skip entry when fewer than 2 minutes remain in the window.
+  // Ceiling: 0 = disabled (no ceiling — enter at any point in the window).
+  maxEntryMinutes: 0,
+  // Floor: skip entry when fewer than 2 minutes remain in the 15-min window.
+  // 0 = disabled.
   minRemainingMinutes: 2,
-  // Allow up to 3 re-entries per window.  Each entry is independent — the bot
-  // exits, re-evaluates, and re-enters only when signals still agree.  Raise to
-  // 4-5 for more aggressive testing; set to 1 to revert to the old one-per-window
-  // behaviour.
-  maxBetsPerWindow: 3,
+  // Allow up to 6 re-entries per coin per window.
+  maxBetsPerWindow: 6,
   enabled: true,
-  quietHoursStart: 0,   // start === end → disabled
-  quietHoursEnd: 0,
-  maxConsecutiveLosses: 3,
-  circuitBreakerPauseWindows: 0, // disabled — keep betting through losses during test-drive
-  enableDirectionCap: false,
-  maxSameDirectionBets: 3,
+  // start === end → disabled; 7 = 07:00 UTC stored value (set equal to disable)
+  quietHoursStart: 7,
+  quietHoursEnd: 7,
+  // 0 = disabled (no circuit breaker on consecutive losses)
+  maxConsecutiveLosses: 0,
+  circuitBreakerPauseWindows: 2,
+  enableDirectionCap: true,
+  maxSameDirectionBets: 6,
   enableMomentumFilter: true,
   momentumWindowCount: 3,
   enableAutoTuning: true,
   autoTuneWindowSize: 100,
-  enableBorderGuard: true,
-  borderProximityPct: 0.1,  // skip when avg settlement gap < 0.1% of strike (0.3% was blocking normal windows)
-  borderLookbackBets: 3,    // examine last 3 settled bets per coin
+  // Border guard disabled by default — only enable if specific proximity issues seen
+  enableBorderGuard: false,
+  borderProximityPct: 0.1,
+  borderLookbackBets: 3,
 };
