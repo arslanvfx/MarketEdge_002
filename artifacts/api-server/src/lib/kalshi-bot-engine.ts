@@ -114,6 +114,7 @@ export function makeBotDecision(
   yesPrice: number | null,
   minutesElapsed: number,
   signalAccuracyPct: number | null,
+  kalshiTarget?: number | null,
 ): BotDecision {
   const sym = symbol.toUpperCase();
 
@@ -165,7 +166,12 @@ export function makeBotDecision(
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
   const pred = getCachedPrediction(sym);
-  const mlKalshiTarget = pred?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
+  // Use the caller-supplied kalshiTarget first (already confirmed non-null by
+  // the bot loop's Phase-3 gate). Falling back to getKalshiCachedData handles
+  // calls from tests or callers that don't pass the value explicitly, but
+  // avoids a stale-cache race where the prediction tracker overwrites the
+  // kalshiTargetCache with value:null between the Phase-3 check and this call.
+  const mlKalshiTarget = kalshiTarget ?? pred?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
   if (pred && mlKalshiTarget != null) {
     const winCtx = getKalshiWindowContext(sym);
     const elapsedFraction = Math.min(minutesElapsed / 15, 1);

@@ -3,17 +3,35 @@ name: ML-primary decision architecture
 description: New signal priority order and the root cause of the ML null bug that caused ML to be skipped every bet.
 ---
 
-## ML null root cause
+## ML null root cause (confirmed, fixed)
 
-`getCachedPrediction(sym)?.kalshiTarget` was always null because `CoinPrediction.kalshiTarget`
-is populated by the prediction tracker independently of the Kalshi route cache. Fix applied in
-`kalshi-bot-engine.ts`:
+**Symptom:** `mlAbove: null` in every bet record even for fully-trained coins (74–103 windows).
 
+**Root cause — async cache race:**
+`_runBotTick` is async with multiple `await` points before calling `makeBotDecision`.
+Between the Phase-3 gate check (`kalshiData.value !== null`) and the `makeBotDecision` call
+inside `_runBotTick`, the prediction tracker can call `fetchKalshiTarget` and write
+`kalshiTargetCache.set(sym, { value: null })` (window transition or API hiccup). `makeBotDecision`
+then re-fetches via `getKalshiCachedData(sym)?.value` → gets null → ML block skipped → `mlAbove: null`.
+
+**Fix:** Added optional `kalshiTarget?: number | null` to `makeBotDecision`. ML block uses it first:
 ```ts
-const mlKalshiTarget = pred?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
+const mlKalshiTarget = kalshiTarget ?? pred?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
 ```
+Both callers updated: `_runBotTick` (passes its own `kalshiTarget` param), Phase-3 eval (passes
+`kalshiData.value`). Cache fallback kept for tests/other callers.
 
-**Why:** The two caches are set independently; never rely on only one for the strike value.
+**Why:** Never re-fetch a cache in a sync function when the caller confirmed the value non-null.
+Async awaits between check and use create a TOCTOU race on ephemeral caches (TTL=12s).
+
+## Other ML architecture notes
+
+- `captureMLSnapshot` at line ~3248 in `crypto.ts` is OUTSIDE `if (ai)` — runs for ALL
+  KALSHI_SERIES coins (BTC ETH SOL XRP HYPE BNB), not just TRAINING_COINS.
+- `CoinPrediction.kalshiTarget` is optional (`?`); `predCache` stores raw `analyzeCoin` without
+  it — so `pred?.kalshiTarget` is always `undefined` from the bot engine.
+- All 8 CRYPTO_COINS get ML state via `getOrCreate()` called during inference; check per-coin
+  readiness via the ml-store hydration log at server startup.
 
 ## New signal priority: ML → Claude → Stat
 

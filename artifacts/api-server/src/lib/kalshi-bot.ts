@@ -980,6 +980,7 @@ async function _runBotTick(
     yesPrice,
     minutesElapsed,
     signalAcc,
+    kalshiTarget,  // pass through so ML doesn't re-fetch a potentially stale cache
   );
 
   if (decision.action === "SKIP") {
@@ -2005,7 +2006,7 @@ export async function runBotLoopTick(): Promise<void> {
     const timingAcc = timingCache.get(`${sym}:${closest * 60}`) ?? timingCache.get(`ALL:${closest * 60}`) ?? null;
 
     const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
-    const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc);
+    const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
     const stability = windowStabilityCache.get(sym) ?? null;
     const reason = decision.reasoning;
 
