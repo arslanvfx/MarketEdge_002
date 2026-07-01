@@ -2375,15 +2375,20 @@ export interface BacktestModeStats {
   coverage: number;
 }
 
+// Re-export pure approval function from isolated zero-dependency module so
+// the DB-importing getBacktestModes() can call it while tests import it directly.
+export { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
+import { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
+
 /**
  * Replays all settled bets through each mode's gating logic using the stored
  * signals snapshot (statAbove / claudeAbove / mlAbove) and returns projected
  * win-rate, P&L, and coverage for each mode.
  *
  * classic  — approves every existing bet (the cascade placed them all)
- * ml_gate  — approves unless ML was available AND disagreed with the direction
- * consensus — approves only when ≥2 of [stat, claude, ml] agree; falls back
- *             to classic when fewer than 2 signals are available
+ * ml_gate  — runs core pair (PATH B/C) without ML; then vetoes if ML disagrees
+ * consensus — requires ≥2 of [stat, claude, ml] to agree on majority direction;
+ *             falls back to classic when fewer than 2 signals are available
  */
 export async function getBacktestModes(): Promise<BacktestModeStats[]> {
   try {
@@ -2426,21 +2431,7 @@ export async function getBacktestModes(): Promise<BacktestModeStats[]> {
       const mlA     = mlAbove     !== null ? mlAbove     === aboveExpected : null;
 
       for (const mode of ALL_MODES) {
-        let approved = false;
-
-        if (mode === "classic") {
-          approved = true; // all placed bets passed the classic cascade
-        } else if (mode === "ml_gate") {
-          // ML veto: reject only when ML was available and disagreed
-          approved = mlA !== false;
-        } else if (mode === "consensus") {
-          const votes = ([statA, claudeA, mlA] as Array<boolean | null>).filter(v => v !== null) as boolean[];
-          if (votes.length < 2) {
-            approved = true; // not enough signals to form a consensus → fall back to classic
-          } else {
-            approved = votes.filter(v => v).length >= 2;
-          }
-        }
+        const approved = backtestModeApproval(mode, aboveExpected, statAbove, claudeAbove, mlAbove);
 
         if (approved) {
           const e = modeAcc.get(mode)!;

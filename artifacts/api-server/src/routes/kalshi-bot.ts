@@ -15,6 +15,7 @@ import {
   getPausedCoinState,
   clearBetHistoryOld,
   getBotLogicPerformance,
+  getBacktestModes,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 
@@ -292,7 +293,6 @@ router.get("/crypto/bot/logic-performance", async (_req, res) => {
 // GET /crypto/bot/backtest-modes — replay settled bets through each mode's logic (public)
 router.get("/crypto/bot/backtest-modes", async (_req, res) => {
   try {
-    const { getBacktestModes } = await import("../lib/kalshi-bot.js");
     const modes = await getBacktestModes();
     res.json({ modes });
   } catch (err) {
