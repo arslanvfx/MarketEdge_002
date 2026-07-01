@@ -129,6 +129,33 @@ async function exitPosition(
   logger.info({ ticker: bet.ticker, pnl: pnl.toFixed(2), reason }, "[stock-bot] exited position");
 }
 
+/**
+ * Manually close a single open position on demand (from the dashboard).
+ *
+ * Uses the same broker-confirm-then-record flow as the automatic exit so the
+ * DB is never marked flat while the broker still holds risk. Reason is recorded
+ * as "manual" so it is distinguishable from bot-driven exits in the history.
+ */
+export async function manualClosePosition(
+  ticker: string,
+): Promise<{ closed: boolean; ticker: string; qty: number; exitPrice: number; pnl: number }> {
+  if (!alpacaConfigured()) throw new Error("Alpaca is not configured");
+  const cfg = getConfig();
+  const sym = ticker.trim().toUpperCase();
+  const open = await openBets(cfg.mode);
+  const bet = open.find((b) => b.ticker.toUpperCase() === sym);
+  if (!bet) throw new Error(`No open ${cfg.mode} position for ${sym}`);
+
+  // Best-effort live price for P&L; fall back to entry if the quote is missing
+  // so the close still proceeds (the broker sells at market regardless).
+  let price = await getLatestPrice(bet.ticker);
+  if (price == null || price <= 0) price = bet.entryPrice;
+
+  await exitPosition(bet, cfg.mode, price, "manual");
+  const pnl = (price - bet.entryPrice) * bet.qty;
+  return { closed: true, ticker: bet.ticker, qty: bet.qty, exitPrice: price, pnl };
+}
+
 async function managePositions(cfg: StockBotConfig, marketOpen: boolean): Promise<number> {
   let exits = 0;
   const open = await openBets(cfg.mode);

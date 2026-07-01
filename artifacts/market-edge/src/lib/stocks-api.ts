@@ -235,6 +235,26 @@ export async function stockAuth<T>(
   return res.json() as Promise<T>;
 }
 
+export interface ClosePositionResult {
+  closed: boolean;
+  ticker: string;
+  qty: number;
+  exitPrice: number;
+  pnl: number;
+}
+
+/** Manually close an open bot position at market (records exit as "manual"). */
+export async function closeStockPosition(
+  getToken: TokenGetter,
+  ticker: string,
+): Promise<ClosePositionResult> {
+  return stockAuth<ClosePositionResult>(
+    getToken,
+    `/bot/positions/${encodeURIComponent(ticker)}/close`,
+    "POST",
+  );
+}
+
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
 export const fmtUsd = (n: number | null | undefined, decimals = 2): string => {

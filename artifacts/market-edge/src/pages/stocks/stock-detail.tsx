@@ -1,5 +1,6 @@
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useAuth } from "@clerk/react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip as RTooltip, ReferenceLine,
 } from "recharts";
@@ -9,8 +10,10 @@ import {
 import {
   TrendingUp, TrendingDown, Loader2, AlertTriangle, ExternalLink, CalendarClock, Newspaper, Brain, Cpu, LineChart as LineIcon,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
 import {
-  stockGet, fmtUsd, fmtPct, sentimentColor,
+  stockGet, closeStockPosition, fmtUsd, fmtPct, fmtSignedUsd, sentimentColor,
   type StockAnalysis, type Candle, type BotStatus, type Direction,
 } from "@/lib/stocks-api";
 
@@ -144,6 +147,11 @@ function ConfidenceBar({ label, icon: Icon, dir, confidence, reasoning, muted }:
 
 export function StockDetail({ ticker, onClose }: { ticker: string | null; onClose: () => void }) {
   const open = !!ticker;
+  const { getToken } = useAuth();
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [confirmClose, setConfirmClose] = useState(false);
+  const [closing, setClosing] = useState(false);
 
   const { data, isLoading, error } = useQuery<StockAnalysis>({
     queryKey: ["stock-analysis", ticker],
@@ -161,6 +169,33 @@ export function StockDetail({ ticker, onClose }: { ticker: string | null; onClos
   });
 
   const held = botStatus?.positions?.find((p) => p.ticker === ticker) ?? null;
+
+  async function handleClose() {
+    if (!ticker) return;
+    setClosing(true);
+    try {
+      const r = await closeStockPosition(getToken, ticker);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["stocks-bot-status"] }),
+        qc.invalidateQueries({ queryKey: ["stocks-bot-positions"] }),
+        qc.invalidateQueries({ queryKey: ["stocks-bot-history"] }),
+        qc.invalidateQueries({ queryKey: ["stocks-bot-pnl"] }),
+      ]);
+      toast({
+        title: `Closed ${r.ticker}`,
+        description: `Sold ${r.qty} @ ${fmtUsd(r.exitPrice)} · P&L ${fmtSignedUsd(r.pnl)}`,
+      });
+    } catch (e) {
+      toast({
+        title: "Could not close position",
+        description: e instanceof Error ? e.message : "Sign in and try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setClosing(false);
+      setConfirmClose(false);
+    }
+  }
 
   const rsiData = useMemo(() => {
     if (!data?.candles) return [];
@@ -257,6 +292,42 @@ export function StockDetail({ ticker, onClose }: { ticker: string | null; onClos
                     <div><div className="text-muted-foreground">Qty</div><div className="text-foreground font-semibold">{held.qty}</div></div>
                     <div><div className="text-muted-foreground">Entry</div><div className="text-foreground font-semibold">{fmtUsd(held.avgEntry)}</div></div>
                     <div><div className="text-muted-foreground">Unreal. P&L</div><div className={`font-semibold ${held.unrealizedPl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtUsd(held.unrealizedPl)} ({fmtPct(held.unrealizedPlpc)})</div></div>
+                  </div>
+                  <div className="mt-3 flex items-center justify-end">
+                    {confirmClose ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-muted-foreground">Sell all {held.qty} shares at market?</span>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          className="h-7 px-2.5 text-xs"
+                          disabled={closing}
+                          onClick={handleClose}
+                          data-testid={`confirm-close-${held.ticker}`}
+                        >
+                          {closing ? <Loader2 className="w-3 h-3 animate-spin" /> : "Confirm close"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-xs"
+                          disabled={closing}
+                          onClick={() => setConfirmClose(false)}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2.5 text-xs"
+                        onClick={() => setConfirmClose(true)}
+                        data-testid={`close-${held.ticker}`}
+                      >
+                        Close position
+                      </Button>
+                    )}
                   </div>
                 </div>
               )}

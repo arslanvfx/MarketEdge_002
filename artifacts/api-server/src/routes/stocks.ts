@@ -15,7 +15,7 @@ import { buildSignals } from "../lib/stock/ai";
 import { getSectorMomentum } from "../lib/stock/scanner";
 import { lookupUniverse, STOCK_UNIVERSE, SECTORS } from "../lib/stock/universe";
 import { mlStatus } from "../lib/stock/ml";
-import { runBotCycle, botStatus } from "../lib/stock/bot";
+import { runBotCycle, botStatus, manualClosePosition } from "../lib/stock/bot";
 import {
   listWatchlist,
   addWatchlist,
@@ -194,6 +194,23 @@ router.post("/stocks/bot/cycle", requireAuth, async (_req, res) => {
     res.json(await runBotCycle());
   } catch {
     res.status(500).json({ error: "Cycle failed" });
+  }
+});
+
+router.post("/stocks/bot/positions/:ticker/close", requireAuth, async (req, res) => {
+  const ticker = String(req.params.ticker ?? "").trim();
+  if (!ticker) {
+    res.status(400).json({ error: "Ticker is required" });
+    return;
+  }
+  try {
+    const result = await manualClosePosition(ticker);
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to close position";
+    // No open position / bad ticker is a client error; broker failures are 500.
+    const status = /No open|required/i.test(msg) ? 400 : 500;
+    res.status(status).json({ error: msg });
   }
 });
 

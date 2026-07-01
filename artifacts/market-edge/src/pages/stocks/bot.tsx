@@ -3,13 +3,13 @@ import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Play, Pause, DollarSign, Wallet, Zap, ShieldAlert, Loader2, RefreshCw,
-  TrendingUp, TrendingDown, Save, AlertTriangle, Activity, CheckCircle2,
+  TrendingUp, TrendingDown, Save, AlertTriangle, Activity, CheckCircle2, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { StocksShell } from "./stocks-shell";
 import {
-  stockGet, stockAuth, fmtUsd, fmtPct,
+  stockGet, stockAuth, closeStockPosition, fmtUsd, fmtPct, fmtSignedUsd,
   type BotStatus, type StockBotConfig, type TradingMode,
 } from "@/lib/stocks-api";
 
@@ -28,6 +28,8 @@ export default function StockBot() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [cycling, setCycling] = useState(false);
+  const [confirmClose, setConfirmClose] = useState<string | null>(null);
+  const [closing, setClosing] = useState<string | null>(null);
 
   const { data: status, isLoading } = useQuery<BotStatus>({
     queryKey: ["stocks-bot-status"],
@@ -105,6 +107,32 @@ export default function StockBot() {
       });
     } finally {
       setCycling(false);
+    }
+  }
+
+  async function closePosition(ticker: string) {
+    setClosing(ticker);
+    try {
+      const r = await closeStockPosition(getToken, ticker);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["stocks-bot-positions"] }),
+        qc.invalidateQueries({ queryKey: ["stocks-bot-status"] }),
+        qc.invalidateQueries({ queryKey: ["stocks-bot-history"] }),
+        qc.invalidateQueries({ queryKey: ["stocks-bot-pnl"] }),
+      ]);
+      toast({
+        title: `Closed ${r.ticker}`,
+        description: `Sold ${r.qty} @ ${fmtUsd(r.exitPrice)} · P&L ${fmtSignedUsd(r.pnl)}`,
+      });
+    } catch (e) {
+      toast({
+        title: "Could not close position",
+        description: e instanceof Error ? e.message : "Sign in and try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setClosing(null);
+      setConfirmClose(null);
     }
   }
 
@@ -238,6 +266,7 @@ export default function StockBot() {
                     {["Ticker", "Qty", "Entry", "Current", "Market Value", "Unreal. P&L", "%"].map((h) => (
                       <th key={h} className="text-left font-medium px-3 py-2 whitespace-nowrap">{h}</th>
                     ))}
+                    <th className="text-right font-medium px-3 py-2 whitespace-nowrap">Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -254,6 +283,43 @@ export default function StockBot() {
                           {p.unrealizedPlpc >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
                           {fmtPct(p.unrealizedPlpc)}
                         </span>
+                      </td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        {confirmClose === p.ticker ? (
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="text-[11px] text-muted-foreground">Sell all?</span>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              className="h-7 px-2 text-xs"
+                              disabled={closing === p.ticker}
+                              onClick={() => closePosition(p.ticker)}
+                              data-testid={`confirm-close-${p.ticker}`}
+                            >
+                              {closing === p.ticker ? <Loader2 className="w-3 h-3 animate-spin" /> : "Confirm"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-1.5 text-xs"
+                              disabled={closing === p.ticker}
+                              onClick={() => setConfirmClose(null)}
+                              aria-label="Cancel close"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </Button>
+                          </span>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => setConfirmClose(p.ticker)}
+                            data-testid={`close-${p.ticker}`}
+                          >
+                            Close
+                          </Button>
+                        )}
                       </td>
                     </tr>
                   ))}
