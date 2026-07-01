@@ -484,9 +484,9 @@ export async function generateMLTrainingExamples(
   const { results } = await runRawBacktest(opts);
   return results.map((r) => ({
     symbol: r.symbol,
-    // v2 prefix: distinguishes improved mid-window features from the old v1
-    // backfill that used window-open-only (elapsed=0.05, all-drift=0) features.
-    windowId: `backfill_v2:${r.symbol}:${r.windowIso}`,
+    // v3 prefix: distinguishes 17-feature (stat+claude aware) from the old v2
+    // 14-feature backfill that had no knowledge of other model signals.
+    windowId: `backfill_v3:${r.symbol}:${r.windowIso}`,
     features: r.mlFeatures,
     outcome: r.actualAbove ? 1 : 0,
     elapsedFraction: 7 / 15, // ~0.47 — matches SNAP_OFFSET_SEC / WINDOW_SEC

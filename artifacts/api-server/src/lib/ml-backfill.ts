@@ -1,6 +1,6 @@
 // ML training-data backfill — runs automatically on startup when any coin's
 // model has been reset (e.g. after an N_FEATURES bump) or when legacy
-// backfill data is detected (v1 backfill had degenerate features).
+// backfill data is detected (v1/v2 backfill had degenerate or incomplete features).
 //
 // v1 backfill (prefix "backfill:") used window-open features only:
 //   - elapsed = 0.05, priceVsStrike ≈ 0, windowDrift = 0 (always)
@@ -8,9 +8,14 @@
 //
 // v2 backfill (prefix "backfill_v2:") uses a mid-window snap (T+7min):
 //   - elapsed ≈ 0.47, real priceVsStrike, real windowDrift
-//   - Training distribution matches what the live endpoint actually sees.
+//   - 14-feature vector — no stat/claude/wm signals (features 14-16 absent).
 //
-// On startup: if any v1 rows exist → wipe ALL ML data → re-run v2 backfill.
+// v3 backfill (prefix "backfill_v3:") extends v2 to 17 features:
+//   - Features 14-15 populated from prediction_records (stat/claude directions).
+//   - Feature 16 = 0.5 (window-monitor not available in historical records).
+//   - Training distribution now matches inference (ML sees real model signals).
+//
+// On startup: if any v1/v2 rows exist → wipe ALL ML data → re-run v3 backfill.
 
 import { generateMLTrainingExamples } from "./backtest.ts";
 import {
@@ -22,25 +27,27 @@ import {
 import { MIN_TRAINING_WINDOWS } from "./ml-model.ts";
 import { logger } from "./logger.ts";
 import { CRYPTO_COINS } from "./crypto.ts";
+import { db, predictionRecordsTable } from "@workspace/db";
+import { and, inArray, isNotNull } from "drizzle-orm";
 
 /**
  * Check which coins are still warming and backfill them with historical data.
- * Also detects legacy (v1) backfill rows and forces a clean re-backfill.
+ * Also detects legacy (v1/v2) backfill rows and forces a clean re-backfill.
  *
  * @param windowCount  Number of historical 15-min windows to replay per coin.
  *                     96 ≈ 24 h — enough to well exceed the 30-window gate.
  */
 export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
-  // ── Step 1: detect and purge legacy v1 backfill data ──────────────────────
-  // v1 rows had priceVsStrike ≈ 0 and windowDrift = 0 for all examples,
-  // which caused the model to ignore the most important live features.
+  // ── Step 1: detect and purge legacy v1/v2 backfill data ───────────────────
+  // v1 rows had degenerate features; v2 rows lacked stat/claude signals (14 vs 17).
+  // Both are detected by hasLegacyBackfillRows (NOT LIKE 'backfill_v3:%').
   const hasLegacy = await hasLegacyBackfillRows();
   if (hasLegacy) {
     logger.warn(
-      "[ml-backfill] legacy v1 backfill detected — wiping all ML data and re-initializing with improved features",
+      "[ml-backfill] legacy v1/v2 backfill detected — wiping all ML data and re-initializing with v3 features",
     );
     await clearMLData(); // wipes DB + in-memory; models reset to 0/30
-    logger.info("[ml-backfill] ML state cleared — proceeding with v2 backfill");
+    logger.info("[ml-backfill] ML state cleared — proceeding with v3 backfill");
   }
 
   // ── Step 2: decide which coins need backfilling ────────────────────────────
@@ -62,7 +69,7 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
 
   logger.info(
     { coins: warmingCoins, windowCount },
-    "[ml-backfill] models warming — generating v2 historical training examples",
+    "[ml-backfill] models warming — generating v3 historical training examples",
   );
 
   try {
@@ -76,6 +83,73 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
       return;
     }
 
+    // ── Step 3: augment features 14-16 from prediction_records ───────────────
+    // The candle-replay backtest can't know what stat/claude predicted for each
+    // historical window. We look them up in prediction_records (source=stat/claude)
+    // and encode their directions as features 14-15. Feature 16 (wmRec) stays at
+    // 0.5 because the window-monitor recommendation is not stored historically.
+    //
+    // windowId format: "backfill_v3:SYM:2026-06-29T06:00:00.000Z"
+    // Split on ':' gives ["backfill_v3", "SYM", "2026-06-29T06", "00", "00.000Z"]
+    // — rejoin parts 2+ to reconstruct the ISO date.
+    try {
+      const predRows = await db
+        .select({
+          symbol: predictionRecordsTable.symbol,
+          targetTime: predictionRecordsTable.targetTime,
+          source: predictionRecordsTable.source,
+          predictedPrice: predictionRecordsTable.predictedPrice,
+          kalshiTarget: predictionRecordsTable.kalshiTarget,
+        })
+        .from(predictionRecordsTable)
+        .where(and(
+          inArray(predictionRecordsTable.source, ["stat", "claude"]),
+          isNotNull(predictionRecordsTable.kalshiTarget),
+        ));
+
+      type SignalEntry = { statAbove: boolean | null; claudeAbove: boolean | null };
+      const signalMap = new Map<string, SignalEntry>();
+      for (const row of predRows) {
+        const key = `${row.symbol}:${new Date(row.targetTime).toISOString()}`;
+        if (!signalMap.has(key)) signalMap.set(key, { statAbove: null, claudeAbove: null });
+        const entry = signalMap.get(key)!;
+        if (row.kalshiTarget != null && row.predictedPrice != null) {
+          const target = Number(row.kalshiTarget);
+          const pred = Number(row.predictedPrice);
+          const pct = target > 0 ? ((pred - target) / target) * 100 : 0;
+          const above: boolean | null = pct > 0.05 ? true : pct < -0.05 ? false : null;
+          if (row.source === "stat") entry.statAbove = above;
+          else if (row.source === "claude") entry.claudeAbove = above;
+        }
+      }
+
+      let augmented = 0;
+      for (const ex of examples) {
+        // Reconstruct targetISO from windowId: "backfill_v3:SYM:ISO"
+        const parts = ex.windowId.split(":");
+        const targetISO = parts.slice(2).join(":");
+        const key = `${ex.symbol}:${targetISO}`;
+        const sig = signalMap.get(key);
+        const statFeat   = sig?.statAbove   === true ? 1 : sig?.statAbove   === false ? 0 : 0.5;
+        const claudeFeat = sig?.claudeAbove === true ? 1 : sig?.claudeAbove === false ? 0 : 0.5;
+        ex.features.push(statFeat, claudeFeat, 0.5); // 0.5 = wmRec unknown for historical data
+        if (sig?.statAbove !== null || sig?.claudeAbove !== null) augmented++;
+      }
+      logger.info(
+        { total: examples.length, withSignals: augmented },
+        "[ml-backfill] augmented examples with historical stat/claude signals",
+      );
+    } catch (augErr) {
+      // Augmentation failure is non-fatal: features 14-16 will all be 0.5 (unknown).
+      // The model will still train on features 0-13 correctly.
+      logger.warn({ err: augErr }, "[ml-backfill] stat/claude augmentation failed — using 0.5 for features 14-16");
+      for (const ex of examples) {
+        if (ex.features.length === 14) {
+          ex.features.push(0.5, 0.5, 0.5);
+        }
+      }
+    }
+
     await backfillFromExamples(examples);
 
     // Per-coin result log.
@@ -84,7 +158,7 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
       if (warmingCoins.includes(s.symbol)) {
         logger.info(
           { symbol: s.symbol, windows: s.windows, ready: s.ready },
-          "[ml-backfill] coin backfilled (v2)",
+          "[ml-backfill] coin backfilled (v3)",
         );
       }
     }

@@ -3059,15 +3059,9 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice, orderBook);
 
-            // ── ML: capture one feature snapshot per window at snap time ────────
-            // elapsedFraction ≈ 0.03–0.07 (30-60s of 900s elapsed).
-            // Only captured when a Kalshi target is known (required feature).
-            if (kalshiTargetSnap != null) {
-              const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
-              const priceAtOpen = getKalshiWindowContext(sym)?.priceAtOpen ?? null;
-              const mlFeatures = extractMLFeatures(analysis, kalshiTargetSnap, elapsed, priceAtOpen);
-              captureMLSnapshot(sym, targetISO, mlFeatures, elapsed);
-            }
+            // ── ML snapshot is now captured AFTER stat+claude are computed ──────
+            // (see below, just after the if(ai) block) so features 14-16
+            // carry real stat/claude directions instead of the 0.5 placeholder.
 
             const basePred =
               analysis.predictions.find((p) => p.target === targetISO) ??
@@ -3227,6 +3221,31 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                 });
               }
 
+              // ── Derive stat/claude directions for ML features 14-16 ─────────────
+              // Use the same 0.05% threshold as the ensemble dirFromPrice helper.
+              // These are used in both the ML training snapshot and the ML accuracy
+              // record below so the training distribution matches inference exactly.
+              {
+                const _ref = kalshiTargetSnap ?? analysis.price;
+                const _pct = (p: number) => _ref > 0 ? ((p - _ref) / _ref) * 100 : 0;
+                const mlStatAbove: boolean | null =
+                  _pct(basePred.predictedPrice) > 0.05 ? true :
+                  _pct(basePred.predictedPrice) < -0.05 ? false : null;
+                const mlClaudeAbove: boolean | null = ai
+                  ? (_pct(ai.predictedPrice) > 0.05 ? true :
+                     _pct(ai.predictedPrice) < -0.05 ? false : null)
+                  : null;
+
+                // ── ML: capture training snapshot after stat+claude are computed ──
+                // Features 14-16 now carry real model directions (not the 0.5
+                // placeholder that would have been used if captured before this point).
+                if (kalshiTargetSnap != null) {
+                  const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
+                  const priceAtOpen = getKalshiWindowContext(sym)?.priceAtOpen ?? null;
+                  const snapFeatures = extractMLFeatures(analysis, kalshiTargetSnap, elapsed, priceAtOpen, mlStatAbove, mlClaudeAbove, null);
+                  captureMLSnapshot(sym, targetISO, snapFeatures, elapsed);
+                }
+
               // ML model record — written alongside stat/claude/ensemble so its
               // accuracy is tracked in the same evaluation pipeline. Only added
               // when the model is ready and a Kalshi target is available (ML
@@ -3238,7 +3257,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                 if (mlStatus.ready) {
                   const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
                   const priceAtOpen = getKalshiWindowContext(sym)?.priceAtOpen ?? null;
-                  const mlFeatures = extractMLFeatures(analysis, kalshiTarget, elapsed, priceAtOpen);
+                  const mlFeatures = extractMLFeatures(analysis, kalshiTarget, elapsed, priceAtOpen, mlStatAbove, mlClaudeAbove, null);
                   const mlResult = getMLPrediction(sym, mlFeatures);
                   if (mlResult.prediction?.above !== null && mlResult.prediction?.above !== undefined) {
                     const mlAbove = mlResult.prediction.above;
@@ -3261,6 +3280,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                   }
                 }
               }
+              } // end stat/claude directions block
 
               for (const rec of newRecs) {
                 records.push(rec);

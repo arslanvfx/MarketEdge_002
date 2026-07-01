@@ -13,9 +13,20 @@ description: How to safely bump N_FEATURES and avoid the "ready with random weig
 
 **How to apply:** Any time you bump N_FEATURES, restart the server — the hydration log will show `warming: X(0/30)` for all coins confirming a clean reset. If it shows `ready: X(63%)` instead, the build cached stale code.
 
+## v3 feature set (N_FEATURES = 17, current)
+Features 14-16 were added to make ML a true synthesis model:
+- Feature 14 `statAbove`: stat model direction (1=above, 0=below, 0.5=unknown)
+- Feature 15 `claudeAbove`: claude model direction (1=above, 0=below, 0.5=unknown)
+- Feature 16 `wmRec`: window monitor (1=bet, 0=stay_away, 0.5=caution/unknown)
+
+**Training distribution fix:** ML snapshot is captured AFTER stat+claude compute (in crypto.ts prediction tracker), not before. This means features 14-16 have real values at training time, matching inference (bot engine also passes live stat/claude/wmRec).
+
+**Backfill:** v3 backfill (prefix `backfill_v3:`) queries prediction_records to populate features 14-15 from historical stat/claude records. Feature 16=0.5 (wmRec not stored historically). `hasLegacyBackfillRows` now detects both v1 and v2 as legacy (NOT LIKE `backfill_v3:`).
+
 ## Checklist for a feature bump
 1. Change `N_FEATURES` in `ml-model.ts`
 2. Add/update features in `ml-features.ts` (signature + FEATURE_NAMES + computation)
 3. Update all `extractMLFeatures(...)` call sites to pass any new params
-4. Update `ml-core.test.ts` if any test uses hardcoded weight-vector length
-5. Rebuild and confirm log shows `warming: X(0/30)` not `ready:`
+4. Bump backfill prefix (`backfill_vN:`) in `backtest.ts` and update `hasLegacyBackfillRows` in `ml-store.ts`
+5. Update `ml-backfill.ts` augmentation if new features need historical data joins
+6. Rebuild and confirm log shows `warming: X(0/30)` not `ready:`

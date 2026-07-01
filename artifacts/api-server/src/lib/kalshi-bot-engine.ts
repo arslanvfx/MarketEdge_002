@@ -227,7 +227,10 @@ export function makeBotDecision(
   if (pred && mlKalshiTarget != null) {
     const winCtx = getKalshiWindowContext(sym);
     const elapsedFraction = Math.min(minutesElapsed / 15, 1);
-    const features = extractMLFeatures(pred, mlKalshiTarget, elapsedFraction, winCtx?.priceAtOpen);
+    // Pass live stat/claude/wm signals so ML sees all three model directions
+    // at inference time — matching the training distribution where these are
+    // also captured at snapshot time after stat+claude have been computed.
+    const features = extractMLFeatures(pred, mlKalshiTarget, elapsedFraction, winCtx?.priceAtOpen, statAbove, claudeAbove, wmRec);
     const mlResult = getMLPrediction(sym, features);
     if (mlResult.ready && mlResult.prediction) {
       mlAbove = mlResult.prediction.above;
