@@ -25,6 +25,7 @@ interface BotConfig {
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number;
   maxEntryMinutes: number;
+  minRemainingMinutes: number;
   maxBetsPerWindow: number;
   enabled: boolean;
   quietHoursStart: number;
@@ -753,12 +754,26 @@ export default function BotDashboard() {
 
                 {/* Max Entry Time */}
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Max Entry Time (never in last 2 min)</span>
+                  <span className="text-xs text-muted-foreground">Latest Entry into Window</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={merged.maxEntryMinutes ?? 11}
                     onChange={e => setConfigDraft(d => ({ ...d, maxEntryMinutes: parseInt(e.target.value) }))}>
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(m => (
-                      <option key={m} value={m}>{m} min into window</option>
+                    <option value={0}>Disabled (no ceiling)</option>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
+                      <option key={m} value={m}>{m} min in ({15 - m} min left)</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Min Time Remaining */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Min Time Remaining</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.minRemainingMinutes ?? 2}
+                    onChange={e => setConfigDraft(d => ({ ...d, minRemainingMinutes: parseInt(e.target.value) }))}>
+                    <option value={0}>Disabled (no floor)</option>
+                    {[1, 2, 3, 4, 5, 6, 7].map(m => (
+                      <option key={m} value={m}>Don&apos;t enter with &lt;{m} min left</option>
                     ))}
                   </select>
                 </label>

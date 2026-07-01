@@ -212,11 +212,9 @@ const windowStabilityCache = new Map<string, TrendStability>();
 // as the new window's strike is confirmed + this stability buffer.
 const MIN_CONFIRM_BUFFER_MS = 8_000;
 
-// Hard late-entry floor: never open a new position if fewer than this many minutes
-// remain in the 15-min window.  Kept at 2 min as a minimal safety margin — the
-// ROI gate in makeBotDecision is the real late-entry filter (market prices in the
-// direction heavily at the end, making net returns fall below the 1.50% minimum).
-const MIN_REMAINING_MINUTES_FOR_ENTRY = 2;
+// Note: entry ceiling (maxEntryMinutes) and floor (minRemainingMinutes) are now
+// both driven by BotConfig so they can be toggled from the dashboard.
+// 0 = disabled for each: ceiling skipped when 0, floor skipped when 0.
 
 // Timing analysis cache (refreshed every 5 min)
 let timingCache: Map<string, number | null> = new Map();
@@ -928,14 +926,14 @@ async function _runBotTick(
     return;
   }
 
-  // Hard ceiling: precise seconds check so the limit is exact.
-  // e.g. maxEntryMinutes=11 → no entry after t+11:00, not t+11:59.
-  if (secondsElapsed > config.maxEntryMinutes * 60) return;
-  // Hard late-entry floor: never enter if fewer than MIN_REMAINING_MINUTES_FOR_ENTRY
-  // minutes remain, regardless of the maxEntryMinutes setting. Enforced here at
-  // execution time (Phase 3 evaluation also skips, but this is the authoritative guard).
-  if (15 * 60 - secondsElapsed < MIN_REMAINING_MINUTES_FOR_ENTRY * 60) {
-    logger.debug({ sym, secondsElapsed }, "[kalshi-bot] hard late-entry floor — skipping");
+  // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
+  // 0 = disabled (no ceiling — enter at any point).
+  if (config.maxEntryMinutes > 0 && secondsElapsed > config.maxEntryMinutes * 60) return;
+  // Floor: skip if fewer than minRemainingMinutes remain in the window.
+  // 0 = disabled (no floor — ROI gate handles unprofitable late entries).
+  const minRemaining = config.minRemainingMinutes ?? 0;
+  if (minRemaining > 0 && 15 * 60 - secondsElapsed < minRemaining * 60) {
+    logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping");
     return;
   }
   if (!kalshiTicker || kalshiTarget === null) return;
@@ -1987,14 +1985,13 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: msSinceEvalConfirm === null ? "awaiting target" : `target buffer (${remaining}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    if (secondsElapsed > config.maxEntryMinutes * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "past entry ceiling", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+    if (config.maxEntryMinutes > 0 && secondsElapsed > config.maxEntryMinutes * 60) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `past entry ceiling (>${config.maxEntryMinutes}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    // Hard late-entry floor: always skip if fewer than MIN_REMAINING_MINUTES_FOR_ENTRY
-    // minutes remain, regardless of the maxEntryMinutes setting.
-    if (15 * 60 - secondsElapsed < MIN_REMAINING_MINUTES_FOR_ENTRY * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `late-entry floor (<${MIN_REMAINING_MINUTES_FOR_ENTRY}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+    const minRem = config.minRemainingMinutes ?? 0;
+    if (minRem > 0 && 15 * 60 - secondsElapsed < minRem * 60) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
 

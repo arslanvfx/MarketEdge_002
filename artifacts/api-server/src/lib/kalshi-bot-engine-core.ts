@@ -386,7 +386,8 @@ export interface BotConfig {
   decisionMode: DecisionMode; // which signal-combination logic to use (default "classic")
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
-  maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 11; hard floor = 4 min remaining)
+  maxEntryMinutes: number;   // ceiling: don't enter after this many minutes into the window; 0 = disabled (no ceiling)
+  minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
@@ -420,11 +421,12 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   decisionMode: "classic",
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
-  // Entry is allowed any time after the target-confirm warmup up until 4 minutes
-  // remain in the window (the hard floor enforced in kalshi-bot.ts).  The ceiling
-  // here (11 min elapsed = 4 min remaining) matches that floor so the only gate is
-  // "must have ≥4 min left" — late-window clarity is not artificially blocked.
+  // Ceiling: 0 = disabled (no ceiling — enter at any point subject to floor).
+  // 11 = enter only in the first 11 min of the 15-min window (4 min remaining).
   maxEntryMinutes: 11,
+  // Floor: 0 = disabled (no floor — ROI gate is the only late-entry filter).
+  // 2 = skip entry when fewer than 2 minutes remain in the window.
+  minRemainingMinutes: 2,
   // Allow up to 3 re-entries per window.  Each entry is independent — the bot
   // exits, re-evaluates, and re-enters only when signals still agree.  Raise to
   // 4-5 for more aggressive testing; set to 1 to revert to the old one-per-window
