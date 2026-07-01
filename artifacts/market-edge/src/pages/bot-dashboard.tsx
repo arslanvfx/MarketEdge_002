@@ -90,6 +90,7 @@ interface HistoryRecord {
   kalshiTarget: string | null;
   cryptoPriceAtEntry: string | null; cryptoPriceAtExit: string | null;
   createdAt: string; exitedAt: string | null;
+  decisionMode: string | null;
 }
 
 interface WindowEval {
@@ -1228,6 +1229,22 @@ export default function BotDashboard() {
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
                         {r.mode?.toUpperCase()}
                       </span>
+
+                      {/* Decision mode badge */}
+                      {(() => {
+                        const dm = r.decisionMode ?? "classic";
+                        const meta: Record<string, { label: string; cls: string }> = {
+                          classic:   { label: "Classic",   cls: "bg-sky-500/10 text-sky-400/80" },
+                          ml_gate:   { label: "ML Gate",   cls: "bg-violet-500/10 text-violet-400/80" },
+                          consensus: { label: "Consensus", cls: "bg-amber-500/10 text-amber-400/80" },
+                        };
+                        const { label, cls } = meta[dm] ?? { label: dm, cls: "bg-muted/30 text-muted-foreground" };
+                        return (
+                          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${cls}`}>
+                            {label}
+                          </span>
+                        );
+                      })()}
 
                       <span className="ml-auto text-xs text-muted-foreground">{fmtDateTime(r.createdAt)}</span>
                     </div>
