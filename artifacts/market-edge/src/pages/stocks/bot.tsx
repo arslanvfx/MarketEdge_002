@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { StocksShell } from "./stocks-shell";
 import {
-  stockGet, stockAuth, closeStockPosition, fmtUsd, fmtPct, fmtSignedUsd,
+  stockGet, stockAuth, closeStockPosition, fmtUsd, fmtPct, fmtSignedUsd, SECTORS,
   type BotStatus, type StockBotConfig, type TradingMode,
 } from "@/lib/stocks-api";
 
@@ -361,6 +361,52 @@ export default function StockBot() {
           </div>
         </section>
 
+        {/* Sector Focus */}
+        <section>
+          <div className="mb-3">
+            <h2 className="text-sm font-bold text-foreground">Sector Focus</h2>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Bot only considers stocks in selected sectors.{" "}
+              {(merged.sectorFocus ?? []).length === 0
+                ? "All sectors active."
+                : `${(merged.sectorFocus ?? []).length} of ${SECTORS.length} sectors active.`}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {SECTORS.map((s) => {
+              const focus = merged.sectorFocus ?? [];
+              const allActive = focus.length === 0;
+              const active = allActive || focus.includes(s);
+              function toggle() {
+                const cur = allActive ? [...SECTORS] : [...focus];
+                const next = cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s];
+                patchSafe({ sectorFocus: next.length === SECTORS.length ? [] : next });
+              }
+              return (
+                <button
+                  key={s}
+                  onClick={toggle}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                    active
+                      ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                      : "border-border text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {s}
+                </button>
+              );
+            })}
+            {(merged.sectorFocus ?? []).length > 0 && (
+              <button
+                onClick={() => patchSafe({ sectorFocus: [] })}
+                className="px-2.5 py-1 text-xs font-medium rounded-full border border-dashed border-border text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Reset all
+              </button>
+            )}
+          </div>
+        </section>
+
         {/* Settings */}
         <section>
           <div className="flex items-center justify-between mb-3">
@@ -375,6 +421,22 @@ export default function StockBot() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 rounded-lg border border-border bg-card p-5">
             <NumField label="Position size (% of equity)" value={merged.positionSizePct} min={0.5} max={25} step={0.5} onChange={(v) => setField("positionSizePct", v)} />
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Max $ per position <span className="text-muted-foreground/60">(blank = no cap)</span></span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-sm text-muted-foreground">$</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={100}
+                  placeholder="No cap"
+                  value={merged.maxPositionDollars ?? ""}
+                  onChange={(e) => setField("maxPositionDollars", e.target.value === "" ? null : Number(e.target.value))}
+                  onBlur={(e) => patchSafe({ maxPositionDollars: e.target.value === "" ? null : Number(e.target.value) })}
+                  className="flex-1 px-3 py-2 text-sm rounded-lg bg-background border border-border focus:border-emerald-500/50 outline-none"
+                />
+              </div>
+            </label>
             <NumField label="Max concurrent positions" value={merged.maxConcurrentPositions} min={1} max={20} step={1} onChange={(v) => setField("maxConcurrentPositions", v)} />
             <NumField label="Daily loss limit ($)" value={merged.dailyLossLimit} min={0} max={100000} step={50} onChange={(v) => setField("dailyLossLimit", v)} />
             <NumField label="Min confidence to enter (%)" value={merged.minConfidence} min={50} max={95} step={1} onChange={(v) => setField("minConfidence", v)} />

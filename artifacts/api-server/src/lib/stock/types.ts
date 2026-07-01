@@ -127,4 +127,6 @@ export interface StockBotConfig {
   earningsBlackoutHours: number;
   newsSensitivity: number;       // 1-5 magnitude threshold that moves confidence
   autoStartStop: boolean;        // auto-enable at market open, disable at close
+  sectorFocus: string[];         // [] = all sectors; else restrict to these sectors
+  maxPositionDollars: number | null; // null = no cap; otherwise min(%, $) sizing
 }

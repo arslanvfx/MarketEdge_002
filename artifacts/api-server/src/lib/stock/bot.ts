@@ -210,7 +210,28 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
 
   if (open.length >= cfg.maxConcurrentPositions) return 0;
 
-  const candidates = await candidateTickers(cfg);
+  const allCandidates = await candidateTickers(cfg);
+
+  // Sector focus filter: if sectorFocus is non-empty, only consider tickers in
+  // those sectors. Watchlist tickers are always eligible regardless of sector.
+  const watchSet = new Set(await watchlistTickers());
+  const activeSectors = (cfg.sectorFocus ?? []);
+  const candidates =
+    activeSectors.length === 0
+      ? allCandidates
+      : allCandidates.filter((t) => {
+          if (watchSet.has(t)) return true; // watchlist bypass
+          const uni = lookupUniverse(t);
+          return activeSectors.includes(uni?.sector ?? "");
+        });
+
+  if (activeSectors.length > 0) {
+    logger.info(
+      { sectorFocus: activeSectors, candidatesBefore: allCandidates.length, candidatesAfter: candidates.length },
+      "[stock-bot] sector filter applied",
+    );
+  }
+
   // Choose the primary trading mode for a new entry: prefer day, then swing, then long.
   const activeModes = cfg.tradingModes.filter((m) =>
     countByMode(m) < (m === "day" ? cfg.maxDayPositions : m === "swing" ? cfg.maxSwingPositions : cfg.maxLongPositions),
@@ -277,9 +298,19 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       const price = signals.price;
       if (price <= 0) continue;
 
-      const notional = Math.max(1, (account.equity * cfg.positionSizePct) / 100);
+      const pctNotional = Math.max(1, (account.equity * cfg.positionSizePct) / 100);
+      const dollarCap = cfg.maxPositionDollars ?? null;
+      const notional = dollarCap != null ? Math.min(pctNotional, dollarCap) : pctNotional;
+      const cappedByDollar = dollarCap != null && notional < pctNotional;
       const qty = Math.floor(notional / price);
       if (qty < 1) continue;
+
+      if (cappedByDollar) {
+        logger.info(
+          { ticker, pctNotional: pctNotional.toFixed(2), cap: dollarCap, notional: notional.toFixed(2) },
+          "[stock-bot] dollar cap applied to position size",
+        );
+      }
 
       const stopLoss = price * (1 - cfg.stopLossPct / 100);
       const targetPrice = price * (1 + cfg.targetGainPct / 100);

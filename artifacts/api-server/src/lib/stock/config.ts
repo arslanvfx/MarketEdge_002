@@ -29,6 +29,8 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   earningsBlackoutHours: 24,
   newsSensitivity: 3,
   autoStartStop: true,
+  sectorFocus: [],
+  maxPositionDollars: null,
 };
 
 let current: StockBotConfig = { ...DEFAULT_CONFIG };

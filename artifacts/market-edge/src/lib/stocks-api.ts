@@ -144,6 +144,8 @@ export interface StockBotConfig {
   earningsBlackoutHours: number;
   newsSensitivity: number;
   autoStartStop: boolean;
+  sectorFocus: string[];
+  maxPositionDollars: number | null;
 }
 
 export interface AlpacaAccount {

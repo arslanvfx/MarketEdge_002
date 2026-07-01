@@ -10,7 +10,7 @@ import { StocksShell } from "./stocks-shell";
 import { StockDetail } from "./stock-detail";
 import {
   stockGet, stockAuth, fmtUsd, fmtPct, sentimentColor, SECTORS,
-  type ScannerRow, type WatchlistEntry, type ResearchResult,
+  type ScannerRow, type WatchlistEntry, type ResearchResult, type StockBotConfig,
 } from "@/lib/stocks-api";
 
 type SortKey = "score" | "changePct" | "confidence" | "price";
@@ -48,8 +48,15 @@ export default function StockScanner() {
     refetchInterval: 15_000,
   });
 
+  const { data: botCfgData } = useQuery<{ config: StockBotConfig }>({
+    queryKey: ["stocks-bot-config"],
+    queryFn: () => stockGet("/bot/config"),
+    refetchInterval: 30_000,
+  });
+
   const researchMap = researchData?.results ?? {};
   const researchRunning = researchData?.running ?? false;
+  const botSectorFocus = botCfgData?.config?.sectorFocus ?? [];
 
   const watchSet = useMemo(
     () => new Set((watchData?.watchlist ?? []).map((w) => w.ticker)),
@@ -198,7 +205,7 @@ export default function StockScanner() {
                 </div>
                 <div className="space-y-1.5">
                   {pinned.map((r) => (
-                    <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
+                    <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched botExcluded={false} onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
                   ))}
                 </div>
               </div>
@@ -206,9 +213,12 @@ export default function StockScanner() {
             <div>
               {pinned.length > 0 && <div className="text-xs font-semibold text-muted-foreground mb-2">All opportunities</div>}
               <div className="space-y-1.5">
-                {unpinned.map((r) => (
-                  <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched={false} onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
-                ))}
+                {unpinned.map((r) => {
+                  const excluded = botSectorFocus.length > 0 && !botSectorFocus.includes(r.sector);
+                  return (
+                    <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched={false} botExcluded={excluded} onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -237,15 +247,17 @@ function ResearchBadge({ r }: { r: ResearchResult }) {
   );
 }
 
-function ScannerCard({ row, research, watched, onOpen, onToggleWatch }: {
-  row: ScannerRow; research?: ResearchResult; watched: boolean; onOpen: () => void; onToggleWatch: () => void;
+function ScannerCard({ row, research, watched, botExcluded, onOpen, onToggleWatch }: {
+  row: ScannerRow; research?: ResearchResult; watched: boolean; botExcluded: boolean; onOpen: () => void; onToggleWatch: () => void;
 }) {
   const up = row.direction === "up";
   return (
     <div
       onClick={onOpen}
       data-testid={`scanner-row-${row.ticker}`}
-      className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-2.5 hover:border-emerald-500/40 transition-colors cursor-pointer"
+      className={`flex items-center gap-3 rounded-lg border bg-card px-4 py-2.5 hover:border-emerald-500/40 transition-colors cursor-pointer ${
+        botExcluded ? "border-border/40 opacity-50" : "border-border"
+      }`}
     >
       <button
         onClick={(e) => { e.stopPropagation(); onToggleWatch(); }}
@@ -275,6 +287,11 @@ function ScannerCard({ row, research, watched, onOpen, onToggleWatch }: {
         )}
         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${sentimentColor(row.newsSentiment)}`}>{row.newsSentiment}</span>
         {research && <ResearchBadge r={research} />}
+        {botExcluded && (
+          <span className="inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border border-border/60 text-muted-foreground/60" title={`Sector "${row.sector}" is outside the bot's active sector focus`}>
+            Bot excluded
+          </span>
+        )}
         {(row.details?.maAlignment as boolean) && (
           <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-400" title="21-day MA above 50-day and 180-day MA — bullish trend structure">
             <BarChart2 className="w-3 h-3" /> 21MA↑
