@@ -368,3 +368,80 @@ export function checkMomentumOverride(
   if (allDown && proposedDirection === "yes") return true;
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Bot configuration types and defaults
+//
+// Defined here (zero-dependency file) so they can be imported by unit tests
+// without pulling in the ./crypto or DB modules.
+// ---------------------------------------------------------------------------
+
+export type DecisionMode = "classic" | "ml_gate" | "consensus";
+
+export interface BotConfig {
+  betSize: number;           // $ per bet (default 0.50)
+  dailyLossLimit: number;    // $ max daily loss (default 20)
+  signalThreshold: number;   // kept for config compat — not used for entry gating (see core-pair gate)
+  minConfidence: number;     // 0-100; skip bet when engine confidence is below this (default 60)
+  decisionMode: DecisionMode; // which signal-combination logic to use (default "classic")
+  midExitSensitivity: "conservative" | "balanced" | "aggressive";
+  phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
+  maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 5)
+  maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
+  enabled: boolean;          // master kill-switch
+  quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
+  quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
+  maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
+  circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
+  // Directional balance filter: caps correlated exposure by limiting same-direction
+  // bets in one window. Set enableDirectionCap=false or maxSameDirectionBets=0 to disable.
+  enableDirectionCap: boolean;   // (default true)
+  maxSameDirectionBets: number;  // max YES or NO bets per 15-min window (default 3)
+  // Momentum filter: prevents betting against a clear multi-window price trend.
+  // Set enableMomentumFilter=false to disable.
+  enableMomentumFilter: boolean; // (default true)
+  momentumWindowCount: number;   // consecutive windows required to trigger (default 3)
+  // Self-learning auto-tune: when enabled the bot periodically analyses its own
+  // recent performance and applies safe parameter adjustments automatically.
+  enableAutoTuning: boolean;     // (default true)
+  autoTuneWindowSize: number;    // number of most-recent settled bets to analyse (default 100)
+  // Border-proximity guard: skip bets when price has been hovering too close to the
+  // Kalshi strike in recent settled windows (high-noise, near-50/50 outcome territory).
+  enableBorderGuard: boolean;    // (default true)
+  borderProximityPct: number;    // skip if avg |closePrice−strike|/strike < this % (default 0.3)
+  borderLookbackBets: number;    // how many most-recent settled bets to examine per coin (default 3)
+}
+
+export const DEFAULT_BOT_CONFIG: BotConfig = {
+  betSize: 1.00, // TEMP: raised from $0.50 for test-drive; revert before live trading
+  dailyLossLimit: 20,
+  signalThreshold: 2,    // legacy field — core-pair gate now governs entry
+  minConfidence: 52,
+  decisionMode: "classic",
+  midExitSensitivity: "balanced",
+  phase2ThresholdPp: 30,
+  // Entry is only allowed between t+45s and t+5:00 of each 15-min window.
+  // 45s warmup = Kalshi market stabilises + Claude opening call completes.
+  // 5-min ceiling = signals get noisier as the window ages.
+  // Hard floor: entry is never allowed if fewer than 4 minutes remain (see kalshi-bot.ts).
+  maxEntryMinutes: 5,
+  // Allow up to 3 re-entries per window.  Each entry is independent — the bot
+  // exits, re-evaluates, and re-enters only when signals still agree.  Raise to
+  // 4-5 for more aggressive testing; set to 1 to revert to the old one-per-window
+  // behaviour.
+  maxBetsPerWindow: 3,
+  enabled: true,
+  quietHoursStart: 0,   // start === end → disabled
+  quietHoursEnd: 0,
+  maxConsecutiveLosses: 3,
+  circuitBreakerPauseWindows: 0, // disabled — keep betting through losses during test-drive
+  enableDirectionCap: false,
+  maxSameDirectionBets: 3,
+  enableMomentumFilter: true,
+  momentumWindowCount: 3,
+  enableAutoTuning: true,
+  autoTuneWindowSize: 100,
+  enableBorderGuard: true,
+  borderProximityPct: 0.3,  // skip when avg settlement gap < 0.3% of strike
+  borderLookbackBets: 3,    // examine last 3 settled bets per coin
+};
