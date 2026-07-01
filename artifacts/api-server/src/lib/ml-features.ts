@@ -123,6 +123,107 @@ export function extractMLFeatures(
 }
 
 /**
+ * Derive binary above/below directions from model predicted prices vs. a reference.
+ *
+ * This is the pure sequencing step that MUST run after stat and claude have both
+ * produced a predictedPrice, and BEFORE captureMLSnapshot is called.  If the
+ * snapshot were captured before this step, statAbove and claudeAbove would both
+ * be null and features 14-15 would encode 0.5 (neutral) — silently degrading
+ * training data quality.
+ *
+ * A 0.05% dead-band is used to avoid encoding trivially small deviations as a
+ * directional signal.  This matches the threshold used by the ensemble's
+ * dirFromPrice helper so training and inference are consistent.
+ *
+ * @param statPredictedPrice   Price output by the stat model (analyzeCoin basePred).
+ * @param claudePredictedPrice Price output by Claude, or null if Claude was not run.
+ * @param reference            Kalshi strike when known; otherwise the live price.
+ */
+export function deriveMLSignalDirections(
+  statPredictedPrice: number,
+  claudePredictedPrice: number | null,
+  reference: number,
+): { mlStatAbove: boolean | null; mlClaudeAbove: boolean | null } {
+  const pct = (p: number): number =>
+    reference > 0 ? ((p - reference) / reference) * 100 : 0;
+
+  const mlStatAbove: boolean | null =
+    pct(statPredictedPrice) > 0.05
+      ? true
+      : pct(statPredictedPrice) < -0.05
+      ? false
+      : null;
+
+  const mlClaudeAbove: boolean | null =
+    claudePredictedPrice !== null
+      ? pct(claudePredictedPrice) > 0.05
+        ? true
+        : pct(claudePredictedPrice) < -0.05
+        ? false
+        : null
+      : null;
+
+  return { mlStatAbove, mlClaudeAbove };
+}
+
+/**
+ * Build the complete ML snapshot inputs in the correct order.
+ *
+ * This function is the single point of truth for the tracker's sequencing
+ * invariant:
+ *
+ *   1. Stat model runs  →  statPredictedPrice is known
+ *   2. Claude runs      →  claudePredictedPrice is known (or null if skipped)
+ *   3. THIS FUNCTION derives directions from those prices (features 14-15)
+ *   4. THIS FUNCTION feeds them into extractMLFeatures
+ *   5. Caller passes the returned `features` to captureMLSnapshot
+ *
+ * The return value is only usable for snapshot capture AFTER this function
+ * has run, which is only possible AFTER stat+claude have both completed.
+ * If the snapshot were captured before calling this function the caller would
+ * have no `features` to pass — the ordering bug becomes a type error.
+ *
+ * @param coin               Full CoinPrediction from the live snapshot
+ * @param kalshiTarget       Kalshi strike for this window
+ * @param elapsedFraction    Time into window / 900 s (clamped 0–1)
+ * @param priceAtOpen        Price at window open (from getKalshiWindowContext)
+ * @param statPredictedPrice predictedPrice from analyzeCoin basePred — stat MUST have run
+ * @param claudePredictedPrice predictedPrice from Claude, or null if Claude was not run
+ * @param wmRec              Window-monitor recommendation string (or null)
+ */
+export function buildMLSnapshotInputs(
+  coin: Parameters<typeof extractMLFeatures>[0],
+  kalshiTarget: number,
+  elapsedFraction: number,
+  priceAtOpen: number | null | undefined,
+  statPredictedPrice: number,
+  claudePredictedPrice: number | null,
+  wmRec: string | null,
+): {
+  features: number[];
+  mlStatAbove: boolean | null;
+  mlClaudeAbove: boolean | null;
+} {
+  // Step 3 — derive directions from post-model prices:
+  const { mlStatAbove, mlClaudeAbove } = deriveMLSignalDirections(
+    statPredictedPrice,
+    claudePredictedPrice,
+    kalshiTarget,
+  );
+  // Step 4 — build the feature vector with real signal values in slots 14-15:
+  const features = extractMLFeatures(
+    coin,
+    kalshiTarget,
+    elapsedFraction,
+    priceAtOpen,
+    mlStatAbove,
+    mlClaudeAbove,
+    wmRec,
+  );
+  return { features, mlStatAbove, mlClaudeAbove };
+}
+
+/**
  * Pure encoding helper shared by extractMLFeatures and the backfill augmentor.
  * Returns [statFeat, claudeFeat, wmFeat] — each in {0, 0.5, 1}.
  *

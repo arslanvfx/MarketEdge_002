@@ -1,7 +1,7 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
-import { extractMLFeatures } from "./ml-features";
+import { extractMLFeatures, deriveMLSignalDirections, buildMLSnapshotInputs } from "./ml-features";
 import {
   captureMLSnapshot,
   labelWindowAndRetrain,
@@ -3221,30 +3221,41 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
                 });
               }
 
-              // ── Derive stat/claude directions for ML features 14-16 ─────────────
-              // Use the same 0.05% threshold as the ensemble dirFromPrice helper.
-              // These are used in both the ML training snapshot and the ML accuracy
-              // record below so the training distribution matches inference exactly.
+              // ── ML training snapshot — stat+claude MUST be computed before here ─
+              // buildMLSnapshotInputs() is the single entry point that:
+              //   (a) derives mlStatAbove/mlClaudeAbove from the model prices,
+              //   (b) feeds them into extractMLFeatures in the correct position.
+              // Calling it requires statPredictedPrice (basePred) and
+              // claudePredictedPrice (ai) to already exist — the type signature
+              // enforces that those values are present, making a refactor that
+              // moves the capture earlier into a compile-time error.
               {
-                const _ref = kalshiTargetSnap ?? analysis.price;
-                const _pct = (p: number) => _ref > 0 ? ((p - _ref) / _ref) * 100 : 0;
-                const mlStatAbove: boolean | null =
-                  _pct(basePred.predictedPrice) > 0.05 ? true :
-                  _pct(basePred.predictedPrice) < -0.05 ? false : null;
-                const mlClaudeAbove: boolean | null = ai
-                  ? (_pct(ai.predictedPrice) > 0.05 ? true :
-                     _pct(ai.predictedPrice) < -0.05 ? false : null)
-                  : null;
-
                 // ── ML: capture training snapshot after stat+claude are computed ──
-                // Features 14-16 now carry real model directions (not the 0.5
-                // placeholder that would have been used if captured before this point).
+                // Features 14-15 carry real model directions because we only reach
+                // this call site after basePred (stat) and ai (claude) are both set.
                 if (kalshiTargetSnap != null) {
                   const elapsed = Math.min(timeIntoWindow / (15 * 60_000), 1);
                   const priceAtOpen = getKalshiWindowContext(sym)?.priceAtOpen ?? null;
-                  const snapFeatures = extractMLFeatures(analysis, kalshiTargetSnap, elapsed, priceAtOpen, mlStatAbove, mlClaudeAbove, null);
+                  const { features: snapFeatures } = buildMLSnapshotInputs(
+                    analysis,
+                    kalshiTargetSnap,
+                    elapsed,
+                    priceAtOpen,
+                    basePred.predictedPrice,
+                    ai?.predictedPrice ?? null,
+                    null,
+                  );
                   captureMLSnapshot(sym, targetISO, snapFeatures, elapsed);
                 }
+                // Re-derive for the ML inference record below (same formula, same
+                // reference) so both the training snapshot and the ML accuracy record
+                // are consistent.  Use deriveMLSignalDirections directly here because
+                // we need the raw booleans, not the full feature vector.
+                const { mlStatAbove, mlClaudeAbove } = deriveMLSignalDirections(
+                  basePred.predictedPrice,
+                  ai?.predictedPrice ?? null,
+                  kalshiTargetSnap ?? analysis.price,
+                );
 
               // ML model record — written alongside stat/claude/ensemble so its
               // accuracy is tracked in the same evaluation pipeline. Only added
