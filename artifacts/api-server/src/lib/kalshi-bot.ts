@@ -193,7 +193,8 @@ let borderProximityCacheWindow = "";
 let regimeCache: Map<string, "above" | "below" | "neutral"> = new Map();
 let regimeCacheWindow = "";
 // Confidence penalty applied when betting against the recent settlement regime.
-const REGIME_AGAINST_PENALTY = 10;
+// Set to 15pp so a base-65% signal drops to 50%, below the default 52% threshold → SKIP.
+const REGIME_AGAINST_PENALTY = 15;
 const REGIME_STRIKES_MAX = 6; // keep last 6 strike prices per symbol
 
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
@@ -460,6 +461,32 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       // DB returned newest-first; reverse for chronological order then cap size.
       recentKalshiTargets.set(sym, targets.reverse().slice(-REGIME_STRIKES_MAX));
     }
+
+    // Per-coin consecutive loss recovery: if a coin has ≥5 consecutive losses in recent
+    // bets, auto-pause it for 4 windows on startup (mirrors the per_coin_pause auto-tune
+    // rule but survives restarts). recentRows is already newest-first.
+    const perCoinStreak: Map<string, number> = new Map();
+    const perCoinStreakDone: Set<string> = new Set();
+    for (const r of recentRows) {
+      const sym = (r.symbol ?? "").toUpperCase();
+      if (!sym || perCoinStreakDone.has(sym)) continue;
+      const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
+      if (p < 0) {
+        perCoinStreak.set(sym, (perCoinStreak.get(sym) ?? 0) + 1);
+      } else {
+        perCoinStreakDone.add(sym); // first win resets streak for this coin
+      }
+    }
+    for (const [sym, consecutive] of perCoinStreak.entries()) {
+      if (consecutive >= 5 && !pausedCoins.has(sym)) {
+        pausedCoins.set(sym, 4);
+        logger.warn(
+          { sym, consecutive },
+          "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive losses",
+        );
+      }
+    }
+
     // Restore circuit-breaker state from the recovered streak.
     // Guard against the disabled mode (maxConsecutiveLosses=0 or pauseWindows=0):
     // when the feature is off, circuitBreakerWindowsRemaining must be 0 regardless
@@ -2111,6 +2138,26 @@ export async function runBotLoopTick(): Promise<void> {
         }
         effectiveConfidence = penalised;
       }
+    }
+
+    // Directional confidence floor: empirical data shows YES bets win at 47% vs 68% for NO.
+    // Require a 6pp higher confidence bar for YES entries to compensate for this asymmetry.
+    const YES_CONFIDENCE_EXTRA = 6;
+    if (decision.action === "BET_YES" && effectiveConfidence < config.minConfidence + YES_CONFIDENCE_EXTRA) {
+      filteredByNewGuards.add(sym);
+      evalResults.push({
+        symbol: sym,
+        action: "SKIP",
+        confidence: effectiveConfidence,
+        score: 0,
+        reason: `YES confidence floor — ${effectiveConfidence}% < ${config.minConfidence + YES_CONFIDENCE_EXTRA}% (YES requires +${YES_CONFIDENCE_EXTRA}pp)`,
+        windowKey,
+        selected: false,
+        evaluatedAt: now,
+        trendStability: stability,
+        regime: regimeCache.get(sym) as "above" | "below" | "neutral" | null ?? null,
+      });
+      continue;
     }
 
     // Border-proximity guard: skip when the coin's close prices have been landing
