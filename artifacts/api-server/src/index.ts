@@ -6,6 +6,11 @@ import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
 import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, getBotState, runAutoTuneJob } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
+import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
+import { initStockMLFromDB } from "./lib/stock/ml";
+import { runScan as runStockScan } from "./lib/stock/scanner";
+import { runBotCycle as runStockBotCycle } from "./lib/stock/bot";
+import { alpacaConfigured } from "./lib/stock/alpaca";
 
 const rawPort = process.env["PORT"];
 
@@ -166,6 +171,157 @@ async function runStartupMigrations(): Promise<void> {
   }
 }
 
+// Stock trading vertical tables. Entirely separate from the crypto/Kalshi
+// tables above — different prefixes (stock_*), different ML feature length, so
+// the two systems can never contaminate each other. Idempotent.
+async function runStockMigrations(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_watchlist (
+        ticker       TEXT PRIMARY KEY,
+        company_name TEXT,
+        sector       TEXT,
+        added_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_bot_config (
+        id         TEXT PRIMARY KEY,
+        config     JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_bot_bets (
+        id              TEXT PRIMARY KEY,
+        ticker          TEXT NOT NULL,
+        sector          TEXT,
+        action          TEXT NOT NULL,
+        trading_mode    TEXT NOT NULL,
+        mode            TEXT NOT NULL,
+        side            TEXT NOT NULL DEFAULT 'long',
+        qty             NUMERIC(14,4),
+        signals         JSONB,
+        confidence      NUMERIC(6,2),
+        entry_price     NUMERIC(14,4),
+        exit_price      NUMERIC(14,4),
+        stop_loss       NUMERIC(14,4),
+        target_price    NUMERIC(14,4),
+        notional        NUMERIC(16,4),
+        pnl             NUMERIC(16,4),
+        exit_reason     TEXT,
+        outcome         TEXT,
+        alpaca_order_id TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        exited_at       TIMESTAMPTZ,
+        evaluated_at    TIMESTAMPTZ,
+        archived_at     TIMESTAMPTZ
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS stock_bot_bets_open
+        ON stock_bot_bets (mode, exited_at)
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_scanner_results (
+        ticker         TEXT PRIMARY KEY,
+        company_name   TEXT,
+        sector         TEXT NOT NULL,
+        price          NUMERIC(14,4),
+        change_pct     NUMERIC(8,4),
+        score          NUMERIC(8,4) NOT NULL,
+        direction      TEXT,
+        confidence     NUMERIC(6,2),
+        news_sentiment TEXT,
+        earnings_soon  BOOLEAN DEFAULT FALSE,
+        details        JSONB,
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_news_cache (
+        id              TEXT PRIMARY KEY,
+        ticker          TEXT NOT NULL,
+        headline        TEXT NOT NULL,
+        summary         TEXT,
+        url             TEXT,
+        source          TEXT,
+        sentiment       TEXT,
+        magnitude       INTEGER,
+        sentiment_score NUMERIC(6,3),
+        published_at    TIMESTAMPTZ,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS stock_news_ticker
+        ON stock_news_cache (ticker, published_at DESC)
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_ml_snapshots (
+        id          SERIAL PRIMARY KEY,
+        ticker      TEXT NOT NULL,
+        ref_id      TEXT NOT NULL,
+        snapshot_at TIMESTAMPTZ NOT NULL,
+        features    JSONB NOT NULL,
+        outcome     SMALLINT,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS stock_ml_snap_ticker
+        ON stock_ml_snapshots (ticker, snapshot_at)
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_ml_model_state (
+        ticker           TEXT PRIMARY KEY,
+        weights          JSONB NOT NULL,
+        training_samples INTEGER NOT NULL DEFAULT 0,
+        labeled_samples  INTEGER NOT NULL DEFAULT 0,
+        last_trained_at  TIMESTAMPTZ NOT NULL,
+        val_accuracy     NUMERIC(6,4),
+        updated_at       TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } finally {
+    client.release();
+  }
+}
+
+// Bring up the stock trading vertical: migrate tables, hydrate ML + config, and
+// start the market-hours-gated scanner and bot loops. Runs independently of the
+// crypto tracker so a failure here never affects the crypto side.
+async function startStockVertical(): Promise<void> {
+  await runStockMigrations();
+  await loadStockConfig().catch((err) =>
+    logger.warn({ err }, "[stock] config load failed (non-fatal)"),
+  );
+  await initStockMLFromDB().catch((err) =>
+    logger.warn({ err }, "[stock-ml] init failed (non-fatal)"),
+  );
+
+  if (!alpacaConfigured()) {
+    logger.info("[stock] Alpaca not configured — scanner/bot idle until keys are set");
+    return;
+  }
+
+  // Scanner every 3 min; bot cycle every 60 s. Both self-guard re-entry and are
+  // internally market-hours aware, so running off-hours is a cheap no-op.
+  const scan = () =>
+    runStockScan().catch((err) => logger.warn({ err }, "[stock-scanner] scan failed (non-fatal)"));
+  scan();
+  setInterval(scan, 3 * 60_000);
+
+  setInterval(() => {
+    runStockBotCycle().catch((err) =>
+      logger.warn({ err }, "[stock-bot] cycle failed (non-fatal)"),
+    );
+  }, 60_000);
+
+  logger.info("[stock] vertical started (scanner + bot loops active)");
+}
+
 app.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
@@ -248,6 +404,12 @@ app.listen(port, (err) => {
         runAutoTune();
         setInterval(runAutoTune, 15 * 60_000);
       }, msToNext15MinBoundary());
+
+      // Bring up the stock trading vertical independently — a failure here must
+      // never take down the crypto tracker or Kalshi bot above.
+      startStockVertical().catch((err) =>
+        logger.warn({ err }, "[stock] vertical startup failed (non-fatal)"),
+      );
     });
 
   // Daily threshold analysis: runs once at midnight UTC then every 24h.

@@ -5,6 +5,7 @@ import combosRouter from "./combos";
 import alertsRouter from "./alerts";
 import cryptoRouter from "./crypto";
 import kalshiBotRouter from "./kalshi-bot";
+import stocksRouter from "./stocks";
 
 const router: IRouter = Router();
 
@@ -14,5 +15,6 @@ router.use(combosRouter);
 router.use(alertsRouter);
 router.use(cryptoRouter);
 router.use(kalshiBotRouter);
+router.use(stocksRouter);
 
 export default router;
