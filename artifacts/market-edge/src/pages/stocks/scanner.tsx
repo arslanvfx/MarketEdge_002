@@ -155,7 +155,7 @@ export default function StockScanner() {
         ) : filtered.length === 0 ? (
           <div className="h-40 flex flex-col items-center justify-center text-center text-muted-foreground text-sm">
             <p>No scanner results yet.</p>
-            <p className="text-xs mt-1">Results populate once the market is open and the broker is connected.</p>
+            <p className="text-xs mt-1">Hit "Run scan" to load the latest prices — works any time, market open or closed.</p>
           </div>
         ) : (
           <div className="space-y-4">

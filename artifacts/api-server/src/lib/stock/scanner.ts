@@ -31,7 +31,7 @@ export function getSectorMomentum(sector: string): number {
   return sectorMomentum.get(sector) ?? 0;
 }
 
-export async function runScan(): Promise<{ scanned: number; scored: number }> {
+export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned: number; scored: number }> {
   if (scanning) return { scanned: 0, scored: 0 };
   if (!alpacaConfigured()) {
     logger.info("[stock-scanner] skipped — Alpaca not configured");
@@ -41,17 +41,19 @@ export async function runScan(): Promise<{ scanned: number; scored: number }> {
   try {
     const cfg = getConfig();
 
-    // Market-hours gate: skip scans when the market is closed so we don't burn
-    // data-rate limits producing stale off-hours results. A clock fetch failure
-    // is non-fatal — we proceed rather than silently stop scanning forever.
-    try {
-      const clock = await getClock(cfg.mode);
-      if (!clock.isOpen) {
-        logger.info("[stock-scanner] skipped — market closed");
-        return { scanned: 0, scored: 0 };
+    // Market-hours gate: skip *automatic* scans when the market is closed so we
+    // don't burn data-rate limits overnight. Manual scans (force=true) bypass this
+    // so users can browse stocks with last-session prices any time.
+    if (!opts.force) {
+      try {
+        const clock = await getClock(cfg.mode);
+        if (!clock.isOpen) {
+          logger.info("[stock-scanner] skipped — market closed (auto-scan)");
+          return { scanned: 0, scored: 0 };
+        }
+      } catch (err) {
+        logger.warn({ err }, "[stock-scanner] clock check failed — scanning anyway");
       }
-    } catch (err) {
-      logger.warn({ err }, "[stock-scanner] clock check failed — scanning anyway");
     }
 
     const watch = new Set(await watchlistTickers());

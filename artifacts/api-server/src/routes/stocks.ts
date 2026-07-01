@@ -65,7 +65,7 @@ router.get("/stocks/scanner", async (_req, res) => {
 
 router.post("/stocks/scanner/run", requireAuth, async (_req, res) => {
   try {
-    const result = await runScan();
+    const result = await runScan({ force: true });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: "Scan failed" });
