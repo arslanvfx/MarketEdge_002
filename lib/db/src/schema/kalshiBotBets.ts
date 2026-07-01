@@ -24,4 +24,9 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   exitedAt: timestamp("exited_at", { withTimezone: true }),
   evaluatedAt: timestamp("evaluated_at", { withTimezone: true }),
+  // Soft-archive: set when the user clears history via the UI or API.
+  // Archived rows are hidden from the display (history list, win-rate stats, P&L)
+  // but are KEPT in the DB so operational queries (momentum filter seeding,
+  // border proximity guard, evalClosedBets, auto-tune) continue to work correctly.
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
 });

@@ -408,6 +408,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       .where(
         and(
           isNotNull(kalshiBotBetsTable.exitedAt),
+          isNull(kalshiBotBetsTable.archivedAt),
           sql`DATE(${kalshiBotBetsTable.exitedAt} AT TIME ZONE 'UTC') = ${today}`,
           sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
         ),
@@ -489,11 +490,17 @@ export async function loadDailyPnlFromDB(): Promise<void> {
  * Prediction_records (learning data) are never touched.
  */
 export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }> {
+  // Soft-archive: stamp archived_at instead of deleting so that operational queries
+  // (recentKalshiTargets seeding, evalClosedBets, border guard, auto-tune) keep
+  // working with full history.  Only DISPLAY queries filter archived_at IS NULL.
   const result = await db.execute(
-    sql`DELETE FROM kalshi_bot_bets WHERE created_at < NOW() - (${hours} || ' hours')::interval`
+    sql`UPDATE kalshi_bot_bets
+        SET archived_at = NOW()
+        WHERE created_at < NOW() - (${hours} || ' hours')::interval
+          AND archived_at IS NULL`
   );
   const deleted = (result as unknown as { rowCount: number }).rowCount ?? 0;
-  logger.info({ deleted, hours }, "[kalshi-bot] clearBetHistoryOld — bet records deleted");
+  logger.info({ archived: deleted, hours }, "[kalshi-bot] clearBetHistoryOld — bet records soft-archived");
   // Reload in-memory daily counters so the running bot reflects the clean slate.
   await loadDailyPnlFromDB();
   return { deleted };
@@ -1644,7 +1651,7 @@ export async function getBotAllHistory(limit = 100, offset = 0): Promise<unknown
     return await db
       .select()
       .from(kalshiBotBetsTable)
-      .where(sql`${kalshiBotBetsTable.action} NOT IN ('skip', 'warmup')`)
+      .where(sql`${kalshiBotBetsTable.action} NOT IN ('skip', 'warmup') AND ${kalshiBotBetsTable.archivedAt} IS NULL`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit)
       .offset(offset);
@@ -1675,7 +1682,7 @@ export async function getBotStats(filterSymbol?: string): Promise<{
   bySymbol: CoinBotStats[];
 }> {
   try {
-    const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`;
+    const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired') AND ${kalshiBotBetsTable.archivedAt} IS NULL`;
     const whereClause = filterSymbol
       ? sql`${baseWhere} AND ${kalshiBotBetsTable.symbol} = ${filterSymbol.toUpperCase()}`
       : baseWhere;

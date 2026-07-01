@@ -139,6 +139,12 @@ async function runStartupMigrations(): Promise<void> {
         ADD COLUMN IF NOT EXISTS crypto_price_at_entry NUMERIC(16,2),
         ADD COLUMN IF NOT EXISTS crypto_price_at_exit  NUMERIC(16,2)
     `);
+    // Soft-archive column: allows clearing display history without deleting
+    // rows the bot needs for operational queries (momentum seeding, border guard).
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ
+    `);
     // Auto-tune mutation log: records every parameter change applied by the
     // self-learning performance analytics job.
     await client.query(`
