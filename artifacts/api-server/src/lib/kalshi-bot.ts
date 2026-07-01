@@ -608,7 +608,7 @@ async function loadRegimeCache(symbols: string[], lookback: number): Promise<Map
           AND evaluated_at IS NOT NULL
           AND signals->>'closePriceAtEval' IS NOT NULL
           AND kalshi_target IS NOT NULL
-          AND symbol = ANY(${symbols})
+          AND symbol = ANY(${sql.raw(`ARRAY[${symbols.map(s => `'${s.replace(/'/g, "''")}'`).join(",")}]`)})
       )
       SELECT
         symbol,
@@ -652,7 +652,7 @@ async function loadBorderProximityCache(symbols: string[], lookback: number): Pr
           AND evaluated_at IS NOT NULL
           AND signals->>'closePriceAtEval' IS NOT NULL
           AND kalshi_target IS NOT NULL
-          AND symbol = ANY(${symbols})
+          AND symbol = ANY(${sql.raw(`ARRAY[${symbols.map(s => `'${s.replace(/'/g, "''")}'`).join(",")}]`)})
       )
       SELECT
         symbol,
