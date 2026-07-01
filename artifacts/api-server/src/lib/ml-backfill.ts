@@ -25,6 +25,7 @@ import {
   clearMLData,
 } from "./ml-store.ts";
 import { MIN_TRAINING_WINDOWS } from "./ml-model.ts";
+import { applySignalAugmentation } from "./ml-features.ts";
 import { logger } from "./logger.ts";
 import { CRYPTO_COINS } from "./crypto.ts";
 import { db, predictionRecordsTable } from "@workspace/db";
@@ -137,9 +138,7 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
         const targetISO = parts.slice(2).join(":");
         const key = `${ex.symbol}:${targetISO}`;
         const sig = signalMap.get(key);
-        ex.features[14] = sig?.statAbove   === true ? 1 : sig?.statAbove   === false ? 0 : 0.5;
-        ex.features[15] = sig?.claudeAbove === true ? 1 : sig?.claudeAbove === false ? 0 : 0.5;
-        ex.features[16] = 0.5; // wmRec not stored historically — keep neutral
+        applySignalAugmentation(ex.features, sig?.statAbove, sig?.claudeAbove);
         if (sig?.statAbove != null || sig?.claudeAbove != null) augmented++;
       }
       logger.info(

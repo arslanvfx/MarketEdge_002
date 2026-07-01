@@ -98,13 +98,8 @@ export function extractMLFeatures(
       ? (lastCandle.c - prevCandle.c) / atr14
       : 0;
 
-  // Features 14-16: other model signals.
-  // Null/unknown → 0.5 so the model sees a neutral "no opinion" value during
-  // training windows where a signal hasn't arrived yet, and correctly ignores
-  // the feature rather than learning a spurious correlation.
-  const statFeat   = statAbove   === true ? 1 : statAbove   === false ? 0 : 0.5;
-  const claudeFeat = claudeAbove === true ? 1 : claudeAbove === false ? 0 : 0.5;
-  const wmFeat     = wmRec === "bet" ? 1 : wmRec === "stay_away" ? 0 : 0.5;
+  // Features 14-16: other model signals (encoded via the shared helper below).
+  const [statFeat, claudeFeat, wmFeat] = encodeSignalFeatures(statAbove, claudeAbove, wmRec);
 
   return [
     clip(elapsedFraction, 0, 1),               //  0
@@ -125,4 +120,44 @@ export function extractMLFeatures(
     claudeFeat,                                // 15: claude direction
     wmFeat,                                    // 16: window-monitor rec
   ];
+}
+
+/**
+ * Pure encoding helper shared by extractMLFeatures and the backfill augmentor.
+ * Returns [statFeat, claudeFeat, wmFeat] — each in {0, 0.5, 1}.
+ *
+ * Encoding rules:
+ *   boolean true  → 1  (above / bet)
+ *   boolean false → 0  (below / stay_away)
+ *   null/undefined/unknown string → 0.5  (no opinion / abstain)
+ *
+ * wmRec string values: "bet"→1, "stay_away"→0, anything else (incl. "caution")→0.5.
+ */
+export function encodeSignalFeatures(
+  statAbove?: boolean | null,
+  claudeAbove?: boolean | null,
+  wmRec?: string | null,
+): [number, number, number] {
+  const statFeat   = statAbove   === true ? 1 : statAbove   === false ? 0 : 0.5;
+  const claudeFeat = claudeAbove === true ? 1 : claudeAbove === false ? 0 : 0.5;
+  const wmFeat     = wmRec === "bet" ? 1 : wmRec === "stay_away" ? 0 : 0.5;
+  return [statFeat, claudeFeat, wmFeat];
+}
+
+/**
+ * In-place mutation: overwrite features[14-16] of a backfill example using
+ * stat/claude directions looked up from the historical signal map.
+ * wmRec is always 0.5 for backfill rows (not stored historically).
+ *
+ * Safe to call even when `sig` is undefined (all three features stay at 0.5).
+ */
+export function applySignalAugmentation(
+  features: number[],
+  statAbove: boolean | null | undefined,
+  claudeAbove: boolean | null | undefined,
+): void {
+  const [statFeat, claudeFeat] = encodeSignalFeatures(statAbove, claudeAbove, null);
+  features[14] = statFeat;
+  features[15] = claudeFeat;
+  features[16] = 0.5; // wmRec never stored historically
 }
