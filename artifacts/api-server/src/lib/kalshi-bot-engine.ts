@@ -276,51 +276,102 @@ export function makeBotDecision(
 
   // ── Decision Mode: consensus ──────────────────────────────────────────────
   // Require at least 2 out of [Stat, Claude, ML] to agree on the same direction.
+  // Fall back to classic when fewer than 2 signals are available (ML not yet
+  // trained) so the mode is never strictly worse than classic during warm-up.
   if (decisionMode === "consensus") {
     const votes: Array<{ above: boolean; conf: number }> = [];
     if (statAbove !== null)  votes.push({ above: statAbove,  conf: statCall?.confidence ?? 55 });
     if (claudeAbove !== null) votes.push({ above: claudeAbove, conf: claudeCall?.confidence ?? 55 });
     if (mlAbove !== null && mlConfidence != null) votes.push({ above: mlAbove, conf: mlConfidence });
 
-    const yesVotes = votes.filter(v => v.above);
-    const noVotes  = votes.filter(v => !v.above);
-    const majorityDir: boolean | null =
-      yesVotes.length > noVotes.length ? true :
-      noVotes.length  > yesVotes.length ? false : null;
-    const majorityCount = majorityDir === null ? 0 : Math.max(yesVotes.length, noVotes.length);
+    if (votes.length < 2) {
+      // Not enough signals to form a meaningful consensus — fall through to classic
+      // so the bot can still operate while ML is warming up.
+    } else {
+      const yesVotes = votes.filter(v => v.above);
+      const noVotes  = votes.filter(v => !v.above);
+      const majorityDir: boolean | null =
+        yesVotes.length > noVotes.length ? true :
+        noVotes.length  > yesVotes.length ? false : null;
+      const majorityCount = majorityDir === null ? 0 : Math.max(yesVotes.length, noVotes.length);
 
-    if (majorityDir === null || majorityCount < 2) {
+      if (majorityDir === null || majorityCount < 2) {
+        return {
+          action: "SKIP",
+          confidence: 0,
+          reasoning: `consensus: no 2/${votes.length} majority (yes=${yesVotes.length} no=${noVotes.length} total=${votes.length}) — skipping`,
+          signals: buildSnapshot(null),
+        };
+      }
+
+      const agreeingVotes = majorityDir ? yesVotes : noVotes;
+      const avgConf = agreeingVotes.reduce((s, v) => s + v.conf, 0) / agreeingVotes.length;
+      const confidence = Math.round(Math.max(avgConf, BASE_CONFIDENCE_HALF_PAIR));
+      const action: BotDecisionAction = majorityDir ? "BET_YES" : "BET_NO";
+
+      if (confidence < config.minConfidence) {
+        return {
+          action: "SKIP",
+          confidence,
+          reasoning: `consensus: confidence ${confidence}% below minimum ${config.minConfidence}%`,
+          signals: buildSnapshot(null, agreeingVotes.length, votes.length),
+        };
+      }
+
       return {
-        action: "SKIP",
-        confidence: 0,
-        reasoning: `consensus: no 2/${votes.length} majority (yes=${yesVotes.length} no=${noVotes.length} total=${votes.length}) — skipping`,
-        signals: buildSnapshot(null),
-      };
-    }
-
-    const agreeingVotes = majorityDir ? yesVotes : noVotes;
-    const avgConf = agreeingVotes.reduce((s, v) => s + v.conf, 0) / agreeingVotes.length;
-    const confidence = Math.round(Math.max(avgConf, BASE_CONFIDENCE_HALF_PAIR));
-    const action: BotDecisionAction = majorityDir ? "BET_YES" : "BET_NO";
-
-    if (confidence < config.minConfidence) {
-      return {
-        action: "SKIP",
+        action,
         confidence,
-        reasoning: `consensus: confidence ${confidence}% below minimum ${config.minConfidence}%`,
-        signals: buildSnapshot(null, agreeingVotes.length, votes.length),
+        reasoning: `consensus: ${agreeingVotes.length}/${votes.length} agree ${majorityDir ? "YES" : "NO"} (avg conf ${confidence}%)`,
+        signals: buildSnapshot(null, agreeingVotes.length, votes.length, action),
       };
     }
+  }
 
+  // ── Decision Mode: ml_gate ────────────────────────────────────────────────
+  // Rule: compute the Stat+Claude core-pair decision WITHOUT ML (so ML is not
+  // promoted to PATH A), then veto the resulting bet if ML is available and
+  // disagrees with the direction. If ML is unavailable, fall through to normal
+  // classic behavior (ML will still boost confidence if it agrees at the end).
+  if (decisionMode === "ml_gate") {
+    const coreResult = computeCorePairDecision({
+      statAbove, claudeAbove,
+      mlAbove: null, mlConfidence: null, // exclude ML from the core direction decision
+      wmDriftAbove, wmRec, wmReady,
+      yesPrice, signalAccuracyPct, minutesElapsed,
+      statConfidence: statCall?.confidence ?? null,
+      claudeConfidence: claudeCall?.confidence ?? null,
+      kalshiTicker,
+      minConfidence: config.minConfidence,
+    });
+
+    if (coreResult.action !== "SKIP" && mlAbove !== null) {
+      const proposedDir = coreResult.action === "BET_YES";
+      if (mlAbove !== proposedDir) {
+        return {
+          action: "SKIP",
+          confidence: 0,
+          reasoning: `ml_gate: ML veto (ML=${mlAbove ? "above" : "below"} opposes ${coreResult.action} from Stat+Claude) — skipping`,
+          signals: buildSnapshot(coreResult.ev, coreResult.signalsAgreeing, coreResult.signalsTotal),
+        };
+      }
+    }
+
+    // ML agrees or is unavailable — return the core result directly
+    const coreSnap = buildSnapshot(
+      coreResult.ev,
+      coreResult.signalsAgreeing,
+      coreResult.signalsTotal,
+      coreResult.action !== "SKIP" ? coreResult.action : null,
+    );
     return {
-      action,
-      confidence,
-      reasoning: `consensus: ${agreeingVotes.length}/${votes.length} agree ${majorityDir ? "YES" : "NO"} (avg conf ${confidence}%)`,
-      signals: buildSnapshot(null, agreeingVotes.length, votes.length, action),
+      action: coreResult.action,
+      confidence: coreResult.confidence,
+      reasoning: coreResult.reasoning + (mlAbove !== null ? ` (ML confirms: ${mlAbove ? "above" : "below"})` : " (ML not ready — no veto applied)"),
+      signals: coreSnap,
     };
   }
 
-  // ── Classic path (also used by ml_primary and ml_gate pre-decision) ────────
+  // ── Classic path (also used by ml_primary) ────────────────────────────────
   const result = computeCorePairDecision({
     statAbove, claudeAbove, mlAbove, wmDriftAbove,
     wmRec, wmReady, yesPrice, signalAccuracyPct, minutesElapsed,
@@ -330,20 +381,6 @@ export function makeBotDecision(
     kalshiTicker,
     minConfidence: config.minConfidence,
   });
-
-  // ── Decision Mode: ml_gate ────────────────────────────────────────────────
-  // Classic decision is taken first, but ML may veto if it disagrees.
-  if (decisionMode === "ml_gate" && result.action !== "SKIP" && mlAbove !== null) {
-    const proposedDir = result.action === "BET_YES";
-    if (mlAbove !== proposedDir) {
-      return {
-        action: "SKIP",
-        confidence: 0,
-        reasoning: `ml_gate: ML veto (ML=${mlAbove ? "above" : "below"} opposes ${result.action}) — skipping`,
-        signals: buildSnapshot(result.ev),
-      };
-    }
-  }
 
   const snapshot = buildSnapshot(
     result.ev,

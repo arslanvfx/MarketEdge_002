@@ -2283,12 +2283,14 @@ export interface LogicModeStats {
   losses: number;
   pnl: number;
   winRate: number | null;
-  avgPnlPerBet: number | null;
+  avgConfidence: number | null;
 }
 
 /**
  * Returns per-decision-mode win/loss/accuracy stats from settled bets.
  * Historical bets with a null decision_mode are bucketed as "classic".
+ * avgConfidence is computed from the statConfidence/claudeConfidence fields
+ * stored in the signals JSONB snapshot at bet-placement time.
  */
 export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
   try {
@@ -2297,6 +2299,7 @@ export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
         decisionMode: kalshiBotBetsTable.decisionMode,
         pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
         outcome: kalshiBotBetsTable.outcome,
+        signals: kalshiBotBetsTable.signals,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -2304,7 +2307,7 @@ export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
           AND ${kalshiBotBetsTable.archivedAt} IS NULL`,
       );
 
-    const modeMap = new Map<string, { bets: number; wins: number; losses: number; pnl: number }>();
+    const modeMap = new Map<string, { bets: number; wins: number; losses: number; pnl: number; confSum: number; confCount: number }>();
 
     for (const r of rows) {
       const mode = r.decisionMode ?? "classic";
@@ -2312,43 +2315,42 @@ export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
       const isWin  = r.outcome ? r.outcome === "win"  : p > 0;
       const isLoss = r.outcome ? r.outcome === "loss" : p < 0;
 
-      const entry = modeMap.get(mode) ?? { bets: 0, wins: 0, losses: 0, pnl: 0 };
+      // Extract bet-time confidence from stored signals snapshot
+      const sigs = r.signals as Record<string, unknown> | null;
+      const statConf  = typeof sigs?.statConfidence  === "number" ? sigs.statConfidence  : null;
+      const cldConf   = typeof sigs?.claudeConfidence === "number" ? sigs.claudeConfidence : null;
+      const confVals  = [statConf, cldConf].filter((v): v is number => v != null);
+      const avgConf   = confVals.length > 0 ? confVals.reduce((s, v) => s + v, 0) / confVals.length : null;
+
+      const entry = modeMap.get(mode) ?? { bets: 0, wins: 0, losses: 0, pnl: 0, confSum: 0, confCount: 0 };
       entry.bets++;
       entry.pnl += p;
       if (isWin)  entry.wins++;
       if (isLoss) entry.losses++;
+      if (avgConf != null) { entry.confSum += avgConf; entry.confCount++; }
       modeMap.set(mode, entry);
     }
 
     const ALL_MODES: DecisionMode[] = ["classic", "ml_gate", "consensus", "ml_primary"];
     const result: LogicModeStats[] = [];
 
-    // Emit results in a fixed order, always including all known modes (even if 0 bets)
+    const toStats = (e: { bets: number; wins: number; losses: number; pnl: number; confSum: number; confCount: number }, m: string): LogicModeStats => ({
+      mode: m,
+      bets: e.bets,
+      wins: e.wins,
+      losses: e.losses,
+      pnl: e.pnl,
+      winRate: e.bets > 0 ? e.wins / e.bets : null,
+      avgConfidence: e.confCount > 0 ? Math.round(e.confSum / e.confCount * 10) / 10 : null,
+    });
+
     for (const m of ALL_MODES) {
-      const e = modeMap.get(m) ?? { bets: 0, wins: 0, losses: 0, pnl: 0 };
-      result.push({
-        mode: m,
-        bets: e.bets,
-        wins: e.wins,
-        losses: e.losses,
-        pnl: e.pnl,
-        winRate: e.bets > 0 ? e.wins / e.bets : null,
-        avgPnlPerBet: e.bets > 0 ? e.pnl / e.bets : null,
-      });
+      result.push(toStats(modeMap.get(m) ?? { bets: 0, wins: 0, losses: 0, pnl: 0, confSum: 0, confCount: 0 }, m));
     }
 
-    // Also include any unknown modes stored in the DB
     for (const [m, e] of modeMap.entries()) {
       if (!(ALL_MODES as string[]).includes(m)) {
-        result.push({
-          mode: m,
-          bets: e.bets,
-          wins: e.wins,
-          losses: e.losses,
-          pnl: e.pnl,
-          winRate: e.bets > 0 ? e.wins / e.bets : null,
-          avgPnlPerBet: e.bets > 0 ? e.pnl / e.bets : null,
-        });
+        result.push(toStats(e, m));
       }
     }
 

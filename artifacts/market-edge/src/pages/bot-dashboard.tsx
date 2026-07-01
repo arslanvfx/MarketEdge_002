@@ -49,7 +49,7 @@ interface LogicModeStats {
   losses: number;
   pnl: number;
   winRate: number | null;
-  avgPnlPerBet: number | null;
+  avgConfidence: number | null;
 }
 
 interface OpenPosition {
@@ -668,24 +668,48 @@ export default function BotDashboard() {
                     onChange={e => setConfigDraft(d => ({ ...d, minConfidence: parseInt(e.target.value) }))} />
                 </label>
 
-                {/* Decision Mode */}
-                <label className="flex flex-col gap-1.5 col-span-2 md:col-span-1">
-                  <span className="text-xs text-muted-foreground">Decision Mode</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.decisionMode ?? "classic"}
-                    onChange={e => setConfigDraft(d => ({ ...d, decisionMode: e.target.value as DecisionMode }))}>
-                    <option value="classic">Classic (Stat → Claude → ML cascade)</option>
-                    <option value="ml_gate">ML Gate (ML veto on disagreement)</option>
-                    <option value="consensus">Consensus (2/3 majority vote)</option>
-                    <option value="ml_primary">ML Primary (ML must lead)</option>
-                  </select>
-                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
-                    {(merged.decisionMode ?? "classic") === "classic" && "Classic 3-path cascade: ML primary if ready, else Claude+Stat, else Stat alone."}
-                    {(merged.decisionMode ?? "classic") === "ml_gate" && "Classic decides direction; if ML is available and disagrees, the bet is vetoed."}
-                    {(merged.decisionMode ?? "classic") === "consensus" && "At least 2 of [Stat, Claude, ML] must agree on the same direction."}
-                    {(merged.decisionMode ?? "classic") === "ml_primary" && "ML model must be confident (≥62%) before any bet is placed."}
-                  </span>
-                </label>
+                {/* Decision Mode — full-width row */}
+                <div className="col-span-2 flex flex-col gap-2">
+                  <span className="text-xs text-muted-foreground">Decision Logic</span>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {([
+                      { id: "classic",    label: "Classic",    desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
+                      { id: "ml_gate",    label: "ML Gate",    desc: "Stat+Claude decide direction; ML vetos if it disagrees" },
+                      { id: "consensus",  label: "Consensus",  desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
+                      { id: "ml_primary", label: "ML Primary", desc: "ML model must be ready and confident (≥62%) to enter" },
+                    ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
+                      const isSelected = (merged.decisionMode ?? "classic") === m.id;
+                      const needsML = m.id === "ml_gate" || m.id === "ml_primary";
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, decisionMode: m.id }))}
+                          className={`text-left rounded-xl p-3 border transition-all ${
+                            isSelected
+                              ? "border-sky-500/60 bg-sky-500/10 ring-1 ring-sky-500/30"
+                              : "border-border bg-background/30 hover:border-border/80 hover:bg-muted/30"
+                          }`}
+                        >
+                          <div className={`text-xs font-semibold mb-1 ${isSelected ? "text-sky-400" : "text-foreground"}`}>
+                            {m.label}
+                            {isSelected && <span className="ml-1.5 text-[9px] text-sky-400/70">✓ selected</span>}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground/80 leading-tight">{m.desc}</div>
+                          {needsML && (
+                            <div className={`mt-1.5 text-[9px] font-medium px-1.5 py-0.5 rounded inline-block ${
+                              status?.mlStatus?.ready
+                                ? "bg-emerald-500/15 text-emerald-400"
+                                : "bg-amber-500/15 text-amber-400"
+                            }`}>
+                              ML {status?.mlStatus?.ready ? "ready" : "warming up…"}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
 
                 {/* Exit Sensitivity */}
                 <label className="flex flex-col gap-1.5">
@@ -1024,11 +1048,15 @@ export default function BotDashboard() {
                               <div className="text-[10px] text-muted-foreground">Total P&L</div>
                               <div className={`text-xs font-bold ${pnlColor}`}>{m.pnl >= 0 ? "+" : ""}{fmt$(m.pnl)}</div>
                             </div>
-                            {m.avgPnlPerBet != null && (
+                            {m.avgConfidence != null && (
                               <div className="flex items-center justify-between">
-                                <div className="text-[10px] text-muted-foreground">Avg / bet</div>
-                                <div className={`text-xs font-semibold ${m.avgPnlPerBet >= 0 ? "text-emerald-400/80" : "text-red-400/80"}`}>
-                                  {m.avgPnlPerBet >= 0 ? "+" : ""}{fmt$(m.avgPnlPerBet)}
+                                <div className="text-[10px] text-muted-foreground">Avg confidence</div>
+                                <div className={`text-xs font-semibold ${
+                                  m.avgConfidence >= 60 ? "text-emerald-400/90"
+                                  : m.avgConfidence >= 52 ? "text-amber-400/90"
+                                  : "text-muted-foreground"
+                                }`}>
+                                  {m.avgConfidence.toFixed(1)}%
                                 </div>
                               </div>
                             )}
