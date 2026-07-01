@@ -14,7 +14,7 @@ const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type DecisionMode = "classic" | "ml_gate" | "consensus";
+type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
 
 interface BotConfig {
   betSize: number;
@@ -695,9 +695,10 @@ export default function BotDashboard() {
                       { id: "classic",   label: "Classic",   desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
                       { id: "ml_gate",   label: "ML Gate",   desc: "Stat+Claude decide direction; ML vetos if it disagrees" },
                       { id: "consensus", label: "Consensus", desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
+                      { id: "unanimous", label: "Unanimous", desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
-                      const needsML = m.id === "ml_gate";
+                      const needsML = m.id === "ml_gate" || m.id === "unanimous";
                       return (
                         <button
                           key={m.id}
@@ -995,6 +996,7 @@ export default function BotDashboard() {
             classic:   { label: "Classic",   desc: "Stat → Claude → ML cascade", color: "border-sky-500/40 bg-sky-950/10",      accent: "text-sky-400" },
             ml_gate:   { label: "ML Gate",   desc: "ML veto on disagreement",    color: "border-violet-500/40 bg-violet-950/10", accent: "text-violet-400" },
             consensus: { label: "Consensus", desc: "2/3 majority vote",          color: "border-amber-500/40 bg-amber-950/10",  accent: "text-amber-400" },
+            unanimous: { label: "Unanimous", desc: "All 3 signals must agree",   color: "border-emerald-500/40 bg-emerald-950/10", accent: "text-emerald-400" },
           };
 
           const btModes = backtestData?.modes ?? [];
@@ -1298,6 +1300,7 @@ export default function BotDashboard() {
                           classic:   { label: "Classic",   cls: "bg-sky-500/10 text-sky-400/80" },
                           ml_gate:   { label: "ML Gate",   cls: "bg-violet-500/10 text-violet-400/80" },
                           consensus: { label: "Consensus", cls: "bg-amber-500/10 text-amber-400/80" },
+                          unanimous: { label: "Unanimous", cls: "bg-emerald-500/10 text-emerald-400/80" },
                         };
                         const { label, cls } = meta[dm] ?? { label: dm, cls: "bg-muted/30 text-muted-foreground" };
                         return (

@@ -6,9 +6,10 @@
 // Backtest question: "given the signals stored at bet time, would mode X have
 // placed THIS specific bet in the same direction?"
 //
-// classic  — yes, always (all existing bets passed the classic cascade)
-// ml_gate  — runs core pair (PATH B/C) without ML; ML can only veto, not lead
+// classic   — yes, always (all existing bets passed the classic cascade)
+// ml_gate   — runs core pair (PATH B/C) without ML; ML can only veto, not lead
 // consensus — majority of [stat, claude, ml] must agree; tie = SKIP = rejected
+// unanimous — all 3 of [stat, claude, ml] must be available and unanimously agree
 
 /**
  * Returns true if the given decision mode would have approved the bet,
@@ -80,6 +81,17 @@ export function backtestModeApproval(
 
     const majorityDir = yesCount > noCount; // true = YES, false = NO
     return majorityDir === aboveExpected;   // must match actual bet direction
+  }
+
+  // ── unanimous ─────────────────────────────────────────────────────────────
+  // All 3 signals must be available AND all must agree on the same direction.
+  // Any missing signal or any disagreement → SKIP (no warm-up fallback).
+  if (mode === "unanimous") {
+    if (statAbove === null || claudeAbove === null || mlAbove === null) {
+      return false; // any unavailable signal → SKIP
+    }
+    // All three must agree with the actual bet direction
+    return statAbove === aboveExpected && claudeAbove === aboveExpected && mlAbove === aboveExpected;
   }
 
   // Unknown mode — approve by default so new modes don't silently disappear.

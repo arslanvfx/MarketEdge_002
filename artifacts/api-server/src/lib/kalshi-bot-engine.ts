@@ -251,6 +251,56 @@ export function makeBotDecision(
     }
   }
 
+  // ── Decision Mode: unanimous ──────────────────────────────────────────────
+  // Require all three signals (Stat, Claude, ML) to be available and agree
+  // unanimously on the same direction. Any missing signal or any disagreement
+  // → SKIP. No warm-up fallback — this is intentionally the strictest mode.
+  if (decisionMode === "unanimous") {
+    if (statAbove === null || claudeAbove === null || mlAbove === null) {
+      const missing = (
+        [statAbove === null && "Stat", claudeAbove === null && "Claude", mlAbove === null && "ML"] as Array<string | false>
+      ).filter(Boolean).join("+");
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `unanimous: ${missing} not available — all 3 signals required`,
+        signals: buildSnapshot(null),
+      };
+    }
+
+    if (statAbove !== claudeAbove || claudeAbove !== mlAbove) {
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `unanimous: signals disagree (Stat=${statAbove ? "YES" : "NO"} Claude=${claudeAbove ? "YES" : "NO"} ML=${mlAbove ? "YES" : "NO"}) — skipping`,
+        signals: buildSnapshot(null),
+      };
+    }
+
+    const agreeDir = statAbove; // all three are identical
+    const action: BotDecisionAction = agreeDir ? "BET_YES" : "BET_NO";
+    const statConf   = statCall?.confidence   ?? BASE_CONFIDENCE_HALF_PAIR;
+    const claudeConf = claudeCall?.confidence ?? BASE_CONFIDENCE_HALF_PAIR;
+    const mlConf     = mlConfidence           ?? BASE_CONFIDENCE_HALF_PAIR;
+    const confidence = Math.round((statConf + claudeConf + mlConf) / 3);
+
+    if (confidence < config.minConfidence) {
+      return {
+        action: "SKIP",
+        confidence,
+        reasoning: `unanimous: confidence ${confidence}% below minimum ${config.minConfidence}%`,
+        signals: buildSnapshot(null, 3, 3),
+      };
+    }
+
+    return {
+      action,
+      confidence,
+      reasoning: `unanimous: all 3 agree ${agreeDir ? "YES" : "NO"} (Stat=${Math.round(statConf)}% Claude=${Math.round(claudeConf)}% ML=${Math.round(mlConf)}% → avg ${confidence}%)`,
+      signals: buildSnapshot(null, 3, 3, action),
+    };
+  }
+
   // ── Decision Mode: ml_gate ────────────────────────────────────────────────
   // Rule: compute the Stat+Claude core-pair decision WITHOUT ML (so ML is not
   // promoted to PATH A), then veto the resulting bet if ML is available and

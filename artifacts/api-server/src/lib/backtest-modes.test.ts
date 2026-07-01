@@ -125,3 +125,50 @@ describe("backtestModeApproval: consensus", () => {
     assert.equal(backtestModeApproval("consensus", true, true, false, null), false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// unanimous — all 3 signals must be available and agree
+// ---------------------------------------------------------------------------
+describe("backtestModeApproval: unanimous", () => {
+  // missing signals → always SKIP
+  it("stat missing → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, null, true, true), false);
+  });
+  it("claude missing → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, true, null, true), false);
+  });
+  it("ml missing → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, true, true, null), false);
+  });
+  it("all signals missing → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, null, null, null), false);
+  });
+
+  // disagreement → SKIP
+  it("stat disagrees (stat=NO, claude+ml=YES) → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, false, true, true), false);
+  });
+  it("claude disagrees (claude=NO, stat+ml=YES) → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, true, false, true), false);
+  });
+  it("ml disagrees (ml=NO, stat+claude=YES) → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, true, true, false), false);
+  });
+  it("all disagree with bet direction (all NO, bet=YES) → not approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, false, false, false), false);
+  });
+
+  // unanimous agreement
+  it("all 3 agree YES, bet=YES → approved", () => {
+    assert.equal(backtestModeApproval("unanimous", true, true, true, true), true);
+  });
+  it("all 3 agree NO, bet=NO → approved", () => {
+    assert.equal(backtestModeApproval("unanimous", false, false, false, false), true);
+  });
+  it("all 3 agree YES, bet=NO → not approved (wrong direction)", () => {
+    assert.equal(backtestModeApproval("unanimous", false, true, true, true), false);
+  });
+  it("all 3 agree NO, bet=YES → not approved (wrong direction)", () => {
+    assert.equal(backtestModeApproval("unanimous", true, false, false, false), false);
+  });
+});
