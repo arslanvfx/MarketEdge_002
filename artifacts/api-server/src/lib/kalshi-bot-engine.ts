@@ -94,6 +94,7 @@ export interface SignalSnapshot {
   claudeConfidence: number | null;
   mlConfidence: number | null;
   warmupActive: boolean;
+  roiPct: number | null;       // net return % on the chosen side; null when yesPrice unknown
 }
 
 export interface BotDecision {
@@ -104,10 +105,25 @@ export interface BotDecision {
 }
 
 // ---------------------------------------------------------------------------
+// ROI gate — skip when the payout on our chosen side is below the minimum
+// ---------------------------------------------------------------------------
+
+// Minimum net return required to place a bet.  At 1.50 %, a YES bet needs
+// yesPrice ≤ 98.52 ¢ and a NO bet needs yesPrice ≥ 1.48 ¢.  When yesPrice is
+// unknown the gate is bypassed so the bot can still operate without live prices.
+const MIN_ROI_PCT = 1.5;
+
+function calcROI(action: BotDecisionAction, yesPrice: number): number {
+  return action === "BET_YES"
+    ? (100 - yesPrice) / yesPrice * 100
+    : yesPrice / (100 - yesPrice) * 100;
+}
+
+// ---------------------------------------------------------------------------
 // Public decision engine — gathers live signals then calls the pure core
 // ---------------------------------------------------------------------------
 
-export function makeBotDecision(
+function _makeBotDecisionInner(
   symbol: string,
   config: BotConfig,
   kalshiTicker: string | null,
@@ -145,6 +161,7 @@ export function makeBotDecision(
       statConfidence: statCall?.confidence ?? null,
       claudeConfidence: null, mlConfidence: null,
       warmupActive: true,
+      roiPct: null,
     };
     return {
       action: "SKIP",
@@ -190,7 +207,7 @@ export function makeBotDecision(
   const wmDriftAbove: boolean | null =
     wmReady && wmRec === "bet" && wmFactors != null ? wmFactors.netDriftPct > 0 : null;
 
-  // Helper to build a signal snapshot
+  // Helper to build a signal snapshot (roiPct filled in by the outer wrapper)
   const buildSnapshot = (ev: number | null, signalsAgreeing = 0, signalsTotal = 0, agreementTarget: BotDecisionAction | null = null): SignalSnapshot => ({
     statAbove, claudeAbove, mlAbove,
     windowMonitor: wmRec, windowMonitorReady: wmReady,
@@ -200,6 +217,7 @@ export function makeBotDecision(
     claudeConfidence: claudeCall?.confidence ?? null,
     mlConfidence,
     warmupActive: false,
+    roiPct: null,
   });
 
   const decisionMode: DecisionMode = config.decisionMode ?? "classic";
@@ -375,4 +393,39 @@ export function makeBotDecision(
     reasoning: result.reasoning,
     signals: snapshot,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Exported wrapper — applies the ROI gate after all signal logic has run
+// ---------------------------------------------------------------------------
+
+export function makeBotDecision(
+  symbol: string,
+  config: BotConfig,
+  kalshiTicker: string | null,
+  yesPrice: number | null,
+  minutesElapsed: number,
+  signalAccuracyPct: number | null,
+  kalshiTarget?: number | null,
+): BotDecision {
+  const inner = _makeBotDecisionInner(symbol, config, kalshiTicker, yesPrice, minutesElapsed, signalAccuracyPct, kalshiTarget);
+
+  // Compute ROI for the chosen side when yesPrice is available.
+  // yesPrice is in cents (0–100); net return = payout / stake.
+  if (inner.action !== "SKIP" && yesPrice !== null && yesPrice > 0 && yesPrice < 100) {
+    const roi = calcROI(inner.action, yesPrice);
+    // Always record roiPct so it shows in bet signals even on SKIPs below.
+    inner.signals = { ...inner.signals, roiPct: parseFloat(roi.toFixed(2)) };
+
+    if (roi < MIN_ROI_PCT) {
+      return {
+        action: "SKIP",
+        confidence: inner.confidence,
+        reasoning: `roi-too-low: ${roi.toFixed(2)}% net return on ${inner.action === "BET_YES" ? "YES" : "NO"} side is below the ${MIN_ROI_PCT}% minimum — market has priced in the direction`,
+        signals: inner.signals,
+      };
+    }
+  }
+
+  return inner;
 }

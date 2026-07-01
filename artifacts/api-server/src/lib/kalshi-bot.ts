@@ -213,9 +213,10 @@ const windowStabilityCache = new Map<string, TrendStability>();
 const MIN_CONFIRM_BUFFER_MS = 8_000;
 
 // Hard late-entry floor: never open a new position if fewer than this many minutes
-// remain in the 15-min window. This is a non-configurable safety rail — late entries
-// leave almost no time for the position to resolve and are consistently losing plays.
-const MIN_REMAINING_MINUTES_FOR_ENTRY = 4;
+// remain in the 15-min window.  Kept at 2 min as a minimal safety margin — the
+// ROI gate in makeBotDecision is the real late-entry filter (market prices in the
+// direction heavily at the end, making net returns fall below the 1.50% minimum).
+const MIN_REMAINING_MINUTES_FOR_ENTRY = 2;
 
 // Timing analysis cache (refreshed every 5 min)
 let timingCache: Map<string, number | null> = new Map();
