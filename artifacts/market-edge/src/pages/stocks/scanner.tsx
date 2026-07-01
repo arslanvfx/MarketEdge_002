@@ -10,7 +10,7 @@ import { StocksShell } from "./stocks-shell";
 import { StockDetail } from "./stock-detail";
 import {
   stockGet, stockAuth, fmtUsd, fmtPct, sentimentColor, SECTORS,
-  type ScannerRow, type WatchlistEntry,
+  type ScannerRow, type WatchlistEntry, type ResearchResult,
 } from "@/lib/stocks-api";
 
 type SortKey = "score" | "changePct" | "confidence" | "price";
@@ -37,6 +37,19 @@ export default function StockScanner() {
     queryFn: () => stockGet("/watchlist"),
     refetchInterval: 30_000,
   });
+
+  const { data: researchData } = useQuery<{
+    results: Record<string, ResearchResult>;
+    running: boolean;
+    ready: string[];
+  }>({
+    queryKey: ["stocks-research"],
+    queryFn: () => stockGet("/research"),
+    refetchInterval: 15_000,
+  });
+
+  const researchMap = researchData?.results ?? {};
+  const researchRunning = researchData?.running ?? false;
 
   const watchSet = useMemo(
     () => new Set((watchData?.watchlist ?? []).map((w) => w.ticker)),
@@ -131,6 +144,11 @@ export default function StockScanner() {
             {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             Run scan
           </Button>
+          {researchRunning && (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="w-3 h-3 animate-spin" /> Researching…
+            </span>
+          )}
         </div>
 
         {/* Sector tabs + MA filter */}
@@ -180,7 +198,7 @@ export default function StockScanner() {
                 </div>
                 <div className="space-y-1.5">
                   {pinned.map((r) => (
-                    <ScannerCard key={r.ticker} row={r} watched onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
+                    <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
                   ))}
                 </div>
               </div>
@@ -189,7 +207,7 @@ export default function StockScanner() {
               {pinned.length > 0 && <div className="text-xs font-semibold text-muted-foreground mb-2">All opportunities</div>}
               <div className="space-y-1.5">
                 {unpinned.map((r) => (
-                  <ScannerCard key={r.ticker} row={r} watched={false} onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
+                  <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched={false} onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
                 ))}
               </div>
             </div>
@@ -202,8 +220,25 @@ export default function StockScanner() {
   );
 }
 
-function ScannerCard({ row, watched, onOpen, onToggleWatch }: {
-  row: ScannerRow; watched: boolean; onOpen: () => void; onToggleWatch: () => void;
+function ResearchBadge({ r }: { r: ResearchResult }) {
+  const cfg = {
+    Buy:   { cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400", dot: "bg-emerald-400" },
+    Hold:  { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400",       dot: "bg-amber-400" },
+    Avoid: { cls: "border-red-500/40 bg-red-500/10 text-red-400",             dot: "bg-red-400" },
+  }[r.verdict];
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border cursor-help ${cfg.cls}`}
+      title={r.reason || r.verdict}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+      {r.score} · {r.verdict}
+    </span>
+  );
+}
+
+function ScannerCard({ row, research, watched, onOpen, onToggleWatch }: {
+  row: ScannerRow; research?: ResearchResult; watched: boolean; onOpen: () => void; onToggleWatch: () => void;
 }) {
   const up = row.direction === "up";
   return (
@@ -239,6 +274,7 @@ function ScannerCard({ row, watched, onOpen, onToggleWatch }: {
           </span>
         )}
         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${sentimentColor(row.newsSentiment)}`}>{row.newsSentiment}</span>
+        {research && <ResearchBadge r={research} />}
         {(row.details?.maAlignment as boolean) && (
           <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-400" title="21-day MA above 50-day and 180-day MA — bullish trend structure">
             <BarChart2 className="w-3 h-3" /> 21MA↑

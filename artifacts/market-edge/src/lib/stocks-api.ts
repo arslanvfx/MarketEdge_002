@@ -117,6 +117,14 @@ export interface StockAnalysis {
   candles: Candle[];
 }
 
+export interface ResearchResult {
+  ticker: string;
+  score: number;        // 0-100
+  verdict: "Buy" | "Hold" | "Avoid";
+  reason: string;
+  researchedAt: string;
+}
+
 export interface StockBotConfig {
   enabled: boolean;
   mode: BotMode;

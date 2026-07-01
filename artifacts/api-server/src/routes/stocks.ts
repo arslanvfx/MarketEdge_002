@@ -8,6 +8,7 @@ import { getAuth } from "@clerk/express";
 import { alpacaConfigured, getAccount, getPositions } from "../lib/stock/alpaca";
 import { getConfig, saveConfig } from "../lib/stock/config";
 import { getScannerResults, runScan, lastScanTime } from "../lib/stock/scanner";
+import { getAllResearch, getResearchStatus } from "../lib/stock/research";
 import { getScoredNews } from "../lib/stock/news";
 import { getEarnings } from "../lib/stock/earnings";
 import { getCandles } from "../lib/stock/data";
@@ -70,6 +71,12 @@ router.post("/stocks/scanner/run", requireAuth, async (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Scan failed" });
   }
+});
+
+router.get("/stocks/research", (_req, res) => {
+  const { running, ready } = getResearchStatus();
+  const results = getAllResearch();
+  res.json({ results, running, ready });
 });
 
 // ---------- Watchlist ----------

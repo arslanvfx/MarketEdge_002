@@ -18,6 +18,7 @@ import { getEarnings } from "./earnings";
 import { efficiencyRatio, sma } from "./indicators";
 import { watchlistTickers } from "./watchlist";
 import { getConfig } from "./config";
+import { runResearchPass } from "./research";
 import type { Candle, Direction, ScannerRow, Sentiment } from "./types";
 
 const TOP_PER_SECTOR = 6;      // how many movers per sector get full scoring
@@ -179,6 +180,16 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
     await persistRows(rows);
     lastScanAt = Date.now();
     logger.info({ scanned: rows.length, scored }, "[stock-scanner] scan complete");
+
+    // Fire-and-forget Claude research pass for the top-20 scored tickers.
+    const top20 = [...rows]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 20)
+      .map((r) => r.ticker);
+    runResearchPass(top20).catch((err) =>
+      logger.warn({ err }, "[stock-scanner] research pass error"),
+    );
+
     return { scanned: rows.length, scored };
   } finally {
     scanning = false;

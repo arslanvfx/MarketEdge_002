@@ -28,6 +28,7 @@ import { buildFeatures, recordOutcome } from "./ml";
 import { getScoredNews } from "./news";
 import { getEarnings } from "./earnings";
 import { getScannerResults, getSectorMomentum } from "./scanner";
+import { getCachedResearch } from "./research";
 import { lookupUniverse } from "./universe";
 import { watchlistTickers } from "./watchlist";
 import type { Candle, TradingMode, StockBotConfig } from "./types";
@@ -251,7 +252,27 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       );
 
       if (signals.combinedDirection !== "up") continue;
-      if (signals.combinedConfidence < cfg.minConfidence) continue;
+
+      // Research signal: ±5pp confidence based on today's cached Claude research.
+      let effectiveConfidence = signals.combinedConfidence;
+      const research = getCachedResearch(ticker);
+      if (research) {
+        if (research.score >= 70) {
+          effectiveConfidence = Math.min(95, effectiveConfidence + 5);
+          logger.info(
+            { ticker, researchScore: research.score, verdict: research.verdict },
+            "[stock-bot] research boost +5pp",
+          );
+        } else if (research.score <= 30) {
+          effectiveConfidence = Math.max(50, effectiveConfidence - 5);
+          logger.info(
+            { ticker, researchScore: research.score, verdict: research.verdict },
+            "[stock-bot] research penalty -5pp",
+          );
+        }
+      }
+
+      if (effectiveConfidence < cfg.minConfidence) continue;
 
       const price = signals.price;
       if (price <= 0) continue;
@@ -292,16 +313,28 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
              features,
              combinedDirection: signals.combinedDirection,
              combinedConfidence: signals.combinedConfidence,
+             effectiveConfidence,
+             research: research
+               ? { score: research.score, verdict: research.verdict }
+               : null,
              stat: signals.stat,
              claude: signals.claude,
              ml: signals.ml,
            })}::jsonb,
-           ${signals.combinedConfidence}, ${filledPrice}, ${stopLoss}, ${targetPrice},
+           ${effectiveConfidence}, ${filledPrice}, ${stopLoss}, ${targetPrice},
            ${qty * filledPrice}, ${orderId}, NOW())
       `);
       entries++;
       logger.info(
-        { ticker, mode, qty, price: filledPrice.toFixed(2), conf: signals.combinedConfidence },
+        {
+          ticker,
+          mode,
+          qty,
+          price: filledPrice.toFixed(2),
+          conf: effectiveConfidence,
+          baseConf: signals.combinedConfidence,
+          research: research ? { score: research.score, verdict: research.verdict } : null,
+        },
         "[stock-bot] opened position",
       );
     } catch (err) {
