@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -15,6 +15,15 @@ import {
 
 type SortKey = "score" | "changePct" | "confidence" | "price";
 
+interface ScanProgress {
+  scanning: boolean;
+  phase: "idle" | "snapshots" | "scoring" | "done";
+  total: number;
+  done: number;
+  currentTicker: string;
+  pct: number;
+}
+
 export default function StockScanner() {
   const { getToken } = useAuth();
   const { toast } = useToast();
@@ -23,19 +32,42 @@ export default function StockScanner() {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("score");
   const [detail, setDetail] = useState<string | null>(null);
-  const [scanning, setScanning] = useState(false);
   const [maAlignOnly, setMaAlignOnly] = useState(false);
 
+  // Results: long staleTime so data stays alive when switching tabs.
   const { data: scanData, isLoading } = useQuery<{ results: ScannerRow[]; lastScanAt: number }>({
     queryKey: ["stocks-scanner"],
     queryFn: () => stockGet("/scanner"),
-    refetchInterval: 10_000,
+    staleTime: 5 * 60_000,    // keep cached for 5 min — survives tab switches
+    refetchInterval: 2 * 60_000, // background refresh every 2 min
   });
+
+  // Progress: poll every 2s; only the backend allocates computation.
+  const { data: progressData } = useQuery<ScanProgress>({
+    queryKey: ["stocks-scanner-progress"],
+    queryFn: () => stockGet("/scanner/progress"),
+    refetchInterval: 2_000,
+  });
+
+  const scanInProgress = progressData?.scanning ?? false;
+  const progressPct = progressData?.pct ?? 0;
+  const progressPhase = progressData?.phase ?? "idle";
+  const currentTicker = progressData?.currentTicker ?? "";
+
+  // When a scan finishes (transitions from scanning to done) refresh results.
+  const [wasScanning, setWasScanning] = useState(false);
+  useEffect(() => {
+    if (wasScanning && !scanInProgress) {
+      qc.invalidateQueries({ queryKey: ["stocks-scanner"] });
+    }
+    setWasScanning(scanInProgress);
+  }, [scanInProgress]);
 
   const { data: watchData } = useQuery<{ watchlist: WatchlistEntry[] }>({
     queryKey: ["stocks-watchlist"],
     queryFn: () => stockGet("/watchlist"),
-    refetchInterval: 30_000,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   });
 
   const { data: researchData } = useQuery<{
@@ -45,13 +77,15 @@ export default function StockScanner() {
   }>({
     queryKey: ["stocks-research"],
     queryFn: () => stockGet("/research"),
-    refetchInterval: 15_000,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
   });
 
   const { data: botCfgData } = useQuery<{ config: StockBotConfig }>({
     queryKey: ["stocks-bot-config"],
     queryFn: () => stockGet("/bot/config"),
-    refetchInterval: 30_000,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   });
 
   const researchMap = researchData?.results ?? {};
@@ -64,6 +98,7 @@ export default function StockScanner() {
   );
 
   const results = scanData?.results ?? [];
+  const lastScanAt = scanData?.lastScanAt ?? 0;
 
   const filtered = useMemo(() => {
     const q = search.trim().toUpperCase();
@@ -78,7 +113,7 @@ export default function StockScanner() {
       return (b[sortKey] as number) - (a[sortKey] as number);
     });
     return rows;
-  }, [results, sector, search, sortKey]);
+  }, [results, sector, search, sortKey, maAlignOnly]);
 
   const pinned = filtered.filter((r) => watchSet.has(r.ticker));
   const unpinned = filtered.filter((r) => !watchSet.has(r.ticker));
@@ -104,20 +139,30 @@ export default function StockScanner() {
   }
 
   async function triggerScan() {
-    setScanning(true);
     try {
-      await stockAuth(getToken, "/scanner/run", "POST");
-      await qc.invalidateQueries({ queryKey: ["stocks-scanner"] });
-    } catch (e) {
+      // Fire the scan (returns quickly; actual progress tracked via /scanner/progress).
+      stockAuth(getToken, "/scanner/run", "POST").catch(() => {});
+    } catch {
       toast({
         title: "Scan failed",
-        description: e instanceof Error ? e.message : "Broker may not be connected.",
+        description: "Broker may not be connected.",
         variant: "destructive",
       });
-    } finally {
-      setScanning(false);
     }
   }
+
+  // Human-readable scan status
+  const scanStatusText = (() => {
+    if (progressPhase === "snapshots") return "Fetching prices…";
+    if (progressPhase === "scoring") {
+      return currentTicker
+        ? `Scoring ${progressData?.done ?? 0} / ${progressData?.total ?? 0} — ${currentTicker}`
+        : `Scoring ${progressData?.done ?? 0} / ${progressData?.total ?? 0}`;
+    }
+    if (progressPhase === "done") return "Scan complete ✓";
+    if (lastScanAt > 0) return `Last scan ${fmtAge(lastScanAt)}`;
+    return "No scan yet";
+  })();
 
   return (
     <StocksShell>
@@ -147,9 +192,17 @@ export default function StockScanner() {
               <option value="price">Price</option>
             </select>
           </div>
-          <Button size="sm" variant="outline" onClick={triggerScan} disabled={scanning} className="gap-1.5">
-            {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-            Run scan
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={triggerScan}
+            disabled={scanInProgress}
+            className="gap-1.5"
+          >
+            {scanInProgress
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <RefreshCw className="w-3.5 h-3.5" />}
+            {scanInProgress ? "Scanning…" : "Run scan"}
           </Button>
           {researchRunning && (
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -157,6 +210,33 @@ export default function StockScanner() {
             </span>
           )}
         </div>
+
+        {/* Progress bar — visible while a scan is running or just finished */}
+        {(scanInProgress || progressPhase === "done") && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span className="flex items-center gap-1.5">
+                {scanInProgress && <Loader2 className="w-3 h-3 animate-spin" />}
+                {scanStatusText}
+              </span>
+              {progressPhase === "scoring" && (
+                <span className="font-mono text-emerald-400">{progressPct}%</span>
+              )}
+            </div>
+            <div className="h-1.5 rounded-full bg-border overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${
+                  progressPhase === "done" ? "bg-emerald-500" : "bg-emerald-500/70"
+                }`}
+                style={{
+                  width: progressPhase === "snapshots" ? "8%" :
+                         progressPhase === "done" ? "100%" :
+                         `${Math.max(8, progressPct)}%`
+                }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Sector tabs + MA filter */}
         <div className="flex flex-wrap gap-2 items-center">
@@ -176,25 +256,37 @@ export default function StockScanner() {
           <div className="h-4 w-px bg-border mx-0.5" />
           <button
             onClick={() => setMaAlignOnly(!maAlignOnly)}
-            title="Show only stocks where the 21-day MA is above the 50-day and 180-day MA"
+            title="Show only stocks where 21-day MA is above 50-day MA — bullish trend structure"
             className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors flex items-center gap-1.5 ${
               maAlignOnly
                 ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
                 : "border-border text-muted-foreground hover:text-foreground"
             }`}
           >
-            <BarChart2 className="w-3 h-3" /> 21D &gt; 50D &amp; 180D MA
+            <BarChart2 className="w-3 h-3" /> 21D MA aligned
           </button>
         </div>
+
+        {/* Status line below filters */}
+        {!scanInProgress && progressPhase !== "done" && (
+          <p className="text-[11px] text-muted-foreground -mt-2">{scanStatusText}</p>
+        )}
 
         {isLoading ? (
           <div className="h-40 flex items-center justify-center text-muted-foreground">
             <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading scanner…
           </div>
-        ) : filtered.length === 0 ? (
+        ) : results.length === 0 && !scanInProgress ? (
           <div className="h-40 flex flex-col items-center justify-center text-center text-muted-foreground text-sm">
             <p>No scanner results yet.</p>
             <p className="text-xs mt-1">Hit "Run scan" to load the latest prices — works any time, market open or closed.</p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="h-32 flex flex-col items-center justify-center text-center text-muted-foreground text-sm">
+            <p>No stocks match the current filters.</p>
+            {maAlignOnly && (
+              <p className="text-xs mt-1">The 21D MA aligned filter requires deep-scored stocks. Run a scan first.</p>
+            )}
           </div>
         ) : (
           <div className="space-y-4">
@@ -228,6 +320,14 @@ export default function StockScanner() {
       <StockDetail ticker={detail} onClose={() => setDetail(null)} />
     </StocksShell>
   );
+}
+
+/** Format how long ago a UNIX-ms timestamp was, e.g. "3 min ago". */
+function fmtAge(ts: number): string {
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  return `${Math.floor(sec / 3600)}h ago`;
 }
 
 function ResearchBadge({ r }: { r: ResearchResult }) {
@@ -293,7 +393,7 @@ function ScannerCard({ row, research, watched, botExcluded, onOpen, onToggleWatc
           </span>
         )}
         {(row.details?.maAlignment as boolean) && (
-          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-400" title="21-day MA above 50-day and 180-day MA — bullish trend structure">
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-400" title="21-day MA is above 50-day MA — bullish trend structure">
             <BarChart2 className="w-3 h-3" /> 21MA↑
           </span>
         )}

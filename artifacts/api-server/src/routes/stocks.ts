@@ -7,7 +7,7 @@ import { Router } from "express";
 import { getAuth } from "@clerk/express";
 import { alpacaConfigured, getAccount, getPositions } from "../lib/stock/alpaca";
 import { getConfig, saveConfig } from "../lib/stock/config";
-import { getScannerResults, runScan, lastScanTime } from "../lib/stock/scanner";
+import { getScannerResults, runScan, lastScanTime, getScanProgress } from "../lib/stock/scanner";
 import { getAllResearch, getResearchStatus } from "../lib/stock/research";
 import { getScoredNews } from "../lib/stock/news";
 import { getEarnings } from "../lib/stock/earnings";
@@ -71,6 +71,10 @@ router.post("/stocks/scanner/run", requireAuth, async (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Scan failed" });
   }
+});
+
+router.get("/stocks/scanner/progress", (_req, res) => {
+  res.json(getScanProgress());
 });
 
 router.get("/stocks/research", (_req, res) => {

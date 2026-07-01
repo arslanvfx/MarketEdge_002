@@ -8,7 +8,7 @@ import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositi
 import { pool } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
-import { runScan as runStockScan } from "./lib/stock/scanner";
+import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
 import { runBotCycle as runStockBotCycle } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
 
@@ -306,12 +306,18 @@ async function startStockVertical(): Promise<void> {
     return;
   }
 
-  // Scanner every 3 min; bot cycle every 60 s. Both self-guard re-entry and are
-  // internally market-hours aware, so running off-hours is a cheap no-op.
+  // Restore lastScanAt from DB so the UI shows the existing results immediately.
+  await initLastScanAt();
+
+  // Startup scan (force=true so it runs even when market is closed, using
+  // last-session prices to populate the UI immediately).
   const scan = () =>
     runStockScan().catch((err) => logger.warn({ err }, "[stock-scanner] scan failed (non-fatal)"));
-  scan();
-  setInterval(scan, 3 * 60_000);
+  const forceScan = () =>
+    runStockScan({ force: true }).catch((err) => logger.warn({ err }, "[stock-scanner] scan failed (non-fatal)"));
+  forceScan();
+  // Auto-scan every 30 min during market hours; off-hours calls are cheap no-ops.
+  setInterval(scan, 30 * 60_000);
 
   setInterval(() => {
     runStockBotCycle().catch((err) =>
