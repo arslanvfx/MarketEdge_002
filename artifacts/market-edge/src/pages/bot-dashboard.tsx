@@ -193,6 +193,10 @@ const GUARD_LABELS: Record<string, string> = {
   mlFlipped: "ML",
 };
 
+// EST ↔ UTC helpers (EST = UTC − 5; no DST adjustment — bot config uses fixed offset)
+const utcToEst = (h: number) => (h - 5 + 24) % 24;
+const estToUtc = (h: number) => (h + 5) % 24;
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function BotDashboard() {
@@ -345,7 +349,7 @@ export default function BotDashboard() {
             </span>
           )}
           {status?.isInQuietHours && (
-            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title={`Quiet hours active (${cfg?.quietHoursStart}:00–${cfg?.quietHoursEnd}:00 UTC) — no new entries`}>
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title={`Quiet hours active (${String(utcToEst(cfg?.quietHoursStart ?? 0)).padStart(2,"0")}:00–${String(utcToEst(cfg?.quietHoursEnd ?? 0)).padStart(2,"0")}:00 EST) — no new entries`}>
               <Clock className="w-3 h-3" />
               Quiet
             </span>
@@ -685,24 +689,24 @@ export default function BotDashboard() {
 
                 {/* Quiet Hours Start */}
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Quiet Hours Start (UTC)</span>
+                  <span className="text-xs text-muted-foreground">Quiet Hours Start (EST)</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.quietHoursStart ?? 12}
-                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursStart: parseInt(e.target.value) }))}>
+                    value={utcToEst(merged.quietHoursStart ?? 0)}
+                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursStart: estToUtc(parseInt(e.target.value)) }))}>
                     {Array.from({ length: 24 }, (_, i) => (
-                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 UTC</option>
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 EST</option>
                     ))}
                   </select>
                 </label>
 
                 {/* Quiet Hours End */}
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Quiet Hours End (UTC)</span>
+                  <span className="text-xs text-muted-foreground">Quiet Hours End (EST) — set equal to start to disable</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.quietHoursEnd ?? 18}
-                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursEnd: parseInt(e.target.value) }))}>
+                    value={utcToEst(merged.quietHoursEnd ?? 0)}
+                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursEnd: estToUtc(parseInt(e.target.value)) }))}>
                     {Array.from({ length: 24 }, (_, i) => (
-                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 UTC{i === (merged.quietHoursStart ?? 12) ? " (disabled)" : ""}</option>
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 EST{i === utcToEst(merged.quietHoursStart ?? 0) ? " (disabled)" : ""}</option>
                     ))}
                   </select>
                 </label>

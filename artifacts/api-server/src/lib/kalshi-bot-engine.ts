@@ -120,8 +120,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // behaviour.
   maxBetsPerWindow: 3,
   enabled: true,
-  quietHoursStart: 12,   // 12:00 UTC
-  quietHoursEnd: 18,     // 18:00 UTC (no entries 12:00–17:59 UTC by default)
+  quietHoursStart: 0,   // start === end → disabled
+  quietHoursEnd: 0,
   maxConsecutiveLosses: 3,
   circuitBreakerPauseWindows: 0, // disabled — keep betting through losses during test-drive
   enableDirectionCap: false,
