@@ -162,7 +162,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof phase2ThresholdPp === "number" && phase2ThresholdPp >= 10 && phase2ThresholdPp <= 50) {
     partial.phase2ThresholdPp = phase2ThresholdPp;
   }
-  if (typeof maxEntryMinutes === "number" && maxEntryMinutes >= 1 && maxEntryMinutes <= 7) {
+  if (typeof maxEntryMinutes === "number" && maxEntryMinutes >= 1 && maxEntryMinutes <= 11) {
     partial.maxEntryMinutes = maxEntryMinutes;
   }
   if (typeof maxBetsPerWindow === "number" && maxBetsPerWindow >= 1 && maxBetsPerWindow <= 10) {

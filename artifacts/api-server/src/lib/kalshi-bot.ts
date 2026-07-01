@@ -928,7 +928,7 @@ async function _runBotTick(
   }
 
   // Hard ceiling: precise seconds check so the limit is exact.
-  // e.g. maxEntryMinutes=5 → no entry after t+5:00, not t+5:59.
+  // e.g. maxEntryMinutes=11 → no entry after t+11:00, not t+11:59.
   if (secondsElapsed > config.maxEntryMinutes * 60) return;
   // Hard late-entry floor: never enter if fewer than MIN_REMAINING_MINUTES_FOR_ENTRY
   // minutes remain, regardless of the maxEntryMinutes setting. Enforced here at

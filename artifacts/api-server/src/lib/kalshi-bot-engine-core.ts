@@ -386,7 +386,7 @@ export interface BotConfig {
   decisionMode: DecisionMode; // which signal-combination logic to use (default "classic")
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
-  maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 5)
+  maxEntryMinutes: number;   // don't enter after this many minutes into the window (default 11; hard floor = 4 min remaining)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
@@ -420,11 +420,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   decisionMode: "classic",
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
-  // Entry is only allowed between t+45s and t+5:00 of each 15-min window.
-  // 45s warmup = Kalshi market stabilises + Claude opening call completes.
-  // 5-min ceiling = signals get noisier as the window ages.
-  // Hard floor: entry is never allowed if fewer than 4 minutes remain (see kalshi-bot.ts).
-  maxEntryMinutes: 5,
+  // Entry is allowed any time after the target-confirm warmup up until 4 minutes
+  // remain in the window (the hard floor enforced in kalshi-bot.ts).  The ceiling
+  // here (11 min elapsed = 4 min remaining) matches that floor so the only gate is
+  // "must have ≥4 min left" — late-window clarity is not artificially blocked.
+  maxEntryMinutes: 11,
   // Allow up to 3 re-entries per window.  Each entry is independent — the bot
   // exits, re-evaluates, and re-enters only when signals still agree.  Raise to
   // 4-5 for more aggressive testing; set to 1 to revert to the old one-per-window
