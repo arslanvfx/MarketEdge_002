@@ -18,6 +18,7 @@ import {
   getBacktestModes,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
+import { getAllMLStatus } from "../lib/ml-store";
 
 const router = Router();
 
@@ -44,7 +45,16 @@ function requireAuth(req: any, res: any, next: any) {
 // GET /crypto/bot/status — full bot state (public — read only)
 router.get("/crypto/bot/status", (_req, res) => {
   try {
-    res.json(getBotState());
+    const allML = getAllMLStatus();
+    const readyCount = allML.filter(s => s.ready).length;
+    const mlStatus = {
+      ready: allML.length > 0 && allML.every(s => s.ready),
+      readyCount,
+      totalCount: allML.length,
+      minWindows: allML.length > 0 ? Math.min(...allML.map(s => s.windows)) : 0,
+      minRequired: 30,
+    };
+    res.json({ ...getBotState(), mlStatus });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
