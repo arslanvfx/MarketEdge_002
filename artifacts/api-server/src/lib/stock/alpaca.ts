@@ -127,6 +127,35 @@ export async function getNews(symbols: string[], limit = 10): Promise<NewsItem[]
   }));
 }
 
+/**
+ * Fetch news for symbols filtered by a start date (ISO date string, e.g. "2025-06-01").
+ * Useful for pulling a strict 30-day window for analyst-change detection.
+ */
+export async function getNewsInRange(
+  symbols: string[],
+  startDate: string,
+  limit = 20,
+): Promise<NewsItem[]> {
+  if (symbols.length === 0) return [];
+  const params = new URLSearchParams({
+    symbols: symbols.join(","),
+    limit: String(limit),
+    sort: "desc",
+    start: startDate,
+  });
+  const url = `${DATA_BASE}/v1beta1/news?${params}`;
+  const data = await req<{ news?: any[] }>(url);
+  return (data.news ?? []).map((n) => ({
+    id: String(n.id),
+    ticker: (n.symbols?.[0] ?? symbols[0]) as string,
+    headline: n.headline ?? "",
+    summary: n.summary ?? "",
+    url: n.url ?? undefined,
+    source: n.source ?? "Alpaca",
+    publishedAt: n.created_at ?? n.updated_at ?? undefined,
+  }));
+}
+
 // ---------- Trading ----------
 
 export interface AlpacaAccount {

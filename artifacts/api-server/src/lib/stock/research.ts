@@ -1,16 +1,21 @@
 // Claude research pass: evaluates the top-ranked stocks from each scan with a
-// structured research brief. The brief is built from Alpaca news, categorized
-// into earnings results, analyst moves, M&A/SEC activity, and general news,
-// plus upcoming earnings timing and sector macro context.
+// structured research brief. The brief is built from:
+//   1. Latest reported EPS vs consensus estimate (Finnhub /stock/earnings)
+//   2. Analyst rating changes in the past 30 days (Alpaca news, date-filtered)
+//   3. M&A / SEC filings (Alpaca news, category-filtered)
+//   4. General business news (Alpaca news)
+//   5. Sector macro context (live scanner data)
+//   6. Upcoming earnings timing (Finnhub calendar, blackout flag)
 //
-// Results are cached per (ticker, trading-day) so Claude is not re-called on
-// every scan cycle. Runs asynchronously after the scan — fire-and-forget safe.
+// Results are cached per (ticker, trading-day). Runs asynchronously after each
+// scan — fire-and-forget safe.
 
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { logger } from "../logger";
 import { getScoredNews } from "./news";
-import { getEarnings } from "./earnings";
+import { getEarnings, getLatestEarningsSurprise } from "./earnings";
 import { getSectorMomentum } from "./scanner";
+import { getNewsInRange, alpacaConfigured } from "./alpaca";
 import type { NewsItem } from "./types";
 
 const RESEARCH_MODEL = "claude-haiku-4-5";
@@ -59,61 +64,45 @@ export function getResearchStatus(): { running: boolean; ready: string[] } {
   return { running: researchRunning, ready };
 }
 
-/** Categorize news items by domain for the structured research brief. */
-interface CategorizedNews {
-  earnings: NewsItem[];   // EPS results, revenue, guidance, beats/misses
-  analyst: NewsItem[];    // Upgrades, downgrades, price target changes
-  maSec: NewsItem[];      // M&A, acquisitions, SEC filings, regulatory
-  general: NewsItem[];    // Other business news
-}
+// ---------- News categorization ----------
 
-function categorizeNews(news: NewsItem[]): CategorizedNews {
-  const earnings: NewsItem[] = [];
-  const analyst: NewsItem[] = [];
-  const maSec: NewsItem[] = [];
-  const general: NewsItem[] = [];
-  const EARNINGS_RE =
-    /\b(earnings|eps|beat|miss|revenue|quarter(ly)?|guidance|profit|loss|net\s+income|adjusted|fiscal|q[1-4]|results?)\b/i;
-  const ANALYST_RE =
-    /\b(upgrad|downgrad|buy|sell|neutral|overweight|underweight|price.?target|outperform|underperform|analyst|rating|initiat|reiterat|cover)\b/i;
-  const MA_SEC_RE =
-    /\b(acqui|merger|m&a|buyout|takeover|sec\b|8-k|10-k|10-q|proxy|filing|antitrust|regulatory|fcpa|settlement|lawsuit|litigation)\b/i;
+const ANALYST_RE =
+  /\b(upgrad|downgrad|buy|sell|neutral|overweight|underweight|price.?target|outperform|underperform|analyst|rating|initiat|reiterat|cover)\b/i;
+const MA_SEC_RE =
+  /\b(acqui|merger|m&a|buyout|takeover|sec\b|8-k|10-k|10-q|proxy|filing|antitrust|regulatory|fcpa|settlement|lawsuit|litigation)\b/i;
+const EARNINGS_RE =
+  /\b(earnings|eps|beat|miss|revenue|quarter(ly)?|guidance|profit|loss|net\s+income|adjusted|fiscal|q[1-4]|results?)\b/i;
 
-  for (const n of news) {
-    const text = `${n.headline} ${n.summary ?? ""}`;
-    if (EARNINGS_RE.test(text)) {
-      earnings.push(n);
-    } else if (ANALYST_RE.test(text)) {
-      analyst.push(n);
-    } else if (MA_SEC_RE.test(text)) {
-      maSec.push(n);
-    } else {
-      general.push(n);
-    }
-  }
-  return { earnings, analyst, maSec, general };
+function filterNews(items: NewsItem[], re: RegExp, max: number): NewsItem[] {
+  return items.filter((n) => re.test(`${n.headline} ${n.summary ?? ""}`)).slice(0, max);
 }
 
 function formatSection(label: string, items: NewsItem[], max = 3): string {
   const slice = items.slice(0, max);
-  if (slice.length === 0) return `${label}: none identified in recent news`;
+  if (slice.length === 0) return `${label}: none`;
   const lines = slice.map(
     (n) =>
-      `  - "${n.headline}"${n.sentiment ? ` [${n.sentiment}, impact ${n.magnitude ?? 1}/5]` : ""}`,
+      `  - [${n.publishedAt ? n.publishedAt.slice(0, 10) : "date unknown"}] "${n.headline}"` +
+      (n.sentiment ? ` [${n.sentiment}, impact ${n.magnitude ?? 1}/5]` : ""),
   );
   return `${label}:\n${lines.join("\n")}`;
 }
 
 function stripJsonFences(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  return fenced ? fenced[1].trim() : trimmed;
+  const fenced = text.trim().match(/```(?:json)?\s*([\s\S]*?)```/);
+  return fenced ? fenced[1].trim() : text.trim();
 }
 
+/** ISO date string N days ago: used as Alpaca `start` param. */
+function isoDateDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+// ---------- Main research pass ----------
+
 /**
- * Evaluate up to MAX_TICKERS stocks with Claude research (low-token model).
- * Skips tickers already evaluated today. Safe to call concurrently —
- * re-entrant guard ensures only one pass runs at a time.
+ * Evaluate up to MAX_TICKERS stocks with Claude research.
+ * Skips tickers already evaluated today. Re-entrant guard prevents double runs.
  */
 export async function runResearchPass(tickers: string[]): Promise<void> {
   if (researchRunning) return;
@@ -124,54 +113,119 @@ export async function runResearchPass(tickers: string[]): Promise<void> {
     for (const rawTicker of batch) {
       const ticker = rawTicker.toUpperCase();
       const cacheKey = `${ticker}:${day}`;
-      if (cache.has(cacheKey)) continue; // already done today
+      if (cache.has(cacheKey)) continue;
 
       try {
-        // Fetch 12 headlines so we have enough items to populate all categories.
-        const [allNews, earnings] = await Promise.all([
-          getScoredNews(ticker),
-          getEarnings(ticker, 72),
+        // ── 1. Parallel data fetch ──────────────────────────────────────────
+        const start30 = isoDateDaysAgo(30);
+        const [recentNews, analystNews30d, surprise, upcomingEarnings] = await Promise.all([
+          getScoredNews(ticker),                                          // scored, cached
+          alpacaConfigured()
+            ? getNewsInRange([ticker], start30, 20)                      // 30-day window for analyst changes
+            : Promise.resolve([] as NewsItem[]),
+          getLatestEarningsSurprise(ticker),                             // EPS actual vs estimate
+          getEarnings(ticker, 72),                                        // upcoming calendar + blackout
         ]);
 
-        const cat = categorizeNews(allNews);
+        // ── 2. Categorize news ──────────────────────────────────────────────
 
-        // Sector momentum as a macro proxy (positive = sector tailwind).
+        // Analyst changes: explicitly date-filtered to 30 days, then regex-matched
+        const analystItems = filterNews(analystNews30d, ANALYST_RE, 4);
+
+        // M&A / SEC from scored news (recent, de-duped via cache)
+        const maSec = filterNews(recentNews, MA_SEC_RE, 2);
+
+        // Earnings results mentioned in recent news (general headlines)
+        const earningsNews = filterNews(recentNews, EARNINGS_RE, 2);
+
+        // General: anything in recentNews not already captured above
+        const usedHeadlines = new Set([
+          ...analystItems.map((n) => n.headline),
+          ...maSec.map((n) => n.headline),
+          ...earningsNews.map((n) => n.headline),
+        ]);
+        const general = recentNews
+          .filter((n) => !usedHeadlines.has(n.headline))
+          .slice(0, 3);
+
+        // ── 3. Build structured brief ───────────────────────────────────────
+
+        // Section 1: EPS surprise (structured, from Finnhub /stock/earnings)
+        let epsSurpriseLine: string;
+        if (surprise) {
+          const pct = surprise.surprisePercent;
+          const direction =
+            pct == null
+              ? "no surprise data"
+              : pct > 0
+                ? `BEAT by ${pct.toFixed(1)}%`
+                : `MISSED by ${Math.abs(pct).toFixed(1)}%`;
+          const actualStr = surprise.actual != null ? `$${surprise.actual.toFixed(2)}` : "N/A";
+          const estStr = surprise.estimate != null ? `$${surprise.estimate.toFixed(2)}` : "N/A";
+          epsSurpriseLine = `Last reported (${surprise.period}): EPS actual=${actualStr} vs estimate=${estStr} → ${direction}`;
+        } else {
+          epsSurpriseLine = "Last reported EPS vs estimate: data unavailable (FINNHUB_API_KEY not set or no recent data)";
+        }
+
+        // Combine earnings news headlines under the same section
+        const earningsSection =
+          `EARNINGS RESULTS & EPS SURPRISE:\n  ${epsSurpriseLine}` +
+          (earningsNews.length > 0
+            ? "\n  Related headlines:\n" +
+              earningsNews
+                .map((n) => `    - [${n.publishedAt?.slice(0, 10) ?? "?"}] "${n.headline}"`)
+                .join("\n")
+            : "");
+
+        // Upcoming earnings timing
+        const earningsLine = upcomingEarnings
+          ? `${upcomingEarnings.date} in ${upcomingEarnings.hoursUntil.toFixed(0)}h${
+              upcomingEarnings.soon
+                ? " — ⚠️  EARNINGS IMMINENT: high uncertainty, penalize score"
+                : ""
+            }`
+          : "no calendar data";
+
+        // Sector context
         const uni = (await import("./universe")).lookupUniverse(ticker);
         const sectorMom = uni ? getSectorMomentum(uni.sector) : 0;
         const macroLine =
           sectorMom > 0.5
-            ? `Sector tailwind: ${uni?.sector ?? "sector"} up ${sectorMom.toFixed(1)}% on average today`
+            ? `${uni?.sector ?? "sector"} up +${sectorMom.toFixed(1)}% average today (tailwind)`
             : sectorMom < -0.5
-              ? `Sector headwind: ${uni?.sector ?? "sector"} down ${Math.abs(sectorMom).toFixed(1)}% on average today`
-              : `Sector: ${uni?.sector ?? "sector"} roughly flat today (${sectorMom.toFixed(1)}%)`;
-
-        const earningsLine = earnings
-          ? `Upcoming earnings: ${earnings.date} in ${earnings.hoursUntil.toFixed(0)}h${earnings.soon ? " — EARNINGS IMMINENT (within blackout)" : ""}`
-          : "Upcoming earnings: no data available";
+              ? `${uni?.sector ?? "sector"} down ${sectorMom.toFixed(1)}% average today (headwind)`
+              : `${uni?.sector ?? "sector"} roughly flat (${sectorMom.toFixed(1)}%)`;
 
         const brief = [
-          formatSection("EARNINGS RESULTS & GUIDANCE", cat.earnings, 3),
-          formatSection("ANALYST MOVES (upgrades/downgrades/targets)", cat.analyst, 3),
-          formatSection("M&A / SEC FILINGS / REGULATORY", cat.maSec, 2),
-          formatSection("GENERAL BUSINESS NEWS", cat.general, 3),
-          `MACRO: ${macroLine}`,
-          `TIMING: ${earningsLine}`,
+          earningsSection,
+          formatSection(
+            "ANALYST RATING CHANGES (past 30 days — upgrades/downgrades/price targets)",
+            analystItems,
+            4,
+          ),
+          formatSection("M&A / SEC FILINGS / REGULATORY", maSec, 2),
+          formatSection("GENERAL BUSINESS NEWS", general, 3),
+          `SECTOR MACRO: ${macroLine}`,
+          `UPCOMING EARNINGS: ${earningsLine}`,
         ].join("\n\n");
 
+        // ── 4. Claude evaluation ────────────────────────────────────────────
         const prompt = `You are a senior equity research analyst. Evaluate ${ticker} as a short-term trading opportunity (1-5 day horizon) using this structured research brief.
 
 ${brief}
 
-Score this stock 0-100:
+Score this stock 0-100 based on the evidence above:
 - 70-100: Strong opportunity — clear positive catalysts, analyst support, favorable sector
 - 40-69: Neutral — mixed or limited catalysts, wait-and-see
 - 0-39: Avoid — negative catalysts, earnings risk, regulatory concerns, analyst downgrades
 
-Reference specific details from the brief in your reason. If earnings are imminent, penalize score.
+Rules:
+- If earnings are IMMINENT (⚠️), cap score at 45 regardless of other signals.
+- Reference specific details (EPS beat/miss, analyst firm name, M&A target) in your reason.
+- Do not generalize — cite what you see in the brief.
 
-Respond with ONLY JSON:
-{"score":0-100,"verdict":"Buy"|"Hold"|"Avoid","reason":"1-2 sentences, cite specific headline or catalyst"}
-No prose, no markdown fences.`;
+Respond with ONLY JSON (no prose, no markdown):
+{"score":0-100,"verdict":"Buy"|"Hold"|"Avoid","reason":"1-2 sentences citing specific data points"}`;
 
         const message = await anthropic.messages.create({
           model: RESEARCH_MODEL,
@@ -180,8 +234,8 @@ No prose, no markdown fences.`;
         });
 
         const block = message.content[0];
-        const text = block && block.type === "text" ? block.text : "";
-        const parsed = JSON.parse(stripJsonFences(text)) as {
+        const rawText = block && block.type === "text" ? block.text : "";
+        const parsed = JSON.parse(stripJsonFences(rawText)) as {
           score: number;
           verdict: string;
           reason: string;
@@ -200,7 +254,13 @@ No prose, no markdown fences.`;
 
         cache.set(cacheKey, result);
         logger.info(
-          { ticker, score: result.score, verdict: result.verdict },
+          {
+            ticker,
+            score: result.score,
+            verdict: result.verdict,
+            hasSurprise: !!surprise,
+            analystCount: analystItems.length,
+          },
           "[stock-research] ticker researched",
         );
       } catch (err) {
