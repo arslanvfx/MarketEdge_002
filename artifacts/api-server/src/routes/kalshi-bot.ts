@@ -272,13 +272,24 @@ router.get("/crypto/bot/auto-tune-log", async (req, res) => {
   }
 });
 
-// DELETE /crypto/bot/bets/old — admin-only maintenance endpoint.
+// DELETE /crypto/bot/bets/old — admin maintenance endpoint.
 // Deletes kalshi_bot_bets records older than `hours` hours (1–24, default 2)
 // and reloads in-memory daily P&L so the running bot reflects the clean slate.
 // prediction_records (learning data) are NEVER touched.
-// Gated by requireAuth (Clerk admin guard) — same protection as all other bot
-// mutation endpoints. hours is capped to 24 to prevent accidental full wipes.
-router.delete("/crypto/bot/bets/old", requireAuth, async (req, res) => {
+// Accepts either Clerk admin auth OR X-Clear-Password header so it can be
+// invoked from the frontend (Clerk session) or via curl (password).
+router.delete("/crypto/bot/bets/old", async (req, res) => {
+  const clerkAuth = getAuth(req);
+  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
+  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
+
+  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
+  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
+
+  if (!hasClerkAuth && !hasClearPassword) {
+    res.status(401).json({ error: "Unauthorized — sign in as admin or supply X-Clear-Password" });
+    return;
+  }
   const hoursRaw = req.query.hours;
   const hours = Math.min(24, Math.max(1, parseInt(String(hoursRaw ?? "2"), 10) || 2));
   try {
