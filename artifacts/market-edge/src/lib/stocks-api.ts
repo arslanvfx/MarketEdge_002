@@ -184,6 +184,7 @@ export interface HistoryRow {
   pnl: number | null;
   exit_reason: string | null;
   outcome: "win" | "loss" | "push" | null;
+  signal_type: "technical" | "ai" | "ml" | "unknown";
   created_at: string;
   exited_at: string | null;
 }

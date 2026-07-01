@@ -212,19 +212,48 @@ router.get("/stocks/bot/positions", async (_req, res) => {
   }
 });
 
+// Derive which signal drove a trade from the stored signals snapshot. The bot
+// blends stat / Claude / ML votes weighted by confidence (Claude ×1.1); the
+// "primary driver" is the highest-weighted signal that agreed with the
+// combined direction actually taken. News only tilts confidence and is not
+// stored per-trade, so it is not surfaced as a discrete driver here.
+function deriveSignalType(signals: any): string {
+  if (!signals || typeof signals !== "object") return "unknown";
+  const dir = signals.combinedDirection;
+  if (!dir) return "unknown";
+  const candidates: { type: string; weight: number }[] = [];
+  const { stat, claude, ml } = signals;
+  if (stat && stat.direction === dir) {
+    candidates.push({ type: "technical", weight: (Number(stat.confidence) || 0) / 100 });
+  }
+  if (claude && claude.direction === dir) {
+    candidates.push({ type: "ai", weight: ((Number(claude.confidence) || 0) / 100) * 1.1 });
+  }
+  if (ml && ml.ready && ml.direction === dir) {
+    candidates.push({ type: "ml", weight: (Number(ml.confidence) || 0) / 100 });
+  }
+  if (candidates.length === 0) return "unknown";
+  candidates.sort((a, b) => b.weight - a.weight);
+  return candidates[0].type;
+}
+
 router.get("/stocks/bot/history", async (req, res) => {
   const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
   try {
     const rows = (await db.execute(sql`
       SELECT id, ticker, sector, action, trading_mode, mode, side, qty, confidence,
              entry_price, exit_price, stop_loss, target_price, notional, pnl,
-             exit_reason, outcome, created_at, exited_at
+             exit_reason, outcome, signals, created_at, exited_at
       FROM stock_bot_bets
       WHERE archived_at IS NULL
       ORDER BY created_at DESC
       LIMIT ${limit}
     `)) as unknown as { rows: any[] };
-    res.json({ history: rows.rows ?? [] });
+    const history = (rows.rows ?? []).map((r) => {
+      const { signals, ...rest } = r;
+      return { ...rest, signal_type: deriveSignalType(signals) };
+    });
+    res.json({ history });
   } catch {
     res.status(500).json({ error: "Failed to load history" });
   }

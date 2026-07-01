@@ -75,12 +75,15 @@ export default function StockPerformance() {
 
   const bySector = useMemo(() => bucketBy((r) => r.sector).map((b) => ({ ...b, winRate: winRate(b) })), [closed]);
   const byMode = useMemo(() => bucketBy((r) => r.trading_mode).map((b) => ({ ...b, winRate: winRate(b) })), [closed]);
+  const bySignal = useMemo(() => bucketBy((r) => r.signal_type).map((b) => ({ ...b, winRate: winRate(b) })), [closed]);
   const byTicker = useMemo(() => bucketBy((r) => r.ticker), [closed]);
 
   const bestTickers = useMemo(() => [...byTicker].sort((a, b) => b.pnl - a.pnl).slice(0, 5), [byTicker]);
   const worstTickers = useMemo(() => [...byTicker].sort((a, b) => a.pnl - b.pnl).slice(0, 5), [byTicker]);
 
   const modeLabel = (k: string) => (k === "day" ? "Day" : k === "swing" ? "Swing" : k === "long" ? "Long" : k);
+  const signalLabel = (k: string) =>
+    k === "technical" ? "Technical" : k === "ai" ? "Claude AI" : k === "ml" ? "ML" : "Unknown";
 
   return (
     <StocksShell>
@@ -163,6 +166,27 @@ export default function StockPerformance() {
                 </ResponsiveContainer>
               </section>
             </div>
+
+            {/* Win rate by signal type */}
+            <section className="rounded-lg border border-border bg-card p-5">
+              <h2 className="text-sm font-bold text-foreground mb-1">Win Rate by Signal Type</h2>
+              <p className="text-[11px] text-muted-foreground mb-3">
+                Which edge — Technical, Claude AI, or ML — drove each entry, by the highest-weighted signal that agreed with the trade.
+              </p>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={bySignal.map((b) => ({ ...b, label: signalLabel(b.key) }))} margin={{ top: 8, right: 12, bottom: 0, left: -18 }}>
+                  <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" />
+                  <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" tickFormatter={(v) => `${v}%`} />
+                  <RTooltip contentStyle={{ background: "hsl(222 47% 11%)", border: "1px solid hsl(216 34% 17%)", borderRadius: 8, fontSize: 12 }}
+                    formatter={(v: number, _n, p) => [`${Math.round(v)}% (${(p.payload as Bucket).wins}W/${(p.payload as Bucket).losses}L)`, "Win rate"]} />
+                  <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                    {bySignal.map((b, i) => (
+                      <Cell key={i} fill={(b.winRate ?? 0) >= 50 ? "#fbbf24" : "#f87171"} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </section>
 
             {/* Best / worst tickers */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
