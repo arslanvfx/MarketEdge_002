@@ -1175,25 +1175,33 @@ async function closePosition(
   // Capture the live coin price at the moment the position is closed.
   const cryptoPriceAtExit = getCachedPrediction(pos.symbol)?.price ?? null;
 
-  await persistBetRecord({
-    symbol: pos.symbol,
-    windowKey: pos.windowKey,
-    ticker: pos.ticker,
-    direction: pos.direction,
-    action: isLateRecovery ? "late_recovery_exit" : isExpiry ? "expired" : "exit",
-    signals: pos.entryDecision.signals,
-    entryPrice: pos.entryYesPrice,
-    exitPrice: fillPrice ?? undefined,
-    kalshiTarget: pos.kalshiTarget,
-    contractCount: pos.contractCount,
-    betAmount: pos.betAmount,
-    pnl,
-    exitReason: reason,
-    phase2Activated: pos.phase2Activated,
-    phase2RecoveredAmount: phase2RecoveredAmount ?? undefined,
-    existingId: pos.id,
-    cryptoPriceAtExit,
-  });
+  // Non-throwing: all in-memory state (P&L, balance, circuit-breaker,
+  // recentKalshiTargets) is already updated above. A DB failure here must
+  // NOT prevent openPositions.delete() from running — otherwise the position
+  // stays stuck in memory across windows and no further bets can be placed.
+  try {
+    await persistBetRecord({
+      symbol: pos.symbol,
+      windowKey: pos.windowKey,
+      ticker: pos.ticker,
+      direction: pos.direction,
+      action: isLateRecovery ? "late_recovery_exit" : isExpiry ? "expired" : "exit",
+      signals: pos.entryDecision.signals,
+      entryPrice: pos.entryYesPrice,
+      exitPrice: fillPrice ?? undefined,
+      kalshiTarget: pos.kalshiTarget,
+      contractCount: pos.contractCount,
+      betAmount: pos.betAmount,
+      pnl,
+      exitReason: reason,
+      phase2Activated: pos.phase2Activated,
+      phase2RecoveredAmount: phase2RecoveredAmount ?? undefined,
+      existingId: pos.id,
+      cryptoPriceAtExit,
+    });
+  } catch (err) {
+    logger.warn({ err, sym: pos.symbol }, "[kalshi-bot] closePosition: DB persist error (non-fatal) — position cleared from memory regardless");
+  }
 
   // Update recent Kalshi strike history for momentum/regime tracking.
   // We record the target price from the closed position (oldest-first order).
