@@ -366,7 +366,10 @@ const KALSHI_URL_SLUGS: Record<string, { path: string; label: string }> = {
 };
 
 const kalshiRouteCache = new Map<string, { data: KalshiTargetPayload; fetchedAt: number }>();
-const KALSHI_TARGET_TTL = 15_000; // 15s — catches new 15-min windows quickly
+// Normal TTL 15s; reduced to 5s near window boundaries (first/last 90s of each
+// 15-min window) so new Kalshi markets are picked up within one poll cycle.
+const KALSHI_TARGET_TTL_NORMAL = 15_000;
+const KALSHI_TARGET_TTL_BOUNDARY = 5_000;
 
 // Per-window Kalshi target cache for the ML prediction endpoint.
 // Key: `${symbol}:${windowMs}` — automatically expires each 15-min boundary.
@@ -379,11 +382,14 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
   if (!series) return { available: false, targetPrice: null };
 
   const cached = kalshiRouteCache.get(symbol);
-  if (cached && Date.now() - cached.fetchedAt < KALSHI_TARGET_TTL) {
+  const secIntoWin = Math.floor(Date.now() / 1_000) % (15 * 60);
+  const nearBoundary = secIntoWin < 90 || secIntoWin > (15 * 60 - 90);
+  const routeTTL = nearBoundary ? KALSHI_TARGET_TTL_BOUNDARY : KALSHI_TARGET_TTL_NORMAL;
+  if (cached && Date.now() - cached.fetchedAt < routeTTL) {
     // If the cached market's close_time has already passed, the previous window
     // has expired — bypass the cache immediately so the new window's strike is
     // fetched instead of serving a stale target that would produce the wrong
-    // ABOVE/BELOW direction for up to KALSHI_TARGET_TTL seconds.
+    // ABOVE/BELOW direction for up to routeTTL seconds.
     const ct = cached.data.closeTime;
     if (!ct || new Date(ct).getTime() > Date.now()) return cached.data;
     // closeTime is in the past — fall through to re-fetch the current window.

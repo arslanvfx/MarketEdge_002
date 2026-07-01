@@ -1929,6 +1929,17 @@ export const KALSHI_SERIES: Record<string, string> = {
 const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number; closeTime?: string; yesPrice?: number | null }>();
 const KALSHI_TARGET_LIB_TTL = 12_000;
 
+// Tracks when each symbol's new-window Kalshi target was first confirmed.
+// Set the moment a NEW ticker is seen in fetchKalshiTarget (i.e. Kalshi published).
+// Consumed by:
+//   • snap gate  — fires opening Claude+ML immediately instead of after fixed 45s delay
+//   • kalshi-bot — replaces time-based warmup with target-detection gate
+const confirmedTargetStore = new Map<string, { ticker: string; confirmedAt: number; target: number }>();
+
+export function getConfirmedTargetMs(symbol: string): number | null {
+  return confirmedTargetStore.get(symbol.toUpperCase())?.confirmedAt ?? null;
+}
+
 // Returns the most-recently-seen event ticker for a symbol (e.g. "KXBTC15M-25JUN2026-B68000").
 // Used by callers (which have the coin price) to detect new windows.
 export function getLastKalshiTicker(symbol: string): string | undefined {
@@ -2002,7 +2013,14 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
   // boundary — silently recording the wrong target in a new prediction record.
   if (!targetTime) {
     const hit = kalshiTargetCache.get(sym);
-    if (hit && Date.now() - hit.at < KALSHI_TARGET_LIB_TTL) {
+    // Near a window boundary (first 90s or last 90s of a 15-min window) reduce
+    // the TTL to 5s so new Kalshi markets are detected within one poll cycle
+    // rather than waiting the full 12s. This is the primary lever for reducing
+    // entry latency — the new ticker usually appears 10-30s after boundary.
+    const secIntoWindow = Math.floor(Date.now() / 1_000) % (15 * 60);
+    const isNearBoundary = secIntoWindow < 90 || secIntoWindow > (15 * 60 - 90);
+    const effectiveTTL = isNearBoundary ? 5_000 : KALSHI_TARGET_LIB_TTL;
+    if (hit && Date.now() - hit.at < effectiveTTL) {
       // Guard: if the cached market's close_time has already passed, the entry
       // holds the previous window's target — even if it was written just now
       // (Kalshi's API can take 20-30s to transition the market to "closed").
@@ -2087,6 +2105,19 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       // priceAtOpen is filled in lazily by updateKalshiWindowPrice (first caller with coin price).
       if (selected.ticker && !kalshiWindowStore.has(selected.ticker)) {
         kalshiWindowStore.set(selected.ticker, { priceAtOpen: null, openedAt: Date.now() });
+      }
+      // Target-detection gate: record the first moment we see this window's ticker.
+      // This timestamp drives the snap gate and bot warmup — replacing the old fixed
+      // 45s delay with "fire as soon as target is confirmed + a small stability buffer."
+      if (selected.ticker) {
+        const prevConf = confirmedTargetStore.get(sym);
+        if (!prevConf || prevConf.ticker !== selected.ticker) {
+          confirmedTargetStore.set(sym, {
+            ticker: selected.ticker,
+            confirmedAt: Date.now(),
+            target: selected.floor_strike!,
+          });
+        }
       }
       return selected.floor_strike!;
     }
@@ -2899,14 +2930,12 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         //   • After 60 s with no target, snap anyway (null target) so the
         //     window always has a prediction for model-accuracy tracking.
         //   • Never snap after 12 min (too far from window open).
-        const SNAP_DELAY_MS   = 45_000;       // min ms into window before first attempt
-        const SNAP_GIVE_UP_MS = 90_000;      // snap without Kalshi target after 90 s max
-        const SNAP_MAX_MS     = 12 * 60_000; // never snap this late in the window
-        //   Extended from 6→12 min so a brief server restart (e.g. deployment)
-        //   mid-window can still catch up on the next 30-s tick.  The timeToNext
-        //   > 60s guard already prevents snapping in the final minute.
-        //   SNAP_GIVE_UP_MS reduced from 4 min → 60 s: Kalshi normally publishes
-        //   within 30 s; waiting 4 min was blocking the stat snap unnecessarily.
+        // SNAP_DELAY_MS removed — snap gate is now target-detection-based (see below).
+        // The snap fires as soon as the new window's Kalshi target has been confirmed
+        // for at least TARGET_CONFIRM_BUFFER_MS, replacing the old fixed 45s timer.
+        const TARGET_CONFIRM_BUFFER_MS = 5_000;  // 5s stability buffer after target confirmed
+        const SNAP_GIVE_UP_MS = 90_000;          // give up waiting for Kalshi target after 90s
+        const SNAP_MAX_MS     = 12 * 60_000;     // never snap after 12 min into the window
         const windowStartMs = nextBoundary.getTime() - 15 * 60_000;
         const timeIntoWindow = nowMs - windowStartMs;
 
@@ -2983,11 +3012,24 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
           }
         }
 
+        // Target-detection snap gate: fire as soon as the new Kalshi target has
+        // been confirmed for TARGET_CONFIRM_BUFFER_MS — no fixed timer needed.
+        // For non-Kalshi coins (KALSHI_SERIES[sym] falsy), confirmed is never set
+        // so we fall back to a lightweight 15s delay from window start.
+        // Fallback path: if 90s have elapsed and still no target (SNAP_GIVE_UP_MS),
+        // snap without a target so the window always has an accuracy record.
+        const confirmedSnap = confirmedTargetStore.get(sym);
+        const msSinceConfirmed = confirmedSnap ? nowMs - confirmedSnap.confirmedAt : null;
+        const kalshiSnapReady = KALSHI_SERIES[sym]
+          ? msSinceConfirmed !== null && msSinceConfirmed >= TARGET_CONFIRM_BUFFER_MS
+          : timeIntoWindow >= 15_000; // non-Kalshi: small fixed buffer only
+        const snapFallback = KALSHI_SERIES[sym] && timeIntoWindow >= SNAP_GIVE_UP_MS;
+
         if (
           !alreadySnapped &&
           !snapInFlight.has(snapKey) &&
           timeToNext > 60_000 &&
-          timeIntoWindow >= SNAP_DELAY_MS &&
+          (kalshiSnapReady || snapFallback) &&
           timeIntoWindow < SNAP_MAX_MS
         ) {
           snapInFlight.add(snapKey);
