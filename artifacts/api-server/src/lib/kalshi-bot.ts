@@ -484,6 +484,22 @@ export async function loadDailyPnlFromDB(): Promise<void> {
 }
 
 /**
+ * Delete kalshi_bot_bets records older than `hours` hours and reload in-memory
+ * daily P&L counters so the bot reflects the trimmed history immediately.
+ * Prediction_records (learning data) are never touched.
+ */
+export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }> {
+  const result = await db.execute(
+    sql`DELETE FROM kalshi_bot_bets WHERE created_at < NOW() - (${hours} || ' hours')::interval`
+  );
+  const deleted = (result as unknown as { rowCount: number }).rowCount ?? 0;
+  logger.info({ deleted, hours }, "[kalshi-bot] clearBetHistoryOld — bet records deleted");
+  // Reload in-memory daily counters so the running bot reflects the clean slate.
+  await loadDailyPnlFromDB();
+  return { deleted };
+}
+
+/**
  * Recover an open position from the DB after a server restart.
  * Looks for the most recent 'bet' row with no exitedAt within the last 24 hours
  * (24h covers midnight-UTC boundaries so a position opened late in one day is

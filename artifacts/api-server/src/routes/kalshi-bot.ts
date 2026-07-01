@@ -13,6 +13,7 @@ import {
   getPerformanceReport,
   getBotAutoTuneLog,
   getPausedCoinState,
+  clearBetHistoryOld,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 
@@ -265,6 +266,31 @@ router.get("/crypto/bot/auto-tune-log", async (req, res) => {
   try {
     const entries = await getBotAutoTuneLog(limit);
     res.json({ entries });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// DELETE /crypto/bot/bets/old — delete bet history older than `hours` hours
+// (default 2). Also reloads in-memory daily P&L so the running bot reflects
+// the trimmed history immediately. Requires X-Clear-Password header.
+// prediction_records (learning data) are NEVER touched.
+router.delete("/crypto/bot/bets/old", async (req, res) => {
+  const expected = process.env["CLEAR_LOGS_PASSWORD"];
+  if (!expected) {
+    res.status(503).json({ error: "Clear password not configured on server" });
+    return;
+  }
+  if (req.headers["x-clear-password"] !== expected) {
+    res.status(401).json({ error: "Invalid password" });
+    return;
+  }
+  const hoursRaw = req.query.hours;
+  const hours = hoursRaw != null ? Math.max(1, parseInt(String(hoursRaw), 10) || 2) : 2;
+  try {
+    const result = await clearBetHistoryOld(hours);
+    res.json({ ok: true, deleted: result.deleted, hours });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
