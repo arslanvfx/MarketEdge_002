@@ -138,7 +138,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "ml_primary") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus") {
     partial.decisionMode = decisionMode;
   }
   if (

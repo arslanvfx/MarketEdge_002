@@ -14,7 +14,7 @@ const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type DecisionMode = "classic" | "ml_gate" | "consensus" | "ml_primary";
+type DecisionMode = "classic" | "ml_gate" | "consensus";
 
 interface BotConfig {
   betSize: number;
@@ -671,15 +671,14 @@ export default function BotDashboard() {
                 {/* Decision Mode — full-width row */}
                 <div className="col-span-2 flex flex-col gap-2">
                   <span className="text-xs text-muted-foreground">Decision Logic</span>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     {([
-                      { id: "classic",    label: "Classic",    desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
-                      { id: "ml_gate",    label: "ML Gate",    desc: "Stat+Claude decide direction; ML vetos if it disagrees" },
-                      { id: "consensus",  label: "Consensus",  desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
-                      { id: "ml_primary", label: "ML Primary", desc: "ML model must be ready and confident (≥62%) to enter" },
+                      { id: "classic",   label: "Classic",   desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
+                      { id: "ml_gate",   label: "ML Gate",   desc: "Stat+Claude decide direction; ML vetos if it disagrees" },
+                      { id: "consensus", label: "Consensus", desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
-                      const needsML = m.id === "ml_gate" || m.id === "ml_primary";
+                      const needsML = m.id === "ml_gate";
                       return (
                         <button
                           key={m.id}
@@ -974,10 +973,9 @@ export default function BotDashboard() {
           const activeMode = status?.config?.decisionMode ?? "classic";
 
           const MODE_META: Record<string, { label: string; desc: string; color: string; accent: string }> = {
-            classic:    { label: "Classic",     desc: "Stat → Claude → ML cascade", color: "border-sky-500/40 bg-sky-950/10",     accent: "text-sky-400" },
-            ml_gate:    { label: "ML Gate",     desc: "ML veto on disagreement",    color: "border-violet-500/40 bg-violet-950/10", accent: "text-violet-400" },
-            consensus:  { label: "Consensus",   desc: "2/3 majority vote",          color: "border-amber-500/40 bg-amber-950/10",  accent: "text-amber-400" },
-            ml_primary: { label: "ML Primary",  desc: "ML must lead",               color: "border-emerald-500/40 bg-emerald-950/10", accent: "text-emerald-400" },
+            classic:   { label: "Classic",   desc: "Stat → Claude → ML cascade", color: "border-sky-500/40 bg-sky-950/10",      accent: "text-sky-400" },
+            ml_gate:   { label: "ML Gate",   desc: "ML veto on disagreement",    color: "border-violet-500/40 bg-violet-950/10", accent: "text-violet-400" },
+            consensus: { label: "Consensus", desc: "2/3 majority vote",          color: "border-amber-500/40 bg-amber-950/10",  accent: "text-amber-400" },
           };
 
           return (

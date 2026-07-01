@@ -2331,7 +2331,7 @@ export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
       modeMap.set(mode, entry);
     }
 
-    const ALL_MODES: DecisionMode[] = ["classic", "ml_gate", "consensus", "ml_primary"];
+    const ALL_MODES: DecisionMode[] = ["classic", "ml_gate", "consensus"];
     const result: LogicModeStats[] = [];
 
     const toStats = (e: { bets: number; wins: number; losses: number; pnl: number; confSum: number; confCount: number }, m: string): LogicModeStats => ({

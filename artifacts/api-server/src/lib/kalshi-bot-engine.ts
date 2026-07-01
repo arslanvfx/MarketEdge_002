@@ -69,7 +69,7 @@ export {
   type PriceRegime,
 };
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "ml_primary";
+export type DecisionMode = "classic" | "ml_gate" | "consensus";
 
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
@@ -259,20 +259,6 @@ export function makeBotDecision(
   });
 
   const decisionMode: DecisionMode = config.decisionMode ?? "classic";
-
-  // ── Decision Mode: ml_primary ──────────────────────────────────────────────
-  // Require ML to be ready before taking any position. If ML is not ready → skip.
-  if (decisionMode === "ml_primary") {
-    if (mlAbove === null || mlConfidence == null || mlConfidence < ML_PRIMARY_MIN_CONFIDENCE) {
-      return {
-        action: "SKIP",
-        confidence: 0,
-        reasoning: `ml_primary: ML not ready (conf=${mlConfidence?.toFixed(0) ?? "—"}) — skipping`,
-        signals: buildSnapshot(null),
-      };
-    }
-    // ML is ready → fall through to classic; PATH A will take over
-  }
 
   // ── Decision Mode: consensus ──────────────────────────────────────────────
   // Require at least 2 out of [Stat, Claude, ML] to agree on the same direction.
