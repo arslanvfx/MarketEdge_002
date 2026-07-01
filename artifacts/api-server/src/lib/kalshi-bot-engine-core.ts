@@ -30,7 +30,7 @@ export const BASE_CONFIDENCE_HALF_PAIR = 60;
 // Each validating signal adds this when it agrees in Path B/C (WM).
 export const CONFIDENCE_BOOST_PER_SIGNAL = 8;
 // Minimum ML confidence required for ML to lead (Path A).
-export const ML_PRIMARY_MIN_CONFIDENCE = 58;
+export const ML_PRIMARY_MIN_CONFIDENCE = 62;
 // Each agreeing validator (Claude, Stat, WM) adds this when ML leads (Path A).
 export const ML_SIGNAL_BOOST = 6;
 
@@ -112,15 +112,37 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
   }
 
   // Whether the ML model is ready to lead
-  const mlLeadReady =
+  let mlLeadReady =
     inp.mlAbove !== null &&
     inp.mlConfidence != null &&
     inp.mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE;
+
+  // Veto PATH A when the core pair (Stat + Claude) are BOTH available and BOTH
+  // oppose ML's direction.  When two independent signals unanimously disagree
+  // with ML, the core pair is more reliable for direction — let PATH B/C decide.
+  if (
+    mlLeadReady &&
+    inp.mlAbove !== null &&
+    inp.statAbove !== null && inp.claudeAbove !== null &&
+    inp.statAbove !== inp.mlAbove && inp.claudeAbove !== inp.mlAbove
+  ) {
+    mlLeadReady = false;
+  }
 
   // ── PATH A: ML primary ────────────────────────────────────────────────────
   if (mlLeadReady) {
     const mlDir = inp.mlAbove as boolean;
     const action: BotDecisionAction = mlDir ? "BET_YES" : "BET_NO";
+
+    // Guard: when ML is the ONLY available signal (no Stat, no Claude) and WM
+    // signals caution, skip rather than betting on a single unvalidated signal.
+    if (inp.statAbove === null && inp.claudeAbove === null && inp.wmRec === "caution") {
+      return skip(
+        `ML only + caution: no core signals to validate ML(${mlDir}) and WM signals caution — skipping`,
+        ev,
+      );
+    }
+
     let confidence = inp.mlConfidence as number;
 
     if (inp.claudeAbove === mlDir) confidence += ML_SIGNAL_BOOST;

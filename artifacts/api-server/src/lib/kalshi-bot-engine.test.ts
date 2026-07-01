@@ -114,11 +114,12 @@ test("PATH A: all three validators agree with ML → +3×ML_SIGNAL_BOOST", () =>
   assert.equal(r.confidence, 62 + 3 * ML_SIGNAL_BOOST);
 });
 
-test("PATH A: Claude+Stat disagree, ML wins direction regardless", () => {
-  // ML says YES; Claude=false, Stat=false both disagree → BET_YES with no boost
+test("PATH A veto: Stat+Claude both oppose ML → core pair wins (falls to PATH B)", () => {
+  // ML=YES(65%); Stat=NO, Claude=NO both oppose → veto fires; PATH B picks up
+  // Claude=NO + Stat=NO agree → BET_NO at BASE_CONFIDENCE_FULL_PAIR
   const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 65, claudeAbove: false, statAbove: false }));
-  assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 65);
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
 });
 
 test("PATH A: ML confidence below threshold → SKIP", () => {
@@ -132,11 +133,12 @@ test("PATH A: reasoning string contains 'ML primary'", () => {
   assert.match(r.reasoning, /ML primary/);
 });
 
-test("PATH A: ML leads even when Stat+Claude both agree on opposite direction", () => {
-  // Stat=true, Claude=true (both say YES), but ML=false (says NO) and is ready
-  // → PATH A: BET_NO on ML direction
+test("PATH A veto: Stat+Claude both YES, ML=NO → core pair wins (BET_YES via PATH B)", () => {
+  // ML=NO(65%); Stat=YES, Claude=YES both oppose → veto fires; PATH B picks up
+  // Claude=YES + Stat=YES agree → BET_YES at BASE_CONFIDENCE_FULL_PAIR
   const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 65, claudeAbove: true, statAbove: true }));
-  assert.equal(r.action, "BET_NO");
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
 });
 
 // ---------------------------------------------------------------------------
