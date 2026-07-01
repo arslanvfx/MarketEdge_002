@@ -1478,9 +1478,22 @@ export async function evalClosedBets(): Promise<void> {
         }
 
         closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
+
+        // Coinbase candle unavailable (e.g. BNB is not listed on Coinbase).
+        // Fall back to the coin price recorded at window expiry — it's the same
+        // value closePosition() already used for the initial P&L estimate, so
+        // using it here is consistent and prevents the row staying stuck forever.
+        if (closePrice === null && row.cryptoPriceAtExit != null) {
+          closePrice = parseFloat(String(row.cryptoPriceAtExit));
+          logger.info(
+            { sym: row.symbol, id: row.id, windowKey: row.windowKey, closePrice },
+            "[kalshi-bot] evalClosedBets: Coinbase candle unavailable — using cryptoPriceAtExit as close price",
+          );
+        }
+
         if (closePrice === null) {
           if (noCoinPriceAtExit && pastDeferWindow) {
-            // Past the deferral window and Coinbase is still unavailable.
+            // Past the deferral window and no price source is available at all.
             // Commit the full-loss fallback recorded by closePosition() so
             // the row doesn't stay unevaluated forever.  Log a warning so
             // the operator knows this outcome may be inaccurate.
@@ -1490,7 +1503,7 @@ export async function evalClosedBets(): Promise<void> {
               fallbackPnl > 0 ? "win" : fallbackPnl < 0 ? "loss" : "push";
             logger.warn(
               { sym: row.symbol, id: row.id, windowKey: row.windowKey, pnl: fallbackPnl },
-              "[kalshi-bot] evalClosedBets: committing full-loss fallback — Coinbase unavailable after 5-min deferral; outcome may be inaccurate",
+              "[kalshi-bot] evalClosedBets: committing full-loss fallback — no price source after 5-min deferral; outcome may be inaccurate",
             );
             await db
               .update(kalshiBotBetsTable)
@@ -1499,8 +1512,8 @@ export async function evalClosedBets(): Promise<void> {
             evaluated++;
             continue;
           }
-          // Coinbase unavailable but row is not ambiguous (or still in defer window) — retry next cycle.
-          logger.debug({ sym: row.symbol, id: row.id }, "[kalshi-bot] evalClosedBets: Coinbase unavailable, will retry");
+          // No price source available yet — retry next cycle.
+          logger.debug({ sym: row.symbol, id: row.id }, "[kalshi-bot] evalClosedBets: no price source available, will retry");
           continue;
         }
 
