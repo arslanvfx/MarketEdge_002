@@ -607,11 +607,23 @@ export default function BotDashboard() {
               {Object.entries(pausedCoins).map(([sym, windowsRemaining]) => (
                 <span
                   key={sym}
-                  className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  className="flex items-center gap-1 text-xs font-medium pl-2.5 pr-1.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
                   title={`${sym} is paused by auto-tune for ${windowsRemaining} more window(s)`}
                 >
                   {sym}
                   <span className="font-mono text-amber-400/70">· {windowsRemaining}w left</span>
+                  <button
+                    type="button"
+                    title={`Unpause ${sym}`}
+                    onClick={async () => {
+                      await fetch(`${API_BASE}/crypto/bot/coins/paused/${sym}`, { method: "DELETE" });
+                      qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+                      qc.invalidateQueries({ queryKey: ["bot-status"] });
+                    }}
+                    className="ml-0.5 flex items-center justify-center w-4 h-4 rounded-full hover:bg-amber-400/30 text-amber-400/70 hover:text-amber-200 transition-colors"
+                  >
+                    ×
+                  </button>
                 </span>
               ))}
             </div>

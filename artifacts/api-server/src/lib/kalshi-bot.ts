@@ -2613,6 +2613,13 @@ export function clearPausedCoins(): string[] {
   return cleared;
 }
 
+export function unpauseCoin(sym: string): boolean {
+  const key = sym.toUpperCase();
+  if (!pausedCoins.has(key)) return false;
+  pausedCoins.delete(key);
+  return true;
+}
+
 export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
   try {
     return await db
