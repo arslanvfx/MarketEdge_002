@@ -1904,7 +1904,7 @@ const RETENTION_DAYS = 60;
 // or auto-pilot state.  The data collected here is what trains the self-learning
 // loop — without it the auto-pilot and ensemble have nothing to learn from.
 // Kept to 5 to bound API cost while building a meaningful dataset quickly.
-export const TRAINING_COINS = new Set(["BTC", "ETH", "XRP", "HYPE", "BNB"]);
+export const TRAINING_COINS = new Set(["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL"]);
 // Fallback accuracy threshold used when no Kalshi target is available.
 // For coins other than BTC (no KXBTC15M market), a prediction is a "hit"
 // only if direction is correct AND price is within this % of actual.
