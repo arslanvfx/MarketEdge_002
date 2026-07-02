@@ -360,7 +360,24 @@ export function setBotPaused(p: boolean): void {
   logger.info({ paused }, "[kalshi-bot] paused changed");
 }
 
-export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean }> {
+// Reset all per-mode adaptive state so switching logic modes starts with a
+// clean slate.  Clears: doubt-filter window history, circuit-breaker streak,
+// per-window bet counts and direction counts, and last-decision dedup keys.
+// Does NOT touch: openPositions, pausedCoins, or account balance.
+function resetModeState(): void {
+  recentWindowOutcomes.clear();
+  cbState = { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 };
+  windowBetCounts.clear();
+  windowDirectionCounts.clear();
+  lastDecisionWindowKey.clear();
+  logger.info("[kalshi-bot] mode-switch: adaptive state cleared (doubt filter, circuit breaker, bet counts)");
+}
+
+export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean; modeReset: boolean }> {
+  // Detect a decision-mode switch before mutating config.
+  const prevMode = config.decisionMode;
+  const modeChanged = "decisionMode" in partial && partial.decisionMode !== prevMode;
+
   config = { ...config, ...partial };
   const snapshot = { ...config };
   let persisted = false;
@@ -381,7 +398,10 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   if ("paperStartingBalance" in partial || "paperBalanceResetAt" in partial) {
     await loadPaperBalanceFromDB().catch(() => {});
   }
-  return { config: snapshot, persisted };
+  // On a mode switch, purge all adaptive state that accumulated under the old
+  // mode so it cannot contaminate decisions in the new mode.
+  if (modeChanged) resetModeState();
+  return { config: snapshot, persisted, modeReset: modeChanged };
 }
 
 export async function loadBotConfigFromDB(): Promise<void> {

@@ -123,6 +123,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperStartingBalance,
     paperWinReturnRate,
     paperBalanceResetAt,
+    minStatConfidence,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -153,6 +154,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
+    minStatConfidence?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -231,9 +233,12 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if ("paperBalanceResetAt" in req.body) {
     partial.paperBalanceResetAt = typeof paperBalanceResetAt === "string" ? paperBalanceResetAt : null;
   }
+  if (typeof minStatConfidence === "number" && minStatConfidence >= 0 && minStatConfidence <= 80) {
+    partial.minStatConfidence = minStatConfidence;
+  }
 
-  const { config: updated, persisted } = await updateBotConfig(partial);
-  res.json({ ok: true, config: updated, persisted });
+  const { config: updated, persisted, modeReset } = await updateBotConfig(partial);
+  res.json({ ok: true, config: updated, persisted, modeReset });
 });
 
 // GET /crypto/bot/history?limit=20 (public — read only, terminal outcomes only)

@@ -430,6 +430,7 @@ export default function BotDashboard() {
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
   const [presetApplied, setPresetApplied] = useState<DecisionMode | null>(null);
+  const [modeResetMsg, setModeResetMsg] = useState<DecisionMode | null>(null);
   const [perfOpen, setPerfOpen] = useState(true);
   const [tuneLogOpen, setTuneLogOpen] = useState(true);
   const [histPage, setHistPage] = useState(0);
@@ -537,11 +538,17 @@ export default function BotDashboard() {
   async function saveConfig() {
     setSaving(true);
     try {
-      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
+      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean; modeReset?: boolean };
       await qc.invalidateQueries({ queryKey: ["bot-status"] });
+      await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
       setConfigDraft({});
       setPersistMsg(result.persisted ? "saved" : "failed");
       setTimeout(() => setPersistMsg(null), 3000);
+      if (result.modeReset) {
+        const newMode = (configDraft.decisionMode ?? "classic") as DecisionMode;
+        setModeResetMsg(newMode);
+        setTimeout(() => setModeResetMsg(null), 6000);
+      }
     } finally {
       setSaving(false);
     }
@@ -1406,6 +1413,21 @@ export default function BotDashboard() {
                   <span className="text-xs text-yellow-400">⚠ Applied (not persisted)</span>
                 )}
               </div>
+
+              {/* Mode-switch state reset banner */}
+              {modeResetMsg && (
+                <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5 mt-1">
+                  <RotateCcw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                  <div>
+                    <p className="text-xs font-medium text-emerald-300">
+                      Switched to {MODE_PRESETS[modeResetMsg].label} — adaptive state cleared
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-muted-foreground/80 leading-snug">
+                      Doubt filter history, circuit-breaker streak, and per-window bet counts from the previous mode have been wiped. The bot starts fresh with no cross-mode bias.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
