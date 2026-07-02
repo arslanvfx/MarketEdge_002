@@ -3705,17 +3705,21 @@ export interface TrackerWindowCall {
 // triggering a new API call.
 export function getTrackerWindowCall(symbol: string): TrackerWindowCall | null {
   const nowMs = Date.now();
+  const sym = symbol.toUpperCase();
   const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
   const targetISO = nextBoundary.toISOString();
-  const records = historyStore.get(symbol.toUpperCase()) ?? [];
+  const records = historyStore.get(sym) ?? [];
   const rec = records.find((r) => r.targetTime === targetISO && r.source === "claude");
   if (!rec) return null;
   const predPrice = Number(rec.predictedPrice);
-  const aboveKalshi =
-    rec.kalshiTarget != null ? predPrice >= Number(rec.kalshiTarget) : null;
+  // When the snap fired before Kalshi published the strike (fallback at t+90s),
+  // rec.kalshiTarget is null. Fall back to the live Kalshi target so Claude's
+  // predicted price can still be compared against the current window's strike.
+  const kalshiTargetForComp = rec.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
+  const aboveKalshi = kalshiTargetForComp != null ? predPrice >= kalshiTargetForComp : null;
   const strikeProximityPct =
-    rec.kalshiTarget != null && rec.priceAtSnapshot != null && rec.priceAtSnapshot > 0
-      ? Math.abs(rec.priceAtSnapshot - rec.kalshiTarget) / rec.priceAtSnapshot * 100
+    kalshiTargetForComp != null && rec.priceAtSnapshot != null && rec.priceAtSnapshot > 0
+      ? Math.abs(rec.priceAtSnapshot - kalshiTargetForComp) / rec.priceAtSnapshot * 100
       : null;
   return {
     direction: rec.predictedDirection as "up" | "down" | "flat",
@@ -3732,7 +3736,8 @@ export function getTrackerWindowCall(symbol: string): TrackerWindowCall | null {
 // a committed ABOVE/BELOW that doesn't flip with live candle jitter.
 export function getStatWindowCall(symbol: string): TrackerWindowCall | null {
   const nowMs = Date.now();
-  const records = historyStore.get(symbol.toUpperCase()) ?? [];
+  const sym = symbol.toUpperCase();
+  const records = historyStore.get(sym) ?? [];
   const result = computeStatWindowCall(records, nowMs);
   if (!result) return null;
   // computeStatWindowCall operates on the minimal SnapRecord shape, so
@@ -3740,11 +3745,22 @@ export function getStatWindowCall(symbol: string): TrackerWindowCall | null {
   // the raw record directly to compute it.
   const targetISO = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS).toISOString();
   const rec = records.find((r) => r.targetTime === targetISO && r.source === "stat");
+  // When the snap fired before Kalshi published the strike (fallback at t+90s),
+  // result.aboveKalshi is null. Fall back to the live Kalshi target so the stat
+  // model's predicted price can still be compared against the window's strike.
+  let aboveKalshi = result.aboveKalshi;
+  if (aboveKalshi === null && result.predictedPrice != null) {
+    const liveTarget = getKalshiCachedData(sym)?.value ?? null;
+    if (liveTarget !== null) {
+      aboveKalshi = result.predictedPrice >= liveTarget;
+    }
+  }
+  const kalshiTargetForProx = rec?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
   const strikeProximityPct =
-    rec != null && rec.kalshiTarget != null && rec.priceAtSnapshot != null && rec.priceAtSnapshot > 0
-      ? Math.abs(rec.priceAtSnapshot - rec.kalshiTarget) / rec.priceAtSnapshot * 100
+    kalshiTargetForProx != null && rec?.priceAtSnapshot != null && rec.priceAtSnapshot > 0
+      ? Math.abs(rec.priceAtSnapshot - kalshiTargetForProx) / rec.priceAtSnapshot * 100
       : null;
-  return { ...result, strikeProximityPct };
+  return { ...result, aboveKalshi, strikeProximityPct };
 }
 
 // ---------------------------------------------------------------------------
