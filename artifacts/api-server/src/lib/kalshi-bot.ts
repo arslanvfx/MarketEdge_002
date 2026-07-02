@@ -609,6 +609,27 @@ export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }
 }
 
 /**
+ * Soft-archive ALL non-archived kalshi_bot_bets rows so the display counters
+ * (win rate, total bets, P&L history) start from zero visually.
+ *
+ * Nothing is deleted. Archived rows are invisible to display queries
+ * (WHERE archived_at IS NULL) but remain fully visible to every operational
+ * query: auto-tune, border-guard, evalClosedBets, recentKalshiTargets seeding.
+ * ML training data (prediction_records) is never touched.
+ */
+export async function softArchiveAllBets(): Promise<{ archived: number }> {
+  const result = await db.execute(
+    sql`UPDATE kalshi_bot_bets
+        SET archived_at = NOW()
+        WHERE archived_at IS NULL`
+  );
+  const archived = (result as unknown as { rowCount: number }).rowCount ?? 0;
+  logger.info({ archived }, "[kalshi-bot] softArchiveAllBets — visual reset, no data deleted");
+  await loadDailyPnlFromDB();
+  return { archived };
+}
+
+/**
  * Recover an open position from the DB after a server restart.
  * Looks for the most recent 'bet' row with no exitedAt within the last 24 hours
  * (24h covers midnight-UTC boundaries so a position opened late in one day is

@@ -14,6 +14,7 @@ import {
   getBotAutoTuneLog,
   getPausedCoinState,
   clearBetHistoryOld,
+  softArchiveAllBets,
   getBotLogicPerformance,
   getBacktestModes,
 } from "../lib/kalshi-bot";
@@ -362,6 +363,31 @@ router.delete("/crypto/bot/bets/old", async (req, res) => {
   try {
     const result = await clearBetHistoryOld(hours);
     res.json({ ok: true, deleted: result.deleted, hours });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/bets/soft-reset — visual reset: soft-archives ALL bet rows
+// so win/loss/accuracy counters start from zero in the UI. Nothing is deleted.
+// Operational queries (auto-tune, border-guard, evalClosedBets) see full history.
+// ML training data (prediction_records) is never touched.
+router.post("/crypto/bot/bets/soft-reset", async (req, res) => {
+  const clerkAuth = getAuth(req);
+  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
+  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
+
+  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
+  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
+
+  if (!hasClerkAuth && !hasClearPassword) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    const result = await softArchiveAllBets();
+    res.json({ ok: true, archived: result.archived });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

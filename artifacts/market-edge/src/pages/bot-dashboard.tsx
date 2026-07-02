@@ -6,7 +6,7 @@ import {
   BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus,
   Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -239,6 +239,8 @@ export default function BotDashboard() {
   const qc = useQueryClient();
   const [configOpen, setConfigOpen] = useState(true);
   const [confirmLive, setConfirmLive] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
@@ -333,6 +335,17 @@ export default function BotDashboard() {
   async function setMode(mode: "paper" | "live") {
     await authPost("/crypto/bot/mode", { mode });
     setConfirmLive(false);
+  }
+
+  async function softReset() {
+    await authPost("/crypto/bot/bets/soft-reset", {});
+    await qc.invalidateQueries({ queryKey: ["bot-history"] });
+    await qc.invalidateQueries({ queryKey: ["bot-stats"] });
+    await qc.invalidateQueries({ queryKey: ["bot-eval"] });
+    await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+    setConfirmReset(false);
+    setResetMsg("Visual stats cleared — all bet data preserved");
+    setTimeout(() => setResetMsg(null), 4000);
   }
 
   async function saveConfig() {
@@ -462,22 +475,50 @@ export default function BotDashboard() {
       <div className="flex-1 p-6 space-y-6">
 
         {/* ── Stats Row ── */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[
-            { label: "Account Balance", value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400" },
-            { label: "Today's P&L", value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
-            { label: "Win Rate", value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
-            { label: "Total Bets", value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
-          ].map(({ label, value, sub, icon: Icon, color, bold }) => (
-            <div key={label} className="bg-card border border-border rounded-lg p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <Icon className={`w-4 h-4 ${color}`} />
-                <span className="text-xs text-muted-foreground">{label}</span>
-              </div>
-              <div className={`text-xl font-bold ${bold ? (pnl >= 0 ? "text-emerald-400" : "text-red-400") : "text-foreground"}`}>{value}</div>
-              {sub && <div className="text-xs text-muted-foreground mt-0.5">{sub}</div>}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60">Performance Since Reset</span>
+            <div className="flex items-center gap-2">
+              {resetMsg && (
+                <span className="text-xs text-emerald-400 font-medium">{resetMsg}</span>
+              )}
+              {confirmReset ? (
+                <div className="flex items-center gap-1">
+                  <span className="text-xs text-muted-foreground mr-1">Archive all visual stats?</span>
+                  <Button size="sm" variant="destructive" className="h-6 text-xs px-2" onClick={() => void softReset()}>Confirm</Button>
+                  <Button size="sm" variant="outline" className="h-6 text-xs px-2" onClick={() => setConfirmReset(false)}>Cancel</Button>
+                </div>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 text-xs gap-1 text-muted-foreground hover:text-foreground"
+                  title="Hides all current bets from display so you can measure performance from a clean slate. No data is deleted — the bot, auto-tune, and ML model still see everything."
+                  onClick={() => setConfirmReset(true)}
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Reset Visual Stats
+                </Button>
+              )}
             </div>
-          ))}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { label: "Account Balance", value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400" },
+              { label: "Today's P&L", value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
+              { label: "Win Rate", value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
+              { label: "Total Bets", value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
+            ].map(({ label, value, sub, icon: Icon, color, bold }) => (
+              <div key={label} className="bg-card border border-border rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Icon className={`w-4 h-4 ${color}`} />
+                  <span className="text-xs text-muted-foreground">{label}</span>
+                </div>
+                <div className={`text-xl font-bold ${bold ? (pnl >= 0 ? "text-emerald-400" : "text-red-400") : "text-foreground"}`}>{value}</div>
+                {sub && <div className="text-xs text-muted-foreground mt-0.5">{sub}</div>}
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* ── Paused Coins Banner ── */}
