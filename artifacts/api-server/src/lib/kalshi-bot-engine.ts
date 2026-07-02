@@ -346,26 +346,44 @@ function _makeBotDecisionInner(
     if (coreResult.action !== "SKIP" && mlAbove !== null) {
       const proposedDir = coreResult.action === "BET_YES";
       if (mlAbove !== proposedDir) {
-        return {
-          action: "SKIP",
-          confidence: 0,
-          reasoning: `ml_gate: ML veto (ML=${mlAbove ? "above" : "below"} opposes ${coreResult.action} from Stat+Claude) — skipping`,
-          signals: buildSnapshot(coreResult.ev, coreResult.signalsAgreeing, coreResult.signalsTotal),
-        };
+        // Soft veto: only block when ML is confident enough in the opposition.
+        // When mlConfidence < mlVetoMinConfidence the ML signal is too uncertain
+        // to override a Stat+Claude agreement — let the bet through.
+        const vetoThreshold = config.mlVetoMinConfidence ?? 57;
+        const mlConf = mlConfidence ?? 0;
+        if (mlConf >= vetoThreshold) {
+          return {
+            action: "SKIP",
+            confidence: 0,
+            reasoning: `ml_gate: ML veto (ML=${mlAbove ? "above" : "below"} at ${mlConf}% ≥ ${vetoThreshold}% threshold opposes ${coreResult.action} from Stat+Claude) — skipping`,
+            signals: buildSnapshot(coreResult.ev, coreResult.signalsAgreeing, coreResult.signalsTotal),
+          };
+        }
+        // ML disagrees but below confidence threshold — proceed, note it in reasoning
+        // (overriding will be logged via the return below)
       }
     }
 
-    // ML agrees or is unavailable — return the core result directly
+    // ML agrees or is unavailable (or disagrees but below veto threshold) — return the core result directly
     const coreSnap = buildSnapshot(
       coreResult.ev,
       coreResult.signalsAgreeing,
       coreResult.signalsTotal,
       coreResult.action !== "SKIP" ? coreResult.action : null,
     );
+    const proposedDir = coreResult.action === "BET_YES";
+    const mlDisagreesButBelowThreshold =
+      mlAbove !== null && mlAbove !== proposedDir && coreResult.action !== "SKIP";
+    const mlReasonSuffix =
+      mlAbove === null
+        ? " (ML not ready — no veto applied)"
+        : mlDisagreesButBelowThreshold
+          ? ` (ML disagrees at ${mlConfidence ?? 0}% < ${config.mlVetoMinConfidence ?? 57}% threshold — veto skipped)`
+          : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
     return {
       action: coreResult.action,
       confidence: coreResult.confidence,
-      reasoning: coreResult.reasoning + (mlAbove !== null ? ` (ML confirms: ${mlAbove ? "above" : "below"})` : " (ML not ready — no veto applied)"),
+      reasoning: coreResult.reasoning + mlReasonSuffix,
       signals: coreSnap,
     };
   }

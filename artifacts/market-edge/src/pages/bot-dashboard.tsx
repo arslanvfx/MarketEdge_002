@@ -42,6 +42,7 @@ interface BotConfig {
   borderProximityPct: number;
   borderLookbackBets: number;
   regimePenalty: number;
+  mlVetoMinConfidence: number;
   paperStartingBalance: number;
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
@@ -750,6 +751,23 @@ export default function BotDashboard() {
                     onChange={e => setConfigDraft(d => ({ ...d, minConfidence: parseInt(e.target.value) }))} />
                 </label>
 
+                {/* ML Veto Threshold — only shown in ML Gate mode */}
+                {(merged.decisionMode ?? "classic") === "ml_gate" && (
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs text-muted-foreground flex items-center gap-1">
+                      <Brain className="w-3 h-3 text-sky-400" />
+                      ML Veto Threshold ({merged.mlVetoMinConfidence ?? 57}%)
+                    </span>
+                    <input type="range" min={50} max={70} step={1}
+                      className="mt-1"
+                      value={merged.mlVetoMinConfidence ?? 57}
+                      onChange={e => setConfigDraft(d => ({ ...d, mlVetoMinConfidence: parseInt(e.target.value) }))} />
+                    <span className="text-[10px] text-muted-foreground/60">
+                      ML veto only fires when ML is ≥{merged.mlVetoMinConfidence ?? 57}% confident — below this the bet proceeds
+                    </span>
+                  </label>
+                )}
+
                 {/* Decision Mode — full-width row */}
                 <div className="col-span-2 flex flex-col gap-2">
                   <span className="text-xs text-muted-foreground">Decision Logic</span>
@@ -876,7 +894,7 @@ export default function BotDashboard() {
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Max Bets / Window</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.maxBetsPerWindow ?? 3}
+                    value={merged.maxBetsPerWindow ?? 8}
                     onChange={e => setConfigDraft(d => ({ ...d, maxBetsPerWindow: parseInt(e.target.value) }))}>
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
                       <option key={n} value={n}>{n} bet{n > 1 ? "s" : ""}</option>

@@ -414,6 +414,11 @@ export interface BotConfig {
   // Regime filter: how many confidence-points to deduct when the bot would bet
   // against the recent settlement direction. Set to 0 to disable the penalty entirely.
   regimePenalty: number;         // pp deducted for against-regime bets (default 8)
+  // ML Gate soft veto: in ml_gate mode, only apply the ML veto when ML is at
+  // least this confident in the opposing direction. When ML confidence is below
+  // this threshold the bet proceeds as if ML were unavailable — avoiding hard
+  // blocks from near-coin-flip ML uncertainty. Range 50–70 (default 57).
+  mlVetoMinConfidence: number;
   // Paper trading simulation parameters (only used in paper mode).
   // paperStartingBalance: the wallet amount before any bets are counted.
   // paperWinReturnRate: profit as a fraction of betSize on a winning bet (0.5 = +50¢ per $1 bet).
@@ -436,8 +441,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Floor: skip entry when fewer than 2 minutes remain in the 15-min window.
   // 0 = disabled.
   minRemainingMinutes: 2,
-  // Allow up to 6 re-entries per coin per window.
-  maxBetsPerWindow: 6,
+  // Allow up to 8 bets per window (matches 8-coin training set: BTC/ETH/XRP/HYPE/BNB/SOL/DOGE/LINK).
+  maxBetsPerWindow: 8,
   enabled: true,
   // start === end → disabled; 7 = 07:00 UTC stored value (set equal to disable)
   quietHoursStart: 7,
@@ -457,6 +462,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   borderLookbackBets: 3,
   // Regime penalty: 15pp deduction for against-regime bets — high bar keeps quality high
   regimePenalty: 15,
+  // ML Gate soft veto: only veto when ML is ≥57% confident in opposition.
+  // Values 50-70; 50 = always veto on any disagreement (original hard veto).
+  mlVetoMinConfidence: 57,
   // Paper trading defaults
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,
