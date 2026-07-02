@@ -434,7 +434,7 @@ export default function BotDashboard() {
           {(status?.circuitBreakerWindowsRemaining ?? 0) > 0 ? (
             <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-red-500/15 text-red-400 border border-red-500/30" title={`Circuit breaker active — ${status!.circuitBreakerWindowsRemaining} window(s) remaining`}>
               <AlertTriangle className="w-3 h-3" />
-              CB {status!.circuitBreakerWindowsRemaining}w
+              CB: {status!.circuitBreakerWindowsRemaining} {status!.circuitBreakerWindowsRemaining === 1 ? "window" : "windows"}
             </span>
           ) : (
             <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title="Circuit breaker inactive">
@@ -505,25 +505,39 @@ export default function BotDashboard() {
         </div>
 
         {/* ── Paused Coins Banner ── */}
-        {Object.keys(pausedCoins).length > 0 && (
+        {(Object.keys(pausedCoins).length > 0 || (status?.circuitBreakerWindowsRemaining ?? 0) > 0) && (
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm flex-shrink-0">
               <Pause className="w-4 h-4" />
-              Auto-paused coins
+              {Object.keys(pausedCoins).length > 0 ? "Auto-paused coins" : "Circuit breaker active"}
             </div>
             <div className="flex flex-wrap gap-2">
               {Object.entries(pausedCoins).map(([sym, windowsRemaining]) => (
                 <span
                   key={sym}
                   className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                  title={`${sym} is paused by auto-tune for ${windowsRemaining} more window(s)`}
+                  title={`${sym} is paused by auto-tune for ${windowsRemaining} more 15-min window(s) (~${windowsRemaining * 15} min)`}
                 >
                   {sym}
-                  <span className="font-mono text-amber-400/70">· {windowsRemaining}w left</span>
+                  <span className="font-mono text-amber-400/70">· {windowsRemaining} {windowsRemaining === 1 ? "window" : "windows"} left</span>
                 </span>
               ))}
+              {(status?.circuitBreakerWindowsRemaining ?? 0) > 0 && (
+                <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-red-500/20 text-red-300 border border-red-500/40">
+                  CB: {status!.circuitBreakerWindowsRemaining} {status!.circuitBreakerWindowsRemaining === 1 ? "window" : "windows"} left
+                </span>
+              )}
             </div>
-            <span className="text-[11px] text-amber-400/60 ml-auto hidden sm:block">Auto-tune paused these coins due to underperformance</span>
+            <button
+              className="ml-auto text-[11px] px-2.5 py-1 rounded-lg border border-amber-500/40 text-amber-400 hover:bg-amber-500/20 transition-colors"
+              onClick={async () => {
+                await authPost("/crypto/bot/clear-pauses", {});
+                void qc.invalidateQueries({ queryKey: ["bot-status"] });
+                void qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+              }}
+            >
+              Clear pauses now
+            </button>
           </div>
         )}
 

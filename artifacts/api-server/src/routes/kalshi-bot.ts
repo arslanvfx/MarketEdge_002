@@ -16,6 +16,7 @@ import {
   clearBetHistoryOld,
   getBotLogicPerformance,
   getBacktestModes,
+  clearAllPauses,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -367,6 +368,19 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
   try {
     const modes = await getBacktestModes();
     res.json({ modes });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/clear-pauses — immediately clear all per-coin auto-tune pauses
+// and reset the circuit-breaker countdown. Safe to call at any time; does not
+// affect mode, positions, or config.
+router.post("/crypto/bot/clear-pauses", requireAuth, (_req, res) => {
+  try {
+    const result = clearAllPauses();
+    res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

@@ -445,6 +445,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
         symbol: kalshiBotBetsTable.symbol,
         kalshiTarget: kalshiBotBetsTable.kalshiTarget,
         windowKey: kalshiBotBetsTable.windowKey,
+        exitedAt: kalshiBotBetsTable.exitedAt,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -478,13 +479,21 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     }
 
     // Per-coin consecutive loss recovery: if a coin has ≥5 consecutive losses in recent
-    // bets, auto-pause it for 4 windows on startup (mirrors the per_coin_pause auto-tune
-    // rule but survives restarts). recentRows is already newest-first.
+    // bets AND the most recent bet for that coin was within the last 90 minutes (6 windows),
+    // auto-pause it for 4 windows. The recency guard prevents perpetual re-pause on every
+    // server restart when the coin has been idle (already served its pause time).
     const perCoinStreak: Map<string, number> = new Map();
+    const perCoinLastBetAt: Map<string, Date> = new Map();
     const perCoinStreakDone: Set<string> = new Set();
+    const STARTUP_PAUSE_RECENCY_MS = 90 * 60_000; // 90 minutes = 6 windows
+    const nowForPause = Date.now();
     for (const r of recentRows) {
       const sym = (r.symbol ?? "").toUpperCase();
       if (!sym || perCoinStreakDone.has(sym)) continue;
+      // Track most-recent bet timestamp per coin (rows are newest-first).
+      if (!perCoinLastBetAt.has(sym) && r.exitedAt) {
+        perCoinLastBetAt.set(sym, new Date(r.exitedAt));
+      }
       const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
       if (p < 0) {
         perCoinStreak.set(sym, (perCoinStreak.get(sym) ?? 0) + 1);
@@ -493,11 +502,18 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       }
     }
     for (const [sym, consecutive] of perCoinStreak.entries()) {
-      if (consecutive >= 5 && !pausedCoins.has(sym)) {
+      const lastBet = perCoinLastBetAt.get(sym);
+      const isRecent = lastBet && (nowForPause - lastBet.getTime()) < STARTUP_PAUSE_RECENCY_MS;
+      if (consecutive >= 5 && !pausedCoins.has(sym) && isRecent) {
         pausedCoins.set(sym, 4);
         logger.warn(
-          { sym, consecutive },
-          "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive losses",
+          { sym, consecutive, lastBetAt: lastBet },
+          "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive recent losses",
+        );
+      } else if (consecutive >= 5 && !isRecent) {
+        logger.info(
+          { sym, consecutive, lastBetAt: lastBet },
+          "[kalshi-bot] startup: skipping auto-pause — last bet too old (coin already served pause time)",
         );
       }
     }
@@ -515,19 +531,15 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       recentWindowOutcomes.set(wk, wo);
     }
 
-    // Restore circuit-breaker state from the recovered streak.
-    // Guard against the disabled mode (maxConsecutiveLosses=0 or pauseWindows=0):
-    // when the feature is off, circuitBreakerWindowsRemaining must be 0 regardless
-    // of streak length (0 >= 0 is always true, so the unguarded condition would
-    // falsely activate the breaker every restart when the feature is disabled).
-    const canActivateCB = config.maxConsecutiveLosses > 0 && config.circuitBreakerPauseWindows > 0;
-    let restoredRemaining = 0;
-    if (canActivateCB) {
-      restoredRemaining = streak >= config.maxConsecutiveLosses
-        ? Math.max(cbState.circuitBreakerWindowsRemaining, config.circuitBreakerPauseWindows)
-        : cbState.circuitBreakerWindowsRemaining;
-    }
-    cbState = { consecutiveLosses: streak, circuitBreakerWindowsRemaining: restoredRemaining };
+    // Restore consecutive-loss streak for in-session tracking only.
+    // The circuit-breaker window countdown is NOT restored on restart because:
+    //   1. cbState starts at 0 each process start — Math.max(0, N) would always reset
+    //      CB to the full configured pause count whenever a streak exists, causing
+    //      perpetual blocking across restarts (no new bets → streak never clears → repeat).
+    //   2. The CB is a session-level safety feature; the per-coin auto-pause (above)
+    //      already handles the "bad recent streak" case on restart with the recency guard.
+    // CB re-activates naturally when new losses happen within the running session.
+    cbState = { consecutiveLosses: streak, circuitBreakerWindowsRemaining: 0 };
 
     logger.info({ dailyPnl, dailyLossCount, date: today, cbState }, "[kalshi-bot] daily P&L loaded from DB");
   } catch (err) {
@@ -2497,6 +2509,18 @@ export function getPausedCoinState(): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [sym, rem] of pausedCoins.entries()) out[sym] = rem;
   return out;
+}
+
+/** Clear all per-coin auto-tune pauses and reset the circuit-breaker countdown.
+ *  Does NOT change bot mode, config, or position state.
+ *  Call this when pauses are stale and the user wants to resume immediately. */
+export function clearAllPauses(): { clearedCoins: string[]; cbWasActive: boolean } {
+  const clearedCoins = [...pausedCoins.keys()];
+  pausedCoins.clear();
+  const cbWasActive = cbState.circuitBreakerWindowsRemaining > 0;
+  cbState = { ...cbState, circuitBreakerWindowsRemaining: 0 };
+  logger.info({ clearedCoins, cbWasActive }, "[kalshi-bot] all pauses cleared manually");
+  return { clearedCoins, cbWasActive };
 }
 
 export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
