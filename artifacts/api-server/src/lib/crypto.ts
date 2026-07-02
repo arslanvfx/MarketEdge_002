@@ -2050,7 +2050,14 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       return null;
     }
     const body = (await resp.json()) as {
-      markets?: { floor_strike?: number; ticker?: string; close_time?: string; yes_ask?: number; yes_bid?: number; last_price?: number }[];
+      markets?: {
+        floor_strike?: number; ticker?: string; close_time?: string;
+        // Legacy integer-cent fields (deprecated by Kalshi ~Jul 2026):
+        yes_ask?: number; yes_bid?: number; last_price?: number;
+        // Current dollar-string fields:
+        yes_ask_dollars?: string; yes_bid_dollars?: string; last_price_dollars?: string;
+        previous_yes_ask_dollars?: string; previous_yes_bid_dollars?: string;
+      }[];
     };
 
     const markets = (body.markets ?? []).filter(
@@ -2091,14 +2098,23 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     }
 
     if (selected) {
-      // yes_ask / yes_bid / last_price are integers in cents (1–99); 0 means no quote.
-      // Prefer the bid/ask midpoint for the most accurate yes probability estimate.
-      // Fall back: ask only → bid only → last traded price → null (no price available).
-      const toFrac = (v: number | undefined | null) =>
+      // Kalshi migrated from integer-cent fields (yes_ask/yes_bid/last_price in 1–99)
+      // to dollar-string fields (yes_ask_dollars/yes_bid_dollars/last_price_dollars in "0.00"–"1.00").
+      // Support both formats; dollar fields take priority when present.
+      // 0 / "0" / "0.00" means no quote in both formats.
+      const toFracInt = (v: number | undefined | null) =>
         typeof v === "number" && v > 0 ? v / 100 : null;
-      const yesAsk   = toFrac(selected.yes_ask);
-      const yesBid   = toFrac(selected.yes_bid);
-      const lastP    = toFrac(selected.last_price);
+      const toFracDollar = (v: string | undefined | null) => {
+        const f = v != null ? parseFloat(v) : NaN;
+        return Number.isFinite(f) && f > 0 ? f : null;
+      };
+      const yesAsk =
+        toFracDollar(selected.yes_ask_dollars) ?? toFracInt(selected.yes_ask);
+      const yesBid =
+        toFracDollar(selected.yes_bid_dollars) ?? toFracInt(selected.yes_bid);
+      const lastP =
+        toFracDollar(selected.last_price_dollars) ?? toFracInt(selected.last_price) ??
+        toFracDollar(selected.previous_yes_ask_dollars);
       const yesPrice =
         yesAsk !== null && yesBid !== null ? (yesAsk + yesBid) / 2
         : yesAsk ?? yesBid ?? lastP ?? null;
