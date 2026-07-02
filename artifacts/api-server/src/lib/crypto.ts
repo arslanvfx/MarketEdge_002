@@ -2930,10 +2930,13 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         //   • After 60 s with no target, snap anyway (null target) so the
         //     window always has a prediction for model-accuracy tracking.
         //   • Never snap after 12 min (too far from window open).
-        // SNAP_DELAY_MS removed — snap gate is now target-detection-based (see below).
-        // The snap fires as soon as the new window's Kalshi target has been confirmed
-        // for at least TARGET_CONFIRM_BUFFER_MS, replacing the old fixed 45s timer.
+        // Snap gate requires BOTH conditions to be true:
+        //   1. The new Kalshi target has been confirmed for at least TARGET_CONFIRM_BUFFER_MS (5s).
+        //   2. At least WINDOW_SNAP_MIN_MS (45s) have elapsed since window open.
+        // This ensures Claude's eager prefetch has completed and all models have
+        // had time to receive and process the correct new-window strike price.
         const TARGET_CONFIRM_BUFFER_MS = 5_000;  // 5s stability buffer after target confirmed
+        const WINDOW_SNAP_MIN_MS      = 45_000;  // hard minimum: snap never fires before 45s into window
         const SNAP_GIVE_UP_MS = 90_000;          // give up waiting for Kalshi target after 90s
         const SNAP_MAX_MS     = 12 * 60_000;     // never snap after 12 min into the window
         const windowStartMs = nextBoundary.getTime() - 15 * 60_000;
@@ -3021,7 +3024,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         const confirmedSnap = confirmedTargetStore.get(sym);
         const msSinceConfirmed = confirmedSnap ? nowMs - confirmedSnap.confirmedAt : null;
         const kalshiSnapReady = KALSHI_SERIES[sym]
-          ? msSinceConfirmed !== null && msSinceConfirmed >= TARGET_CONFIRM_BUFFER_MS
+          ? msSinceConfirmed !== null && msSinceConfirmed >= TARGET_CONFIRM_BUFFER_MS && timeIntoWindow >= WINDOW_SNAP_MIN_MS
           : timeIntoWindow >= 15_000; // non-Kalshi: small fixed buffer only
         const snapFallback = KALSHI_SERIES[sym] && timeIntoWindow >= SNAP_GIVE_UP_MS;
 

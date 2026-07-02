@@ -217,10 +217,11 @@ let stabilityFiredForCoins = new Set<string>();
 // Cleared on each window transition. Populated async — may be null on the first tick.
 const windowStabilityCache = new Map<string, TrendStability>();
 
-// Minimum ms between Kalshi target first confirmed and allowing a bot entry.
-// Replaces the old fixed WARMUP_MS = 45_000 timer: the bot now fires as soon
-// as the new window's strike is confirmed + this stability buffer.
-const MIN_CONFIRM_BUFFER_MS = 8_000;
+// Hard seconds-into-window buffer before any bet entry or window evaluation.
+// All models (Stat snap, Claude analysis, ML prediction) must run AFTER this
+// mark so they use the NEW window's Kalshi strike — not the previous window's.
+// Claude is pre-fetched eagerly on ticker detection so it is warm by ~45 s.
+const WINDOW_ENTRY_BUFFER_S = 45;
 
 // Note: entry ceiling (maxEntryMinutes) and floor (minRemainingMinutes) are now
 // both driven by BotConfig so they can be toggled from the dashboard.
@@ -284,26 +285,16 @@ export function getBotState(): BotStateSnapshot {
     };
   });
 
-  // Compute warmup state: how many seconds remain before the bot can enter the
-  // current window. null when warmup is over.
-  // With target-detection gate, the warmup is based on confirmedTargetMs:
-  //   • No target yet → show MIN_CONFIRM_BUFFER_MS / 1000 as placeholder
-  //   • Target seen   → count down remaining buffer, clear when elapsed
+  // Compute warmup state: how many seconds remain of the 45-second window
+  // buffer before any model bets are allowed. null when warmup is over.
   let warmupSecondsRemaining: number | null = null;
   if (!paused) {
-    for (const coin of CRYPTO_COINS) {
-      if (!KALSHI_SERIES[coin.symbol]) continue;
-      const confirmedMs = getConfirmedTargetMs(coin.symbol);
-      if (confirmedMs === null) {
-        // Target not yet confirmed — show buffer as warmup indicator
-        warmupSecondsRemaining = Math.max(warmupSecondsRemaining ?? 0, MIN_CONFIRM_BUFFER_MS / 1_000);
-      } else {
-        const remaining = Math.max(0, MIN_CONFIRM_BUFFER_MS - (Date.now() - confirmedMs)) / 1_000;
-        if (remaining > 0) {
-          warmupSecondsRemaining = Math.max(warmupSecondsRemaining ?? 0, remaining);
-        }
-      }
-      break; // All coins share the same window timing — one is enough
+    const firstKalshiCoin = CRYPTO_COINS.find((c) => KALSHI_SERIES[c.symbol]);
+    if (firstKalshiCoin) {
+      const winCtx = getKalshiWindowContext(firstKalshiCoin.symbol);
+      const secondsIntoWindow = winCtx?.secondsElapsed ?? 0;
+      const remaining = Math.max(0, WINDOW_ENTRY_BUFFER_S - secondsIntoWindow);
+      if (remaining > 0) warmupSecondsRemaining = remaining;
     }
   }
 
@@ -1057,13 +1048,15 @@ async function _runBotTick(
     fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget
   }
 
-  // Target-detection warmup gate: wait until the new Kalshi window's target
-  // has been confirmed for at least MIN_CONFIRM_BUFFER_MS (8s) before allowing
-  // an entry. Replaces the old fixed 45s time-based warmup — fires ~25-30s
-  // earlier and guarantees we never commit against the wrong-window strike.
-  const confirmedBotMs = getConfirmedTargetMs(sym);
-  const msSinceConfirm = confirmedBotMs !== null ? Date.now() - confirmedBotMs : null;
-  if (msSinceConfirm === null || msSinceConfirm < MIN_CONFIRM_BUFFER_MS) {
+  // Hard 45-second window buffer: no entry until the window is at least
+  // WINDOW_ENTRY_BUFFER_S seconds old. This guarantees:
+  //   1. The new Kalshi strike has had time to publish (Kalshi can be slow).
+  //   2. Claude's eager prefetch (fired on new-ticker detection above) has
+  //      completed so the live-direction cache holds the CURRENT window's
+  //      verdict — not the previous window's stale result.
+  //   3. The stat snap has had time to run and update predCache with the
+  //      new window's predictions (ML included).
+  if (secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
     if (lastDecisionWindowKey.get(sym) !== `warmup:${windowKey}`) {
       lastDecisionWindowKey.set(sym, `warmup:${windowKey}`);
       await persistBetRecord({
@@ -1072,7 +1065,7 @@ async function _runBotTick(
         ticker: kalshiTicker,
         direction: null,
         action: "skip",
-        signals: { warmupActive: true, secondsElapsed, minutesElapsed, reason: msSinceConfirm === null ? "awaiting-target" : "warmup-buffer", msSinceConfirm },
+        signals: { warmupActive: true, secondsElapsed, minutesElapsed, reason: "warmup-buffer", msSinceConfirm: Math.round(secondsElapsed * 1000) },
         entryPrice: null,
         kalshiTarget,
       });
@@ -2123,13 +2116,9 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    const confirmedEvalMs = getConfirmedTargetMs(sym);
-    const msSinceEvalConfirm = confirmedEvalMs !== null ? Date.now() - confirmedEvalMs : null;
-    if (msSinceEvalConfirm === null || msSinceEvalConfirm < MIN_CONFIRM_BUFFER_MS) {
-      const remaining = msSinceEvalConfirm !== null
-        ? Math.ceil((MIN_CONFIRM_BUFFER_MS - msSinceEvalConfirm) / 1_000)
-        : Math.ceil(MIN_CONFIRM_BUFFER_MS / 1_000);
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: msSinceEvalConfirm === null ? "awaiting target" : `target buffer (${remaining}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+    if (secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
+      const remaining = Math.ceil(WINDOW_ENTRY_BUFFER_S - secondsElapsed);
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `window buffer (${remaining}s remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     if (config.maxEntryMinutes > 0 && secondsElapsed > config.maxEntryMinutes * 60) {
