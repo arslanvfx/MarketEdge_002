@@ -508,35 +508,11 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       recentKalshiTargets.set(sym, targets.reverse().slice(-REGIME_STRIKES_MAX));
     }
 
-    // Per-coin consecutive loss recovery: if a coin has ≥5 consecutive losses in recent
-    // bets, auto-pause it for 4 windows on startup (mirrors the per_coin_pause auto-tune
-    // rule but survives restarts). recentRows is already newest-first.
-    const perCoinStreak: Map<string, number> = new Map();
-    const perCoinStreakDone: Set<string> = new Set();
-    for (const r of recentRows) {
-      const sym = (r.symbol ?? "").toUpperCase();
-      if (!sym || perCoinStreakDone.has(sym)) continue;
-      const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
-      if (p < 0) {
-        perCoinStreak.set(sym, (perCoinStreak.get(sym) ?? 0) + 1);
-      } else {
-        perCoinStreakDone.add(sym); // first win resets streak for this coin
-      }
-    }
-    // Only auto-pause coins at startup when auto-tuning is enabled.
-    // Skipping this when enableAutoTuning=false lets the user keep coins
-    // unpaused across server restarts without the pause being silently re-applied.
-    if (config.enableAutoTuning ?? true) {
-      for (const [sym, consecutive] of perCoinStreak.entries()) {
-        if (consecutive >= 5 && !pausedCoins.has(sym)) {
-          pausedCoins.set(sym, 4);
-          logger.warn(
-            { sym, consecutive },
-            "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive losses",
-          );
-        }
-      }
-    }
+    // Startup does NOT auto-pause coins based on historical consecutive losses.
+    // Consecutive-loss pausing is handled entirely by the per-window auto-tune job
+    // (runAutoTuneRules), which only looks at bets from the current session.
+    // Restoring pauses at startup means losses from a broken-API period (or any
+    // other one-off event) permanently block coins across every future deploy.
 
     // Do NOT restore recentWindowOutcomes from DB at startup.
     // This map is intentional ephemeral per-session state: seeding it from

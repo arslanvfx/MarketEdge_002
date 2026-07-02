@@ -902,7 +902,7 @@ export default function BotDashboard() {
                           </span>
                         ) : <span className="text-muted-foreground text-xs">—</span>}
                       </td>
-                      <td className="px-3 py-2.5 text-muted-foreground text-xs max-w-[200px] truncate">{e.reason}</td>
+                      <td className="px-3 py-2.5 text-muted-foreground text-xs">{e.reason}</td>
                       <td className="px-3 py-2.5">
                         {e.selected ? <Star className="w-4 h-4 text-amber-400 fill-amber-400" /> : null}
                       </td>
