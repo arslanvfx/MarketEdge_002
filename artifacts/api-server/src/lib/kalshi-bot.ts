@@ -181,10 +181,15 @@ const pausedCoins: Map<string, number> = new Map();
 
 // Per-window outcome tracking for the doubt-penalty signal.
 // Key: windowKey (ISO string "YYYY-MM-DDTHH:mm"), Value: { wins, losses }.
-// Populated at startup from DB and updated live as bets settle in evalClosedBets.
+// NOT restored from DB at startup — purely ephemeral per-session state.
 // When the last 1-2 completed windows had <40% win rate the bot raises its
 // effective confidence floor to filter out marginal signals that may be noise.
 const recentWindowOutcomes: Map<string, { wins: number; losses: number }> = new Map();
+
+// Coins the user explicitly unpaused this session. Auto-tune will NOT re-pause
+// these until the next server restart, giving the user's choice priority over
+// the per-window auto-tune rule (which looks at all historical losses).
+const manuallyUnpausedCoins: Set<string> = new Set();
 
 // Cached performance report from the most recent auto-tune run (null before
 // the first run fires, typically ~15 min after startup).
@@ -518,28 +523,27 @@ export async function loadDailyPnlFromDB(): Promise<void> {
         perCoinStreakDone.add(sym); // first win resets streak for this coin
       }
     }
-    for (const [sym, consecutive] of perCoinStreak.entries()) {
-      if (consecutive >= 5 && !pausedCoins.has(sym)) {
-        pausedCoins.set(sym, 4);
-        logger.warn(
-          { sym, consecutive },
-          "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive losses",
-        );
+    // Only auto-pause coins at startup when auto-tuning is enabled.
+    // Skipping this when enableAutoTuning=false lets the user keep coins
+    // unpaused across server restarts without the pause being silently re-applied.
+    if (config.enableAutoTuning ?? true) {
+      for (const [sym, consecutive] of perCoinStreak.entries()) {
+        if (consecutive >= 5 && !pausedCoins.has(sym)) {
+          pausedCoins.set(sym, 4);
+          logger.warn(
+            { sym, consecutive },
+            "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive losses",
+          );
+        }
       }
     }
 
-    // Populate per-window outcome tracking from recent settled rows.
-    // recentRows is newest-first; we just iterate and bucket by windowKey.
+    // Do NOT restore recentWindowOutcomes from DB at startup.
+    // This map is intentional ephemeral per-session state: seeding it from
+    // historical losses means a mode-switch clear (or manual unpause) gets
+    // immediately undone on the next deploy, permanently blocking bets.
+    // The doubt filter will rebuild naturally from bets placed this session.
     recentWindowOutcomes.clear();
-    for (const r of recentRows) {
-      const wk = r.windowKey;
-      if (!wk || r.pnl == null) continue;
-      const p = parseFloat(String(r.pnl));
-      const wo = recentWindowOutcomes.get(wk) ?? { wins: 0, losses: 0 };
-      if (p > 0) wo.wins++;
-      else if (p < 0) wo.losses++;
-      recentWindowOutcomes.set(wk, wo);
-    }
 
     // Restore circuit-breaker state from the recovered streak.
     // Guard against the disabled mode (maxConsecutiveLosses=0 or pauseWindows=0):
@@ -2630,6 +2634,11 @@ export function getPausedCoinState(): Record<string, number> {
 export function clearPausedCoins(): string[] {
   const cleared = Array.from(pausedCoins.keys());
   pausedCoins.clear();
+  // Mark every cleared coin as manually unpaused so auto-tune won't re-pause
+  // them this session based on historical losses.
+  for (const sym of cleared) manuallyUnpausedCoins.add(sym);
+  // Also wipe the doubt filter so the fresh session starts clean.
+  recentWindowOutcomes.clear();
   return cleared;
 }
 
@@ -2637,7 +2646,12 @@ export function unpauseCoin(sym: string): boolean {
   const key = sym.toUpperCase();
   if (!pausedCoins.has(key)) return false;
   pausedCoins.delete(key);
+  manuallyUnpausedCoins.add(key);
   return true;
+}
+
+export function clearRecentWindowOutcomes(): void {
+  recentWindowOutcomes.clear();
 }
 
 export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
@@ -2939,11 +2953,18 @@ export async function runAutoTuneJob(): Promise<void> {
         updateBotConfig(mutation.configMutation).catch(() => {});
       }
 
-      // Apply per-coin pause
+      // Apply per-coin pause — but never re-pause a coin the user explicitly
+      // unpaused this session. manuallyUnpausedCoins protects user intent until
+      // the next server restart, preventing the re-pause loop.
       if (mutation.pauseCoin) {
         const { symbol: pauseSym, windows } = mutation.pauseCoin;
-        pausedCoins.set(pauseSym.toUpperCase(), windows);
-        logger.info({ sym: pauseSym, windows }, "[auto-tune] per-coin pause applied");
+        const upperSym = pauseSym.toUpperCase();
+        if (manuallyUnpausedCoins.has(upperSym)) {
+          logger.info({ sym: upperSym }, "[auto-tune] per-coin pause skipped — user manually unpaused this session");
+        } else {
+          pausedCoins.set(upperSym, windows);
+          logger.info({ sym: upperSym, windows }, "[auto-tune] per-coin pause applied");
+        }
       }
     }
   } catch (err) {

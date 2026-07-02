@@ -748,7 +748,7 @@ export default function BotDashboard() {
             <button
               type="button"
               onClick={async () => {
-                await fetch(`${API_BASE}/crypto/bot/coins/unpause-all`, { method: "POST" });
+                await authPost("/crypto/bot/coins/unpause-all", {});
                 await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
                 await qc.invalidateQueries({ queryKey: ["bot-status"] });
               }}
