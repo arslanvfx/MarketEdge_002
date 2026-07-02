@@ -33,12 +33,12 @@ export type AiFeature =
 
 const ENABLED: Record<AiSpendLevel, Set<AiFeature>> = {
   off: new Set(),
-  // Eco: all bot-critical features ON at minimum thinking depth.
-  // Skips only non-accuracy-affecting calls (market summaries, research briefs).
+  // Eco: core bot signals only at minimum thinking depth.
+  // Skips: trend stability (overlaps with momentum filter), market summaries,
+  // research briefs. Keeps snap + live-dir (bot accuracy) and stock signals.
   eco: new Set<AiFeature>([
     "crypto_snap",
     "crypto_live_dir",
-    "crypto_stability",
     "crypto_btc_call",
     "stock_signal",
     "stock_sentiment",
