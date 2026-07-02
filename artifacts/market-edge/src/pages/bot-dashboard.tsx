@@ -716,7 +716,7 @@ export default function BotDashboard() {
 
         {/* ── Paused Coins Banner ── */}
         {Object.keys(pausedCoins).length > 0 && (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3 flex flex-wrap items-center gap-3">
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm flex-shrink-0">
               <Pause className="w-4 h-4" />
               Auto-paused coins
@@ -735,8 +735,8 @@ export default function BotDashboard() {
                     title={`Unpause ${sym}`}
                     onClick={async () => {
                       await fetch(`${API_BASE}/crypto/bot/coins/paused/${sym}`, { method: "DELETE" });
-                      qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
-                      qc.invalidateQueries({ queryKey: ["bot-status"] });
+                      await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+                      await qc.invalidateQueries({ queryKey: ["bot-status"] });
                     }}
                     className="ml-0.5 flex items-center justify-center w-4 h-4 rounded-full hover:bg-amber-400/30 text-amber-400/70 hover:text-amber-200 transition-colors"
                   >
@@ -745,7 +745,17 @@ export default function BotDashboard() {
                 </span>
               ))}
             </div>
-            <span className="text-[11px] text-amber-400/60 ml-auto hidden sm:block">Auto-tune paused these coins due to underperformance</span>
+            <button
+              type="button"
+              onClick={async () => {
+                await fetch(`${API_BASE}/crypto/bot/coins/unpause-all`, { method: "POST" });
+                await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+                await qc.invalidateQueries({ queryKey: ["bot-status"] });
+              }}
+              className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 border border-amber-500/40 transition-colors"
+            >
+              Unpause All
+            </button>
           </div>
         )}
 
