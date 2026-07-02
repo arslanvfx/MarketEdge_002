@@ -180,6 +180,15 @@ const pausedCoins: Map<string, number> = new Map();
 // effective confidence floor to filter out marginal signals that may be noise.
 const recentWindowOutcomes: Map<string, { wins: number; losses: number }> = new Map();
 
+// Consecutive zero-bet window counter. Incremented at each window transition when
+// no bets were placed in the window that just ended. Reset to 0 on any bet placement.
+// Used by the drought safety valve: when this reaches DROUGHT_VALVE_WINDOWS the
+// momentum filter is softened from a hard skip to a confidence penalty so the bot
+// stays active even during extended directional streaks.
+let droughtWindowCount = 0;
+const DROUGHT_VALVE_WINDOWS = 2;   // windows with no bets before valve opens
+const DROUGHT_MOMENTUM_PENALTY = 5; // pp deducted instead of hard-skip when drought active
+
 // Cached performance report from the most recent auto-tune run (null before
 // the first run fires, typically ~15 min after startup).
 let cachedPerformanceReport: PerformanceReport | null = null;
@@ -1182,6 +1191,8 @@ async function _runBotTick(
   lastDecisionWindowKey.set(sym, windowKey);
   // Increment the per-window bet counter so subsequent ticks respect maxBetsPerWindow.
   windowBetCounts.set(windowBetKey, betsThisWindow + 1);
+  // A bet was placed — reset the drought counter so the valve closes again.
+  droughtWindowCount = 0;
 
   logger.info({ sym, direction, fillPrice, contractCount, betsThisWindow: betsThisWindow + 1 }, "[kalshi-bot] bet placed");
 }
@@ -1916,6 +1927,22 @@ export async function runBotLoopTick(): Promise<void> {
   const isCBNewWindow = cbWindowNow !== lastCircuitBreakerWindowKey;
   const cbWindowsAtStart = cbState.circuitBreakerWindowsRemaining;
   if (isCBNewWindow) {
+    // Drought tracking: check whether any bets were placed in the window that just ended.
+    // windowBetCounts still holds previous-window entries at this point (lazy purge).
+    const prevWindowKey = lastCircuitBreakerWindowKey;
+    const anyBetPrevWindow = prevWindowKey !== ""
+      && Array.from(windowBetCounts.entries()).some(([k, v]) => k.includes(`:${prevWindowKey}`) && v > 0);
+    if (anyBetPrevWindow) {
+      droughtWindowCount = 0;
+    } else if (prevWindowKey !== "") {
+      droughtWindowCount++;
+      if (droughtWindowCount >= DROUGHT_VALVE_WINDOWS) {
+        logger.warn(
+          { droughtWindowCount, DROUGHT_VALVE_WINDOWS },
+          `[kalshi-bot] drought valve: ${droughtWindowCount} consecutive zero-bet windows — softening momentum filter`,
+        );
+      }
+    }
     lastCircuitBreakerWindowKey = cbWindowNow;
     // Reset per-window direction counts so the cap applies fresh each 15-min window.
     windowDirectionCounts.clear();
@@ -2170,25 +2197,37 @@ export async function runBotLoopTick(): Promise<void> {
 
     // Momentum override filter: skip when price trend opposes the proposed direction.
     // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
+    // Drought valve: when droughtWindowCount >= DROUGHT_VALVE_WINDOWS the filter is softened
+    // from a hard skip to a confidence penalty so the bot stays active during long trends.
     if (decision.action !== "SKIP" && config.enableMomentumFilter) {
       const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
       if (checkMomentumOverride(proposedDir, recentStrikes, 0.5, config.momentumWindowCount)) {
-        logger.info({ sym, proposedDir, recentStrikes, windowCount: config.momentumWindowCount },
-          `[kalshi-bot] momentum override — ${sym} trending against ${proposedDir.toUpperCase()} entry`);
-        filteredByNewGuards.add(sym);
-        evalResults.push({
-          symbol: sym,
-          action: "SKIP",
-          confidence: effectiveConfidence,
-          score: 0,
-          reason: `momentum override — trending against ${proposedDir.toUpperCase()} entry`,
-          windowKey,
-          selected: false,
-          evaluatedAt: now,
-          trendStability: stability,
-          regime,
-        });
-        continue;
+        if (droughtWindowCount >= DROUGHT_VALVE_WINDOWS) {
+          // Soft mode: penalise confidence instead of hard-skipping.
+          effectiveConfidence = effectiveConfidence - DROUGHT_MOMENTUM_PENALTY;
+          logger.info(
+            { sym, proposedDir, recentStrikes, droughtWindowCount, penalised: effectiveConfidence },
+            `[kalshi-bot] momentum override (soft — drought valve active) — ${sym} confidence −${DROUGHT_MOMENTUM_PENALTY}pp → ${effectiveConfidence}%`,
+          );
+          // Let the remaining threshold checks decide whether to bet or skip.
+        } else {
+          logger.info({ sym, proposedDir, recentStrikes, windowCount: config.momentumWindowCount },
+            `[kalshi-bot] momentum override — ${sym} trending against ${proposedDir.toUpperCase()} entry`);
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `momentum override — trending against ${proposedDir.toUpperCase()} entry`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
       }
     }
 
@@ -2251,25 +2290,10 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // Directional confidence floor: empirical data shows YES bets win at 47% vs 68% for NO.
-    // Require a 6pp higher confidence bar for YES entries to compensate for this asymmetry.
-    const YES_CONFIDENCE_EXTRA = 6;
-    if (decision.action === "BET_YES" && effectiveConfidence < config.minConfidence + YES_CONFIDENCE_EXTRA) {
-      filteredByNewGuards.add(sym);
-      evalResults.push({
-        symbol: sym,
-        action: "SKIP",
-        confidence: effectiveConfidence,
-        score: 0,
-        reason: `YES confidence floor — ${effectiveConfidence}% < ${config.minConfidence + YES_CONFIDENCE_EXTRA}% (YES requires +${YES_CONFIDENCE_EXTRA}pp)`,
-        windowKey,
-        selected: false,
-        evaluatedAt: now,
-        trendStability: stability,
-        regime: regimeCache.get(sym) as "above" | "below" | "neutral" | null ?? null,
-      });
-      continue;
-    }
+    // YES directional confidence floor removed: the regime filter (−regimePenalty pp) and
+    // momentum filter already penalise against-direction bets. A separate +6pp floor on top
+    // was causing all YES bets to be blocked when combined with the regime penalty, resulting
+    // in multi-window droughts. The minConfidence setting is the single configurable threshold.
 
     // Window-doubt filter: if recent windows had poor win rates, require higher conviction
     // for both YES and NO bets. This prevents the bot from over-betting during choppy
