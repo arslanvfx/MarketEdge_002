@@ -346,6 +346,7 @@ function _makeBotDecisionInner(
       claudeConfidence: claudeCall?.confidence ?? null,
       kalshiTicker,
       minConfidence: config.minConfidence,
+      minStatConfidence: config.minStatConfidence ?? 0,
     });
 
     if (coreResult.action !== "SKIP" && mlAbove !== null) {
@@ -384,6 +385,7 @@ function _makeBotDecisionInner(
     mlConfidence,
     kalshiTicker,
     minConfidence: config.minConfidence,
+    minStatConfidence: config.minStatConfidence ?? 0,
   });
 
   const snapshot = buildSnapshot(

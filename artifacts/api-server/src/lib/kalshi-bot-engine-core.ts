@@ -49,6 +49,10 @@ export interface CorePairInputs {
   mlConfidence: number | null;
   kalshiTicker: string | null;
   minConfidence: number;
+  /** Hard floor on the raw stat model confidence. When stat is available and
+   *  below this value the bet is skipped regardless of what composite confidence
+   *  the ML / Claude validators produce.  0 = disabled.  Default 55. */
+  minStatConfidence: number;
 }
 
 export interface CorePairResult {
@@ -109,6 +113,22 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
       reasoning: `Negative EV (${ev.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}%`,
       signalsAgreeing: 0, signalsTotal: 0, ev,
     };
+  }
+
+  // Stat confidence floor gate — applied to all paths before any direction decision.
+  // When stat is available but its raw confidence is below the configured floor,
+  // the underlying signal is too weak to be reliable regardless of what Claude/ML
+  // push the composite score up to.  Skip early so we only bet when stat is
+  // actually meaningful.  If stat is absent (null) the gate does not block.
+  if (
+    inp.minStatConfidence > 0 &&
+    inp.statConfidence !== null &&
+    inp.statConfidence < inp.minStatConfidence
+  ) {
+    return skip(
+      `stat-floor: statConf ${inp.statConfidence}% < minStatConfidence ${inp.minStatConfidence}% — underlying signal too weak`,
+      ev,
+    );
   }
 
   // Whether the ML model is ready to lead
@@ -422,6 +442,11 @@ export interface BotConfig {
   paperStartingBalance: number;  // (default 100)
   paperWinReturnRate: number;    // (default 0.5)
   paperBalanceResetAt: string | null; // (default null = count all bets)
+  /** Hard floor on the raw stat model confidence (0-100).
+   *  A bet is skipped when stat is available and its raw confidence is below
+   *  this threshold, regardless of what Claude/ML push the composite score to.
+   *  Set to 0 to disable the floor entirely.  Default 55 (data-derived). */
+  minStatConfidence: number;
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -463,4 +488,6 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,
   paperBalanceResetAt: null,
+  // Stat floor: derived from historical data — stat < 55 = ~49-55% WR, stat >= 55 = ~69% WR
+  minStatConfidence: 55,
 };

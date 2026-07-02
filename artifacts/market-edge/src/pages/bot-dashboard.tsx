@@ -46,6 +46,7 @@ interface BotConfig {
   paperStartingBalance: number;
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
+  minStatConfidence: number;
 }
 
 interface LogicModeStats {
@@ -751,6 +752,21 @@ export default function BotDashboard() {
                     className="mt-1"
                     value={merged.minConfidence ?? 60}
                     onChange={e => setConfigDraft(d => ({ ...d, minConfidence: parseInt(e.target.value) }))} />
+                </label>
+
+                {/* Min Stat Confidence */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Min Stat Confidence ({merged.minStatConfidence ?? 55}%)
+                    <span className="ml-1 text-amber-400/70">· data-derived floor</span>
+                  </span>
+                  <input type="range" min={0} max={70} step={1}
+                    className="mt-1"
+                    value={merged.minStatConfidence ?? 55}
+                    onChange={e => setConfigDraft(d => ({ ...d, minStatConfidence: parseInt(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">
+                    0 = disabled · 55 = 69% WR · 56 = 74% WR (based on {139} settled bets)
+                  </span>
                 </label>
 
                 {/* Decision Mode — full-width row */}
