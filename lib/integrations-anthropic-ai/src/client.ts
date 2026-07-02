@@ -3,23 +3,28 @@ import Anthropic from "@anthropic-ai/sdk";
 let client: Anthropic | null = null;
 
 /**
- * Lazily construct the Anthropic client on first use. Throwing here (rather than
- * at module load) means a missing integration only fails the requests that
- * actually need Anthropic — it does not crash the whole API server at boot and
- * take down unrelated endpoints.
+ * Lazily construct the Anthropic client on first use.
+ *
+ * Priority:
+ *   1. ANTHROPIC_API_KEY — user's own direct Anthropic key (no proxy markup)
+ *   2. AI_INTEGRATIONS_ANTHROPIC_API_KEY — Replit managed integration (fallback)
+ *
+ * Throwing here (rather than at module load) means a missing key only fails
+ * the requests that actually need Anthropic — it does not crash the whole API
+ * server at boot and take down unrelated endpoints.
  */
 function getClient(): Anthropic {
   if (client) return client;
 
-  if (!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL) {
-    throw new Error(
-      "AI_INTEGRATIONS_ANTHROPIC_BASE_URL must be set. Did you forget to provision the Anthropic AI integration?",
-    );
+  const ownKey = process.env.ANTHROPIC_API_KEY;
+  if (ownKey) {
+    client = new Anthropic({ apiKey: ownKey });
+    return client;
   }
 
-  if (!process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY) {
+  if (!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL || !process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY) {
     throw new Error(
-      "AI_INTEGRATIONS_ANTHROPIC_API_KEY must be set. Did you forget to provision the Anthropic AI integration?",
+      "No Anthropic API key found. Set ANTHROPIC_API_KEY (your own key) or provision the Anthropic AI integration.",
     );
   }
 
