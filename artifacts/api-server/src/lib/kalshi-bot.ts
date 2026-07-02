@@ -2273,6 +2273,42 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
+    // Position-relative NO gate: when the live crypto price is already above the
+    // Kalshi strike by > 0.1%, a NO bet is a mean-reversion call into a trending
+    // market. Historical data shows 7/7 NO losses in exactly this configuration.
+    // Require ML confirmation (mlAbove === false) OR broad 3-signal agreement to
+    // allow entry — otherwise skip.
+    if (decision.action === "BET_NO" && kalshiData.value !== null) {
+      const livePrice = getCachedPrediction(sym)?.price ?? null;
+      const ABOVE_STRIKE_NO_GAP = 0.001; // 0.1% above strike
+      if (livePrice !== null && livePrice > kalshiData.value * (1 + ABOVE_STRIKE_NO_GAP)) {
+        const sigs = decision.signals as { signalsAgreeing?: number; mlAbove?: boolean | null };
+        const mlConfirmsNo = sigs.mlAbove === false;
+        const broadAgreement = (sigs.signalsAgreeing ?? 0) >= 3;
+        if (!mlConfirmsNo && !broadAgreement) {
+          const gapPct = ((livePrice - kalshiData.value) / kalshiData.value * 100).toFixed(3);
+          logger.info(
+            { sym, livePrice, kalshiTarget: kalshiData.value, gapPct, signalsAgreeing: sigs.signalsAgreeing, mlAbove: sigs.mlAbove },
+            `[kalshi-bot] NO gate — ${sym} price +${gapPct}% above strike, no ML reversal confirmation`,
+          );
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `NO gate — price +${gapPct}% above strike, requires ML or 3-signal agreement`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+      }
+    }
+
     // Window-doubt filter: if recent windows had poor win rates, require higher conviction
     // for both YES and NO bets. This prevents the bot from over-betting during choppy
     // uncertain regimes when all signals are marginal.

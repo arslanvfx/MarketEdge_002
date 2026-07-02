@@ -3058,6 +3058,11 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
             ]);
             const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
             const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice, orderBook);
+            // Keep predCache warm from the tracker so getCachedPrediction() always
+            // returns a non-null value at bot decision time — regardless of whether
+            // the frontend dashboard is actively polling the predictions endpoint.
+            // Without this, ML inference is null whenever no browser tab is open.
+            predCache.set(sym, { at: Date.now(), value: analysis });
 
             // ── ML snapshot is now captured AFTER stat+claude are computed ──────
             // (see below, just after the if(ai) block) so features 14-16

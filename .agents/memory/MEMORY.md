@@ -34,3 +34,5 @@
 - [Stock trading vertical](stock-vertical-arch.md) — Alpaca stock vertical is fully isolated from crypto (stock_* tables, 21-feat ML); never mark DB flat before broker close confirmed
 - [Window-doubt & chop filters](window-doubt-chop.md) — recentWindowOutcomes Map tracks per-window wins/losses; doubt penalty +4/+8pp when 1/2 recent windows <40% win rate; chop cap limits to 2 bets when 4+ coins ≤58% confidence
 - [ML features v4](ml-features-v4.md) — N_FEATURES 17→19; feature 17=volumeDirectionBias (net bullish/bearish volume last 8 candles); feature 18=candleReversalSignal (-1/0/+1 for shooting star, engulfing, hammer patterns)
+- [predCache must be warm for ML](predcache-ml-fix.md) — getCachedPrediction() reads predCache; only populated by fetchCryptoPredictions (frontend endpoint); fix: tracker snap loop must also call predCache.set() after analyzeCoin
+- [Position-relative NO gate](no-gate-above-strike.md) — when live price > kalshiStrike × 1.001, NO bets need ML confirm (mlAbove===false) OR ≥3 signals; 7/7 historical losses without this gate
