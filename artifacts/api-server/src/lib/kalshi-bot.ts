@@ -8,6 +8,7 @@
 // Live mode: requires KALSHI_API_KEY secret and explicit user toggle.
 
 import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
+import { isAiFeatureEnabled } from "./ai-spend";
 import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import {
@@ -1968,7 +1969,7 @@ export async function runBotLoopTick(): Promise<void> {
     const kd = getKalshiCachedData(sym);
     return kd?.value != null && kd.yesPrice != null;
   });
-  if (pendingCoins.length > 0) {
+  if (pendingCoins.length > 0 && isAiFeatureEnabled("crypto_stability")) {
     // Mark synchronously before any await to prevent double-dispatch on overlapping ticks.
     pendingCoins.forEach(c => stabilityFiredForCoins.add(c.symbol.toUpperCase()));
     void Promise.all(

@@ -3,6 +3,7 @@
 // into one directional call per ticker. Isolated from the crypto predictor.
 
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { isAiFeatureEnabled } from "../ai-spend";
 import { logger } from "../logger";
 import {
   rsi,
@@ -181,7 +182,7 @@ export async function buildSignals(
   const ml: MlSignal = predictStock(ticker, features);
 
   let claude: ClaudeSignal | undefined;
-  if (opts.useClaude) {
+  if (opts.useClaude && isAiFeatureEnabled("stock_signal")) {
     claude = await claudeSignal(ticker, candles, news, earnings, stat);
   }
 

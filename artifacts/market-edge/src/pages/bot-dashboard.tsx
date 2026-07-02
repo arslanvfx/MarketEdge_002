@@ -302,6 +302,15 @@ export default function BotDashboard() {
     refetchInterval: 5 * 60_000,
   });
 
+  const { data: presetsData } = useQuery<{ presets: Partial<Record<string, object>> }>({
+    queryKey: ["bot-mode-presets"],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/crypto/bot/config/presets`);
+      return res.json();
+    },
+    refetchInterval: 30_000,
+  });
+
   const { data: backtestData } = useQuery<{ modes: BacktestModeStats[] }>({
     queryKey: ["bot-backtest-modes"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/backtest-modes`).then(r => r.json()),
@@ -309,6 +318,8 @@ export default function BotDashboard() {
   });
 
   const [btPerfTab, setBtPerfTab] = useState<"live" | "backtest">("live");
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetMsg, setPresetMsg] = useState<string | null>(null);
 
   // ── Mutations ────────────────────────────────────────────────────────────
   async function authPost(path: string, body: object) {
@@ -343,6 +354,21 @@ export default function BotDashboard() {
       setTimeout(() => setPersistMsg(null), 3000);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function savePreset() {
+    setSavingPreset(true);
+    try {
+      await authPost("/crypto/bot/config/save-preset", {});
+      void qc.invalidateQueries({ queryKey: ["bot-mode-presets"] });
+      setPresetMsg("Preset saved ✓");
+      setTimeout(() => setPresetMsg(null), 3000);
+    } catch {
+      setPresetMsg("Save failed");
+      setTimeout(() => setPresetMsg(null), 3000);
+    } finally {
+      setSavingPreset(false);
     }
   }
 
@@ -751,6 +777,38 @@ export default function BotDashboard() {
                       );
                     })}
                   </div>
+                </div>
+
+                {/* Mode preset — save current config as a recall point for this mode */}
+                <div className="col-span-2 flex flex-col gap-1.5 rounded-xl border border-border/60 bg-muted/20 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">Mode Preset</span>
+                    <button
+                      type="button"
+                      disabled={savingPreset}
+                      onClick={savePreset}
+                      className="text-[10px] px-2.5 py-1 rounded-lg border border-border bg-background/60 text-muted-foreground hover:text-foreground hover:border-border/80 transition-colors disabled:opacity-50"
+                    >
+                      {savingPreset ? "Saving…" : `Save as ${(merged.decisionMode ?? "classic")} preset`}
+                    </button>
+                  </div>
+                  {presetMsg && (
+                    <span className={`text-[10px] ${presetMsg.includes("✓") ? "text-emerald-400" : "text-yellow-400"}`}>{presetMsg}</span>
+                  )}
+                  {(() => {
+                    const dm = merged.decisionMode ?? "classic";
+                    const p = presetsData?.presets?.[dm] as Record<string, unknown> | undefined;
+                    if (!p) return (
+                      <p className="text-[9px] text-muted-foreground/50">No preset saved for <span className="font-medium">{dm}</span> yet. Configure settings and save to auto-apply on next mode switch.</p>
+                    );
+                    return (
+                      <p className="text-[9px] text-muted-foreground/60">
+                        Preset saved for <span className="font-medium text-sky-400/80">{dm}</span> — auto-applied when you switch to this mode.
+                        {typeof p.minConfidence === "number" && ` Min conf: ${p.minConfidence}%.`}
+                        {typeof p.betSize === "number" && ` Bet: $${p.betSize}.`}
+                      </p>
+                    );
+                  })()}
                 </div>
 
                 {/* Exit Sensitivity */}

@@ -3,6 +3,7 @@ import {
   batchProcess,
   isRateLimitError,
 } from "@workspace/integrations-anthropic-ai/batch";
+import { isAiFeatureEnabled } from "./ai-spend";
 import type { Market } from "./markets";
 
 /**
@@ -164,6 +165,9 @@ export async function analyzeMarkets(
   }
 
   if (toAnalyze.length === 0) return result;
+
+  // Skip Claude analysis when AI spend is below the threshold for market summaries.
+  if (!isAiFeatureEnabled("market_summary")) return result;
 
   // Chunk the markets, then process chunks with limited concurrency + retries.
   const chunks: Market[][] = [];

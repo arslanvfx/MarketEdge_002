@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { getAiSpendLevel, setAiSpendLevel, AI_SPEND_LABELS, isAiFeatureEnabled, type AiSpendLevel } from "../lib/ai-spend";
 import {
   fetchCryptoPredictions,
   fetchCryptoPrices,
@@ -468,10 +469,27 @@ router.get("/crypto/kalshi-btc-target", async (_req, res) => {
   }
 });
 
+// ── Global AI spend level ─────────────────────────────────────────────────────
+
+router.get("/crypto/ai-spend", (_req, res) => {
+  const level = getAiSpendLevel();
+  res.json({ level, labels: AI_SPEND_LABELS });
+});
+
+router.post("/crypto/ai-spend", (req, res) => {
+  const { level } = req.body as { level?: string };
+  if (level !== "off" && level !== "eco" && level !== "balanced" && level !== "max") {
+    res.status(400).json({ error: "level must be off | eco | balanced | max" });
+    return;
+  }
+  setAiSpendLevel(level as AiSpendLevel);
+  res.json({ ok: true, level, labels: AI_SPEND_LABELS });
+});
+
 // Dedicated Claude call for the current Kalshi BTC window
 router.get("/crypto/kalshi-btc-call", async (req, res) => {
-  if (!isAiGloballyEnabled()) {
-    res.status(503).json({ error: "AI disabled" });
+  if (!isAiGloballyEnabled() || !isAiFeatureEnabled("crypto_btc_call")) {
+    res.status(503).json({ error: "AI disabled at current spend level" });
     return;
   }
 

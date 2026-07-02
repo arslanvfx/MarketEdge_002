@@ -4,6 +4,7 @@
 
 import { sql } from "drizzle-orm";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { isAiFeatureEnabled } from "../ai-spend";
 import { db } from "@workspace/db";
 import { logger } from "../logger";
 import { getNews as alpacaGetNews, alpacaConfigured } from "./alpaca";
@@ -125,6 +126,10 @@ export async function getScoredNews(ticker: string): Promise<NewsItem[]> {
   try {
     const raw = await alpacaGetNews([T], 8);
     if (raw.length === 0) {
+      lastFetched.set(T, Date.now());
+      return readCache(T);
+    }
+    if (!isAiFeatureEnabled("stock_sentiment")) {
       lastFetched.set(T, Date.now());
       return readCache(T);
     }

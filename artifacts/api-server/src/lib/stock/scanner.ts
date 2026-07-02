@@ -13,6 +13,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { logger } from "../logger";
+import { isAiFeatureEnabled } from "../ai-spend";
 import { alpacaConfigured, getSnapshots, getBars, getClock } from "./alpaca";
 import { STOCK_UNIVERSE, SECTORS, lookupUniverse } from "./universe";
 import { statSignal } from "./ai";
@@ -266,13 +267,15 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
     logger.info({ scanned: rows.length, scored }, "[stock-scanner] scan complete");
 
     // Fire-and-forget Claude research pass for the top-20 scored tickers.
-    const top20 = [...rows]
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 20)
-      .map((r) => r.ticker);
-    runResearchPass(top20).catch((err) =>
-      logger.warn({ err }, "[stock-scanner] research pass error"),
-    );
+    if (isAiFeatureEnabled("stock_research")) {
+      const top20 = [...rows]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 20)
+        .map((r) => r.ticker);
+      runResearchPass(top20).catch((err) =>
+        logger.warn({ err }, "[stock-scanner] research pass error"),
+      );
+    }
 
     return { scanned: rows.length, scored };
   } finally {

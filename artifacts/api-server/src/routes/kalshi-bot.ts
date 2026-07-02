@@ -18,7 +18,37 @@ import {
   getBacktestModes,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
+import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
+import { db, botConfigTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
+
+// ── Decision-mode preset helpers ──────────────────────────────────────────────
+
+const PRESET_ROW_ID = "mode_presets";
+
+async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<BotConfig>>>> {
+  try {
+    const rows = await db.select().from(botConfigTable).where(eq(botConfigTable.id, PRESET_ROW_ID)).limit(1);
+    if (rows.length > 0) {
+      const cfg = rows[0].config as { presets?: Partial<Record<DecisionMode, Partial<BotConfig>>> } | null;
+      return cfg?.presets ?? {};
+    }
+  } catch { /* non-fatal */ }
+  return {};
+}
+
+async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): Promise<void> {
+  const existing = await readModePresets();
+  const updated = { ...existing, [mode]: config };
+  await db
+    .insert(botConfigTable)
+    .values({ id: PRESET_ROW_ID, config: { presets: updated } as Record<string, unknown>, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: botConfigTable.id,
+      set: { config: { presets: updated } as Record<string, unknown>, updatedAt: new Date() },
+    });
+}
 
 const router = Router();
 
@@ -159,7 +189,14 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous") {
+    // When switching modes: auto-load the saved preset for the new mode (if any),
+    // then apply any explicit overrides from this request on top.
+    const presets = await readModePresets();
+    const modePreset = presets[decisionMode as DecisionMode];
+    if (modePreset) {
+      Object.assign(partial, modePreset);
+    }
     partial.decisionMode = decisionMode;
   }
   if (
@@ -330,6 +367,32 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
   try {
     const modes = await getBacktestModes();
     res.json({ modes });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/config/presets — return all saved per-mode presets (public)
+router.get("/crypto/bot/config/presets", async (_req, res) => {
+  try {
+    const presets = await readModePresets();
+    res.json({ presets });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/config/save-preset — save current bot config as preset for
+// the current decision mode. Call this after dialling in optimal settings for
+// a mode so they auto-apply next time the mode is selected.
+router.post("/crypto/bot/config/save-preset", requireAuth, async (_req, res) => {
+  try {
+    const state = getBotState();
+    const mode = state.config.decisionMode;
+    await writeModePreset(mode, state.config as unknown as Partial<BotConfig>);
+    res.json({ ok: true, saved: mode, preset: state.config });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

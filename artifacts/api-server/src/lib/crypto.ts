@@ -1,4 +1,5 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { isAiFeatureEnabled } from "./ai-spend";
 import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { extractMLFeatures, deriveMLSignalDirections, buildMLSnapshotInputs } from "./ml-features";
@@ -3080,7 +3081,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
               // Claude improves while paused and accuracy tracking breaks.
               updateKalshiWindowPrice(getLastKalshiTicker(sym), analysis.price);
               const winCtxSnap = getKalshiWindowContext(sym);
-              const useAI = TRAINING_COINS.has(sym);
+              const useAI = TRAINING_COINS.has(sym) && isAiFeatureEnabled("crypto_snap");
               const [ai, kalshiTarget] = await Promise.all([
                 useAI
                   ? refineWithSelfConsistency(analysis, basePred, {
@@ -3363,7 +3364,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
               }
             }
 
-            if (triggerReason) {
+            if (triggerReason && isAiFeatureEnabled("crypto_live_dir")) {
               const isInitialTrigger = triggerReason === "initial (stat snap ready)";
               liveDirectionInFlight.add(sym);
               liveDirectionLastAutoTrigger.set(sym, nowMs);
