@@ -937,7 +937,7 @@ function SelfLearningDashboard({
       <div className="mb-4 flex items-start gap-2 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2.5">
         <Bot className="w-3.5 h-3.5 text-violet-400 shrink-0 mt-0.5" />
         <div className="text-[11px] text-muted-foreground leading-snug">
-          <span className="text-violet-300 font-semibold">BTC · ETH · XRP · HYPE · BNB</span> are training coins — all 4 models (Stat, Claude, Ensemble, ML) are recorded every window so accuracy can be compared fairly.
+          <span className="text-violet-300 font-semibold">BTC · ETH · XRP · HYPE · BNB · DOGE · LINK</span> are training coins — all 4 models (Stat, Claude, Ensemble, ML) are recorded every window so accuracy can be compared fairly.
           {" "}New coins enter an <span className="text-sky-300/80 font-medium">Exploring</span> phase to gather enough data before the comparison is made.
           {" "}The <span className="text-foreground/70 font-medium">Auto-Pilot</span> live signal is then routed through whichever model is winning per coin.
         </div>
@@ -1145,7 +1145,7 @@ function SelfLearningDashboard({
 // Best Windows to Trade panel
 // ---------------------------------------------------------------------------
 
-const TRAINING_COIN_FILTERS = ["ALL", "BTC", "ETH", "XRP", "HYPE", "BNB"] as const;
+const TRAINING_COIN_FILTERS = ["ALL", "BTC", "ETH", "XRP", "HYPE", "BNB", "DOGE", "LINK"] as const;
 
 type BarViewMode = "er" | "accuracy";
 
@@ -2831,7 +2831,7 @@ export default function Predictor() {
   const aiSettings: AiSettings = aiSettingsQuery.data ?? {
     mode: "stat",
     claudeCoins: [],
-    trainingCoins: ["BTC", "ETH", "XRP", "HYPE", "BNB"],
+    trainingCoins: ["BTC", "ETH", "XRP", "HYPE", "BNB", "DOGE", "LINK"],
     autoPilot: { enabled: false, maxActive: 0, decisions: [] },
   };
   const claudeEnabledSet = useMemo(() => new Set(aiSettings.claudeCoins), [aiSettings.claudeCoins]);

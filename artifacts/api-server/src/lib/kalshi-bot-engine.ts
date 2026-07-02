@@ -371,15 +371,20 @@ function _makeBotDecisionInner(
       coreResult.signalsTotal,
       coreResult.action !== "SKIP" ? coreResult.action : null,
     );
-    const proposedDir = coreResult.action === "BET_YES";
-    const mlDisagreesButBelowThreshold =
-      mlAbove !== null && mlAbove !== proposedDir && coreResult.action !== "SKIP";
-    const mlReasonSuffix =
-      mlAbove === null
-        ? " (ML not ready — no veto applied)"
-        : mlDisagreesButBelowThreshold
-          ? ` (ML disagrees at ${mlConfidence ?? 0}% < ${config.mlVetoMinConfidence ?? 57}% threshold — veto skipped)`
-          : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
+    // Only annotate with ML context when the core produced an actionable direction.
+    // A SKIP result (e.g. "No signals available") has no direction for ML to confirm.
+    let mlReasonSuffix = "";
+    if (coreResult.action !== "SKIP") {
+      const proposedDir = coreResult.action === "BET_YES";
+      const mlDisagreesButBelowThreshold =
+        mlAbove !== null && mlAbove !== proposedDir;
+      mlReasonSuffix =
+        mlAbove === null
+          ? " (ML not ready — no veto applied)"
+          : mlDisagreesButBelowThreshold
+            ? ` (ML disagrees at ${mlConfidence ?? 0}% < ${config.mlVetoMinConfidence ?? 57}% threshold — veto skipped)`
+            : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
+    }
     return {
       action: coreResult.action,
       confidence: coreResult.confidence,
