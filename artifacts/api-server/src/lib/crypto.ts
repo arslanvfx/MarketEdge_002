@@ -2345,6 +2345,7 @@ async function refineSnappedPrediction(
   basePred: Prediction,
   extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number | null; minutesElapsed?: number },
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
+  if (globalAIPaused) return null;
   try {
     const dp = priceDp(coin.price);
     const recent = coin.candles.slice(-60);
@@ -2563,7 +2564,7 @@ Return ONLY valid JSON (no markdown):
     const snapParams: Parameters<typeof anthropic.messages.create>[0] = {
       model: "claude-sonnet-4-6",
       max_tokens: snapExtendedThinking ? 16000 : 1024,
-      ...(snapExtendedThinking ? { thinking: { type: "enabled", budget_tokens: 6000 } } : {}),
+      ...(snapExtendedThinking ? { thinking: { type: "enabled", budget_tokens: 3000 } } : {}),
       system: snapExtendedThinking
         ? "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text."
         : "You are an expert crypto technical analyst. Respond with ONLY valid compact JSON — no markdown, no extra text.",
@@ -2607,6 +2608,34 @@ Return ONLY valid JSON (no markdown):
 let snapExtendedThinking = true;
 export function setSnapExtendedThinking(enabled: boolean): void {
   snapExtendedThinking = enabled;
+}
+
+// ---------------------------------------------------------------------------
+// Global AI pause + per-coin pause + maintenance window
+// ---------------------------------------------------------------------------
+
+// Emergency switch: when true ALL Claude calls return null immediately.
+// Persisted via BotConfig.aiPaused — kalshi-bot syncs this on every tick.
+let globalAIPaused = false;
+export function setGlobalAIPaused(paused: boolean): void {
+  globalAIPaused = paused;
+}
+
+// Coins currently auto-paused by the circuit breaker.  Claude snap is skipped
+// for paused coins (no bet will be placed, so extended thinking is wasted).
+let claudePausedCoins = new Set<string>();
+export function setClaudePausedCoins(coins: Set<string>): void {
+  claudePausedCoins = coins;
+}
+
+// Kalshi weekly maintenance: Thursdays 03:00–05:00 AM EST (UTC−5).
+// During this window Kalshi is down — no new markets open, no bets possible.
+export function isKalshiMaintenanceWindow(): boolean {
+  const now = new Date();
+  // Shift to EST (UTC-5) and check day + hour.
+  const estMs = now.getTime() - 5 * 60 * 60 * 1000;
+  const est = new Date(estMs);
+  return est.getUTCDay() === 4 && est.getUTCHours() >= 3 && est.getUTCHours() < 5;
 }
 
 // Self-consistency wrapper: when selfConsistencySamples > 1, independently
@@ -3101,7 +3130,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
               // Claude improves while paused and accuracy tracking breaks.
               updateKalshiWindowPrice(getLastKalshiTicker(sym), analysis.price);
               const winCtxSnap = getKalshiWindowContext(sym);
-              const useAI = TRAINING_COINS.has(sym);
+              const useAI = TRAINING_COINS.has(sym) && !claudePausedCoins.has(sym);
               const [ai, kalshiTarget] = await Promise.all([
                 useAI
                   ? refineWithSelfConsistency(analysis, basePred, {
@@ -3953,6 +3982,7 @@ export async function fetchLiveDirection(symbol: string, force = false): Promise
   if (!force && entry && nowMs - entry.at < LIVE_DIR_TTL) {
     return { ...entry.result, cached: true };
   }
+  if (globalAIPaused) return null;
 
   const coin = CRYPTO_COINS.find((c) => c.symbol === symbol.toUpperCase());
   if (!coin) return null;
@@ -4091,6 +4121,7 @@ export async function fetchTrendStabilityForBot(
   symbol: string,
   windowKey: string,
 ): Promise<TrendStabilityResult | null> {
+  if (globalAIPaused) return null;
   const sym = symbol.toUpperCase();
   const cacheKey = `${sym}:${windowKey}`;
   const cached = trendStabilityCache.get(cacheKey);

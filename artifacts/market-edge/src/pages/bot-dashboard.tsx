@@ -42,6 +42,7 @@ interface BotConfig {
   borderProximityPct: number;
   borderLookbackBets: number;
   regimePenalty: number;
+  aiPaused: boolean;
   paperStartingBalance: number;
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
@@ -1018,6 +1019,26 @@ export default function BotDashboard() {
                       {merged.enabled ? "Enabled" : "Disabled"}
                     </span>
                   </div>
+                </label>
+
+                {/* AI Pause — emergency cost kill-switch */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Pause All AI Calls</span>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <button
+                      onClick={() => setConfigDraft(d => ({ ...d, aiPaused: !merged.aiPaused }))}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${merged.aiPaused ? "bg-amber-500" : "bg-muted"}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${merged.aiPaused ? "translate-x-5" : ""}`} />
+                    </button>
+                    <span className={`text-xs font-medium ${merged.aiPaused ? "text-amber-400" : "text-muted-foreground"}`}>
+                      {merged.aiPaused ? "AI Paused — no Claude calls" : "AI Active"}
+                    </span>
+                  </div>
+                  {merged.aiPaused && (
+                    <p className="text-[10px] text-amber-400/80 mt-0.5">
+                      Snaps + live direction return null. Bot continues using stat + ML signals only.
+                    </p>
+                  )}
                 </label>
               </div>
 

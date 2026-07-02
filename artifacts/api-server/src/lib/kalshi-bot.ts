@@ -43,6 +43,9 @@ import {
   getPredictionAnalytics,
   getConfirmedTargetMs,
   setSnapExtendedThinking,
+  setGlobalAIPaused,
+  setClaudePausedCoins,
+  isKalshiMaintenanceWindow,
   CRYPTO_COINS,
   KALSHI_SERIES,
   type TrendStability,
@@ -1877,12 +1880,20 @@ export async function runBotLoopTick(): Promise<void> {
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
   evalClosedBets().catch(() => {});
 
-  // Disable extended thinking for snap calls during quiet hours — the snap
-  // still fires (accuracy tracking + ML training), but extended thinking adds
-  // no value when no bets will be placed. Standard Sonnet is ~10× cheaper.
-  setSnapExtendedThinking(
-    !isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd),
-  );
+  // Sync AI call flags before any work this tick.
+  const inMaintenance = isKalshiMaintenanceWindow();
+  const inQuiet = isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd);
+  // Extended thinking off during quiet hours OR maintenance (no bets, no need for deep reasoning).
+  setSnapExtendedThinking(!inQuiet && !inMaintenance);
+  // Global pause: manual aiPaused flag OR active maintenance window kills ALL Claude calls.
+  setGlobalAIPaused(config.aiPaused || inMaintenance);
+  // Skip Claude snap for circuit-breaker-paused coins (no bet will fire, so extended thinking is wasted).
+  setClaudePausedCoins(new Set(pausedCoins.keys()));
+
+  if (inMaintenance) {
+    logger.info("[kalshi-bot] Kalshi maintenance window (Thu 03–05 EST) — skipping tick");
+    return;
+  }
 
   // Always run window-expiry check, even when paused or disabled.
   // If the 15-minute window rolls over while a position is still open (e.g.

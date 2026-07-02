@@ -390,6 +390,7 @@ export interface BotConfig {
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
+  aiPaused: boolean;         // emergency: suspend ALL Claude calls without stopping the bot
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
   quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
@@ -457,6 +458,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   borderLookbackBets: 3,
   // Regime penalty: 15pp deduction for against-regime bets — high bar keeps quality high
   regimePenalty: 15,
+  aiPaused: false,
   // Paper trading defaults
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,
