@@ -41,6 +41,10 @@ interface BotConfig {
   enableBorderGuard: boolean;
   borderProximityPct: number;
   borderLookbackBets: number;
+  regimePenalty: number;
+  paperStartingBalance: number;
+  paperWinReturnRate: number;
+  paperBalanceResetAt: string | null;
 }
 
 interface LogicModeStats {
@@ -984,6 +988,23 @@ export default function BotDashboard() {
                   />
                 </label>
 
+                {/* Regime Penalty */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Regime Penalty ({merged.regimePenalty ?? 8}pp)
+                  </span>
+                  <input type="range" min={0} max={20} step={1}
+                    className="mt-1"
+                    value={merged.regimePenalty ?? 8}
+                    onChange={e => setConfigDraft(d => ({ ...d, regimePenalty: parseInt(e.target.value) }))} />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0 (off)</span><span>20pp</span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    Confidence deducted when betting against the recent settlement direction. Lower = more bets.
+                  </span>
+                </label>
+
                 {/* Master Enable */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Bot Master Switch</span>
@@ -999,6 +1020,69 @@ export default function BotDashboard() {
                   </div>
                 </label>
               </div>
+
+              {/* Paper Trading Simulation — only visible in paper mode */}
+              {status?.mode === "paper" && (
+                <div className="border border-border/60 rounded-lg p-4 space-y-4 bg-sky-500/5">
+                  <div className="flex items-center gap-2 mb-1">
+                    <DollarSign className="w-3.5 h-3.5 text-sky-400" />
+                    <span className="text-xs font-semibold text-sky-400">Paper Trading Simulation</span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    {/* Starting Balance */}
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-xs text-muted-foreground">Starting Wallet ($)</span>
+                      <input type="number" min={1} max={100000} step={10}
+                        className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                        value={merged.paperStartingBalance ?? 100}
+                        onChange={e => setConfigDraft(d => ({ ...d, paperStartingBalance: parseFloat(e.target.value) }))} />
+                      <span className="text-[10px] text-muted-foreground/70">
+                        Balance when the wallet is reset.
+                      </span>
+                    </label>
+
+                    {/* Win Return Rate */}
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-xs text-muted-foreground">
+                        Win Profit Rate ({((merged.paperWinReturnRate ?? 0.5) * 100).toFixed(0)}%)
+                      </span>
+                      <input type="range" min={0.05} max={1.0} step={0.05}
+                        className="mt-1"
+                        value={merged.paperWinReturnRate ?? 0.5}
+                        onChange={e => setConfigDraft(d => ({ ...d, paperWinReturnRate: parseFloat(e.target.value) }))} />
+                      <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                        <span>5%</span><span>100%</span>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/70">
+                        Profit returned as % of bet on a win (e.g. 50% → +$0.50 per $1 bet).
+                      </span>
+                    </label>
+
+                    {/* Reset Wallet */}
+                    <div className="flex flex-col gap-1.5">
+                      <span className="text-xs text-muted-foreground">Reset Wallet</span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-sky-500/40 text-sky-400 hover:bg-sky-500/10 text-xs"
+                        onClick={() => {
+                          const now = new Date().toISOString();
+                          setConfigDraft(d => ({
+                            ...d,
+                            paperBalanceResetAt: now,
+                            paperStartingBalance: merged.paperStartingBalance ?? 100,
+                          }));
+                        }}
+                      >
+                        Reset to ${(merged.paperStartingBalance ?? 100).toFixed(0)}
+                      </Button>
+                      <span className="text-[10px] text-muted-foreground/70">
+                        Resets the wallet to the Starting Wallet amount. Save to apply.
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="flex items-center gap-2 pt-2 border-t border-border">
                 <Button size="sm" disabled={!hasDraft || saving} onClick={saveConfig} className="gap-1">

@@ -411,6 +411,16 @@ export interface BotConfig {
   enableBorderGuard: boolean;    // (default true)
   borderProximityPct: number;    // skip if avg |closePrice−strike|/strike < this % (default 0.3)
   borderLookbackBets: number;    // how many most-recent settled bets to examine per coin (default 3)
+  // Regime filter: how many confidence-points to deduct when the bot would bet
+  // against the recent settlement direction. Set to 0 to disable the penalty entirely.
+  regimePenalty: number;         // pp deducted for against-regime bets (default 8)
+  // Paper trading simulation parameters (only used in paper mode).
+  // paperStartingBalance: the wallet amount before any bets are counted.
+  // paperWinReturnRate: profit as a fraction of betSize on a winning bet (0.5 = +50¢ per $1 bet).
+  // paperBalanceResetAt: ISO timestamp of the last manual wallet reset; bets before this are ignored.
+  paperStartingBalance: number;  // (default 100)
+  paperWinReturnRate: number;    // (default 0.5)
+  paperBalanceResetAt: string | null; // (default null = count all bets)
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -445,4 +455,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableBorderGuard: false,
   borderProximityPct: 0.1,
   borderLookbackBets: 3,
+  // Regime penalty: 8pp deduction for against-regime bets (softer than the original 15pp)
+  regimePenalty: 8,
+  // Paper trading defaults
+  paperStartingBalance: 100,
+  paperWinReturnRate: 0.50,
+  paperBalanceResetAt: null,
 };

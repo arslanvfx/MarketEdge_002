@@ -137,9 +137,10 @@ const openPositions = new Map<string, OpenPosition>();
 let dailyPnl = 0;
 let dailyLossCount = 0;
 let dailyDate = todayUTC();
-// Paper mode starts with a simulated $100 balance so the dashboard can display
-// it immediately.  Live mode reads the real account balance from Kalshi.
-let accountBalance: number | null = 100;
+// Paper mode balance: starts at null and is populated by loadPaperBalanceFromDB()
+// on startup. Live mode reads from Kalshi. Using null (not 100) prevents the balance
+// from being incorrectly reset to $100 on every server restart / republish.
+let accountBalance: number | null = null;
 // Per-symbol exit-guard diagnostics — updated every tick a position is managed.
 const lastGuardStatesMap = new Map<string, GuardStates>();
 const lastGuardReasonMap = new Map<string, string>();
@@ -199,9 +200,9 @@ let borderProximityCacheWindow = "";
 // the Kalshi strike. Used to penalise against-regime bets.
 let regimeCache: Map<string, "above" | "below" | "neutral"> = new Map();
 let regimeCacheWindow = "";
-// Confidence penalty applied when betting against the recent settlement regime.
-// Set to 15pp so a base-65% signal drops to 50%, below the default 52% threshold → SKIP.
-const REGIME_AGAINST_PENALTY = 15;
+// Fallback regime penalty used only before config is loaded from DB.
+// The live value is config.regimePenalty (default 8pp via DEFAULT_BOT_CONFIG).
+const REGIME_AGAINST_PENALTY_FALLBACK = 8;
 const REGIME_STRIKES_MAX = 6; // keep last 6 strike prices per symbol
 
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
@@ -368,6 +369,11 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   } catch (err) {
     logger.error({ err }, "[kalshi-bot] failed to persist config to DB");
   }
+  // If paper wallet settings changed, recompute the in-memory balance immediately
+  // so the dashboard reflects the new value without a server restart.
+  if ("paperStartingBalance" in partial || "paperBalanceResetAt" in partial) {
+    await loadPaperBalanceFromDB().catch(() => {});
+  }
   return { config: snapshot, persisted };
 }
 
@@ -525,6 +531,54 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     logger.info({ dailyPnl, dailyLossCount, date: today, cbState }, "[kalshi-bot] daily P&L loaded from DB");
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load daily P&L from DB (non-fatal)");
+  }
+}
+
+/**
+ * Compute and restore the paper-mode account balance from the DB.
+ *
+ * Balance = paperStartingBalance (from config) + sum of all paper-mode bet PnL
+ * settled *after* config.paperBalanceResetAt (or all time when that is null).
+ *
+ * Called once on startup after loadBotConfigFromDB() so the balance reflects
+ * the real state rather than resetting to the hardcoded default on every
+ * server restart / republish.
+ */
+export async function loadPaperBalanceFromDB(): Promise<void> {
+  if (botMode === "live") {
+    // Live mode: balance is fetched from Kalshi on demand; skip DB computation.
+    return;
+  }
+  try {
+    const startingBalance = config.paperStartingBalance ?? 100;
+    const resetAt = config.paperBalanceResetAt ? new Date(config.paperBalanceResetAt) : null;
+
+    const conditions = [
+      isNotNull(kalshiBotBetsTable.exitedAt),
+      eq(kalshiBotBetsTable.mode, "paper"),
+      sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
+    ];
+    if (resetAt) {
+      conditions.push(sql`${kalshiBotBetsTable.exitedAt} >= ${resetAt.toISOString()}`);
+    }
+
+    const rows = await db
+      .select({ pnl: kalshiBotBetsTable.pnl })
+      .from(kalshiBotBetsTable)
+      .where(and(...conditions));
+
+    let pnlSum = 0;
+    for (const r of rows) {
+      pnlSum += r.pnl != null ? parseFloat(String(r.pnl)) : 0;
+    }
+    accountBalance = startingBalance + pnlSum;
+    logger.info(
+      { startingBalance, pnlSum, accountBalance, resetAt },
+      "[kalshi-bot] paper balance loaded from DB",
+    );
+  } catch (err) {
+    accountBalance = config.paperStartingBalance ?? 100;
+    logger.warn({ err }, "[kalshi-bot] failed to load paper balance from DB — using starting balance");
   }
 }
 
@@ -1176,9 +1230,9 @@ async function closePosition(
   // For expiry: TEMP paper simulation uses fixed return rate (see PAPER_WIN_RETURN_RATE).
   //   In live mode this path is replaced by evalClosedBets using real candle data.
 
-  // TEMPORARY: paper-mode win return for test-drive (50¢ profit per $1 bet).
-  // Remove / set to null when going live — evalClosedBets will use real contract PnL.
-  const PAPER_WIN_RETURN_RATE = 0.50;
+  // Paper win return rate: configurable via config.paperWinReturnRate.
+  // Default 0.50 = 50¢ profit per $1 bet. Change in Bot Configuration panel.
+  const PAPER_WIN_RETURN_RATE = config.paperWinReturnRate ?? 0.50;
 
   let pnl = 0;
   if (fillPrice !== null) {
@@ -1234,7 +1288,7 @@ async function closePosition(
       .then((b) => { accountBalance = b.availableBalance; })
       .catch(() => {});
   } else {
-    accountBalance = (accountBalance ?? 100) + pnl; // simulated paper balance
+    accountBalance = (accountBalance ?? config.paperStartingBalance ?? 100) + pnl; // simulated paper balance
   }
 
   const phase2RecoveredAmount = isLateRecovery && pnl > -pos.betAmount
@@ -2172,7 +2226,7 @@ export async function runBotLoopTick(): Promise<void> {
         (regime === "above" && decision.action === "BET_NO") ||
         (regime === "below" && decision.action === "BET_YES");
       if (isAgainstRegime) {
-        const penalised = effectiveConfidence - REGIME_AGAINST_PENALTY;
+        const penalised = effectiveConfidence - (config.regimePenalty ?? REGIME_AGAINST_PENALTY_FALLBACK);
         logger.info(
           { sym, regime, action: decision.action, confidence: effectiveConfidence, penalised },
           `[kalshi-bot] regime filter — ${sym} regime=${regime} vs ${decision.action}: confidence ${effectiveConfidence}→${penalised}`,

@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, getBotState, runAutoTuneJob } from "./lib/kalshi-bot";
+import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, getBotState, runAutoTuneJob } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -358,6 +358,9 @@ app.listen(port, (err) => {
       );
       await loadDailyPnlFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] daily P&L load failed (non-fatal)"),
+      );
+      await loadPaperBalanceFromDB().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] paper balance load failed (non-fatal)"),
       );
       await loadOpenPositionFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] open position restore failed (non-fatal)"),
