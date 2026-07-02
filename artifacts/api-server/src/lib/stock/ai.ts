@@ -4,6 +4,7 @@
 
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { logger } from "../logger";
+import { isGlobalAIKill } from "../global-ai";
 import {
   rsi,
   bollinger,
@@ -99,7 +100,7 @@ export async function claudeSignal(
   if (cached && Date.now() - cached.at < CLAUDE_TTL_MS) {
     return { ...cached.sig, cached: true };
   }
-  if (stockAIPaused) {
+  if (stockAIPaused || isGlobalAIKill()) {
     return { direction: stat.direction, confidence: 50, reasoning: "AI paused — using statistical read.", rating: "hold", cached: false };
   }
 

@@ -11,6 +11,7 @@ import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
 import { runBotCycle as runStockBotCycle } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
+import { loadGlobalAIKillFromDB } from "./lib/global-ai";
 
 const rawPort = process.env["PORT"];
 
@@ -353,6 +354,9 @@ app.listen(port, (err) => {
       // 1. config + mode from bot_config table
       // 2. daily P&L reconstructed from today's kalshi_bot_bets rows
       // 3. open position restored if its window is still active
+      await loadGlobalAIKillFromDB().catch((err) =>
+        logger.warn({ err }, "[global-ai] kill switch load failed (non-fatal)"),
+      );
       await loadBotConfigFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] config load failed (non-fatal)"),
       );

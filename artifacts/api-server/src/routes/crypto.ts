@@ -33,6 +33,7 @@ import {
 } from "../lib/crypto";
 import { getMLPrediction, getMLStatus } from "../lib/ml-store";
 import { extractMLFeatures } from "../lib/ml-features";
+import { isGlobalAIKill, saveGlobalAIKill } from "../lib/global-ai";
 import {
   runBacktest,
   compareReports,
@@ -83,6 +84,24 @@ router.get("/crypto/ai-predict", async (req, res) => {
     const msg = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: `AI prediction failed: ${msg}` });
   }
+});
+
+// ── Global emergency AI kill-switch ──────────────────────────────────────────
+// Single flag that stops ALL anthropic.messages.create calls app-wide,
+// regardless of which bot or page triggers them.
+
+router.get("/crypto/ai-kill", (_req, res) => {
+  res.json({ kill: isGlobalAIKill() });
+});
+
+router.post("/crypto/ai-kill", async (req, res) => {
+  const { kill } = req.body as { kill?: boolean };
+  if (typeof kill !== "boolean") {
+    res.status(400).json({ error: "kill must be a boolean" });
+    return;
+  }
+  await saveGlobalAIKill(kill);
+  res.json({ ok: true, kill: isGlobalAIKill() });
 });
 
 // ── AI mode settings ─────────────────────────────────────────────────────────

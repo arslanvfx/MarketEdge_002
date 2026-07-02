@@ -12,6 +12,7 @@
 
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { logger } from "../logger";
+import { isGlobalAIKill } from "../global-ai";
 import { getScoredNews } from "./news";
 import { getEarnings, getLatestEarningsSurprise } from "./earnings";
 import { getSectorMomentum } from "./scanner";
@@ -105,7 +106,7 @@ function isoDateDaysAgo(days: number): string {
  * Skips tickers already evaluated today. Re-entrant guard prevents double runs.
  */
 export async function runResearchPass(tickers: string[], opts: { aiPaused?: boolean } = {}): Promise<void> {
-  if (opts.aiPaused) return;
+  if (opts.aiPaused || isGlobalAIKill()) return;
   if (researchRunning) return;
   researchRunning = true;
   const day = todayKey();

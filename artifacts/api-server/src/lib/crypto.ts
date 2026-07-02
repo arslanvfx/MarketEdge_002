@@ -1,4 +1,5 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { isGlobalAIKill } from "./global-ai";
 import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { extractMLFeatures, deriveMLSignalDirections, buildMLSnapshotInputs } from "./ml-features";
@@ -1715,10 +1716,11 @@ Return ONLY valid JSON with exactly 1 item:
   ]
 }`;
 
+    if (isGlobalAIKill()) return null;
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: 6000 },
+      thinking: { type: "enabled", budget_tokens: 3000 },
       system:
         "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike — not just to predict general direction. Analyze chart patterns, indicators, and the live order book to produce refined short-term price predictions. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: userPrompt }],
@@ -3371,7 +3373,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         //       Claude's last cached ABOVE/BELOW call.
         //   (b) Periodic: cache is stale (> LIVE_DIR_PERIODIC_MS elapsed since
         //       the last fetch), so Claude re-analyses current market conditions.
-        const LIVE_DIR_PERIODIC_MS = 5 * 60_000; // refresh at least every 5 min
+        const LIVE_DIR_PERIODIC_MS = 10 * 60_000; // refresh at least every 10 min
         if (isCoinClaudeEnabled(sym) && !liveDirectionInFlight.has(sym)) {
           const cached = liveDirectionCache.get(sym);
           const lastTrigger = liveDirectionLastAutoTrigger.get(sym) ?? 0;
@@ -3966,7 +3968,7 @@ export interface LiveDirectionResult {
 }
 
 const liveDirectionCache = new Map<string, { result: LiveDirectionResult; at: number }>();
-const LIVE_DIR_TTL = 5 * 60_000; // 5 minutes — frontend polls; window-open forced call is unaffected
+const LIVE_DIR_TTL = 10 * 60_000; // 10 minutes — frontend polls; window-open forced call is unaffected
 // Tracks in-flight live-direction re-checks (prevents concurrent calls per coin).
 const liveDirectionInFlight = new Set<string>();
 // Tracks when the last auto-trigger fired per coin (cooldown guard).
