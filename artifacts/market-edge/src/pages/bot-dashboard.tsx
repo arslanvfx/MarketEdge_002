@@ -23,69 +23,180 @@ const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
 
 type ModePreset = Partial<{
+  // Signal quality gates
   minStatConfidence: number;
   minConfidence: number;
   regimePenalty: number;
+  // Entry timing
+  maxEntryMinutes: number;
+  minRemainingMinutes: number;
+  // Volume / direction controls
   maxBetsPerWindow: number;
   maxSameDirectionBets: number;
   enableDirectionCap: boolean;
+  // Momentum / trend filter
   enableMomentumFilter: boolean;
   momentumWindowCount: number;
+  // Exit
+  midExitSensitivity: "conservative" | "balanced" | "aggressive";
+  phase2ThresholdPp: number;
+  // Circuit breaker
+  maxConsecutiveLosses: number;
+  circuitBreakerPauseWindows: number;
+  // Border guard
+  enableBorderGuard: boolean;
+  borderProximityPct: number;
+  borderLookbackBets: number;
+  // Auto-tune
   enableAutoTuning: boolean;
+  autoTuneWindowSize: number;
 }>;
 
 const MODE_PRESETS: Record<DecisionMode, ModePreset & { label: string; why: string }> = {
+  // ── Classic ──────────────────────────────────────────────────────────────
+  // Stat → Claude → ML cascade. Full pre-cost-cut configuration + data-derived
+  // stat floor of 55 (69% WR) from 139-bet DB analysis.
   classic: {
     label: "Classic",
     why: "Stat → Claude → ML cascade. Hard stat floor at 55 filters the 49%-WR noise band; regime penalty blocks against-trend bets.",
-    minStatConfidence:   55,
-    minConfidence:       65,
-    regimePenalty:       15,
-    maxBetsPerWindow:    3,
-    maxSameDirectionBets: 3,
-    enableDirectionCap:  true,
-    enableMomentumFilter: true,
-    momentumWindowCount: 3,
-    enableAutoTuning:    true,
+    // Signal gates (data-derived)
+    minStatConfidence:      55,
+    minConfidence:          65,
+    regimePenalty:          15,
+    // Entry timing — no ceiling; skip when fewer than 2 min remain
+    maxEntryMinutes:        0,
+    minRemainingMinutes:    2,
+    // Volume
+    maxBetsPerWindow:       3,
+    maxSameDirectionBets:   3,
+    enableDirectionCap:     true,
+    // Momentum / trend
+    enableMomentumFilter:   true,
+    momentumWindowCount:    3,
+    // Exit
+    midExitSensitivity:     "balanced",
+    phase2ThresholdPp:      30,
+    // Circuit breaker disabled — auto-tune handles pausing underperformers
+    maxConsecutiveLosses:   0,
+    circuitBreakerPauseWindows: 2,
+    // Border guard off (proximity hasn't been a reliable gate)
+    enableBorderGuard:      false,
+    borderProximityPct:     0.1,
+    borderLookbackBets:     3,
+    // Auto-tune on with 100-bet rolling window
+    enableAutoTuning:       true,
+    autoTuneWindowSize:     100,
   },
+
+  // ── ML Gate ──────────────────────────────────────────────────────────────
+  // Stat+Claude decide direction; ML vetos if it disagrees.
+  // Full pre-cost-cut parameter set — all settings restored to what was in
+  // place before the cost-reduction changes (reduced thinking budget, quiet-
+  // hours snap-off, live-dir TTL). Those changes are now in the AI intensity
+  // tiers (Eco / Balanced / Max) so the bot config is unaffected.
+  //
+  // NOTE: the old 45s time-based warmup was replaced with a smarter
+  // target-detection gate (confirms the Kalshi strike before allowing entry)
+  // which fires earlier and is more reliable. That gate is always active
+  // regardless of mode — no extra entry delay needed here.
   ml_gate: {
     label: "ML Gate",
-    why: "Stat+Claude pick direction; ML vetos if it disagrees. ML veto already filters weak-stat calls so the stat floor can be lighter.",
-    minStatConfidence:   52,
-    minConfidence:       63,
-    regimePenalty:       10,
-    maxBetsPerWindow:    3,
-    maxSameDirectionBets: 3,
-    enableDirectionCap:  true,
-    enableMomentumFilter: true,
-    momentumWindowCount: 3,
-    enableAutoTuning:    true,
+    why: "Stat+Claude pick direction; ML vetos if it disagrees. ML veto already filters weak-stat calls so the stat floor is slightly relaxed.",
+    // Signal gates — slightly relaxed because ML veto adds a second safety layer
+    minStatConfidence:      52,
+    minConfidence:          63,
+    regimePenalty:          10,
+    // Entry timing — no ceiling; skip when fewer than 2 min remain
+    maxEntryMinutes:        0,
+    minRemainingMinutes:    2,
+    // Volume — conservative; ML veto already limits entries naturally
+    maxBetsPerWindow:       3,
+    maxSameDirectionBets:   3,
+    enableDirectionCap:     true,
+    // Momentum / trend
+    enableMomentumFilter:   true,
+    momentumWindowCount:    3,
+    // Exit — balanced exit; ML veto means we're more confident on entry
+    midExitSensitivity:     "balanced",
+    phase2ThresholdPp:      30,
+    // Circuit breaker: 5 consecutive losses → pause 2 windows
+    maxConsecutiveLosses:   5,
+    circuitBreakerPauseWindows: 2,
+    // Border guard off
+    enableBorderGuard:      false,
+    borderProximityPct:     0.1,
+    borderLookbackBets:     3,
+    // Auto-tune on
+    enableAutoTuning:       true,
+    autoTuneWindowSize:     100,
   },
+
+  // ── Consensus ────────────────────────────────────────────────────────────
+  // ≥2 of 3 signals (Stat, Claude, ML) must agree on direction.
   consensus: {
     label: "Consensus",
-    why: "≥2 of 3 signals must agree — multi-signal agreement already acts as a quality gate, so entry bars can be slightly lower.",
-    minStatConfidence:   50,
-    minConfidence:       60,
-    regimePenalty:       8,
-    maxBetsPerWindow:    4,
-    maxSameDirectionBets: 4,
-    enableDirectionCap:  true,
-    enableMomentumFilter: true,
-    momentumWindowCount: 3,
-    enableAutoTuning:    true,
+    why: "≥2 of 3 signals must agree — multi-signal agreement is its own quality gate so individual floors are relaxed.",
+    // Signal gates — relaxed because consensus already filters noise
+    minStatConfidence:      50,
+    minConfidence:          60,
+    regimePenalty:          8,
+    // Entry timing
+    maxEntryMinutes:        0,
+    minRemainingMinutes:    2,
+    // Volume — 4 slots since entries are already selective
+    maxBetsPerWindow:       4,
+    maxSameDirectionBets:   4,
+    enableDirectionCap:     true,
+    // Momentum / trend
+    enableMomentumFilter:   true,
+    momentumWindowCount:    3,
+    // Exit
+    midExitSensitivity:     "balanced",
+    phase2ThresholdPp:      30,
+    // Circuit breaker
+    maxConsecutiveLosses:   5,
+    circuitBreakerPauseWindows: 2,
+    // Border guard off
+    enableBorderGuard:      false,
+    borderProximityPct:     0.1,
+    borderLookbackBets:     3,
+    // Auto-tune on
+    enableAutoTuning:       true,
+    autoTuneWindowSize:     100,
   },
+
+  // ── Unanimous ────────────────────────────────────────────────────────────
+  // All 3 signals must agree — highest conviction, fewest bets.
   unanimous: {
     label: "Unanimous",
-    why: "All 3 signals must agree — the strictest mode. Unanimity is already a very high bar so confidence floors are relaxed; more slots per window since entries are rare.",
-    minStatConfidence:   50,
-    minConfidence:       55,
-    regimePenalty:       5,
-    maxBetsPerWindow:    5,
-    maxSameDirectionBets: 5,
-    enableDirectionCap:  true,
-    enableMomentumFilter: true,
-    momentumWindowCount: 2,
-    enableAutoTuning:    true,
+    why: "All 3 signals must agree — the strictest entry bar. Confidence floors are relaxed since unanimity already guarantees conviction; more slots because entries are rare.",
+    // Signal gates — very relaxed; 3-signal unanimity is already very strict
+    minStatConfidence:      50,
+    minConfidence:          55,
+    regimePenalty:          5,
+    // Entry timing
+    maxEntryMinutes:        0,
+    minRemainingMinutes:    2,
+    // Volume — 5 slots since entries are rare; direction cap still protects
+    maxBetsPerWindow:       5,
+    maxSameDirectionBets:   5,
+    enableDirectionCap:     true,
+    // Momentum — 2-window lookback (less strict; 3-signal agreement overrides trend)
+    enableMomentumFilter:   true,
+    momentumWindowCount:    2,
+    // Exit
+    midExitSensitivity:     "balanced",
+    phase2ThresholdPp:      30,
+    // Circuit breaker: very conservative — unanimous bets should rarely lose
+    maxConsecutiveLosses:   3,
+    circuitBreakerPauseWindows: 3,
+    // Border guard off
+    enableBorderGuard:      false,
+    borderProximityPct:     0.1,
+    borderLookbackBets:     3,
+    // Auto-tune on
+    enableAutoTuning:       true,
+    autoTuneWindowSize:     100,
   },
 };
 
