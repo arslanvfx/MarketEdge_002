@@ -115,12 +115,18 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
     };
   }
 
-  // Stat confidence floor gate — applied to all paths before any direction decision.
-  // When stat is available but its raw confidence is below the configured floor,
-  // the underlying signal is too weak to be reliable regardless of what Claude/ML
-  // push the composite score up to.  Skip early so we only bet when stat is
-  // actually meaningful.  If stat is absent (null) the gate does not block.
+  // Stat confidence floor gate — blocks bets when the stat model's raw confidence
+  // is too weak to be the primary signal.  Bypassed when ML is ready to lead
+  // (mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE) because in that case ML is the
+  // decision-maker and stat is just a validator/booster — a weak stat doesn't
+  // disqualify a strong ML signal.  Gate is also skipped when stat is absent (null).
+  const mlReadyToLead =
+    inp.mlAbove !== null &&
+    inp.mlConfidence != null &&
+    inp.mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE;
+
   if (
+    !mlReadyToLead &&
     inp.minStatConfidence > 0 &&
     inp.statConfidence !== null &&
     inp.statConfidence < inp.minStatConfidence
