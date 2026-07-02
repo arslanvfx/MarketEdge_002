@@ -34,6 +34,7 @@ import {
 import { getMLPrediction, getMLStatus } from "../lib/ml-store";
 import { extractMLFeatures } from "../lib/ml-features";
 import { isGlobalAIKill, saveGlobalAIKill } from "../lib/global-ai";
+import { getAIIntensityConfig, saveAIIntensity, type AIIntensityTier } from "../lib/ai-intensity";
 import {
   runBacktest,
   compareReports,
@@ -102,6 +103,23 @@ router.post("/crypto/ai-kill", async (req, res) => {
   }
   await saveGlobalAIKill(kill);
   res.json({ ok: true, kill: isGlobalAIKill() });
+});
+
+// ── AI intensity tiers ───────────────────────────────────────────────────────
+// Three tiers control budget_tokens, live-direction TTL, and stock AI TTL.
+
+router.get("/crypto/ai-intensity", (_req, res) => {
+  res.json(getAIIntensityConfig());
+});
+
+router.post("/crypto/ai-intensity", async (req, res) => {
+  const { tier } = req.body as { tier?: AIIntensityTier };
+  if (!tier || !["eco", "balanced", "max"].includes(tier)) {
+    res.status(400).json({ error: "tier must be one of: eco, balanced, max" });
+    return;
+  }
+  await saveAIIntensity(tier);
+  res.json({ ok: true, ...getAIIntensityConfig() });
 });
 
 // ── AI mode settings ─────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
 import { runBotCycle as runStockBotCycle } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
 import { loadGlobalAIKillFromDB } from "./lib/global-ai";
+import { loadAIIntensityFromDB } from "./lib/ai-intensity";
 
 const rawPort = process.env["PORT"];
 
@@ -356,6 +357,9 @@ app.listen(port, (err) => {
       // 3. open position restored if its window is still active
       await loadGlobalAIKillFromDB().catch((err) =>
         logger.warn({ err }, "[global-ai] kill switch load failed (non-fatal)"),
+      );
+      await loadAIIntensityFromDB().catch((err) =>
+        logger.warn({ err }, "[ai-intensity] tier load failed (non-fatal)"),
       );
       await loadBotConfigFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] config load failed (non-fatal)"),

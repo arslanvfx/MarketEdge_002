@@ -5,6 +5,7 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { logger } from "../logger";
 import { isGlobalAIKill } from "../global-ai";
+import { getStockAITTLMs } from "../ai-intensity";
 import {
   rsi,
   bollinger,
@@ -29,7 +30,7 @@ import type {
 } from "./types";
 
 const MODEL = "claude-sonnet-4-6";
-const CLAUDE_TTL_MS = 5 * 60 * 1000;
+const getClaudeTTLMs = () => getStockAITTLMs(); // eco/balanced=5min max=3min
 const claudeCache = new Map<string, { sig: ClaudeSignal; at: number }>();
 
 let stockAIPaused = false;
@@ -97,7 +98,7 @@ export async function claudeSignal(
 ): Promise<ClaudeSignal> {
   const T = ticker.toUpperCase();
   const cached = claudeCache.get(T);
-  if (cached && Date.now() - cached.at < CLAUDE_TTL_MS) {
+  if (cached && Date.now() - cached.at < getClaudeTTLMs()) {
     return { ...cached.sig, cached: true };
   }
   if (stockAIPaused || isGlobalAIKill()) {
