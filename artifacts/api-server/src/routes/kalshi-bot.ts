@@ -147,6 +147,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderProximityPct,
     borderLookbackBets,
     regimePenalty,
+    mlVetoMinConfidence,
     paperStartingBalance,
     paperWinReturnRate,
     paperBalanceResetAt,
@@ -176,6 +177,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderProximityPct?: number;
     borderLookbackBets?: number;
     regimePenalty?: number;
+    mlVetoMinConfidence?: number;
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
@@ -197,6 +199,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     const modePreset = presets[decisionMode as DecisionMode];
     if (modePreset) {
       Object.assign(partial, modePreset);
+    } else if (decisionMode === "ml_gate" && typeof minConfidence !== "number") {
+      // No saved ml_gate preset and no explicit minConfidence: apply a sensible
+      // default of 62% — lower than the classic 65% since ML validates each bet.
+      partial.minConfidence = 62;
     }
     partial.decisionMode = decisionMode;
   }
@@ -253,6 +259,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof regimePenalty === "number" && regimePenalty >= 0 && regimePenalty <= 20) {
     partial.regimePenalty = regimePenalty;
+  }
+  if (typeof mlVetoMinConfidence === "number" && mlVetoMinConfidence >= 50 && mlVetoMinConfidence <= 70) {
+    partial.mlVetoMinConfidence = mlVetoMinConfidence;
   }
   if (typeof paperStartingBalance === "number" && paperStartingBalance >= 1 && paperStartingBalance <= 10000) {
     partial.paperStartingBalance = paperStartingBalance;
