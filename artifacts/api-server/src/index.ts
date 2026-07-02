@@ -378,71 +378,79 @@ app.listen(port, (err) => {
         "[kalshi-bot] startup state restored",
       );
 
-      // Start the prediction accuracy tracker: snaps model predictions at each
-      // 15-min boundary and evaluates them against actual prices once the window closes.
-      // The onInitComplete callback runs after initMLFromDB() resolves — backfill
-      // runs at that point so it sees the true post-hydration warming status.
-      startPredictionTracker(() => {
-        runMLBackfillIfNeeded(96)
-          .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
-      });
-      logger.info("Prediction tracker started");
+      // All background loops (prediction tracker, bot, auto-tune, stock vertical)
+      // only run in production. In the development Replit workspace the API
+      // endpoints still respond (bot config, history, markets) using persisted DB
+      // state, but no live Claude calls or ticks are fired.
+      if (process.env.NODE_ENV === "production") {
+        // Start the prediction accuracy tracker: snaps model predictions at each
+        // 15-min boundary and evaluates them against actual prices once the window closes.
+        // The onInitComplete callback runs after initMLFromDB() resolves — backfill
+        // runs at that point so it sees the true post-hydration warming status.
+        startPredictionTracker(() => {
+          runMLBackfillIfNeeded(96)
+            .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
+        });
+        logger.info("Prediction tracker started");
 
-      // Kalshi bot loop — runs every 30 s alongside the main tracker.
-      // Reads from the cached state that the main tracker populates, so no
-      // extra network calls are made when the caches are warm.
-      setInterval(() => {
-        runBotLoopTick().catch((err) =>
-          logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
+        // Kalshi bot loop — runs every 30 s alongside the main tracker.
+        // Reads from the cached state that the main tracker populates, so no
+        // extra network calls are made when the caches are warm.
+        setInterval(() => {
+          runBotLoopTick().catch((err) =>
+            logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
+          );
+        }, 30_000);
+
+        // Auto-tune performance analytics: runs every 15 min, aligned to UTC
+        // 15-minute window boundaries (00, 15, 30, 45) so the analytics window
+        // matches the same cadence as the Kalshi bet windows.
+        const msToNext15MinBoundary = (): number => {
+          const now = Date.now();
+          const boundary = Math.ceil((now + 1) / (15 * 60_000)) * (15 * 60_000);
+          return Math.max(5_000, boundary - now); // at least 5s
+        };
+        const runAutoTune = () =>
+          runAutoTuneJob().catch((err) =>
+            logger.warn({ err }, "[auto-tune] scheduled job failed (non-fatal)"),
+          );
+        setTimeout(() => {
+          runAutoTune();
+          setInterval(runAutoTune, 15 * 60_000);
+        }, msToNext15MinBoundary());
+
+        // Bring up the stock trading vertical independently — a failure here must
+        // never take down the crypto tracker or Kalshi bot above.
+        startStockVertical().catch((err) =>
+          logger.warn({ err }, "[stock] vertical startup failed (non-fatal)"),
         );
-      }, 30_000);
-
-      // Auto-tune performance analytics: runs every 15 min, aligned to UTC
-      // 15-minute window boundaries (00, 15, 30, 45) so the analytics window
-      // matches the same cadence as the Kalshi bet windows.
-      const msToNext15MinBoundary = (): number => {
-        const now = Date.now();
-        const boundary = Math.ceil((now + 1) / (15 * 60_000)) * (15 * 60_000);
-        return Math.max(5_000, boundary - now); // at least 5s
-      };
-      const runAutoTune = () =>
-        runAutoTuneJob().catch((err) =>
-          logger.warn({ err }, "[auto-tune] scheduled job failed (non-fatal)"),
-        );
-      setTimeout(() => {
-        runAutoTune();
-        setInterval(runAutoTune, 15 * 60_000);
-      }, msToNext15MinBoundary());
-
-      // Bring up the stock trading vertical independently — a failure here must
-      // never take down the crypto tracker or Kalshi bot above.
-      startStockVertical().catch((err) =>
-        logger.warn({ err }, "[stock] vertical startup failed (non-fatal)"),
-      );
+      } else {
+        logger.info("[dev] background loops skipped (NODE_ENV != production) — no Claude calls in dev");
+      }
     });
 
-  // Daily threshold analysis: runs once at midnight UTC then every 24h.
-  // Fetches 96 windows (~24h) of historical candles, buckets hit rates by
-  // pre-window efficiency ratio, and logs suggested threshold updates when
-  // the data-derived optimum drifts from the current hardcoded values.
-  const runDailyThresholdLog = () => {
-    runThresholdAnalysis({ windows: 96 })
-      .then((report) =>
-        logger.info({ summary: formatThresholdReport(report) }, "[threshold-analysis] daily"),
-      )
-      .catch((err) =>
-        logger.warn({ err }, "[threshold-analysis] daily run failed (non-fatal)"),
+  // Daily threshold analysis — production only (no Claude calls, but avoids
+  // unnecessary background work in the dev workspace).
+  if (process.env.NODE_ENV === "production") {
+    const runDailyThresholdLog = () => {
+      runThresholdAnalysis({ windows: 96 })
+        .then((report) =>
+          logger.info({ summary: formatThresholdReport(report) }, "[threshold-analysis] daily"),
+        )
+        .catch((err) =>
+          logger.warn({ err }, "[threshold-analysis] daily run failed (non-fatal)"),
+        );
+    };
+    const msUntilMidnightUTC = (): number => {
+      const now = new Date();
+      const next = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
       );
-  };
-  const msUntilMidnightUTC = (): number => {
-    const now = new Date();
-    const next = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
-    );
-    return next.getTime() - now.getTime();
-  };
-  setTimeout(() => {
-    runDailyThresholdLog();
-    setInterval(runDailyThresholdLog, 24 * 60 * 60 * 1_000);
-  }, msUntilMidnightUTC());
+      return next.getTime() - now.getTime();
+    };
+    setTimeout(() => {
+      runDailyThresholdLog();
+      setInterval(runDailyThresholdLog, 24 * 60 * 60 * 1_000);
+    }, msUntilMidnightUTC());
+  }
 });
