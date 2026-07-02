@@ -33,14 +33,28 @@ export type AiFeature =
 
 const ENABLED: Record<AiSpendLevel, Set<AiFeature>> = {
   off: new Set(),
-  eco: new Set(),
-  balanced: new Set<AiFeature>([
+  // Eco: all bot-critical features ON at minimum thinking depth.
+  // Skips only non-accuracy-affecting calls (market summaries, research briefs).
+  eco: new Set<AiFeature>([
     "crypto_snap",
     "crypto_live_dir",
+    "crypto_stability",
     "crypto_btc_call",
     "stock_signal",
     "stock_sentiment",
   ]),
+  // Balanced: all features ON at standard thinking depth.
+  balanced: new Set<AiFeature>([
+    "crypto_snap",
+    "crypto_live_dir",
+    "crypto_stability",
+    "crypto_btc_call",
+    "market_summary",
+    "stock_signal",
+    "stock_research",
+    "stock_sentiment",
+  ]),
+  // Max: all features ON at maximum thinking depth with self-consistency sampling.
   max: new Set<AiFeature>([
     "crypto_snap",
     "crypto_live_dir",
@@ -52,6 +66,32 @@ const ENABLED: Record<AiSpendLevel, Set<AiFeature>> = {
     "stock_sentiment",
   ]),
 };
+
+/** Extended thinking token budget per spend level. */
+const THINKING_BUDGET: Record<AiSpendLevel, number> = {
+  off:      0,
+  eco:      3000,
+  balanced: 5000,
+  max:      8000,
+};
+
+/** Self-consistency samples for the refinement pass per spend level. */
+const SELF_CONSISTENCY: Record<AiSpendLevel, number> = {
+  off:      1,
+  eco:      1,
+  balanced: 1,
+  max:      2,
+};
+
+/** Returns the extended thinking token budget for the current spend level. */
+export function getAiThinkingBudget(): number {
+  return THINKING_BUDGET[currentLevel];
+}
+
+/** Returns the self-consistency sample count for the current spend level. */
+export function getAiSelfConsistency(): number {
+  return SELF_CONSISTENCY[currentLevel];
+}
 
 let currentLevel: AiSpendLevel = "max";
 
@@ -78,10 +118,10 @@ export function isAiFeatureEnabled(feature: AiFeature): boolean {
 
 /** Human-readable description of each level's cost impact. */
 export const AI_SPEND_LABELS: Record<AiSpendLevel, { name: string; description: string; costTag: string }> = {
-  off:      { name: "Off",      description: "Emergency kill switch — all AI disabled", costTag: "Free" },
-  eco:      { name: "Eco",      description: "Stat + ML only, no Claude calls",         costTag: "Free" },
-  balanced: { name: "Balanced", description: "Claude for bot signals + stock picks, no research or market summaries", costTag: "Low cost" },
-  max:      { name: "Max",      description: "Full AI — all Claude features active",    costTag: "Full cost" },
+  off:      { name: "Off",      description: "Emergency kill switch — all AI disabled",                                    costTag: "Free"      },
+  eco:      { name: "Eco",      description: "All accuracy-critical features, minimum thinking depth (3K tokens)",         costTag: "~50% cost" },
+  balanced: { name: "Balanced", description: "All features, standard thinking depth (5K tokens) + research & summaries",  costTag: "~70% cost" },
+  max:      { name: "Max",      description: "All features, deep thinking (8K tokens) + 2× self-consistency on each snap", costTag: "Full cost" },
 };
 
 /** Load persisted spend level from DB (call once at server startup). */

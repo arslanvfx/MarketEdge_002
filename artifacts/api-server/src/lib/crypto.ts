@@ -1,5 +1,5 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
-import { isAiFeatureEnabled } from "./ai-spend";
+import { isAiFeatureEnabled, getAiThinkingBudget, getAiSelfConsistency } from "./ai-spend";
 import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { extractMLFeatures, deriveMLSignalDirections, buildMLSnapshotInputs } from "./ml-features";
@@ -1719,7 +1719,7 @@ Return ONLY valid JSON with exactly 1 item:
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: 5000 },
+      thinking: { type: "enabled", budget_tokens: getAiThinkingBudget() },
       system:
         "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike — not just to predict general direction. Analyze chart patterns, indicators, and the live order book to produce refined short-term price predictions. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: userPrompt }],
@@ -2559,7 +2559,7 @@ Return ONLY valid JSON (no markdown):
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: 5000 },
+      thinking: { type: "enabled", budget_tokens: getAiThinkingBudget() },
       system:
         "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
@@ -2599,7 +2599,7 @@ async function refineWithSelfConsistency(
   basePred: Prediction,
   extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number | null; minutesElapsed?: number },
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
-  const samples = clamp(selfConsistencySamples, 1, MAX_SELF_CONSISTENCY);
+  const samples = clamp(Math.max(selfConsistencySamples, getAiSelfConsistency()), 1, MAX_SELF_CONSISTENCY);
   if (samples <= 1) return refineSnappedPrediction(coin, basePred, extra);
 
   const results = (

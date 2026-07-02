@@ -169,10 +169,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
             })}
           </div>
           <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
-            {spendLevel === "off" ? "All Claude calls gated — stat model only" :
-             spendLevel === "eco" ? "Eco · snap + live price signals only" :
-             spendLevel === "balanced" ? "Balanced · snap · live · stock signals" :
-             "Max · all features including research"}
+            {spendLevel === "off" ? "All Claude calls gated — stat + ML only" :
+             spendLevel === "eco" ? "Eco · all signals, 3K thinking depth" :
+             spendLevel === "balanced" ? "Balanced · all features, 5K thinking depth" :
+             "Max · 8K thinking + 2× self-consistency per snap"}
           </p>
         </div>
 
