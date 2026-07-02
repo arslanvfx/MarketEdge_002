@@ -10,7 +10,7 @@ import { logger } from "../logger";
 import { getNews as alpacaGetNews, alpacaConfigured } from "./alpaca";
 import type { NewsItem, Sentiment } from "./types";
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "claude-haiku-4-5";
 const CACHE_TTL_MS = 20 * 60 * 1000; // 20 min
 
 // In-memory freshness guard so we don't re-hit Alpaca + Claude per request.

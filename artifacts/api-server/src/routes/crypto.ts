@@ -486,7 +486,9 @@ router.post("/crypto/ai-spend", (req, res) => {
   res.json({ ok: true, level, labels: AI_SPEND_LABELS });
 });
 
-// Dedicated Claude call for the current Kalshi BTC window
+// Dedicated Claude call for the current Kalshi BTC window.
+// Serves from the tracker's opening snap (free) when available;
+// only falls back to a fresh Claude call if the snap hasn't fired yet.
 router.get("/crypto/kalshi-btc-call", async (req, res) => {
   if (!isAiGloballyEnabled() || !isAiFeatureEnabled("crypto_btc_call")) {
     res.status(503).json({ error: "AI disabled at current spend level" });
@@ -498,6 +500,13 @@ router.get("/crypto/kalshi-btc-call", async (req, res) => {
 
   if (!eventTicker || isNaN(rawTarget)) {
     res.status(400).json({ error: "eventTicker and target query params required" });
+    return;
+  }
+
+  // Prefer the tracker's already-computed opening snap — no new Claude call needed.
+  const snap = getTrackerWindowCall("BTC");
+  if (snap && snap.aboveKalshi !== null) {
+    res.json({ above: snap.aboveKalshi, predictedPrice: snap.predictedPrice, confidence: snap.confidence });
     return;
   }
 
