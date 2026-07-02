@@ -42,6 +42,7 @@ import {
   fetchTrendStabilityForBot,
   getPredictionAnalytics,
   getConfirmedTargetMs,
+  setSnapExtendedThinking,
   CRYPTO_COINS,
   KALSHI_SERIES,
   type TrendStability,
@@ -1875,6 +1876,13 @@ export async function runBotLoopTick(): Promise<void> {
   // Evaluate any closed bets that haven't been stamped with outcome yet.
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
   evalClosedBets().catch(() => {});
+
+  // Disable extended thinking for snap calls during quiet hours — the snap
+  // still fires (accuracy tracking + ML training), but extended thinking adds
+  // no value when no bets will be placed. Standard Sonnet is ~10× cheaper.
+  setSnapExtendedThinking(
+    !isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd),
+  );
 
   // Always run window-expiry check, even when paused or disabled.
   // If the 15-minute window rolls over while a position is still open (e.g.

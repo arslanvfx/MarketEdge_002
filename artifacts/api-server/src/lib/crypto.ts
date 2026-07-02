@@ -2560,14 +2560,16 @@ Analysis steps:
 Return ONLY valid JSON (no markdown):
 {"predictedPrice": 0.0, "direction": "up", "confidence": 70}`;
 
-    const response = await anthropic.messages.create({
+    const snapParams: Parameters<typeof anthropic.messages.create>[0] = {
       model: "claude-sonnet-4-6",
-      max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: 6000 },
-      system:
-        "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
+      max_tokens: snapExtendedThinking ? 16000 : 1024,
+      ...(snapExtendedThinking ? { thinking: { type: "enabled", budget_tokens: 6000 } } : {}),
+      system: snapExtendedThinking
+        ? "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text."
+        : "You are an expert crypto technical analyst. Respond with ONLY valid compact JSON — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
-    } as Parameters<typeof anthropic.messages.create>[0]);
+    };
+    const response = await anthropic.messages.create(snapParams);
 
     const typedResponse = response as { content: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
     const usageIn  = typedResponse.usage?.input_tokens  ?? 0;
@@ -2596,6 +2598,15 @@ Return ONLY valid JSON (no markdown):
   } catch {
     return null; // fall back to statistical model
   }
+}
+
+// When false, refineSnappedPrediction uses standard Sonnet (no extended
+// thinking). Set to false during bot quiet hours so training snaps are still
+// recorded for accuracy / ML — but without paying for extended thinking when
+// no bets will be placed. kalshi-bot sets this at the start of every tick.
+let snapExtendedThinking = true;
+export function setSnapExtendedThinking(enabled: boolean): void {
+  snapExtendedThinking = enabled;
 }
 
 // Self-consistency wrapper: when selfConsistencySamples > 1, independently
@@ -3926,7 +3937,7 @@ export interface LiveDirectionResult {
 }
 
 const liveDirectionCache = new Map<string, { result: LiveDirectionResult; at: number }>();
-const LIVE_DIR_TTL = 2 * 60_000; // 2 minutes — "live" means live
+const LIVE_DIR_TTL = 5 * 60_000; // 5 minutes — frontend polls; window-open forced call is unaffected
 // Tracks in-flight live-direction re-checks (prevents concurrent calls per coin).
 const liveDirectionInFlight = new Set<string>();
 // Tracks when the last auto-trigger fired per coin (cooldown guard).
