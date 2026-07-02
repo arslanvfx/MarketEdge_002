@@ -755,6 +755,20 @@ export async function loadOpenPositionFromDB(): Promise<void> {
 
     if (restored > 0) {
       logger.info({ restored }, "[kalshi-bot] open positions restored from DB");
+
+      // Deduct the stake for each restored open position from the in-memory
+      // paper balance.  loadPaperBalanceFromDB() only sums SETTLED bets, so
+      // open-position stakes are not yet reflected — we mirror the entry-time
+      // deduction that would have happened had the server not restarted.
+      if (botMode === "paper" && accountBalance !== null) {
+        for (const pos of openPositions.values()) {
+          accountBalance -= pos.betAmount;
+        }
+        logger.info(
+          { restored, accountBalance },
+          "[kalshi-bot] in-flight stake(s) deducted from paper balance after position restore",
+        );
+      }
     }
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to restore open positions from DB (non-fatal)");
@@ -1209,6 +1223,14 @@ async function _runBotTick(
   };
   openPositions.set(sym, newPosition);
 
+  // Deduct bet cost from in-memory paper balance at the moment the bet is
+  // placed so the dashboard shows available funds dropping immediately.
+  // closePosition returns betAmount + pnl (returning the stake + net profit)
+  // so the net effect stays identical to the old scheme.
+  if (botMode === "paper" && accountBalance !== null) {
+    accountBalance -= betAmount;
+  }
+
   // Enrich signals with effectiveConfidence (the composite score that gated this bet)
   // so analytics can build accurate confidence-band win-rate breakdowns without relying
   // on statConfidence/claudeConfidence alone, which are per-model not per-decision.
@@ -1344,7 +1366,11 @@ async function closePosition(
       .then((b) => { accountBalance = b.availableBalance; })
       .catch(() => {});
   } else {
-    accountBalance = (accountBalance ?? config.paperStartingBalance ?? 100) + pnl; // simulated paper balance
+    // Paper mode: betAmount was deducted from accountBalance at entry time.
+    // Here we return the stake and add the net pnl:
+    //   WIN:  +betAmount + (betAmount × winRate) → net gain = betAmount × winRate
+    //   LOSS: +betAmount + (−betAmount)          → net change = −betAmount  ✓
+    accountBalance = (accountBalance ?? config.paperStartingBalance ?? 100) + pos.betAmount + pnl;
   }
 
   const phase2RecoveredAmount = isLateRecovery && pnl > -pos.betAmount
@@ -1862,7 +1888,7 @@ export async function getBotStats(filterSymbol?: string): Promise<{
   bySymbol: CoinBotStats[];
 }> {
   try {
-    const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired') AND ${kalshiBotBetsTable.archivedAt} IS NULL`;
+    const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired') AND ${kalshiBotBetsTable.archivedAt} IS NULL AND ${kalshiBotBetsTable.evaluatedAt} IS NOT NULL`;
     const whereClause = filterSymbol
       ? sql`${baseWhere} AND ${kalshiBotBetsTable.symbol} = ${filterSymbol.toUpperCase()}`
       : baseWhere;
