@@ -247,7 +247,7 @@ export function runExitGuard(
   // ── PHASE 1 GUARDS ────────────────────────────────────────────────────────
 
   const holdDurationMs = Date.now() - state.phase1.entryTime;
-  const holdDurationOk = holdDurationMs >= 4 * 60_000;
+  const holdDurationOk = holdDurationMs >= 2 * 60_000;
   const flipConfirmed = state.phase1.adverseTickCount >= adverseTicks;
   const magnitudeOk = priceMovePp >= magnitudePp;
 
@@ -289,6 +289,22 @@ export function runExitGuard(
     phase2Active: false, phase2UptickDetected: false, phase2Timeout: false,
     phase2YesPrice: yp, phase2RecentLow: null,
   };
+
+  // Fast-flip path: if BOTH stat and Claude unanimously say the position is
+  // wrong AND we've held for at least 90 seconds, exit immediately — no
+  // tick-count or magnitude requirement.  This is the "sell and rebuy"
+  // mechanism: cut the loss early while there's still contract value left,
+  // then let the entry loop re-enter in the correct direction next tick.
+  const bothCoreFlipped = statSaysAdverse && claudeSaysAdverse;
+  const holdMinimumForFlip = holdDurationMs >= 90_000;
+  if (bothCoreFlipped && holdMinimumForFlip && !timingOverride) {
+    return {
+      recommendation: "EXIT",
+      reason: `Fast flip: stat + Claude both signal reversal after ${Math.round(holdDurationMs / 1000)}s — cutting to allow re-entry`,
+      phase: 1,
+      guardStates,
+    };
+  }
 
   // Timing override: always hold if high accuracy at this minute
   if (timingOverride) {

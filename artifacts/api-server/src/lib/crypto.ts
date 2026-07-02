@@ -1622,6 +1622,7 @@ async function callClaudeForPredictions(
 
     // ── B: 5-min candle block + VWAP ─────────────────────────────────────────
     let multiTfBlock = "";
+    let htfLine = "";
     if (extra?.candles5m && extra.candles5m.length > 0) {
       const c5m = extra.candles5m.slice(-24); // last 2 hours at 5-min
       const vwapVal = vwap(c5m);
@@ -1634,7 +1635,34 @@ VWAP (4-hour, 5-min candles): $${vwapVal.toFixed(dp)} — price is ${vwapRel}
 
 LAST 24 × 5-MIN CANDLES — 2-hour structure (oldest first, unix/open/high/low/close/volume):
 ${rows5m}`;
+
+      // 4h trend from the full 5-min candle set (up to 48 bars = 4 hours)
+      const fullC5m = extra.candles5m;
+      if (fullC5m.length >= 4) {
+        const oldest5m = fullC5m[0].o;
+        const newest5m = fullC5m[fullC5m.length - 1].c;
+        const htfChangePct = oldest5m > 0 ? ((newest5m - oldest5m) / oldest5m) * 100 : 0;
+        const htfDir = htfChangePct > 0.15 ? "UPTREND" : htfChangePct < -0.15 ? "DOWNTREND" : "SIDEWAYS";
+        htfLine = `4h candle trend: ${htfDir} (${htfChangePct >= 0 ? "+" : ""}${htfChangePct.toFixed(3)}% over ${fullC5m.length} × 5-min bars)`;
+      }
     }
+
+    // ── D: Day-context block — intraday trajectory for directional anchoring ──
+    const rangeWidth = coin.high24h - coin.low24h;
+    const rangePosPct = rangeWidth > 0 ? ((coin.price - coin.low24h) / rangeWidth) * 100 : 50;
+    const rangeDesc =
+      rangePosPct >= 85 ? "near 24h HIGH — watch for exhaustion/reversal" :
+      rangePosPct <= 15 ? "near 24h LOW — watch for oversold bounce" :
+      rangePosPct >= 60 ? "upper half of day range — momentum favors upside continuation" :
+      rangePosPct <= 40 ? "lower half of day range — momentum favors downside continuation" :
+      "mid day range — no strong intraday directional bias";
+    const dayTrendBlock = `
+DAY CONTEXT — how ${coin.symbol} has traded today (use this to anchor directional bias):
+24h change: ${coin.change24hPct >= 0 ? "+" : ""}${coin.change24hPct.toFixed(2)}% from yesterday's close
+1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}% (recent hourly momentum)
+Day range: $${coin.low24h.toFixed(dp)} – $${coin.high24h.toFixed(dp)} | Current price is ${rangePosPct.toFixed(0)}% up from day low (${rangeDesc})
+${htfLine}
+RULE: If price has been trending in one direction all day, bias toward continuation unless indicators show a clear reversal (divergence, key rejection, volume breakdown).`;
 
     // ── A: order book block ───────────────────────────────────────────────────
     let orderBookBlock = "";
@@ -1684,6 +1712,7 @@ ATR(14): $${coin.indicators.atr14.toFixed(dp)} (expected move per bar)
 1h change: ${coin.change1hPct >= 0 ? "+" : ""}${coin.change1hPct.toFixed(2)}%
 24h range: $${coin.low24h.toFixed(dp)}–$${coin.high24h.toFixed(dp)}
 ${intraWindowBlock(coin.indicators)}
+${dayTrendBlock}
 ${multiTfBlock}
 TOP-3 VOLUME SPIKES (possible order-flow events):
 ${volSpikes}
@@ -1706,8 +1735,9 @@ Instructions:
 6. Use ATR to calibrate realistic move size over each 15-minute window (see PRECISION REQUIREMENT above)
 7. Weigh the INTRA-WINDOW MOMENTUM regime heavily: in a CHOPPY / low efficiency-ratio window price is sawing back and forth, so directional edge is weak — lower your confidence accordingly. Only a TRENDING (high ER) window justifies high confidence
 8. If a spike is flagged, treat the recent move with caution — it may be a one-off blip rather than sustained order flow; do not over-extrapolate it
-9. Produce your best price estimate for the NEXT 15-MIN TARGET ONLY, plus a pessimistic low and optimistic high
-10. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict or when the window is choppy
+9. Factor in the DAY CONTEXT: if 24h change and 4h candle trend both point the same direction, that macro bias should anchor your prediction. Only override it if you see clear reversal evidence (divergence, key rejection level, volume breakdown)
+10. Produce your best price estimate for the NEXT 15-MIN TARGET ONLY, plus a pessimistic low and optimistic high
+11. Set direction (up/down/flat) and confidence (0-100) based on signal confluence; penalise confidence when signals conflict or when the window is choppy
 
 Return ONLY valid JSON with exactly 1 item:
 {

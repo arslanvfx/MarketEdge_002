@@ -135,6 +135,9 @@ let paused = false;
 let config: BotConfig = { ...DEFAULT_BOT_CONFIG };
 // Keyed by symbol — each coin that has an open bet gets its own slot.
 const openPositions = new Map<string, OpenPosition>();
+// Tracks mid-exits this window so re-entry can flip direction intelligently.
+// Key = symbol, value = { windowKey, direction that was exited }.
+const midExitedWindows = new Map<string, { windowKey: string; direction: "yes" | "no" }>();
 let dailyPnl = 0;
 let dailyLossCount = 0;
 let dailyDate = todayUTC();
@@ -905,6 +908,7 @@ async function _runBotTick(
   if (pos) {
     // Check if the window has changed (expired)
     if (pos.windowKey !== windowKey) {
+      midExitedWindows.delete(sym); // clear flip state — new window starts fresh
       await closePosition(pos, yesPrice, kalshiTarget, "window_expired");
       openPositions.delete(sym);
     } else {
@@ -977,6 +981,9 @@ async function _runBotTick(
         logger.info({ sym, exitReason, guardReason: guard.reason }, "[kalshi-bot] mid-exit triggered");
         await closePosition(pos, effectiveYesPrice, kalshiTarget, exitReason, isLateRecovery);
         openPositions.delete(sym);
+        // Record that we exited mid-window so the entry loop can re-enter in
+        // the opposite direction ("sell and rebuy") with a higher confidence bar.
+        midExitedWindows.set(sym, { windowKey, direction: pos.direction });
       }
 
       // Guaranteed time-stop: if < 2 minutes remain in the 15-min window AND the
@@ -1085,6 +1092,30 @@ async function _runBotTick(
     signalAcc,
     kalshiTarget,  // pass through so ML doesn't re-fetch a potentially stale cache
   );
+
+  // ── RE-ENTRY GUARD ───────────────────────────────────────────────────────
+  // If we exited a position mid-window (fast-flip or phase-2), we may re-enter
+  // — but only in the OPPOSITE direction, and only with a higher confidence bar
+  // (+5pp) to avoid immediately flipping back on noise.
+  const recentFlip = midExitedWindows.get(sym);
+  if (recentFlip && recentFlip.windowKey === windowKey && decision.action !== "SKIP") {
+    const exitedDir = recentFlip.direction; // "yes" or "no"
+    const newDir = decision.action === "BET_YES" ? "yes" : "no";
+    if (newDir === exitedDir) {
+      // Same direction as what we just exited — skip to avoid whipsawing.
+      logger.debug({ sym, exitedDir, newDir }, "[kalshi-bot] re-entry blocked — same direction as mid-exit");
+      return;
+    }
+    // Opposite direction is allowed but requires higher confidence.
+    const flipConfidenceBar = (config.minConfidence ?? 65) + 5;
+    if (decision.confidence < flipConfidenceBar) {
+      logger.debug({ sym, confidence: decision.confidence, flipConfidenceBar }, "[kalshi-bot] re-entry blocked — confidence below flip bar");
+      return;
+    }
+    logger.info({ sym, exitedDir, newDir, confidence: decision.confidence }, "[kalshi-bot] flip re-entry — entering opposite direction after mid-exit");
+    // Clear the flip record so we don't double-guard
+    midExitedWindows.delete(sym);
+  }
 
   if (decision.action === "SKIP") {
     // Log at most one SKIP per (symbol, window) to avoid flooding audit logs
