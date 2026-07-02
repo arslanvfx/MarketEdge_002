@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, getBotState, runAutoTuneJob } from "./lib/kalshi-bot";
+import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, getBotState, runAutoTuneJob, reloadOverallPnl, evalClosedBets } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -373,6 +373,9 @@ app.listen(port, (err) => {
       await loadOpenPositionFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] open position restore failed (non-fatal)"),
       );
+      await reloadOverallPnl().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] overall P&L load failed (non-fatal)"),
+      );
 
       // Single consolidated summary so operators can confirm state at a glance.
       const s = getBotState();
@@ -409,6 +412,13 @@ app.listen(port, (err) => {
             logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
           );
         }, 30_000);
+
+        // Bet evaluation runs on its own faster loop (every 5 s) so that
+        // outcomes are stamped and Overall P&L is updated quickly after a
+        // window closes, without waiting for the full 30-s bot tick.
+        setInterval(() => {
+          evalClosedBets().catch(() => {});
+        }, 5_000);
 
         // Auto-tune performance analytics: runs every 15 min, aligned to UTC
         // 15-minute window boundaries (00, 15, 30, 45) so the analytics window

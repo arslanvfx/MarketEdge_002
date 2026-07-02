@@ -88,7 +88,7 @@ interface GuardStates {
 interface BotStatus {
   mode: "paper" | "live"; status: string; paused: boolean;
   config: BotConfig; openPositions: OpenPosition[];
-  dailyPnl: number; accountBalance: number | null;
+  dailyPnl: number; overallPnl: number | null; accountBalance: number | null;
   warmupSecondsRemaining: number | null; configured: boolean;
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;
@@ -375,7 +375,7 @@ export default function BotDashboard() {
   const evaluation = evalData?.evaluation ?? [];
   const stats = statsData;
   const openPosList = status?.openPositions ?? [];
-  const pnl = status?.dailyPnl ?? 0;
+  const pnl = status?.overallPnl ?? 0;
   const winRate = (stats?.totalBets ?? 0) > 0 ? Math.round((stats!.wins / stats!.totalBets) * 100) : 0;
 
   const statusLabel = () => {
@@ -505,7 +505,7 @@ export default function BotDashboard() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
               { label: "Account Balance", value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400" },
-              { label: "Today's P&L", value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
+              { label: "Overall P&L", value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
               { label: "Win Rate", value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
               { label: "Total Bets", value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
             ].map(({ label, value, sub, icon: Icon, color, bold }) => (
@@ -1542,10 +1542,10 @@ export default function BotDashboard() {
                         <div className="text-xs font-semibold">{r.contractCount ?? "—"} × {fmt$(r.betAmount)}</div>
                       </div>
 
-                      <div className={`rounded-lg p-2.5 col-span-1 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
+                      <div className={`rounded-lg p-2.5 col-span-1 ${isPendingEval || pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
                         <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">P&L</div>
-                        <div className={`text-sm font-bold font-mono ${pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                          {pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
+                        <div className={`text-sm font-bold font-mono ${isPendingEval || pnlNum == null ? "text-muted-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          {!isPendingEval && pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
                         </div>
                       </div>
                     </div>

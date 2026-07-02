@@ -99,6 +99,7 @@ export interface BotStateSnapshot {
   config: BotConfig;
   openPositions: OpenPositionDisplay[];  // one entry per symbol with an open bet
   dailyPnl: number;
+  overallPnl: number | null;
   dailyLossCount: number;
   dailyDate: string;        // YYYY-MM-DD in UTC
   accountBalance: number | null;
@@ -139,6 +140,7 @@ let config: BotConfig = { ...DEFAULT_BOT_CONFIG };
 // Keyed by symbol — each coin that has an open bet gets its own slot.
 const openPositions = new Map<string, OpenPosition>();
 let dailyPnl = 0;
+let overallPnl: number | null = null;
 let dailyLossCount = 0;
 let dailyDate = todayUTC();
 // Paper mode balance: starts at null and is populated by loadPaperBalanceFromDB()
@@ -317,6 +319,7 @@ export function getBotState(): BotStateSnapshot {
     config: { ...config },
     openPositions: openPositionsList,
     dailyPnl,
+    overallPnl,
     dailyLossCount,
     dailyDate,
     accountBalance,
@@ -535,6 +538,34 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     logger.info({ dailyPnl, dailyLossCount, date: today, cbState }, "[kalshi-bot] daily P&L loaded from DB");
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load daily P&L from DB (non-fatal)");
+  }
+}
+
+/**
+ * Recompute overallPnl from all evaluated (non-archived) bet rows in DB.
+ * Called once at startup and again after each evalClosedBets run so the
+ * status endpoint always reflects the true settled P&L, not an in-memory
+ * estimate that was frozen at exit time before evaluation corrected it.
+ */
+export async function reloadOverallPnl(): Promise<void> {
+  try {
+    const rows = await db
+      .select({ pnl: kalshiBotBetsTable.pnl })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNotNull(kalshiBotBetsTable.evaluatedAt),
+          isNull(kalshiBotBetsTable.archivedAt),
+          sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
+        ),
+      );
+    let sum = 0;
+    for (const r of rows) {
+      sum += r.pnl != null ? parseFloat(String(r.pnl)) : 0;
+    }
+    overallPnl = sum;
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] reloadOverallPnl failed (non-fatal)");
   }
 }
 
@@ -1707,6 +1738,7 @@ export async function evalClosedBets(): Promise<void> {
 
     if (evaluated > 0) {
       logger.info({ evaluated }, "[kalshi-bot] evalClosedBets — outcomes stamped");
+      reloadOverallPnl().catch(() => {});
     }
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] evalClosedBets error (non-fatal)");
