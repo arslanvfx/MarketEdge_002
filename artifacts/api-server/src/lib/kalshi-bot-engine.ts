@@ -29,7 +29,6 @@ import {
 
 import { extractMLFeatures } from "./ml-features";
 import { getMLPrediction } from "./ml-store";
-import { isGlobalAIKill } from "./global-ai";
 
 import {
   computeCorePairDecision,
@@ -149,15 +148,11 @@ function _makeBotDecisionInner(
   // we're within the first 90 s of the window, hold off rather than entering on
   // stat alone — Claude's opening call takes 15–60 s after the snapshot fires at
   // t+45 s, so the first bot tick (t+60 s) can race ahead of Claude's response.
-  // Skip this wait when Claude is permanently disabled (global kill or per-bot
-  // aiPaused) — there is no call coming, so waiting is pointless.
   const CLAUDE_PENDING_THRESHOLD_MIN = 1.5; // 90 s expressed in minutes
-  const claudePermanentlyDisabled = isGlobalAIKill() || (config.aiPaused === true);
   if (
     TRAINING_COINS.has(sym) &&
     claudeAbove === null &&
-    minutesElapsed < CLAUDE_PENDING_THRESHOLD_MIN &&
-    !claudePermanentlyDisabled
+    minutesElapsed < CLAUDE_PENDING_THRESHOLD_MIN
   ) {
     const pendingSnapshot: SignalSnapshot = {
       statAbove, claudeAbove: null, mlAbove: null,
@@ -346,7 +341,6 @@ function _makeBotDecisionInner(
       claudeConfidence: claudeCall?.confidence ?? null,
       kalshiTicker,
       minConfidence: config.minConfidence,
-      minStatConfidence: config.minStatConfidence ?? 0,
     });
 
     if (coreResult.action !== "SKIP" && mlAbove !== null) {
@@ -385,7 +379,6 @@ function _makeBotDecisionInner(
     mlConfidence,
     kalshiTicker,
     minConfidence: config.minConfidence,
-    minStatConfidence: config.minStatConfidence ?? 0,
   });
 
   const snapshot = buildSnapshot(

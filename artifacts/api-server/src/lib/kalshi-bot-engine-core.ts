@@ -49,10 +49,6 @@ export interface CorePairInputs {
   mlConfidence: number | null;
   kalshiTicker: string | null;
   minConfidence: number;
-  /** Hard floor on the raw stat model confidence. When stat is available and
-   *  below this value the bet is skipped regardless of what composite confidence
-   *  the ML / Claude validators produce.  0 = disabled.  Default 55. */
-  minStatConfidence: number;
 }
 
 export interface CorePairResult {
@@ -113,28 +109,6 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
       reasoning: `Negative EV (${ev.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}%`,
       signalsAgreeing: 0, signalsTotal: 0, ev,
     };
-  }
-
-  // Stat confidence floor gate — blocks bets when the stat model's raw confidence
-  // is too weak to be the primary signal.  Bypassed when ML is ready to lead
-  // (mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE) because in that case ML is the
-  // decision-maker and stat is just a validator/booster — a weak stat doesn't
-  // disqualify a strong ML signal.  Gate is also skipped when stat is absent (null).
-  const mlReadyToLead =
-    inp.mlAbove !== null &&
-    inp.mlConfidence != null &&
-    inp.mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE;
-
-  if (
-    !mlReadyToLead &&
-    inp.minStatConfidence > 0 &&
-    inp.statConfidence !== null &&
-    inp.statConfidence < inp.minStatConfidence
-  ) {
-    return skip(
-      `stat-floor: statConf ${inp.statConfidence}% < minStatConfidence ${inp.minStatConfidence}% — underlying signal too weak`,
-      ev,
-    );
   }
 
   // Whether the ML model is ready to lead
@@ -416,7 +390,6 @@ export interface BotConfig {
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
-  aiPaused: boolean;         // emergency: suspend ALL Claude calls without stopping the bot
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
   quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
@@ -448,11 +421,6 @@ export interface BotConfig {
   paperStartingBalance: number;  // (default 100)
   paperWinReturnRate: number;    // (default 0.5)
   paperBalanceResetAt: string | null; // (default null = count all bets)
-  /** Hard floor on the raw stat model confidence (0-100).
-   *  A bet is skipped when stat is available and its raw confidence is below
-   *  this threshold, regardless of what Claude/ML push the composite score to.
-   *  Set to 0 to disable the floor entirely.  Default 55 (data-derived). */
-  minStatConfidence: number;
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -489,11 +457,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   borderLookbackBets: 3,
   // Regime penalty: 15pp deduction for against-regime bets — high bar keeps quality high
   regimePenalty: 15,
-  aiPaused: false,
   // Paper trading defaults
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,
   paperBalanceResetAt: null,
-  // Stat floor: derived from historical data — stat < 55 = ~49-55% WR, stat >= 55 = ~69% WR
-  minStatConfidence: 55,
 };

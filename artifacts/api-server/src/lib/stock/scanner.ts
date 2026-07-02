@@ -270,7 +270,7 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
       .sort((a, b) => b.score - a.score)
       .slice(0, 20)
       .map((r) => r.ticker);
-    runResearchPass(top20, { aiPaused: getConfig().aiPaused }).catch((err) =>
+    runResearchPass(top20).catch((err) =>
       logger.warn({ err }, "[stock-scanner] research pass error"),
     );
 

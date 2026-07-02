@@ -1,6 +1,4 @@
 import { anthropic } from "@workspace/integrations-anthropic-ai";
-import { isGlobalAIKill } from "./global-ai";
-import { getSnapBudgetTokens, getDisplayBudgetTokens, getLiveDirTTLMs, getLiveDirPeriodicMs } from "./ai-intensity";
 import { db, predictionRecordsTable, mlWindowSnapshotsTable, mlModelStateTable, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { extractMLFeatures, deriveMLSignalDirections, buildMLSnapshotInputs } from "./ml-features";
@@ -1717,22 +1715,16 @@ Return ONLY valid JSON with exactly 1 item:
   ]
 }`;
 
-    if (isGlobalAIKill()) return null;
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: getDisplayBudgetTokens() },
+      thinking: { type: "enabled", budget_tokens: 10000 },
       system:
         "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike — not just to predict general direction. Analyze chart patterns, indicators, and the live order book to produce refined short-term price predictions. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: userPrompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const typedResp = response as { content: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
-    const rIn  = typedResp.usage?.input_tokens  ?? 0;
-    const rOut = typedResp.usage?.output_tokens ?? 0;
-    console.info(`[claude-ai-predict] tokens — in:${rIn} out:${rOut} total:${rIn + rOut}`);
-
-    const raw = typedResp.content
+    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("") || "";
@@ -2050,14 +2042,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       return null;
     }
     const body = (await resp.json()) as {
-      markets?: {
-        floor_strike?: number; ticker?: string; close_time?: string;
-        // Legacy integer-cent fields (deprecated by Kalshi ~Jul 2026):
-        yes_ask?: number; yes_bid?: number; last_price?: number;
-        // Current dollar-string fields:
-        yes_ask_dollars?: string; yes_bid_dollars?: string; last_price_dollars?: string;
-        previous_yes_ask_dollars?: string; previous_yes_bid_dollars?: string;
-      }[];
+      markets?: { floor_strike?: number; ticker?: string; close_time?: string; yes_ask?: number; yes_bid?: number; last_price?: number }[];
     };
 
     const markets = (body.markets ?? []).filter(
@@ -2098,23 +2083,14 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     }
 
     if (selected) {
-      // Kalshi migrated from integer-cent fields (yes_ask/yes_bid/last_price in 1–99)
-      // to dollar-string fields (yes_ask_dollars/yes_bid_dollars/last_price_dollars in "0.00"–"1.00").
-      // Support both formats; dollar fields take priority when present.
-      // 0 / "0" / "0.00" means no quote in both formats.
-      const toFracInt = (v: number | undefined | null) =>
+      // yes_ask / yes_bid / last_price are integers in cents (1–99); 0 means no quote.
+      // Prefer the bid/ask midpoint for the most accurate yes probability estimate.
+      // Fall back: ask only → bid only → last traded price → null (no price available).
+      const toFrac = (v: number | undefined | null) =>
         typeof v === "number" && v > 0 ? v / 100 : null;
-      const toFracDollar = (v: string | undefined | null) => {
-        const f = v != null ? parseFloat(v) : NaN;
-        return Number.isFinite(f) && f > 0 ? f : null;
-      };
-      const yesAsk =
-        toFracDollar(selected.yes_ask_dollars) ?? toFracInt(selected.yes_ask);
-      const yesBid =
-        toFracDollar(selected.yes_bid_dollars) ?? toFracInt(selected.yes_bid);
-      const lastP =
-        toFracDollar(selected.last_price_dollars) ?? toFracInt(selected.last_price) ??
-        toFracDollar(selected.previous_yes_ask_dollars);
+      const yesAsk   = toFrac(selected.yes_ask);
+      const yesBid   = toFrac(selected.yes_bid);
+      const lastP    = toFrac(selected.last_price);
       const yesPrice =
         yesAsk !== null && yesBid !== null ? (yesAsk + yesBid) / 2
         : yesAsk ?? yesBid ?? lastP ?? null;
@@ -2364,7 +2340,6 @@ async function refineSnappedPrediction(
   basePred: Prediction,
   extra?: { candles5m?: Candle[]; orderBook?: OrderBook; kalshiTarget?: number | null; windowOpenPrice?: number | null; minutesElapsed?: number },
 ): Promise<{ predictedPrice: number; direction: "up" | "down" | "flat"; confidence: number } | null> {
-  if (globalAIPaused) return null;
   try {
     const dp = priceDp(coin.price);
     const recent = coin.candles.slice(-60);
@@ -2580,23 +2555,16 @@ Analysis steps:
 Return ONLY valid JSON (no markdown):
 {"predictedPrice": 0.0, "direction": "up", "confidence": 70}`;
 
-    const snapParams: Parameters<typeof anthropic.messages.create>[0] = {
+    const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: snapExtendedThinking ? 16000 : 1024,
-      ...(snapExtendedThinking ? { thinking: { type: "enabled", budget_tokens: getSnapBudgetTokens() } } : {}),
-      system: snapExtendedThinking
-        ? "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text."
-        : "You are an expert crypto technical analyst. Respond with ONLY valid compact JSON — no markdown, no extra text.",
+      max_tokens: 16000,
+      thinking: { type: "enabled", budget_tokens: 10000 },
+      system:
+        "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
-    };
-    const response = await anthropic.messages.create(snapParams);
+    } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const typedResponse = response as { content: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
-    const usageIn  = typedResponse.usage?.input_tokens  ?? 0;
-    const usageOut = typedResponse.usage?.output_tokens ?? 0;
-    console.info(`[claude-snap] ${coin.symbol} tokens — in:${usageIn} out:${usageOut} total:${usageIn + usageOut}`);
-
-    const raw = typedResponse.content
+    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("") || "";
@@ -2618,52 +2586,6 @@ Return ONLY valid JSON (no markdown):
   } catch {
     return null; // fall back to statistical model
   }
-}
-
-// When false, refineSnappedPrediction uses standard Sonnet (no extended
-// thinking). Set to false during bot quiet hours so training snaps are still
-// recorded for accuracy / ML — but without paying for extended thinking when
-// no bets will be placed. kalshi-bot sets this at the start of every tick.
-let snapExtendedThinking = true;
-export function setSnapExtendedThinking(enabled: boolean): void {
-  snapExtendedThinking = enabled;
-}
-
-// ---------------------------------------------------------------------------
-// Global AI pause + per-coin pause + maintenance window
-// ---------------------------------------------------------------------------
-
-// Emergency switch: when true ALL Claude calls return null immediately.
-// Persisted via BotConfig.aiPaused — kalshi-bot syncs this on every tick.
-let globalAIPaused = false;
-export function setGlobalAIPaused(paused: boolean): void {
-  globalAIPaused = paused;
-}
-
-// Coins currently auto-paused by the circuit breaker.  Claude snap is skipped
-// for paused coins (no bet will be placed, so extended thinking is wasted).
-let claudePausedCoins = new Set<string>();
-export function setClaudePausedCoins(coins: Set<string>): void {
-  claudePausedCoins = coins;
-}
-
-// Kalshi weekly maintenance: Thursdays 03:00–05:00 AM EST (UTC−5).
-// During this window Kalshi is down — no new markets open, no bets possible.
-export function isKalshiMaintenanceWindow(): boolean {
-  // Use America/New_York so DST is handled automatically
-  // (EDT=UTC-4 in summer, EST=UTC-5 in winter). Kalshi maintenance is
-  // every Thursday 03:00–05:00 Eastern time.
-  const now = new Date();
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    hour12: false,
-  });
-  const parts = Object.fromEntries(fmt.formatToParts(now).map((p) => [p.type, p.value]));
-  const day = parts["weekday"]; // "Thu"
-  const hour = parseInt(parts["hour"] ?? "0", 10); // 0-23
-  return day === "Thu" && hour >= 3 && hour < 5;
 }
 
 // Self-consistency wrapper: when selfConsistencySamples > 1, independently
@@ -3158,7 +3080,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
               // Claude improves while paused and accuracy tracking breaks.
               updateKalshiWindowPrice(getLastKalshiTicker(sym), analysis.price);
               const winCtxSnap = getKalshiWindowContext(sym);
-              const useAI = TRAINING_COINS.has(sym) && !claudePausedCoins.has(sym);
+              const useAI = TRAINING_COINS.has(sym);
               const [ai, kalshiTarget] = await Promise.all([
                 useAI
                   ? refineWithSelfConsistency(analysis, basePred, {
@@ -3399,7 +3321,7 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
         //       Claude's last cached ABOVE/BELOW call.
         //   (b) Periodic: cache is stale (> LIVE_DIR_PERIODIC_MS elapsed since
         //       the last fetch), so Claude re-analyses current market conditions.
-        const LIVE_DIR_PERIODIC_MS = getLiveDirPeriodicMs(); // eco=10min balanced=7min max=5min
+        const LIVE_DIR_PERIODIC_MS = 5 * 60_000; // refresh at least every 5 min
         if (isCoinClaudeEnabled(sym) && !liveDirectionInFlight.has(sym)) {
           const cached = liveDirectionCache.get(sym);
           const lastTrigger = liveDirectionLastAutoTrigger.get(sym) ?? 0;
@@ -3994,7 +3916,7 @@ export interface LiveDirectionResult {
 }
 
 const liveDirectionCache = new Map<string, { result: LiveDirectionResult; at: number }>();
-const LIVE_DIR_TTL = () => getLiveDirTTLMs(); // eco=10min balanced=7min max=5min; evaluated on every cache check
+const LIVE_DIR_TTL = 2 * 60_000; // 2 minutes — "live" means live
 // Tracks in-flight live-direction re-checks (prevents concurrent calls per coin).
 const liveDirectionInFlight = new Set<string>();
 // Tracks when the last auto-trigger fired per coin (cooldown guard).
@@ -4007,10 +3929,9 @@ const LIVE_DIR_AUTO_COOLDOWN = 2 * 60_000; // min gap between auto-triggers per 
 export async function fetchLiveDirection(symbol: string, force = false): Promise<LiveDirectionResult | null> {
   const nowMs = Date.now();
   const entry = liveDirectionCache.get(symbol.toUpperCase());
-  if (!force && entry && nowMs - entry.at < LIVE_DIR_TTL()) {
+  if (!force && entry && nowMs - entry.at < LIVE_DIR_TTL) {
     return { ...entry.result, cached: true };
   }
-  if (globalAIPaused) return null;
 
   const coin = CRYPTO_COINS.find((c) => c.symbol === symbol.toUpperCase());
   if (!coin) return null;
@@ -4089,12 +4010,7 @@ JSON only: {"direction":"up","confidence":65}`;
       messages: [{ role: "user", content: prompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const typedLive = response as { content: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
-    const lIn  = typedLive.usage?.input_tokens  ?? 0;
-    const lOut = typedLive.usage?.output_tokens ?? 0;
-    console.info(`[claude-live-dir] ${symbol} tokens — in:${lIn} out:${lOut} total:${lIn + lOut}`);
-
-    const raw = typedLive.content
+    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("")
@@ -4149,7 +4065,6 @@ export async function fetchTrendStabilityForBot(
   symbol: string,
   windowKey: string,
 ): Promise<TrendStabilityResult | null> {
-  if (globalAIPaused) return null;
   const sym = symbol.toUpperCase();
   const cacheKey = `${sym}:${windowKey}`;
   const cached = trendStabilityCache.get(cacheKey);

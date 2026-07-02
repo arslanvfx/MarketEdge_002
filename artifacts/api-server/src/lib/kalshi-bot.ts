@@ -42,10 +42,6 @@ import {
   fetchTrendStabilityForBot,
   getPredictionAnalytics,
   getConfirmedTargetMs,
-  setSnapExtendedThinking,
-  setGlobalAIPaused,
-  setClaudePausedCoins,
-  isKalshiMaintenanceWindow,
   CRYPTO_COINS,
   KALSHI_SERIES,
   type TrendStability,
@@ -99,7 +95,6 @@ export interface BotStateSnapshot {
   config: BotConfig;
   openPositions: OpenPositionDisplay[];  // one entry per symbol with an open bet
   dailyPnl: number;
-  overallPnl: number | null;
   dailyLossCount: number;
   dailyDate: string;        // YYYY-MM-DD in UTC
   accountBalance: number | null;
@@ -140,7 +135,6 @@ let config: BotConfig = { ...DEFAULT_BOT_CONFIG };
 // Keyed by symbol — each coin that has an open bet gets its own slot.
 const openPositions = new Map<string, OpenPosition>();
 let dailyPnl = 0;
-let overallPnl: number | null = null;
 let dailyLossCount = 0;
 let dailyDate = todayUTC();
 // Paper mode balance: starts at null and is populated by loadPaperBalanceFromDB()
@@ -181,15 +175,10 @@ const pausedCoins: Map<string, number> = new Map();
 
 // Per-window outcome tracking for the doubt-penalty signal.
 // Key: windowKey (ISO string "YYYY-MM-DDTHH:mm"), Value: { wins, losses }.
-// NOT restored from DB at startup — purely ephemeral per-session state.
+// Populated at startup from DB and updated live as bets settle in evalClosedBets.
 // When the last 1-2 completed windows had <40% win rate the bot raises its
 // effective confidence floor to filter out marginal signals that may be noise.
 const recentWindowOutcomes: Map<string, { wins: number; losses: number }> = new Map();
-
-// Coins the user explicitly unpaused this session. Auto-tune will NOT re-pause
-// these until the next server restart, giving the user's choice priority over
-// the per-window auto-tune rule (which looks at all historical losses).
-const manuallyUnpausedCoins: Set<string> = new Set();
 
 // Cached performance report from the most recent auto-tune run (null before
 // the first run fires, typically ~15 min after startup).
@@ -324,7 +313,6 @@ export function getBotState(): BotStateSnapshot {
     config: { ...config },
     openPositions: openPositionsList,
     dailyPnl,
-    overallPnl,
     dailyLossCount,
     dailyDate,
     accountBalance,
@@ -365,24 +353,7 @@ export function setBotPaused(p: boolean): void {
   logger.info({ paused }, "[kalshi-bot] paused changed");
 }
 
-// Reset all per-mode adaptive state so switching logic modes starts with a
-// clean slate.  Clears: doubt-filter window history, circuit-breaker streak,
-// per-window bet counts and direction counts, and last-decision dedup keys.
-// Does NOT touch: openPositions, pausedCoins, or account balance.
-function resetModeState(): void {
-  recentWindowOutcomes.clear();
-  cbState = { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 };
-  windowBetCounts.clear();
-  windowDirectionCounts.clear();
-  lastDecisionWindowKey.clear();
-  logger.info("[kalshi-bot] mode-switch: adaptive state cleared (doubt filter, circuit breaker, bet counts)");
-}
-
-export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean; modeReset: boolean }> {
-  // Detect a decision-mode switch before mutating config.
-  const prevMode = config.decisionMode;
-  const modeChanged = "decisionMode" in partial && partial.decisionMode !== prevMode;
-
+export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean }> {
   config = { ...config, ...partial };
   const snapshot = { ...config };
   let persisted = false;
@@ -403,10 +374,7 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   if ("paperStartingBalance" in partial || "paperBalanceResetAt" in partial) {
     await loadPaperBalanceFromDB().catch(() => {});
   }
-  // On a mode switch, purge all adaptive state that accumulated under the old
-  // mode so it cannot contaminate decisions in the new mode.
-  if (modeChanged) resetModeState();
-  return { config: snapshot, persisted, modeReset: modeChanged };
+  return { config: snapshot, persisted };
 }
 
 export async function loadBotConfigFromDB(): Promise<void> {
@@ -508,18 +476,43 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       recentKalshiTargets.set(sym, targets.reverse().slice(-REGIME_STRIKES_MAX));
     }
 
-    // Startup does NOT auto-pause coins based on historical consecutive losses.
-    // Consecutive-loss pausing is handled entirely by the per-window auto-tune job
-    // (runAutoTuneRules), which only looks at bets from the current session.
-    // Restoring pauses at startup means losses from a broken-API period (or any
-    // other one-off event) permanently block coins across every future deploy.
+    // Per-coin consecutive loss recovery: if a coin has ≥5 consecutive losses in recent
+    // bets, auto-pause it for 4 windows on startup (mirrors the per_coin_pause auto-tune
+    // rule but survives restarts). recentRows is already newest-first.
+    const perCoinStreak: Map<string, number> = new Map();
+    const perCoinStreakDone: Set<string> = new Set();
+    for (const r of recentRows) {
+      const sym = (r.symbol ?? "").toUpperCase();
+      if (!sym || perCoinStreakDone.has(sym)) continue;
+      const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
+      if (p < 0) {
+        perCoinStreak.set(sym, (perCoinStreak.get(sym) ?? 0) + 1);
+      } else {
+        perCoinStreakDone.add(sym); // first win resets streak for this coin
+      }
+    }
+    for (const [sym, consecutive] of perCoinStreak.entries()) {
+      if (consecutive >= 5 && !pausedCoins.has(sym)) {
+        pausedCoins.set(sym, 4);
+        logger.warn(
+          { sym, consecutive },
+          "[kalshi-bot] startup: auto-pausing coin with ≥5 consecutive losses",
+        );
+      }
+    }
 
-    // Do NOT restore recentWindowOutcomes from DB at startup.
-    // This map is intentional ephemeral per-session state: seeding it from
-    // historical losses means a mode-switch clear (or manual unpause) gets
-    // immediately undone on the next deploy, permanently blocking bets.
-    // The doubt filter will rebuild naturally from bets placed this session.
+    // Populate per-window outcome tracking from recent settled rows.
+    // recentRows is newest-first; we just iterate and bucket by windowKey.
     recentWindowOutcomes.clear();
+    for (const r of recentRows) {
+      const wk = r.windowKey;
+      if (!wk || r.pnl == null) continue;
+      const p = parseFloat(String(r.pnl));
+      const wo = recentWindowOutcomes.get(wk) ?? { wins: 0, losses: 0 };
+      if (p > 0) wo.wins++;
+      else if (p < 0) wo.losses++;
+      recentWindowOutcomes.set(wk, wo);
+    }
 
     // Restore circuit-breaker state from the recovered streak.
     // Guard against the disabled mode (maxConsecutiveLosses=0 or pauseWindows=0):
@@ -538,34 +531,6 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     logger.info({ dailyPnl, dailyLossCount, date: today, cbState }, "[kalshi-bot] daily P&L loaded from DB");
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load daily P&L from DB (non-fatal)");
-  }
-}
-
-/**
- * Recompute overallPnl from all evaluated (non-archived) bet rows in DB.
- * Called once at startup and again after each evalClosedBets run so the
- * status endpoint always reflects the true settled P&L, not an in-memory
- * estimate that was frozen at exit time before evaluation corrected it.
- */
-export async function reloadOverallPnl(): Promise<void> {
-  try {
-    const rows = await db
-      .select({ pnl: kalshiBotBetsTable.pnl })
-      .from(kalshiBotBetsTable)
-      .where(
-        and(
-          isNotNull(kalshiBotBetsTable.evaluatedAt),
-          isNull(kalshiBotBetsTable.archivedAt),
-          sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
-        ),
-      );
-    let sum = 0;
-    for (const r of rows) {
-      sum += r.pnl != null ? parseFloat(String(r.pnl)) : 0;
-    }
-    overallPnl = sum;
-  } catch (err) {
-    logger.warn({ err }, "[kalshi-bot] reloadOverallPnl failed (non-fatal)");
   }
 }
 
@@ -637,27 +602,6 @@ export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }
   // Reload in-memory daily counters so the running bot reflects the clean slate.
   await loadDailyPnlFromDB();
   return { deleted };
-}
-
-/**
- * Soft-archive ALL non-archived kalshi_bot_bets rows so the display counters
- * (win rate, total bets, P&L history) start from zero visually.
- *
- * Nothing is deleted. Archived rows are invisible to display queries
- * (WHERE archived_at IS NULL) but remain fully visible to every operational
- * query: auto-tune, border-guard, evalClosedBets, recentKalshiTargets seeding.
- * ML training data (prediction_records) is never touched.
- */
-export async function softArchiveAllBets(): Promise<{ archived: number }> {
-  const result = await db.execute(
-    sql`UPDATE kalshi_bot_bets
-        SET archived_at = NOW()
-        WHERE archived_at IS NULL`
-  );
-  const archived = (result as unknown as { rowCount: number }).rowCount ?? 0;
-  logger.info({ archived }, "[kalshi-bot] softArchiveAllBets — visual reset, no data deleted");
-  await loadDailyPnlFromDB();
-  return { archived };
 }
 
 /**
@@ -755,20 +699,6 @@ export async function loadOpenPositionFromDB(): Promise<void> {
 
     if (restored > 0) {
       logger.info({ restored }, "[kalshi-bot] open positions restored from DB");
-
-      // Deduct the stake for each restored open position from the in-memory
-      // paper balance.  loadPaperBalanceFromDB() only sums SETTLED bets, so
-      // open-position stakes are not yet reflected — we mirror the entry-time
-      // deduction that would have happened had the server not restarted.
-      if (botMode === "paper" && accountBalance !== null) {
-        for (const pos of openPositions.values()) {
-          accountBalance -= pos.betAmount;
-        }
-        logger.info(
-          { restored, accountBalance },
-          "[kalshi-bot] in-flight stake(s) deducted from paper balance after position restore",
-        );
-      }
     }
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to restore open positions from DB (non-fatal)");
@@ -1223,14 +1153,6 @@ async function _runBotTick(
   };
   openPositions.set(sym, newPosition);
 
-  // Deduct bet cost from in-memory paper balance at the moment the bet is
-  // placed so the dashboard shows available funds dropping immediately.
-  // closePosition returns betAmount + pnl (returning the stake + net profit)
-  // so the net effect stays identical to the old scheme.
-  if (botMode === "paper" && accountBalance !== null) {
-    accountBalance -= betAmount;
-  }
-
   // Enrich signals with effectiveConfidence (the composite score that gated this bet)
   // so analytics can build accurate confidence-band win-rate breakdowns without relying
   // on statConfidence/claudeConfidence alone, which are per-model not per-decision.
@@ -1366,11 +1288,7 @@ async function closePosition(
       .then((b) => { accountBalance = b.availableBalance; })
       .catch(() => {});
   } else {
-    // Paper mode: betAmount was deducted from accountBalance at entry time.
-    // Here we return the stake and add the net pnl:
-    //   WIN:  +betAmount + (betAmount × winRate) → net gain = betAmount × winRate
-    //   LOSS: +betAmount + (−betAmount)          → net change = −betAmount  ✓
-    accountBalance = (accountBalance ?? config.paperStartingBalance ?? 100) + pos.betAmount + pnl;
+    accountBalance = (accountBalance ?? config.paperStartingBalance ?? 100) + pnl; // simulated paper balance
   }
 
   const phase2RecoveredAmount = isLateRecovery && pnl > -pos.betAmount
@@ -1743,17 +1661,6 @@ export async function evalClosedBets(): Promise<void> {
           .update(kalshiBotBetsTable)
           .set({ outcome, pnl: String(correctedPnl), evaluatedAt: new Date(), signals: updatedSignals })
           .where(eq(kalshiBotBetsTable.id, row.id));
-
-        // Patch in-memory accumulators so the running session reflects the
-        // corrected outcome without waiting for a restart to reload from DB.
-        // Only applies to expired bets (correctedPnl != null) where the initial
-        // estimate in closePosition() may have differed from the real outcome.
-        const estimatedPnl = row.pnl != null ? parseFloat(String(row.pnl)) : 0;
-        const delta = correctedPnl - estimatedPnl;
-        if (delta !== 0) {
-          dailyPnl += delta;
-          if (accountBalance !== null) accountBalance += delta;
-        }
       } else {
         await db
           .update(kalshiBotBetsTable)
@@ -1775,7 +1682,6 @@ export async function evalClosedBets(): Promise<void> {
 
     if (evaluated > 0) {
       logger.info({ evaluated }, "[kalshi-bot] evalClosedBets — outcomes stamped");
-      reloadOverallPnl().catch(() => {});
     }
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] evalClosedBets error (non-fatal)");
@@ -1888,7 +1794,7 @@ export async function getBotStats(filterSymbol?: string): Promise<{
   bySymbol: CoinBotStats[];
 }> {
   try {
-    const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired') AND ${kalshiBotBetsTable.archivedAt} IS NULL AND ${kalshiBotBetsTable.evaluatedAt} IS NOT NULL`;
+    const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired') AND ${kalshiBotBetsTable.archivedAt} IS NULL`;
     const whereClause = filterSymbol
       ? sql`${baseWhere} AND ${kalshiBotBetsTable.symbol} = ${filterSymbol.toUpperCase()}`
       : baseWhere;
@@ -1969,21 +1875,6 @@ export async function runBotLoopTick(): Promise<void> {
   // Evaluate any closed bets that haven't been stamped with outcome yet.
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
   evalClosedBets().catch(() => {});
-
-  // Sync AI call flags before any work this tick.
-  const inMaintenance = isKalshiMaintenanceWindow();
-  const inQuiet = isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd);
-  // Extended thinking off during quiet hours OR maintenance (no bets, no need for deep reasoning).
-  setSnapExtendedThinking(!inQuiet && !inMaintenance);
-  // Global pause: manual aiPaused flag OR active maintenance window kills ALL Claude calls.
-  setGlobalAIPaused(config.aiPaused || inMaintenance);
-  // Skip Claude snap for circuit-breaker-paused coins (no bet will fire, so extended thinking is wasted).
-  setClaudePausedCoins(new Set(pausedCoins.keys()));
-
-  if (inMaintenance) {
-    logger.info("[kalshi-bot] Kalshi maintenance window (Thu 03–05 EST) — skipping tick");
-    return;
-  }
 
   // Always run window-expiry check, even when paused or disabled.
   // If the 15-minute window rolls over while a position is still open (e.g.
@@ -2607,29 +2498,6 @@ export function getPausedCoinState(): Record<string, number> {
   return out;
 }
 
-export function clearPausedCoins(): string[] {
-  const cleared = Array.from(pausedCoins.keys());
-  pausedCoins.clear();
-  // Mark every cleared coin as manually unpaused so auto-tune won't re-pause
-  // them this session based on historical losses.
-  for (const sym of cleared) manuallyUnpausedCoins.add(sym);
-  // Also wipe the doubt filter so the fresh session starts clean.
-  recentWindowOutcomes.clear();
-  return cleared;
-}
-
-export function unpauseCoin(sym: string): boolean {
-  const key = sym.toUpperCase();
-  if (!pausedCoins.has(key)) return false;
-  pausedCoins.delete(key);
-  manuallyUnpausedCoins.add(key);
-  return true;
-}
-
-export function clearRecentWindowOutcomes(): void {
-  recentWindowOutcomes.clear();
-}
-
 export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
   try {
     return await db
@@ -2929,18 +2797,11 @@ export async function runAutoTuneJob(): Promise<void> {
         updateBotConfig(mutation.configMutation).catch(() => {});
       }
 
-      // Apply per-coin pause — but never re-pause a coin the user explicitly
-      // unpaused this session. manuallyUnpausedCoins protects user intent until
-      // the next server restart, preventing the re-pause loop.
+      // Apply per-coin pause
       if (mutation.pauseCoin) {
         const { symbol: pauseSym, windows } = mutation.pauseCoin;
-        const upperSym = pauseSym.toUpperCase();
-        if (manuallyUnpausedCoins.has(upperSym)) {
-          logger.info({ sym: upperSym }, "[auto-tune] per-coin pause skipped — user manually unpaused this session");
-        } else {
-          pausedCoins.set(upperSym, windows);
-          logger.info({ sym: upperSym, windows }, "[auto-tune] per-coin pause applied");
-        }
+        pausedCoins.set(pauseSym.toUpperCase(), windows);
+        logger.info({ sym: pauseSym, windows }, "[auto-tune] per-coin pause applied");
       }
     }
   } catch (err) {

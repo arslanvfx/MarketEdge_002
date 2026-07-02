@@ -1,8 +1,8 @@
 import { Link, useLocation } from "wouter";
 import { useUser, useClerk, Show } from "@clerk/react";
-import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, TrendingUp, Bot, Radar, Star, BarChart3, History, ShieldOff, Shield, Zap } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, TrendingUp, Bot, Radar, Star, BarChart3, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 
@@ -30,55 +30,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
     });
     void queryClient.invalidateQueries({ queryKey: ["ai-settings"] });
   }
-
-  const { data: aiKillData } = useQuery({
-    queryKey: ["ai-kill"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/crypto/ai-kill`);
-      return res.json() as Promise<{ kill: boolean }>;
-    },
-    refetchInterval: 10_000,
-  });
-  const aiKill = aiKillData?.kill ?? false;
-
-  const aiKillMutation = useMutation({
-    mutationFn: async (kill: boolean) => {
-      const res = await fetch(`${API_BASE}/crypto/ai-kill`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kill }),
-      });
-      return res.json() as Promise<{ kill: boolean }>;
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["ai-kill"] });
-    },
-  });
-
-  type AIIntensityTier = "eco" | "balanced" | "max";
-  const { data: aiIntensityData } = useQuery({
-    queryKey: ["ai-intensity"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/crypto/ai-intensity`);
-      return res.json() as Promise<{ tier: AIIntensityTier; label: string; estDailyCost: string }>;
-    },
-    refetchInterval: 15_000,
-  });
-  const aiTier = aiIntensityData?.tier ?? "eco";
-
-  const aiIntensityMutation = useMutation({
-    mutationFn: async (tier: AIIntensityTier) => {
-      const res = await fetch(`${API_BASE}/crypto/ai-intensity`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier }),
-      });
-      return res.json() as Promise<{ tier: AIIntensityTier }>;
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["ai-intensity"] });
-    },
-  });
 
   const navigation = [
     { name: "Markets", href: "/markets", icon: LineChart },
@@ -178,67 +129,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </Show>
         </nav>
 
-        {/* Emergency global AI kill — stops ALL Claude calls across the entire app */}
-        <div className="px-4 pb-2">
-          <button
-            onClick={() => aiKillMutation.mutate(!aiKill)}
-            disabled={aiKillMutation.isPending}
-            className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border transition-all font-semibold text-[12px] ${
-              aiKill
-                ? "bg-red-500/20 border-red-500/60 text-red-400 hover:bg-red-500/30"
-                : "bg-muted/40 border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-            }`}
-          >
-            <span className="flex items-center gap-2">
-              {aiKill ? <ShieldOff className="w-4 h-4 shrink-0" /> : <Shield className="w-4 h-4 shrink-0" />}
-              {aiKill ? "AI Killed — All Claude Off" : "Kill All AI"}
-            </span>
-            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${aiKill ? "bg-red-500/30 text-red-300" : "bg-muted text-muted-foreground"}`}>
-              {aiKill ? "ON" : "OFF"}
-            </span>
-          </button>
-          {aiKill && (
-            <p className="text-[9px] text-red-400/70 text-center mt-1">
-              Zero AI spend · all models paused
-            </p>
-          )}
-        </div>
-
-        {/* AI intensity tier selector */}
-        <div className="px-4 pb-2">
-          <div className="flex items-center gap-1.5 mb-1.5 px-1">
-            <Zap className="w-3 h-3 text-muted-foreground/60" />
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold">AI Intensity</p>
-          </div>
-          <div className={`flex rounded-lg overflow-hidden border border-border transition-opacity ${aiKill ? "opacity-40 pointer-events-none" : ""}`}>
-            {(["eco", "balanced", "max"] as AIIntensityTier[]).map((t, i) => (
-              <button
-                key={t}
-                onClick={() => aiIntensityMutation.mutate(t)}
-                disabled={aiIntensityMutation.isPending}
-                className={`flex-1 py-1.5 text-[11px] font-semibold transition-colors ${i > 0 ? "border-l border-border" : ""} ${
-                  aiTier === t
-                    ? t === "eco"
-                      ? "bg-emerald-500/20 text-emerald-300"
-                      : t === "balanced"
-                      ? "bg-amber-500/20 text-amber-300"
-                      : "bg-red-500/20 text-red-300"
-                    : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
-                }`}
-              >
-                {t === "eco" ? "Eco" : t === "balanced" ? "Balanced" : "Max"}
-              </button>
-            ))}
-          </div>
-          <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
-            {aiKill ? "Overridden by kill switch" : aiTier === "eco" ? "~$20/day · conservative" : aiTier === "balanced" ? "~$30/day · middle ground" : "~$45/day · original settings"}
-          </p>
-        </div>
-
-        {/* Per-bot AI mode toggle — only relevant when kill switch is OFF */}
+        {/* Global AI mode toggle — controls all AI spend across the app */}
         <div className="px-4 pb-3">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold mb-1.5 px-1">AI Mode</p>
-          <div className={`flex rounded-lg overflow-hidden border border-border transition-opacity ${aiKill ? "opacity-40 pointer-events-none" : ""}`}>
+          <div className="flex rounded-lg overflow-hidden border border-border">
             <button
               onClick={() => void setAiMode("stat")}
               className={`flex-1 flex items-center justify-center gap-1 py-1.5 text-[11px] font-semibold transition-colors ${
@@ -263,7 +157,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </button>
           </div>
           <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
-            {aiKill ? "Overridden by kill switch" : aiMode === "stat" ? "Free · no AI spend" : "Paid · Claude active"}
+            {aiMode === "stat" ? "Free · no AI spend" : "Paid · Claude active"}
           </p>
         </div>
 

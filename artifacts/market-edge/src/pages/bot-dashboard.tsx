@@ -6,199 +6,15 @@ import {
   BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus,
   Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders,
-  ChevronLeft, ChevronRight, RotateCcw,
+  ChevronLeft, ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 
-// ─── Mode presets ────────────────────────────────────────────────────────────
-// Each entry is the subset of BotConfig that should be applied automatically
-// when the user switches to that decision mode.  Settings not listed here are
-// left untouched so the user's manual overrides survive a mode switch.
-//
-// Values are derived from historical bet analysis (139 settled classic bets):
-//   stat ≥ 55 → 69% WR   stat ≥ 56 → 74% WR   stat 53-56 → 49% WR (!)
-//
+// ─── Types ──────────────────────────────────────────────────────────────────
+
 type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
-
-type ModePreset = Partial<{
-  // Signal quality gates
-  minStatConfidence: number;
-  minConfidence: number;
-  regimePenalty: number;
-  // Entry timing
-  maxEntryMinutes: number;
-  minRemainingMinutes: number;
-  // Volume / direction controls
-  maxBetsPerWindow: number;
-  maxSameDirectionBets: number;
-  enableDirectionCap: boolean;
-  // Momentum / trend filter
-  enableMomentumFilter: boolean;
-  momentumWindowCount: number;
-  // Exit
-  midExitSensitivity: "conservative" | "balanced" | "aggressive";
-  phase2ThresholdPp: number;
-  // Circuit breaker
-  maxConsecutiveLosses: number;
-  circuitBreakerPauseWindows: number;
-  // Border guard
-  enableBorderGuard: boolean;
-  borderProximityPct: number;
-  borderLookbackBets: number;
-  // Auto-tune
-  enableAutoTuning: boolean;
-  autoTuneWindowSize: number;
-}>;
-
-const MODE_PRESETS: Record<DecisionMode, ModePreset & { label: string; why: string }> = {
-  // ── Classic ──────────────────────────────────────────────────────────────
-  // Stat → Claude → ML cascade. Full pre-cost-cut configuration + data-derived
-  // stat floor of 55 (69% WR) from 139-bet DB analysis.
-  classic: {
-    label: "Classic",
-    why: "Stat → Claude → ML cascade. Hard stat floor at 55 filters the 49%-WR noise band; regime penalty blocks against-trend bets.",
-    // Signal gates (data-derived)
-    minStatConfidence:      55,
-    minConfidence:          65,
-    regimePenalty:          15,
-    // Entry timing — no ceiling; skip when fewer than 2 min remain
-    maxEntryMinutes:        0,
-    minRemainingMinutes:    2,
-    // Volume
-    maxBetsPerWindow:       3,
-    maxSameDirectionBets:   3,
-    enableDirectionCap:     true,
-    // Momentum / trend
-    enableMomentumFilter:   true,
-    momentumWindowCount:    3,
-    // Exit
-    midExitSensitivity:     "balanced",
-    phase2ThresholdPp:      30,
-    // Circuit breaker disabled — auto-tune handles pausing underperformers
-    maxConsecutiveLosses:   0,
-    circuitBreakerPauseWindows: 2,
-    // Border guard off (proximity hasn't been a reliable gate)
-    enableBorderGuard:      false,
-    borderProximityPct:     0.1,
-    borderLookbackBets:     3,
-    // Auto-tune on with 100-bet rolling window
-    enableAutoTuning:       true,
-    autoTuneWindowSize:     100,
-  },
-
-  // ── ML Gate ──────────────────────────────────────────────────────────────
-  // Stat+Claude decide direction; ML vetos if it disagrees.
-  // Full pre-cost-cut parameter set — all settings restored to what was in
-  // place before the cost-reduction changes (reduced thinking budget, quiet-
-  // hours snap-off, live-dir TTL). Those changes are now in the AI intensity
-  // tiers (Eco / Balanced / Max) so the bot config is unaffected.
-  //
-  // NOTE: the old 45s time-based warmup was replaced with a smarter
-  // target-detection gate (confirms the Kalshi strike before allowing entry)
-  // which fires earlier and is more reliable. That gate is always active
-  // regardless of mode — no extra entry delay needed here.
-  ml_gate: {
-    label: "ML Gate",
-    why: "Stat+Claude pick direction; ML vetos if it disagrees. ML veto already filters weak-stat calls so the stat floor is slightly relaxed.",
-    // Signal gates — slightly relaxed because ML veto adds a second safety layer
-    minStatConfidence:      52,
-    minConfidence:          63,
-    regimePenalty:          10,
-    // Entry timing — no ceiling; skip when fewer than 2 min remain
-    maxEntryMinutes:        0,
-    minRemainingMinutes:    2,
-    // Volume — conservative; ML veto already limits entries naturally
-    maxBetsPerWindow:       3,
-    maxSameDirectionBets:   3,
-    enableDirectionCap:     true,
-    // Momentum / trend
-    enableMomentumFilter:   true,
-    momentumWindowCount:    3,
-    // Exit — balanced exit; ML veto means we're more confident on entry
-    midExitSensitivity:     "balanced",
-    phase2ThresholdPp:      30,
-    // Circuit breaker: 5 consecutive losses → pause 2 windows
-    maxConsecutiveLosses:   5,
-    circuitBreakerPauseWindows: 2,
-    // Border guard off
-    enableBorderGuard:      false,
-    borderProximityPct:     0.1,
-    borderLookbackBets:     3,
-    // Auto-tune on
-    enableAutoTuning:       true,
-    autoTuneWindowSize:     100,
-  },
-
-  // ── Consensus ────────────────────────────────────────────────────────────
-  // ≥2 of 3 signals (Stat, Claude, ML) must agree on direction.
-  consensus: {
-    label: "Consensus",
-    why: "≥2 of 3 signals must agree — multi-signal agreement is its own quality gate so individual floors are relaxed.",
-    // Signal gates — relaxed because consensus already filters noise
-    minStatConfidence:      50,
-    minConfidence:          60,
-    regimePenalty:          8,
-    // Entry timing
-    maxEntryMinutes:        0,
-    minRemainingMinutes:    2,
-    // Volume — 4 slots since entries are already selective
-    maxBetsPerWindow:       4,
-    maxSameDirectionBets:   4,
-    enableDirectionCap:     true,
-    // Momentum / trend
-    enableMomentumFilter:   true,
-    momentumWindowCount:    3,
-    // Exit
-    midExitSensitivity:     "balanced",
-    phase2ThresholdPp:      30,
-    // Circuit breaker
-    maxConsecutiveLosses:   5,
-    circuitBreakerPauseWindows: 2,
-    // Border guard off
-    enableBorderGuard:      false,
-    borderProximityPct:     0.1,
-    borderLookbackBets:     3,
-    // Auto-tune on
-    enableAutoTuning:       true,
-    autoTuneWindowSize:     100,
-  },
-
-  // ── Unanimous ────────────────────────────────────────────────────────────
-  // All 3 signals must agree — highest conviction, fewest bets.
-  unanimous: {
-    label: "Unanimous",
-    why: "All 3 signals must agree — the strictest entry bar. Confidence floors are relaxed since unanimity already guarantees conviction; more slots because entries are rare.",
-    // Signal gates — very relaxed; 3-signal unanimity is already very strict
-    minStatConfidence:      50,
-    minConfidence:          55,
-    regimePenalty:          5,
-    // Entry timing
-    maxEntryMinutes:        0,
-    minRemainingMinutes:    2,
-    // Volume — 5 slots since entries are rare; direction cap still protects
-    maxBetsPerWindow:       5,
-    maxSameDirectionBets:   5,
-    enableDirectionCap:     true,
-    // Momentum — 2-window lookback (less strict; 3-signal agreement overrides trend)
-    enableMomentumFilter:   true,
-    momentumWindowCount:    2,
-    // Exit
-    midExitSensitivity:     "balanced",
-    phase2ThresholdPp:      30,
-    // Circuit breaker: very conservative — unanimous bets should rarely lose
-    maxConsecutiveLosses:   3,
-    circuitBreakerPauseWindows: 3,
-    // Border guard off
-    enableBorderGuard:      false,
-    borderProximityPct:     0.1,
-    borderLookbackBets:     3,
-    // Auto-tune on
-    enableAutoTuning:       true,
-    autoTuneWindowSize:     100,
-  },
-};
 
 interface BotConfig {
   betSize: number;
@@ -226,11 +42,9 @@ interface BotConfig {
   borderProximityPct: number;
   borderLookbackBets: number;
   regimePenalty: number;
-  aiPaused: boolean;
   paperStartingBalance: number;
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
-  minStatConfidence: number;
 }
 
 interface LogicModeStats {
@@ -273,7 +87,7 @@ interface GuardStates {
 interface BotStatus {
   mode: "paper" | "live"; status: string; paused: boolean;
   config: BotConfig; openPositions: OpenPosition[];
-  dailyPnl: number; overallPnl: number | null; accountBalance: number | null;
+  dailyPnl: number; accountBalance: number | null;
   warmupSecondsRemaining: number | null; configured: boolean;
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;
@@ -424,13 +238,9 @@ export default function BotDashboard() {
   const qc = useQueryClient();
   const [configOpen, setConfigOpen] = useState(true);
   const [confirmLive, setConfirmLive] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [resetMsg, setResetMsg] = useState<string | null>(null);
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
-  const [presetApplied, setPresetApplied] = useState<DecisionMode | null>(null);
-  const [modeResetMsg, setModeResetMsg] = useState<DecisionMode | null>(null);
   const [perfOpen, setPerfOpen] = useState(true);
   const [tuneLogOpen, setTuneLogOpen] = useState(true);
   const [histPage, setHistPage] = useState(0);
@@ -524,31 +334,13 @@ export default function BotDashboard() {
     setConfirmLive(false);
   }
 
-  async function softReset() {
-    await authPost("/crypto/bot/bets/soft-reset", {});
-    await qc.invalidateQueries({ queryKey: ["bot-history"] });
-    await qc.invalidateQueries({ queryKey: ["bot-stats"] });
-    await qc.invalidateQueries({ queryKey: ["bot-eval"] });
-    await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
-    setConfirmReset(false);
-    setResetMsg("Visual stats cleared — all bet data preserved");
-    setTimeout(() => setResetMsg(null), 4000);
-  }
-
   async function saveConfig() {
     setSaving(true);
     try {
-      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean; modeReset?: boolean };
-      await qc.invalidateQueries({ queryKey: ["bot-status"] });
-      await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
       setConfigDraft({});
       setPersistMsg(result.persisted ? "saved" : "failed");
       setTimeout(() => setPersistMsg(null), 3000);
-      if (result.modeReset) {
-        const newMode = (configDraft.decisionMode ?? "classic") as DecisionMode;
-        setModeResetMsg(newMode);
-        setTimeout(() => setModeResetMsg(null), 6000);
-      }
     } finally {
       setSaving(false);
     }
@@ -568,7 +360,7 @@ export default function BotDashboard() {
   const evaluation = evalData?.evaluation ?? [];
   const stats = statsData;
   const openPosList = status?.openPositions ?? [];
-  const pnl = status?.overallPnl ?? 0;
+  const pnl = status?.dailyPnl ?? 0;
   const winRate = (stats?.totalBets ?? 0) > 0 ? Math.round((stats!.wins / stats!.totalBets) * 100) : 0;
 
   const statusLabel = () => {
@@ -668,55 +460,27 @@ export default function BotDashboard() {
       <div className="flex-1 p-6 space-y-6">
 
         {/* ── Stats Row ── */}
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60">Performance Since Reset</span>
-            <div className="flex items-center gap-2">
-              {resetMsg && (
-                <span className="text-xs text-emerald-400 font-medium">{resetMsg}</span>
-              )}
-              {confirmReset ? (
-                <div className="flex items-center gap-1">
-                  <span className="text-xs text-muted-foreground mr-1">Archive all visual stats?</span>
-                  <Button size="sm" variant="destructive" className="h-6 text-xs px-2" onClick={() => void softReset()}>Confirm</Button>
-                  <Button size="sm" variant="outline" className="h-6 text-xs px-2" onClick={() => setConfirmReset(false)}>Cancel</Button>
-                </div>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-6 text-xs gap-1 text-muted-foreground hover:text-foreground"
-                  title="Hides all current bets from display so you can measure performance from a clean slate. No data is deleted — the bot, auto-tune, and ML model still see everything."
-                  onClick={() => setConfirmReset(true)}
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  Reset Visual Stats
-                </Button>
-              )}
-            </div>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {[
-              { label: "Account Balance", value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400" },
-              { label: "Overall P&L", value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
-              { label: "Win Rate", value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
-              { label: "Total Bets", value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
-            ].map(({ label, value, sub, icon: Icon, color, bold }) => (
-              <div key={label} className="bg-card border border-border rounded-lg p-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <Icon className={`w-4 h-4 ${color}`} />
-                  <span className="text-xs text-muted-foreground">{label}</span>
-                </div>
-                <div className={`text-xl font-bold ${bold ? (pnl >= 0 ? "text-emerald-400" : "text-red-400") : "text-foreground"}`}>{value}</div>
-                {sub && <div className="text-xs text-muted-foreground mt-0.5">{sub}</div>}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[
+            { label: "Account Balance", value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400" },
+            { label: "Today's P&L", value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
+            { label: "Win Rate", value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
+            { label: "Total Bets", value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
+          ].map(({ label, value, sub, icon: Icon, color, bold }) => (
+            <div key={label} className="bg-card border border-border rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Icon className={`w-4 h-4 ${color}`} />
+                <span className="text-xs text-muted-foreground">{label}</span>
               </div>
-            ))}
-          </div>
+              <div className={`text-xl font-bold ${bold ? (pnl >= 0 ? "text-emerald-400" : "text-red-400") : "text-foreground"}`}>{value}</div>
+              {sub && <div className="text-xs text-muted-foreground mt-0.5">{sub}</div>}
+            </div>
+          ))}
         </div>
 
         {/* ── Paused Coins Banner ── */}
         {Object.keys(pausedCoins).length > 0 && (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex flex-wrap items-center gap-3">
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm flex-shrink-0">
               <Pause className="w-4 h-4" />
               Auto-paused coins
@@ -725,37 +489,15 @@ export default function BotDashboard() {
               {Object.entries(pausedCoins).map(([sym, windowsRemaining]) => (
                 <span
                   key={sym}
-                  className="flex items-center gap-1 text-xs font-medium pl-2.5 pr-1.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
                   title={`${sym} is paused by auto-tune for ${windowsRemaining} more window(s)`}
                 >
                   {sym}
                   <span className="font-mono text-amber-400/70">· {windowsRemaining}w left</span>
-                  <button
-                    type="button"
-                    title={`Unpause ${sym}`}
-                    onClick={async () => {
-                      await fetch(`${API_BASE}/crypto/bot/coins/paused/${sym}`, { method: "DELETE" });
-                      await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
-                      await qc.invalidateQueries({ queryKey: ["bot-status"] });
-                    }}
-                    className="ml-0.5 flex items-center justify-center w-4 h-4 rounded-full hover:bg-amber-400/30 text-amber-400/70 hover:text-amber-200 transition-colors"
-                  >
-                    ×
-                  </button>
                 </span>
               ))}
             </div>
-            <button
-              type="button"
-              onClick={async () => {
-                await authPost("/crypto/bot/coins/unpause-all", {});
-                await qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
-                await qc.invalidateQueries({ queryKey: ["bot-status"] });
-              }}
-              className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 border border-amber-500/40 transition-colors"
-            >
-              Unpause All
-            </button>
+            <span className="text-[11px] text-amber-400/60 ml-auto hidden sm:block">Auto-tune paused these coins due to underperformance</span>
           </div>
         )}
 
@@ -902,7 +644,7 @@ export default function BotDashboard() {
                           </span>
                         ) : <span className="text-muted-foreground text-xs">—</span>}
                       </td>
-                      <td className="px-3 py-2.5 text-muted-foreground text-xs">{e.reason}</td>
+                      <td className="px-3 py-2.5 text-muted-foreground text-xs max-w-[200px] truncate">{e.reason}</td>
                       <td className="px-3 py-2.5">
                         {e.selected ? <Star className="w-4 h-4 text-amber-400 fill-amber-400" /> : null}
                       </td>
@@ -968,38 +710,23 @@ export default function BotDashboard() {
                     onChange={e => setConfigDraft(d => ({ ...d, minConfidence: parseInt(e.target.value) }))} />
                 </label>
 
-                {/* Min Stat Confidence */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">
-                    Min Stat Confidence ({merged.minStatConfidence ?? 55}%)
-                    <span className="ml-1 text-amber-400/70">· data-derived floor</span>
-                  </span>
-                  <input type="range" min={0} max={70} step={1}
-                    className="mt-1"
-                    value={merged.minStatConfidence ?? 55}
-                    onChange={e => setConfigDraft(d => ({ ...d, minStatConfidence: parseInt(e.target.value) }))} />
-                  <span className="text-[10px] text-muted-foreground/60">
-                    0 = disabled · 55 = 69% WR · 56 = 74% WR (based on {139} settled bets)
-                  </span>
-                </label>
-
                 {/* Decision Mode — full-width row */}
                 <div className="col-span-2 flex flex-col gap-2">
                   <span className="text-xs text-muted-foreground">Decision Logic</span>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    {(Object.entries(MODE_PRESETS) as [DecisionMode, typeof MODE_PRESETS[DecisionMode]][]).map(([id, preset]) => {
-                      const isSelected = (merged.decisionMode ?? "classic") === id;
-                      const needsML = id === "ml_gate" || id === "unanimous";
+                    {([
+                      { id: "classic",   label: "Classic",   desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
+                      { id: "ml_gate",   label: "ML Gate",   desc: "Stat+Claude decide direction; ML vetos if it disagrees" },
+                      { id: "consensus", label: "Consensus", desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
+                      { id: "unanimous", label: "Unanimous", desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
+                    ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
+                      const isSelected = (merged.decisionMode ?? "classic") === m.id;
+                      const needsML = m.id === "ml_gate" || m.id === "unanimous";
                       return (
                         <button
-                          key={id}
+                          key={m.id}
                           type="button"
-                          onClick={() => {
-                            const { label: _l, why: _w, ...presetFields } = preset;
-                            setConfigDraft(d => ({ ...d, decisionMode: id, ...presetFields }));
-                            setPresetApplied(id);
-                            setTimeout(() => setPresetApplied(null), 4000);
-                          }}
+                          onClick={() => setConfigDraft(d => ({ ...d, decisionMode: m.id }))}
                           className={`text-left rounded-xl p-3 border transition-all ${
                             isSelected
                               ? "border-sky-500/60 bg-sky-500/10 ring-1 ring-sky-500/30"
@@ -1007,23 +734,10 @@ export default function BotDashboard() {
                           }`}
                         >
                           <div className={`text-xs font-semibold mb-1 ${isSelected ? "text-sky-400" : "text-foreground"}`}>
-                            {preset.label}
-                            {isSelected && <span className="ml-1.5 text-[9px] text-sky-400/70">✓ active</span>}
+                            {m.label}
+                            {isSelected && <span className="ml-1.5 text-[9px] text-sky-400/70">✓ selected</span>}
                           </div>
-                          <div className="text-[10px] text-muted-foreground/80 leading-tight">
-                            {preset.why.split(".")[0]}.
-                          </div>
-                          <div className="mt-1.5 flex flex-wrap gap-1">
-                            <span className="text-[9px] px-1 py-0.5 rounded bg-muted/40 text-muted-foreground/70">
-                              conf ≥{preset.minConfidence}%
-                            </span>
-                            <span className="text-[9px] px-1 py-0.5 rounded bg-muted/40 text-muted-foreground/70">
-                              stat ≥{preset.minStatConfidence}%
-                            </span>
-                            <span className="text-[9px] px-1 py-0.5 rounded bg-muted/40 text-muted-foreground/70">
-                              {preset.maxBetsPerWindow} slots
-                            </span>
-                          </div>
+                          <div className="text-[10px] text-muted-foreground/80 leading-tight">{m.desc}</div>
                           {needsML && (
                             <div className={`mt-1.5 text-[9px] font-medium px-1.5 py-0.5 rounded inline-block ${
                               status?.mlStatus?.ready
@@ -1037,24 +751,6 @@ export default function BotDashboard() {
                       );
                     })}
                   </div>
-
-                  {/* Preset-applied flash */}
-                  {presetApplied && (
-                    <div className="mt-2 flex items-start gap-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2">
-                      <Zap className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-400" />
-                      <div>
-                        <p className="text-xs font-medium text-sky-300">
-                          {MODE_PRESETS[presetApplied].label} preset applied
-                        </p>
-                        <p className="mt-0.5 text-[10px] text-muted-foreground/80 leading-snug">
-                          {MODE_PRESETS[presetApplied].why}
-                        </p>
-                        <p className="mt-1 text-[10px] text-muted-foreground/60">
-                          You can still adjust any setting below — changes are saved when you click Save.
-                        </p>
-                      </div>
-                    </div>
-                  )}
                 </div>
 
                 {/* Exit Sensitivity */}
@@ -1323,26 +1019,6 @@ export default function BotDashboard() {
                     </span>
                   </div>
                 </label>
-
-                {/* AI Pause — emergency cost kill-switch */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Pause All AI Calls</span>
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <button
-                      onClick={() => setConfigDraft(d => ({ ...d, aiPaused: !merged.aiPaused }))}
-                      className={`relative w-10 h-5 rounded-full transition-colors ${merged.aiPaused ? "bg-amber-500" : "bg-muted"}`}>
-                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${merged.aiPaused ? "translate-x-5" : ""}`} />
-                    </button>
-                    <span className={`text-xs font-medium ${merged.aiPaused ? "text-amber-400" : "text-muted-foreground"}`}>
-                      {merged.aiPaused ? "AI Paused — no Claude calls" : "AI Active"}
-                    </span>
-                  </div>
-                  {merged.aiPaused && (
-                    <p className="text-[10px] text-amber-400/80 mt-0.5">
-                      Snaps + live direction return null. Bot continues using stat + ML signals only.
-                    </p>
-                  )}
-                </label>
               </div>
 
               {/* Paper Trading Simulation — only visible in paper mode */}
@@ -1423,21 +1099,6 @@ export default function BotDashboard() {
                   <span className="text-xs text-yellow-400">⚠ Applied (not persisted)</span>
                 )}
               </div>
-
-              {/* Mode-switch state reset banner */}
-              {modeResetMsg && (
-                <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5 mt-1">
-                  <RotateCcw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                  <div>
-                    <p className="text-xs font-medium text-emerald-300">
-                      Switched to {MODE_PRESETS[modeResetMsg].label} — adaptive state cleared
-                    </p>
-                    <p className="mt-0.5 text-[10px] text-muted-foreground/80 leading-snug">
-                      Doubt filter history, circuit-breaker streak, and per-window bet counts from the previous mode have been wiped. The bot starts fresh with no cross-mode bias.
-                    </p>
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -1818,10 +1479,10 @@ export default function BotDashboard() {
                         <div className="text-xs font-semibold">{r.contractCount ?? "—"} × {fmt$(r.betAmount)}</div>
                       </div>
 
-                      <div className={`rounded-lg p-2.5 col-span-1 ${isPendingEval || pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
+                      <div className={`rounded-lg p-2.5 col-span-1 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
                         <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">P&L</div>
-                        <div className={`text-sm font-bold font-mono ${isPendingEval || pnlNum == null ? "text-muted-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                          {!isPendingEval && pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
+                        <div className={`text-sm font-bold font-mono ${pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          {pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
                         </div>
                       </div>
                     </div>

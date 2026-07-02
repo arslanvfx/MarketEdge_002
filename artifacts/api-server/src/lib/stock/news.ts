@@ -8,7 +8,6 @@ import { db } from "@workspace/db";
 import { logger } from "../logger";
 import { getNews as alpacaGetNews, alpacaConfigured } from "./alpaca";
 import type { NewsItem, Sentiment } from "./types";
-import { isGlobalAIKill } from "../global-ai";
 
 const MODEL = "claude-sonnet-4-6";
 const CACHE_TTL_MS = 20 * 60 * 1000; // 20 min
@@ -24,7 +23,6 @@ function stripJsonFences(text: string): string {
 
 async function scoreSentiment(items: NewsItem[]): Promise<NewsItem[]> {
   if (items.length === 0) return items;
-  if (isGlobalAIKill()) return items.map((n) => ({ ...n, sentiment: "neutral" as Sentiment, magnitude: 1, sentimentScore: 0 }));
   const lines = items
     .map((n, i) => `${i}. [${n.ticker}] "${n.headline}"${n.summary ? ` — ${n.summary.slice(0, 200)}` : ""}`)
     .join("\n");

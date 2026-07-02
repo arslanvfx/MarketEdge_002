@@ -12,7 +12,6 @@
 
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { logger } from "../logger";
-import { isGlobalAIKill } from "../global-ai";
 import { getScoredNews } from "./news";
 import { getEarnings, getLatestEarningsSurprise } from "./earnings";
 import { getSectorMomentum } from "./scanner";
@@ -105,8 +104,7 @@ function isoDateDaysAgo(days: number): string {
  * Evaluate up to MAX_TICKERS stocks with Claude research.
  * Skips tickers already evaluated today. Re-entrant guard prevents double runs.
  */
-export async function runResearchPass(tickers: string[], opts: { aiPaused?: boolean } = {}): Promise<void> {
-  if (opts.aiPaused || isGlobalAIKill()) return;
+export async function runResearchPass(tickers: string[]): Promise<void> {
   if (researchRunning) return;
   researchRunning = true;
   const day = todayKey();

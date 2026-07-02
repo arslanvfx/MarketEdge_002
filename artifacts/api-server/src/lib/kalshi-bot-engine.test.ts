@@ -57,7 +57,6 @@ function inp(overrides: Partial<CorePairInputs> = {}): CorePairInputs {
     mlConfidence:      null,
     kalshiTicker:      "KXBTC-123",
     minConfidence:     DEFAULT_MIN_CONFIDENCE,
-    minStatConfidence: 0, // disabled in tests — tests cover composite logic, not the stat floor
     ...overrides,
   };
 }

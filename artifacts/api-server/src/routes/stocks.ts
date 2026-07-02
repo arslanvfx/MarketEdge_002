@@ -187,7 +187,7 @@ router.put("/stocks/bot/config", requireAuth, async (req, res) => {
     "maxDayPositions", "maxSwingPositions", "maxLongPositions", "dailyLossLimit",
     "minConfidence", "stopLossPct", "targetGainPct", "swingMaxHoldDays",
     "longMaxHoldDays", "earningsBlackout", "earningsBlackoutHours", "newsSensitivity",
-    "sectorFocus", "maxPositionDollars", "aiPaused",
+    "sectorFocus", "maxPositionDollars",
   ];
   const partial: Partial<StockBotConfig> = {};
   for (const k of allowed) {

@@ -4,15 +4,13 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, getBotState, runAutoTuneJob, reloadOverallPnl, evalClosedBets } from "./lib/kalshi-bot";
+import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, getBotState, runAutoTuneJob } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
 import { runBotCycle as runStockBotCycle } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
-import { loadGlobalAIKillFromDB } from "./lib/global-ai";
-import { loadAIIntensityFromDB } from "./lib/ai-intensity";
 
 const rawPort = process.env["PORT"];
 
@@ -355,12 +353,6 @@ app.listen(port, (err) => {
       // 1. config + mode from bot_config table
       // 2. daily P&L reconstructed from today's kalshi_bot_bets rows
       // 3. open position restored if its window is still active
-      await loadGlobalAIKillFromDB().catch((err) =>
-        logger.warn({ err }, "[global-ai] kill switch load failed (non-fatal)"),
-      );
-      await loadAIIntensityFromDB().catch((err) =>
-        logger.warn({ err }, "[ai-intensity] tier load failed (non-fatal)"),
-      );
       await loadBotConfigFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] config load failed (non-fatal)"),
       );
@@ -372,9 +364,6 @@ app.listen(port, (err) => {
       );
       await loadOpenPositionFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] open position restore failed (non-fatal)"),
-      );
-      await reloadOverallPnl().catch((err) =>
-        logger.warn({ err }, "[kalshi-bot] overall P&L load failed (non-fatal)"),
       );
 
       // Single consolidated summary so operators can confirm state at a glance.
@@ -389,86 +378,71 @@ app.listen(port, (err) => {
         "[kalshi-bot] startup state restored",
       );
 
-      // All background loops (prediction tracker, bot, auto-tune, stock vertical)
-      // only run in production. In the development Replit workspace the API
-      // endpoints still respond (bot config, history, markets) using persisted DB
-      // state, but no live Claude calls or ticks are fired.
-      if (process.env.NODE_ENV === "production") {
-        // Start the prediction accuracy tracker: snaps model predictions at each
-        // 15-min boundary and evaluates them against actual prices once the window closes.
-        // The onInitComplete callback runs after initMLFromDB() resolves — backfill
-        // runs at that point so it sees the true post-hydration warming status.
-        startPredictionTracker(() => {
-          runMLBackfillIfNeeded(96)
-            .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
-        });
-        logger.info("Prediction tracker started");
+      // Start the prediction accuracy tracker: snaps model predictions at each
+      // 15-min boundary and evaluates them against actual prices once the window closes.
+      // The onInitComplete callback runs after initMLFromDB() resolves — backfill
+      // runs at that point so it sees the true post-hydration warming status.
+      startPredictionTracker(() => {
+        runMLBackfillIfNeeded(96)
+          .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
+      });
+      logger.info("Prediction tracker started");
 
-        // Kalshi bot loop — runs every 30 s alongside the main tracker.
-        // Reads from the cached state that the main tracker populates, so no
-        // extra network calls are made when the caches are warm.
-        setInterval(() => {
-          runBotLoopTick().catch((err) =>
-            logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
-          );
-        }, 30_000);
-
-        // Bet evaluation runs on its own faster loop (every 5 s) so that
-        // outcomes are stamped and Overall P&L is updated quickly after a
-        // window closes, without waiting for the full 30-s bot tick.
-        setInterval(() => {
-          evalClosedBets().catch(() => {});
-        }, 5_000);
-
-        // Auto-tune performance analytics: runs every 15 min, aligned to UTC
-        // 15-minute window boundaries (00, 15, 30, 45) so the analytics window
-        // matches the same cadence as the Kalshi bet windows.
-        const msToNext15MinBoundary = (): number => {
-          const now = Date.now();
-          const boundary = Math.ceil((now + 1) / (15 * 60_000)) * (15 * 60_000);
-          return Math.max(5_000, boundary - now); // at least 5s
-        };
-        const runAutoTune = () =>
-          runAutoTuneJob().catch((err) =>
-            logger.warn({ err }, "[auto-tune] scheduled job failed (non-fatal)"),
-          );
-        setTimeout(() => {
-          runAutoTune();
-          setInterval(runAutoTune, 15 * 60_000);
-        }, msToNext15MinBoundary());
-
-        // Bring up the stock trading vertical independently — a failure here must
-        // never take down the crypto tracker or Kalshi bot above.
-        startStockVertical().catch((err) =>
-          logger.warn({ err }, "[stock] vertical startup failed (non-fatal)"),
+      // Kalshi bot loop — runs every 30 s alongside the main tracker.
+      // Reads from the cached state that the main tracker populates, so no
+      // extra network calls are made when the caches are warm.
+      setInterval(() => {
+        runBotLoopTick().catch((err) =>
+          logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
         );
-      } else {
-        logger.info("[dev] background loops skipped (NODE_ENV != production) — no Claude calls in dev");
-      }
+      }, 30_000);
+
+      // Auto-tune performance analytics: runs every 15 min, aligned to UTC
+      // 15-minute window boundaries (00, 15, 30, 45) so the analytics window
+      // matches the same cadence as the Kalshi bet windows.
+      const msToNext15MinBoundary = (): number => {
+        const now = Date.now();
+        const boundary = Math.ceil((now + 1) / (15 * 60_000)) * (15 * 60_000);
+        return Math.max(5_000, boundary - now); // at least 5s
+      };
+      const runAutoTune = () =>
+        runAutoTuneJob().catch((err) =>
+          logger.warn({ err }, "[auto-tune] scheduled job failed (non-fatal)"),
+        );
+      setTimeout(() => {
+        runAutoTune();
+        setInterval(runAutoTune, 15 * 60_000);
+      }, msToNext15MinBoundary());
+
+      // Bring up the stock trading vertical independently — a failure here must
+      // never take down the crypto tracker or Kalshi bot above.
+      startStockVertical().catch((err) =>
+        logger.warn({ err }, "[stock] vertical startup failed (non-fatal)"),
+      );
     });
 
-  // Daily threshold analysis — production only (no Claude calls, but avoids
-  // unnecessary background work in the dev workspace).
-  if (process.env.NODE_ENV === "production") {
-    const runDailyThresholdLog = () => {
-      runThresholdAnalysis({ windows: 96 })
-        .then((report) =>
-          logger.info({ summary: formatThresholdReport(report) }, "[threshold-analysis] daily"),
-        )
-        .catch((err) =>
-          logger.warn({ err }, "[threshold-analysis] daily run failed (non-fatal)"),
-        );
-    };
-    const msUntilMidnightUTC = (): number => {
-      const now = new Date();
-      const next = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+  // Daily threshold analysis: runs once at midnight UTC then every 24h.
+  // Fetches 96 windows (~24h) of historical candles, buckets hit rates by
+  // pre-window efficiency ratio, and logs suggested threshold updates when
+  // the data-derived optimum drifts from the current hardcoded values.
+  const runDailyThresholdLog = () => {
+    runThresholdAnalysis({ windows: 96 })
+      .then((report) =>
+        logger.info({ summary: formatThresholdReport(report) }, "[threshold-analysis] daily"),
+      )
+      .catch((err) =>
+        logger.warn({ err }, "[threshold-analysis] daily run failed (non-fatal)"),
       );
-      return next.getTime() - now.getTime();
-    };
-    setTimeout(() => {
-      runDailyThresholdLog();
-      setInterval(runDailyThresholdLog, 24 * 60 * 60 * 1_000);
-    }, msUntilMidnightUTC());
-  }
+  };
+  const msUntilMidnightUTC = (): number => {
+    const now = new Date();
+    const next = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+    );
+    return next.getTime() - now.getTime();
+  };
+  setTimeout(() => {
+    runDailyThresholdLog();
+    setInterval(runDailyThresholdLog, 24 * 60 * 60 * 1_000);
+  }, msUntilMidnightUTC());
 });

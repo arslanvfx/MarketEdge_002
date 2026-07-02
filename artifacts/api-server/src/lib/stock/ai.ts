@@ -4,8 +4,6 @@
 
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { logger } from "../logger";
-import { isGlobalAIKill } from "../global-ai";
-import { getStockAITTLMs } from "../ai-intensity";
 import {
   rsi,
   bollinger,
@@ -30,11 +28,8 @@ import type {
 } from "./types";
 
 const MODEL = "claude-sonnet-4-6";
-const getClaudeTTLMs = () => getStockAITTLMs(); // eco/balanced=5min max=3min
+const CLAUDE_TTL_MS = 5 * 60 * 1000;
 const claudeCache = new Map<string, { sig: ClaudeSignal; at: number }>();
-
-let stockAIPaused = false;
-export function setStockAIPaused(v: boolean): void { stockAIPaused = v; }
 
 /** Pure statistical directional call from candles. */
 export function statSignal(candles: Candle[]): StatSignal {
@@ -98,11 +93,8 @@ export async function claudeSignal(
 ): Promise<ClaudeSignal> {
   const T = ticker.toUpperCase();
   const cached = claudeCache.get(T);
-  if (cached && Date.now() - cached.at < getClaudeTTLMs()) {
+  if (cached && Date.now() - cached.at < CLAUDE_TTL_MS) {
     return { ...cached.sig, cached: true };
-  }
-  if (stockAIPaused || isGlobalAIKill()) {
-    return { direction: stat.direction, confidence: 50, reasoning: "AI paused — using statistical read.", rating: "hold", cached: false };
   }
 
   const last = candles[candles.length - 1]?.c ?? 0;

@@ -4,7 +4,6 @@ import {
   isRateLimitError,
 } from "@workspace/integrations-anthropic-ai/batch";
 import type { Market } from "./markets";
-import { isGlobalAIKill } from "./global-ai";
 
 /**
  * AI analysis of a single market. We ask Claude for the TRUE probability that
@@ -65,7 +64,6 @@ function fallbackAnalyses(markets: Market[]): MarketAnalysis[] {
 }
 
 async function analyzeChunk(markets: Market[]): Promise<MarketAnalysis[]> {
-  if (isGlobalAIKill()) return fallbackAnalyses(markets);
   const today = new Date().toISOString().slice(0, 10);
 
   const marketLines = markets

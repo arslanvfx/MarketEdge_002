@@ -23,7 +23,7 @@ import {
 } from "./alpaca";
 import { getConfig, saveConfig } from "./config";
 import { getCandles } from "./data";
-import { buildSignals, setStockAIPaused } from "./ai";
+import { buildSignals } from "./ai";
 import { buildFeatures, recordOutcome } from "./ml";
 import { getScoredNews } from "./news";
 import { getEarnings } from "./earnings";
@@ -269,7 +269,7 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         news,
         earnings,
         getSectorMomentum(sector),
-        { useClaude: !cfg.aiPaused },
+        { useClaude: true },
       );
 
       if (signals.combinedDirection !== "up") continue;
@@ -381,8 +381,6 @@ export async function runBotCycle(): Promise<{ ran: boolean; summary: string }> 
   if (!alpacaConfigured()) return { ran: false, summary: "alpaca not configured" };
 
   let cfg = getConfig();
-  // Sync AI pause flag at the top of every cycle so claudeSignal() sees it immediately.
-  setStockAIPaused(cfg.aiPaused ?? false);
 
   // Auto-start/stop: enable the bot when the market opens, disable when it closes.
   // This runs even when the bot is disabled, so it can auto-enable at open.

@@ -31,7 +31,6 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   autoStartStop: true,
   sectorFocus: [],
   maxPositionDollars: null,
-  aiPaused: false,
 };
 
 let current: StockBotConfig = { ...DEFAULT_CONFIG };

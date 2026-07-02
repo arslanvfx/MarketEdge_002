@@ -13,10 +13,7 @@ import {
   getPerformanceReport,
   getBotAutoTuneLog,
   getPausedCoinState,
-  clearPausedCoins,
-  unpauseCoin,
   clearBetHistoryOld,
-  softArchiveAllBets,
   getBotLogicPerformance,
   getBacktestModes,
 } from "../lib/kalshi-bot";
@@ -119,11 +116,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderProximityPct,
     borderLookbackBets,
     regimePenalty,
-    aiPaused,
     paperStartingBalance,
     paperWinReturnRate,
     paperBalanceResetAt,
-    minStatConfidence,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -150,11 +145,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderProximityPct?: number;
     borderLookbackBets?: number;
     regimePenalty?: number;
-    aiPaused?: boolean;
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
-    minStatConfidence?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -223,7 +216,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof regimePenalty === "number" && regimePenalty >= 0 && regimePenalty <= 20) {
     partial.regimePenalty = regimePenalty;
   }
-  if (typeof aiPaused === "boolean") partial.aiPaused = aiPaused;
   if (typeof paperStartingBalance === "number" && paperStartingBalance >= 1 && paperStartingBalance <= 10000) {
     partial.paperStartingBalance = paperStartingBalance;
   }
@@ -233,12 +225,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if ("paperBalanceResetAt" in req.body) {
     partial.paperBalanceResetAt = typeof paperBalanceResetAt === "string" ? paperBalanceResetAt : null;
   }
-  if (typeof minStatConfidence === "number" && minStatConfidence >= 0 && minStatConfidence <= 80) {
-    partial.minStatConfidence = minStatConfidence;
-  }
 
-  const { config: updated, persisted, modeReset } = await updateBotConfig(partial);
-  res.json({ ok: true, config: updated, persisted, modeReset });
+  const { config: updated, persisted } = await updateBotConfig(partial);
+  res.json({ ok: true, config: updated, persisted });
 });
 
 // GET /crypto/bot/history?limit=20 (public — read only, terminal outcomes only)
@@ -374,60 +363,6 @@ router.delete("/crypto/bot/bets/old", async (req, res) => {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
   }
-});
-
-// POST /crypto/bot/bets/soft-reset — visual reset: soft-archives ALL bet rows
-// so win/loss/accuracy counters start from zero in the UI. Nothing is deleted.
-// Operational queries (auto-tune, border-guard, evalClosedBets) see full history.
-// ML training data (prediction_records) is never touched.
-router.post("/crypto/bot/bets/soft-reset", async (req, res) => {
-  const clerkAuth = getAuth(req);
-  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
-  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
-
-  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
-  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
-
-  if (!hasClerkAuth && !hasClearPassword) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  try {
-    const result = await softArchiveAllBets();
-    res.json({ ok: true, archived: result.archived });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown error";
-    res.status(500).json({ error: msg });
-  }
-});
-
-router.delete("/crypto/bot/coins/paused/:sym", (req, res) => {
-  const clerkAuth = getAuth(req);
-  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
-  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
-  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
-  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
-  if (!hasClerkAuth && !hasClearPassword) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  const sym = (req.params as { sym: string }).sym;
-  const found = unpauseCoin(sym);
-  res.json({ ok: true, unpaused: found ? sym.toUpperCase() : null });
-});
-
-router.post("/crypto/bot/coins/unpause-all", (req, res) => {
-  const clerkAuth = getAuth(req);
-  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
-  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
-  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
-  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
-  if (!hasClerkAuth && !hasClearPassword) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  const cleared = clearPausedCoins();
-  res.json({ ok: true, cleared });
 });
 
 export default router;
