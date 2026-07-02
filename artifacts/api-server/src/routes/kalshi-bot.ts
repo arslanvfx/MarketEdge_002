@@ -116,6 +116,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderProximityPct,
     borderLookbackBets,
     regimePenalty,
+    aiPaused,
     paperStartingBalance,
     paperWinReturnRate,
     paperBalanceResetAt,
@@ -145,6 +146,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderProximityPct?: number;
     borderLookbackBets?: number;
     regimePenalty?: number;
+    aiPaused?: boolean;
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
@@ -216,6 +218,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof regimePenalty === "number" && regimePenalty >= 0 && regimePenalty <= 20) {
     partial.regimePenalty = regimePenalty;
   }
+  if (typeof aiPaused === "boolean") partial.aiPaused = aiPaused;
   if (typeof paperStartingBalance === "number" && paperStartingBalance >= 1 && paperStartingBalance <= 10000) {
     partial.paperStartingBalance = paperStartingBalance;
   }
