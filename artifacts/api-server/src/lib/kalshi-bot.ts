@@ -1717,6 +1717,17 @@ export async function evalClosedBets(): Promise<void> {
           .update(kalshiBotBetsTable)
           .set({ outcome, pnl: String(correctedPnl), evaluatedAt: new Date(), signals: updatedSignals })
           .where(eq(kalshiBotBetsTable.id, row.id));
+
+        // Patch in-memory accumulators so the running session reflects the
+        // corrected outcome without waiting for a restart to reload from DB.
+        // Only applies to expired bets (correctedPnl != null) where the initial
+        // estimate in closePosition() may have differed from the real outcome.
+        const estimatedPnl = row.pnl != null ? parseFloat(String(row.pnl)) : 0;
+        const delta = correctedPnl - estimatedPnl;
+        if (delta !== 0) {
+          dailyPnl += delta;
+          if (accountBalance !== null) accountBalance += delta;
+        }
       } else {
         await db
           .update(kalshiBotBetsTable)
