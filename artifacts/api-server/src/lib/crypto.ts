@@ -2164,7 +2164,10 @@ const historyStore = new Map<string, PredictionRecord[]>(); // symbol → record
 // >30s two ticks overlap and both see alreadySnapped=false before either pushes
 // records. The DB deduplicates via onConflictDoNothing but the in-memory array
 // gets both copies. This Set is the synchronous guard that closes the gap.
-const snapInFlight = new Set<string>(); // `${sym}:${targetISO}`
+const snapInFlight = new Set<string>(); // `${sym}:${targetISO}` or `${sym}:${targetISO}:mid`
+// Tracks mid-window re-snap firings (once per window per symbol, never cleared —
+// keyed by `${sym}:${targetISO}:mid`; unique per window so cleanup is not needed).
+const midSnapFired = new Set<string>();
 
 export function getPredictionHistory(symbol: string): PredictionRecord[] {
   return (historyStore.get(symbol.toUpperCase()) ?? []).slice().reverse(); // newest first
@@ -3343,6 +3346,47 @@ export function startPredictionTracker(onInitComplete?: () => void): void {
             // non-fatal — will retry next tick
           } finally {
             snapInFlight.delete(snapKey);
+          }
+        }
+
+        // ── Mid-window stat re-snap (T+7 min) ───────────────────────────────
+        // Re-runs the stat model with fresh candles at the 7-minute mark so
+        // the bot's entry signal reflects mid-window conditions rather than
+        // only the window-open snapshot. Only updates predCache — no new DB
+        // records are written (history stays clean; one stat record per window).
+        // Fires once per window per symbol via midSnapFired (never cleared;
+        // keys are window-scoped so the set stays bounded).
+        {
+          const MID_SNAP_MARK_MS   = 7 * 60_000; // fire at T+7 min
+          const MID_SNAP_WINDOW_MS = 90_000;      // ±90s tolerance (2 ticks)
+          const midKey = `${sym}:${targetISO}:mid`;
+          if (
+            alreadySnapped &&               // only after main snap is done
+            !midSnapFired.has(midKey) &&
+            !snapInFlight.has(midKey) &&
+            timeIntoWindow >= MID_SNAP_MARK_MS &&
+            timeIntoWindow < MID_SNAP_MARK_MS + MID_SNAP_WINDOW_MS &&
+            timeToNext > 60_000            // skip when window is nearly over
+          ) {
+            midSnapFired.add(midKey);
+            snapInFlight.add(midKey);
+            (async () => {
+              try {
+                const [freshCandles, freshStats, freshTicker] = await Promise.all([
+                  getCandles(coin.product),
+                  getStats(coin.product),
+                  getTicker(coin.product).catch(() => 0),
+                ]);
+                const freshPrice = freshTicker > 0 ? freshTicker : undefined;
+                const freshAnalysis = analyzeCoin(coin, freshCandles, freshStats, new Date(nowMs), freshPrice);
+                predCache.set(sym, { at: Date.now(), value: freshAnalysis });
+                console.info(`[mid-snap] ${sym}: predCache refreshed at T+${Math.round(timeIntoWindow / 60_000)}min`);
+              } catch {
+                // non-fatal — main snap result remains in predCache
+              } finally {
+                snapInFlight.delete(midKey);
+              }
+            })();
           }
         }
 
