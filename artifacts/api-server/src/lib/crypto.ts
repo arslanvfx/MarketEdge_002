@@ -2634,11 +2634,20 @@ export function setClaudePausedCoins(coins: Set<string>): void {
 // Kalshi weekly maintenance: Thursdays 03:00–05:00 AM EST (UTC−5).
 // During this window Kalshi is down — no new markets open, no bets possible.
 export function isKalshiMaintenanceWindow(): boolean {
+  // Use America/New_York so DST is handled automatically
+  // (EDT=UTC-4 in summer, EST=UTC-5 in winter). Kalshi maintenance is
+  // every Thursday 03:00–05:00 Eastern time.
   const now = new Date();
-  // Shift to EST (UTC-5) and check day + hour.
-  const estMs = now.getTime() - 5 * 60 * 60 * 1000;
-  const est = new Date(estMs);
-  return est.getUTCDay() === 4 && est.getUTCHours() >= 3 && est.getUTCHours() < 5;
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(now).map((p) => [p.type, p.value]));
+  const day = parts["weekday"]; // "Thu"
+  const hour = parseInt(parts["hour"] ?? "0", 10); // 0-23
+  return day === "Thu" && hour >= 3 && hour < 5;
 }
 
 // Self-consistency wrapper: when selfConsistencySamples > 1, independently
