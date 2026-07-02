@@ -2064,7 +2064,7 @@ export async function runBotLoopTick(): Promise<void> {
   for (const wk of completedWindowKeys) {
     const wo = recentWindowOutcomes.get(wk)!;
     const total = wo.wins + wo.losses;
-    if (total >= 2 && wo.wins / total < DOUBT_WIN_RATE_THRESHOLD) weakWindowCount++;
+    if (total >= 3 && wo.wins / total < DOUBT_WIN_RATE_THRESHOLD) weakWindowCount++;
   }
   if (weakWindowCount >= 2) windowDoubtPenalty = 8;
   else if (weakWindowCount === 1) windowDoubtPenalty = 4;
