@@ -1718,13 +1718,18 @@ Return ONLY valid JSON with exactly 1 item:
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: 10000 },
+      thinking: { type: "enabled", budget_tokens: 6000 },
       system:
         "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike — not just to predict general direction. Analyze chart patterns, indicators, and the live order book to produce refined short-term price predictions. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: userPrompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
+    const typedResp = response as { content: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
+    const rIn  = typedResp.usage?.input_tokens  ?? 0;
+    const rOut = typedResp.usage?.output_tokens ?? 0;
+    console.info(`[claude-ai-predict] tokens — in:${rIn} out:${rOut} total:${rIn + rOut}`);
+
+    const raw = typedResp.content
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("") || "";
@@ -2558,13 +2563,18 @@ Return ONLY valid JSON (no markdown):
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 16000,
-      thinking: { type: "enabled", budget_tokens: 10000 },
+      thinking: { type: "enabled", budget_tokens: 6000 },
       system:
         "You are an expert crypto technical analyst and quantitative trader. When a Kalshi binary target is shown, your primary job is to determine whether price will be above or below that strike at window close. Use multi-timeframe candle data, the live order book, technical indicators, VWAP, and your accuracy record as supporting evidence. Respond with ONLY valid JSON after your thinking — no markdown, no extra text.",
       messages: [{ role: "user", content: prompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
+    const typedResponse = response as { content: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
+    const usageIn  = typedResponse.usage?.input_tokens  ?? 0;
+    const usageOut = typedResponse.usage?.output_tokens ?? 0;
+    console.info(`[claude-snap] ${coin.symbol} tokens — in:${usageIn} out:${usageOut} total:${usageIn + usageOut}`);
+
+    const raw = typedResponse.content
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("") || "";
@@ -4010,7 +4020,12 @@ JSON only: {"direction":"up","confidence":65}`;
       messages: [{ role: "user", content: prompt }],
     } as Parameters<typeof anthropic.messages.create>[0]);
 
-    const raw = (response as { content: Array<{ type: string; text?: string }> }).content
+    const typedLive = response as { content: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
+    const lIn  = typedLive.usage?.input_tokens  ?? 0;
+    const lOut = typedLive.usage?.output_tokens ?? 0;
+    console.info(`[claude-live-dir] ${symbol} tokens — in:${lIn} out:${lOut} total:${lIn + lOut}`);
+
+    const raw = typedLive.content
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("")

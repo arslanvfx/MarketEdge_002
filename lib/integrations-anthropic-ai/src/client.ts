@@ -3,31 +3,39 @@ import Anthropic from "@anthropic-ai/sdk";
 let client: Anthropic | null = null;
 
 /**
- * Lazily construct the Anthropic client on first use. Throwing here (rather than
- * at module load) means a missing integration only fails the requests that
- * actually need Anthropic — it does not crash the whole API server at boot and
- * take down unrelated endpoints.
+ * Lazily construct the Anthropic client on first use.
+ *
+ * Priority:
+ *  1. ANTHROPIC_API_KEY — direct Anthropic billing, no proxy markup.
+ *  2. AI_INTEGRATIONS_ANTHROPIC_* — Replit proxy (fallback for legacy envs).
+ *
+ * Throwing here (rather than at module load) means a missing key only fails
+ * the requests that actually need Anthropic — it does not crash the whole API
+ * server at boot and take down unrelated endpoints.
  */
 function getClient(): Anthropic {
   if (client) return client;
 
-  if (!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL) {
-    throw new Error(
-      "AI_INTEGRATIONS_ANTHROPIC_BASE_URL must be set. Did you forget to provision the Anthropic AI integration?",
-    );
+  if (process.env.ANTHROPIC_API_KEY) {
+    client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    return client;
   }
 
-  if (!process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY) {
-    throw new Error(
-      "AI_INTEGRATIONS_ANTHROPIC_API_KEY must be set. Did you forget to provision the Anthropic AI integration?",
-    );
+  if (
+    process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL &&
+    process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY
+  ) {
+    client = new Anthropic({
+      apiKey: process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY,
+      baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
+    });
+    return client;
   }
 
-  client = new Anthropic({
-    apiKey: process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY,
-    baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
-  });
-  return client;
+  throw new Error(
+    "No Anthropic credentials found. Set ANTHROPIC_API_KEY for direct billing, " +
+    "or provision the Replit Anthropic AI integration.",
+  );
 }
 
 /**
