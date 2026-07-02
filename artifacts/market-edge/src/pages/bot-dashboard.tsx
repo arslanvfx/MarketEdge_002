@@ -991,11 +991,11 @@ export default function BotDashboard() {
                 {/* Regime Penalty */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">
-                    Regime Penalty ({merged.regimePenalty ?? 8}pp)
+                    Regime Penalty ({merged.regimePenalty ?? 15}pp)
                   </span>
                   <input type="range" min={0} max={20} step={1}
                     className="mt-1"
-                    value={merged.regimePenalty ?? 8}
+                    value={merged.regimePenalty ?? 15}
                     onChange={e => setConfigDraft(d => ({ ...d, regimePenalty: parseInt(e.target.value) }))} />
                   <div className="flex justify-between text-[10px] text-muted-foreground/60">
                     <span>0 (off)</span><span>20pp</span>

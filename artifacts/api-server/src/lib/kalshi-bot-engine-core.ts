@@ -455,8 +455,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableBorderGuard: false,
   borderProximityPct: 0.1,
   borderLookbackBets: 3,
-  // Regime penalty: 8pp deduction for against-regime bets (softer than the original 15pp)
-  regimePenalty: 8,
+  // Regime penalty: 15pp deduction for against-regime bets — high bar keeps quality high
+  regimePenalty: 15,
   // Paper trading defaults
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,
