@@ -104,7 +104,8 @@ function isoDateDaysAgo(days: number): string {
  * Evaluate up to MAX_TICKERS stocks with Claude research.
  * Skips tickers already evaluated today. Re-entrant guard prevents double runs.
  */
-export async function runResearchPass(tickers: string[]): Promise<void> {
+export async function runResearchPass(tickers: string[], opts: { aiPaused?: boolean } = {}): Promise<void> {
+  if (opts.aiPaused) return;
   if (researchRunning) return;
   researchRunning = true;
   const day = todayKey();

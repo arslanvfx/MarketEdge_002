@@ -129,4 +129,5 @@ export interface StockBotConfig {
   autoStartStop: boolean;        // auto-enable at market open, disable at close
   sectorFocus: string[];         // [] = all sectors; else restrict to these sectors
   maxPositionDollars: number | null; // null = no cap; otherwise min(%, $) sizing
+  aiPaused: boolean;             // kill-switch: skip all Claude calls this session
 }

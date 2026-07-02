@@ -31,6 +31,9 @@ const MODEL = "claude-sonnet-4-6";
 const CLAUDE_TTL_MS = 5 * 60 * 1000;
 const claudeCache = new Map<string, { sig: ClaudeSignal; at: number }>();
 
+let stockAIPaused = false;
+export function setStockAIPaused(v: boolean): void { stockAIPaused = v; }
+
 /** Pure statistical directional call from candles. */
 export function statSignal(candles: Candle[]): StatSignal {
   const closes = candles.map((c) => c.c);
@@ -95,6 +98,9 @@ export async function claudeSignal(
   const cached = claudeCache.get(T);
   if (cached && Date.now() - cached.at < CLAUDE_TTL_MS) {
     return { ...cached.sig, cached: true };
+  }
+  if (stockAIPaused) {
+    return { direction: stat.direction, confidence: 50, reasoning: "AI paused — using statistical read.", rating: "hold", cached: false };
   }
 
   const last = candles[candles.length - 1]?.c ?? 0;

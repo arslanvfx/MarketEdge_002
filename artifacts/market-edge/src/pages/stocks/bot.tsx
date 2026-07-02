@@ -463,6 +463,20 @@ export default function StockBot() {
                 <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${merged.autoStartStop ? "translate-x-4" : "translate-x-0.5"}`} />
               </button>
             </div>
+            <div className="flex items-center justify-between md:col-span-2 pt-1 border-t border-border mt-1">
+              <div>
+                <span className="text-sm text-foreground">Pause All AI Calls</span>
+                <p className={`text-[11px] mt-0.5 ${merged.aiPaused ? "text-amber-400/80" : "text-muted-foreground"}`}>
+                  {merged.aiPaused
+                    ? "Claude signals disabled — bot runs on stat + ML only."
+                    : "Claude signals active for entry decisions and research."}
+                </p>
+              </div>
+              <button onClick={() => patchSafe({ aiPaused: !merged.aiPaused })}
+                className={`ml-4 flex-shrink-0 w-9 h-5 rounded-full relative transition-colors ${merged.aiPaused ? "bg-amber-500" : "bg-muted"}`}>
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${merged.aiPaused ? "translate-x-4" : "translate-x-0.5"}`} />
+              </button>
+            </div>
           </div>
           {!status?.configured && (
             <p className="text-[11px] text-amber-400/80 mt-2 flex items-center gap-1">
