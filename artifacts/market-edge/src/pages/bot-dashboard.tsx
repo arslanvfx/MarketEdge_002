@@ -12,9 +12,82 @@ import { Button } from "@/components/ui/button";
 
 const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/\/api$/, "/api");
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
+// ─── Mode presets ────────────────────────────────────────────────────────────
+// Each entry is the subset of BotConfig that should be applied automatically
+// when the user switches to that decision mode.  Settings not listed here are
+// left untouched so the user's manual overrides survive a mode switch.
+//
+// Values are derived from historical bet analysis (139 settled classic bets):
+//   stat ≥ 55 → 69% WR   stat ≥ 56 → 74% WR   stat 53-56 → 49% WR (!)
+//
 type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
+
+type ModePreset = Partial<{
+  minStatConfidence: number;
+  minConfidence: number;
+  regimePenalty: number;
+  maxBetsPerWindow: number;
+  maxSameDirectionBets: number;
+  enableDirectionCap: boolean;
+  enableMomentumFilter: boolean;
+  momentumWindowCount: number;
+  enableAutoTuning: boolean;
+}>;
+
+const MODE_PRESETS: Record<DecisionMode, ModePreset & { label: string; why: string }> = {
+  classic: {
+    label: "Classic",
+    why: "Stat → Claude → ML cascade. Hard stat floor at 55 filters the 49%-WR noise band; regime penalty blocks against-trend bets.",
+    minStatConfidence:   55,
+    minConfidence:       65,
+    regimePenalty:       15,
+    maxBetsPerWindow:    3,
+    maxSameDirectionBets: 3,
+    enableDirectionCap:  true,
+    enableMomentumFilter: true,
+    momentumWindowCount: 3,
+    enableAutoTuning:    true,
+  },
+  ml_gate: {
+    label: "ML Gate",
+    why: "Stat+Claude pick direction; ML vetos if it disagrees. ML veto already filters weak-stat calls so the stat floor can be lighter.",
+    minStatConfidence:   52,
+    minConfidence:       63,
+    regimePenalty:       10,
+    maxBetsPerWindow:    3,
+    maxSameDirectionBets: 3,
+    enableDirectionCap:  true,
+    enableMomentumFilter: true,
+    momentumWindowCount: 3,
+    enableAutoTuning:    true,
+  },
+  consensus: {
+    label: "Consensus",
+    why: "≥2 of 3 signals must agree — multi-signal agreement already acts as a quality gate, so entry bars can be slightly lower.",
+    minStatConfidence:   50,
+    minConfidence:       60,
+    regimePenalty:       8,
+    maxBetsPerWindow:    4,
+    maxSameDirectionBets: 4,
+    enableDirectionCap:  true,
+    enableMomentumFilter: true,
+    momentumWindowCount: 3,
+    enableAutoTuning:    true,
+  },
+  unanimous: {
+    label: "Unanimous",
+    why: "All 3 signals must agree — the strictest mode. Unanimity is already a very high bar so confidence floors are relaxed; more slots per window since entries are rare.",
+    minStatConfidence:   50,
+    minConfidence:       55,
+    regimePenalty:       5,
+    maxBetsPerWindow:    5,
+    maxSameDirectionBets: 5,
+    enableDirectionCap:  true,
+    enableMomentumFilter: true,
+    momentumWindowCount: 2,
+    enableAutoTuning:    true,
+  },
+};
 
 interface BotConfig {
   betSize: number;
@@ -245,6 +318,7 @@ export default function BotDashboard() {
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
+  const [presetApplied, setPresetApplied] = useState<DecisionMode | null>(null);
   const [perfOpen, setPerfOpen] = useState(true);
   const [tuneLogOpen, setTuneLogOpen] = useState(true);
   const [histPage, setHistPage] = useState(0);
@@ -773,19 +847,19 @@ export default function BotDashboard() {
                 <div className="col-span-2 flex flex-col gap-2">
                   <span className="text-xs text-muted-foreground">Decision Logic</span>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    {([
-                      { id: "classic",   label: "Classic",   desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
-                      { id: "ml_gate",   label: "ML Gate",   desc: "Stat+Claude decide direction; ML vetos if it disagrees" },
-                      { id: "consensus", label: "Consensus", desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
-                      { id: "unanimous", label: "Unanimous", desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
-                    ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
-                      const isSelected = (merged.decisionMode ?? "classic") === m.id;
-                      const needsML = m.id === "ml_gate" || m.id === "unanimous";
+                    {(Object.entries(MODE_PRESETS) as [DecisionMode, typeof MODE_PRESETS[DecisionMode]][]).map(([id, preset]) => {
+                      const isSelected = (merged.decisionMode ?? "classic") === id;
+                      const needsML = id === "ml_gate" || id === "unanimous";
                       return (
                         <button
-                          key={m.id}
+                          key={id}
                           type="button"
-                          onClick={() => setConfigDraft(d => ({ ...d, decisionMode: m.id }))}
+                          onClick={() => {
+                            const { label: _l, why: _w, ...presetFields } = preset;
+                            setConfigDraft(d => ({ ...d, decisionMode: id, ...presetFields }));
+                            setPresetApplied(id);
+                            setTimeout(() => setPresetApplied(null), 4000);
+                          }}
                           className={`text-left rounded-xl p-3 border transition-all ${
                             isSelected
                               ? "border-sky-500/60 bg-sky-500/10 ring-1 ring-sky-500/30"
@@ -793,10 +867,23 @@ export default function BotDashboard() {
                           }`}
                         >
                           <div className={`text-xs font-semibold mb-1 ${isSelected ? "text-sky-400" : "text-foreground"}`}>
-                            {m.label}
-                            {isSelected && <span className="ml-1.5 text-[9px] text-sky-400/70">✓ selected</span>}
+                            {preset.label}
+                            {isSelected && <span className="ml-1.5 text-[9px] text-sky-400/70">✓ active</span>}
                           </div>
-                          <div className="text-[10px] text-muted-foreground/80 leading-tight">{m.desc}</div>
+                          <div className="text-[10px] text-muted-foreground/80 leading-tight">
+                            {preset.why.split(".")[0]}.
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-muted/40 text-muted-foreground/70">
+                              conf ≥{preset.minConfidence}%
+                            </span>
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-muted/40 text-muted-foreground/70">
+                              stat ≥{preset.minStatConfidence}%
+                            </span>
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-muted/40 text-muted-foreground/70">
+                              {preset.maxBetsPerWindow} slots
+                            </span>
+                          </div>
                           {needsML && (
                             <div className={`mt-1.5 text-[9px] font-medium px-1.5 py-0.5 rounded inline-block ${
                               status?.mlStatus?.ready
@@ -810,6 +897,24 @@ export default function BotDashboard() {
                       );
                     })}
                   </div>
+
+                  {/* Preset-applied flash */}
+                  {presetApplied && (
+                    <div className="mt-2 flex items-start gap-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2">
+                      <Zap className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-400" />
+                      <div>
+                        <p className="text-xs font-medium text-sky-300">
+                          {MODE_PRESETS[presetApplied].label} preset applied
+                        </p>
+                        <p className="mt-0.5 text-[10px] text-muted-foreground/80 leading-snug">
+                          {MODE_PRESETS[presetApplied].why}
+                        </p>
+                        <p className="mt-1 text-[10px] text-muted-foreground/60">
+                          You can still adjust any setting below — changes are saved when you click Save.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Exit Sensitivity */}
