@@ -486,7 +486,7 @@ export async function generateMLTrainingExamples(
     symbol: r.symbol,
     // v3 prefix: distinguishes 17-feature (stat+claude aware) from the old v2
     // 14-feature backfill that had no knowledge of other model signals.
-    windowId: `backfill_v3:${r.symbol}:${r.windowIso}`,
+    windowId: `backfill_v4:${r.symbol}:${r.windowIso}`,
     features: r.mlFeatures,
     outcome: r.actualAbove ? 1 : 0,
     elapsedFraction: 7 / 15, // ~0.47 — matches SNAP_OFFSET_SEC / WINDOW_SEC

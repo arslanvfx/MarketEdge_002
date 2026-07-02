@@ -10,12 +10,14 @@
 //   - elapsed ≈ 0.47, real priceVsStrike, real windowDrift
 //   - 14-feature vector — no stat/claude/wm signals (features 14-16 absent).
 //
-// v3 backfill (prefix "backfill_v3:") extends v2 to 17 features:
-//   - Features 14-15 populated from prediction_records (stat/claude directions).
-//   - Feature 16 = 0.5 (window-monitor not available in historical records).
-//   - Training distribution now matches inference (ML sees real model signals).
+// v3 backfill (prefix "backfill_v3:") extended to 17 features (stat/claude signals).
+// v4 backfill (prefix "backfill_v4:") extends to N_FEATURES (currently 19) features:
+//   - Features 14-15: stat/claude directions from prediction_records.
+//   - Feature 16: wmRec = 0.5 (window-monitor not stored historically).
+//   - Features 17-18: volumeDirectionBias, candleReversalSignal from candle replay.
+//   - Training distribution matches live inference for all N_FEATURES signals.
 //
-// On startup: if any v1/v2 rows exist → wipe ALL ML data → re-run v3 backfill.
+// On startup: if any v1/v2/v3 rows exist → wipe ALL ML data → re-run v4 backfill.
 
 import { generateMLTrainingExamples } from "./backtest.ts";
 import {
@@ -24,7 +26,7 @@ import {
   hasLegacyBackfillRows,
   clearMLData,
 } from "./ml-store.ts";
-import { MIN_TRAINING_WINDOWS } from "./ml-model.ts";
+import { MIN_TRAINING_WINDOWS, N_FEATURES } from "./ml-model.ts";
 import { applySignalAugmentation } from "./ml-features.ts";
 import { logger } from "./logger.ts";
 import { CRYPTO_COINS } from "./crypto.ts";
@@ -39,16 +41,16 @@ import { and, inArray, isNotNull } from "drizzle-orm";
  *                     96 ≈ 24 h — enough to well exceed the 30-window gate.
  */
 export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
-  // ── Step 1: detect and purge legacy v1/v2 backfill data ───────────────────
-  // v1 rows had degenerate features; v2 rows lacked stat/claude signals (14 vs 17).
-  // Both are detected by hasLegacyBackfillRows (NOT LIKE 'backfill_v3:%').
+  // ── Step 1: detect and purge legacy v1/v2/v3 backfill data ──────────────────
+  // v1 rows had degenerate features; v2 had 14-feature vectors; v3 had 17 features.
+  // All are detected by hasLegacyBackfillRows (NOT LIKE 'backfill_v4:%').
   const hasLegacy = await hasLegacyBackfillRows();
   if (hasLegacy) {
     logger.warn(
-      "[ml-backfill] legacy v1/v2 backfill detected — wiping all ML data and re-initializing with v3 features",
+      "[ml-backfill] legacy backfill detected — wiping all ML data and re-initializing with v4 features",
     );
     await clearMLData(); // wipes DB + in-memory; models reset to 0/30
-    logger.info("[ml-backfill] ML state cleared — proceeding with v3 backfill");
+    logger.info("[ml-backfill] ML state cleared — proceeding with v4 backfill");
   }
 
   // ── Step 2: decide which coins need backfilling ────────────────────────────
@@ -127,13 +129,13 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
         }
       }
 
-      // generateMLTrainingExamples already calls extractMLFeatures (N_FEATURES=17),
-      // so each example has 17 elements with features 14-16 = 0.5 (unknown).
+      // generateMLTrainingExamples calls extractMLFeatures (N_FEATURES features),
+      // so each example has N_FEATURES elements with features 14-16 = 0.5 (unknown).
       // We OVERWRITE those 3 slots with real historical values — never push.
       let augmented = 0;
       for (const ex of examples) {
-        if (ex.features.length !== 17) continue; // defensive: skip malformed
-        // Reconstruct targetISO from windowId: "backfill_v3:SYM:ISO"
+        if (ex.features.length !== N_FEATURES) continue; // defensive: skip malformed
+        // Reconstruct targetISO from windowId: "backfill_v4:SYM:ISO"
         const parts = ex.windowId.split(":");
         const targetISO = parts.slice(2).join(":");
         const key = `${ex.symbol}:${targetISO}`;
@@ -160,7 +162,7 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
       if (warmingCoins.includes(s.symbol)) {
         logger.info(
           { symbol: s.symbol, windows: s.windows, ready: s.ready },
-          "[ml-backfill] coin backfilled (v3)",
+          "[ml-backfill] coin backfilled (v4)",
         );
       }
     }
