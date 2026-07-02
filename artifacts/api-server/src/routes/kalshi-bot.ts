@@ -13,6 +13,7 @@ import {
   getPerformanceReport,
   getBotAutoTuneLog,
   getPausedCoinState,
+  clearPausedCoins,
   clearBetHistoryOld,
   softArchiveAllBets,
   getBotLogicPerformance,
@@ -392,6 +393,20 @@ router.post("/crypto/bot/bets/soft-reset", async (req, res) => {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
   }
+});
+
+router.post("/crypto/bot/coins/unpause-all", (req, res) => {
+  const clerkAuth = getAuth(req);
+  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
+  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
+  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
+  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
+  if (!hasClerkAuth && !hasClearPassword) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const cleared = clearPausedCoins();
+  res.json({ ok: true, cleared });
 });
 
 export default router;

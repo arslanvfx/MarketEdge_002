@@ -2607,6 +2607,12 @@ export function getPausedCoinState(): Record<string, number> {
   return out;
 }
 
+export function clearPausedCoins(): string[] {
+  const cleared = Array.from(pausedCoins.keys());
+  pausedCoins.clear();
+  return cleared;
+}
+
 export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
   try {
     return await db
