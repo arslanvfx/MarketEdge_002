@@ -2574,12 +2574,11 @@ export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
       const isWin  = r.outcome ? r.outcome === "win"  : p > 0;
       const isLoss = r.outcome ? r.outcome === "loss" : p < 0;
 
-      // Extract bet-time confidence from stored signals snapshot
+      // Use effectiveConfidence (the actual decision threshold) from the signals snapshot.
+      // This is the value the bot compared against minConfidence when placing the bet,
+      // so it accurately reflects how strongly the system committed to the trade.
       const sigs = r.signals as Record<string, unknown> | null;
-      const statConf  = typeof sigs?.statConfidence  === "number" ? sigs.statConfidence  : null;
-      const cldConf   = typeof sigs?.claudeConfidence === "number" ? sigs.claudeConfidence : null;
-      const confVals  = [statConf, cldConf].filter((v): v is number => v != null);
-      const avgConf   = confVals.length > 0 ? confVals.reduce((s, v) => s + v, 0) / confVals.length : null;
+      const avgConf = typeof sigs?.effectiveConfidence === "number" ? sigs.effectiveConfidence : null;
 
       const entry = modeMap.get(mode) ?? { bets: 0, wins: 0, losses: 0, pnl: 0, confSum: 0, confCount: 0 };
       entry.bets++;
