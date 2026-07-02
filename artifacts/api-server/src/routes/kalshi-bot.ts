@@ -115,6 +115,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableBorderGuard,
     borderProximityPct,
     borderLookbackBets,
+    regimePenalty,
+    paperStartingBalance,
+    paperWinReturnRate,
+    paperBalanceResetAt,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -140,6 +144,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableBorderGuard?: boolean;
     borderProximityPct?: number;
     borderLookbackBets?: number;
+    regimePenalty?: number;
+    paperStartingBalance?: number;
+    paperWinReturnRate?: number;
+    paperBalanceResetAt?: string | null;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -204,6 +212,18 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof borderLookbackBets === "number" && borderLookbackBets >= 1 && borderLookbackBets <= 10) {
     partial.borderLookbackBets = borderLookbackBets;
+  }
+  if (typeof regimePenalty === "number" && regimePenalty >= 0 && regimePenalty <= 20) {
+    partial.regimePenalty = regimePenalty;
+  }
+  if (typeof paperStartingBalance === "number" && paperStartingBalance >= 1 && paperStartingBalance <= 10000) {
+    partial.paperStartingBalance = paperStartingBalance;
+  }
+  if (typeof paperWinReturnRate === "number" && paperWinReturnRate >= 0.1 && paperWinReturnRate <= 2.0) {
+    partial.paperWinReturnRate = paperWinReturnRate;
+  }
+  if ("paperBalanceResetAt" in req.body) {
+    partial.paperBalanceResetAt = typeof paperBalanceResetAt === "string" ? paperBalanceResetAt : null;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
