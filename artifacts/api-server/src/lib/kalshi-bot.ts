@@ -227,6 +227,18 @@ const windowStabilityCache = new Map<string, TrendStability>();
 // Claude is pre-fetched eagerly on ticker detection so it is warm by ~45 s.
 const WINDOW_ENTRY_BUFFER_S = 45;
 
+// --- Per-coin direction filters (Task A, data-driven, 2026-07-03) ---
+// Based on 223 settled production bets. Coins/directions with no historical edge
+// are blocked here rather than relying on signal models to self-correct.
+//   BTC YES: 20% WR (15 bets)  ETH YES: 20% WR (10 bets)  DOGE YES: 25% WR (4 bets)
+//   SOL NO:  22% WR (9 bets)   SOL YES: 40% WR (5 bets) → no edge either direction
+const COIN_YES_BLOCKED: ReadonlySet<string> = new Set(["BTC", "ETH", "DOGE"]);
+const COIN_FULLY_BLOCKED: ReadonlySet<string> = new Set(["SOL"]);
+
+// Module-level doubt penalty for the current window — set in runBotWindow Phase 3
+// (where it's computed) so _runBotTick can include it in the signals JSON for analytics.
+let currentWindowDoubtPenalty = 0;
+
 // Note: entry ceiling (maxEntryMinutes) and floor (minRemainingMinutes) are now
 // both driven by BotConfig so they can be toggled from the dashboard.
 // 0 = disabled for each: ceiling skipped when 0, floor skipped when 0.
@@ -388,6 +400,19 @@ export async function loadBotConfigFromDB(): Promise<void> {
         logger.info({ mode: botMode }, "[kalshi-bot] mode restored from DB");
       }
       logger.info({ config }, "[kalshi-bot] config loaded from DB");
+
+      // One-time startup migration (2026-07-03): ml_gate → classic.
+      // ml_gate mode pins every bet at 65% effective confidence because ML only vetos,
+      // never boosts. Classic mode (PATH A/B/C) lets ML conviction differentiate
+      // signal quality — strong ML agreement can push effective confidence to 80%+.
+      // Production data: 223 bets, all entered at exactly 65%. Zero differentiation.
+      if (config.decisionMode === "ml_gate") {
+        config.decisionMode = "classic";
+        logger.info("[kalshi-bot] startup migration: decisionMode ml_gate → classic (Task-A)");
+        updateBotConfig({ decisionMode: "classic" }).catch(err =>
+          logger.warn({ err }, "[kalshi-bot] startup migration persist failed (non-fatal)")
+        );
+      }
     } else {
       logger.info("[kalshi-bot] no saved config in DB — using defaults");
     }
@@ -1194,9 +1219,14 @@ async function _runBotTick(
   // Enrich signals with effectiveConfidence (the composite score that gated this bet)
   // so analytics can build accurate confidence-band win-rate breakdowns without relying
   // on statConfidence/claudeConfidence alone, which are per-model not per-decision.
+  // Task C (2026-07-03): also persist regime, trendStability, and windowDoubtPenalty
+  // so post-analysis can evaluate the impact of each Phase-3 filter on outcomes.
   const enrichedSignals = {
-    ...(decision.signals as Record<string, unknown>),
+    ...(decision.signals as unknown as Record<string, unknown>),
     effectiveConfidence: decision.confidence,
+    regime: regimeCache.get(sym) ?? null,
+    trendStability: windowStabilityCache.get(sym) ?? null,
+    windowDoubtPenalty: currentWindowDoubtPenalty,
   };
 
   await persistBetRecord({
@@ -2115,6 +2145,8 @@ export async function runBotLoopTick(): Promise<void> {
       `[kalshi-bot] doubt penalty: ${weakWindowCount} recent window(s) <${DOUBT_WIN_RATE_THRESHOLD * 100}% win rate — confidence floor +${windowDoubtPenalty}pp`,
     );
   }
+  // Store for Task-C signal enrichment: _runBotTick includes this in the signals JSON.
+  currentWindowDoubtPenalty = windowDoubtPenalty;
   // Symbols blocked by the new regime-aware guards (momentum override, directional cap, border guard).
   // These must be excluded from Phase-4 orderedSymbols so runBotTickForCoin cannot
   // independently place a bet that the Phase-3 filter just blocked.
@@ -2331,6 +2363,73 @@ export async function runBotLoopTick(): Promise<void> {
             confidence: effectiveConfidence,
             score: 0,
             reason: `NO gate — price +${gapPct}% above strike, requires ML or 3-signal agreement`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+      }
+    }
+
+    // --- Per-coin direction filter (Task A) + YES consensus gate (Task B) ---
+    // Task A: Block coins/directions with insufficient historical edge.
+    //   COIN_FULLY_BLOCKED (SOL): no edge in either direction → skip entirely.
+    //   COIN_YES_BLOCKED (BTC/ETH/DOGE): historical YES WR <25% → block YES entirely.
+    // Task B: All remaining YES bets require stat+claude+ml to ALL agree (full 3-signal
+    //   consensus). Mixed YES bets (any signal misaligned) average 0-33% WR vs 73%+ for
+    //   full-consensus NO. NO bets are allowed with stat+claude only (60-70% WR).
+    if (decision.action !== "SKIP") {
+      if (COIN_FULLY_BLOCKED.has(sym)) {
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `coin filter — ${sym} blocked (no edge in either direction: NO ${sym==="SOL"?"22":"?"}% WR, YES ${sym==="SOL"?"40":"?"}% WR)`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
+        });
+        continue;
+      }
+
+      if (decision.action === "BET_YES") {
+        if (COIN_YES_BLOCKED.has(sym)) {
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `coin filter — ${sym} YES blocked (historical WR ≤25%)`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+
+        // Full 3-signal consensus required for YES bets
+        const yesSigs = decision.signals as { statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null };
+        const has3SignalYes = yesSigs.statAbove === true && yesSigs.claudeAbove === true && yesSigs.mlAbove === true;
+        if (!has3SignalYes) {
+          const sig = (v: boolean | null | undefined) => v === true ? "Y" : v === false ? "N" : "?";
+          const signalSummary = `Stat=${sig(yesSigs.statAbove)} Claude=${sig(yesSigs.claudeAbove)} ML=${sig(yesSigs.mlAbove)}`;
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `YES consensus gate — requires all 3 signals agree (${signalSummary})`,
             windowKey,
             selected: false,
             evaluatedAt: now,
