@@ -159,7 +159,8 @@ export interface WindowCoinEvaluation {
   score: number;               // composite: confidence × timingAcc / 100 × stabilityMultiplier
   reason: string;              // short human-readable explanation
   windowKey: string;
-  selected: boolean;           // true for the coin chosen for the bet
+  selected: boolean;           // true for the coin chosen for the bet (current tick only)
+  betPlacedThisWindow?: boolean; // true if a bet was placed for this coin in the current window
   evaluatedAt: string;         // ISO timestamp
   trendStability: TrendStability | null; // from window-open Claude analysis (null = not yet ready)
   regime: PriceRegime | null;  // price-trend regime derived from recent Kalshi strikes
@@ -3036,7 +3037,15 @@ export async function runBotLoopTick(): Promise<void> {
       windowKey,
     }, "[kalshi-bot] best-market selected");
   }
-  lastWindowEvaluation = [...bets, ...skips];
+  // Stamp betPlacedThisWindow on every eval entry so the dashboard can show a
+  // persistent "bet placed" indicator even after the coin switches to SKIP
+  // (e.g. "directional cap reached") on subsequent ticks within the same window.
+  const allResults = [...bets, ...skips];
+  for (const e of allResults) {
+    const wbKey = `${e.symbol}:${e.windowKey}`;
+    e.betPlacedThisWindow = (windowBetCounts.get(wbKey) ?? 0) > 0;
+  }
+  lastWindowEvaluation = allResults;
 
   // Phase 4: run ticks in priority order — best BET candidate first.
   // Once a position is opened, break so only one bet is placed per tick.

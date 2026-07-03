@@ -129,7 +129,7 @@ interface HistoryRecord {
 interface WindowEval {
   symbol: string; action: "BET_YES" | "BET_NO" | "SKIP";
   confidence: number; score: number; reason: string;
-  windowKey: string; selected: boolean; evaluatedAt: string;
+  windowKey: string; selected: boolean; betPlacedThisWindow: boolean; evaluatedAt: string;
   trendStability: "clean" | "choppy" | "reversing" | null;
   regime: "trending_up" | "trending_down" | "ranging" | null;
 }
@@ -1103,7 +1103,14 @@ export default function BotDashboard() {
                       </td>
                       <td className="px-3 py-2.5"><CountdownCell reason={e.reason} windowKey={e.windowKey} /></td>
                       <td className="px-3 py-2.5">
-                        {e.selected ? <Star className="w-4 h-4 text-amber-400 fill-amber-400" /> : null}
+                        {e.betPlacedThisWindow ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                            BET PLACED
+                          </span>
+                        ) : e.selected ? (
+                          <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
+                        ) : null}
                       </td>
                     </tr>
                   ))}
