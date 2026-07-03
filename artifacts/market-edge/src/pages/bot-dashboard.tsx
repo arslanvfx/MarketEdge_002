@@ -207,7 +207,13 @@ const fmtCrypto = (n: number | string | null | undefined) => {
   if (n == null || n === "") return "—";
   const v = typeof n === "string" ? parseFloat(n) : n;
   if (isNaN(v)) return "—";
-  return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  // Use enough decimals to preserve meaningful precision at every price tier.
+  // $1000+  → 2dp (BTC, ETH high-range)
+  // $1–999  → up to 4dp (XRP $1.1355, SOL, LINK, etc.)
+  // <$1     → up to 6dp (DOGE, very low-priced coins)
+  if (v >= 1000) return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (v >= 1)    return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+  return `$${v.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 6 })}`;
 };
 
 const EST = "America/New_York";
