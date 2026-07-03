@@ -79,6 +79,11 @@ export interface OpenPosition {
   exitState: ExitState;
   entryDecision: BotDecision;
   phase2Activated: boolean;
+  // The bot mode this position was OPENED in. Exits must use this — not the
+  // current global botMode — so a live position is always closed with a real
+  // Kalshi sell order even if the user has since switched the bot to paper.
+  // Otherwise real money would be stranded on the exchange.
+  entryMode: BotMode;
 }
 
 // OpenPosition augmented with live display data (P&L, guard states) for the
@@ -736,6 +741,9 @@ export async function loadOpenPositionFromDB(): Promise<void> {
           signals: (row.signals ?? {}) as Record<string, unknown>,
         } as unknown as BotDecision,
         phase2Activated: row.phase2Activated ?? false,
+        // Recover the mode the position was opened in so its exit uses a real
+        // sell order when it was a live bet, regardless of the current mode.
+        entryMode: row.mode === "live" ? "live" : "paper",
       });
 
       logger.info(
@@ -1189,7 +1197,13 @@ async function _runBotTick(
   let fillPrice = yesPrice; // paper fill
   let orderId: string | null = null;
 
-  if (botMode === "live") {
+  // Snapshot the mode ONCE before any await. If the user flips the mode while
+  // the live order is filling, this entry must still be recorded and exited as
+  // the mode it was actually placed in — otherwise a real live buy could be
+  // recorded as paper and never sold, stranding funds on the exchange.
+  const entryMode: BotMode = botMode;
+
+  if (entryMode === "live") {
     try {
       const result = await placeOrderWithRetry({
         ticker: kalshiTicker,
@@ -1228,6 +1242,7 @@ async function _runBotTick(
     exitState: makeInitialExitState(fillPrice ?? yesPrice ?? 0.5),
     entryDecision: decision,
     phase2Activated: false,
+    entryMode,
   };
   openPositions.set(sym, newPosition);
 
@@ -1260,6 +1275,9 @@ async function _runBotTick(
     insertId: id,
     cryptoPriceAtEntry,
     decisionMode: config.decisionMode ?? "classic",
+    // Persist the snapshotted entry mode (not the live global) so a mid-fill
+    // mode flip cannot mislabel this row on restart.
+    mode: entryMode,
   });
   // Mark this window as having a recorded decision so SKIP dedup works correctly
   lastDecisionWindowKey.set(sym, windowKey);
@@ -1292,7 +1310,7 @@ async function closePosition(
   // This will be corrected by the evaluator job (task #112) once Kalshi settles.
   let fillPrice: number | null = isExpiry ? null : currentYesPrice;
 
-  if (botMode === "live" && !isExpiry) {
+  if (pos.entryMode === "live" && !isExpiry) {
     try {
       const result = pos.direction === "yes"
         ? await sellYes(pos.ticker, pos.contractCount)
@@ -1365,8 +1383,9 @@ async function closePosition(
     }
   }
 
-  // Recover account balance
-  if (botMode === "live") {
+  // Recover account balance. Use the position's entry mode so a live position
+  // closed after the user switched to paper still refreshes the real balance.
+  if (pos.entryMode === "live") {
     getBalance()
       .then((b) => { accountBalance = b.availableBalance; })
       .catch(() => {});
@@ -1454,6 +1473,9 @@ interface BetRecordArgs {
   cryptoPriceAtExit?: number | null;
   // Active decision mode at the time of bet placement. Null on exit/expiry updates.
   decisionMode?: DecisionMode | null;
+  // Bot mode (paper/live) captured at entry. Falls back to the global botMode
+  // when omitted (e.g. skip/warmup rows). Prevents mid-fill flips mislabeling rows.
+  mode?: BotMode;
 }
 
 async function persistBetRecord(args: BetRecordArgs): Promise<void> {
@@ -1484,7 +1506,7 @@ async function persistBetRecord(args: BetRecordArgs): Promise<void> {
         ticker: args.ticker ?? undefined,
         direction: args.direction ?? undefined,
         action: args.action,
-        mode: botMode,
+        mode: args.mode ?? botMode,
         signals: args.signals as Record<string, unknown>,
         entryPrice: args.entryPrice != null ? String(args.entryPrice) : undefined,
         kalshiTarget: String(args.kalshiTarget),

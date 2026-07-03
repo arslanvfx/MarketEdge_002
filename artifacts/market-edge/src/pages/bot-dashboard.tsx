@@ -497,17 +497,34 @@ export default function BotDashboard() {
           <Button size="sm" variant="outline" onClick={togglePause} className="h-7 gap-1">
             {status?.paused ? <><Play className="w-3 h-3" />Resume</> : <><Pause className="w-3 h-3" />Pause</>}
           </Button>
-          {status?.mode === "paper" ? (
-            confirmLive ? (
-              <div className="flex gap-1">
-                <Button size="sm" variant="destructive" className="h-7 text-xs" onClick={() => setMode("live")}>Confirm Live</Button>
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setConfirmLive(false)}>Cancel</Button>
-              </div>
-            ) : (
-              <Button size="sm" variant="outline" className="h-7 text-xs border-red-500/30 text-red-400 hover:bg-red-500/10" onClick={() => setConfirmLive(true)}>Go Live</Button>
-            )
+          {/* Paper ⇄ Live mode toggle. Switching to Paper is immediate and stops
+              all real-money betting. Switching to Live requires confirmation. */}
+          {confirmLive ? (
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-red-400 font-medium">Bet real money?</span>
+              <Button size="sm" variant="destructive" className="h-7 text-xs" onClick={() => setMode("live")}>Confirm Live</Button>
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setConfirmLive(false)}>Cancel</Button>
+            </div>
           ) : (
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setMode("paper")}>Paper Mode</Button>
+            <div className="flex items-center gap-2" title={status?.mode === "live" ? "Live — betting real money. Click to switch back to Paper." : "Paper — simulated betting. Click to go Live."}>
+              <span className={`text-xs font-medium ${status?.mode === "paper" ? "text-yellow-400" : "text-muted-foreground"}`}>Paper</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={status?.mode === "live"}
+                onClick={() => {
+                  if (status?.mode === "live") {
+                    setMode("paper"); // immediate — stops real-money betting
+                  } else {
+                    setConfirmLive(true); // require confirmation before real money
+                  }
+                }}
+                className={`relative w-11 h-6 rounded-full transition-colors ${status?.mode === "live" ? "bg-red-500" : "bg-muted"}`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${status?.mode === "live" ? "translate-x-5" : ""}`} />
+              </button>
+              <span className={`text-xs font-medium ${status?.mode === "live" ? "text-red-400" : "text-muted-foreground"}`}>Live</span>
+            </div>
           )}
         </div>
       </div>

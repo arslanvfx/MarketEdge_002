@@ -36,6 +36,7 @@
 - [ML features v4](ml-features-v4.md) — N_FEATURES 17→19; feature 17=volumeDirectionBias (net bullish/bearish volume last 8 candles); feature 18=candleReversalSignal (-1/0/+1 for shooting star, engulfing, hammer patterns)
 - [predCache must be warm for ML](predcache-ml-fix.md) — getCachedPrediction() reads predCache; only populated by fetchCryptoPredictions (frontend endpoint); fix: tracker snap loop must also call predCache.set() after analyzeCoin
 - [Position-relative NO gate](no-gate-above-strike.md) — when live price > kalshiStrike × 1.001, NO bets need ML confirm (mlAbove===false) OR ≥3 signals; 7/7 historical losses without this gate
+- [Paper/Live mode entry-mode safety](paper-live-mode-safety.md) — real-money exit actions must key off pos.entryMode (captured pre-await), never the live global botMode, or flipping to paper strands live funds
 - [ML Gate reference config](ml-gate-reference-config.md) — canonical restore point for ml_gate mode: all engine constants, bot config values, and veto logic; use this whenever switching decisionMode to ml_gate
 - [User context default](user-context-default.md) — user always references production unless explicitly stated otherwise; always query production DB and check production logs first
 - [Per-coin direction filters](per-coin-direction-filters.md) — COIN_YES_BLOCKED={BTC,ETH,DOGE} (≤25% YES WR); COIN_FULLY_BLOCKED={SOL} (no edge either direction); startup migration ml_gate→classic on loadBotConfigFromDB
