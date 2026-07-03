@@ -268,6 +268,10 @@ export default function BotDashboard() {
   const [perfOpen, setPerfOpen] = useState(true);
   const [tuneLogOpen, setTuneLogOpen] = useState(true);
   const [histPage, setHistPage] = useState(0);
+  // historyMode is the mode shown in the Transaction History table and stats.
+  // Defaults to the active bot mode but can be toggled independently so the
+  // user can browse paper history while live or vice versa.
+  const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
 
   // ── Data fetching ────────────────────────────────────────────────────────
   const { data: status, isLoading } = useQuery<BotStatus>({
@@ -290,15 +294,27 @@ export default function BotDashboard() {
     prevCfgRef.current = cfg;
   }, [status?.config]);
 
+  // Sync the history/stats view mode when the bot's active mode changes so the
+  // user always sees their current session's data by default.
+  const prevBotMode = useRef<"paper" | "live" | undefined>(undefined);
+  useEffect(() => {
+    const m = status?.mode;
+    if (m && m !== prevBotMode.current) {
+      prevBotMode.current = m;
+      setHistoryMode(m);
+      setHistPage(0);
+    }
+  }, [status?.mode]);
+
   const { data: historyData } = useQuery<{ history: HistoryRecord[] }>({
-    queryKey: ["bot-all-history"],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=500`).then(r => r.json()),
+    queryKey: ["bot-all-history", historyMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=500&mode=${historyMode}`).then(r => r.json()),
     refetchInterval: 15_000,
   });
 
   const { data: statsData } = useQuery<BotStats>({
-    queryKey: ["bot-stats"],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/stats`).then(r => r.json()),
+    queryKey: ["bot-stats", historyMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/stats?mode=${historyMode}`).then(r => r.json()),
     refetchInterval: 30_000,
   });
 
@@ -548,10 +564,13 @@ export default function BotDashboard() {
         {/* ── Stats Row ── */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: "Account Balance", value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400" },
-            { label: "Today's P&L", value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
-            { label: "Win Rate", value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
-            { label: "Total Bets", value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
+            {
+              label: status?.mode === "live" ? "Kalshi Balance" : "Paper Balance",
+              value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400",
+            },
+            { label: `Today's P&L (${historyMode})`, value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
+            { label: `Win Rate (${historyMode})`, value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
+            { label: `Total Bets (${historyMode})`, value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
           ].map(({ label, value, sub, icon: Icon, color, bold }) => (
             <div key={label} className="bg-card border border-border rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
@@ -1473,6 +1492,7 @@ export default function BotDashboard() {
             <div className="px-5 py-3 border-b border-border flex items-center gap-2">
               <Activity className="w-4 h-4 text-muted-foreground" />
               <h2 className="font-semibold text-sm">Performance by Coin</h2>
+              <span className={`ml-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${historyMode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-400"}`}>{historyMode}</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -1505,6 +1525,19 @@ export default function BotDashboard() {
           <div className="px-5 py-3 border-b border-border flex items-center gap-2 flex-wrap">
             <Clock className="w-4 h-4 text-muted-foreground" />
             <h2 className="font-semibold text-sm">Transaction History</h2>
+            {/* Paper / Live tab — independent of the bot's active mode so the user
+                can always browse either log regardless of which mode the bot is in. */}
+            <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
+              {(["paper", "live"] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => { setHistoryMode(m); setHistPage(0); }}
+                  className={`px-2.5 py-1 transition-colors capitalize ${historyMode === m ? (m === "live" ? "bg-red-500/20 text-red-300" : "bg-yellow-500/15 text-yellow-300") : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
             <span className="text-xs text-muted-foreground">{bets.length} record{bets.length !== 1 ? "s" : ""}</span>
             {totalHistPages > 1 && (
               <div className="ml-auto flex items-center gap-1">

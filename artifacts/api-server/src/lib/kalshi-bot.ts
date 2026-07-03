@@ -381,6 +381,10 @@ export function setBotMode(mode: BotMode): void {
   logger.info({ mode }, "[kalshi-bot] mode changed");
   // Fire-and-forget — persist mode so it survives server restarts.
   _persistModeToConfig().catch(() => {});
+  // Recompute daily P&L and loss count for the new mode immediately so the
+  // daily loss limit and circuit breaker reflect only this mode's bets.
+  // Fire-and-forget; the counters will be correct on the next bot tick.
+  loadDailyPnlFromDB().catch(() => {});
 }
 
 async function _persistModeToConfig(): Promise<void> {
@@ -469,6 +473,10 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     // in closePosition() (i.e. at exit time), so reconstruction must use the same
     // day bucket — exitedAt UTC date — not createdAt. This keeps daily state correct
     // even when a position opened before midnight and was closed after.
+    //
+    // IMPORTANT: filter to the current botMode so paper and live have fully
+    // independent daily loss limits. Paper losses must not eat into the live
+    // daily budget and vice versa.
     const rows = await db
       .select({ pnl: kalshiBotBetsTable.pnl })
       .from(kalshiBotBetsTable)
@@ -476,6 +484,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
         and(
           isNotNull(kalshiBotBetsTable.exitedAt),
           isNull(kalshiBotBetsTable.archivedAt),
+          eq(kalshiBotBetsTable.mode, botMode),
           sql`DATE(${kalshiBotBetsTable.exitedAt} AT TIME ZONE 'UTC') = ${today}`,
           sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
         ),
@@ -1858,8 +1867,9 @@ export interface TrendPoint {
   rollingWinRate: number;  // 10-bet rolling window, 0–1
 }
 
-export async function getBotTrend(limit = 50): Promise<TrendPoint[]> {
+export async function getBotTrend(limit = 50, filterMode?: BotMode): Promise<TrendPoint[]> {
   try {
+    const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
     const rows = await db
       .select({
         symbol: kalshiBotBetsTable.symbol,
@@ -1869,7 +1879,7 @@ export async function getBotTrend(limit = 50): Promise<TrendPoint[]> {
       })
       .from(kalshiBotBetsTable)
       .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
-        AND ${kalshiBotBetsTable.outcome} IS NOT NULL`)
+        AND ${kalshiBotBetsTable.outcome} IS NOT NULL${modeClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit);
 
@@ -1897,12 +1907,13 @@ export async function getBotTrend(limit = 50): Promise<TrendPoint[]> {
 // Returns bet-action records for the bot dashboard — excludes skip/warmup audit
 // rows which are internal-only and would otherwise crowd out real bet records
 // within the pagination limit.
-export async function getBotAllHistory(limit = 100, offset = 0): Promise<unknown[]> {
+export async function getBotAllHistory(limit = 100, offset = 0, filterMode?: BotMode): Promise<unknown[]> {
   try {
+    const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
     return await db
       .select()
       .from(kalshiBotBetsTable)
-      .where(sql`${kalshiBotBetsTable.action} NOT IN ('skip', 'warmup') AND ${kalshiBotBetsTable.archivedAt} IS NULL`)
+      .where(sql`${kalshiBotBetsTable.action} NOT IN ('skip', 'warmup') AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit)
       .offset(offset);
@@ -1919,7 +1930,7 @@ export interface CoinBotStats {
   pnl: number;
 }
 
-export async function getBotStats(filterSymbol?: string): Promise<{
+export async function getBotStats(filterSymbol?: string, filterMode?: BotMode): Promise<{
   totalBets: number;
   wins: number;
   losses: number;
@@ -1934,9 +1945,12 @@ export async function getBotStats(filterSymbol?: string): Promise<{
 }> {
   try {
     const baseWhere = sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired') AND ${kalshiBotBetsTable.archivedAt} IS NULL`;
-    const whereClause = filterSymbol
+    let whereClause = filterSymbol
       ? sql`${baseWhere} AND ${kalshiBotBetsTable.symbol} = ${filterSymbol.toUpperCase()}`
       : baseWhere;
+    if (filterMode) {
+      whereClause = sql`${whereClause} AND ${kalshiBotBetsTable.mode} = ${filterMode}`;
+    }
 
     const rows = await db
       .select({

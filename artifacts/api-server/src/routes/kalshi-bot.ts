@@ -306,12 +306,13 @@ router.get("/crypto/bot/history", async (req, res) => {
   }
 });
 
-// GET /crypto/bot/all-history?limit=100&offset=0 (public — all records for dashboard)
+// GET /crypto/bot/all-history?limit=100&offset=0&mode=paper|live (public — all records for dashboard)
 router.get("/crypto/bot/all-history", async (req, res) => {
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
   const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
+  const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
   try {
-    const history = await getBotAllHistory(limit, offset);
+    const history = await getBotAllHistory(limit, offset, mode);
     res.json({ history });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -319,13 +320,14 @@ router.get("/crypto/bot/all-history", async (req, res) => {
   }
 });
 
-// GET /crypto/bot/stats?symbol=BTC (public — read only)
+// GET /crypto/bot/stats?symbol=BTC&mode=paper|live (public — read only)
 router.get("/crypto/bot/stats", async (req, res) => {
   const symbol = typeof req.query.symbol === "string" && req.query.symbol.trim()
     ? req.query.symbol.trim()
     : undefined;
+  const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
   try {
-    const stats = await getBotStats(symbol);
+    const stats = await getBotStats(symbol, mode);
     res.json(stats);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -333,11 +335,12 @@ router.get("/crypto/bot/stats", async (req, res) => {
   }
 });
 
-// GET /crypto/bot/trend?limit=50 — chronological win/loss sequence with rolling win rate
+// GET /crypto/bot/trend?limit=50&mode=paper|live — chronological win/loss sequence with rolling win rate
 router.get("/crypto/bot/trend", async (req, res) => {
   const limit = Math.min(100, Math.max(2, parseInt(String(req.query.limit ?? "50"), 10) || 50));
+  const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
   try {
-    const points = await getBotTrend(limit);
+    const points = await getBotTrend(limit, mode);
     res.json(points);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
