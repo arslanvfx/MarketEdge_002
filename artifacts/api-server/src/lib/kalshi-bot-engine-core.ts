@@ -637,3 +637,62 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinStreakPauseWindows: 2,
   maxSlippageCents: 5,
 };
+
+// ---------------------------------------------------------------------------
+// Coin streak state — pure persistence helpers
+// ---------------------------------------------------------------------------
+
+export interface CoinStreakEntry {
+  consecutiveLosses: number;
+  pauseUntilWindowKey: string | null;
+}
+
+/**
+ * Build the JSON snapshot that gets written to the DB.
+ * Only entries with non-trivial state are included (keeps the JSON small).
+ */
+export function buildStreakSnapshot(
+  state: Map<string, CoinStreakEntry>,
+): Record<string, CoinStreakEntry> {
+  const snapshot: Record<string, CoinStreakEntry> = {};
+  for (const [sym, entry] of state.entries()) {
+    if (entry.consecutiveLosses > 0 || entry.pauseUntilWindowKey !== null) {
+      snapshot[sym] = { ...entry };
+    }
+  }
+  return snapshot;
+}
+
+/**
+ * Restore coinStreakState from a persisted snapshot.
+ * Auto-clears any pauseUntilWindowKey that has already expired:
+ * Expiry semantics (per task spec):
+ *   active  → pauseUntilWindowKey > currentWindowKey  (strictly in the future)
+ *   expired → pauseUntilWindowKey <= currentWindowKey (current window or past)
+ *
+ * The coin resumes betting starting FROM the pauseUntilWindowKey window — the
+ * pause covered all windows BEFORE that key, not the key window itself.
+ *
+ * Window keys are ISO "YYYY-MM-DDTHH:mm" strings; lexicographic comparison is correct.
+ */
+export function restoreStreakState(
+  saved: Record<string, CoinStreakEntry>,
+  nowWindowKey: string,
+): { state: Map<string, CoinStreakEntry>; clearedSyms: string[] } {
+  const out = new Map<string, CoinStreakEntry>();
+  const clearedSyms: string[] = [];
+  for (const [sym, entry] of Object.entries(saved)) {
+    const pauseKey = entry.pauseUntilWindowKey ?? null;
+    // Keep the pause only when the pause target is strictly in the future.
+    // pauseKey === nowWindowKey means the coin resumes this window → clear.
+    const effectivePause = pauseKey !== null && pauseKey > nowWindowKey ? pauseKey : null;
+    out.set(sym.toUpperCase(), {
+      consecutiveLosses: entry.consecutiveLosses ?? 0,
+      pauseUntilWindowKey: effectivePause,
+    });
+    if (pauseKey !== null && effectivePause === null) {
+      clearedSyms.push(sym.toUpperCase());
+    }
+  }
+  return { state: out, clearedSyms };
+}

@@ -428,7 +428,7 @@ test("Full circuit-breaker lifecycle: 3 losses → trigger → 2 ticks → re-en
 // checkMomentumOverride tests
 // ---------------------------------------------------------------------------
 
-import { checkMomentumOverride, deriveRegime } from "./kalshi-bot-engine-core.ts";
+import { checkMomentumOverride, deriveRegime, buildStreakSnapshot, restoreStreakState, type CoinStreakEntry } from "./kalshi-bot-engine-core.ts";
 
 test("checkMomentumOverride: returns false when insufficient data (fewer than windowCount+1 points)", () => {
   const strikes = [100, 101, 102];
@@ -491,5 +491,124 @@ test("deriveRegime: uses only last windowCount points", () => {
   // First half goes down, but last 3 go up → trending_up
   const strikes = [200, 150, 100, 101, 102, 103];
   assert.equal(deriveRegime(strikes, 3), "trending_up");
+});
+
+// ---------------------------------------------------------------------------
+// buildStreakSnapshot — snapshot filter for persistence
+// ---------------------------------------------------------------------------
+
+test("buildStreakSnapshot: excludes entry with consecutiveLosses=0 and no pause (win-cleared)", () => {
+  const state = new Map<string, CoinStreakEntry>([
+    ["BTC", { consecutiveLosses: 0, pauseUntilWindowKey: null }],
+  ]);
+  const snap = buildStreakSnapshot(state);
+  assert.deepEqual(snap, {}, "win-cleared entry must NOT appear in snapshot");
+});
+
+test("buildStreakSnapshot: includes entry with consecutiveLosses > 0", () => {
+  const state = new Map<string, CoinStreakEntry>([
+    ["ETH", { consecutiveLosses: 2, pauseUntilWindowKey: null }],
+  ]);
+  const snap = buildStreakSnapshot(state);
+  assert.ok("ETH" in snap);
+  assert.equal(snap["ETH"].consecutiveLosses, 2);
+  assert.equal(snap["ETH"].pauseUntilWindowKey, null);
+});
+
+test("buildStreakSnapshot: includes entry with active pause even when consecutiveLosses=0", () => {
+  const state = new Map<string, CoinStreakEntry>([
+    ["DOGE", { consecutiveLosses: 0, pauseUntilWindowKey: "2099-01-01T00:00" }],
+  ]);
+  const snap = buildStreakSnapshot(state);
+  assert.ok("DOGE" in snap);
+  assert.equal(snap["DOGE"].pauseUntilWindowKey, "2099-01-01T00:00");
+});
+
+test("buildStreakSnapshot: mixed map — only non-trivial entries appear", () => {
+  const state = new Map<string, CoinStreakEntry>([
+    ["BTC",  { consecutiveLosses: 0, pauseUntilWindowKey: null }],
+    ["ETH",  { consecutiveLosses: 1, pauseUntilWindowKey: null }],
+    ["DOGE", { consecutiveLosses: 0, pauseUntilWindowKey: "2099-01-01T00:00" }],
+  ]);
+  const snap = buildStreakSnapshot(state);
+  assert.ok(!("BTC" in snap),  "BTC (trivial) must be excluded");
+  assert.ok("ETH" in snap,     "ETH (loss streak) must be included");
+  assert.ok("DOGE" in snap,    "DOGE (paused) must be included");
+});
+
+// ---------------------------------------------------------------------------
+// restoreStreakState — expiry logic on startup load
+// ---------------------------------------------------------------------------
+
+test("restoreStreakState: active pause (nowWindowKey <= pauseUntilWindowKey) is preserved", () => {
+  const saved: Record<string, CoinStreakEntry> = {
+    BTC: { consecutiveLosses: 3, pauseUntilWindowKey: "2026-07-03T10:15" },
+  };
+  const now = "2026-07-03T10:00"; // earlier than pause key
+  const { state, clearedSyms } = restoreStreakState(saved, now);
+  const entry = state.get("BTC");
+  assert.ok(entry, "BTC must be present after restore");
+  assert.equal(entry!.pauseUntilWindowKey, "2026-07-03T10:15", "active pause must be kept");
+  assert.equal(entry!.consecutiveLosses, 3);
+  assert.deepEqual(clearedSyms, [], "no syms should have been cleared");
+});
+
+test("restoreStreakState: pause at exact same window key as now is expired (boundary — nowKey === pauseKey)", () => {
+  // Spec: expired = pauseUntilWindowKey <= currentWindowKey.
+  // At equality the coin resumes betting this window → pause must be cleared.
+  const saved: Record<string, CoinStreakEntry> = {
+    ETH: { consecutiveLosses: 3, pauseUntilWindowKey: "2026-07-03T10:00" },
+  };
+  const now = "2026-07-03T10:00"; // equal → pause has expired
+  const { state, clearedSyms } = restoreStreakState(saved, now);
+  assert.equal(state.get("ETH")!.pauseUntilWindowKey, null, "pause at exact current window must be cleared");
+  assert.ok(clearedSyms.includes("ETH"), "ETH must appear in clearedSyms");
+});
+
+test("restoreStreakState: expired pause (nowWindowKey > pauseUntilWindowKey) is auto-cleared", () => {
+  const saved: Record<string, CoinStreakEntry> = {
+    BTC: { consecutiveLosses: 3, pauseUntilWindowKey: "2026-07-03T09:45" },
+  };
+  const now = "2026-07-03T10:00"; // later than pause key → expired
+  const { state, clearedSyms } = restoreStreakState(saved, now);
+  const entry = state.get("BTC");
+  assert.ok(entry, "BTC must still be present");
+  assert.equal(entry!.pauseUntilWindowKey, null, "expired pause must be cleared");
+  assert.ok(clearedSyms.includes("BTC"), "BTC must appear in clearedSyms");
+});
+
+test("restoreStreakState: multiple coins — active pauses kept, expired pauses cleared", () => {
+  const saved: Record<string, CoinStreakEntry> = {
+    BTC:  { consecutiveLosses: 3, pauseUntilWindowKey: "2026-07-03T10:15" }, // future → keep
+    ETH:  { consecutiveLosses: 2, pauseUntilWindowKey: "2026-07-03T09:45" }, // past   → clear
+    DOGE: { consecutiveLosses: 1, pauseUntilWindowKey: null },                // no pause
+  };
+  const now = "2026-07-03T10:00";
+  const { state, clearedSyms } = restoreStreakState(saved, now);
+  assert.equal(state.get("BTC")!.pauseUntilWindowKey,  "2026-07-03T10:15", "BTC pause must be kept");
+  assert.equal(state.get("ETH")!.pauseUntilWindowKey,  null,               "ETH pause must be cleared");
+  assert.equal(state.get("DOGE")!.pauseUntilWindowKey, null,               "DOGE has no pause");
+  assert.ok(clearedSyms.includes("ETH"),  "ETH in clearedSyms");
+  assert.ok(!clearedSyms.includes("BTC"), "BTC not in clearedSyms");
+  assert.ok(!clearedSyms.includes("DOGE"), "DOGE not in clearedSyms");
+});
+
+test("restoreStreakState: symbol keys are uppercased on restore", () => {
+  const saved: Record<string, CoinStreakEntry> = {
+    btc: { consecutiveLosses: 2, pauseUntilWindowKey: null },
+  };
+  const { state } = restoreStreakState(saved, "2026-07-03T10:00");
+  assert.ok(state.has("BTC"), "lowercase key must be uppercased");
+  assert.ok(!state.has("btc"), "original case key must not be present");
+});
+
+test("restoreStreakState: entry with no pause and no losses is restored (not filtered)", () => {
+  // restoreStreakState faithfully restores whatever was saved; filtering at persist time
+  // is buildStreakSnapshot's job — it would never save this entry in the first place.
+  const saved: Record<string, CoinStreakEntry> = {
+    SOL: { consecutiveLosses: 0, pauseUntilWindowKey: null },
+  };
+  const { state } = restoreStreakState(saved, "2026-07-03T10:00");
+  assert.ok(state.has("SOL"), "trivial entry in saved snapshot is still restored");
 });
 

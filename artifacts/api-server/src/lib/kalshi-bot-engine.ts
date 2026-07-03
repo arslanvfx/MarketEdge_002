@@ -48,6 +48,8 @@ import {
   resolveStartupMode,
   applyStartupModeRestore,
   DEFAULT_BOT_CONFIG,
+  buildStreakSnapshot,
+  restoreStreakState,
   type BetProfile,
   type BetProfileConfig,
   type DecisionMode,
@@ -57,6 +59,7 @@ import {
   type CorePairResult,
   type CircuitBreakerState,
   type PriceRegime,
+  type CoinStreakEntry,
 } from "./kalshi-bot-engine-core";
 
 // Re-export constants and types so callers only import from this file.
@@ -82,6 +85,10 @@ export {
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,
+  // Streak-state pure helpers — extracted so kalshi-bot.ts can delegate and
+  // unit tests can verify expiry logic without touching the DB.
+  buildStreakSnapshot,
+  restoreStreakState,
   type BetProfile,
   type BetProfileConfig,
   type DecisionMode,
@@ -91,6 +98,7 @@ export {
   type CorePairResult,
   type CircuitBreakerState,
   type PriceRegime,
+  type CoinStreakEntry,
 };
 
 export interface SignalSnapshot {

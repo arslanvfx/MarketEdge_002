@@ -34,11 +34,14 @@ import {
   assertSetBotModeAllowed,
   resolveStartupMode,
   applyStartupModeRestore,
+  buildStreakSnapshot,
+  restoreStreakState,
   type BotConfig,
   type BotDecision,
   type CircuitBreakerState,
   type PriceRegime,
   type DecisionMode,
+  type CoinStreakEntry,
 } from "./kalshi-bot-engine";
 import {
   makeInitialExitState,
@@ -70,6 +73,11 @@ import {
   type AutoTuneMutation,
   type SettledBetRecord,
 } from "./kalshi-bot-performance";
+import {
+  persistCoinStreakState,
+  loadCoinStreakState,
+  type StreakDbStore,
+} from "./kalshi-bot-streak-db";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -212,9 +220,30 @@ const coinDailyLoss: Map<string, number> = new Map();
 
 // Per-coin consecutive window streak state.
 //   consecutiveLosses: resets to 0 on any win.
-//   pauseUntilWindowKey: ISO "YYYY-MM-DDTHH:mm" — coin skipped until current
-//     windowKey is strictly greater than this value.  null = not paused.
-const coinStreakState: Map<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }> = new Map();
+//   pauseUntilWindowKey: ISO "YYYY-MM-DDTHH:mm" — coin resumes betting when
+//     currentWindowKey > pauseUntilWindowKey (strict).  null = not paused.
+const coinStreakState: Map<string, CoinStreakEntry> = new Map();
+
+// Drizzle-backed implementation of StreakDbStore used by the real server.
+// Tests supply an in-memory stub instead.
+const drizzleStreakStore: StreakDbStore = {
+  async upsert(snapshot) {
+    await db.execute(sql`
+      INSERT INTO bot_config (id, config, updated_at)
+      VALUES ('coin_streak_state', ${JSON.stringify(snapshot)}::jsonb, NOW())
+      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+    `);
+  },
+  async fetch() {
+    const rows = await db
+      .select()
+      .from(botConfigTable)
+      .where(eq(botConfigTable.id, "coin_streak_state"))
+      .limit(1);
+    if (rows.length === 0 || !rows[0].config) return null;
+    return rows[0].config as Record<string, CoinStreakEntry>;
+  },
+};
 
 // Per-coin slippage strike counter.
 //   strikes: consecutive fills this window that exceeded maxSlippageCents.
@@ -707,18 +736,7 @@ export async function loadCoinDailyLossFromDB(): Promise<void> {
  */
 async function persistCoinStreakStateToDB(): Promise<void> {
   try {
-    const snapshot: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }> = {};
-    for (const [sym, state] of coinStreakState.entries()) {
-      // Only persist entries that carry non-trivial state to keep the JSON small.
-      if (state.consecutiveLosses > 0 || state.pauseUntilWindowKey !== null) {
-        snapshot[sym] = { ...state };
-      }
-    }
-    await db.execute(sql`
-      INSERT INTO bot_config (id, config, updated_at)
-      VALUES ('coin_streak_state', ${JSON.stringify(snapshot)}::jsonb, NOW())
-      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-    `);
+    await persistCoinStreakState(coinStreakState, drizzleStreakStore);
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to persist coinStreakState to DB (non-fatal)");
   }
@@ -732,33 +750,23 @@ async function persistCoinStreakStateToDB(): Promise<void> {
  */
 export async function loadCoinStreakStateFromDB(): Promise<void> {
   try {
-    const rows = await db
-      .select()
-      .from(botConfigTable)
-      .where(eq(botConfigTable.id, "coin_streak_state"))
-      .limit(1);
-    if (rows.length === 0 || !rows[0].config) {
+    const nowWindowKey = currentWindowKey();
+    const { state: restored, clearedSyms } = await loadCoinStreakState(drizzleStreakStore, nowWindowKey);
+    if (restored.size === 0 && clearedSyms.length === 0) {
       logger.info("[kalshi-bot] no persisted coinStreakState found — starting fresh");
       return;
     }
-    const saved = rows[0].config as Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
-    const nowWindowKey = currentWindowKey();
     coinStreakState.clear();
-    for (const [sym, state] of Object.entries(saved)) {
-      const pauseKey = state.pauseUntilWindowKey ?? null;
-      // Auto-clear expired pauses: if the recorded pause window has already
-      // passed, restore with no pause so the coin is not blocked after restart.
-      const effectivePause = pauseKey && nowWindowKey <= pauseKey ? pauseKey : null;
-      const entry = { consecutiveLosses: state.consecutiveLosses ?? 0, pauseUntilWindowKey: effectivePause };
-      coinStreakState.set(sym.toUpperCase(), entry);
-      if (pauseKey && !effectivePause) {
+    for (const [sym, entry] of restored.entries()) {
+      coinStreakState.set(sym, entry);
+      if (clearedSyms.includes(sym)) {
         logger.info(
-          { sym, pauseKey, nowWindowKey },
+          { sym, nowWindowKey },
           "[kalshi-bot] startup: coinStreak pauseUntilWindowKey expired — cleared",
         );
-      } else if (effectivePause) {
+      } else if (entry.pauseUntilWindowKey) {
         logger.warn(
-          { sym, pauseUntilWindowKey: effectivePause, consecutiveLosses: entry.consecutiveLosses, nowWindowKey },
+          { sym, pauseUntilWindowKey: entry.pauseUntilWindowKey, consecutiveLosses: entry.consecutiveLosses, nowWindowKey },
           "[kalshi-bot] startup: restoring active coinStreak pause",
         );
       }
