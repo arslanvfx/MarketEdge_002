@@ -1,0 +1,26 @@
+1. Live account balance guard
+Before every bet, fetch your actual Kalshi balance and abort if it's below a floor (e.g. $5). Right now the bot has no idea if the account is drained — it will keep trying to place orders and they'll silently fail or error. Surfacing the live balance on the dashboard would also be useful.
+
+2. Total open-exposure cap
+The multi-position bot can hold several bets simultaneously. With 6 coins × $1 each you have $6 at risk at once — but there's no hard cap on that total. A maxTotalExposure limit (e.g. $5) would abort new entries if the sum of all open positions would exceed it.
+
+3. Pre-live checklist modal
+When switching from paper → live, show a confirmation that requires you to tick off: API keys verified, Kalshi balance fetched, maxBetSize acknowledged, dailyLossLimit set. One accidental click shouldn't move real money.
+
+High-value additions
+4. Per-coin daily loss limit
+The daily loss limit is global. If ETH has a bad day it can eat most of the budget before other coins get a chance. A per-coin cap (e.g. $3/coin/day) isolates the blast radius.
+
+5. Consecutive-window losing streak per coin
+Similar to the global circuit breaker but per symbol: if a specific coin loses 3 consecutive windows, stop betting it for the rest of the day. The global CB doesn't protect you from one coin repeatedly misfiring.
+
+6. Fill quality / slippage check
+After each live fill, compare the actual fill price to the price the bot used for its decision. If slippage is > 5¢, log a warning. Persistent high slippage is a signal the market is illiquid and the model's edge is being eaten.
+
+Nice-to-have
+7. Loss alert notification
+Send a Telegram message (or email via Resend) when daily P&L drops past a threshold — so you don't have to keep the dashboard open to know something went wrong.
+
+8. Weekend/off-hours kill switch
+Kalshi markets are thinner on weekends and at odd hours. A configurable "only bet Mon–Fri 9am–5pm ET" mode as an alternative to the simple quiet hours you have now.
+
