@@ -239,6 +239,33 @@ export function isKalshiConfigured(): boolean {
   return !!getApiKey();
 }
 
+// ---------------------------------------------------------------------------
+// Cached balance fetch (10-second TTL)
+// ---------------------------------------------------------------------------
+// getBalance() makes a live Kalshi API call.  For per-bet guards we need a
+// reasonably fresh balance without hammering the API on every tick.  10 s is
+// tight enough to catch a real drain between consecutive bets in the same window.
+
+let _balanceCache: { availableBalance: number; fetchedAt: number } | null = null;
+const BALANCE_CACHE_TTL_MS = 10_000;
+
+/** Return Kalshi available balance in dollars, cached for up to 10 seconds. */
+export async function getCachedKalshiBalance(): Promise<number> {
+  const now = Date.now();
+  if (_balanceCache && now - _balanceCache.fetchedAt < BALANCE_CACHE_TTL_MS) {
+    return _balanceCache.availableBalance;
+  }
+  const bal = await getBalance();
+  _balanceCache = { availableBalance: bal.availableBalance, fetchedAt: now };
+  return bal.availableBalance;
+}
+
+/** Invalidate the cached balance (call after a bet is placed so the next guard
+ *  sees the post-fill balance, not a stale pre-fill value). */
+export function invalidateBalanceCache(): void {
+  _balanceCache = null;
+}
+
 // Buy Yes contracts at market price.
 // Returns null on paper mode (caller handles the no-op).
 export async function buyYes(ticker: string, count: number): Promise<PlaceOrderResult> {

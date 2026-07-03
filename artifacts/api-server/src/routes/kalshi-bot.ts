@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
 import { BET_PROFILES, isLiveModePermitted, type BetProfile } from "../lib/kalshi-bot-engine";
+import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
   setBotMode,
@@ -159,6 +160,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperStartingBalance,
     paperWinReturnRate,
     paperBalanceResetAt,
+    maxBetSize,
+    minAccountBalance,
+    maxTotalExposure,
+    maxDailyLossPerCoin,
+    coinStreakLossLimit,
+    coinStreakPauseWindows,
+    maxSlippageCents,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -190,6 +198,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
+    maxBetSize?: number;
+    minAccountBalance?: number;
+    maxTotalExposure?: number;
+    maxDailyLossPerCoin?: number;
+    coinStreakLossLimit?: number;
+    coinStreakPauseWindows?: number;
+    maxSlippageCents?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -289,9 +304,31 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if ("paperBalanceResetAt" in req.body) {
     partial.paperBalanceResetAt = typeof paperBalanceResetAt === "string" ? paperBalanceResetAt : null;
   }
+  // Live-mode safety guards
+  if (typeof maxBetSize === "number" && maxBetSize >= 0.5 && maxBetSize <= 100) partial.maxBetSize = maxBetSize;
+  if (typeof minAccountBalance === "number" && minAccountBalance >= 0 && minAccountBalance <= 1000) partial.minAccountBalance = minAccountBalance;
+  if (typeof maxTotalExposure === "number" && maxTotalExposure >= 0 && maxTotalExposure <= 500) partial.maxTotalExposure = maxTotalExposure;
+  if (typeof maxDailyLossPerCoin === "number" && maxDailyLossPerCoin >= 0 && maxDailyLossPerCoin <= 100) partial.maxDailyLossPerCoin = maxDailyLossPerCoin;
+  if (typeof coinStreakLossLimit === "number" && coinStreakLossLimit >= 0 && coinStreakLossLimit <= 10) partial.coinStreakLossLimit = coinStreakLossLimit;
+  if (typeof coinStreakPauseWindows === "number" && coinStreakPauseWindows >= 1 && coinStreakPauseWindows <= 10) partial.coinStreakPauseWindows = coinStreakPauseWindows;
+  if (typeof maxSlippageCents === "number" && maxSlippageCents >= 0 && maxSlippageCents <= 50) partial.maxSlippageCents = maxSlippageCents;
 
   const { config: updated, persisted } = await updateBotConfig(partial);
   res.json({ ok: true, config: updated, persisted });
+});
+
+// GET /crypto/bot/kalshi-balance — live Kalshi account balance (used for pre-live checklist)
+router.get("/crypto/bot/kalshi-balance", async (_req, res) => {
+  try {
+    if (!isKalshiConfigured()) {
+      res.json({ balance: null, ok: false });
+      return;
+    }
+    const balance = await getCachedKalshiBalance();
+    res.json({ balance, ok: true });
+  } catch {
+    res.json({ balance: null, ok: false });
+  }
 });
 
 // GET /crypto/bot/history?limit=20 (public — read only, terminal outcomes only)

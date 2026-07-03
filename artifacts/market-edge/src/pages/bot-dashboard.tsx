@@ -48,6 +48,12 @@ interface BotConfig {
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
   maxBetSize: number;
+  minAccountBalance: number;
+  maxTotalExposure: number;
+  maxDailyLossPerCoin: number;
+  coinStreakLossLimit: number;
+  coinStreakPauseWindows: number;
+  maxSlippageCents: number;
 }
 
 interface LogicModeStats {
@@ -269,6 +275,7 @@ export default function BotDashboard() {
   const qc = useQueryClient();
   const [configOpen, setConfigOpen] = useState(true);
   const [confirmLive, setConfirmLive] = useState(false);
+  const [liveCheckboxChecked, setLiveCheckboxChecked] = useState(false);
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
@@ -285,6 +292,15 @@ export default function BotDashboard() {
     queryKey: ["bot-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/status`).then(r => r.json()),
     refetchInterval: 5_000,
+  });
+
+  // Fetched only when the user opens the pre-live checklist modal.
+  const { data: kalshiBalanceData, isLoading: balanceLoading } = useQuery<{ balance: number | null; ok: boolean }>({
+    queryKey: ["bot-kalshi-balance"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/kalshi-balance`).then(r => r.json()),
+    enabled: confirmLive,
+    staleTime: 0,
+    refetchInterval: false,
   });
 
   // ── Sync draft with backend ───────────────────────────────────────────────
@@ -540,11 +556,102 @@ export default function BotDashboard() {
               <span className="text-xs font-medium text-muted-foreground">Live</span>
             </div>
           ) : confirmLive ? (
-            <div className="flex items-center gap-1">
-              <span className="text-xs text-red-400 font-medium">Bet real money?</span>
-              <Button size="sm" variant="destructive" className="h-7 text-xs" onClick={() => setMode("live")}>Confirm Live</Button>
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setConfirmLive(false)}>Cancel</Button>
-            </div>
+            <>
+              {/* Overlay modal backdrop */}
+              <div
+                className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm flex items-center justify-center"
+                onClick={() => { setConfirmLive(false); setLiveCheckboxChecked(false); }}
+              >
+                <div
+                  className="w-96 max-w-[92vw] bg-card border border-red-500/40 rounded-2xl shadow-2xl p-6 flex flex-col gap-4"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <div className="flex items-center gap-2 text-red-400 font-bold text-base">
+                    <AlertTriangle className="w-5 h-5 shrink-0" />
+                    Switch to Live Betting
+                  </div>
+                  <p className="text-xs text-muted-foreground -mt-1">Real money will be at stake. Review the checks below before confirming.</p>
+
+                  {/* Pre-live checklist */}
+                  <div className="flex flex-col gap-2.5">
+                    <div className="flex items-center gap-2 text-xs">
+                      {status?.configured
+                        ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                        : <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                      <span className={status?.configured ? "text-emerald-400" : "text-red-400 font-medium"}>
+                        {status?.configured ? "Kalshi API key configured" : "Kalshi API key NOT configured — cannot go live"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      {kalshiBalanceData?.ok
+                        ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                        : balanceLoading
+                          ? <RefreshCw className="w-4 h-4 text-muted-foreground animate-spin shrink-0" />
+                          : <XCircle className="w-4 h-4 text-amber-400 shrink-0" />}
+                      <span className={kalshiBalanceData?.ok ? "text-foreground" : "text-muted-foreground"}>
+                        {balanceLoading
+                          ? "Fetching Kalshi balance…"
+                          : kalshiBalanceData?.ok
+                            ? `Kalshi balance: $${kalshiBalanceData.balance?.toFixed(2)}`
+                            : "Could not verify Kalshi balance (non-blocking)"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Active limits summary */}
+                  <div className="bg-background/60 border border-border rounded-lg px-4 py-3 text-xs flex flex-col gap-1.5">
+                    <div className="text-muted-foreground font-medium mb-1">Active safety limits</div>
+                    {([
+                      ["Max single bet", `$${(merged.maxBetSize ?? 2).toFixed(2)}`],
+                      ["Daily loss limit", `$${(merged.dailyLossLimit ?? 20).toFixed(2)}`],
+                      ["Total exposure cap", `$${(merged.maxTotalExposure ?? 5).toFixed(2)}`],
+                      ["Min account balance", `$${(merged.minAccountBalance ?? 5).toFixed(2)}`],
+                      ["Daily loss / coin", `$${(merged.maxDailyLossPerCoin ?? 3).toFixed(2)}`],
+                    ] as [string, string][]).map(([k, v]) => (
+                      <div key={k} className="flex justify-between">
+                        <span className="text-muted-foreground">{k}</span>
+                        <span className="text-foreground font-mono">{v}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Confirmation checkbox */}
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none text-xs">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 accent-red-500 cursor-pointer"
+                      checked={liveCheckboxChecked}
+                      onChange={e => setLiveCheckboxChecked(e.target.checked)}
+                    />
+                    <span className="text-muted-foreground leading-relaxed">
+                      I understand this will place real bets on Kalshi. I have reviewed my settings and accept the financial risk.
+                    </span>
+                  </label>
+
+                  <div className="flex gap-2 pt-1">
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="flex-1 h-8 font-semibold"
+                      disabled={!status?.configured || !liveCheckboxChecked}
+                      onClick={() => { setMode("live"); setConfirmLive(false); setLiveCheckboxChecked(false); }}
+                    >
+                      Confirm — Go Live
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8"
+                      onClick={() => { setConfirmLive(false); setLiveCheckboxChecked(false); }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              {/* Subtle indicator in header while the modal is open */}
+              <span className="text-xs text-red-400 font-medium animate-pulse">Confirming…</span>
+            </>
           ) : (
             <div className="flex items-center gap-2" title={status?.mode === "live" ? "Live — betting real money. Click to switch back to Paper." : "Paper — simulated betting. Click to go Live."}>
               <span className={`text-xs font-medium ${status?.mode === "paper" ? "text-yellow-400" : "text-muted-foreground"}`}>Paper</span>
@@ -888,6 +995,75 @@ export default function BotDashboard() {
                     onChange={e => setConfigDraft(d => ({ ...d, maxBetSize: parseFloat(e.target.value) }))} />
                   <span className="text-[10px] text-muted-foreground/60">Hard safety cap — any bet above this is blocked</span>
                 </label>
+
+                {/* ── Live Mode Guards ─────────────────────────────────── */}
+                <div className="col-span-full border-t border-amber-500/20 pt-3 -mt-1">
+                  <span className="text-xs font-semibold text-amber-400/90 flex items-center gap-1.5">
+                    <Shield className="w-3.5 h-3.5" /> Live Mode Guards
+                  </span>
+                  <p className="text-[10px] text-muted-foreground/60 mt-0.5">Active in live betting only — enforced before each trade</p>
+                </div>
+
+                {/* Min Account Balance */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Min Account Balance ($)</span>
+                  <input type="number" min={0} max={1000} step={1}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.minAccountBalance ?? 5}
+                    onChange={e => setConfigDraft(d => ({ ...d, minAccountBalance: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Abort live bet if Kalshi balance drops below this</span>
+                </label>
+
+                {/* Max Total Exposure */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max Total Exposure ($)</span>
+                  <input type="number" min={0} max={500} step={0.5}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxTotalExposure ?? 5}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxTotalExposure: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Max total $ across all open positions at once</span>
+                </label>
+
+                {/* Max Daily Loss Per Coin */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Daily Loss / Coin ($)</span>
+                  <input type="number" min={0} max={100} step={0.5}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxDailyLossPerCoin ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxDailyLossPerCoin: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Per-coin daily loss cap (0 = disabled)</span>
+                </label>
+
+                {/* Streak Loss Limit */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Streak Loss Limit (windows)</span>
+                  <input type="number" min={0} max={10} step={1}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.coinStreakLossLimit ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, coinStreakLossLimit: parseInt(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Consecutive losses before this coin pauses (0 = off)</span>
+                </label>
+
+                {/* Streak Pause Windows */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Streak Pause (windows)</span>
+                  <input type="number" min={1} max={10} step={1}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.coinStreakPauseWindows ?? 2}
+                    onChange={e => setConfigDraft(d => ({ ...d, coinStreakPauseWindows: parseInt(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">How many windows to skip after the streak limit fires</span>
+                </label>
+
+                {/* Max Slippage Cents */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max Slippage (¢)</span>
+                  <input type="number" min={0} max={50} step={1}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxSlippageCents ?? 5}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxSlippageCents: parseInt(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Fill vs expected price warning threshold (0 = off)</span>
+                </label>
+                {/* ──────────────────────────────────────────────────────── */}
 
                 {/* Daily Loss Limit */}
                 <label className="flex flex-col gap-1.5">

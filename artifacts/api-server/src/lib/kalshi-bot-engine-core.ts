@@ -484,6 +484,37 @@ export interface BotConfig {
   // order to Kalshi.  The default is intentionally conservative ($2) and should
   // be raised only after deliberate review.  Applies in both paper and live mode.
   maxBetSize: number;            // (default 2.00)
+
+  // ── Live-mode safety guards ─────────────────────────────────────────────
+  // These guards are checked before every live bet entry.
+
+  // Minimum Kalshi available balance required to place any live bet.  If the
+  // real account balance drops below this the trade is aborted and logged as an
+  // error.  Prevents the bot from betting on a nearly-empty account.
+  minAccountBalance: number;     // $ (default 5.00)
+
+  // Maximum simultaneous open-position dollar exposure.  The bot will not open
+  // a new position if (sum of all open betAmounts + newBetAmount) would exceed
+  // this cap.  Guards against many concurrent positions draining the account.
+  maxTotalExposure: number;      // $ (default 5.00)
+
+  // Per-coin daily loss cap.  If a coin's cumulative settled losses for the
+  // current UTC day (in the current mode) reach or exceed this, that coin is
+  // skipped for the rest of the day regardless of model signals.
+  maxDailyLossPerCoin: number;   // $ (default 3.00)
+
+  // Number of consecutive windows a coin must lose before it is briefly paused.
+  // Set to 0 to disable this guard entirely.
+  coinStreakLossLimit: number;   // (default 3)
+
+  // How many additional 15-min windows a coin is paused after hitting the streak
+  // loss limit.  The coin resumes when the pause window key expires.
+  coinStreakPauseWindows: number; // (default 2)
+
+  // Slippage guard: if a live fill price differs from the expected yes-price by
+  // more than this many cents, it is logged as a strike.  Three strikes within
+  // the same window will skip that coin for one window.  Set to 0 to disable.
+  maxSlippageCents: number;      // ¢ (default 5)
 }
 
 // ---------------------------------------------------------------------------
@@ -597,4 +628,12 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Safety cap: hard-abort any bet whose computed dollar cost exceeds this.
   // Conservative default; raise deliberately when going live.
   maxBetSize: 2.00,
+
+  // Live-mode safety guards — conservative defaults for first live sessions.
+  minAccountBalance: 5.00,
+  maxTotalExposure: 5.00,
+  maxDailyLossPerCoin: 3.00,
+  coinStreakLossLimit: 3,
+  coinStreakPauseWindows: 2,
+  maxSlippageCents: 5,
 };

@@ -36,7 +36,7 @@ import {
   type ExitState,
   type GuardStates,
 } from "./kalshi-bot-exit";
-import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry } from "./kalshi-trader";
+import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry, getCachedKalshiBalance, invalidateBalanceCache } from "./kalshi-trader";
 import {
   getKalshiWindowContext,
   getTimingAnalysis,
@@ -193,6 +193,22 @@ const windowDirectionCounts: Map<"yes" | "no", number> = new Map();
 // Decremented on each window transition; deleted when it reaches 0.
 const pausedCoins: Map<string, number> = new Map();
 
+// Per-coin daily loss accumulator (absolute $ loss, current UTC day + mode).
+// Reset at midnight via resetDailyIfNeeded(); loaded from DB at startup.
+const coinDailyLoss: Map<string, number> = new Map();
+
+// Per-coin consecutive window streak state.
+//   consecutiveLosses: resets to 0 on any win.
+//   pauseUntilWindowKey: ISO "YYYY-MM-DDTHH:mm" — coin skipped until current
+//     windowKey is strictly greater than this value.  null = not paused.
+const coinStreakState: Map<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }> = new Map();
+
+// Per-coin slippage strike counter.
+//   strikes: consecutive fills this window that exceeded maxSlippageCents.
+//   windowKey: the 15-min window in which the strikes were recorded.
+// Clears automatically when a new window is detected for that coin.
+const coinSlippageStrikes: Map<string, { strikes: number; windowKey: string }> = new Map();
+
 // Per-window outcome tracking for the doubt-penalty signal.
 // Key: windowKey (ISO string "YYYY-MM-DDTHH:mm"), Value: { wins, losses }.
 // Populated at startup from DB and updated live as bets settle in evalClosedBets.
@@ -300,6 +316,8 @@ function resetDailyIfNeeded(): void {
     dailyDate = today;
     dailyPnl = 0;
     dailyLossCount = 0;
+    // Reset per-coin daily loss totals at UTC midnight.
+    coinDailyLoss.clear();
   }
 }
 
@@ -386,6 +404,7 @@ export function setBotMode(mode: BotMode): void {
   // daily loss limit and circuit breaker reflect only this mode's bets.
   // Fire-and-forget; the counters will be correct on the next bot tick.
   loadDailyPnlFromDB().catch(() => {});
+  loadCoinDailyLossFromDB().catch(() => {});
 }
 
 async function _persistModeToConfig(): Promise<void> {
@@ -617,6 +636,46 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     logger.info({ dailyPnl, dailyLossCount, date: today, cbState }, "[kalshi-bot] daily P&L loaded from DB");
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load daily P&L from DB (non-fatal)");
+  }
+}
+
+/**
+ * Reconstruct per-coin daily loss totals from today's settled bet rows.
+ * Called at startup and after a mode change (same timing as loadDailyPnlFromDB).
+ */
+export async function loadCoinDailyLossFromDB(): Promise<void> {
+  try {
+    const today = todayUTC();
+    const rows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        pnl: kalshiBotBetsTable.pnl,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNotNull(kalshiBotBetsTable.exitedAt),
+          isNull(kalshiBotBetsTable.archivedAt),
+          eq(kalshiBotBetsTable.mode, botMode),
+          sql`DATE(${kalshiBotBetsTable.exitedAt} AT TIME ZONE 'UTC') = ${today}`,
+          sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
+        ),
+      );
+
+    coinDailyLoss.clear();
+    for (const r of rows) {
+      const sym = (r.symbol ?? "").toUpperCase();
+      const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
+      if (sym && p < 0) {
+        coinDailyLoss.set(sym, (coinDailyLoss.get(sym) ?? 0) + Math.abs(p));
+      }
+    }
+    logger.info(
+      { coinDailyLoss: Object.fromEntries(coinDailyLoss) },
+      "[kalshi-bot] per-coin daily loss loaded from DB",
+    );
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to load per-coin daily loss from DB (non-fatal)");
   }
 }
 
@@ -1218,6 +1277,31 @@ async function _runBotTick(
     return;
   }
 
+  // ── Per-coin streak pause ─────────────────────────────────────────────────
+  // If a coin lost N consecutive windows it is paused for M windows.  The pause
+  // key is an ISO windowKey string — skip while the current window ≤ pause key.
+  const streakInfo = coinStreakState.get(sym);
+  if (streakInfo?.pauseUntilWindowKey && windowKey <= streakInfo.pauseUntilWindowKey) {
+    logger.info(
+      { sym, pauseUntilWindowKey: streakInfo.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo.consecutiveLosses },
+      "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
+    );
+    return;
+  }
+
+  // ── Per-coin daily loss cap ───────────────────────────────────────────────
+  // Skip for the rest of the UTC day when this coin's losses reach the cap.
+  const coinLossToday = coinDailyLoss.get(sym) ?? 0;
+  const maxCoinLoss = config.maxDailyLossPerCoin ?? 3;
+  if (maxCoinLoss > 0 && coinLossToday >= maxCoinLoss) {
+    logger.info(
+      { sym, coinLossToday: coinLossToday.toFixed(4), maxDailyLossPerCoin: maxCoinLoss },
+      "[kalshi-bot] SKIP — coin has reached its daily loss cap",
+    );
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   // Place the bet
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
   // Cost per contract: YES contracts cost yesPrice per $1 face; NO contracts cost (1-yesPrice)
@@ -1249,6 +1333,47 @@ async function _runBotTick(
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // ── LIVE-ONLY GUARDS: slippage strikes, account balance, total exposure ───
+  if (botMode === "live") {
+    // Slippage: skip if this coin accumulated ≥3 unfair fills this window.
+    const slipInfo = coinSlippageStrikes.get(sym);
+    if (slipInfo && slipInfo.windowKey === windowKey && slipInfo.strikes >= 3) {
+      logger.warn(
+        { sym, strikes: slipInfo.strikes, windowKey },
+        "[kalshi-bot] SKIP — coin has ≥3 slippage strikes this window",
+      );
+      return;
+    }
+
+    // Account balance guard: abort if Kalshi available balance is below the floor.
+    const minBal = config.minAccountBalance ?? 5;
+    try {
+      const liveBal = await getCachedKalshiBalance();
+      if (liveBal < minBal) {
+        logger.error(
+          { sym, liveBal: liveBal.toFixed(2), minAccountBalance: minBal },
+          "[kalshi-bot] SAFETY ABORT — Kalshi account balance below minimum; trade cancelled",
+        );
+        return;
+      }
+    } catch (err) {
+      logger.error({ err, sym }, "[kalshi-bot] SAFETY ABORT — could not fetch Kalshi balance before trade; trade cancelled");
+      return;
+    }
+
+    // Total open exposure cap: sum of all open positions + this bet must not exceed the cap.
+    const maxExposure = config.maxTotalExposure ?? 5;
+    const openExposure = Array.from(openPositions.values()).reduce((s, p) => s + p.betAmount, 0);
+    if (openExposure + betAmount > maxExposure + 0.01) {
+      logger.error(
+        { sym, openExposure: openExposure.toFixed(4), betAmount: betAmount.toFixed(4), maxTotalExposure: maxExposure },
+        "[kalshi-bot] SAFETY ABORT — total open exposure would exceed cap; trade cancelled",
+      );
+      return;
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   logger.info({ sym, direction, decision: decision.action, confidence: decision.confidence }, "[kalshi-bot] placing bet");
 
   let fillPrice = yesPrice; // paper fill
@@ -1275,6 +1400,38 @@ async function _runBotTick(
       }
       fillPrice = result.avgPrice ?? yesPrice;
       orderId = result.orderId;
+
+      // Slippage guard: compare actual fill price to the expected yes-price used
+      // in the decision.  Log a warning and increment the per-coin strike counter
+      // when the deviation exceeds the configured threshold.
+      const maxSlipCents = config.maxSlippageCents ?? 5;
+      if (maxSlipCents > 0 && result.avgPrice != null && yesPrice != null) {
+        const slippageCents = Math.abs(result.avgPrice - yesPrice) * 100;
+        if (slippageCents > maxSlipCents) {
+          logger.warn(
+            {
+              sym,
+              expectedYesPrice: yesPrice.toFixed(4),
+              fillPrice: result.avgPrice.toFixed(4),
+              slippageCents: slippageCents.toFixed(1),
+              maxSlippageCents: maxSlipCents,
+            },
+            "[kalshi-bot] SLIPPAGE WARNING — fill price deviated from expected price",
+          );
+          const existing = coinSlippageStrikes.get(sym);
+          if (existing?.windowKey === windowKey) {
+            coinSlippageStrikes.set(sym, { strikes: existing.strikes + 1, windowKey });
+          } else {
+            coinSlippageStrikes.set(sym, { strikes: 1, windowKey });
+          }
+          const strikes = coinSlippageStrikes.get(sym)!.strikes;
+          if (strikes >= 3) {
+            logger.warn({ sym, strikes }, "[kalshi-bot] slippage strikes reached — this coin will skip the next window entry");
+          }
+        }
+      }
+      // Invalidate the cached balance so the next entry guard fetches a fresh value.
+      invalidateBalanceCache();
     } catch (err) {
       logger.error({ err, sym }, "[kalshi-bot] order placement failed");
       return;
@@ -1449,6 +1606,40 @@ async function closePosition(
       "[kalshi-bot] closePosition: skipping risk-counter update — position entry mode differs from current bot mode",
     );
   }
+
+  // ── Per-coin daily loss accumulator ────────────────────────────────────────
+  // Only count losses that belong to the current mode so paper losses don't
+  // pollute the live daily coin cap and vice versa.
+  if (pnl < 0 && pos.entryMode === botMode) {
+    const prev = coinDailyLoss.get(pos.symbol) ?? 0;
+    coinDailyLoss.set(pos.symbol, prev + Math.abs(pnl));
+  }
+
+  // ── Per-coin consecutive window streak tracking ────────────────────────────
+  // Increment on loss; reset on win.  Trigger a pause when the loss limit is hit.
+  {
+    const existing = coinStreakState.get(pos.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
+    if (pnl < 0) {
+      existing.consecutiveLosses++;
+      const limit = config.coinStreakLossLimit ?? 3;
+      const pauseWindows = config.coinStreakPauseWindows ?? 2;
+      if (limit > 0 && existing.consecutiveLosses >= limit && !existing.pauseUntilWindowKey) {
+        const pauseMs = pauseWindows * 15 * 60_000;
+        const pauseUntil = new Date(Date.now() + pauseMs).toISOString().slice(0, 16);
+        existing.pauseUntilWindowKey = pauseUntil;
+        logger.warn(
+          { sym: pos.symbol, consecutiveLosses: existing.consecutiveLosses, pauseUntilWindowKey: pauseUntil, pauseWindows },
+          "[kalshi-bot] per-coin streak pause triggered — coin skipped for N windows",
+        );
+      }
+    } else {
+      // Any win fully resets streak and clears any pending pause.
+      existing.consecutiveLosses = 0;
+      existing.pauseUntilWindowKey = null;
+    }
+    coinStreakState.set(pos.symbol, existing);
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
 
   // Recover account balance. Use the position's entry mode so a live position
   // closed after the user switched to paper still refreshes the real balance.
