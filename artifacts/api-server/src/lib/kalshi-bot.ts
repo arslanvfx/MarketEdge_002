@@ -687,6 +687,78 @@ export async function loadCoinDailyLossFromDB(): Promise<void> {
 }
 
 /**
+ * Persist the current coinStreakState to bot_config (id="coin_streak_state").
+ * Called fire-and-forget after every closePosition() that updates the Map so
+ * the guard survives server restarts without touching the main config row.
+ */
+async function persistCoinStreakStateToDB(): Promise<void> {
+  try {
+    const snapshot: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }> = {};
+    for (const [sym, state] of coinStreakState.entries()) {
+      // Only persist entries that carry non-trivial state to keep the JSON small.
+      if (state.consecutiveLosses > 0 || state.pauseUntilWindowKey !== null) {
+        snapshot[sym] = { ...state };
+      }
+    }
+    await db.execute(sql`
+      INSERT INTO bot_config (id, config, updated_at)
+      VALUES ('coin_streak_state', ${JSON.stringify(snapshot)}::jsonb, NOW())
+      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+    `);
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to persist coinStreakState to DB (non-fatal)");
+  }
+}
+
+/**
+ * Restore coinStreakState from DB on startup.
+ * Auto-clears any pauseUntilWindowKey that has already expired by comparing it
+ * to the current window key — so a pause set before a restart never blocks a
+ * coin after the pause window has passed.
+ */
+export async function loadCoinStreakStateFromDB(): Promise<void> {
+  try {
+    const rows = await db
+      .select()
+      .from(botConfigTable)
+      .where(eq(botConfigTable.id, "coin_streak_state"))
+      .limit(1);
+    if (rows.length === 0 || !rows[0].config) {
+      logger.info("[kalshi-bot] no persisted coinStreakState found — starting fresh");
+      return;
+    }
+    const saved = rows[0].config as Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
+    const nowWindowKey = currentWindowKey();
+    coinStreakState.clear();
+    for (const [sym, state] of Object.entries(saved)) {
+      const pauseKey = state.pauseUntilWindowKey ?? null;
+      // Auto-clear expired pauses: if the recorded pause window has already
+      // passed, restore with no pause so the coin is not blocked after restart.
+      const effectivePause = pauseKey && nowWindowKey <= pauseKey ? pauseKey : null;
+      const entry = { consecutiveLosses: state.consecutiveLosses ?? 0, pauseUntilWindowKey: effectivePause };
+      coinStreakState.set(sym.toUpperCase(), entry);
+      if (pauseKey && !effectivePause) {
+        logger.info(
+          { sym, pauseKey, nowWindowKey },
+          "[kalshi-bot] startup: coinStreak pauseUntilWindowKey expired — cleared",
+        );
+      } else if (effectivePause) {
+        logger.warn(
+          { sym, pauseUntilWindowKey: effectivePause, consecutiveLosses: entry.consecutiveLosses, nowWindowKey },
+          "[kalshi-bot] startup: restoring active coinStreak pause",
+        );
+      }
+    }
+    logger.info(
+      { coinStreakState: Object.fromEntries(coinStreakState) },
+      "[kalshi-bot] coinStreakState loaded from DB",
+    );
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to load coinStreakState from DB (non-fatal)");
+  }
+}
+
+/**
  * Compute and restore the paper-mode account balance from the DB.
  *
  * Balance = paperStartingBalance (from config) + sum of all paper-mode bet PnL
@@ -1669,6 +1741,8 @@ async function closePosition(
       existing.pauseUntilWindowKey = null;
     }
     coinStreakState.set(pos.symbol, existing);
+    // Fire-and-forget — persist so the streak guard survives a server restart.
+    persistCoinStreakStateToDB().catch(() => {});
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
