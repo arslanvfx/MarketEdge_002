@@ -36,3 +36,4 @@
 - [ML features v4](ml-features-v4.md) — N_FEATURES 17→19; feature 17=volumeDirectionBias (net bullish/bearish volume last 8 candles); feature 18=candleReversalSignal (-1/0/+1 for shooting star, engulfing, hammer patterns)
 - [predCache must be warm for ML](predcache-ml-fix.md) — getCachedPrediction() reads predCache; only populated by fetchCryptoPredictions (frontend endpoint); fix: tracker snap loop must also call predCache.set() after analyzeCoin
 - [Position-relative NO gate](no-gate-above-strike.md) — when live price > kalshiStrike × 1.001, NO bets need ML confirm (mlAbove===false) OR ≥3 signals; 7/7 historical losses without this gate
+- [ML Gate reference config](ml-gate-reference-config.md) — canonical restore point for ml_gate mode: all engine constants, bot config values, and veto logic; use this whenever switching decisionMode to ml_gate
