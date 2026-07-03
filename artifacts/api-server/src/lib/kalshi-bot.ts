@@ -400,19 +400,6 @@ export async function loadBotConfigFromDB(): Promise<void> {
         logger.info({ mode: botMode }, "[kalshi-bot] mode restored from DB");
       }
       logger.info({ config }, "[kalshi-bot] config loaded from DB");
-
-      // One-time startup migration (2026-07-03): ml_gate → classic.
-      // ml_gate mode pins every bet at 65% effective confidence because ML only vetos,
-      // never boosts. Classic mode (PATH A/B/C) lets ML conviction differentiate
-      // signal quality — strong ML agreement can push effective confidence to 80%+.
-      // Production data: 223 bets, all entered at exactly 65%. Zero differentiation.
-      if (config.decisionMode === "ml_gate") {
-        config.decisionMode = "classic";
-        logger.info("[kalshi-bot] startup migration: decisionMode ml_gate → classic (Task-A)");
-        updateBotConfig({ decisionMode: "classic" }).catch(err =>
-          logger.warn({ err }, "[kalshi-bot] startup migration persist failed (non-fatal)")
-        );
-      }
     } else {
       logger.info("[kalshi-bot] no saved config in DB — using defaults");
     }
