@@ -96,6 +96,7 @@ interface BotStatus {
   isInQuietHours: boolean;
   dbDegraded?: boolean;
   dbDegradedSince?: string | null;
+  isProductionEnv?: boolean;
   mlStatus?: {
     ready: boolean; readyCount: number; totalCount: number;
     minWindows: number; minRequired: number;
@@ -498,8 +499,21 @@ export default function BotDashboard() {
             {status?.paused ? <><Play className="w-3 h-3" />Resume</> : <><Pause className="w-3 h-3" />Pause</>}
           </Button>
           {/* Paper ⇄ Live mode toggle. Switching to Paper is immediate and stops
-              all real-money betting. Switching to Live requires confirmation. */}
-          {confirmLive ? (
+              all real-money betting. Switching to Live requires confirmation.
+              The toggle is locked to Paper in non-production environments — live
+              betting is only permitted in the production deployment. */}
+          {!status?.isProductionEnv ? (
+            <div
+              className="flex items-center gap-2 opacity-50 cursor-not-allowed select-none"
+              title="Live betting is only available in the production deployment."
+            >
+              <span className="text-xs font-medium text-yellow-400">Paper</span>
+              <div className="relative w-11 h-6 rounded-full bg-muted">
+                <span className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full" />
+              </div>
+              <span className="text-xs font-medium text-muted-foreground">Live</span>
+            </div>
+          ) : confirmLive ? (
             <div className="flex items-center gap-1">
               <span className="text-xs text-red-400 font-medium">Bet real money?</span>
               <Button size="sm" variant="destructive" className="h-7 text-xs" onClick={() => setMode("live")}>Confirm Live</Button>

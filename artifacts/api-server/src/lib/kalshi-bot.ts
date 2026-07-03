@@ -118,6 +118,9 @@ export interface BotStateSnapshot {
   // True when DB writes have been failing and new bets are suppressed.
   dbDegraded: boolean;
   dbDegradedSince: string | null; // ISO timestamp when degraded mode began
+  // True only in a Replit production deployment (NODE_ENV === "production").
+  // Live betting is structurally blocked in all other environments.
+  isProductionEnv: boolean;
 }
 
 // Per-coin evaluation result from the best-market selection pass.
@@ -363,10 +366,14 @@ export function getBotState(): BotStateSnapshot {
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd),
     dbDegraded: dbDegradedSince !== null,
     dbDegradedSince: dbDegradedSince?.toISOString() ?? null,
+    isProductionEnv: process.env.NODE_ENV === "production",
   };
 }
 
 export function setBotMode(mode: BotMode): void {
+  if (mode === "live" && process.env.NODE_ENV !== "production") {
+    throw new Error("Live betting is only available in the production deployment.");
+  }
   if (mode === "live" && !isKalshiConfigured()) {
     throw new Error("KALSHI_API_KEY not configured — cannot enable live mode");
   }
@@ -429,7 +436,16 @@ export async function loadBotConfigFromDB(): Promise<void> {
       const saved = rows[0].config as Partial<BotConfig> & { mode?: BotMode };
       config = { ...DEFAULT_BOT_CONFIG, ...saved };
       if (saved.mode === "paper" || saved.mode === "live") {
-        botMode = saved.mode;
+        if (saved.mode === "live" && process.env.NODE_ENV !== "production") {
+          // Safety net: never allow a "live" mode to persist into a non-production
+          // environment even if the DB was written in prod and the DB is shared.
+          botMode = "paper";
+          logger.warn("[kalshi-bot] DB had mode=live but this is a non-production environment — forcing paper mode");
+          // Rewrite the DB value so the next restart is also clean.
+          _persistModeToConfig().catch(() => {});
+        } else {
+          botMode = saved.mode;
+        }
         logger.info({ mode: botMode }, "[kalshi-bot] mode restored from DB");
       }
       logger.info({ config }, "[kalshi-bot] config loaded from DB");

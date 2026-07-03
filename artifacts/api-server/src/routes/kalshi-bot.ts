@@ -100,6 +100,12 @@ router.post("/crypto/bot/mode", requireAuth, (req, res) => {
     res.status(400).json({ error: "mode must be 'paper' or 'live'" });
     return;
   }
+  // Guard live-mode requests in non-production before calling setBotMode so the
+  // caller gets a 403 (forbidden here) rather than a generic 400 (bad input).
+  if (mode === "live" && process.env.NODE_ENV !== "production") {
+    res.status(403).json({ error: "Live betting is only available in the production deployment." });
+    return;
+  }
   try {
     setBotMode(mode as BotMode);
     res.json({ ok: true, ...getBotState() });
