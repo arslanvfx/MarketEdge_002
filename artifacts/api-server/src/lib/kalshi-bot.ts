@@ -12,6 +12,16 @@ import { isAiFeatureEnabled } from "./ai-spend";
 import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import {
+  checkMaxBetSizeGuard,
+  checkDailyLossGuard,
+  checkStreakPauseGuard,
+  checkSlippageStrikeGuard,
+  checkBalanceGuard,
+  checkExposureGuard,
+  applyDailyLossUpdate,
+  applyStreakUpdate,
+} from "./kalshi-bot-guards";
+import {
   DEFAULT_BOT_CONFIG,
   BET_PROFILES,
   makeBotDecision,
@@ -1362,25 +1372,24 @@ async function _runBotTick(
   // When the pause expires, clear pauseUntilWindowKey so a future losing streak
   // can re-arm a new pause without requiring a win to reset the field first.
   const streakInfo = coinStreakState.get(sym);
-  if (streakInfo?.pauseUntilWindowKey) {
-    if (windowKey <= streakInfo.pauseUntilWindowKey) {
-      logger.info(
-        { sym, pauseUntilWindowKey: streakInfo.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo.consecutiveLosses },
-        "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
-      );
-      return;
-    } else {
-      // Pause has expired — clear it so subsequent streaks can trigger new pauses.
-      streakInfo.pauseUntilWindowKey = null;
-      coinStreakState.set(sym, streakInfo);
-    }
+  const streakPause = checkStreakPauseGuard(streakInfo?.pauseUntilWindowKey ?? null, windowKey);
+  if (streakPause.blocked) {
+    logger.info(
+      { sym, pauseUntilWindowKey: streakInfo!.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo!.consecutiveLosses },
+      "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
+    );
+    return;
+  } else if (streakPause.expired && streakInfo) {
+    // Pause has expired — clear it so subsequent streaks can trigger new pauses.
+    streakInfo.pauseUntilWindowKey = null;
+    coinStreakState.set(sym, streakInfo);
   }
 
   // ── Per-coin daily loss cap ───────────────────────────────────────────────
   // Skip for the rest of the UTC day when this coin's losses reach the cap.
   const coinLossToday = coinDailyLoss.get(sym) ?? 0;
   const maxCoinLoss = config.maxDailyLossPerCoin ?? 3;
-  if (maxCoinLoss > 0 && coinLossToday >= maxCoinLoss) {
+  if (checkDailyLossGuard(coinLossToday, maxCoinLoss)) {
     logger.info(
       { sym, coinLossToday: coinLossToday.toFixed(4), maxDailyLossPerCoin: maxCoinLoss },
       "[kalshi-bot] SKIP — coin has reached its daily loss cap",
@@ -1402,7 +1411,7 @@ async function _runBotTick(
   // betSize values, unexpected rounding, or any future code change that could
   // inflate contractCount.  A tolerance of $0.01 covers floating-point dust.
   const maxBetCap = config.maxBetSize ?? 2;
-  if (betAmount > maxBetCap + 0.01) {
+  if (checkMaxBetSizeGuard(betAmount, maxBetCap)) {
     logger.error(
       {
         sym,
@@ -1426,9 +1435,9 @@ async function _runBotTick(
     // Strikes accumulated in window W → entry skipped in window W+1, then cleared.
     // (Strikes in the same window don't block entry — the bet already went through.)
     const slipInfo = coinSlippageStrikes.get(sym);
-    if (slipInfo && slipInfo.strikes >= 3 && slipInfo.windowKey < windowKey) {
+    if (checkSlippageStrikeGuard(slipInfo, windowKey)) {
       logger.warn(
-        { sym, strikes: slipInfo.strikes, strikeWindowKey: slipInfo.windowKey, windowKey },
+        { sym, strikes: slipInfo!.strikes, strikeWindowKey: slipInfo!.windowKey, windowKey },
         "[kalshi-bot] SKIP — coin had ≥3 slippage strikes in the previous window; clearing counter",
       );
       coinSlippageStrikes.delete(sym); // one-window penalty only — clear so W+2 is unaffected
@@ -1440,7 +1449,7 @@ async function _runBotTick(
     try {
       const liveBal = await getCachedKalshiBalance();
       accountBalance = liveBal; // keep bot state fresh for the dashboard badge
-      if (liveBal < minBal) {
+      if (checkBalanceGuard(liveBal, minBal)) {
         logger.error(
           { sym, liveBal: liveBal.toFixed(2), minAccountBalance: minBal },
           "[kalshi-bot] SAFETY ABORT — Kalshi account balance below minimum; trade cancelled",
@@ -1455,7 +1464,7 @@ async function _runBotTick(
     // Total open exposure cap: sum of all open positions + this bet must not exceed the cap.
     const maxExposure = config.maxTotalExposure ?? 5;
     const openExposure = Array.from(openPositions.values()).reduce((s, p) => s + p.betAmount, 0);
-    if (openExposure + betAmount > maxExposure + 0.01) {
+    if (checkExposureGuard(openExposure, betAmount, maxExposure)) {
       logger.error(
         { sym, openExposure: openExposure.toFixed(4), betAmount: betAmount.toFixed(4), maxTotalExposure: maxExposure },
         "[kalshi-bot] SAFETY ABORT — total open exposure would exceed cap; trade cancelled",
@@ -1709,38 +1718,30 @@ async function closePosition(
   // ── Per-coin daily loss accumulator ────────────────────────────────────────
   // Only count losses that belong to the current mode so paper losses don't
   // pollute the live daily coin cap and vice versa.
-  if (pnl < 0 && pos.entryMode === botMode) {
-    const prev = coinDailyLoss.get(pos.symbol) ?? 0;
-    coinDailyLoss.set(pos.symbol, prev + Math.abs(pnl));
-  }
+  coinDailyLoss.set(
+    pos.symbol,
+    applyDailyLossUpdate(coinDailyLoss, pos.symbol, pnl, pos.entryMode, botMode).get(pos.symbol) ??
+      (coinDailyLoss.get(pos.symbol) ?? 0),
+  );
 
   // ── Per-coin consecutive window streak tracking ────────────────────────────
   // Increment on loss; reset on win.  Trigger a pause when the loss limit is hit.
   {
     const existing = coinStreakState.get(pos.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
-    if (pnl < 0) {
-      existing.consecutiveLosses++;
-      const limit = config.coinStreakLossLimit ?? 3;
-      const pauseWindows = config.coinStreakPauseWindows ?? 2;
-      // Re-arm a new pause whenever the loss count reaches the limit, even if a
-      // previous pause has already expired (pauseUntilWindowKey cleared on expiry).
-      if (limit > 0 && existing.consecutiveLosses >= limit && !existing.pauseUntilWindowKey) {
-        const pauseMs = pauseWindows * 15 * 60_000;
-        const pauseUntil = new Date(Date.now() + pauseMs).toISOString().slice(0, 16);
-        existing.pauseUntilWindowKey = pauseUntil;
-        // Reset the counter so the NEXT N-loss streak triggers another pause.
-        existing.consecutiveLosses = 0;
-        logger.warn(
-          { sym: pos.symbol, pauseUntilWindowKey: pauseUntil, pauseWindows },
-          "[kalshi-bot] per-coin streak pause triggered — coin skipped for N windows",
-        );
-      }
-    } else {
-      // Any win fully resets streak and clears any pending pause.
-      existing.consecutiveLosses = 0;
-      existing.pauseUntilWindowKey = null;
+    const updated = applyStreakUpdate(
+      existing,
+      pnl,
+      config.coinStreakLossLimit ?? 3,
+      config.coinStreakPauseWindows ?? 2,
+      Date.now(),
+    );
+    if (updated.pauseUntilWindowKey && !existing.pauseUntilWindowKey) {
+      logger.warn(
+        { sym: pos.symbol, pauseUntilWindowKey: updated.pauseUntilWindowKey, pauseWindows: config.coinStreakPauseWindows ?? 2 },
+        "[kalshi-bot] per-coin streak pause triggered — coin skipped for N windows",
+      );
     }
-    coinStreakState.set(pos.symbol, existing);
+    coinStreakState.set(pos.symbol, updated);
     // Fire-and-forget — persist so the streak guard survives a server restart.
     persistCoinStreakStateToDB().catch(() => {});
   }
