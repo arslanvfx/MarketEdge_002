@@ -21,6 +21,7 @@ import {
   checkSlippageStrikeGuard,
   checkBalanceGuard,
   checkExposureGuard,
+  checkWindowMonitorReadyGuard,
   applyDailyLossUpdate,
   applyStreakUpdate,
   type CoinStreakState,
@@ -442,5 +443,37 @@ test("streak/wiring: kalshi-bot.ts closePosition calls applyStreakUpdate", () =>
   assert.ok(
     src.includes("config.coinStreakPauseWindows ?? 2"),
     "applyStreakUpdate call must pass coinStreakPauseWindows",
+  );
+});
+
+// ===========================================================================
+// Guard 7 — Window Monitor readiness gate
+// ===========================================================================
+
+test("wmReady: monitor ready, gate enabled → not blocked", () => {
+  assert.equal(checkWindowMonitorReadyGuard(true, true), false);
+});
+
+test("wmReady: monitor not ready, gate enabled → blocked (defer tick)", () => {
+  assert.equal(checkWindowMonitorReadyGuard(false, true), true);
+});
+
+test("wmReady: monitor not ready, gate disabled → not blocked", () => {
+  assert.equal(checkWindowMonitorReadyGuard(false, false), false);
+});
+
+test("wmReady: monitor ready, gate disabled → not blocked", () => {
+  assert.equal(checkWindowMonitorReadyGuard(true, false), false);
+});
+
+test("wmReady/wiring: kalshi-bot.ts imports and calls checkWindowMonitorReadyGuard", () => {
+  const src = readSrc("kalshi-bot.ts");
+  assert.ok(
+    src.includes("checkWindowMonitorReadyGuard"),
+    "kalshi-bot.ts must import checkWindowMonitorReadyGuard from kalshi-bot-guards",
+  );
+  assert.ok(
+    src.includes("config.requireMonitorReady"),
+    "kalshi-bot.ts Phase-3 loop must pass config.requireMonitorReady to the gate",
   );
 });

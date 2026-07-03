@@ -40,4 +40,4 @@
 - [ML Gate reference config](ml-gate-reference-config.md) — canonical restore point for ml_gate mode: all engine constants, bot config values, and veto logic; use this whenever switching decisionMode to ml_gate
 - [User context default](user-context-default.md) — user always references production unless explicitly stated otherwise; always query production DB and check production logs first
 - [Per-coin direction filters](per-coin-direction-filters.md) — COIN_YES_BLOCKED={BTC,ETH,DOGE} (≤25% YES WR); COIN_FULLY_BLOCKED={SOL} (no edge either direction); startup migration ml_gate→classic on loadBotConfigFromDB
-- [Bot signal enrichment](bot-signal-enrichment.md) — enrichedSignals includes regime+trendStability+windowDoubtPenalty since 2026-07-03; config snapshot at .local/config-snapshots/pre-task-abc-2026-07-03.json
+- [Learning improvements defaults](learning-improvements-defaults.md) — 4 guard default changes from production data; wmReady gate defers NOT blocks

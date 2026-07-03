@@ -515,6 +515,14 @@ export interface BotConfig {
   // more than this many cents, it is logged as a strike.  Three strikes within
   // the same window will skip that coin for one window.  Set to 0 to disable.
   maxSlippageCents: number;      // ¢ (default 5)
+
+  // Window Monitor readiness gate: when true, the bot skips entry for a coin
+  // until the Window Monitor has collected ≥2 minutes of intra-window data
+  // (or ≥5 min on the fallback path without pre-window ER).  This is a
+  // per-tick defer — the coin is re-evaluated on the next 60-second tick, not
+  // blocked for the whole window.  Set to false to allow immediate entry.
+  // Recommended: true — data shows 78% win rate when monitor is ready vs 64% when not.
+  requireMonitorReady: boolean;  // (default true)
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +593,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   betSize: 1.00,
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry
-  minConfidence: 52,
+  minConfidence: 67,
   decisionMode: "classic",
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
@@ -604,16 +612,17 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxConsecutiveLosses: 0,
   circuitBreakerPauseWindows: 2,
   enableDirectionCap: true,
-  maxSameDirectionBets: 6,
+  maxSameDirectionBets: 2,
   enableMomentumFilter: true,
   momentumWindowCount: 3,
   enableAutoTuning: true,
   autoTuneWindowSize: 100,
   autoTuneConfidenceRevertAt: null,
   autoTuneConfidenceRevertTo: null,
-  // Border guard disabled by default — only enable if specific proximity issues seen
-  enableBorderGuard: false,
-  borderProximityPct: 0.1,
+  // Border guard enabled by default — DOGE and similar low-volatility coins hover
+  // near the strike and produce near-50/50 outcomes; 3% threshold captures those cases.
+  enableBorderGuard: true,
+  borderProximityPct: 3.0,
   borderLookbackBets: 3,
   // Regime penalty: 15pp deduction for against-regime bets — high bar keeps quality high
   regimePenalty: 15,
@@ -636,6 +645,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinStreakLossLimit: 3,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 5,
+  requireMonitorReady: true,
 };
 
 // ---------------------------------------------------------------------------

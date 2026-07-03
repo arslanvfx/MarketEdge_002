@@ -16,6 +16,7 @@ import {
   checkDailyLossGuard,
   checkStreakPauseGuard,
   checkSlippageStrikeGuard,
+  checkWindowMonitorReadyGuard,
   checkBalanceGuard,
   checkExposureGuard,
   applyDailyLossUpdate,
@@ -2664,6 +2665,17 @@ export async function runBotLoopTick(): Promise<void> {
     const minRem = config.minRemainingMinutes ?? 0;
     if (minRem > 0 && 15 * 60 - secondsElapsed < minRem * 60) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      continue;
+    }
+
+    // Window Monitor readiness gate: defer (not permanently block) until the monitor
+    // has ≥2 min of intra-window candle data.  Unlike filteredByNewGuards entries,
+    // this coin is NOT blocked from Phase-4 for the whole window — the next 60-second
+    // tick will re-evaluate it and find the monitor ready.
+    if (checkWindowMonitorReadyGuard(getWindowBetSignal(sym)?.ready ?? false, config.requireMonitorReady ?? true)) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0,
+        reason: `window monitor not ready (${minutesElapsed.toFixed(1)}m elapsed — needs ≥2m)`,
+        windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
 

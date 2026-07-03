@@ -41,6 +41,7 @@ interface BotConfig {
   enableBorderGuard: boolean;
   borderProximityPct: number;
   borderLookbackBets: number;
+  requireMonitorReady: boolean;
   regimePenalty: number;
   mlVetoMinConfidence: number;
   betProfile: "normal" | "aggressive";
@@ -1505,16 +1506,16 @@ export default function BotDashboard() {
                 {/* Border Proximity Threshold */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">
-                    Proximity Threshold — {((merged.borderProximityPct ?? 0.3)).toFixed(2)}% of strike
+                    Proximity Threshold — {((merged.borderProximityPct ?? 3.0)).toFixed(1)}% of strike
                   </span>
                   <input
-                    type="range" min={0.05} max={1.0} step={0.05}
-                    value={merged.borderProximityPct ?? 0.3}
+                    type="range" min={0.1} max={5.0} step={0.1}
+                    value={merged.borderProximityPct ?? 3.0}
                     onChange={e => setConfigDraft(d => ({ ...d, borderProximityPct: parseFloat(e.target.value) }))}
                     className="w-full accent-amber-500"
                   />
                   <div className="flex justify-between text-[10px] text-muted-foreground/60">
-                    <span>0.05% (tight)</span><span>1.0% (wide)</span>
+                    <span>0.1% (tight)</span><span>5.0% (wide)</span>
                   </div>
                 </label>
 
@@ -1528,6 +1529,24 @@ export default function BotDashboard() {
                       <option key={n} value={n}>Last {n} settled bet{n > 1 ? "s" : ""}</option>
                     ))}
                   </select>
+                </label>
+
+                {/* Window Monitor Readiness Gate */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Window Monitor Ready Gate</span>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <button
+                      onClick={() => setConfigDraft(d => ({ ...d, requireMonitorReady: !(merged.requireMonitorReady ?? true) }))}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${(merged.requireMonitorReady ?? true) ? "bg-violet-500" : "bg-muted"}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${(merged.requireMonitorReady ?? true) ? "translate-x-5" : ""}`} />
+                    </button>
+                    <span className={`text-xs font-medium ${(merged.requireMonitorReady ?? true) ? "text-violet-400" : "text-muted-foreground"}`}>
+                      {(merged.requireMonitorReady ?? true) ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight mt-0.5">
+                    Defers entry until the window monitor has ≥2 min of intra-window data. First 2 ticks (~0–1 min) are skipped; bets start at minute 2. Recommended: ON.
+                  </span>
                 </label>
 
                 {/* Auto-Tuning */}

@@ -178,6 +178,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     coinStreakLossLimit,
     coinStreakPauseWindows,
     maxSlippageCents,
+    requireMonitorReady,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -216,6 +217,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     coinStreakLossLimit?: number;
     coinStreakPauseWindows?: number;
     maxSlippageCents?: number;
+    requireMonitorReady?: boolean;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -323,6 +325,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof coinStreakLossLimit === "number" && coinStreakLossLimit >= 0 && coinStreakLossLimit <= 10) partial.coinStreakLossLimit = coinStreakLossLimit;
   if (typeof coinStreakPauseWindows === "number" && coinStreakPauseWindows >= 1 && coinStreakPauseWindows <= 10) partial.coinStreakPauseWindows = coinStreakPauseWindows;
   if (typeof maxSlippageCents === "number" && maxSlippageCents >= 0 && maxSlippageCents <= 50) partial.maxSlippageCents = maxSlippageCents;
+  if (typeof requireMonitorReady === "boolean") partial.requireMonitorReady = requireMonitorReady;
 
   const { config: updated, persisted } = await updateBotConfig(partial);
   res.json({ ok: true, config: updated, persisted });

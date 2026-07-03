@@ -74,7 +74,26 @@ export function checkBalanceGuard(liveBal: number, minAccountBalance: number): b
 }
 
 /**
- * Guard 6 (live-only): Total open-exposure cap.
+ * Guard 7: Window Monitor readiness gate.
+ *
+ * Returns true (blocked/deferred) when the window monitor has not yet
+ * collected enough intra-window data to produce a reliable signal.
+ *
+ * This is a per-tick defer (not a permanent window block) — the coin is
+ * re-evaluated on the next bot tick (≈60 s) rather than skipped for the
+ * whole 15-min window.
+ *
+ * Pass `requireMonitorReady = false` to disable the gate entirely.
+ */
+export function checkWindowMonitorReadyGuard(
+  wmReady: boolean,
+  requireMonitorReady: boolean,
+): boolean {
+  return requireMonitorReady && !wmReady;
+}
+
+/**
+ * Guard 8 (live-only): Total open-exposure cap.
  *
  * Returns true (blocked) when adding this bet would push the total open dollar
  * exposure over the configured cap.  A $0.01 tolerance covers floating-point dust.
