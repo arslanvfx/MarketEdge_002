@@ -312,9 +312,12 @@ export default function BotDashboard() {
     refetchInterval: 15_000,
   });
 
+  // Stats always reflect the active bot mode so the KPI cards are authoritative.
+  // Only the Transaction History table is separately switchable via historyMode.
+  const activeMode = status?.mode ?? "paper";
   const { data: statsData } = useQuery<BotStats>({
-    queryKey: ["bot-stats", historyMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/stats?mode=${historyMode}`).then(r => r.json()),
+    queryKey: ["bot-stats", activeMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/stats?mode=${activeMode}`).then(r => r.json()),
     refetchInterval: 30_000,
   });
 
@@ -568,9 +571,9 @@ export default function BotDashboard() {
               label: status?.mode === "live" ? "Kalshi Balance" : "Paper Balance",
               value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400",
             },
-            { label: `Today's P&L (${historyMode})`, value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
-            { label: `Win Rate (${historyMode})`, value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
-            { label: `Total Bets (${historyMode})`, value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
+            { label: `Today's P&L (${activeMode})`, value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
+            { label: `Win Rate (${activeMode})`, value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
+            { label: `Total Bets (${activeMode})`, value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
           ].map(({ label, value, sub, icon: Icon, color, bold }) => (
             <div key={label} className="bg-card border border-border rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
@@ -1492,7 +1495,7 @@ export default function BotDashboard() {
             <div className="px-5 py-3 border-b border-border flex items-center gap-2">
               <Activity className="w-4 h-4 text-muted-foreground" />
               <h2 className="font-semibold text-sm">Performance by Coin</h2>
-              <span className={`ml-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${historyMode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-400"}`}>{historyMode}</span>
+              <span className={`ml-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${activeMode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-400"}`}>{activeMode}</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">

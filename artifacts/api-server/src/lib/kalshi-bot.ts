@@ -504,6 +504,8 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     // Restore consecutive-loss streak and recent Kalshi strike prices from recent bets.
     // Both are needed on startup: streak → circuit-breaker restore; strikes → momentum filter.
     // Rows ordered newest-first so we can walk the streak forward from the most recent bet.
+    // Filter to the current botMode so a paper loss streak cannot trip the live
+    // circuit-breaker and vice versa.
     const recentRows = await db
       .select({
         pnl: kalshiBotBetsTable.pnl,
@@ -514,8 +516,11 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       })
       .from(kalshiBotBetsTable)
       .where(
-        sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')
-          AND ${kalshiBotBetsTable.exitedAt} IS NOT NULL`,
+        and(
+          eq(kalshiBotBetsTable.mode, botMode),
+          sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')
+            AND ${kalshiBotBetsTable.exitedAt} IS NOT NULL`,
+        ),
       )
       .orderBy(desc(kalshiBotBetsTable.exitedAt))
       .limit(REGIME_STRIKES_MAX * 8); // fetch enough to populate targets for all coins
