@@ -2274,16 +2274,19 @@ function KalshiBotPanel() {
     enabled: open,
   });
 
+  // Use the active bot mode so stats/trend sparkline reflect the running mode only.
+  const botActiveMode = botQuery.data?.mode ?? "paper";
+
   const statsQuery = useQuery<BotStats>({
-    queryKey: ["bot-stats"],
-    queryFn: () => fetchJson<BotStats>("/crypto/bot/stats"),
+    queryKey: ["bot-stats", botActiveMode],
+    queryFn: () => fetchJson<BotStats>(`/crypto/bot/stats?mode=${botActiveMode}`),
     refetchInterval: 60_000,
     enabled: open,
   });
 
   const trendQuery = useQuery<TrendPoint[]>({
-    queryKey: ["bot-trend"],
-    queryFn: () => fetchJson<TrendPoint[]>("/crypto/bot/trend?limit=50"),
+    queryKey: ["bot-trend", botActiveMode],
+    queryFn: () => fetchJson<TrendPoint[]>(`/crypto/bot/trend?limit=50&mode=${botActiveMode}`),
     refetchInterval: 60_000,
     enabled: open,
   });
