@@ -1978,6 +1978,22 @@ export async function runBotLoopTick(): Promise<void> {
       if (!nextPausedCoins.has(sym)) pausedCoins.delete(sym);
       else pausedCoins.set(sym, nextPausedCoins.get(sym)!);
     }
+
+    // Temporary confidence raise revert: if auto-tune raised minConfidence for a
+    // fixed number of windows, check whether the revert window has arrived and
+    // restore the original value automatically.
+    if (config.autoTuneConfidenceRevertAt && cbWindowNow >= config.autoTuneConfidenceRevertAt) {
+      const revertTo = config.autoTuneConfidenceRevertTo ?? DEFAULT_BOT_CONFIG.minConfidence;
+      logger.info(
+        { from: config.minConfidence, to: revertTo, revertAt: config.autoTuneConfidenceRevertAt },
+        "[auto-tune] temporary confidence raise expired — reverting to base",
+      );
+      await updateBotConfig({
+        minConfidence: revertTo,
+        autoTuneConfidenceRevertAt: null,
+        autoTuneConfidenceRevertTo: null,
+      }).catch(() => {});
+    }
   }
 
   if (!config.enabled || paused) return;
@@ -2772,6 +2788,8 @@ export async function runAutoTuneJob(): Promise<void> {
       quietHoursEnd: config.quietHoursEnd,
       enableAutoTuning: config.enableAutoTuning ?? true,
       defaultMinConfidence: DEFAULT_BOT_CONFIG.minConfidence,
+      autoTuneConfidenceRevertAt: config.autoTuneConfidenceRevertAt ?? null,
+      autoTuneConfidenceRevertTo: config.autoTuneConfidenceRevertTo ?? null,
     };
 
     // Build a per-rule "last fired at" map from the log table so the cooldown

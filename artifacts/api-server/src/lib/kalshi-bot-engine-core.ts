@@ -442,6 +442,11 @@ export interface BotConfig {
   // recent performance and applies safe parameter adjustments automatically.
   enableAutoTuning: boolean;     // (default true)
   autoTuneWindowSize: number;    // number of most-recent settled bets to analyse (default 100)
+  // Temporary confidence raise tracking: when auto-tune raises minConfidence it stores
+  // the revert windowKey and the original value here. The bot loop checks these each
+  // window-open and restores minConfidence when the windowKey is reached.
+  autoTuneConfidenceRevertAt: string | null;  // windowKey to revert at (null = no pending revert)
+  autoTuneConfidenceRevertTo: number | null;  // value to restore (null = no pending revert)
   // Border-proximity guard: skip bets when price has been hovering too close to the
   // Kalshi strike in recent settled windows (high-noise, near-50/50 outcome territory).
   enableBorderGuard: boolean;    // (default true)
@@ -495,6 +500,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   momentumWindowCount: 3,
   enableAutoTuning: true,
   autoTuneWindowSize: 100,
+  autoTuneConfidenceRevertAt: null,
+  autoTuneConfidenceRevertTo: null,
   // Border guard disabled by default — only enable if specific proximity issues seen
   enableBorderGuard: false,
   borderProximityPct: 0.1,

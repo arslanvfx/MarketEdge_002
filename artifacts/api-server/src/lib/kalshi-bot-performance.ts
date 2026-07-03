@@ -105,6 +105,10 @@ export interface AutoTuneBotConfig {
   enableAutoTuning: boolean;
   /** The factory-default minConfidence value — used to gate the lower rule. */
   defaultMinConfidence: number;
+  /** WindowKey (e.g. "2026-07-03T05:15") at which a temporary confidence raise should revert. */
+  autoTuneConfidenceRevertAt?: string | null;
+  /** The minConfidence value to restore when the temporary raise expires. */
+  autoTuneConfidenceRevertTo?: number | null;
 }
 
 /**
@@ -599,35 +603,46 @@ export function runAutoTuneRules(
     }
   }
 
-  // Rule 3 — Confidence-floor auto-raise
-  // Overall win rate over last 30 bets < 55% → raise floor. Prefers jumping directly
-  // to the data-validated optimal threshold (lowest 5-pt band with ≥ 55% win rate and
-  // ≥ 5 samples) over a blind +5 so the bot reaches the right level in one step.
+  // Rule 3 — Confidence-floor temporary raise
+  // Overall win rate over last 30 bets < 55% → raise floor for exactly 3 windows,
+  // then auto-revert to whatever the user had set. The raise is capped at 70% so
+  // models can still realistically find bets in that range. After 3 windows the
+  // bot reverts automatically — no permanent confidence changes.
   // Guarded by a 6-hour cooldown to prevent thrashing.
+  const RAISE_CAP = 70;
   if (
     report.last30WinRate !== null &&
     report.totalBets >= 30 &&
     report.last30WinRate < 0.55 &&
-    config.minConfidence < 80 &&
+    config.minConfidence < RAISE_CAP &&
     !isOnCooldown("confidence_floor_raise")
   ) {
-    // Prefer the data-driven optimal threshold over blind +5 when available and higher
+    // Prefer the data-driven optimal threshold over blind +5 when available and higher,
+    // but never exceed RAISE_CAP (70%).
     const dataTarget = report.optimalConfidenceThreshold;
     const blindTarget = config.minConfidence + 5;
     const newConfidence = Math.min(
-      80,
+      RAISE_CAP,
       dataTarget !== null && dataTarget > config.minConfidence ? dataTarget : blindTarget,
     );
+    // Compute revert windowKey: 3 windows (45 min) from now
+    const revertDate = new Date(now.getTime() + 3 * 15 * 60 * 1_000);
+    const revertMins = Math.floor(revertDate.getUTCMinutes() / 15) * 15;
+    const revertAt = revertDate.toISOString().substring(0, 14) + String(revertMins).padStart(2, "0");
     const triggerReason = dataTarget !== null && dataTarget > config.minConfidence
       ? `Data-driven: ${dataTarget}% is lowest confidence band with ≥55% win rate ` +
-        `(last-30 WR: ${Math.round(report.last30WinRate * 100)}%)`
-      : `Win rate ${Math.round(report.last30WinRate * 100)}% over last 30 bets is below 55% — raising +5`;
+        `(last-30 WR: ${Math.round(report.last30WinRate * 100)}%) — temporary, reverts after 3 windows`
+      : `Win rate ${Math.round(report.last30WinRate * 100)}% over last 30 bets is below 55% — raising +5 for 3 windows`;
     mutations.push({
       ruleName: "confidence_floor_raise",
       oldValue: String(config.minConfidence),
       newValue: String(newConfidence),
       triggerReason,
-      configMutation: { minConfidence: newConfidence },
+      configMutation: {
+        minConfidence: newConfidence,
+        autoTuneConfidenceRevertAt: revertAt,
+        autoTuneConfidenceRevertTo: config.minConfidence,
+      },
     });
   }
 
