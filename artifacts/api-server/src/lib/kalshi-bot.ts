@@ -1280,13 +1280,21 @@ async function _runBotTick(
   // ── Per-coin streak pause ─────────────────────────────────────────────────
   // If a coin lost N consecutive windows it is paused for M windows.  The pause
   // key is an ISO windowKey string — skip while the current window ≤ pause key.
+  // When the pause expires, clear pauseUntilWindowKey so a future losing streak
+  // can re-arm a new pause without requiring a win to reset the field first.
   const streakInfo = coinStreakState.get(sym);
-  if (streakInfo?.pauseUntilWindowKey && windowKey <= streakInfo.pauseUntilWindowKey) {
-    logger.info(
-      { sym, pauseUntilWindowKey: streakInfo.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo.consecutiveLosses },
-      "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
-    );
-    return;
+  if (streakInfo?.pauseUntilWindowKey) {
+    if (windowKey <= streakInfo.pauseUntilWindowKey) {
+      logger.info(
+        { sym, pauseUntilWindowKey: streakInfo.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo.consecutiveLosses },
+        "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
+      );
+      return;
+    } else {
+      // Pause has expired — clear it so subsequent streaks can trigger new pauses.
+      streakInfo.pauseUntilWindowKey = null;
+      coinStreakState.set(sym, streakInfo);
+    }
   }
 
   // ── Per-coin daily loss cap ───────────────────────────────────────────────
@@ -1404,9 +1412,9 @@ async function _runBotTick(
       fillPrice = result.avgPrice ?? yesPrice;
       orderId = result.orderId;
 
-      // Slippage guard: compare actual fill price to the expected yes-price used
-      // in the decision.  Log a warning and increment the per-coin strike counter
-      // when the deviation exceeds the configured threshold.
+      // Slippage guard: compare actual fill price to the expected yes-price.
+      // Tracks CONSECUTIVE bad fills — a clean fill resets the counter.
+      // 3 consecutive bad fills → coin skips next window's entry, then counter clears.
       const maxSlipCents = config.maxSlippageCents ?? 5;
       if (maxSlipCents > 0 && result.avgPrice != null && yesPrice != null) {
         const slippageCents = Math.abs(result.avgPrice - yesPrice) * 100;
@@ -1429,7 +1437,15 @@ async function _runBotTick(
           }
           const strikes = coinSlippageStrikes.get(sym)!.strikes;
           if (strikes >= 3) {
-            logger.warn({ sym, strikes }, "[kalshi-bot] slippage strikes reached — this coin will skip the next window entry");
+            logger.warn({ sym, strikes }, "[kalshi-bot] slippage strikes reached 3 — coin will skip next window's first entry");
+          }
+        } else {
+          // Clean fill — reset consecutive slippage strikes so the counter tracks
+          // only runs of consecutive bad fills, not total bad fills in the window.
+          const existing = coinSlippageStrikes.get(sym);
+          if (existing?.windowKey === windowKey && existing.strikes > 0) {
+            logger.info({ sym, prevStrikes: existing.strikes }, "[kalshi-bot] slippage strikes reset — clean fill received");
+            coinSlippageStrikes.delete(sym);
           }
         }
       }
@@ -1626,12 +1642,16 @@ async function closePosition(
       existing.consecutiveLosses++;
       const limit = config.coinStreakLossLimit ?? 3;
       const pauseWindows = config.coinStreakPauseWindows ?? 2;
+      // Re-arm a new pause whenever the loss count reaches the limit, even if a
+      // previous pause has already expired (pauseUntilWindowKey cleared on expiry).
       if (limit > 0 && existing.consecutiveLosses >= limit && !existing.pauseUntilWindowKey) {
         const pauseMs = pauseWindows * 15 * 60_000;
         const pauseUntil = new Date(Date.now() + pauseMs).toISOString().slice(0, 16);
         existing.pauseUntilWindowKey = pauseUntil;
+        // Reset the counter so the NEXT N-loss streak triggers another pause.
+        existing.consecutiveLosses = 0;
         logger.warn(
-          { sym: pos.symbol, consecutiveLosses: existing.consecutiveLosses, pauseUntilWindowKey: pauseUntil, pauseWindows },
+          { sym: pos.symbol, pauseUntilWindowKey: pauseUntil, pauseWindows },
           "[kalshi-bot] per-coin streak pause triggered — coin skipped for N windows",
         );
       }

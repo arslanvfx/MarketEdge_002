@@ -587,17 +587,13 @@ export default function BotDashboard() {
                         ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                         : balanceLoading
                           ? <RefreshCw className="w-4 h-4 text-muted-foreground animate-spin shrink-0" />
-                          : kalshiBalanceData?.reason === "not_live"
-                            ? <Shield className="w-4 h-4 text-sky-400 shrink-0" />
-                            : <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
-                      <span className={kalshiBalanceData?.ok ? "text-emerald-400" : kalshiBalanceData?.reason === "not_live" ? "text-sky-400" : "text-muted-foreground"}>
+                          : <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                      <span className={kalshiBalanceData?.ok ? "text-emerald-400" : "text-muted-foreground"}>
                         {balanceLoading
                           ? "Fetching Kalshi balance…"
                           : kalshiBalanceData?.ok
                             ? `Kalshi balance: $${kalshiBalanceData.balance?.toFixed(2)}`
-                            : kalshiBalanceData?.reason === "not_live"
-                              ? "Balance verified automatically on first live bet"
-                              : "Could not reach Kalshi API — check your connection"}
+                            : "Could not reach Kalshi API — check your connection"}
                       </span>
                     </div>
                   </div>
@@ -641,7 +637,7 @@ export default function BotDashboard() {
                         !status?.configured ||
                         !liveCheckboxChecked ||
                         balanceLoading ||
-                        (kalshiBalanceData != null && !kalshiBalanceData.ok && kalshiBalanceData.reason !== "not_live")
+                        (kalshiBalanceData != null && !kalshiBalanceData.ok)
                       }
                       onClick={() => { setMode("live"); setConfirmLive(false); setLiveCheckboxChecked(false); }}
                     >
