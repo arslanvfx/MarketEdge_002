@@ -2885,116 +2885,12 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // Directional-cap filter: skip when too many same-direction bets already placed this window.
-    // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
-    // dirCount = confirmed bets from previous ticks (windowDirectionCounts) + provisional
-    // approvals from earlier in THIS tick's Phase-3 loop (phase3DirectionCounts).
-    // Without phase3DirectionCounts, all 7 coins see dirCount=0 on the first tick of a
-    // window and all pass — then Phase 4 fires them all, blowing through the cap.
-    if (decision.action !== "SKIP" && config.enableDirectionCap) {
-      const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
-      const dirCount = (windowDirectionCounts.get(proposedDir) ?? 0)
-                     + (phase3DirectionCounts.get(proposedDir) ?? 0);
-      if (config.maxSameDirectionBets > 0 && dirCount >= config.maxSameDirectionBets) {
-        logger.info({ sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
-          `[kalshi-bot] directional cap reached — skipping ${proposedDir.toUpperCase()} entry for ${sym}`);
-        filteredByNewGuards.add(sym);
-        evalResults.push({
-          symbol: sym,
-          action: "SKIP",
-          confidence: effectiveConfidence,
-          score: 0,
-          reason: `directional cap reached — skipping ${proposedDir.toUpperCase()} entry`,
-          windowKey,
-          selected: false,
-          evaluatedAt: now,
-          trendStability: stability,
-          regime,
-        });
-        continue;
-      }
-      // Coin passed — count it provisionally so subsequent coins in this same tick
-      // see the correct accumulated count when they reach this check.
-      phase3DirectionCounts.set(proposedDir, (phase3DirectionCounts.get(proposedDir) ?? 0) + 1);
-    }
-
-    // Regime filter: if recent settlements consistently closed on one side of the strike,
-    // penalise bets going against that regime by raising the minimum confidence bar.
-    // This prevents the bot from fighting a persistent directional bias.
-    if (decision.action !== "SKIP") {
-      const regime = regimeCache.get(sym);
-      const isAgainstRegime =
-        (regime === "above" && decision.action === "BET_NO") ||
-        (regime === "below" && decision.action === "BET_YES");
-      if (isAgainstRegime) {
-        const penalised = effectiveConfidence - (config.regimePenalty ?? REGIME_AGAINST_PENALTY_FALLBACK);
-        logger.info(
-          { sym, regime, action: decision.action, confidence: effectiveConfidence, penalised },
-          `[kalshi-bot] regime filter — ${sym} regime=${regime} vs ${decision.action}: confidence ${effectiveConfidence}→${penalised}`,
-        );
-        if (penalised < config.minConfidence) {
-          filteredByNewGuards.add(sym);
-          evalResults.push({
-            symbol: sym,
-            action: "SKIP",
-            confidence: effectiveConfidence,
-            score: 0,
-            reason: `regime filter — ${regime} regime, against-direction penalty → ${penalised}% < ${config.minConfidence}%`,
-            windowKey,
-            selected: false,
-            evaluatedAt: now,
-            trendStability: stability,
-            regime: regimeCache.get(sym) as "above" | "below" | "neutral" | null ?? null,
-          });
-          continue;
-        }
-        effectiveConfidence = penalised;
-      }
-    }
-
-    // Position-relative NO gate: when the live crypto price is already above the
-    // Kalshi strike by > 0.1%, a NO bet is a mean-reversion call into a trending
-    // market. Historical data shows 7/7 NO losses in exactly this configuration.
-    // Require ML confirmation (mlAbove === false) OR broad 3-signal agreement to
-    // allow entry — otherwise skip.
-    if (decision.action === "BET_NO" && kalshiData.value !== null) {
-      const livePrice = getCachedPrediction(sym)?.price ?? null;
-      const ABOVE_STRIKE_NO_GAP = 0.001; // 0.1% above strike
-      if (livePrice !== null && livePrice > kalshiData.value * (1 + ABOVE_STRIKE_NO_GAP)) {
-        const sigs = decision.signals as { signalsAgreeing?: number; mlAbove?: boolean | null };
-        const mlConfirmsNo = sigs.mlAbove === false;
-        const broadAgreement = (sigs.signalsAgreeing ?? 0) >= 3;
-        if (!mlConfirmsNo && !broadAgreement) {
-          const gapPct = ((livePrice - kalshiData.value) / kalshiData.value * 100).toFixed(3);
-          logger.info(
-            { sym, livePrice, kalshiTarget: kalshiData.value, gapPct, signalsAgreeing: sigs.signalsAgreeing, mlAbove: sigs.mlAbove },
-            `[kalshi-bot] NO gate — ${sym} price +${gapPct}% above strike, no ML reversal confirmation`,
-          );
-          filteredByNewGuards.add(sym);
-          evalResults.push({
-            symbol: sym,
-            action: "SKIP",
-            confidence: effectiveConfidence,
-            score: 0,
-            reason: `NO gate — price +${gapPct}% above strike, requires ML or 3-signal agreement`,
-            windowKey,
-            selected: false,
-            evaluatedAt: now,
-            trendStability: stability,
-            regime,
-          });
-          continue;
-        }
-      }
-    }
-
-    // --- Per-coin direction filter (Task A) + YES consensus gate (Task B) ---
-    // Task A: Block coins/directions with insufficient historical edge.
-    //   COIN_FULLY_BLOCKED (SOL): no edge in either direction → skip entirely.
-    //   COIN_YES_BLOCKED (BTC/ETH/DOGE): historical YES WR <25% → block YES entirely.
-    // Task B: All remaining YES bets require stat+claude+ml to ALL agree (full 3-signal
-    //   consensus). Mixed YES bets (any signal misaligned) average 0-33% WR vs 73%+ for
-    //   full-consensus NO. NO bets are allowed with stat+claude only (60-70% WR).
+    // --- Per-coin blocking filters BEFORE directional cap ---
+    // These must run before phase3DirectionCounts is incremented so that coins which will
+    // never actually bet cannot steal a directional cap slot and prevent a valid coin
+    // from entering. Example: SOL is COIN_FULLY_BLOCKED; if it passed the dirCap check
+    // first it would increment phase3DirectionCounts["no"] to 3, then get SKIP'd here,
+    // leaving only 3 real NO slots (instead of 4) for the remaining coins.
     if (decision.action !== "SKIP") {
       if (COIN_FULLY_BLOCKED.has(sym)) {
         filteredByNewGuards.add(sym);
@@ -3055,6 +2951,111 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
+    // Directional-cap filter: skip when too many same-direction bets already placed this window.
+    // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
+    // dirCount = confirmed bets from previous ticks (windowDirectionCounts) + provisional
+    // approvals from earlier in THIS tick's Phase-3 loop (phase3DirectionCounts).
+    // Without phase3DirectionCounts, all 7 coins see dirCount=0 on the first tick of a
+    // window and all pass — then Phase 4 fires them all, blowing through the cap.
+    // NOTE: per-coin blocking filters run ABOVE this check so that coins which will never
+    // bet (COIN_FULLY_BLOCKED, COIN_YES_BLOCKED, no-consensus YES) cannot waste cap slots.
+    if (decision.action !== "SKIP" && config.enableDirectionCap) {
+      const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
+      const dirCount = (windowDirectionCounts.get(proposedDir) ?? 0)
+                     + (phase3DirectionCounts.get(proposedDir) ?? 0);
+      if (config.maxSameDirectionBets > 0 && dirCount >= config.maxSameDirectionBets) {
+        logger.info({ sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
+          `[kalshi-bot] directional cap reached — skipping ${proposedDir.toUpperCase()} entry for ${sym}`);
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `directional cap reached — skipping ${proposedDir.toUpperCase()} entry`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
+        });
+        continue;
+      }
+      // Coin passed — count it provisionally so subsequent coins in this same tick
+      // see the correct accumulated count when they reach this check.
+      phase3DirectionCounts.set(proposedDir, (phase3DirectionCounts.get(proposedDir) ?? 0) + 1);
+    }
+
+    // Regime filter: if recent settlements consistently closed on one side of the strike,
+    // penalise bets going against that regime by raising the minimum confidence bar.
+    // This prevents the bot from fighting a persistent directional bias.
+    if (decision.action !== "SKIP") {
+      const kalshiRegime = regimeCache.get(sym);
+      const isAgainstRegime =
+        (kalshiRegime === "above" && decision.action === "BET_NO") ||
+        (kalshiRegime === "below" && decision.action === "BET_YES");
+      if (isAgainstRegime) {
+        const penalised = effectiveConfidence - (config.regimePenalty ?? REGIME_AGAINST_PENALTY_FALLBACK);
+        logger.info(
+          { sym, kalshiRegime, action: decision.action, confidence: effectiveConfidence, penalised },
+          `[kalshi-bot] regime filter — ${sym} regime=${kalshiRegime} vs ${decision.action}: confidence ${effectiveConfidence}→${penalised}`,
+        );
+        if (penalised < config.minConfidence) {
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `regime filter — ${kalshiRegime} regime, against-direction penalty → ${penalised}% < ${config.minConfidence}%`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+        effectiveConfidence = penalised;
+      }
+    }
+
+    // Position-relative NO gate: when the live crypto price is already above the
+    // Kalshi strike by > 0.1%, a NO bet is a mean-reversion call into a trending
+    // market. Historical data shows 7/7 NO losses in exactly this configuration.
+    // Require ML confirmation (mlAbove === false) OR broad 3-signal agreement to
+    // allow entry — otherwise skip.
+    if (decision.action === "BET_NO" && kalshiData.value !== null) {
+      const livePrice = getCachedPrediction(sym)?.price ?? null;
+      const ABOVE_STRIKE_NO_GAP = 0.001; // 0.1% above strike
+      if (livePrice !== null && livePrice > kalshiData.value * (1 + ABOVE_STRIKE_NO_GAP)) {
+        const sigs = decision.signals as { signalsAgreeing?: number; mlAbove?: boolean | null };
+        const mlConfirmsNo = sigs.mlAbove === false;
+        const broadAgreement = (sigs.signalsAgreeing ?? 0) >= 3;
+        if (!mlConfirmsNo && !broadAgreement) {
+          const gapPct = ((livePrice - kalshiData.value) / kalshiData.value * 100).toFixed(3);
+          logger.info(
+            { sym, livePrice, kalshiTarget: kalshiData.value, gapPct, signalsAgreeing: sigs.signalsAgreeing, mlAbove: sigs.mlAbove },
+            `[kalshi-bot] NO gate — ${sym} price +${gapPct}% above strike, no ML reversal confirmation`,
+          );
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `NO gate — price +${gapPct}% above strike, requires ML or 3-signal agreement`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+      }
+    }
+
     // Window-doubt filter: if recent windows had poor win rates, require higher conviction
     // for both YES and NO bets. This prevents the bot from over-betting during choppy
     // uncertain regimes when all signals are marginal.
@@ -3070,7 +3071,7 @@ export async function runBotLoopTick(): Promise<void> {
         selected: false,
         evaluatedAt: now,
         trendStability: stability,
-        regime: regimeCache.get(sym) as "above" | "below" | "neutral" | null ?? null,
+        regime,
       });
       continue;
     }
