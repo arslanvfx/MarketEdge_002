@@ -309,7 +309,9 @@ function parseCountdownScenario(
   reason: string,
   windowKey: string,
 ): { label: string; endsAt: number; total: number; color: CountdownColor } | null {
-  const ws = new Date(windowKey).getTime();
+  // windowKey is always UTC ("YYYY-MM-DDTHH:mm" from toISOString().slice(0,16)).
+  // Without a "Z" suffix, browsers parse it as LOCAL time → large wrong offset.
+  const ws = new Date(windowKey + "Z").getTime();
   if (reason.startsWith("window buffer")) {
     return { label: "Buffer clears in", endsAt: ws + 45_000,       total: 45,      color: "amber"  };
   }
