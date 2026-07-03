@@ -2726,13 +2726,6 @@ export async function runBotLoopTick(): Promise<void> {
   // independently place a bet that the Phase-3 filter just blocked.
   const filteredByNewGuards = new Set<string>();
 
-  // Provisional direction counts accumulated WITHIN Phase 3 so the directional
-  // cap works correctly when multiple coins are evaluated in the same tick.
-  // windowDirectionCounts only reflects bets placed in Phase 4 of PREVIOUS ticks;
-  // without this, all coins see dirCount=0 on the first tick of a window and
-  // all pass — causing 6+ same-direction bets from a single loop iteration.
-  const phase3DirectionCounts = new Map<"yes" | "no", number>();
-
   // Global bet cap: total bets placed across ALL coins this window.
   // This is the correct interpretation of maxBetsPerWindow — not per-coin.
   // The per-coin windowBetCounts is still used to prevent a single coin from re-betting.
@@ -2951,40 +2944,6 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // Directional-cap filter: skip when too many same-direction bets already placed this window.
-    // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
-    // dirCount = confirmed bets from previous ticks (windowDirectionCounts) + provisional
-    // approvals from earlier in THIS tick's Phase-3 loop (phase3DirectionCounts).
-    // Without phase3DirectionCounts, all 7 coins see dirCount=0 on the first tick of a
-    // window and all pass — then Phase 4 fires them all, blowing through the cap.
-    // NOTE: per-coin blocking filters run ABOVE this check so that coins which will never
-    // bet (COIN_FULLY_BLOCKED, COIN_YES_BLOCKED, no-consensus YES) cannot waste cap slots.
-    if (decision.action !== "SKIP" && config.enableDirectionCap) {
-      const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
-      const dirCount = (windowDirectionCounts.get(proposedDir) ?? 0)
-                     + (phase3DirectionCounts.get(proposedDir) ?? 0);
-      if (config.maxSameDirectionBets > 0 && dirCount >= config.maxSameDirectionBets) {
-        logger.info({ sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
-          `[kalshi-bot] directional cap reached — skipping ${proposedDir.toUpperCase()} entry for ${sym}`);
-        filteredByNewGuards.add(sym);
-        evalResults.push({
-          symbol: sym,
-          action: "SKIP",
-          confidence: effectiveConfidence,
-          score: 0,
-          reason: `directional cap reached — skipping ${proposedDir.toUpperCase()} entry`,
-          windowKey,
-          selected: false,
-          evaluatedAt: now,
-          trendStability: stability,
-          regime,
-        });
-        continue;
-      }
-      // Coin passed — count it provisionally so subsequent coins in this same tick
-      // see the correct accumulated count when they reach this check.
-      phase3DirectionCounts.set(proposedDir, (phase3DirectionCounts.get(proposedDir) ?? 0) + 1);
-    }
 
     // Regime filter: if recent settlements consistently closed on one side of the strike,
     // penalise bets going against that regime by raising the minimum confidence bar.
@@ -3142,6 +3101,39 @@ export async function runBotLoopTick(): Promise<void> {
   // Sort: BET candidates descending by composite score, then SKIP coins.
   const bets = evalResults.filter(e => e.action !== "SKIP").sort((a, b) => b.score - a.score);
   const skips = evalResults.filter(e => e.action === "SKIP");
+
+  // Directional-cap filter (post-loop, confidence-aware):
+  // Applied after all coins are scored and sorted so we keep the HIGHEST-confidence
+  // bets per direction and drop the weakest — not whichever coin happened to be
+  // last in CRYPTO_COINS iteration order.
+  // windowDirectionCounts reflects bets placed in PREVIOUS ticks this window;
+  // `remaining` is how many more same-direction bets are still allowed.
+  if (config.enableDirectionCap && config.maxSameDirectionBets > 0) {
+    for (const dir of ["yes", "no"] as const) {
+      const action = dir === "yes" ? "BET_YES" : "BET_NO";
+      const alreadyPlaced = windowDirectionCounts.get(dir) ?? 0;
+      const remaining = Math.max(0, config.maxSameDirectionBets - alreadyPlaced);
+      // bets[] is sorted score DESC — dirBets preserves that order.
+      const dirBets = bets.filter(e => e.action === action);
+      if (dirBets.length > remaining) {
+        // Keep the top `remaining` (highest score); drop the rest.
+        const toCap = dirBets.slice(remaining);
+        const cappedSyms = toCap.map(e => e.symbol);
+        logger.info(
+          { dir, alreadyPlaced, remaining, cap: config.maxSameDirectionBets, dropped: cappedSyms },
+          `[kalshi-bot] directional cap — keeping top ${remaining} ${dir.toUpperCase()} bets, dropping ${toCap.length} weakest`,
+        );
+        for (const e of toCap) {
+          e.action = "SKIP";
+          e.reason = `directional cap — ${dir.toUpperCase()} slots filled (kept higher-confidence entries)`;
+          filteredByNewGuards.add(e.symbol);
+          const idx = bets.indexOf(e);
+          if (idx !== -1) bets.splice(idx, 1);
+          skips.push(e);
+        }
+      }
+    }
+  }
 
   // Cross-coin chop detection: when 4 or more eligible coins are all in the
   // "low conviction" confidence band (≤58%), the market is indecisive across
