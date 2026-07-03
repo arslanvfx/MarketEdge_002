@@ -47,6 +47,7 @@ interface BotConfig {
   paperStartingBalance: number;
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
+  maxBetSize: number;
 }
 
 interface LogicModeStats {
@@ -867,10 +868,25 @@ export default function BotDashboard() {
                 {/* Bet Size */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Bet Size ($)</span>
-                  <input type="number" min={0.5} max={25} step={0.5}
-                    className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.betSize ?? 0.5}
+                  <input type="number" min={0.5} max={merged.maxBetSize ?? 2} step={0.5}
+                    className={`bg-background border rounded-md px-3 py-1.5 text-sm text-foreground ${(merged.betSize ?? 1) > (merged.maxBetSize ?? 2) ? "border-red-500" : "border-border"}`}
+                    value={merged.betSize ?? 1}
                     onChange={e => setConfigDraft(d => ({ ...d, betSize: parseFloat(e.target.value) }))} />
+                  {(merged.betSize ?? 1) > (merged.maxBetSize ?? 2) && (
+                    <span className="text-[10px] text-red-400">Exceeds max bet cap — bets will be blocked</span>
+                  )}
+                </label>
+
+                {/* Max Bet Size (safety cap) */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground flex items-center gap-1">
+                    <span className="text-amber-400">⚠</span> Max Bet Cap ($)
+                  </span>
+                  <input type="number" min={0.5} max={100} step={0.5}
+                    className="bg-background border border-amber-500/40 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxBetSize ?? 2}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxBetSize: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Hard safety cap — any bet above this is blocked</span>
                 </label>
 
                 {/* Daily Loss Limit */}

@@ -478,6 +478,12 @@ export interface BotConfig {
   paperStartingBalance: number;  // (default 100)
   paperWinReturnRate: number;    // (default 0.5)
   paperBalanceResetAt: string | null; // (default null = count all bets)
+  // Hard cap on the dollar amount of any single bet.  If the computed betAmount
+  // would exceed this value the entire trade is aborted and an error is logged.
+  // Acts as a safety rail so a misconfigured betSize can never send an outsized
+  // order to Kalshi.  The default is intentionally conservative ($2) and should
+  // be raised only after deliberate review.  Applies in both paper and live mode.
+  maxBetSize: number;            // (default 2.00)
 }
 
 // ---------------------------------------------------------------------------
@@ -588,4 +594,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,
   paperBalanceResetAt: null,
+  // Safety cap: hard-abort any bet whose computed dollar cost exceeds this.
+  // Conservative default; raise deliberately when going live.
+  maxBetSize: 2.00,
 };

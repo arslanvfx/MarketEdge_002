@@ -1225,6 +1225,30 @@ async function _runBotTick(
   const contractCount = Math.max(1, Math.round(config.betSize / sideCost));
   const betAmount = contractCount * sideCost; // actual dollars risked (may differ slightly from configured betSize)
 
+  // ── SAFETY GUARD: hard bet-size cap ─────────────────────────────────────────
+  // If the computed betAmount would exceed the configured maxBetSize, abort the
+  // trade entirely before touching Kalshi.  This protects against misconfigured
+  // betSize values, unexpected rounding, or any future code change that could
+  // inflate contractCount.  A tolerance of $0.01 covers floating-point dust.
+  const maxBetCap = config.maxBetSize ?? 2;
+  if (betAmount > maxBetCap + 0.01) {
+    logger.error(
+      {
+        sym,
+        betAmount: betAmount.toFixed(4),
+        maxBetSize: maxBetCap,
+        configuredBetSize: config.betSize,
+        contractCount,
+        sideCost: sideCost.toFixed(4),
+        direction,
+        mode: botMode,
+      },
+      "[kalshi-bot] SAFETY ABORT — computed betAmount exceeds maxBetSize cap; trade cancelled",
+    );
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   logger.info({ sym, direction, decision: decision.action, confidence: decision.confidence }, "[kalshi-bot] placing bet");
 
   let fillPrice = yesPrice; // paper fill
