@@ -14,7 +14,7 @@
 
 import { db, mlWindowSnapshotsTable, mlModelStateTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
-import { initWeights, type MLPrediction } from "./ml-model.ts";
+import { initWeights, N_FEATURES, type MLPrediction } from "./ml-model.ts";
 import {
   applyHydratedModel,
   applyLabeledSnapshot,
@@ -258,6 +258,25 @@ export async function initMLFromDB(): Promise<void> {
       .select()
       .from(mlWindowSnapshotsTable)
       .orderBy(mlWindowSnapshotsTable.snapshotAt);
+
+    // N_FEATURES guard: if stored examples have a different feature count than
+    // the current N_FEATURES (e.g. after a feature-vector bump), all those rows
+    // will be silently ignored by applyLabeledSnapshot — the model would then
+    // restart from zero and re-backfill unnecessarily.  Detect this up-front:
+    // find the first row with a non-empty feature array and compare its length.
+    // If it doesn't match, wipe all ML data now; runMLBackfillIfNeeded will
+    // re-seed from scratch with the correct N_FEATURES on the same startup.
+    const firstWithFeatures = snapshots.find(r => Array.isArray(r.features) && (r.features as number[]).length > 0);
+    if (firstWithFeatures) {
+      const storedLen = (firstWithFeatures.features as number[]).length;
+      if (storedLen !== N_FEATURES) {
+        console.warn(
+          `[ml-store] N_FEATURES mismatch: DB snapshots have ${storedLen} features but current N_FEATURES=${N_FEATURES}. Wiping ML data — backfill will re-seed with correct feature count.`,
+        );
+        await clearMLData();
+        return; // runMLBackfillIfNeeded will run immediately after this call
+      }
+    }
 
     let labeledCount = 0;
     let pendingCount = 0;

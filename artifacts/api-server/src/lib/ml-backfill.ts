@@ -24,7 +24,7 @@ import {
   hasLegacyBackfillRows,
   clearMLData,
 } from "./ml-store.ts";
-import { MIN_TRAINING_WINDOWS } from "./ml-model.ts";
+import { MIN_TRAINING_WINDOWS, N_FEATURES } from "./ml-model.ts";
 import { applySignalAugmentation } from "./ml-features.ts";
 import { logger } from "./logger.ts";
 import { CRYPTO_COINS } from "./crypto.ts";
@@ -127,12 +127,12 @@ export async function runMLBackfillIfNeeded(windowCount = 96): Promise<void> {
         }
       }
 
-      // generateMLTrainingExamples already calls extractMLFeatures (N_FEATURES=17),
-      // so each example has 17 elements with features 14-16 = 0.5 (unknown).
+      // generateMLTrainingExamples already calls extractMLFeatures (N_FEATURES elements),
+      // with the last 3 slots = 0.5 (unknown stat/claude/wm signals).
       // We OVERWRITE those 3 slots with real historical values — never push.
       let augmented = 0;
       for (const ex of examples) {
-        if (ex.features.length !== 17) continue; // defensive: skip malformed
+        if (ex.features.length !== N_FEATURES) continue; // defensive: skip malformed
         // Reconstruct targetISO from windowId: "backfill_v3:SYM:ISO"
         const parts = ex.windowId.split(":");
         const targetISO = parts.slice(2).join(":");
