@@ -2611,6 +2611,13 @@ export async function runBotLoopTick(): Promise<void> {
   // independently place a bet that the Phase-3 filter just blocked.
   const filteredByNewGuards = new Set<string>();
 
+  // Provisional direction counts accumulated WITHIN Phase 3 so the directional
+  // cap works correctly when multiple coins are evaluated in the same tick.
+  // windowDirectionCounts only reflects bets placed in Phase 4 of PREVIOUS ticks;
+  // without this, all coins see dirCount=0 on the first tick of a window and
+  // all pass — causing 6+ same-direction bets from a single loop iteration.
+  const phase3DirectionCounts = new Map<"yes" | "no", number>();
+
   // Refresh border-proximity and regime caches once per window transition.
   if (windowKey !== borderProximityCacheWindow) {
     const syms = CRYPTO_COINS
@@ -2751,9 +2758,14 @@ export async function runBotLoopTick(): Promise<void> {
 
     // Directional-cap filter: skip when too many same-direction bets already placed this window.
     // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
+    // dirCount = confirmed bets from previous ticks (windowDirectionCounts) + provisional
+    // approvals from earlier in THIS tick's Phase-3 loop (phase3DirectionCounts).
+    // Without phase3DirectionCounts, all 7 coins see dirCount=0 on the first tick of a
+    // window and all pass — then Phase 4 fires them all, blowing through the cap.
     if (decision.action !== "SKIP" && config.enableDirectionCap) {
       const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
-      const dirCount = windowDirectionCounts.get(proposedDir) ?? 0;
+      const dirCount = (windowDirectionCounts.get(proposedDir) ?? 0)
+                     + (phase3DirectionCounts.get(proposedDir) ?? 0);
       if (config.maxSameDirectionBets > 0 && dirCount >= config.maxSameDirectionBets) {
         logger.info({ sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
           `[kalshi-bot] directional cap reached — skipping ${proposedDir.toUpperCase()} entry for ${sym}`);
@@ -2772,6 +2784,9 @@ export async function runBotLoopTick(): Promise<void> {
         });
         continue;
       }
+      // Coin passed — count it provisionally so subsequent coins in this same tick
+      // see the correct accumulated count when they reach this check.
+      phase3DirectionCounts.set(proposedDir, (phase3DirectionCounts.get(proposedDir) ?? 0) + 1);
     }
 
     // Regime filter: if recent settlements consistently closed on one side of the strike,
@@ -3062,6 +3077,25 @@ export async function runBotLoopTick(): Promise<void> {
     ).map(e => e.symbol),
   ];
   for (const sym of orderedSymbols) {
+    // Defense-in-depth: re-check directional cap just before execution.
+    // Phase-3's check is the primary gate, but this catches any edge case where
+    // a coin approved in Phase 3 would exceed the cap when actually fired
+    // (e.g. if two coins tie for the same direction slot).
+    if (config.enableDirectionCap && config.maxSameDirectionBets > 0) {
+      const evalEntry = bets.find(e => e.symbol === sym);
+      if (evalEntry) {
+        const proposedDir = evalEntry.action === "BET_YES" ? "yes" : "no";
+        const dirCount = windowDirectionCounts.get(proposedDir) ?? 0;
+        if (dirCount >= config.maxSameDirectionBets) {
+          logger.info(
+            { sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
+            "[kalshi-bot] directional cap (phase-4 gate) — blocking entry",
+          );
+          continue;
+        }
+      }
+    }
+
     const kalshiData = getKalshiCachedData(sym);
     const prediction = getCachedPrediction(sym);
     // Capture before-state so we can detect a fresh bet placement for this symbol.
