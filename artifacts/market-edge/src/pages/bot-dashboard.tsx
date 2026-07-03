@@ -739,22 +739,31 @@ export default function BotDashboard() {
                   Bet Profile
                 </span>
                 <div className="grid grid-cols-2 gap-3">
-                  {([
-                    {
-                      id: "normal" as const,
-                      label: "Normal",
-                      sublabel: "Current proven defaults",
-                      bullets: ["ML leads at ≥62% confidence", "15pp regime penalty", "No confidence cap"],
-                      color: "sky",
-                    },
-                    {
-                      id: "aggressive" as const,
-                      label: "Aggressive",
-                      sublabel: "More bets per window",
-                      bullets: ["ML leads at ≥58% confidence", "10pp regime penalty", "Confidence capped at 80%"],
-                      color: "amber",
-                    },
-                  ]).map(p => {
+                  {((): Array<{ id: "normal" | "aggressive"; label: string; sublabel: string; bullets: string[]; color: string }> => {
+                    const mode = merged.decisionMode ?? "classic";
+                    const mlBullet = (thresh: number): string => {
+                      if (mode === "ml_gate") return `ML vetos bets it opposes (≥${merged.mlVetoMinConfidence ?? 57}% threshold)`;
+                      if (mode === "consensus") return `ML is 1 of 3 majority votes`;
+                      if (mode === "unanimous") return `ML must agree with all signals`;
+                      return `ML leads at ≥${thresh}% confidence`;
+                    };
+                    return [
+                      {
+                        id: "normal" as const,
+                        label: "Normal",
+                        sublabel: "Current proven defaults",
+                        bullets: [mlBullet(62), "15pp regime penalty", "No confidence cap"],
+                        color: "sky",
+                      },
+                      {
+                        id: "aggressive" as const,
+                        label: "Aggressive",
+                        sublabel: "More bets per window",
+                        bullets: [mlBullet(58), "10pp regime penalty", "Confidence capped at 80%"],
+                        color: "amber",
+                      },
+                    ];
+                  })().map(p => {
                     const isSelected = (merged.betProfile ?? "normal") === p.id;
                     const colorSelected = p.color === "sky"
                       ? "border-sky-500/60 bg-sky-500/10 ring-1 ring-sky-500/30"
