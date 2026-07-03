@@ -1388,29 +1388,39 @@ async function closePosition(
     }
   }
 
-  dailyPnl += pnl;
-  if (pnl < 0) dailyLossCount++;
+  // Only apply risk counters if the position was opened in the current mode.
+  // If the user switched modes mid-trade the result still gets persisted to DB
+  // (correct) but must not corrupt the new mode's daily budget or circuit-breaker.
+  if (pos.entryMode === botMode) {
+    dailyPnl += pnl;
+    if (pnl < 0) dailyLossCount++;
 
-  // Circuit breaker: update consecutive-loss streak and trigger if needed.
-  cbState = applyBetOutcome(
-    cbState,
-    pnl >= 0,
-    config.maxConsecutiveLosses,
-    config.circuitBreakerPauseWindows,
-  );
-  if (pnl >= 0 && cbState.consecutiveLosses === 0) {
-    logger.info({ cbState }, "[kalshi-bot] win — consecutive loss streak reset");
-  } else if (pnl < 0) {
-    logger.info(
-      { cbState, maxConsecutiveLosses: config.maxConsecutiveLosses },
-      "[kalshi-bot] loss — consecutive loss count updated",
+    // Circuit breaker: update consecutive-loss streak and trigger if needed.
+    cbState = applyBetOutcome(
+      cbState,
+      pnl >= 0,
+      config.maxConsecutiveLosses,
+      config.circuitBreakerPauseWindows,
     );
-    if (cbState.circuitBreakerWindowsRemaining > 0 && cbState.consecutiveLosses === config.maxConsecutiveLosses) {
-      logger.warn(
-        { cbState },
-        "[kalshi-bot] ⚡ circuit breaker TRIGGERED — new entries paused for this many windows",
+    if (pnl >= 0 && cbState.consecutiveLosses === 0) {
+      logger.info({ cbState }, "[kalshi-bot] win — consecutive loss streak reset");
+    } else if (pnl < 0) {
+      logger.info(
+        { cbState, maxConsecutiveLosses: config.maxConsecutiveLosses },
+        "[kalshi-bot] loss — consecutive loss count updated",
       );
+      if (cbState.circuitBreakerWindowsRemaining > 0 && cbState.consecutiveLosses === config.maxConsecutiveLosses) {
+        logger.warn(
+          { cbState },
+          "[kalshi-bot] ⚡ circuit breaker TRIGGERED — new entries paused for this many windows",
+        );
+      }
     }
+  } else {
+    logger.info(
+      { sym: pos.symbol, entryMode: pos.entryMode, currentMode: botMode },
+      "[kalshi-bot] closePosition: skipping risk-counter update — position entry mode differs from current bot mode",
+    );
   }
 
   // Recover account balance. Use the position's entry mode so a live position
