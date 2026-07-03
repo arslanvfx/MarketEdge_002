@@ -294,12 +294,22 @@ export default function BotDashboard() {
     refetchInterval: 5_000,
   });
 
-  // Live Kalshi balance — fetched when modal is open OR while in live mode for the header badge.
-  // The endpoint requires mode=live; when in paper mode it returns ok:false/not_live (informational only).
+  // Pre-live preflight check — fires when the pre-live confirmation modal is open.
+  // Uses a separate mode-agnostic endpoint so we can verify Kalshi API reachability
+  // and account balance BEFORE the user switches to live mode.
+  const { data: kalshiPreflightData, isLoading: preflightLoading } = useQuery<{ configured: boolean; balance: number | null; ok: boolean }>({
+    queryKey: ["bot-kalshi-preflight"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/kalshi-preflight`).then(r => r.json()),
+    enabled: confirmLive,
+    staleTime: 0,
+    refetchInterval: false,
+  });
+
+  // Live Kalshi balance badge — fires only while the bot is in live mode (mode-guarded endpoint).
   const { data: kalshiBalanceData } = useQuery<{ balance: number | null; ok: boolean; reason?: string }>({
     queryKey: ["bot-kalshi-balance"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/kalshi-balance`).then(r => r.json()),
-    enabled: confirmLive || status?.mode === "live",
+    enabled: status?.mode === "live",
     staleTime: 0,
     refetchInterval: status?.mode === "live" ? 30_000 : false,
   });
@@ -584,9 +594,17 @@ export default function BotDashboard() {
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-xs">
-                      <Shield className="w-4 h-4 text-sky-400 shrink-0" />
-                      <span className="text-sky-400">
-                        Balance verified before each live bet (min ${(merged.minAccountBalance ?? 5).toFixed(2)})
+                      {preflightLoading
+                        ? <RefreshCw className="w-4 h-4 text-muted-foreground animate-spin shrink-0" />
+                        : kalshiPreflightData?.ok
+                          ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                          : <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                      <span className={preflightLoading ? "text-muted-foreground" : kalshiPreflightData?.ok ? "text-emerald-400" : "text-red-400 font-medium"}>
+                        {preflightLoading
+                          ? "Checking Kalshi account balance…"
+                          : kalshiPreflightData?.ok
+                            ? `Kalshi balance: $${kalshiPreflightData.balance?.toFixed(2)} (above $${(merged.minAccountBalance ?? 5).toFixed(2)} minimum)`
+                            : "Could not verify Kalshi balance — check API key or connection"}
                       </span>
                     </div>
                   </div>
@@ -626,10 +644,10 @@ export default function BotDashboard() {
                       size="sm"
                       variant="destructive"
                       className="flex-1 h-8 font-semibold"
-                      disabled={!status?.configured || !liveCheckboxChecked}
+                      disabled={!status?.configured || !kalshiPreflightData?.ok || !liveCheckboxChecked}
                       onClick={() => { setMode("live"); setConfirmLive(false); setLiveCheckboxChecked(false); }}
                     >
-                      Confirm — Go Live
+                      {preflightLoading ? "Verifying…" : "Confirm — Go Live"}
                     </Button>
                     <Button
                       size="sm"
