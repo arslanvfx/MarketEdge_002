@@ -53,6 +53,7 @@ import {
 import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry, getCachedKalshiBalance, invalidateBalanceCache } from "./kalshi-trader";
 import {
   getKalshiWindowContext,
+  getWindowBetSignal,
   getTimingAnalysis,
   intraWindowMetrics,
   getCachedPrediction,
