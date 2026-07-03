@@ -2290,28 +2290,6 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // YES directional confidence floor: YES bets must clear an extra 6pp on top of
-    // minConfidence to account for the historically lower win rate on upside calls.
-    // This is intentional — the regime filter and momentum filter already handle
-    // directional risk, and this additional bar keeps YES quality high.
-    const YES_CONFIDENCE_EXTRA = 6;
-    if (decision.action === "BET_YES" && effectiveConfidence < config.minConfidence + YES_CONFIDENCE_EXTRA) {
-      filteredByNewGuards.add(sym);
-      evalResults.push({
-        symbol: sym,
-        action: "SKIP",
-        confidence: effectiveConfidence,
-        score: 0,
-        reason: `YES confidence floor — ${effectiveConfidence}% < ${config.minConfidence + YES_CONFIDENCE_EXTRA}% (min ${config.minConfidence} + ${YES_CONFIDENCE_EXTRA}pp YES floor)`,
-        windowKey,
-        selected: false,
-        evaluatedAt: now,
-        trendStability: stability,
-        regime,
-      });
-      continue;
-    }
-
     // Position-relative NO gate: when the live crypto price is already above the
     // Kalshi strike by > 0.1%, a NO bet is a mean-reversion call into a trending
     // market. Historical data shows 7/7 NO losses in exactly this configuration.
