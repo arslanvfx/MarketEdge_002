@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, type BetProfile } from "../lib/kalshi-bot-engine";
 import {
   getBotState,
   setBotMode,
@@ -102,7 +102,7 @@ router.post("/crypto/bot/mode", requireAuth, (req, res) => {
   }
   // Guard live-mode requests in non-production before calling setBotMode so the
   // caller gets a 403 (forbidden here) rather than a generic 400 (bad input).
-  if (mode === "live" && process.env.NODE_ENV !== "production") {
+  if (mode === "live" && !isLiveModePermitted(process.env.NODE_ENV)) {
     res.status(403).json({ error: "Live betting is only available in the production deployment." });
     return;
   }

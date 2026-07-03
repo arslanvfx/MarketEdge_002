@@ -43,6 +43,10 @@ import {
   tickCircuitBreakerWindow,
   checkMomentumOverride,
   deriveRegime,
+  isLiveModePermitted,
+  assertSetBotModeAllowed,
+  resolveStartupMode,
+  applyStartupModeRestore,
   DEFAULT_BOT_CONFIG,
   type BetProfile,
   type BetProfileConfig,
@@ -69,6 +73,12 @@ export {
   tickCircuitBreakerWindow,
   checkMomentumOverride,
   deriveRegime,
+  // Live-mode env guards — pure functions, also exported here so callers
+  // (e.g. routes/kalshi-bot.ts) only import from this file.
+  isLiveModePermitted,
+  assertSetBotModeAllowed,
+  resolveStartupMode,
+  applyStartupModeRestore,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,

@@ -480,6 +480,70 @@ export interface BotConfig {
   paperBalanceResetAt: string | null; // (default null = count all bets)
 }
 
+// ---------------------------------------------------------------------------
+// Live-mode environment guards (pure — no I/O, fully testable)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true only when the provided NODE_ENV value is "production".
+ * Used by setBotMode and the POST /crypto/bot/mode route to block live-betting
+ * in development/staging environments before any I/O takes place.
+ */
+export function isLiveModePermitted(nodeEnv: string | undefined): boolean {
+  return nodeEnv === "production";
+}
+
+/**
+ * assertSetBotModeAllowed — the complete guard logic of setBotMode, extracted
+ * for unit testing.  The real setBotMode calls this function before touching
+ * any I/O, so testing this function IS testing the real setBotMode guard.
+ *
+ * Throws an Error if the mode transition is not allowed:
+ *   - Live mode is only allowed in production (env guard).
+ *   - Live mode requires KALSHI_API_KEY to be configured (config guard).
+ */
+export function assertSetBotModeAllowed(
+  mode: string,
+  nodeEnv: string | undefined,
+  kalshiConfigured: boolean,
+): void {
+  if (mode === "live" && !isLiveModePermitted(nodeEnv)) {
+    throw new Error("Live betting is only available in the production deployment.");
+  }
+  if (mode === "live" && !kalshiConfigured) {
+    throw new Error("KALSHI_API_KEY not configured — cannot enable live mode");
+  }
+}
+
+/**
+ * Given a mode read from the DB on startup and the current NODE_ENV, returns
+ * the effective mode the server should use.  A persisted "live" row is silently
+ * downgraded to "paper" in any non-production environment so that developers
+ * running against a shared DB never accidentally enter live-betting mode.
+ */
+export function resolveStartupMode(
+  savedMode: "paper" | "live",
+  nodeEnv: string | undefined,
+): "paper" | "live" {
+  if (savedMode === "live" && !isLiveModePermitted(nodeEnv)) {
+    return "paper";
+  }
+  return savedMode;
+}
+
+/**
+ * applyStartupModeRestore — the startup restore logic of loadBotConfigFromDB,
+ * extracted for unit testing.  Returns the effective mode and a flag indicating
+ * whether a downgrade occurred (which triggers a DB re-persist to paper).
+ */
+export function applyStartupModeRestore(
+  savedMode: "paper" | "live",
+  nodeEnv: string | undefined,
+): { effective: "paper" | "live"; didDowngrade: boolean } {
+  const effective = resolveStartupMode(savedMode, nodeEnv);
+  return { effective, didDowngrade: effective !== savedMode };
+}
+
 export const DEFAULT_BOT_CONFIG: BotConfig = {
   betSize: 1.00,
   dailyLossLimit: 20,

@@ -20,6 +20,10 @@ import {
   tickCircuitBreakerWindow,
   checkMomentumOverride,
   deriveRegime,
+  isLiveModePermitted,
+  assertSetBotModeAllowed,
+  resolveStartupMode,
+  applyStartupModeRestore,
   type BotConfig,
   type BotDecision,
   type CircuitBreakerState,
@@ -371,12 +375,9 @@ export function getBotState(): BotStateSnapshot {
 }
 
 export function setBotMode(mode: BotMode): void {
-  if (mode === "live" && process.env.NODE_ENV !== "production") {
-    throw new Error("Live betting is only available in the production deployment.");
-  }
-  if (mode === "live" && !isKalshiConfigured()) {
-    throw new Error("KALSHI_API_KEY not configured — cannot enable live mode");
-  }
+  // assertSetBotModeAllowed throws for env or Kalshi-config violations.
+  // Extracted to kalshi-bot-engine-core for unit-testability without DB.
+  assertSetBotModeAllowed(mode, process.env.NODE_ENV, isKalshiConfigured());
   botMode = mode;
   logger.info({ mode }, "[kalshi-bot] mode changed");
   // Fire-and-forget — persist mode so it survives server restarts.
@@ -440,15 +441,17 @@ export async function loadBotConfigFromDB(): Promise<void> {
       const saved = rows[0].config as Partial<BotConfig> & { mode?: BotMode };
       config = { ...DEFAULT_BOT_CONFIG, ...saved };
       if (saved.mode === "paper" || saved.mode === "live") {
-        if (saved.mode === "live" && process.env.NODE_ENV !== "production") {
+        // applyStartupModeRestore: extracted to engine-core for unit-testability.
+        const { effective, didDowngrade } = applyStartupModeRestore(saved.mode, process.env.NODE_ENV);
+        // Set botMode BEFORE persisting so _persistModeToConfig writes the
+        // correct (effective) value, not a stale previous botMode.
+        botMode = effective;
+        if (didDowngrade) {
           // Safety net: never allow a "live" mode to persist into a non-production
           // environment even if the DB was written in prod and the DB is shared.
-          botMode = "paper";
           logger.warn("[kalshi-bot] DB had mode=live but this is a non-production environment — forcing paper mode");
           // Rewrite the DB value so the next restart is also clean.
           _persistModeToConfig().catch(() => {});
-        } else {
-          botMode = saved.mode;
         }
         logger.info({ mode: botMode }, "[kalshi-bot] mode restored from DB");
       }
