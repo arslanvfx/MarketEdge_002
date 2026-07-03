@@ -161,6 +161,8 @@ export interface WindowCoinEvaluation {
   windowKey: string;
   selected: boolean;           // true for the coin chosen for the bet (current tick only)
   betPlacedThisWindow?: boolean; // true if a bet was placed for this coin in the current window
+  placedBetDirection?: "yes" | "no"; // direction of the placed bet (set when betPlacedThisWindow=true)
+  placedBetConfidence?: number;      // confidence at placement time
   evaluatedAt: string;         // ISO timestamp
   trendStability: TrendStability | null; // from window-open Claude analysis (null = not yet ready)
   regime: PriceRegime | null;  // price-trend regime derived from recent Kalshi strikes
@@ -204,9 +206,18 @@ const lastDecisionWindowKey: Map<string, string> = new Map();
 const prefetchedTicker: Map<string, string> = new Map();
 
 // Tracks how many bets have been placed per (symbol, windowKey) in the current window.
-// Key format: "${sym}:${windowKey}".  Bounded by config.maxBetsPerWindow.
+// Key format: "${sym}:${windowKey}".
 // Old entries are purged lazily when a new window key is seen for a symbol.
 const windowBetCounts: Map<string, number> = new Map();
+
+// Global total bets this window (all symbols combined).
+// Key: windowKey.  Enforces config.maxBetsPerWindow as a TOTAL cap, not per-coin.
+const windowTotalBets: Map<string, number> = new Map();
+
+// Bet details stored at placement time so the eval panel can show actual direction +
+// confidence even after the coin switches to SKIP (directional cap, etc.) on later ticks.
+// Key: "${sym}:${windowKey}".
+const windowBetDetails: Map<string, { direction: "yes" | "no"; confidence: number }> = new Map();
 
 // Direction-cap tracking: counts YES and NO bets placed in the current 15-min window
 // across all symbols. Reset on each window transition. Key: "yes" | "no".
@@ -1620,6 +1631,11 @@ async function _runBotTick(
   lastDecisionWindowKey.set(sym, windowKey);
   // Increment the per-window bet counter so subsequent ticks respect maxBetsPerWindow.
   windowBetCounts.set(windowBetKey, betsThisWindow + 1);
+  // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
+  windowTotalBets.set(windowKey, (windowTotalBets.get(windowKey) ?? 0) + 1);
+  // Store bet details so the eval panel can display actual direction + confidence
+  // even after the coin switches to "directional cap reached" on later ticks.
+  windowBetDetails.set(windowBetKey, { direction, confidence: decision.confidence });
 
   logger.info({ sym, direction, fillPrice, contractCount, betsThisWindow: betsThisWindow + 1 }, "[kalshi-bot] bet placed");
 }
@@ -2424,8 +2440,13 @@ export async function runBotLoopTick(): Promise<void> {
   const cbWindowsAtStart = cbState.circuitBreakerWindowsRemaining;
   if (isCBNewWindow) {
     lastCircuitBreakerWindowKey = cbWindowNow;
-    // Reset per-window direction counts so the cap applies fresh each 15-min window.
+    // Reset per-window counters so all caps apply fresh each 15-min window.
     windowDirectionCounts.clear();
+    windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
+    // Clear bet details older than the current window to prevent map growth.
+    for (const k of windowBetDetails.keys()) {
+      if (!k.endsWith(`:${cbWindowNow}`)) windowBetDetails.delete(k);
+    }
     if (cbState.circuitBreakerWindowsRemaining > 0) {
       cbState = tickCircuitBreakerWindow(cbState);
       logger.info(
@@ -2618,6 +2639,12 @@ export async function runBotLoopTick(): Promise<void> {
   // all pass — causing 6+ same-direction bets from a single loop iteration.
   const phase3DirectionCounts = new Map<"yes" | "no", number>();
 
+  // Global bet cap: total bets placed across ALL coins this window.
+  // This is the correct interpretation of maxBetsPerWindow — not per-coin.
+  // The per-coin windowBetCounts is still used to prevent a single coin from re-betting.
+  const globalBetsThisWindow = windowTotalBets.get(windowKey) ?? 0;
+  const globalCapReached = config.maxBetsPerWindow > 0 && globalBetsThisWindow >= config.maxBetsPerWindow;
+
   // Refresh border-proximity and regime caches once per window transition.
   if (windowKey !== borderProximityCacheWindow) {
     const syms = CRYPTO_COINS
@@ -2671,6 +2698,14 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `past entry ceiling (>${config.maxEntryMinutes}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
+    // Global total-bet cap: if maxBetsPerWindow total bets have already been placed
+    // across ALL coins this window, skip any coin that has not yet placed a bet.
+    // Coins that already placed a bet are allowed to continue (for display/exit purposes).
+    if (globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}`) ?? 0 > 0)) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      continue;
+    }
+
     const minRem = config.minRemainingMinutes ?? 0;
     if (minRem > 0 && 15 * 60 - secondsElapsed < minRem * 60) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -3052,13 +3087,19 @@ export async function runBotLoopTick(): Promise<void> {
       windowKey,
     }, "[kalshi-bot] best-market selected");
   }
-  // Stamp betPlacedThisWindow on every eval entry so the dashboard can show a
-  // persistent "bet placed" indicator even after the coin switches to SKIP
-  // (e.g. "directional cap reached") on subsequent ticks within the same window.
+  // Stamp betPlacedThisWindow + placed bet details on every eval entry so the dashboard
+  // shows accurate direction/confidence even after the coin switches to SKIP.
   const allResults = [...bets, ...skips];
   for (const e of allResults) {
     const wbKey = `${e.symbol}:${e.windowKey}`;
     e.betPlacedThisWindow = (windowBetCounts.get(wbKey) ?? 0) > 0;
+    if (e.betPlacedThisWindow) {
+      const details = windowBetDetails.get(wbKey);
+      if (details) {
+        e.placedBetDirection = details.direction;
+        e.placedBetConfidence = details.confidence;
+      }
+    }
   }
   lastWindowEvaluation = allResults;
 
@@ -3077,6 +3118,20 @@ export async function runBotLoopTick(): Promise<void> {
     ).map(e => e.symbol),
   ];
   for (const sym of orderedSymbols) {
+    // Defense-in-depth: re-check GLOBAL bet cap just before execution.
+    // Phase-3's check uses a snapshot; bets placed earlier in THIS Phase-4 loop
+    // must also be counted so we don't overshoot the total.
+    if (config.maxBetsPerWindow > 0) {
+      const totalNow = windowTotalBets.get(windowKey) ?? 0;
+      if (totalNow >= config.maxBetsPerWindow) {
+        logger.info(
+          { sym, totalNow, cap: config.maxBetsPerWindow },
+          "[kalshi-bot] global bet cap (phase-4 gate) — blocking entry",
+        );
+        continue;
+      }
+    }
+
     // Defense-in-depth: re-check directional cap just before execution.
     // Phase-3's check is the primary gate, but this catches any edge case where
     // a coin approved in Phase 3 would exceed the cap when actually fired

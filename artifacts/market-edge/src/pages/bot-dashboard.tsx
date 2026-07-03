@@ -130,6 +130,8 @@ interface WindowEval {
   symbol: string; action: "BET_YES" | "BET_NO" | "SKIP";
   confidence: number; score: number; reason: string;
   windowKey: string; selected: boolean; betPlacedThisWindow: boolean; evaluatedAt: string;
+  placedBetDirection?: "yes" | "no";
+  placedBetConfidence?: number;
   trendStability: "clean" | "choppy" | "reversing" | null;
   regime: "trending_up" | "trending_down" | "ranging" | null;
 }
@@ -1063,16 +1065,31 @@ export default function BotDashboard() {
                     <tr key={e.symbol} className={`border-b border-border/50 ${e.selected ? "bg-amber-500/5" : ""}`}>
                       <td className="px-5 py-2.5 font-bold">{e.symbol}</td>
                       <td className="px-3 py-2.5">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                          e.action === "BET_YES" ? "bg-emerald-500/15 text-emerald-400" :
-                          e.action === "BET_NO" ? "bg-red-500/15 text-red-400" :
-                          "bg-muted text-muted-foreground"
-                        }`}>
-                          {e.action.replace("BET_", "")}
-                        </span>
+                        {e.betPlacedThisWindow && e.placedBetDirection ? (
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                            e.placedBetDirection === "yes" ? "bg-emerald-500/15 text-emerald-400" :
+                            "bg-red-500/15 text-red-400"
+                          }`}>
+                            {e.placedBetDirection.toUpperCase()}
+                          </span>
+                        ) : (
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                            e.action === "BET_YES" ? "bg-emerald-500/15 text-emerald-400" :
+                            e.action === "BET_NO" ? "bg-red-500/15 text-red-400" :
+                            "bg-muted text-muted-foreground"
+                          }`}>
+                            {e.action.replace("BET_", "")}
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2.5">
-                        {e.action !== "SKIP" ? <span className="font-mono">{e.confidence.toFixed(0)}%</span> : <span className="text-muted-foreground">—</span>}
+                        {e.betPlacedThisWindow && e.placedBetConfidence != null ? (
+                          <span className="font-mono">{e.placedBetConfidence.toFixed(0)}%</span>
+                        ) : e.action !== "SKIP" ? (
+                          <span className="font-mono">{e.confidence.toFixed(0)}%</span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </td>
                       <td className="px-3 py-2.5">
                         {e.action !== "SKIP" ? <span className="font-mono">{e.score.toFixed(2)}</span> : <span className="text-muted-foreground">—</span>}
