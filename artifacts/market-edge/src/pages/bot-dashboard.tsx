@@ -43,6 +43,7 @@ interface BotConfig {
   borderLookbackBets: number;
   regimePenalty: number;
   mlVetoMinConfidence: number;
+  betProfile: "normal" | "aggressive";
   paperStartingBalance: number;
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
@@ -711,6 +712,62 @@ export default function BotDashboard() {
 
           {configOpen && cfg && (
             <div className="p-5 space-y-5">
+
+              {/* ── Bet Profile ── */}
+              <div className="flex flex-col gap-2">
+                <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                  <Zap className="w-3 h-3" />
+                  Bet Profile
+                </span>
+                <div className="grid grid-cols-2 gap-3">
+                  {([
+                    {
+                      id: "normal" as const,
+                      label: "Normal",
+                      sublabel: "Current proven defaults",
+                      bullets: ["ML leads at ≥62% confidence", "15pp regime penalty", "No confidence cap"],
+                      color: "sky",
+                    },
+                    {
+                      id: "aggressive" as const,
+                      label: "Aggressive",
+                      sublabel: "More bets per window",
+                      bullets: ["ML leads at ≥58% confidence", "10pp regime penalty", "Confidence capped at 80%"],
+                      color: "amber",
+                    },
+                  ]).map(p => {
+                    const isSelected = (merged.betProfile ?? "normal") === p.id;
+                    const colorSelected = p.color === "sky"
+                      ? "border-sky-500/60 bg-sky-500/10 ring-1 ring-sky-500/30"
+                      : "border-amber-500/60 bg-amber-500/10 ring-1 ring-amber-500/30";
+                    const labelColor = p.color === "sky" ? "text-sky-400" : "text-amber-400";
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, betProfile: p.id }))}
+                        className={`text-left rounded-xl p-3.5 border transition-all ${
+                          isSelected ? colorSelected : "border-border bg-background/30 hover:border-border/80 hover:bg-muted/30"
+                        }`}
+                      >
+                        <div className={`text-sm font-semibold mb-0.5 ${isSelected ? labelColor : "text-foreground"}`}>
+                          {p.label}
+                          {isSelected && <span className="ml-1.5 text-[9px] opacity-70">✓ active</span>}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground/70 mb-2">{p.sublabel}</div>
+                        <ul className="space-y-0.5">
+                          {p.bullets.map(b => (
+                            <li key={b} className="text-[10px] text-muted-foreground/60 flex items-center gap-1">
+                              <span className="opacity-40">·</span> {b}
+                            </li>
+                          ))}
+                        </ul>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                 {/* Bet Size */}
                 <label className="flex flex-col gap-1.5">

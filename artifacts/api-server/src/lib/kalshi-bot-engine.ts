@@ -37,12 +37,15 @@ import {
   CONFIDENCE_BOOST_PER_SIGNAL,
   ML_PRIMARY_MIN_CONFIDENCE,
   ML_SIGNAL_BOOST,
+  BET_PROFILES,
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
   checkMomentumOverride,
   deriveRegime,
   DEFAULT_BOT_CONFIG,
+  type BetProfile,
+  type BetProfileConfig,
   type DecisionMode,
   type BotConfig,
   type BotDecisionAction,
@@ -60,6 +63,7 @@ export {
   CONFIDENCE_BOOST_PER_SIGNAL,
   ML_PRIMARY_MIN_CONFIDENCE,
   ML_SIGNAL_BOOST,
+  BET_PROFILES,
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
@@ -68,6 +72,8 @@ export {
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,
+  type BetProfile,
+  type BetProfileConfig,
   type DecisionMode,
   type BotConfig,
   type BotDecisionAction,
@@ -222,6 +228,7 @@ function _makeBotDecisionInner(
   });
 
   const decisionMode: DecisionMode = config.decisionMode ?? "classic";
+  const profile = BET_PROFILES[config.betProfile ?? "normal"];
 
   // ── Decision Mode: consensus ──────────────────────────────────────────────
   // Require at least 2 out of [Stat, Claude, ML] to agree on the same direction.
@@ -339,6 +346,7 @@ function _makeBotDecisionInner(
       yesPrice, signalAccuracyPct, minutesElapsed,
       statConfidence: statCall?.confidence ?? null,
       claudeConfidence: claudeCall?.confidence ?? null,
+      mlMinConfidence: profile.mlMinConfidence,
       kalshiTicker,
       minConfidence: config.minConfidence,
     });
@@ -400,6 +408,7 @@ function _makeBotDecisionInner(
     statConfidence: statCall?.confidence ?? null,
     claudeConfidence: claudeCall?.confidence ?? null,
     mlConfidence,
+    mlMinConfidence: profile.mlMinConfidence,
     kalshiTicker,
     minConfidence: config.minConfidence,
   });

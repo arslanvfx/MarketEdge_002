@@ -13,6 +13,7 @@ import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import {
   DEFAULT_BOT_CONFIG,
+  BET_PROFILES,
   makeBotDecision,
   isInQuietHours,
   applyBetOutcome,
@@ -2175,14 +2176,19 @@ export async function runBotLoopTick(): Promise<void> {
     const stability = windowStabilityCache.get(sym) ?? null;
     const reason = decision.reasoning;
 
-    // Reversing: apply a -20% confidence penalty instead of a hard skip.
-    // Only very high-conviction entries (base 65% + boosters = 73–81%) survive the
-    // penalty and still clear minConfidence. Low-conviction reversing windows are
-    // still skipped, but high-agreement signals can proceed with a caution tag.
-    let effectiveConfidence = decision.confidence;
+    // Apply the bet profile's confidence cap before any further filters.
+    // In aggressive mode this clamps at 80% — preventing the false-unanimity
+    // problem where all signals agree in choppy markets and produce inflated 85-92%
+    // confidence bets that win at only ~50%.
+    const _betProfile = BET_PROFILES[config.betProfile ?? "normal"];
+    let effectiveConfidence = Math.min(decision.confidence, _betProfile.effectiveConfidenceCap);
+
+    // Reversing: apply a -20pp penalty instead of a hard skip. Only very
+    // high-conviction entries still clear minConfidence after the penalty.
+    // Subtracts from the already-profile-capped value for consistency.
     let reversingCaution = false;
     if (stability === "reversing" && decision.action !== "SKIP") {
-      effectiveConfidence = decision.confidence - 20;
+      effectiveConfidence = effectiveConfidence - 20;
       reversingCaution = true;
       if (effectiveConfidence < config.minConfidence) {
         evalResults.push({

@@ -34,6 +34,40 @@ export const ML_PRIMARY_MIN_CONFIDENCE = 62;
 // Each agreeing validator (Claude, Stat, WM) adds this when ML leads (Path A).
 export const ML_SIGNAL_BOOST = 6;
 
+// ── Bet Profiles ─────────────────────────────────────────────────────────────
+// Two preset aggression levels the user can switch between in the dashboard.
+// "Normal"     — current proven defaults; higher bar for ML-led entries.
+// "Aggressive" — more bets per window; ML leads at a lower confidence threshold;
+//                effective confidence is capped at 80% to neutralise the false-
+//                unanimity problem where all signals agree in choppy markets.
+
+export type BetProfile = "normal" | "aggressive";
+
+export interface BetProfileConfig {
+  label: string;
+  description: string;
+  mlMinConfidence: number;        // minimum ML confidence for ML to lead (Path A)
+  effectiveConfidenceCap: number; // clamps effective confidence before the minConfidence check
+  regimePenalty: number;          // pp deducted for against-regime bets (auto-synced to BotConfig.regimePenalty on switch)
+}
+
+export const BET_PROFILES: Record<BetProfile, BetProfileConfig> = {
+  normal: {
+    label: "Normal",
+    description: "Balanced — ML needs 62% to lead; 15pp regime penalty. Fewer bets, higher conviction.",
+    mlMinConfidence: 62,
+    effectiveConfidenceCap: 100,
+    regimePenalty: 15,
+  },
+  aggressive: {
+    label: "Aggressive",
+    description: "More bets — ML leads at 58%+; 10pp regime penalty; confidence capped at 80% to prevent false-unanimity overconfidence.",
+    mlMinConfidence: 58,
+    effectiveConfidenceCap: 80,
+    regimePenalty: 10,
+  },
+};
+
 export interface CorePairInputs {
   statAbove: boolean | null;
   claudeAbove: boolean | null;
@@ -47,6 +81,7 @@ export interface CorePairInputs {
   statConfidence: number | null;
   claudeConfidence: number | null;
   mlConfidence: number | null;
+  mlMinConfidence?: number | null;  // profile override for ML_PRIMARY_MIN_CONFIDENCE
   kalshiTicker: string | null;
   minConfidence: number;
 }
@@ -112,10 +147,11 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
   }
 
   // Whether the ML model is ready to lead
+  const mlMinConf = inp.mlMinConfidence ?? ML_PRIMARY_MIN_CONFIDENCE;
   let mlLeadReady =
     inp.mlAbove !== null &&
     inp.mlConfidence != null &&
-    inp.mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE;
+    inp.mlConfidence >= mlMinConf;
 
   // Veto PATH A when the core pair (Stat + Claude) are BOTH available and BOTH
   // oppose ML's direction.  When two independent signals unanimously disagree
@@ -419,6 +455,9 @@ export interface BotConfig {
   // this threshold the bet proceeds as if ML were unavailable — avoiding hard
   // blocks from near-coin-flip ML uncertainty. Range 50–70 (default 57).
   mlVetoMinConfidence: number;
+  // Bet aggression profile — "normal" uses proven defaults; "aggressive" lowers
+  // the ML-lead threshold and caps effective confidence at 80%.
+  betProfile: BetProfile;
   // Paper trading simulation parameters (only used in paper mode).
   // paperStartingBalance: the wallet amount before any bets are counted.
   // paperWinReturnRate: profit as a fraction of betSize on a winning bet (0.5 = +50¢ per $1 bet).
@@ -465,6 +504,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // ML Gate soft veto: only veto when ML is ≥57% confident in opposition.
   // Values 50-70; 50 = always veto on any disagreement (original hard veto).
   mlVetoMinConfidence: 57,
+  betProfile: "normal",
   // Paper trading defaults
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,

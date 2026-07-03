@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
+import { BET_PROFILES, type BetProfile } from "../lib/kalshi-bot-engine";
 import {
   getBotState,
   setBotMode,
@@ -148,6 +149,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderLookbackBets,
     regimePenalty,
     mlVetoMinConfidence,
+    betProfile,
     paperStartingBalance,
     paperWinReturnRate,
     paperBalanceResetAt,
@@ -178,6 +180,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     borderLookbackBets?: number;
     regimePenalty?: number;
     mlVetoMinConfidence?: number;
+    betProfile?: "normal" | "aggressive";
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
@@ -262,6 +265,14 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof mlVetoMinConfidence === "number" && mlVetoMinConfidence >= 50 && mlVetoMinConfidence <= 70) {
     partial.mlVetoMinConfidence = mlVetoMinConfidence;
+  }
+  if (betProfile === "normal" || betProfile === "aggressive") {
+    partial.betProfile = betProfile;
+    // Auto-sync regimePenalty to the profile's preset unless the caller also
+    // explicitly provided a regimePenalty override in the same request.
+    if (typeof regimePenalty !== "number") {
+      partial.regimePenalty = BET_PROFILES[betProfile].regimePenalty;
+    }
   }
   if (typeof paperStartingBalance === "number" && paperStartingBalance >= 1 && paperStartingBalance <= 10000) {
     partial.paperStartingBalance = paperStartingBalance;
