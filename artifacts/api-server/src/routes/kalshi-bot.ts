@@ -320,14 +320,21 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
 // GET /crypto/bot/kalshi-balance — live Kalshi account balance (used for pre-live checklist)
 router.get("/crypto/bot/kalshi-balance", async (_req, res) => {
   try {
+    // Only meaningful in live mode — return a clear non-ok when in paper mode so
+    // the pre-live checklist modal can distinguish "not live yet" from "API error".
+    const { mode } = getBotState();
+    if (mode !== "live") {
+      res.json({ balance: null, ok: false, reason: "not_live" });
+      return;
+    }
     if (!isKalshiConfigured()) {
-      res.json({ balance: null, ok: false });
+      res.json({ balance: null, ok: false, reason: "not_configured" });
       return;
     }
     const balance = await getCachedKalshiBalance();
     res.json({ balance, ok: true });
   } catch {
-    res.json({ balance: null, ok: false });
+    res.json({ balance: null, ok: false, reason: "api_error" });
   }
 });
 

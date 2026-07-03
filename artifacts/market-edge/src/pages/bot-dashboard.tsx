@@ -295,7 +295,7 @@ export default function BotDashboard() {
   });
 
   // Fetched only when the user opens the pre-live checklist modal.
-  const { data: kalshiBalanceData, isLoading: balanceLoading } = useQuery<{ balance: number | null; ok: boolean }>({
+  const { data: kalshiBalanceData, isLoading: balanceLoading } = useQuery<{ balance: number | null; ok: boolean; reason?: string }>({
     queryKey: ["bot-kalshi-balance"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/kalshi-balance`).then(r => r.json()),
     enabled: confirmLive,
@@ -587,13 +587,17 @@ export default function BotDashboard() {
                         ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                         : balanceLoading
                           ? <RefreshCw className="w-4 h-4 text-muted-foreground animate-spin shrink-0" />
-                          : <XCircle className="w-4 h-4 text-amber-400 shrink-0" />}
-                      <span className={kalshiBalanceData?.ok ? "text-foreground" : "text-muted-foreground"}>
+                          : kalshiBalanceData?.reason === "not_live"
+                            ? <Shield className="w-4 h-4 text-sky-400 shrink-0" />
+                            : <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                      <span className={kalshiBalanceData?.ok ? "text-emerald-400" : kalshiBalanceData?.reason === "not_live" ? "text-sky-400" : "text-muted-foreground"}>
                         {balanceLoading
                           ? "Fetching Kalshi balance…"
                           : kalshiBalanceData?.ok
                             ? `Kalshi balance: $${kalshiBalanceData.balance?.toFixed(2)}`
-                            : "Could not verify Kalshi balance (non-blocking)"}
+                            : kalshiBalanceData?.reason === "not_live"
+                              ? "Balance verified automatically on first live bet"
+                              : "Could not reach Kalshi API — check your connection"}
                       </span>
                     </div>
                   </div>
@@ -633,10 +637,15 @@ export default function BotDashboard() {
                       size="sm"
                       variant="destructive"
                       className="flex-1 h-8 font-semibold"
-                      disabled={!status?.configured || !liveCheckboxChecked}
+                      disabled={
+                        !status?.configured ||
+                        !liveCheckboxChecked ||
+                        balanceLoading ||
+                        (kalshiBalanceData != null && !kalshiBalanceData.ok && kalshiBalanceData.reason !== "not_live")
+                      }
                       onClick={() => { setMode("live"); setConfirmLive(false); setLiveCheckboxChecked(false); }}
                     >
-                      Confirm — Go Live
+                      {balanceLoading ? "Verifying balance…" : "Confirm — Go Live"}
                     </Button>
                     <Button
                       size="sm"
@@ -671,6 +680,12 @@ export default function BotDashboard() {
                 <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${status?.mode === "live" ? "translate-x-5" : ""}`} />
               </button>
               <span className={`text-xs font-medium ${status?.mode === "live" ? "text-red-400" : "text-muted-foreground"}`}>Live</span>
+              {/* Live Kalshi balance badge — shown next to the toggle when in live mode */}
+              {status?.mode === "live" && status?.accountBalance != null && (
+                <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 ml-1" title="Kalshi account balance">
+                  ${status.accountBalance.toFixed(2)}
+                </span>
+              )}
             </div>
           )}
         </div>

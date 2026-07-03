@@ -1335,13 +1335,16 @@ async function _runBotTick(
 
   // ── LIVE-ONLY GUARDS: slippage strikes, account balance, total exposure ───
   if (botMode === "live") {
-    // Slippage: skip if this coin accumulated ≥3 unfair fills this window.
+    // Slippage: skip entry on the window immediately following ≥3 unfair fills.
+    // Strikes accumulated in window W → entry skipped in window W+1, then cleared.
+    // (Strikes in the same window don't block entry — the bet already went through.)
     const slipInfo = coinSlippageStrikes.get(sym);
-    if (slipInfo && slipInfo.windowKey === windowKey && slipInfo.strikes >= 3) {
+    if (slipInfo && slipInfo.strikes >= 3 && slipInfo.windowKey < windowKey) {
       logger.warn(
-        { sym, strikes: slipInfo.strikes, windowKey },
-        "[kalshi-bot] SKIP — coin has ≥3 slippage strikes this window",
+        { sym, strikes: slipInfo.strikes, strikeWindowKey: slipInfo.windowKey, windowKey },
+        "[kalshi-bot] SKIP — coin had ≥3 slippage strikes in the previous window; clearing counter",
       );
+      coinSlippageStrikes.delete(sym); // one-window penalty only — clear so W+2 is unaffected
       return;
     }
 
