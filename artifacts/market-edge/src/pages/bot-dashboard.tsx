@@ -94,6 +94,8 @@ interface BotStatus {
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;
   isInQuietHours: boolean;
+  dbDegraded?: boolean;
+  dbDegradedSince?: string | null;
   mlStatus?: {
     ready: boolean; readyCount: number; totalCount: number;
     minWindows: number; minRequired: number;
@@ -467,6 +469,12 @@ export default function BotDashboard() {
             <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title={`Quiet hours active (${String(utcToEst(cfg?.quietHoursStart ?? 0)).padStart(2,"0")}:00–${String(utcToEst(cfg?.quietHoursEnd ?? 0)).padStart(2,"0")}:00 EST) — no new entries`}>
               <Clock className="w-3 h-3" />
               Quiet
+            </span>
+          )}
+          {status?.dbDegraded && (
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30 animate-pulse" title={`Database unreachable since ${status.dbDegradedSince ? new Date(status.dbDegradedSince).toLocaleTimeString() : "recently"} — new bets paused until connection restores`}>
+              <AlertTriangle className="w-3 h-3" />
+              DB offline
             </span>
           )}
           {recentTuneEntry && (() => {

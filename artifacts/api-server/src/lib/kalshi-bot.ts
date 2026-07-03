@@ -110,6 +110,9 @@ export interface BotStateSnapshot {
   consecutiveLosses: number;
   // Whether the current UTC hour falls within the configured quiet-hours window.
   isInQuietHours: boolean;
+  // True when DB writes have been failing and new bets are suppressed.
+  dbDegraded: boolean;
+  dbDegradedSince: string | null; // ISO timestamp when degraded mode began
 }
 
 // Per-coin evaluation result from the best-market selection pass.
@@ -208,6 +211,29 @@ let regimeCacheWindow = "";
 // Fallback regime penalty used only before config is loaded from DB.
 // The live value is config.regimePenalty (default 8pp via DEFAULT_BOT_CONFIG).
 const REGIME_AGAINST_PENALTY_FALLBACK = 8;
+
+// ---------------------------------------------------------------------------
+// DB health watchdog
+// ---------------------------------------------------------------------------
+// Consecutive DB write failures before entering degraded mode (no new bets).
+const DB_DEGRADED_THRESHOLD = 3;
+let dbConsecutiveFailures = 0;
+let dbDegradedSince: Date | null = null; // null = healthy
+
+/** True when the DB has been unreachable long enough to suppress new bets. */
+export function isDbDegraded(): boolean {
+  return dbDegradedSince !== null;
+}
+
+/** Lightweight DB probe — SELECT 1. Returns true on success. */
+async function probeDb(): Promise<boolean> {
+  try {
+    await db.execute(sql`SELECT 1`);
+    return true;
+  } catch {
+    return false;
+  }
+}
 const REGIME_STRIKES_MAX = 6; // keep last 6 strike prices per symbol
 
 // Tracks the windowKey for which the window-open parallel trend-stability analysis
@@ -330,6 +356,8 @@ export function getBotState(): BotStateSnapshot {
     circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining,
     consecutiveLosses: cbState.consecutiveLosses,
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd),
+    dbDegraded: dbDegradedSince !== null,
+    dbDegradedSince: dbDegradedSince?.toISOString() ?? null,
   };
 }
 
@@ -1467,7 +1495,25 @@ async function persistBetRecord(args: BetRecordArgs): Promise<void> {
         createdAt: new Date(),
       }).onConflictDoNothing();
     }
+    // Successful write — reset the failure counter and clear degraded mode if set.
+    if (dbDegradedSince !== null) {
+      const downMs = Date.now() - dbDegradedSince.getTime();
+      logger.info(
+        { downSeconds: Math.round(downMs / 1000) },
+        "[kalshi-bot] DB connection restored — exiting degraded mode, resuming new bets",
+      );
+      dbDegradedSince = null;
+    }
+    dbConsecutiveFailures = 0;
   } catch (err) {
+    dbConsecutiveFailures++;
+    if (dbConsecutiveFailures >= DB_DEGRADED_THRESHOLD && dbDegradedSince === null) {
+      dbDegradedSince = new Date();
+      logger.warn(
+        { failures: dbConsecutiveFailures },
+        "[kalshi-bot] DB degraded — pausing new bets until connection restores (open positions still managed)",
+      );
+    }
     logger.warn({ err }, "[kalshi-bot] DB persist error (non-fatal)");
   }
 }
@@ -2014,6 +2060,26 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   if (!config.enabled || paused) return;
+
+  // DB degraded mode: probe for recovery each tick; skip new bets until healthy.
+  if (dbDegradedSince !== null) {
+    const recovered = await probeDb();
+    if (recovered) {
+      const downMs = Date.now() - dbDegradedSince.getTime();
+      logger.info(
+        { downSeconds: Math.round(downMs / 1000) },
+        "[kalshi-bot] DB probe succeeded — exiting degraded mode, resuming new bets",
+      );
+      dbDegradedSince = null;
+      dbConsecutiveFailures = 0;
+    } else {
+      logger.warn(
+        { degradedSince: dbDegradedSince.toISOString() },
+        "[kalshi-bot] DB still unreachable — skipping new bets this tick",
+      );
+      return;
+    }
+  }
 
   // Phase 1: refresh market data for all Kalshi-enabled coins.
   for (const coin of CRYPTO_COINS) {
