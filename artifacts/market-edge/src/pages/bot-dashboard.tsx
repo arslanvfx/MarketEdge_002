@@ -294,13 +294,14 @@ export default function BotDashboard() {
     refetchInterval: 5_000,
   });
 
-  // Fetched only when the user opens the pre-live checklist modal.
-  const { data: kalshiBalanceData, isLoading: balanceLoading } = useQuery<{ balance: number | null; ok: boolean; reason?: string }>({
+  // Live Kalshi balance — fetched when modal is open OR while in live mode for the header badge.
+  // The endpoint requires mode=live; when in paper mode it returns ok:false/not_live (informational only).
+  const { data: kalshiBalanceData } = useQuery<{ balance: number | null; ok: boolean; reason?: string }>({
     queryKey: ["bot-kalshi-balance"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/kalshi-balance`).then(r => r.json()),
-    enabled: confirmLive,
+    enabled: confirmLive || status?.mode === "live",
     staleTime: 0,
-    refetchInterval: false,
+    refetchInterval: status?.mode === "live" ? 30_000 : false,
   });
 
   // ── Sync draft with backend ───────────────────────────────────────────────
@@ -583,17 +584,9 @@ export default function BotDashboard() {
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-xs">
-                      {kalshiBalanceData?.ok
-                        ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                        : balanceLoading
-                          ? <RefreshCw className="w-4 h-4 text-muted-foreground animate-spin shrink-0" />
-                          : <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
-                      <span className={kalshiBalanceData?.ok ? "text-emerald-400" : "text-muted-foreground"}>
-                        {balanceLoading
-                          ? "Fetching Kalshi balance…"
-                          : kalshiBalanceData?.ok
-                            ? `Kalshi balance: $${kalshiBalanceData.balance?.toFixed(2)}`
-                            : "Could not reach Kalshi API — check your connection"}
+                      <Shield className="w-4 h-4 text-sky-400 shrink-0" />
+                      <span className="text-sky-400">
+                        Balance verified before each live bet (min ${(merged.minAccountBalance ?? 5).toFixed(2)})
                       </span>
                     </div>
                   </div>
@@ -633,15 +626,10 @@ export default function BotDashboard() {
                       size="sm"
                       variant="destructive"
                       className="flex-1 h-8 font-semibold"
-                      disabled={
-                        !status?.configured ||
-                        !liveCheckboxChecked ||
-                        balanceLoading ||
-                        (kalshiBalanceData != null && !kalshiBalanceData.ok)
-                      }
+                      disabled={!status?.configured || !liveCheckboxChecked}
                       onClick={() => { setMode("live"); setConfirmLive(false); setLiveCheckboxChecked(false); }}
                     >
-                      {balanceLoading ? "Verifying balance…" : "Confirm — Go Live"}
+                      Confirm — Go Live
                     </Button>
                     <Button
                       size="sm"
@@ -677,9 +665,9 @@ export default function BotDashboard() {
               </button>
               <span className={`text-xs font-medium ${status?.mode === "live" ? "text-red-400" : "text-muted-foreground"}`}>Live</span>
               {/* Live Kalshi balance badge — shown next to the toggle when in live mode */}
-              {status?.mode === "live" && status?.accountBalance != null && (
+              {status?.mode === "live" && (kalshiBalanceData?.ok ? kalshiBalanceData.balance : status?.accountBalance) != null && (
                 <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 ml-1" title="Kalshi account balance">
-                  ${status.accountBalance.toFixed(2)}
+                  ${((kalshiBalanceData?.ok ? kalshiBalanceData.balance : status?.accountBalance) ?? 0).toFixed(2)}
                 </span>
               )}
             </div>

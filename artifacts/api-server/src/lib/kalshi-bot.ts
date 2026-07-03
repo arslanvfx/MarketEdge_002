@@ -405,6 +405,13 @@ export function setBotMode(mode: BotMode): void {
   // Fire-and-forget; the counters will be correct on the next bot tick.
   loadDailyPnlFromDB().catch(() => {});
   loadCoinDailyLossFromDB().catch(() => {});
+  // Refresh the Kalshi account balance immediately on switch to live so the
+  // dashboard badge reflects the real balance before any trades have closed.
+  if (mode === "live" && isKalshiConfigured()) {
+    getCachedKalshiBalance()
+      .then(bal => { accountBalance = bal; })
+      .catch(() => {});
+  }
 }
 
 async function _persistModeToConfig(): Promise<void> {
@@ -1360,6 +1367,7 @@ async function _runBotTick(
     const minBal = config.minAccountBalance ?? 5;
     try {
       const liveBal = await getCachedKalshiBalance();
+      accountBalance = liveBal; // keep bot state fresh for the dashboard badge
       if (liveBal < minBal) {
         logger.error(
           { sym, liveBal: liveBal.toFixed(2), minAccountBalance: minBal },

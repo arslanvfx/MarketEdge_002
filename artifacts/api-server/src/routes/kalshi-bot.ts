@@ -317,11 +317,17 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   res.json({ ok: true, config: updated, persisted });
 });
 
-// GET /crypto/bot/kalshi-balance — Kalshi account balance (used for pre-live checklist and header badge)
-// Works in both paper and live modes so the pre-live checklist can verify the
-// account is funded before the user confirms the mode switch.
+// GET /crypto/bot/kalshi-balance — live Kalshi account balance
+// Returns ok:false unless the bot is in live mode and Kalshi is configured.
+// Used by the live balance header badge. Pre-live checklist fetches this too,
+// but treats a not_live response as informational (not a hard gate).
 router.get("/crypto/bot/kalshi-balance", async (_req, res) => {
   try {
+    const { mode } = getBotState();
+    if (mode !== "live") {
+      res.json({ balance: null, ok: false, reason: "not_live" });
+      return;
+    }
     if (!isKalshiConfigured()) {
       res.json({ balance: null, ok: false, reason: "not_configured" });
       return;
