@@ -135,6 +135,9 @@ export interface BotStateSnapshot {
   // True only in a Replit production deployment (NODE_ENV === "production").
   // Live betting is structurally blocked in all other environments.
   isProductionEnv: boolean;
+  // Per-coin streak pause state: symbol → { consecutiveLosses, pauseUntilWindowKey }.
+  // pauseUntilWindowKey is non-null while the coin is blocked from new entries.
+  coinStreakState: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
 }
 
 // Per-coin evaluation result from the best-market selection pass.
@@ -399,6 +402,7 @@ export function getBotState(): BotStateSnapshot {
     dbDegraded: dbDegradedSince !== null,
     dbDegradedSince: dbDegradedSince?.toISOString() ?? null,
     isProductionEnv: process.env.NODE_ENV === "production",
+    coinStreakState: Object.fromEntries(coinStreakState),
   };
 }
 

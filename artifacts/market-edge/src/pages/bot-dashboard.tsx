@@ -108,6 +108,7 @@ interface BotStatus {
     ready: boolean; readyCount: number; totalCount: number;
     minWindows: number; minRequired: number;
   };
+  coinStreakState?: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
 }
 
 interface HistoryRecord {
@@ -501,6 +502,13 @@ export default function BotDashboard() {
   const recentTuneEntry = tuneEntries.find(e => new Date(e.createdAt).getTime() > oneHourAgo) ?? null;
   const pausedCoins = perfReportData?.pausedCoins ?? {};
 
+  // Coins currently blocked by the per-coin streak loss limit (coinStreakState).
+  // These are separate from the auto-tune pausedCoins and always come from /bot/status.
+  const streakPausedCoins: Array<{ sym: string; pauseUntilWindowKey: string; consecutiveLosses: number }> =
+    Object.entries(status?.coinStreakState ?? {})
+      .filter(([, s]) => s.pauseUntilWindowKey !== null)
+      .map(([sym, s]) => ({ sym, pauseUntilWindowKey: s.pauseUntilWindowKey!, consecutiveLosses: s.consecutiveLosses }));
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -737,23 +745,36 @@ export default function BotDashboard() {
         </div>
 
         {/* ── Paused Coins Banner ── */}
-        {(Object.keys(pausedCoins).length > 0 || (status?.circuitBreakerWindowsRemaining ?? 0) > 0) && (
+        {(Object.keys(pausedCoins).length > 0 || streakPausedCoins.length > 0 || (status?.circuitBreakerWindowsRemaining ?? 0) > 0) && (
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm flex-shrink-0">
               <Pause className="w-4 h-4" />
-              {Object.keys(pausedCoins).length > 0 ? "Auto-paused coins" : "Circuit breaker active"}
+              Blocked coins
             </div>
             <div className="flex flex-wrap gap-2">
               {Object.entries(pausedCoins).map(([sym, windowsRemaining]) => (
                 <span
-                  key={sym}
+                  key={`tune-${sym}`}
                   className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
                   title={`${sym} is paused by auto-tune for ${windowsRemaining} more 15-min window(s) (~${windowsRemaining * 15} min)`}
                 >
                   {sym}
-                  <span className="font-mono text-amber-400/70">· {windowsRemaining} {windowsRemaining === 1 ? "window" : "windows"} left</span>
+                  <span className="font-mono text-amber-400/70">· {windowsRemaining} {windowsRemaining === 1 ? "window" : "windows"} (tune)</span>
                 </span>
               ))}
+              {streakPausedCoins.map(({ sym, pauseUntilWindowKey, consecutiveLosses }) => {
+                const utcTime = pauseUntilWindowKey.slice(11, 16);
+                return (
+                  <span
+                    key={`streak-${sym}`}
+                    className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/40"
+                    title={`${sym} streak-paused after ${consecutiveLosses} consecutive losses — re-opens at window ${pauseUntilWindowKey} UTC`}
+                  >
+                    {sym}
+                    <span className="font-mono text-orange-400/70">· until {utcTime} UTC ({consecutiveLosses}L streak)</span>
+                  </span>
+                );
+              })}
               {(status?.circuitBreakerWindowsRemaining ?? 0) > 0 && (
                 <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-red-500/20 text-red-300 border border-red-500/40">
                   CB: {status!.circuitBreakerWindowsRemaining} {status!.circuitBreakerWindowsRemaining === 1 ? "window" : "windows"} left
