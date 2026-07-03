@@ -401,18 +401,18 @@ test("rule3: confidence_floor_raise fires when last30WinRate<55% and totalBetsâ‰
   assert.equal(r3.newValue, "65");
 });
 
-test("rule3: confidence_floor_raise is capped at 80", () => {
+test("rule3: confidence_floor_raise is capped at 70", () => {
   const report = makeReport({ totalBets: 40, last30WinRate: 0.40 });
-  const config = { ...DEFAULT_CONFIG, minConfidence: 78 };
+  const config = { ...DEFAULT_CONFIG, minConfidence: 68 };
   const mutations = runAutoTuneRules(report, config, new Map());
   const r3 = mutations.find(m => m.ruleName === "confidence_floor_raise");
   assert.ok(r3);
-  assert.equal(r3.configMutation?.minConfidence, 80);
+  assert.equal(r3.configMutation?.minConfidence, 70);
 });
 
-test("rule3: confidence_floor_raise does not fire when already at 80", () => {
+test("rule3: confidence_floor_raise does not fire when already at 70", () => {
   const report = makeReport({ totalBets: 40, last30WinRate: 0.40 });
-  const config = { ...DEFAULT_CONFIG, minConfidence: 80 };
+  const config = { ...DEFAULT_CONFIG, minConfidence: 70 };
   const mutations = runAutoTuneRules(report, config, new Map());
   const r3 = mutations.find(m => m.ruleName === "confidence_floor_raise");
   assert.equal(r3, undefined);
