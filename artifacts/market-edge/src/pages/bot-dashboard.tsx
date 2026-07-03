@@ -341,6 +341,7 @@ function CountdownCell({ reason, windowKey }: { reason: string; windowKey: strin
   }
 
   const remaining = Math.max(0, Math.round((scenario.endsAt - now) / 1000));
+  const expired = remaining === 0;
   const pct = Math.max(0, Math.min(1, remaining / scenario.total));
   const mins = Math.floor(remaining / 60);
   const secs = remaining % 60;
@@ -350,6 +351,17 @@ function CountdownCell({ reason, windowKey }: { reason: string; windowKey: strin
   const circ = 2 * Math.PI * R;
   const dash = circ * pct;
   const colors = COUNTDOWN_COLORS[scenario.color];
+
+  // When the countdown expires, show a neutral "updating…" spinner instead of
+  // freezing on "0s".  The 3-second poll will deliver the fresh eval within moments.
+  if (expired) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/40 animate-pulse inline-block" />
+        <span className="text-[10px] text-muted-foreground/60 italic">updating…</span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center gap-2">
@@ -461,7 +473,7 @@ export default function BotDashboard() {
   const { data: evalData } = useQuery<{ evaluation: WindowEval[] }>({
     queryKey: ["bot-window-eval"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/window-eval`).then(r => r.json()),
-    refetchInterval: 30_000,
+    refetchInterval: 3_000,
   });
 
   const { data: perfReportData } = useQuery<{ report: PerformanceReport | null; pausedCoins: Record<string, number> }>({

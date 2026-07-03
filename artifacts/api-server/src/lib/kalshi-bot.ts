@@ -968,6 +968,59 @@ export async function loadOpenPositionFromDB(): Promise<void> {
   }
 }
 
+/**
+ * Restore windowBetCounts, windowTotalBets, and windowBetDetails from DB on startup.
+ * Without this, every server restart wipes the in-memory maps so bets placed earlier
+ * in the current window won't have BET PLACED badges and the global cap resets to 0.
+ * We only restore for the CURRENT window — previous windows don't matter.
+ */
+export async function loadWindowBetCountsFromDB(): Promise<void> {
+  try {
+    const wk = currentWindowKey();
+    const rows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        direction: kalshiBotBetsTable.direction,
+        signals: kalshiBotBetsTable.signals,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          eq(kalshiBotBetsTable.action, "bet"),
+          eq(kalshiBotBetsTable.windowKey, wk),
+          isNull(kalshiBotBetsTable.archivedAt),
+        ),
+      );
+
+    if (rows.length === 0) return;
+
+    for (const row of rows) {
+      const sym = row.symbol.toUpperCase();
+      const key = `${sym}:${wk}`;
+      windowBetCounts.set(key, (windowBetCounts.get(key) ?? 0) + 1);
+      windowTotalBets.set(wk, (windowTotalBets.get(wk) ?? 0) + 1);
+
+      const dir = row.direction as "yes" | "no" | null;
+      if (dir === "yes" || dir === "no") {
+        // Restore direction cap counters so maxSameDirectionBets also respects prior bets.
+        windowDirectionCounts.set(dir, (windowDirectionCounts.get(dir) ?? 0) + 1);
+        const sig = row.signals as Record<string, unknown> | null;
+        const confidence = typeof sig?.effectiveConfidence === "number"
+          ? sig.effectiveConfidence
+          : 0;
+        windowBetDetails.set(key, { direction: dir, confidence });
+      }
+    }
+
+    logger.info(
+      { windowKey: wk, restoredCount: rows.length },
+      "[kalshi-bot] window bet counts restored from DB",
+    );
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] failed to restore window bet counts from DB (non-fatal)");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Border-proximity guard helper
 // ---------------------------------------------------------------------------
