@@ -3074,6 +3074,40 @@ export function getPausedCoinState(): Record<string, number> {
   return out;
 }
 
+export interface CoinGuardEntry {
+  symbol: string;
+  dailyLoss: number;
+  consecutiveLosses: number;
+  pauseUntilWindowKey: string | null;
+  slippageStrikes: number;
+}
+
+/** Returns per-coin guard state for display in the bot dashboard. */
+export function getCoinGuardState(): {
+  coins: CoinGuardEntry[];
+  maxDailyLossPerCoin: number;
+} {
+  const nowMs = Date.now();
+  const currentWK = new Date(Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000)).toISOString().slice(0, 16);
+
+  const coins: CoinGuardEntry[] = CRYPTO_COINS.map((c) => {
+    const sym = c.symbol;
+    const dailyLoss = coinDailyLoss.get(sym) ?? 0;
+    const streak = coinStreakState.get(sym) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
+    const slip = coinSlippageStrikes.get(sym);
+    const slippageStrikes = slip && slip.windowKey === currentWK ? slip.strikes : 0;
+    return {
+      symbol: sym,
+      dailyLoss,
+      consecutiveLosses: streak.consecutiveLosses,
+      pauseUntilWindowKey: streak.pauseUntilWindowKey,
+      slippageStrikes,
+    };
+  });
+
+  return { coins, maxDailyLossPerCoin: config.maxDailyLossPerCoin };
+}
+
 /** Clear all per-coin auto-tune pauses and reset the circuit-breaker countdown.
  *  Does NOT change bot mode, config, or position state.
  *  Call this when pauses are stale and the user wants to resume immediately. */
