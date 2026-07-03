@@ -1952,6 +1952,7 @@ export const KALSHI_SERIES: Record<string, string> = {
   XRP:  "KXXRP15M",
   HYPE: "KXHYPE15M",
   BNB:  "KXBNB15M",
+  DOGE: "KXDOGE15M",
 };
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
