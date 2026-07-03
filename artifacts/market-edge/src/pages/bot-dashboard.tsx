@@ -207,11 +207,30 @@ const fmtCrypto = (n: number | string | null | undefined) => {
   return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
+const EST = "America/New_York";
 const fmtDateTime = (iso: string | null) => {
   if (!iso) return "—";
   const d = new Date(iso);
-  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
-    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: EST }) + " " +
+    d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: EST }) + " EST";
+};
+
+/** Convert a windowKey like "2026-07-03T05:15" (UTC) to "12:15 AM EST" display. */
+const wkToEst = (wk: string | null | undefined): string => {
+  if (!wk) return "—";
+  const d = new Date(wk + ":00Z");
+  return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: EST });
+};
+
+/** Convert "HH-HH" UTC hour band to EST, e.g. "00-02" → "7PM-9PM EST". */
+const bandToEst = (band: string): string => {
+  const [s, e] = band.split("-").map(Number);
+  const fmt = (h: number) => {
+    const ampm = ((h % 24) < 12) ? "AM" : "PM";
+    const h12 = ((h % 24) % 12) || 12;
+    return `${h12}${ampm}`;
+  };
+  return `${fmt((s - 5 + 24) % 24)}-${fmt((e - 5 + 24) % 24)}`;
 };
 
 const fmtDuration = (start: string | null, end: string | null) => {
@@ -585,7 +604,7 @@ export default function BotDashboard() {
                     { label: "Contracts", value: String(pos.contractCount) },
                     { label: "Bet Size", value: fmt$(pos.betAmount) },
                     { label: "Ticker", value: pos.ticker },
-                    { label: "Window", value: pos.windowKey.slice(11) },
+                    { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-background/30 rounded-lg p-2.5">
                       <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">{label}</div>
@@ -620,7 +639,7 @@ export default function BotDashboard() {
             <h2 className="font-semibold text-sm">Market Selection — This Window</h2>
             {evaluation.length > 0 && (
               <span className="text-xs text-muted-foreground ml-auto">
-                {evaluation[0]?.windowKey?.slice(0, 16).replace("T", " ")}
+                {wkToEst(evaluation[0]?.windowKey)} EST window
               </span>
             )}
           </div>
@@ -1642,7 +1661,7 @@ export default function BotDashboard() {
                           {fmtDuration(r.createdAt, r.exitedAt)}
                         </span>
                       )}
-                      <span className="font-mono">{r.windowKey?.slice(11, 16)} window</span>
+                      <span className="font-mono">{wkToEst(r.windowKey)} EST</span>
                       {(() => {
                         const conf = sigs?.confidence as number | null ?? sigs?.statConfidence as number | null ?? null;
                         return conf != null ? (
@@ -1936,7 +1955,7 @@ export default function BotDashboard() {
                     {/* Hour band heatmap */}
                     {Object.keys(r.byHourBand).length > 0 && (
                       <div>
-                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Win Rate by Hour Band (UTC)</div>
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Win Rate by Hour Band (EST)</div>
                         <div className="flex flex-wrap gap-2">
                           {Object.values(r.byHourBand)
                             .sort((a, b) => a.band.localeCompare(b.band))
@@ -1948,7 +1967,7 @@ export default function BotDashboard() {
                                 : "bg-red-500/20 text-red-400";
                               return (
                                 <div key={b.band} className={`rounded-lg px-3 py-2 text-center min-w-[70px] ${color}`}>
-                                  <div className="text-[9px] font-mono mb-0.5">{b.band}</div>
+                                  <div className="text-[9px] font-mono mb-0.5">{bandToEst(b.band)}</div>
                                   <div className="text-xs font-bold">{pct(b.winRate)}</div>
                                   <div className="text-[9px] opacity-70">{b.betCount} bets</div>
                                 </div>
@@ -1966,7 +1985,7 @@ export default function BotDashboard() {
                       return (
                         <div>
                           <div className="flex items-center justify-between mb-2">
-                            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Win Rate by Day of Week (UTC)</div>
+                            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Win Rate by Day of Week</div>
                             {bestDay?.betCount >= 3 && bestDay.winRate !== null && (
                               <span className="text-[10px] text-emerald-400 font-medium">
                                 Best: {bestDay.dayName} ({Math.round(bestDay.winRate * 100)}% / {bestDay.betCount} bets)
@@ -2013,10 +2032,10 @@ export default function BotDashboard() {
                       return (
                         <div>
                           <div className="flex items-center justify-between mb-2">
-                            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Win Rate by Hour of Day (UTC)</div>
+                            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Win Rate by Hour of Day (EST)</div>
                             {bestHour?.betCount >= 3 && bestHour.winRate !== null && (
                               <span className="text-[10px] text-emerald-400 font-medium">
-                                Best: {String(bestHour.hour).padStart(2,"0")}:00 UTC ({Math.round(bestHour.winRate * 100)}%)
+                                Best: {new Date(Date.UTC(2000,0,1,(bestHour.hour))).toLocaleTimeString("en-US",{hour:"numeric",hour12:true,timeZone:EST})} EST ({Math.round(bestHour.winRate * 100)}%)
                               </span>
                             )}
                           </div>
@@ -2030,21 +2049,21 @@ export default function BotDashboard() {
                                 : wr >= 0.4  ? "bg-yellow-400"
                                 : "bg-red-400";
                               return (
-                                <div key={h.hour} className="flex-1 flex flex-col items-center gap-px" title={`${String(h.hour).padStart(2,"0")}:00 UTC — ${h.betCount} bets${h.betCount > 0 ? `, ${Math.round(wr*100)}% WR` : ""}`}>
+                                <div key={h.hour} className="flex-1 flex flex-col items-center gap-px" title={`${new Date(Date.UTC(2000,0,1,h.hour)).toLocaleTimeString("en-US",{hour:"numeric",hour12:true,timeZone:EST})} EST — ${h.betCount} bets${h.betCount > 0 ? `, ${Math.round(wr*100)}% WR` : ""}`}>
                                   <div className="w-full flex items-end" style={{ height: 52 }}>
                                     <div className={`w-full rounded-sm ${color}`} style={{ height: barH }} />
                                   </div>
                                   {h.hour % 6 === 0 && (
-                                    <div className="text-[8px] text-muted-foreground/60">{String(h.hour).padStart(2,"0")}</div>
+                                    <div className="text-[8px] text-muted-foreground/60">{new Date(Date.UTC(2000,0,1,h.hour)).toLocaleTimeString("en-US",{hour:"numeric",hour12:true,timeZone:EST}).replace(":00","")}</div>
                                   )}
                                 </div>
                               );
                             })}
                           </div>
                           <div className="flex justify-between text-[8px] text-muted-foreground/40 mt-0.5 px-px">
-                            <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
+                            <span>7PM</span><span>1AM</span><span>7AM</span><span>1PM</span><span>6PM</span>
                           </div>
-                          <div className="text-[9px] text-muted-foreground/50 mt-1">Hover bars for detail · Labels every 6 hours · Faded = &lt;2 bets</div>
+                          <div className="text-[9px] text-muted-foreground/50 mt-1">Hover bars for detail · Labels every 6 hours (EST) · Faded = &lt;2 bets</div>
                         </div>
                       );
                     })()}
@@ -2065,7 +2084,7 @@ export default function BotDashboard() {
                     )}
 
                     <div className="text-[10px] text-muted-foreground">
-                      Last computed: {r.computedAt ? new Date(r.computedAt).toLocaleString() : "—"}
+                      Last computed: {r.computedAt ? new Date(r.computedAt).toLocaleString("en-US", { timeZone: EST, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) : "—"}
                     </div>
                   </>
                 );
@@ -2126,7 +2145,7 @@ export default function BotDashboard() {
                             </span>
                           )}
                           <span className="ml-auto text-[10px] text-muted-foreground">
-                            {new Date(entry.createdAt).toLocaleString()}
+                            {new Date(entry.createdAt).toLocaleString("en-US", { timeZone: EST, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}
                           </span>
                         </div>
                         <div className="text-[11px] text-muted-foreground">{entry.triggerReason}</div>

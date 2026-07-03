@@ -293,9 +293,10 @@ export const fmtDateTime = (iso: string | null): string => {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "—";
   return (
-    d.toLocaleDateString([], { month: "short", day: "numeric" }) +
+    d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" }) +
     " " +
-    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" }) +
+    " EST"
   );
 };
 
