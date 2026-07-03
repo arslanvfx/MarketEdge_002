@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -284,6 +284,90 @@ const utcToEst = (h: number) => (h - 5 + 24) % 24;
 const estToUtc = (h: number) => (h + 5) % 24;
 
 // ─── Main Component ──────────────────────────────────────────────────────────
+
+// ─── Animated countdown cell for Market Selection table ─────────────────────
+//
+// Countdown end times are derived from windowKey (wall-clock math) rather than
+// the server-reported remaining seconds.  This means the countdown is accurate
+// even immediately after a server restart — the server's transient "45s remaining"
+// snapshot is ignored in favour of reality.
+//
+// Countdown scenarios:
+//   "window buffer (Xs remaining)"           → clears at windowStart + 45 s
+//   "window monitor not ready (…)"           → clears at windowStart + 120 s
+//   "min-remaining floor (<Xmin remaining)"  → shows time left in the window
+
+type CountdownColor = "amber" | "violet" | "rose";
+
+const COUNTDOWN_COLORS: Record<CountdownColor, { ring: string; text: string; pulse: string }> = {
+  amber:  { ring: "stroke-amber-400",  text: "text-amber-400",  pulse: "bg-amber-400"  },
+  violet: { ring: "stroke-violet-400", text: "text-violet-400", pulse: "bg-violet-400" },
+  rose:   { ring: "stroke-rose-400",   text: "text-rose-400",   pulse: "bg-rose-400"   },
+};
+
+function parseCountdownScenario(
+  reason: string,
+  windowKey: string,
+): { label: string; endsAt: number; total: number; color: CountdownColor } | null {
+  const ws = new Date(windowKey).getTime();
+  if (reason.startsWith("window buffer")) {
+    return { label: "Buffer clears in", endsAt: ws + 45_000,       total: 45,      color: "amber"  };
+  }
+  if (reason.startsWith("window monitor not ready")) {
+    return { label: "Monitor ready in", endsAt: ws + 120_000,      total: 120,     color: "violet" };
+  }
+  if (reason.startsWith("min-remaining floor")) {
+    return { label: "Window ends in",   endsAt: ws + 15 * 60_000,  total: 15 * 60, color: "rose"   };
+  }
+  return null;
+}
+
+function CountdownCell({ reason, windowKey }: { reason: string; windowKey: string }) {
+  const scenario = useMemo(() => parseCountdownScenario(reason, windowKey), [reason, windowKey]);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!scenario) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [scenario]);
+
+  if (!scenario) {
+    return <span className="text-muted-foreground text-xs truncate max-w-[200px] block">{reason}</span>;
+  }
+
+  const remaining = Math.max(0, Math.round((scenario.endsAt - now) / 1000));
+  const pct = Math.max(0, Math.min(1, remaining / scenario.total));
+  const mins = Math.floor(remaining / 60);
+  const secs = remaining % 60;
+  const timeStr = mins > 0 ? `${mins}m ${String(secs).padStart(2, "0")}s` : `${secs}s`;
+
+  const R = 10;
+  const circ = 2 * Math.PI * R;
+  const dash = circ * pct;
+  const colors = COUNTDOWN_COLORS[scenario.color];
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="relative w-6 h-6 flex-shrink-0">
+        <svg viewBox="0 0 24 24" className="-rotate-90 w-6 h-6">
+          <circle cx="12" cy="12" r={R} fill="none" stroke="currentColor"
+            strokeWidth="2.5" className="text-muted-foreground/20" />
+          <circle cx="12" cy="12" r={R} fill="none" strokeWidth="2.5"
+            strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
+            className={`${colors.ring} transition-all duration-900`} />
+        </svg>
+        <span className="absolute inset-0 flex items-center justify-center">
+          <span className={`w-1.5 h-1.5 rounded-full ${colors.pulse} animate-pulse`} />
+        </span>
+      </div>
+      <div className="flex flex-col leading-tight">
+        <span className={`text-xs font-mono font-bold tabular-nums ${colors.text}`}>{timeStr}</span>
+        <span className="text-[9px] text-muted-foreground/60 whitespace-nowrap">{scenario.label}</span>
+      </div>
+    </div>
+  );
+}
 
 export default function BotDashboard() {
   const { getToken } = useAuth();
@@ -1015,7 +1099,7 @@ export default function BotDashboard() {
                           </span>
                         ) : <span className="text-muted-foreground text-xs">—</span>}
                       </td>
-                      <td className="px-3 py-2.5 text-muted-foreground text-xs max-w-[200px] truncate">{e.reason}</td>
+                      <td className="px-3 py-2.5"><CountdownCell reason={e.reason} windowKey={e.windowKey} /></td>
                       <td className="px-3 py-2.5">
                         {e.selected ? <Star className="w-4 h-4 text-amber-400 fill-amber-400" /> : null}
                       </td>
