@@ -54,14 +54,22 @@ export interface BetProfileConfig {
 export const BET_PROFILES: Record<BetProfile, BetProfileConfig> = {
   normal: {
     label: "Normal",
-    description: "Balanced — ML needs 62% to lead; 15pp regime penalty. Fewer bets, higher conviction.",
+    // Classic confidence ranges:
+    //   PATH A (ML leads, ≥62%): 62–80% base + 6pp per supporting signal (Stat/Claude/WM)
+    //   PATH B (Stat+Claude): 65% base; no cap → high-conviction entries pass through cleanly
+    //   Strict 15pp regime penalty keeps quality high — fewer total bets
+    description: "Balanced — ML leads at 62%+; confidence uncapped (PATH A up to 80%+); 15pp regime penalty. Fewer bets, higher conviction.",
     mlMinConfidence: 62,
     effectiveConfidenceCap: 100,
     regimePenalty: 15,
   },
   aggressive: {
     label: "Aggressive",
-    description: "More bets — ML leads at 58%+; 10pp regime penalty; confidence capped at 80% to prevent false-unanimity overconfidence.",
+    // Classic confidence ranges:
+    //   PATH A (ML leads, ≥58%): 58–80% effective (capped) — ML at 58% + Stat+Claude = 70%, all 3 = 76%
+    //   PATH B (Stat+Claude): 65% base, capped at 80 — prevents borderline ML signals from inflating to 87-90%
+    //   10pp regime penalty allows more cross-regime entries than Normal
+    description: "More bets — ML leads at 58%+; 10pp regime penalty; confidence capped at 80% (PATH A with full support peaks at ~76–80%).",
     mlMinConfidence: 58,
     effectiveConfidenceCap: 80,
     regimePenalty: 10,
