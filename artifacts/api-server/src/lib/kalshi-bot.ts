@@ -2631,6 +2631,25 @@ export async function runBotLoopTick(): Promise<void> {
       { utcHour: new Date().getUTCHours(), quietHoursStart: config.quietHoursStart, quietHoursEnd: config.quietHoursEnd },
       "[kalshi-bot] quiet hours — skipping new entry",
     );
+    if (isCBNewWindow) {
+      const qhWindowKey = currentWindowKey();
+      const qhNow = new Date().toISOString();
+      lastWindowEvaluation = CRYPTO_COINS
+        .filter(c => KALSHI_SERIES[c.symbol])
+        .map(c => ({
+          symbol: c.symbol.toUpperCase(),
+          action: "SKIP" as const,
+          confidence: 0,
+          score: 0,
+          reason: "quiet hours — no new entries",
+          windowKey: qhWindowKey,
+          selected: false,
+          betPlacedThisWindow: false,
+          evaluatedAt: qhNow,
+          trendStability: null,
+          regime: null,
+        }));
+    }
     return;
   }
 
@@ -2641,6 +2660,28 @@ export async function runBotLoopTick(): Promise<void> {
       { circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining },
       "[kalshi-bot] circuit breaker active — skipping new entry",
     );
+    // On a window transition, refresh lastWindowEvaluation with SKIP entries so the
+    // dashboard panel clears stale BET PLACED badges from the previous window.
+    // Without this, the panel stays frozen on old window data indefinitely while paused.
+    if (isCBNewWindow) {
+      const cbWindowKey = currentWindowKey();
+      const cbNow = new Date().toISOString();
+      lastWindowEvaluation = CRYPTO_COINS
+        .filter(c => KALSHI_SERIES[c.symbol])
+        .map(c => ({
+          symbol: c.symbol.toUpperCase(),
+          action: "SKIP" as const,
+          confidence: 0,
+          score: 0,
+          reason: `circuit breaker paused (${cbState.circuitBreakerWindowsRemaining} window${cbState.circuitBreakerWindowsRemaining === 1 ? "" : "s"} remaining)`,
+          windowKey: cbWindowKey,
+          selected: false,
+          betPlacedThisWindow: false,
+          evaluatedAt: cbNow,
+          trendStability: null,
+          regime: null,
+        }));
+    }
     return;
   }
 
