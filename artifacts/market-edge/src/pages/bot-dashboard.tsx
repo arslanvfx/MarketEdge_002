@@ -1274,26 +1274,43 @@ export default function BotDashboard() {
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                 {/* Bet Size */}
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Bet Size ($)</span>
-                  <input type="number" min={0.5} max={merged.maxBetSize ?? 2} step={0.5}
+                  <span className="text-xs text-muted-foreground">
+                    {(merged.enableDynamicSizing ?? false) ? "Min Bet ($) — at min confidence" : "Bet Size ($)"}
+                  </span>
+                  <input type="number" min={0.5} max={25} step={0.5}
                     className={`bg-background border rounded-md px-3 py-1.5 text-sm text-foreground ${(merged.betSize ?? 1) > (merged.maxBetSize ?? 2) ? "border-red-500" : "border-border"}`}
                     value={merged.betSize ?? 1}
-                    onChange={e => setConfigDraft(d => ({ ...d, betSize: parseFloat(e.target.value) }))} />
-                  {(merged.betSize ?? 1) > (merged.maxBetSize ?? 2) && (
-                    <span className="text-[10px] text-red-400">Exceeds max bet cap — bets will be blocked</span>
+                    onChange={e => {
+                      const v = parseFloat(e.target.value);
+                      if (!Number.isNaN(v)) setConfigDraft(d => ({ ...d, betSize: v }));
+                    }} />
+                  {(merged.betSize ?? 1) > (merged.maxBetSize ?? 2) ? (
+                    <span className="text-[10px] text-red-400">Exceeds max bet — bets will be blocked by the safety cap</span>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground/60">
+                      Actual amounts may be slightly under due to integer contract rounding
+                    </span>
                   )}
                 </label>
 
-                {/* Max Bet Size (safety cap) */}
+                {/* Max Bet Size — safety cap AND dynamic-sizing target */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground flex items-center gap-1">
-                    <span className="text-amber-400">⚠</span> Max Bet Cap ($)
+                    <span className="text-amber-400">⚠</span>
+                    {(merged.enableDynamicSizing ?? false) ? "Max Bet ($) — at highest confidence" : "Max Allowed Bet ($)"}
                   </span>
                   <input type="number" min={0.5} max={100} step={0.5}
                     className="bg-background border border-amber-500/40 rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={merged.maxBetSize ?? 2}
-                    onChange={e => setConfigDraft(d => ({ ...d, maxBetSize: parseFloat(e.target.value) }))} />
-                  <span className="text-[10px] text-muted-foreground/60">Hard safety cap — any bet above this is blocked</span>
+                    onChange={e => {
+                      const v = parseFloat(e.target.value);
+                      if (!Number.isNaN(v)) setConfigDraft(d => ({ ...d, maxBetSize: v }));
+                    }} />
+                  <span className="text-[10px] text-muted-foreground/60">
+                    {(merged.enableDynamicSizing ?? false)
+                      ? "Max bet placed at high confidence — also the hard safety cap"
+                      : "Hard cap — any computed bet above this is blocked before it touches Kalshi"}
+                  </span>
                 </label>
 
                 {/* Dynamic (confidence-based) sizing toggle */}
@@ -1310,8 +1327,8 @@ export default function BotDashboard() {
                   </button>
                   <span className="text-[10px] text-muted-foreground/60">
                     {(merged.enableDynamicSizing ?? false)
-                      ? <>Bet {`$${(merged.betSize ?? 1).toFixed(2)}`} at min confidence → {`$${(merged.maxBetSize ?? 2).toFixed(2)}`} at max</>
-                      : <>Turn on to scale bets from {`$${(merged.betSize ?? 1).toFixed(2)}`} to {`$${(merged.maxBetSize ?? 2).toFixed(2)}`} by confidence</>}
+                      ? <>Scales from ${`${(merged.betSize ?? 1).toFixed(2)}`} (low confidence) → ${`${(merged.maxBetSize ?? 2).toFixed(2)}`} (high confidence)</>
+                      : <>Off — every bet is ${`${(merged.betSize ?? 1).toFixed(2)}`} regardless of confidence</>}
                   </span>
                 </label>
 
@@ -1319,28 +1336,32 @@ export default function BotDashboard() {
                 {(() => {
                   const dynamicOn = merged.enableDynamicSizing ?? false;
                   const minConf = merged.minConfidence ?? 60;
-                  const maxBetConf = merged.dynamicSizingMaxConfidence ?? 85;
+                  const maxBetConf = merged.dynamicSizingMaxConfidence ?? 90;
                   const belowMin = dynamicOn && maxBetConf < minConf;
                   return (
                     <label className="flex flex-col gap-1.5">
-                      <span className="text-xs text-muted-foreground">Max-Bet Confidence (%)</span>
+                      <span className="text-xs text-muted-foreground">Full-Size Confidence (%)</span>
                       <input type="number" min={50} max={100} step={1}
                         disabled={!dynamicOn}
                         className={`bg-background border rounded-md px-3 py-1.5 text-sm text-foreground disabled:opacity-40 ${belowMin ? "border-amber-500" : "border-border"}`}
                         value={maxBetConf}
                         onChange={e => {
                           const raw = parseFloat(e.target.value);
-                          setConfigDraft(d => ({
-                            ...d,
-                            dynamicSizingMaxConfidence: Number.isNaN(raw) ? raw : Math.min(100, Math.max(50, raw)),
-                          }));
+                          if (!Number.isNaN(raw)) {
+                            setConfigDraft(d => ({ ...d, dynamicSizingMaxConfidence: raw }));
+                          }
+                        }}
+                        onBlur={e => {
+                          const raw = parseFloat(e.target.value);
+                          const clamped = Number.isNaN(raw) ? 90 : Math.min(100, Math.max(50, raw));
+                          setConfigDraft(d => ({ ...d, dynamicSizingMaxConfidence: clamped }));
                         }} />
                       {!dynamicOn ? (
-                        <span className="text-[10px] text-muted-foreground/40">No effect while Dynamic Sizing is off</span>
+                        <span className="text-[10px] text-muted-foreground/40">Enable Dynamic Sizing above to use this</span>
                       ) : belowMin ? (
-                        <span className="text-[10px] text-amber-400">Below Min Confidence ({minConf}%) — sizing collapses to a step, not a smooth ramp</span>
+                        <span className="text-[10px] text-amber-400">Below Min Confidence ({minConf}%) — sizing will collapse to a flat step</span>
                       ) : (
-                        <span className="text-[10px] text-muted-foreground/60">Confidence at which the max bet is reached</span>
+                        <span className="text-[10px] text-muted-foreground/60">Confidence % where the max bet is reached — type any value 50–100</span>
                       )}
                     </label>
                   );
