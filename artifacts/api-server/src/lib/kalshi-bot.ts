@@ -301,9 +301,9 @@ const recentWindowOutcomes: Map<string, { wins: number; losses: number }> = new 
 // breaker from a single bad window even during an overall winning session.
 const windowCBBuffer: Map<string, { wins: number; losses: number }> = new Map();
 
-// Cached performance report from the most recent auto-tune run (null before
-// the first run fires, typically ~15 min after startup).
-let cachedPerformanceReport: PerformanceReport | null = null;
+// Cached performance reports from the most recent auto-tune run, keyed by mode.
+// Null before the first run fires (typically ~15 min after startup).
+const cachedPerformanceReportByMode = new Map<BotMode, PerformanceReport>();
 
 // Recent Kalshi strike prices per symbol (chronological, oldest first).
 // Maintained from DB on startup and updated after each position close.
@@ -2408,14 +2408,15 @@ export async function evalClosedBets(): Promise<void> {
 // History
 // ---------------------------------------------------------------------------
 
-export async function getBotHistory(limit = 20): Promise<unknown[]> {
+export async function getBotHistory(limit = 20, filterMode?: BotMode): Promise<unknown[]> {
   try {
     // Only return terminal outcomes for the recent table — bet entries and
     // intermediate marks (e.g. exit_failed) are excluded for fidelity.
+    const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
     return await db
       .select()
       .from(kalshiBotBetsTable)
-      .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`)
+      .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')${modeClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit);
   } catch {
@@ -3570,8 +3571,9 @@ export function getWindowEvaluation(): WindowCoinEvaluation[] {
 // Performance report & auto-tune job
 // ---------------------------------------------------------------------------
 
-export function getPerformanceReport(): PerformanceReport | null {
-  return cachedPerformanceReport;
+export function getPerformanceReport(mode?: BotMode): PerformanceReport | null {
+  const key = mode ?? botMode;
+  return cachedPerformanceReportByMode.get(key) ?? null;
 }
 
 export function getPausedCoinState(): Record<string, number> {
@@ -3863,7 +3865,8 @@ export async function runAutoTuneJob(): Promise<void> {
       .from(kalshiBotBetsTable)
       .where(
         sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
-          AND ${kalshiBotBetsTable.outcome} IS NOT NULL`,
+          AND ${kalshiBotBetsTable.outcome} IS NOT NULL
+          AND ${kalshiBotBetsTable.mode} = ${botMode}`,
       )
       .orderBy(desc(kalshiBotBetsTable.createdAt)) // most-recent first → reverse below
       .limit(config.autoTuneWindowSize ?? 100);
@@ -3883,7 +3886,7 @@ export async function runAutoTuneJob(): Promise<void> {
     }));
 
     const report = computePerformanceReport(bets);
-    cachedPerformanceReport = report;
+    cachedPerformanceReportByMode.set(botMode, report);
 
     const tuneConfig = {
       minConfidence: config.minConfidence,

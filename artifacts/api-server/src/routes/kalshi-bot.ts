@@ -370,11 +370,14 @@ router.get("/crypto/bot/kalshi-balance", async (_req, res) => {
   }
 });
 
-// GET /crypto/bot/history?limit=20 (public — read only, terminal outcomes only)
+// GET /crypto/bot/history?limit=20&mode=paper|live (public — read only, terminal outcomes only)
 router.get("/crypto/bot/history", async (req, res) => {
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
+  const rawMode = req.query.mode;
+  const filterMode: BotMode =
+    rawMode === "paper" || rawMode === "live" ? rawMode : getBotState().mode;
   try {
-    const history = await getBotHistory(limit);
+    const history = await getBotHistory(limit, filterMode);
     res.json({ history });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -434,10 +437,13 @@ router.get("/crypto/bot/window-eval", (_req, res) => {
   }
 });
 
-// GET /crypto/bot/performance-report — latest cached analytics report (public)
-router.get("/crypto/bot/performance-report", (_req, res) => {
+// GET /crypto/bot/performance-report?mode=paper|live — latest cached analytics report (public)
+router.get("/crypto/bot/performance-report", (req, res) => {
   try {
-    const report = getPerformanceReport();
+    const rawMode = req.query.mode;
+    const filterMode: BotMode =
+      rawMode === "paper" || rawMode === "live" ? rawMode : getBotState().mode;
+    const report = getPerformanceReport(filterMode);
     res.json({ report, pausedCoins: getPausedCoinState() });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

@@ -527,7 +527,7 @@ export default function BotDashboard() {
 
   const { data: perfReportData } = useQuery<{ report: PerformanceReport | null; pausedCoins: Record<string, number> }>({
     queryKey: ["bot-performance-report", activeMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/performance-report`).then(r => r.json()),
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/performance-report?mode=${activeMode}`).then(r => r.json()),
     refetchInterval: 5 * 60_000,
   });
 

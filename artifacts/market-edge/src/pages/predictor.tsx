@@ -2267,15 +2267,15 @@ function KalshiBotPanel() {
     refetchInterval: 10_000,
   });
 
+  // Use the active bot mode so stats/trend sparkline reflect the running mode only.
+  const botActiveMode = botQuery.data?.mode ?? "paper";
+
   const historyQuery = useQuery<{ history: BotBetRecord[] }>({
-    queryKey: ["bot-history"],
-    queryFn: () => fetchJson<{ history: BotBetRecord[] }>("/crypto/bot/history?limit=10"),
+    queryKey: ["bot-history", botActiveMode],
+    queryFn: () => fetchJson<{ history: BotBetRecord[] }>(`/crypto/bot/history?limit=10&mode=${botActiveMode}`),
     refetchInterval: 30_000,
     enabled: open,
   });
-
-  // Use the active bot mode so stats/trend sparkline reflect the running mode only.
-  const botActiveMode = botQuery.data?.mode ?? "paper";
 
   const statsQuery = useQuery<BotStats>({
     queryKey: ["bot-stats", botActiveMode],
