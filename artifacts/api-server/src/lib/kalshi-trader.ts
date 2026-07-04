@@ -21,7 +21,27 @@ function getKeyId(): string | null {
 }
 
 function getPrivateKey(): string | null {
-  return process.env["KALSHI_PRIVATE_KEY"] ?? null;
+  const raw = process.env["KALSHI_PRIVATE_KEY"] ?? null;
+  if (!raw) return null;
+
+  // If the key already has a PEM header, normalise newlines and return as-is.
+  if (raw.includes("-----BEGIN")) {
+    return raw.includes("\\n") ? raw.replace(/\\n/g, "\n") : raw;
+  }
+
+  // The key is stored as raw base64 without PEM headers (common when pasted
+  // directly from Kalshi's dashboard).  Reconstruct a proper PKCS#1 RSA PEM:
+  //   -----BEGIN RSA PRIVATE KEY-----
+  //   <base64, 64 chars per line>
+  //   -----END RSA PRIVATE KEY-----
+  // Strip any whitespace/newlines from the raw value first.
+  const b64 = raw.replace(/\s+/g, "");
+  const lines = b64.match(/.{1,64}/g) ?? [];
+  return [
+    "-----BEGIN RSA PRIVATE KEY-----",
+    ...lines,
+    "-----END RSA PRIVATE KEY-----",
+  ].join("\n");
 }
 
 function makeSignedHeaders(method: string, path: string): Record<string, string> {
@@ -89,24 +109,29 @@ export interface KalshiBalance {
 }
 
 export async function getBalance(): Promise<KalshiBalance> {
-  // New Kalshi API (api.elections.kalshi.com) uses /portfolio/balance.
-  // Response: { "balance": <cents integer> } — single field, no nesting.
-  const data = await kalshiFetch<{
-    balance?: number | {
-      available_balance?: number;
-      balance?: number;
-      portfolio_value?: number;
-    };
-  }>("GET", "/portfolio/balance");
-  // Handle both new flat shape ({ balance: 44675 }) and old nested shape.
-  if (typeof data.balance === "number") {
-    const dollars = data.balance / 100;
-    return { availableBalance: dollars, totalBalance: dollars };
-  }
-  const b = (data.balance as { available_balance?: number; balance?: number; portfolio_value?: number }) ?? {};
+  // GET /portfolio/balance — Kalshi trade-api v2.
+  // Confirmed response shape (2026-07):
+  //   { balance: <cents int>,          ← available CASH (what you can bet with)
+  //     portfolio_value: <cents int>,  ← current mark-to-market position value
+  //     balance_dollars: "<string>",   ← cash as a decimal string
+  //     balance_breakdown: [...],      ← per-exchange breakdown
+  //     updated_ts: <unix seconds> }
+  //
+  // Total portfolio = balance + portfolio_value (matches Kalshi app's Portfolio figure).
+  // We expose "available cash" as availableBalance so balance guards work correctly.
+  const raw = await kalshiFetch<Record<string, unknown>>("GET", "/portfolio/balance");
+
+  const num = (key: string): number | null => {
+    const v = raw[key];
+    return typeof v === "number" ? v : null;
+  };
+
+  const cashCents = num("balance") ?? 0;
+  const positionCents = num("portfolio_value") ?? 0;
+
   return {
-    availableBalance: (b.available_balance ?? 0) / 100,
-    totalBalance: (b.balance ?? b.portfolio_value ?? 0) / 100,
+    availableBalance: cashCents / 100,
+    totalBalance: (cashCents + positionCents) / 100,
   };
 }
 

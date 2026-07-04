@@ -1435,7 +1435,7 @@ async function _runBotTick(
     }
   }
   // Mode-aware key so paper bets don't count against the live cap and vice-versa.
-  const windowBetKey = `${sym}:${windowKey}:${mode}`;
+  const windowBetKey = `${sym}:${windowKey}:${botMode}`;
   const betsThisWindow = windowBetCounts.get(windowBetKey) ?? 0;
   if (betsThisWindow >= config.maxBetsPerWindow) {
     logger.debug({ sym, betsThisWindow, max: config.maxBetsPerWindow }, "[kalshi-bot] maxBetsPerWindow reached — skipping entry");
@@ -1785,7 +1785,7 @@ async function _runBotTick(
   windowBetCounts.set(windowBetKey, betsThisWindow + 1);
   // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
   // Mode-aware: paper and live each have their own counter.
-  const totalKey = `${windowKey}:${mode}`;
+  const totalKey = `${windowKey}:${botMode}`;
   windowTotalBets.set(totalKey, (windowTotalBets.get(totalKey) ?? 0) + 1);
   // Store bet details so the eval panel can display actual direction + confidence
   // even after the coin switches to "directional cap reached" on later ticks.
@@ -2926,7 +2926,7 @@ export async function runBotLoopTick(): Promise<void> {
   // Global bet cap: total bets placed across ALL coins this window (mode-aware).
   // This is the correct interpretation of maxBetsPerWindow — not per-coin.
   // The per-coin windowBetCounts is still used to prevent a single coin from re-betting.
-  const globalBetsThisWindow = windowTotalBets.get(`${windowKey}:${mode}`) ?? 0;
+  const globalBetsThisWindow = windowTotalBets.get(`${windowKey}:${botMode}`) ?? 0;
   const globalCapReached = config.maxBetsPerWindow > 0 && globalBetsThisWindow >= config.maxBetsPerWindow;
 
   // Refresh border-proximity and regime caches once per window transition.
@@ -2985,7 +2985,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Global total-bet cap: if maxBetsPerWindow total bets have already been placed
     // across ALL coins this window, skip any coin that has not yet placed a bet.
     // Coins that already placed a bet are allowed to continue (for display/exit purposes).
-    if (globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${mode}`) ?? 0 > 0)) {
+    if (globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${botMode}`) ?? 0 > 0)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -3501,7 +3501,7 @@ export async function runBotLoopTick(): Promise<void> {
   // shows accurate direction/confidence even after the coin switches to SKIP.
   const allResults = [...bets, ...skips];
   for (const e of allResults) {
-    const wbKey = `${e.symbol}:${e.windowKey}:${mode}`;
+    const wbKey = `${e.symbol}:${e.windowKey}:${botMode}`;
     e.betPlacedThisWindow = (windowBetCounts.get(wbKey) ?? 0) > 0;
     if (e.betPlacedThisWindow) {
       const details = windowBetDetails.get(wbKey);
