@@ -304,6 +304,14 @@ let regimeCacheWindow = "";
 // Fallback regime penalty used only before config is loaded from DB.
 // The live value is config.regimePenalty (default 8pp via DEFAULT_BOT_CONFIG).
 const REGIME_AGAINST_PENALTY_FALLBACK = 8;
+// Extra confidence penalty when betting against the current live-price position
+// (contrarian play — fading today's trend). Applied on top of the settlement-
+// based regimeCache penalty when the two regimes agree.
+const CONTRARIAN_LIVE_REGIME_PENALTY = 10;
+// A model must clear this individual confidence floor to count as genuinely
+// "agreeing" in a consensus check. A model at 48–51% is statistical noise,
+// not a real signal — requiring 55% filters out those weak leans.
+const MODEL_SIGNAL_MIN_CONFIDENCE = 55;
 
 // ---------------------------------------------------------------------------
 // DB health watchdog
@@ -3015,19 +3023,32 @@ export async function runBotLoopTick(): Promise<void> {
           continue;
         }
 
-        // Full 3-signal consensus required for YES bets
-        const yesSigs = decision.signals as { statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null };
-        const has3SignalYes = yesSigs.statAbove === true && yesSigs.claudeAbove === true && yesSigs.mlAbove === true;
+        // Full 3-signal consensus required for YES bets.
+        // A model only counts as genuinely "agreeing" when its own directional
+        // confidence clears MODEL_SIGNAL_MIN_CONFIDENCE (55%). Anything below
+        // that is noise, not a real signal — claudeConf=48 pointing YES does not
+        // constitute Claude agreeing with the YES thesis.
+        const yesSigs = decision.signals as {
+          statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
+          statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
+        };
+        const statGenuineYes   = yesSigs.statAbove   === true && (yesSigs.statConfidence   ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
+        const claudeGenuineYes = yesSigs.claudeAbove === true && (yesSigs.claudeConfidence ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
+        const mlGenuineYes     = yesSigs.mlAbove     === true && (yesSigs.mlConfidence     ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
+        const has3SignalYes = statGenuineYes && claudeGenuineYes && mlGenuineYes;
         if (!has3SignalYes) {
-          const sig = (v: boolean | null | undefined) => v === true ? "Y" : v === false ? "N" : "?";
-          const signalSummary = `Stat=${sig(yesSigs.statAbove)} Claude=${sig(yesSigs.claudeAbove)} ML=${sig(yesSigs.mlAbove)}`;
+          const sig = (above: boolean | null | undefined, conf: number | null | undefined) => {
+            if (above !== true) return above === false ? "N" : "?";
+            return (conf ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE ? "Y" : `weak(${conf ?? "?"}%)`;
+          };
+          const signalSummary = `Stat=${sig(yesSigs.statAbove, yesSigs.statConfidence)} Claude=${sig(yesSigs.claudeAbove, yesSigs.claudeConfidence)} ML=${sig(yesSigs.mlAbove, yesSigs.mlConfidence)}`;
           filteredByNewGuards.add(sym);
           evalResults.push({
             symbol: sym,
             action: "SKIP",
             confidence: effectiveConfidence,
             score: 0,
-            reason: `YES consensus gate — requires all 3 signals agree (${signalSummary})`,
+            reason: `YES consensus gate — all 3 signals must genuinely agree ≥${MODEL_SIGNAL_MIN_CONFIDENCE}% (${signalSummary})`,
             windowKey,
             selected: false,
             evaluatedAt: now,
@@ -3062,6 +3083,42 @@ export async function runBotLoopTick(): Promise<void> {
             confidence: effectiveConfidence,
             score: 0,
             reason: `regime filter — ${kalshiRegime} regime, against-direction penalty → ${penalised}% < ${config.minConfidence}%`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+        effectiveConfidence = penalised;
+      }
+    }
+
+    // Contrarian momentum gate: when the Kalshi strike-price trend (from recent
+    // windows) is moving strongly against the proposed bet direction, the bot is
+    // making a mean-reversion call that needs extra conviction.
+    // - Strikes trending DOWN + BET_YES (betting above while trend is falling) → contrarian
+    // - Strikes trending UP  + BET_NO  (betting below while trend is rising)   → contrarian
+    // These plays require CONTRARIAN_LIVE_REGIME_PENALTY extra confidence.
+    if (decision.action !== "SKIP" && regime !== null) {
+      const isContrarian =
+        (regime === "trending_down" && decision.action === "BET_YES") ||
+        (regime === "trending_up"   && decision.action === "BET_NO");
+      if (isContrarian) {
+        const penalised = effectiveConfidence - CONTRARIAN_LIVE_REGIME_PENALTY;
+        logger.info(
+          { sym, regime, action: decision.action, confidence: effectiveConfidence, penalised },
+          `[kalshi-bot] contrarian-momentum gate — ${sym} strike trend=${regime} vs ${decision.action}: ${effectiveConfidence}→${penalised}`,
+        );
+        if (penalised < config.minConfidence) {
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `contrarian-momentum gate — strikes ${regime === "trending_down" ? "falling" : "rising"}, betting ${decision.action === "BET_YES" ? "YES" : "NO"} needs +${CONTRARIAN_LIVE_REGIME_PENALTY}pp → ${penalised}% < ${config.minConfidence}%`,
             windowKey,
             selected: false,
             evaluatedAt: now,
