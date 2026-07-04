@@ -5,24 +5,52 @@
 //
 // In paper mode every write method is a no-op and returns a simulated result
 // so the rest of the bot logic works identically in both modes.
+//
+// Auth: Kalshi elections API uses RSA-PSS request signing.
+// Each request must include:
+//   KALSHI-ACCESS-KEY    — the API key ID (UUID)
+//   KALSHI-ACCESS-TIMESTAMP — current ms timestamp as string
+//   KALSHI-ACCESS-SIGNATURE — base64(RSA-PSS-SHA256(timestamp + method + path))
+
+import crypto from "crypto";
 
 const KALSHI_TRADE_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
-function getApiKey(): string | null {
-  return process.env["KALSHI_API_KEY"] ?? null;
+function getKeyId(): string | null {
+  return process.env["KALSHI_API_KEY_ID"] ?? null;
 }
 
-function makeHeaders(): Record<string, string> {
-  const key = getApiKey();
+function getPrivateKey(): string | null {
+  return process.env["KALSHI_PRIVATE_KEY"] ?? null;
+}
+
+function makeSignedHeaders(method: string, path: string): Record<string, string> {
   const h: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
-  if (key) {
-    // New Kalshi elections API (api.elections.kalshi.com) requires "Token <key>".
-    // Guard against double-prefixing if the stored secret already has the prefix.
-    h["Authorization"] = key.startsWith("Token ") ? key : `Token ${key}`;
-  }
+
+  const keyId = getKeyId();
+  const privateKeyPem = getPrivateKey();
+  if (!keyId || !privateKeyPem) return h;
+
+  const timestampMs = Date.now().toString();
+  // Signature message: timestamp + METHOD + /trade-api/v2 + path
+  // Strip any query string from the path for signing
+  const pathWithoutQuery = path.split("?")[0];
+  const message = timestampMs + method.toUpperCase() + "/trade-api/v2" + pathWithoutQuery;
+
+  const sign = crypto.createSign("SHA256");
+  sign.update(message);
+  sign.end();
+  const signature = sign.sign(
+    { key: privateKeyPem, padding: crypto.constants.RSA_PKCS1_PSS_PADDING },
+    "base64",
+  );
+
+  h["KALSHI-ACCESS-KEY"] = keyId;
+  h["KALSHI-ACCESS-TIMESTAMP"] = timestampMs;
+  h["KALSHI-ACCESS-SIGNATURE"] = signature;
   return h;
 }
 
@@ -37,7 +65,7 @@ async function kalshiFetch<T>(
   try {
     const res = await fetch(`${KALSHI_TRADE_BASE}${path}`, {
       method,
-      headers: makeHeaders(),
+      headers: makeSignedHeaders(method, path),
       body: body != null ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
@@ -134,7 +162,7 @@ export interface PlaceOrderResult {
 }
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
-  if (!getApiKey()) throw new Error("KALSHI_API_KEY not configured");
+  if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   const body: Record<string, unknown> = {
     ticker: params.ticker,
     action: params.action,
@@ -165,7 +193,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
 }
 
 export async function cancelOrder(orderId: string): Promise<void> {
-  if (!getApiKey()) throw new Error("KALSHI_API_KEY not configured");
+  if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   await kalshiFetch("DELETE", `/portfolio/orders/${orderId}`);
 }
 
@@ -174,7 +202,7 @@ export async function getOrder(
   orderId: string,
   side: "yes" | "no",
 ): Promise<{ filledCount: number; status: string; avgPrice: number | null }> {
-  if (!getApiKey()) throw new Error("KALSHI_API_KEY not configured");
+  if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   const data = await kalshiFetch<{
     order?: {
       status?: string;
@@ -244,9 +272,9 @@ export async function placeOrderWithRetry(
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Check if API key is configured (doesn't validate it).
+// Check if API credentials are configured (doesn't validate them).
 export function isKalshiConfigured(): boolean {
-  return !!getApiKey();
+  return !!(getKeyId() && getPrivateKey());
 }
 
 // ---------------------------------------------------------------------------
