@@ -1581,13 +1581,23 @@ async function _runBotTick(
   // Cost per contract: YES contracts cost yesPrice per $1 face; NO contracts cost (1-yesPrice)
   const sideCost = direction === "yes" ? (yesPrice ?? 0.5) : (1 - (yesPrice ?? 0.5));
 
-  // Size using the EXPECTED FILL price (marketable-limit with buffer), not the raw quote.
-  // Raw quote is e.g. 0.50 → buffer pushes fill to 0.65 → 4 contracts × 0.65 = $2.60 > $2 limit.
-  // Using the fill price for sizing keeps the real cost within budget.
-  const bookSide = direction === "yes" ? "bid" : "ask";
-  const expectedFillPrice = computeMarketableLimitPrice(bookSide, yesPrice, config.minReturnMultiple);
-  const contractCount = Math.max(1, Math.floor(config.betSize / expectedFillPrice));
-  const betAmount = contractCount * expectedFillPrice; // expected dollars risked at fill price
+  // Size using the expected ACTUAL COST per contract, not the raw quote or the API ask price.
+  //
+  // YES buy (bid): worst-case cost = the bid price we submit (fill can only improve).
+  //   Use computeMarketableLimitPrice("bid") — it accounts for the +0.15 buffer.
+  //   e.g. yesPrice=0.50, bid=0.65, 2 contracts fit in $2 (floor(2/0.65)=3 at $1.95).
+  //
+  // NO buy (ask):  actual NO cost = (1 − YES_fill) ≈ sideCost = (1 − yesPrice).
+  //   The ask price we submit only needs to cross the spread; the fill happens at
+  //   the resting YES bid, and we receive that bid as a credit.  The ask price
+  //   itself is NOT our cost — using computeMarketableLimitPrice("ask") here would
+  //   return the low YES-side ask (e.g. 0.22) and massively overcount contracts.
+  const expectedFillCost =
+    direction === "yes"
+      ? computeMarketableLimitPrice("bid", yesPrice, config.minReturnMultiple)
+      : sideCost; // NO cost ≈ 1 − yesPrice (unaffected by our aggressive ask price)
+  const contractCount = Math.max(1, Math.floor(config.betSize / expectedFillCost));
+  const betAmount = contractCount * expectedFillCost; // expected dollars risked
 
   // ── SAFETY GUARD: hard bet-size cap ─────────────────────────────────────────
   // If the computed betAmount would exceed the configured maxBetSize, abort the
