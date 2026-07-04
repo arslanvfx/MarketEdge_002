@@ -198,10 +198,10 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     action: params.action,
     side: params.side,
     type: params.type,
-    count: params.count,
+    count: String(params.count), // v2 API requires count as a string
   };
   if (params.type === "limit" && params.yesPrice != null) {
-    body.yes_price = Math.round(params.yesPrice); // cents 0-100
+    body.yes_price = String(Math.round(params.yesPrice)); // v2 requires string
   }
   const data = await kalshiFetch<{
     order?: {
