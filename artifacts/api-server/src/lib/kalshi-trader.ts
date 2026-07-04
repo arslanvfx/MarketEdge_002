@@ -57,15 +57,21 @@ export interface KalshiBalance {
 }
 
 export async function getBalance(): Promise<KalshiBalance> {
+  // New Kalshi API (api.elections.kalshi.com) uses /portfolio/balance.
+  // Response: { "balance": <cents integer> } — single field, no nesting.
   const data = await kalshiFetch<{
-    balance: {
+    balance?: number | {
       available_balance?: number;
       balance?: number;
       portfolio_value?: number;
     };
-  }>("GET", "/exchange/balance");
-  const b = data.balance ?? {};
-  // Kalshi returns cents as integers
+  }>("GET", "/portfolio/balance");
+  // Handle both new flat shape ({ balance: 44675 }) and old nested shape.
+  if (typeof data.balance === "number") {
+    const dollars = data.balance / 100;
+    return { availableBalance: dollars, totalBalance: dollars };
+  }
+  const b = (data.balance as { available_balance?: number; balance?: number; portfolio_value?: number }) ?? {};
   return {
     availableBalance: (b.available_balance ?? 0) / 100,
     totalBalance: (b.balance ?? b.portfolio_value ?? 0) / 100,
