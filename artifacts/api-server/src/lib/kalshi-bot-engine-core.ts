@@ -428,6 +428,10 @@ export interface BotConfig {
   signalThreshold: number;   // kept for config compat — not used for entry gating (see core-pair gate)
   minConfidence: number;     // 0-100; skip bet when engine confidence is below this (default 60)
   decisionMode: DecisionMode; // which signal-combination logic to use (default "classic")
+  // Per-mode decisionMode preferences — saved when the user changes decisionMode while in
+  // a given mode, restored automatically when switching back to that mode.
+  paperDecisionMode?: DecisionMode;
+  liveDecisionMode?: DecisionMode;
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
   maxEntryMinutes: number;   // ceiling: don't enter after this many minutes into the window; 0 = disabled (no ceiling)

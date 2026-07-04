@@ -22,6 +22,8 @@ interface BotConfig {
   signalThreshold: number;
   minConfidence: number;
   decisionMode: DecisionMode;
+  paperDecisionMode?: DecisionMode;
+  liveDecisionMode?: DecisionMode;
   midExitSensitivity: "conservative" | "balanced" | "aggressive";
   phase2ThresholdPp: number;
   maxEntryMinutes: number;
@@ -524,7 +526,7 @@ export default function BotDashboard() {
   });
 
   const { data: perfReportData } = useQuery<{ report: PerformanceReport | null; pausedCoins: Record<string, number> }>({
-    queryKey: ["bot-performance-report"],
+    queryKey: ["bot-performance-report", activeMode],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/performance-report`).then(r => r.json()),
     refetchInterval: 5 * 60_000,
   });
@@ -536,8 +538,8 @@ export default function BotDashboard() {
   });
 
   const { data: logicPerfData } = useQuery<{ modes: LogicModeStats[] }>({
-    queryKey: ["bot-logic-performance"],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/logic-performance`).then(r => r.json()),
+    queryKey: ["bot-logic-performance", activeMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/logic-performance?mode=${activeMode}`).then(r => r.json()),
     refetchInterval: 5 * 60_000,
   });
 

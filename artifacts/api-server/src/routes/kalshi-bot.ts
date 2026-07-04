@@ -458,9 +458,12 @@ router.get("/crypto/bot/auto-tune-log", async (req, res) => {
 });
 
 // GET /crypto/bot/logic-performance — per-decision-mode win/loss/accuracy stats (public)
-router.get("/crypto/bot/logic-performance", async (_req, res) => {
+router.get("/crypto/bot/logic-performance", async (req, res) => {
   try {
-    const modes = await getBotLogicPerformance();
+    const rawMode = req.query.mode;
+    const filterMode: "paper" | "live" | undefined =
+      rawMode === "paper" || rawMode === "live" ? rawMode : undefined;
+    const modes = await getBotLogicPerformance(filterMode);
     res.json({ modes });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

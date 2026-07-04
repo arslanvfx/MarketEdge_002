@@ -232,32 +232,52 @@ const pausedCoins: Map<string, number> = new Map();
 // Reset at midnight via resetDailyIfNeeded(); loaded from DB at startup.
 const coinDailyLoss: Map<string, number> = new Map();
 
-// Per-coin consecutive window streak state.
-//   consecutiveLosses: resets to 0 on any win.
-//   pauseUntilWindowKey: ISO "YYYY-MM-DDTHH:mm" — coin resumes betting when
-//     currentWindowKey > pauseUntilWindowKey (strict).  null = not paused.
-const coinStreakState: Map<string, CoinStreakEntry> = new Map();
+// Per-coin consecutive window streak state — isolated by bot mode so paper
+// losing streaks never block live entries and vice versa.
+const paperCoinStreakState: Map<string, CoinStreakEntry> = new Map();
+const liveCoinStreakState: Map<string, CoinStreakEntry> = new Map();
 
-// Drizzle-backed implementation of StreakDbStore used by the real server.
-// Tests supply an in-memory stub instead.
-const drizzleStreakStore: StreakDbStore = {
-  async upsert(snapshot) {
-    await db.execute(sql`
-      INSERT INTO bot_config (id, config, updated_at)
-      VALUES ('coin_streak_state', ${JSON.stringify(snapshot)}::jsonb, NOW())
-      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-    `);
-  },
-  async fetch() {
-    const rows = await db
-      .select()
-      .from(botConfigTable)
-      .where(eq(botConfigTable.id, "coin_streak_state"))
-      .limit(1);
-    if (rows.length === 0 || !rows[0].config) return null;
-    return rows[0].config as Record<string, CoinStreakEntry>;
-  },
-};
+/** Returns the streak map for the currently-active bot mode. */
+function activeCoinStreakState(): Map<string, CoinStreakEntry> {
+  return botMode === "live" ? liveCoinStreakState : paperCoinStreakState;
+}
+
+/** Returns the streak map for a specific mode (used when closing a position). */
+function coinStreakStateForMode(mode: BotMode): Map<string, CoinStreakEntry> {
+  return mode === "live" ? liveCoinStreakState : paperCoinStreakState;
+}
+
+// Drizzle-backed StreakDbStore implementations — one per mode.
+// Row IDs: "coin_streak_state_paper" and "coin_streak_state_live".
+// Tests supply in-memory stubs instead.
+function makeStreakStore(rowId: string): StreakDbStore {
+  return {
+    async upsert(snapshot) {
+      await db.execute(sql`
+        INSERT INTO bot_config (id, config, updated_at)
+        VALUES (${rowId}, ${JSON.stringify(snapshot)}::jsonb, NOW())
+        ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+      `);
+    },
+    async fetch() {
+      const rows = await db
+        .select()
+        .from(botConfigTable)
+        .where(eq(botConfigTable.id, rowId))
+        .limit(1);
+      if (rows.length === 0 || !rows[0].config) return null;
+      return rows[0].config as Record<string, CoinStreakEntry>;
+    },
+  };
+}
+
+const paperStreakStore: StreakDbStore = makeStreakStore("coin_streak_state_paper");
+const liveStreakStore: StreakDbStore = makeStreakStore("coin_streak_state_live");
+
+/** Returns the streak store for a specific mode. */
+function streakStoreForMode(mode: BotMode): StreakDbStore {
+  return mode === "live" ? liveStreakStore : paperStreakStore;
+}
 
 // Per-coin slippage strike counter.
 //   strikes: consecutive fills this window that exceeded maxSlippageCents.
@@ -414,28 +434,31 @@ export function getBotState(): BotStateSnapshot {
     ? "position_open"
     : "idle";
 
-  // Build display objects for every open position with live P&L and guard diagnostics.
-  const openPositionsList: OpenPositionDisplay[] = Array.from(openPositions.values()).map((pos) => {
-    const liveKalshi = getKalshiCachedData(pos.symbol);
-    let currentYesPrice: number | null = null;
-    let unrealizedPnl: number | null = null;
-    if (liveKalshi?.yesPrice != null) {
-      currentYesPrice = liveKalshi.yesPrice;
-      // YES bet: profits when yesPrice rises; NO bet: profits when yesPrice falls
-      const priceDelta = pos.direction === "yes"
-        ? liveKalshi.yesPrice - pos.entryYesPrice
-        : pos.entryYesPrice - liveKalshi.yesPrice;
-      unrealizedPnl = priceDelta * pos.contractCount;
-    }
-    return {
-      ...pos,
-      exitState: pos.exitState, // reference — callers must not mutate
-      currentYesPrice,
-      unrealizedPnl,
-      guardStates: lastGuardStatesMap.get(pos.symbol) ?? null,
-      guardReason: lastGuardReasonMap.get(pos.symbol) ?? null,
-    };
-  });
+  // Build display objects for positions in the CURRENT mode only.
+  // Positions from a different mode (e.g. paper bets left open when user switched to live)
+  // are hidden so each mode shows only its own active trades.
+  const openPositionsList: OpenPositionDisplay[] = Array.from(openPositions.values())
+    .filter((pos) => pos.entryMode === botMode)
+    .map((pos) => {
+      const liveKalshi = getKalshiCachedData(pos.symbol);
+      let currentYesPrice: number | null = null;
+      let unrealizedPnl: number | null = null;
+      if (liveKalshi?.yesPrice != null) {
+        currentYesPrice = liveKalshi.yesPrice;
+        const priceDelta = pos.direction === "yes"
+          ? liveKalshi.yesPrice - pos.entryYesPrice
+          : pos.entryYesPrice - liveKalshi.yesPrice;
+        unrealizedPnl = priceDelta * pos.contractCount;
+      }
+      return {
+        ...pos,
+        exitState: pos.exitState,
+        currentYesPrice,
+        unrealizedPnl,
+        guardStates: lastGuardStatesMap.get(pos.symbol) ?? null,
+        guardReason: lastGuardReasonMap.get(pos.symbol) ?? null,
+      };
+    });
 
   // Compute warmup state: how many seconds remain of the 45-second window
   // buffer before any model bets are allowed. null when warmup is over.
@@ -469,7 +492,7 @@ export function getBotState(): BotStateSnapshot {
     dbDegraded: dbDegradedSince !== null,
     dbDegradedSince: dbDegradedSince?.toISOString() ?? null,
     isProductionEnv: process.env.NODE_ENV === "production",
-    coinStreakState: Object.fromEntries(coinStreakState),
+    coinStreakState: Object.fromEntries(activeCoinStreakState()),
   };
 }
 
@@ -479,13 +502,24 @@ export function setBotMode(mode: BotMode): void {
   assertSetBotModeAllowed(mode, process.env.NODE_ENV, isKalshiConfigured());
   botMode = mode;
   logger.info({ mode }, "[kalshi-bot] mode changed");
-  // Fire-and-forget — persist mode so it survives server restarts.
+
+  // Restore per-mode decisionMode preference so each mode remembers its own
+  // last-used signal logic (Classic vs ML Gate etc.).
+  const savedDecisionMode = mode === "paper" ? config.paperDecisionMode : config.liveDecisionMode;
+  if (savedDecisionMode) {
+    config = { ...config, decisionMode: savedDecisionMode };
+    logger.info({ mode, decisionMode: savedDecisionMode }, "[kalshi-bot] restored per-mode decisionMode");
+  }
+
+  // Fire-and-forget — persist mode (and restored decisionMode) so it survives restarts.
   _persistModeToConfig().catch(() => {});
   // Recompute daily P&L and loss count for the new mode immediately so the
   // daily loss limit and circuit breaker reflect only this mode's bets.
   // Fire-and-forget; the counters will be correct on the next bot tick.
   loadDailyPnlFromDB().catch(() => {});
   loadCoinDailyLossFromDB().catch(() => {});
+  // Reload per-coin streak state for the new mode so mode-specific pauses are correct.
+  loadCoinStreakStateFromDB().catch(() => {});
   // Refresh the Kalshi account balance immediately on switch to live so the
   // dashboard badge reflects the real balance before any trades have closed.
   if (mode === "live" && isKalshiConfigured()) {
@@ -514,7 +548,14 @@ export function setBotPaused(p: boolean): void {
 }
 
 export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean }> {
-  config = { ...config, ...partial };
+  // When the user changes decisionMode, save it as the preference for the
+  // current mode so switching modes restores the last-used signal logic.
+  const modeSpecific: Partial<BotConfig> = {};
+  if ("decisionMode" in partial && partial.decisionMode) {
+    if (botMode === "paper") modeSpecific.paperDecisionMode = partial.decisionMode;
+    else modeSpecific.liveDecisionMode = partial.decisionMode;
+  }
+  config = { ...config, ...partial, ...modeSpecific };
   const snapshot = { ...config };
   let persisted = false;
   try {
@@ -774,14 +815,18 @@ export async function loadCoinDailyLossFromDB(): Promise<void> {
  */
 async function persistCoinStreakStateToDB(): Promise<void> {
   try {
-    await persistCoinStreakState(coinStreakState, drizzleStreakStore);
+    // Persist both mode-specific maps independently so each has its own row.
+    await Promise.all([
+      persistCoinStreakState(paperCoinStreakState, paperStreakStore),
+      persistCoinStreakState(liveCoinStreakState, liveStreakStore),
+    ]);
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to persist coinStreakState to DB (non-fatal)");
   }
 }
 
 /**
- * Restore coinStreakState from DB on startup.
+ * Restore both per-mode coinStreak maps from DB.
  * Auto-clears any pauseUntilWindowKey that has already expired by comparing it
  * to the current window key — so a pause set before a restart never blocks a
  * coin after the pause window has passed.
@@ -789,30 +834,36 @@ async function persistCoinStreakStateToDB(): Promise<void> {
 export async function loadCoinStreakStateFromDB(): Promise<void> {
   try {
     const nowWindowKey = currentWindowKey();
-    const { state: restored, clearedSyms } = await loadCoinStreakState(drizzleStreakStore, nowWindowKey);
-    if (restored.size === 0 && clearedSyms.length === 0) {
-      logger.info("[kalshi-bot] no persisted coinStreakState found — starting fresh");
-      return;
-    }
-    coinStreakState.clear();
-    for (const [sym, entry] of restored.entries()) {
-      coinStreakState.set(sym, entry);
-      if (clearedSyms.includes(sym)) {
-        logger.info(
-          { sym, nowWindowKey },
-          "[kalshi-bot] startup: coinStreak pauseUntilWindowKey expired — cleared",
-        );
-      } else if (entry.pauseUntilWindowKey) {
-        logger.warn(
-          { sym, pauseUntilWindowKey: entry.pauseUntilWindowKey, consecutiveLosses: entry.consecutiveLosses, nowWindowKey },
-          "[kalshi-bot] startup: restoring active coinStreak pause",
-        );
+
+    async function loadIntoMap(store: StreakDbStore, target: Map<string, CoinStreakEntry>, label: string) {
+      const { state: restored, clearedSyms } = await loadCoinStreakState(store, nowWindowKey);
+      if (restored.size === 0 && clearedSyms.length === 0) {
+        logger.info(`[kalshi-bot] no persisted coinStreakState found for ${label} — starting fresh`);
+        target.clear();
+        return;
       }
+      target.clear();
+      for (const [sym, entry] of restored.entries()) {
+        target.set(sym, entry);
+        if (clearedSyms.includes(sym)) {
+          logger.info({ sym, nowWindowKey }, `[kalshi-bot] startup: ${label} coinStreak pause expired — cleared`);
+        } else if (entry.pauseUntilWindowKey) {
+          logger.warn(
+            { sym, pauseUntilWindowKey: entry.pauseUntilWindowKey, consecutiveLosses: entry.consecutiveLosses, nowWindowKey },
+            `[kalshi-bot] startup: restoring active ${label} coinStreak pause`,
+          );
+        }
+      }
+      logger.info(
+        { [label]: Object.fromEntries(target) },
+        `[kalshi-bot] coinStreakState(${label}) loaded from DB`,
+      );
     }
-    logger.info(
-      { coinStreakState: Object.fromEntries(coinStreakState) },
-      "[kalshi-bot] coinStreakState loaded from DB",
-    );
+
+    await Promise.all([
+      loadIntoMap(paperStreakStore, paperCoinStreakState, "paper"),
+      loadIntoMap(liveStreakStore, liveCoinStreakState, "live"),
+    ]);
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load coinStreakState from DB (non-fatal)");
   }
@@ -1474,7 +1525,8 @@ async function _runBotTick(
   // key is an ISO windowKey string — skip while the current window ≤ pause key.
   // When the pause expires, clear pauseUntilWindowKey so a future losing streak
   // can re-arm a new pause without requiring a win to reset the field first.
-  const streakInfo = coinStreakState.get(sym);
+  const streakMap = activeCoinStreakState();
+  const streakInfo = streakMap.get(sym);
   const streakPause = checkStreakPauseGuard(streakInfo?.pauseUntilWindowKey ?? null, windowKey);
   if (streakPause.blocked) {
     logger.info(
@@ -1485,7 +1537,7 @@ async function _runBotTick(
   } else if (streakPause.expired && streakInfo) {
     // Pause has expired — clear it so subsequent streaks can trigger new pauses.
     streakInfo.pauseUntilWindowKey = null;
-    coinStreakState.set(sym, streakInfo);
+    streakMap.set(sym, streakInfo);
   }
 
   // ── Per-coin daily loss cap ───────────────────────────────────────────────
@@ -1847,8 +1899,11 @@ async function closePosition(
   // For window expiry: defer to evalClosedBets so the confirmed candle close
   // drives the streak — not the provisional estimate that closePosition uses
   // (which can be a conservative full-loss fallback when the price cache is cold).
+  // Use the position's entryMode to update the right mode's streak map.
   if (!isExpiry) {
-    const existing = coinStreakState.get(pos.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
+    const posStreakMap = coinStreakStateForMode(pos.entryMode);
+    const posStreakStore = streakStoreForMode(pos.entryMode);
+    const existing = posStreakMap.get(pos.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
     const updated = applyStreakUpdate(
       existing,
       pnl,
@@ -1862,9 +1917,9 @@ async function closePosition(
         "[kalshi-bot] per-coin streak pause triggered — coin skipped for N windows",
       );
     }
-    coinStreakState.set(pos.symbol, updated);
+    posStreakMap.set(pos.symbol, updated);
     // Fire-and-forget — persist so the streak guard survives a server restart.
-    persistCoinStreakStateToDB().catch(() => {});
+    persistCoinStreakState(posStreakMap, posStreakStore).catch(() => {});
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2160,6 +2215,7 @@ export async function evalClosedBets(): Promise<void> {
         windowKey: kalshiBotBetsTable.windowKey,
         direction: kalshiBotBetsTable.direction,
         action: kalshiBotBetsTable.action,
+        mode: kalshiBotBetsTable.mode,
         pnl: kalshiBotBetsTable.pnl,
         kalshiTarget: kalshiBotBetsTable.kalshiTarget,
         contractCount: kalshiBotBetsTable.contractCount,
@@ -2308,9 +2364,13 @@ export async function evalClosedBets(): Promise<void> {
       // Apply real outcome to per-coin streak for expired rows.
       // closePosition() deferred this so that the confirmed candle close —
       // not the provisional estimate — drives coinStreakState.
+      // Use the bet's mode so each mode's streak is updated independently.
       if (row.action === "expired") {
         const finalPnl = correctedPnl ?? (row.pnl != null ? parseFloat(String(row.pnl)) : 0);
-        const existingStreak = coinStreakState.get(row.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
+        const rowMode: BotMode = row.mode === "live" ? "live" : "paper";
+        const evalStreakMap = coinStreakStateForMode(rowMode);
+        const evalStreakStore = streakStoreForMode(rowMode);
+        const existingStreak = evalStreakMap.get(row.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
         const updatedStreak = applyStreakUpdate(
           existingStreak,
           finalPnl,
@@ -2329,8 +2389,8 @@ export async function evalClosedBets(): Promise<void> {
             "[kalshi-bot] evalClosedBets: per-coin streak reset on win",
           );
         }
-        coinStreakState.set(row.symbol, updatedStreak);
-        persistCoinStreakStateToDB().catch(() => {});
+        evalStreakMap.set(row.symbol, updatedStreak);
+        persistCoinStreakState(evalStreakMap, evalStreakStore).catch(() => {});
       }
 
       evaluated++;
@@ -3536,10 +3596,11 @@ export function getCoinGuardState(): {
   const nowMs = Date.now();
   const currentWK = new Date(Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000)).toISOString().slice(0, 16);
 
+  const activeStreak = activeCoinStreakState();
   const coins: CoinGuardEntry[] = CRYPTO_COINS.map((c) => {
     const sym = c.symbol;
     const dailyLoss = coinDailyLoss.get(sym) ?? 0;
-    const streak = coinStreakState.get(sym) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
+    const streak = activeStreak.get(sym) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
     const slip = coinSlippageStrikes.get(sym);
     const slippageStrikes = slip && slip.windowKey === currentWK ? slip.strikes : 0;
     return {
@@ -3564,12 +3625,13 @@ export function clearAllPauses(): { clearedCoins: string[]; cbWasActive: boolean
   const cbWasActive = cbState.circuitBreakerWindowsRemaining > 0;
   cbState = { ...cbState, circuitBreakerWindowsRemaining: 0 };
 
-  // Also clear streak-based pauses (pauseUntilWindowKey) from coinStreakState.
-  // These are displayed in the "Blocked coins" banner under the orange badges.
+  // Also clear streak-based pauses (pauseUntilWindowKey) from the active mode's
+  // coinStreakState. These are displayed in the "Blocked coins" banner.
+  const activeStreakMap = activeCoinStreakState();
   const streakCleared: string[] = [];
-  for (const [sym, entry] of coinStreakState.entries()) {
+  for (const [sym, entry] of activeStreakMap.entries()) {
     if (entry.pauseUntilWindowKey !== null) {
-      coinStreakState.set(sym, { ...entry, pauseUntilWindowKey: null, consecutiveLosses: 0 });
+      activeStreakMap.set(sym, { ...entry, pauseUntilWindowKey: null, consecutiveLosses: 0 });
       streakCleared.push(sym);
     }
   }
@@ -3579,7 +3641,7 @@ export function clearAllPauses(): { clearedCoins: string[]; cbWasActive: boolean
     "[kalshi-bot] all pauses cleared manually",
   );
   // Persist the updated streak state so the clear survives a restart.
-  persistCoinStreakStateToDB().catch(() => {});
+  persistCoinStreakState(activeStreakMap, streakStoreForMode(botMode)).catch(() => {});
   return { clearedCoins: [...clearedCoins, ...streakCleared], cbWasActive };
 }
 
@@ -3611,8 +3673,9 @@ export interface LogicModeStats {
  * avgConfidence is computed from the statConfidence/claudeConfidence fields
  * stored in the signals JSONB snapshot at bet-placement time.
  */
-export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
+export async function getBotLogicPerformance(filterMode?: BotMode): Promise<LogicModeStats[]> {
   try {
+    const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
     const rows = await db
       .select({
         decisionMode: kalshiBotBetsTable.decisionMode,
@@ -3623,7 +3686,7 @@ export async function getBotLogicPerformance(): Promise<LogicModeStats[]> {
       .from(kalshiBotBetsTable)
       .where(
         sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
-          AND ${kalshiBotBetsTable.archivedAt} IS NULL`,
+          AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`,
       );
 
     const modeMap = new Map<string, { bets: number; wins: number; losses: number; pnl: number; confSum: number; confCount: number }>();

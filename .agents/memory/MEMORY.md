@@ -41,3 +41,4 @@
 - [User context default](user-context-default.md) — user always references production unless explicitly stated otherwise; always query production DB and check production logs first
 - [Per-coin direction filters](per-coin-direction-filters.md) — COIN_YES_BLOCKED={BTC,ETH,DOGE} (≤25% YES WR); COIN_FULLY_BLOCKED={SOL} (no edge either direction); startup migration ml_gate→classic on loadBotConfigFromDB
 - [Learning improvements defaults](learning-improvements-defaults.md) — 4 guard default changes from production data; wmReady gate defers NOT blocks
+- [Paper/Live mode full isolation](paper-live-isolation.md) — per-mode streak maps, positions filtered by entryMode in getBotState, decisionMode preference per mode; performance-report cache not yet mode-split (Task #235)
