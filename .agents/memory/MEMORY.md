@@ -45,6 +45,4 @@
 - [Kalshi RSA key format](kalshi-rsa-key-format.md) — KALSHI_PRIVATE_KEY stored as raw base64 (no headers); getPrivateKey() must wrap it in PKCS#1 PEM before signing
 - [Kalshi balance API fields](kalshi-balance-api-fields.md) — balance=cash cents, portfolio_value=position cents; total=sum; use balance for guards, not total
 - [Bot mode variable naming](bot-mode-variable-name.md) — runBotLoopTick/_runBotTick use module-level botMode; ${mode} throws ReferenceError in those functions
-- [Minimum-return gate](min-return-gate.md) — min payout-multiple entry guard via shared checkMinReturnGate; every decision mode (incl. consensus/unanimous) must route through it or bypasses the guard
-
-- [Kalshi order v2](kalshi-order-v2.md) — orders must use POST /portfolio/events/orders with bid/ask side + required decimal price + FOK; flat response fill_count/average_fill_price
+- [Kalshi order price format](kalshi-order-price-format.md) — price must be 2-decimal cent-resolution string (e.g. "0.69"); 4-decimal gives invalid_price; size using expectedFillPrice not raw yesPrice

@@ -50,7 +50,7 @@ import {
   type ExitState,
   type GuardStates,
 } from "./kalshi-bot-exit";
-import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry, getCachedKalshiBalance, invalidateBalanceCache } from "./kalshi-trader";
+import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry, getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice } from "./kalshi-trader";
 import {
   getKalshiWindowContext,
   getWindowBetSignal,
@@ -1580,8 +1580,14 @@ async function _runBotTick(
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
   // Cost per contract: YES contracts cost yesPrice per $1 face; NO contracts cost (1-yesPrice)
   const sideCost = direction === "yes" ? (yesPrice ?? 0.5) : (1 - (yesPrice ?? 0.5));
-  const contractCount = Math.max(1, Math.round(config.betSize / sideCost));
-  const betAmount = contractCount * sideCost; // actual dollars risked (may differ slightly from configured betSize)
+
+  // Size using the EXPECTED FILL price (marketable-limit with buffer), not the raw quote.
+  // Raw quote is e.g. 0.50 → buffer pushes fill to 0.65 → 4 contracts × 0.65 = $2.60 > $2 limit.
+  // Using the fill price for sizing keeps the real cost within budget.
+  const bookSide = direction === "yes" ? "bid" : "ask";
+  const expectedFillPrice = computeMarketableLimitPrice(bookSide, yesPrice, config.minReturnMultiple);
+  const contractCount = Math.max(1, Math.floor(config.betSize / expectedFillPrice));
+  const betAmount = contractCount * expectedFillPrice; // expected dollars risked at fill price
 
   // ── SAFETY GUARD: hard bet-size cap ─────────────────────────────────────────
   // If the computed betAmount would exceed the configured maxBetSize, abort the
