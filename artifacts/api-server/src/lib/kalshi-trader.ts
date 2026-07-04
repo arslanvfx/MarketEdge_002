@@ -18,7 +18,11 @@ function makeHeaders(): Record<string, string> {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
-  if (key) h["Authorization"] = key;
+  if (key) {
+    // New Kalshi elections API (api.elections.kalshi.com) requires "Token <key>".
+    // Guard against double-prefixing if the stored secret already has the prefix.
+    h["Authorization"] = key.startsWith("Token ") ? key : `Token ${key}`;
+  }
   return h;
 }
 
