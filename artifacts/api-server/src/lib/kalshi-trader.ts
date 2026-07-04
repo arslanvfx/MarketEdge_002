@@ -176,7 +176,7 @@ export interface PlaceOrderParams {
   action: "buy" | "sell";
   count: number;
   type: "market" | "limit";
-  yesPrice?: number; // 0-100 cents for limit orders
+  yesPrice?: number; // reference YES price as a fraction (0-1); used to bound the marketable-limit price
 }
 
 export interface PlaceOrderResult {
@@ -188,39 +188,69 @@ export interface PlaceOrderResult {
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
   if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
-  // v2 create-order endpoint requires client_order_id (UUID) in addition to
-  // the standard fields.  Path changed from /portfolio/orders to
-  // /portfolio/events/orders (old path returns 410 deprecated_v1_order_endpoint).
+
+  // Kalshi Trade API v2: POST /portfolio/events/orders  (CreateOrderV2).
+  // The legacy /portfolio/orders path returns 410 deprecated_v1_order_endpoint.
+  //
+  // The v2 endpoint quotes EVERYTHING from the YES side of the book:
+  //   side="bid"  → acquire YES exposure  (buy yes, or sell/close a no position)
+  //   side="ask"  → acquire NO  exposure  (buy no,  or sell/close a yes position)
+  // Selling YES is economically buying NO at (1 - price); a "yes bid at 7¢" is
+  // the same as a "no ask at 93¢".
+  //
+  // There is NO "market" order type in v2 — a market order is a marketable LIMIT
+  // with time_in_force="fill_or_kill". We send an aggressive price that crosses
+  // the spread; price-improvement means we never pay worse than the resting book,
+  // and FOK guarantees the whole order fills at once or is killed (never rests).
   const clientOrderId = crypto.randomUUID();
+
+  // Which side of the YES book acquires the exposure we want.
+  const wantYesExposure =
+    (params.action === "buy" && params.side === "yes") ||
+    (params.action === "sell" && params.side === "no");
+  const bookSide = wantYesExposure ? "bid" : "ask";
+
+  // Marketable limit price (fixed-point YES-side dollars, clamped 0.01–0.99).
+  // With a reference yesPrice we bound slippage to ±MARKETABLE_BUFFER; without
+  // one (e.g. exits) we go fully aggressive to guarantee the fill.
+  const MARKETABLE_BUFFER = 0.15;
+  const ref =
+    params.yesPrice != null && params.yesPrice > 0 && params.yesPrice < 1 ? params.yesPrice : null;
+  const priceFrac =
+    bookSide === "bid"
+      ? ref != null
+        ? Math.min(ref + MARKETABLE_BUFFER, 0.99)
+        : 0.99
+      : ref != null
+        ? Math.max(ref - MARKETABLE_BUFFER, 0.01)
+        : 0.01;
+  const price = priceFrac.toFixed(4); // FixedPointDollars string
+
   const body: Record<string, unknown> = {
     client_order_id: clientOrderId,
     ticker: params.ticker,
-    action: params.action,
-    side: params.side,
-    type: params.type,
-    count: String(params.count), // v2 API requires count as a string
-    time_in_force: "fill_or_kill", // v2 required field
-    self_trade_prevention_type: "taker_at_cross", // v2 required field — valid oneof value from Kalshi docs
+    side: bookSide, // BookSide: "bid" | "ask"
+    count: String(params.count), // FixedPointCount string
+    price, // required in v2 (YES-side)
+    time_in_force: "fill_or_kill",
+    self_trade_prevention_type: "taker_at_cross",
   };
-  if (params.type === "limit" && params.yesPrice != null) {
-    body.yes_price = String(Math.round(params.yesPrice)); // v2 requires string
-  }
+
+  // CreateOrderV2Response is a FLAT object (not wrapped in { order: {} }).
   const data = await kalshiFetch<{
-    order?: {
-      order_id?: string;
-      status?: string;
-      no_count?: number;
-      yes_count?: number;
-      avg_price?: number; // cents
-    };
+    order_id?: string;
+    fill_count?: string;
+    remaining_count?: string;
+    average_fill_price?: string; // fixed-point YES-side dollars
   }>("POST", "/portfolio/events/orders", body);
-  const o = data.order ?? {};
-  const filled = params.side === "yes" ? (o.yes_count ?? 0) : (o.no_count ?? 0);
+
+  const filled = data.fill_count != null ? parseFloat(data.fill_count) || 0 : 0;
+  const avg = data.average_fill_price != null ? parseFloat(data.average_fill_price) : NaN;
   return {
-    orderId: o.order_id ?? null,
-    status: o.status ?? "unknown",
+    orderId: data.order_id ?? null,
+    status: filled > 0 ? "filled" : "unfilled",
     filledCount: filled,
-    avgPrice: o.avg_price != null ? o.avg_price / 100 : null,
+    avgPrice: Number.isFinite(avg) ? avg : null, // YES-side fraction 0-1
   };
 }
 
@@ -251,15 +281,17 @@ export async function getOrder(
     avgPrice: o.avg_price != null ? o.avg_price / 100 : null,
   };
 }
+// NOTE: getOrder is unused in the hot path — fill_or_kill orders resolve
+// immediately in placeOrder's response, so there is no resting order to poll.
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Place an order and retry up to maxRetries times if it doesn't fill.
-// Between each attempt: waits retryDelayMs, polls the order for a late fill,
-// cancels it if still empty, then places a fresh order.  Prevents duplicate
-// open orders by always cancelling the previous attempt before retrying.
+// fill_or_kill orders never rest on the book — each attempt either fully fills
+// immediately or is killed — so there is no resting order to poll or cancel
+// between attempts. We simply re-place the order after a short delay.
 export async function placeOrderWithRetry(
   params: PlaceOrderParams,
   maxRetries = 3,
@@ -271,29 +303,12 @@ export async function placeOrderWithRetry(
     lastResult = await placeOrder(params);
 
     if (lastResult.filledCount > 0) {
-      return lastResult; // filled on first try (most common case)
+      return lastResult; // filled (most common case)
     }
 
-    // Not filled — wait to give Kalshi time to match the order.
-    await sleep(retryDelayMs);
-
-    // Poll for a late fill before cancelling.
-    if (lastResult.orderId) {
-      try {
-        const current = await getOrder(lastResult.orderId, params.side);
-        if (current.filledCount > 0) {
-          return { ...lastResult, filledCount: current.filledCount, avgPrice: current.avgPrice };
-        }
-        // Still unfilled — cancel so we don't hold a resting order.
-        await cancelOrder(lastResult.orderId).catch(() => {});
-      } catch {
-        // Ignore status-check errors; fall through to retry.
-      }
-    }
-
+    // Killed (unfilled) — wait briefly, then re-place a fresh order.
     if (attempt < maxRetries - 1) {
-      // Brief extra pause before the next attempt to avoid hammering the API.
-      await sleep(500);
+      await sleep(retryDelayMs);
     }
   }
 

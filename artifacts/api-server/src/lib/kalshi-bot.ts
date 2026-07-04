@@ -1671,6 +1671,7 @@ async function _runBotTick(
         action: "buy",
         count: contractCount,
         type: "market",
+        yesPrice: yesPrice ?? undefined, // bound the marketable-limit price to the current YES quote
       });
       if (result.filledCount === 0) {
         logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] order not filled after retries — skipping entry");
