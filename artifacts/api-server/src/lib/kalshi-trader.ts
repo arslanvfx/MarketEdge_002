@@ -6,7 +6,7 @@
 // In paper mode every write method is a no-op and returns a simulated result
 // so the rest of the bot logic works identically in both modes.
 
-const KALSHI_TRADE_BASE = "https://trading-api.kalshi.com/trade-api/v2";
+const KALSHI_TRADE_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
 function getApiKey(): string | null {
   return process.env["KALSHI_API_KEY"] ?? null;
