@@ -742,7 +742,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxDailyLossPerCoin: 3.00,
   coinStreakLossLimit: 3,
   coinStreakPauseWindows: 2,
-  maxSlippageCents: 5,
+  maxSlippageCents: 10,
   minReturnMultiple: 1.7,
   minNoEntryMinutes: 1,
   requireMonitorReady: true,

@@ -1799,15 +1799,14 @@ async function _runBotTick(
           minReturnMultiple: config.minReturnMultiple,
         },
         {
-          // Phase 1: retry immediately a few times at the same price — thin
-          // Kalshi books frequently fill on a quick re-place (the common cause
-          // of fill_or_kill_insufficient_resting_volume kills).
-          immediateAttempts: 4,
-          // Phase 2 (option 2): only if the immediate retries all fail, cross a
-          // little further into the book. Bounded by the slippage tolerance so
-          // we never pay more than the coin's configured max slippage, and the
+          // Phase 1: retry twice at the same price — a quick re-place often
+          // fills on thin books without waiting. Kept short so we reach Phase 2
+          // price escalation quickly when the book is genuinely thin.
+          immediateAttempts: 2,
+          // Phase 2: cross further into the book 1 cent at a time. Bounded by
+          // maxSlippageCents so we never pay more than configured, and the
           // return-floor cap still clamps every improved price.
-          priceImprovementMaxCents: config.maxSlippageCents ?? 5,
+          priceImprovementMaxCents: config.maxSlippageCents ?? 10,
         },
       );
       if (result.filledCount === 0) {
@@ -1820,7 +1819,7 @@ async function _runBotTick(
       // Slippage guard: compare actual fill price to the expected yes-price.
       // Tracks CONSECUTIVE bad fills — a clean fill resets the counter.
       // 3 consecutive bad fills → coin skips next window's entry, then counter clears.
-      const maxSlipCents = config.maxSlippageCents ?? 5;
+      const maxSlipCents = config.maxSlippageCents ?? 10;
       if (maxSlipCents > 0 && result.avgPrice != null && yesPrice != null) {
         const slippageCents = Math.abs(result.avgPrice - yesPrice) * 100;
         if (slippageCents > maxSlipCents) {
