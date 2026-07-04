@@ -311,7 +311,13 @@ const CONTRARIAN_LIVE_REGIME_PENALTY = 10;
 // A model must clear this individual confidence floor to count as genuinely
 // "agreeing" in a consensus check. A model at 48–51% is statistical noise,
 // not a real signal — requiring 55% filters out those weak leans.
+// Applied to BOTH YES and NO bets.
 const MODEL_SIGNAL_MIN_CONFIDENCE = 55;
+// Minimum number of hard model signals (stat / claude / ML — windowMonitor
+// does NOT count) that must produce a non-null directional output before the
+// bot places any bet.  A single-model signal is too thin regardless of
+// direction; two is the minimum to have any cross-check.
+const MIN_HARD_MODEL_SIGNALS = 2;
 
 // ---------------------------------------------------------------------------
 // DB health watchdog
@@ -3005,6 +3011,39 @@ export async function runBotLoopTick(): Promise<void> {
         continue;
       }
 
+      // Hard-model-signal minimum: at least MIN_HARD_MODEL_SIGNALS of the three
+      // core models (stat, claude, ML) must have produced a non-null directional
+      // output. windowMonitor ("bet" / "caution" / "stay_away") does not count —
+      // it is a meta-signal derived from the models, not an independent source.
+      // This prevents single-model bets like XRP (stat=null, claude=null, ML only).
+      {
+        const hardSigs = decision.signals as {
+          statAbove?: boolean | null;
+          claudeAbove?: boolean | null;
+          mlAbove?: boolean | null;
+        };
+        const hardModelCount =
+          (hardSigs.statAbove   != null ? 1 : 0) +
+          (hardSigs.claudeAbove != null ? 1 : 0) +
+          (hardSigs.mlAbove     != null ? 1 : 0);
+        if (hardModelCount < MIN_HARD_MODEL_SIGNALS) {
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `hard-model gate — only ${hardModelCount}/${MIN_HARD_MODEL_SIGNALS} core models produced a signal (stat=${hardSigs.statAbove ?? "null"} claude=${hardSigs.claudeAbove ?? "null"} ml=${hardSigs.mlAbove ?? "null"})`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+      }
+
       if (decision.action === "BET_YES") {
         if (COIN_YES_BLOCKED.has(sym)) {
           filteredByNewGuards.add(sym);
@@ -3023,11 +3062,11 @@ export async function runBotLoopTick(): Promise<void> {
           continue;
         }
 
-        // Full 3-signal consensus required for YES bets.
+        // Full 3-signal genuine consensus required for YES bets.
         // A model only counts as genuinely "agreeing" when its own directional
         // confidence clears MODEL_SIGNAL_MIN_CONFIDENCE (55%). Anything below
-        // that is noise, not a real signal — claudeConf=48 pointing YES does not
-        // constitute Claude agreeing with the YES thesis.
+        // that is noise — claudeConf=48 pointing YES does not constitute Claude
+        // agreeing with the YES thesis.
         const yesSigs = decision.signals as {
           statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
           statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
@@ -3049,6 +3088,42 @@ export async function runBotLoopTick(): Promise<void> {
             confidence: effectiveConfidence,
             score: 0,
             reason: `YES consensus gate — all 3 signals must genuinely agree ≥${MODEL_SIGNAL_MIN_CONFIDENCE}% (${signalSummary})`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+      }
+
+      if (decision.action === "BET_NO") {
+        // Full 3-signal genuine consensus required for NO bets — mirrors the YES
+        // gate exactly.  A model pointing NO at <55% confidence is noise, not a
+        // real signal.  This caught BTC (Claude 30%), HYPE (stat 53%, claude 51%
+        // both sub-threshold, ML actually saying YES), and similar weak NO calls.
+        const noSigs = decision.signals as {
+          statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
+          statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
+        };
+        const statGenuineNo   = noSigs.statAbove   === false && (noSigs.statConfidence   ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
+        const claudeGenuineNo = noSigs.claudeAbove === false && (noSigs.claudeConfidence ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
+        const mlGenuineNo     = noSigs.mlAbove     === false && (noSigs.mlConfidence     ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
+        const has3SignalNo = statGenuineNo && claudeGenuineNo && mlGenuineNo;
+        if (!has3SignalNo) {
+          const sig = (above: boolean | null | undefined, conf: number | null | undefined) => {
+            if (above !== false) return above === true ? "Y" : "?";
+            return (conf ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE ? "N" : `weak(${conf ?? "?"}%)`;
+          };
+          const signalSummary = `Stat=${sig(noSigs.statAbove, noSigs.statConfidence)} Claude=${sig(noSigs.claudeAbove, noSigs.claudeConfidence)} ML=${sig(noSigs.mlAbove, noSigs.mlConfidence)}`;
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `NO consensus gate — all 3 signals must genuinely agree ≥${MODEL_SIGNAL_MIN_CONFIDENCE}% (${signalSummary})`,
             windowKey,
             selected: false,
             evaluatedAt: now,
