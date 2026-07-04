@@ -9,7 +9,7 @@
 
 import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
 import { isAiFeatureEnabled } from "./ai-spend";
-import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import {
   checkMaxBetSizeGuard,
@@ -271,6 +271,15 @@ const coinSlippageStrikes: Map<string, { strikes: number; windowKey: string }> =
 // When the last 1-2 completed windows had <40% win rate the bot raises its
 // effective confidence floor to filter out marginal signals that may be noise.
 const recentWindowOutcomes: Map<string, { wins: number; losses: number }> = new Map();
+
+// Per-window circuit-breaker outcome buffer.
+// closePosition() accumulates expiry outcomes here (keyed by windowKey)
+// instead of updating cbState directly.  The runBotLoopTick flush applies
+// ONE cbState update per closed window so N concurrent expiry closures in
+// the same 15-min window don't each count as a separate consecutive loss.
+// Without this, 6 coins all losing in one window = 6 CB ticks, firing the
+// breaker from a single bad window even during an overall winning session.
+const windowCBBuffer: Map<string, { wins: number; losses: number }> = new Map();
 
 // Cached performance report from the most recent auto-tune run (null before
 // the first run fires, typically ~15 min after startup).
@@ -1771,25 +1780,35 @@ async function closePosition(
     dailyPnl += pnl;
     if (pnl < 0) dailyLossCount++;
 
-    // Circuit breaker: update consecutive-loss streak and trigger if needed.
-    cbState = applyBetOutcome(
-      cbState,
-      pnl >= 0,
-      config.maxConsecutiveLosses,
-      config.circuitBreakerPauseWindows,
-    );
-    if (pnl >= 0 && cbState.consecutiveLosses === 0) {
-      logger.info({ cbState }, "[kalshi-bot] win — consecutive loss streak reset");
-    } else if (pnl < 0) {
-      logger.info(
-        { cbState, maxConsecutiveLosses: config.maxConsecutiveLosses },
-        "[kalshi-bot] loss — consecutive loss count updated",
+    if (isExpiry) {
+      // Buffer this outcome — the window-level CB flush in runBotLoopTick
+      // applies ONE cbState update for the entire window so that N concurrent
+      // expiry closures in the same 15-min window don't count as N consecutive
+      // losses.  A single bad window should be one data point, not N.
+      const wo = windowCBBuffer.get(pos.windowKey) ?? { wins: 0, losses: 0 };
+      if (pnl >= 0) wo.wins++; else wo.losses++;
+      windowCBBuffer.set(pos.windowKey, wo);
+    } else {
+      // Mid-window exit: apply circuit breaker immediately (independent events).
+      cbState = applyBetOutcome(
+        cbState,
+        pnl >= 0,
+        config.maxConsecutiveLosses,
+        config.circuitBreakerPauseWindows,
       );
-      if (cbState.circuitBreakerWindowsRemaining > 0 && cbState.consecutiveLosses === config.maxConsecutiveLosses) {
-        logger.warn(
-          { cbState },
-          "[kalshi-bot] ⚡ circuit breaker TRIGGERED — new entries paused for this many windows",
+      if (pnl >= 0 && cbState.consecutiveLosses === 0) {
+        logger.info({ cbState }, "[kalshi-bot] win — consecutive loss streak reset");
+      } else if (pnl < 0) {
+        logger.info(
+          { cbState, maxConsecutiveLosses: config.maxConsecutiveLosses },
+          "[kalshi-bot] loss — consecutive loss count updated",
         );
+        if (cbState.circuitBreakerWindowsRemaining > 0 && cbState.consecutiveLosses === config.maxConsecutiveLosses) {
+          logger.warn(
+            { cbState },
+            "[kalshi-bot] ⚡ circuit breaker TRIGGERED — new entries paused for this many windows",
+          );
+        }
       }
     }
   } else {
@@ -1809,8 +1828,11 @@ async function closePosition(
   );
 
   // ── Per-coin consecutive window streak tracking ────────────────────────────
-  // Increment on loss; reset on win.  Trigger a pause when the loss limit is hit.
-  {
+  // For mid-window exits: apply immediately (pnl is based on real Kalshi price).
+  // For window expiry: defer to evalClosedBets so the confirmed candle close
+  // drives the streak — not the provisional estimate that closePosition uses
+  // (which can be a conservative full-loss fallback when the price cache is cold).
+  if (!isExpiry) {
     const existing = coinStreakState.get(pos.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
     const updated = applyStreakUpdate(
       existing,
@@ -2138,6 +2160,7 @@ export async function evalClosedBets(): Promise<void> {
           sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')`,
         ),
       )
+      .orderBy(asc(kalshiBotBetsTable.windowKey)) // chronological order for correct streak sequencing
       .limit(20); // process in small batches — each expired row makes a network call
 
     if (rows.length === 0) return;
@@ -2265,6 +2288,34 @@ export async function evalClosedBets(): Promise<void> {
         if (correctedPnl > 0) wo.wins++;
         else if (correctedPnl < 0) wo.losses++;
         recentWindowOutcomes.set(wk, wo);
+      }
+
+      // Apply real outcome to per-coin streak for expired rows.
+      // closePosition() deferred this so that the confirmed candle close —
+      // not the provisional estimate — drives coinStreakState.
+      if (row.action === "expired") {
+        const finalPnl = correctedPnl ?? (row.pnl != null ? parseFloat(String(row.pnl)) : 0);
+        const existingStreak = coinStreakState.get(row.symbol) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
+        const updatedStreak = applyStreakUpdate(
+          existingStreak,
+          finalPnl,
+          config.coinStreakLossLimit ?? 3,
+          config.coinStreakPauseWindows ?? 2,
+          Date.now(),
+        );
+        if (updatedStreak.pauseUntilWindowKey && !existingStreak.pauseUntilWindowKey) {
+          logger.warn(
+            { sym: row.symbol, windowKey: row.windowKey, pauseUntilWindowKey: updatedStreak.pauseUntilWindowKey, outcome },
+            "[kalshi-bot] evalClosedBets: per-coin streak pause triggered (confirmed outcome)",
+          );
+        } else if (finalPnl >= 0 && updatedStreak.consecutiveLosses === 0 && existingStreak.consecutiveLosses > 0) {
+          logger.info(
+            { sym: row.symbol, windowKey: row.windowKey },
+            "[kalshi-bot] evalClosedBets: per-coin streak reset on win",
+          );
+        }
+        coinStreakState.set(row.symbol, updatedStreak);
+        persistCoinStreakStateToDB().catch(() => {});
       }
 
       evaluated++;
@@ -2499,6 +2550,31 @@ export async function runBotLoopTick(): Promise<void> {
           logger.warn({ err, sym: posSymbol }, "[kalshi-bot] window-expiry close error (non-fatal)");
         }
       }
+    }
+  }
+
+  // Flush per-window circuit-breaker outcomes.
+  // windowCBBuffer is populated by closePosition() for every window-expiry
+  // closure.  Apply ONE cbState update per fully-closed window so that N
+  // concurrent expiry closures don't each tick the consecutive-loss counter.
+  // A window is considered "fully closed" as soon as its key is older than
+  // the current 15-min window (the expiry loop above already processed it).
+  if (windowCBBuffer.size > 0) {
+    const flushKey = currentWindowKey();
+    for (const [wk, wo] of Array.from(windowCBBuffer.entries())) {
+      if (wk >= flushKey) continue; // window not yet closed — keep buffered
+      const windowWon = wo.wins >= wo.losses; // majority-win decides the window outcome
+      cbState = applyBetOutcome(cbState, windowWon, config.maxConsecutiveLosses, config.circuitBreakerPauseWindows);
+      logger.info(
+        { wk, wins: wo.wins, losses: wo.losses, windowWon, cbState },
+        "[kalshi-bot] window CB flush — one outcome applied for closed window",
+      );
+      if (!windowWon && cbState.circuitBreakerWindowsRemaining > 0 && cbState.consecutiveLosses === config.maxConsecutiveLosses) {
+        logger.warn({ cbState }, "[kalshi-bot] ⚡ circuit breaker TRIGGERED (window-level)");
+      } else if (windowWon && cbState.consecutiveLosses === 0) {
+        logger.info({ cbState }, "[kalshi-bot] window win — consecutive loss streak reset");
+      }
+      windowCBBuffer.delete(wk);
     }
   }
 
