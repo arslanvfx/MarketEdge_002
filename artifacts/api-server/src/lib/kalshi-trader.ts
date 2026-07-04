@@ -188,7 +188,12 @@ export interface PlaceOrderResult {
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
   if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
+  // v2 create-order endpoint requires client_order_id (UUID) in addition to
+  // the standard fields.  Path changed from /portfolio/orders to
+  // /portfolio/events/orders (old path returns 410 deprecated_v1_order_endpoint).
+  const clientOrderId = crypto.randomUUID();
   const body: Record<string, unknown> = {
+    client_order_id: clientOrderId,
     ticker: params.ticker,
     action: params.action,
     side: params.side,
@@ -206,7 +211,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
       yes_count?: number;
       avg_price?: number; // cents
     };
-  }>("POST", "/portfolio/orders", body);
+  }>("POST", "/portfolio/events/orders", body);
   const o = data.order ?? {};
   const filled = params.side === "yes" ? (o.yes_count ?? 0) : (o.no_count ?? 0);
   return {

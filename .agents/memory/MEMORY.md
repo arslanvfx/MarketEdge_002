@@ -45,3 +45,4 @@
 - [Kalshi RSA key format](kalshi-rsa-key-format.md) — KALSHI_PRIVATE_KEY stored as raw base64 (no headers); getPrivateKey() must wrap it in PKCS#1 PEM before signing
 - [Kalshi balance API fields](kalshi-balance-api-fields.md) — balance=cash cents, portfolio_value=position cents; total=sum; use balance for guards, not total
 - [Bot mode variable naming](bot-mode-variable-name.md) — runBotLoopTick/_runBotTick use module-level botMode; ${mode} throws ReferenceError in those functions
+- [Kalshi order endpoint v2](kalshi-order-endpoint-v2.md) — POST /portfolio/orders is 410 deprecated; v2 path is /portfolio/events/orders + client_order_id required
