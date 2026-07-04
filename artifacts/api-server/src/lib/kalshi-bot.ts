@@ -3763,75 +3763,51 @@ export async function runBotLoopTick(): Promise<void> {
   }
   lastWindowEvaluation = allResults;
 
-  // Phase 4: run ticks in priority order — best BET candidate first.
-  // Once a position is opened, break so only one bet is placed per tick.
-  // Reversing coins that survived the confidence penalty appear in bets[] and
-  // execute normally. Reversing coins that were soft-skipped are in skips[] with
-  // trendStability="reversing" and are filtered out of execution to avoid double-entry.
-  const orderedSymbols = [
-    ...bets.map(e => e.symbol),
-    // Exclude: reversing-caution soft-skips (handled separately) AND symbols blocked by
-    // momentum override / directional-cap so runBotTickForCoin cannot bypass Phase-3 filters.
-    ...skips.filter(e =>
-      e.trendStability !== "reversing" &&
-      !filteredByNewGuards.has(e.symbol)
-    ).map(e => e.symbol),
-  ];
-  for (const sym of orderedSymbols) {
-    // Defense-in-depth: re-check GLOBAL bet cap just before execution.
-    // Phase-3's check uses a snapshot; bets placed earlier in THIS Phase-4 loop
-    // must also be counted so we don't overshoot the total.
-    if (config.maxBetsPerWindow > 0) {
-      const totalNow = windowTotalBets.get(windowKey) ?? 0;
-      if (totalNow >= config.maxBetsPerWindow) {
-        logger.info(
-          { sym, totalNow, cap: config.maxBetsPerWindow },
-          "[kalshi-bot] global bet cap (phase-4 gate) — blocking entry",
-        );
-        continue;
-      }
-    }
+  // Phase 4: run all eligible coins in parallel.
+  // Phase 3 is the authoritative filter — it has already enforced the global bet cap,
+  // directional caps, chop filter, and all other guards on bets[].
+  // Reversing coins that were soft-skipped (trendStability="reversing") and coins
+  // blocked by momentum override / directional-cap are excluded from execution.
+  const betSymbols  = bets.map(e => e.symbol);
+  const skipSymbols = skips
+    .filter(e => e.trendStability !== "reversing" && !filteredByNewGuards.has(e.symbol))
+    .map(e => e.symbol);
 
-    // Defense-in-depth: re-check directional cap just before execution.
-    // Phase-3's check is the primary gate, but this catches any edge case where
-    // a coin approved in Phase 3 would exceed the cap when actually fired
-    // (e.g. if two coins tie for the same direction slot).
-    if (config.enableDirectionCap && config.maxSameDirectionBets > 0) {
-      const evalEntry = bets.find(e => e.symbol === sym);
-      if (evalEntry) {
-        const proposedDir = evalEntry.action === "BET_YES" ? "yes" : "no";
-        const dirCount = windowDirectionCounts.get(proposedDir) ?? 0;
-        if (dirCount >= config.maxSameDirectionBets) {
-          logger.info(
-            { sym, proposedDir, dirCount, cap: config.maxSameDirectionBets },
-            "[kalshi-bot] directional cap (phase-4 gate) — blocking entry",
-          );
-          continue;
-        }
-      }
-    }
+  // Snapshot pre-launch open-position state for all candidates.
+  // Must happen before any await so direction-count updates after settling are correct.
+  const hadPositionBefore = new Map<string, boolean>(
+    [...betSymbols, ...skipSymbols].map(sym => [sym, openPositions.has(sym)]),
+  );
 
+  const runCoin = async (sym: string) => {
     const kalshiData = getKalshiCachedData(sym);
-    const prediction = getCachedPrediction(sym);
-    // Capture before-state so we can detect a fresh bet placement for this symbol.
-    const hadPositionBefore = openPositions.has(sym);
+    const prediction  = getCachedPrediction(sym);
     try {
       await runBotTickForCoin(
         sym,
-        kalshiData?.ticker ?? null,
-        kalshiData?.value ?? null,
+        kalshiData?.ticker   ?? null,
+        kalshiData?.value    ?? null,
         kalshiData?.yesPrice ?? null,
-        prediction?.candles ?? [],
+        prediction?.candles  ?? [],
       );
     } catch (err) {
       logger.warn({ err, sym }, "[kalshi-bot] loop tick error (non-fatal)");
     }
-    // Track direction counts for the directional-cap filter across the window.
-    if (!hadPositionBefore && openPositions.has(sym)) {
+  };
+
+  // Fire all bet candidates in parallel so FOK retries and DB writes don't
+  // serialize — all three (or however many Phase 3 approved) attempt concurrently.
+  await Promise.allSettled(betSymbols.map(runCoin));
+
+  // Then manage existing positions (skips) in parallel.
+  await Promise.allSettled(skipSymbols.map(runCoin));
+
+  // Update direction counts for all positions newly opened this tick.
+  for (const sym of [...betSymbols, ...skipSymbols]) {
+    if (!hadPositionBefore.get(sym) && openPositions.has(sym)) {
       const dir = openPositions.get(sym)!.direction;
       windowDirectionCounts.set(dir, (windowDirectionCounts.get(dir) ?? 0) + 1);
     }
-    // No break — with multi-position support each coin enters independently.
   }
 }
 
