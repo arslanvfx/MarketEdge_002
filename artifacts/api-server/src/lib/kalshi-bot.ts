@@ -1927,6 +1927,25 @@ interface BetRecordArgs {
 }
 
 async function persistBetRecord(args: BetRecordArgs): Promise<void> {
+  const MAX_ATTEMPTS = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      await _persistBetRecordOnce(args);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < MAX_ATTEMPTS) {
+        // Brief pause lets the connection pool free up a slot (window-expiry
+        // often fires 6-7 simultaneous writes that exhaust the pool).
+        await new Promise(r => setTimeout(r, attempt * 600));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> {
   try {
     const id = args.existingId ?? args.insertId ?? `${args.symbol}:${args.windowKey}:${Date.now()}`;
     if (args.existingId) {
@@ -3319,15 +3338,32 @@ export function getCoinGuardState(): {
 }
 
 /** Clear all per-coin auto-tune pauses and reset the circuit-breaker countdown.
- *  Does NOT change bot mode, config, or position state.
- *  Call this when pauses are stale and the user wants to resume immediately. */
+ *  Also clears all coinStreak pauseUntilWindowKey entries (the streak-based
+ *  per-coin blocks shown in the "Blocked coins" banner).
+ *  Does NOT change bot mode, config, or position state. */
 export function clearAllPauses(): { clearedCoins: string[]; cbWasActive: boolean } {
   const clearedCoins = [...pausedCoins.keys()];
   pausedCoins.clear();
   const cbWasActive = cbState.circuitBreakerWindowsRemaining > 0;
   cbState = { ...cbState, circuitBreakerWindowsRemaining: 0 };
-  logger.info({ clearedCoins, cbWasActive }, "[kalshi-bot] all pauses cleared manually");
-  return { clearedCoins, cbWasActive };
+
+  // Also clear streak-based pauses (pauseUntilWindowKey) from coinStreakState.
+  // These are displayed in the "Blocked coins" banner under the orange badges.
+  const streakCleared: string[] = [];
+  for (const [sym, entry] of coinStreakState.entries()) {
+    if (entry.pauseUntilWindowKey !== null) {
+      coinStreakState.set(sym, { ...entry, pauseUntilWindowKey: null, consecutiveLosses: 0 });
+      streakCleared.push(sym);
+    }
+  }
+
+  logger.info(
+    { clearedCoins, streakCleared, cbWasActive },
+    "[kalshi-bot] all pauses cleared manually",
+  );
+  // Persist the updated streak state so the clear survives a restart.
+  persistCoinStreakStateToDB().catch(() => {});
+  return { clearedCoins: [...clearedCoins, ...streakCleared], cbWasActive };
 }
 
 export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {

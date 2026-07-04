@@ -385,6 +385,53 @@ function CountdownCell({ reason, windowKey }: { reason: string; windowKey: strin
   );
 }
 
+function ClearPausesButton() {
+  const { getToken } = useAuth();
+  const qc = useQueryClient();
+  const [state, setState] = useState<"idle" | "loading" | "done">("idle");
+
+  async function handleClear() {
+    setState("loading");
+    try {
+      const token = await getToken();
+      await fetch(`${API_BASE}/crypto/bot/clear-pauses`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({}),
+      });
+      setState("done");
+      void qc.invalidateQueries({ queryKey: ["bot-status"] });
+      void qc.invalidateQueries({ queryKey: ["bot-coin-guard-state"] });
+      void qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+      setTimeout(() => setState("idle"), 2000);
+    } catch {
+      setState("idle");
+    }
+  }
+
+  return (
+    <button
+      className={`ml-auto text-[11px] px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1.5 ${
+        state === "done"
+          ? "border-emerald-500/50 text-emerald-400 bg-emerald-500/10"
+          : state === "loading"
+          ? "border-amber-500/30 text-amber-400/50 cursor-not-allowed"
+          : "border-amber-500/40 text-amber-400 hover:bg-amber-500/20 cursor-pointer"
+      }`}
+      onClick={handleClear}
+      disabled={state !== "idle"}
+    >
+      {state === "loading" && (
+        <RefreshCw className="w-3 h-3 animate-spin" />
+      )}
+      {state === "done" ? "Pauses cleared ✓" : "Clear pauses now"}
+    </button>
+  );
+}
+
 export default function BotDashboard() {
   const { getToken } = useAuth();
   const qc = useQueryClient();
@@ -882,16 +929,7 @@ export default function BotDashboard() {
                 </span>
               )}
             </div>
-            <button
-              className="ml-auto text-[11px] px-2.5 py-1 rounded-lg border border-amber-500/40 text-amber-400 hover:bg-amber-500/20 transition-colors"
-              onClick={async () => {
-                await authPost("/crypto/bot/clear-pauses", {});
-                void qc.invalidateQueries({ queryKey: ["bot-status"] });
-                void qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
-              }}
-            >
-              Clear pauses now
-            </button>
+            <ClearPausesButton />
           </div>
         )}
 
