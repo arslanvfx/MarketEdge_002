@@ -2255,7 +2255,14 @@ export default function BotDashboard() {
 
                       <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
                         <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Size</div>
-                        <div className="text-xs font-semibold">{r.contractCount ?? "—"} × {fmt$(r.betAmount)}</div>
+                        <div className="text-xs font-semibold">
+                          {r.contractCount ?? "—"} @ {(() => {
+                            const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
+                            if (ep == null) return r.betAmount ? fmt$(parseFloat(r.betAmount)) : "—";
+                            const costPerContract = r.direction === "no" ? 1 - ep : ep;
+                            return `${(costPerContract * 100).toFixed(0)}¢`;
+                          })()}
+                        </div>
                       </div>
 
                       <div className={`rounded-lg p-2.5 col-span-1 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>

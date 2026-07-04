@@ -46,3 +46,4 @@
 - [Kalshi balance API fields](kalshi-balance-api-fields.md) — balance=cash cents, portfolio_value=position cents; total=sum; use balance for guards, not total
 - [Bot mode variable naming](bot-mode-variable-name.md) — runBotLoopTick/_runBotTick use module-level botMode; ${mode} throws ReferenceError in those functions
 - [Kalshi order price format](kalshi-order-price-format.md) — price must be 2-decimal cent-resolution string (e.g. "0.69"); 4-decimal gives invalid_price; size using expectedFillPrice not raw yesPrice
+- [Kalshi live P&L formula](kalshi-live-pnl.md) — real contract math: YES win=(1−ep)×n, YES loss=−ep×n, NO win=ep×n, NO loss=−(1−ep)×n; betAmount=actual fill cost; fixLiveExpiredPnlHistorical() corrects DB on startup

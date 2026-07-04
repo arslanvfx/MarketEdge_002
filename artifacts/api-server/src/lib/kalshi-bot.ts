@@ -896,6 +896,42 @@ export async function loadCoinStreakStateFromDB(): Promise<void> {
  * the real state rather than resetting to the hardcoded default on every
  * server restart / republish.
  */
+/**
+ * One-time startup migration: correct historical live-mode expired bet P&L records
+ * that were written with the old paper-simulation formula (betAmount × 0.50).
+ *
+ * Real Kalshi contract P&L:
+ *   YES win:  (1 − entryPrice) × contractCount
+ *   YES loss: −entryPrice × contractCount
+ *   NO  win:   entryPrice × contractCount
+ *   NO  loss: −(1 − entryPrice) × contractCount
+ *
+ * Safe to run on every startup: only updates rows where outcome AND entry_price
+ * AND contract_count are all set (evaluated rows), and only for mode='live'.
+ */
+export async function fixLiveExpiredPnlHistorical(): Promise<void> {
+  try {
+    const updated = await db.execute(sql`
+      UPDATE kalshi_bot_bets
+      SET pnl = CASE
+        WHEN direction = 'yes' AND outcome = 'win'  THEN ((1 - entry_price::numeric) * contract_count)::text
+        WHEN direction = 'yes' AND outcome = 'loss' THEN ((-entry_price::numeric) * contract_count)::text
+        WHEN direction = 'no'  AND outcome = 'win'  THEN (entry_price::numeric * contract_count)::text
+        WHEN direction = 'no'  AND outcome = 'loss' THEN ((-(1 - entry_price::numeric)) * contract_count)::text
+        ELSE pnl
+      END
+      WHERE mode = 'live'
+        AND action = 'expired'
+        AND outcome IN ('win', 'loss')
+        AND entry_price IS NOT NULL
+        AND contract_count IS NOT NULL
+    `);
+    logger.info({ rowCount: updated.rowCount }, "[kalshi-bot] fixLiveExpiredPnlHistorical: corrected live expired P&L to real contract math");
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] fixLiveExpiredPnlHistorical: failed (non-fatal)");
+  }
+}
+
 export async function loadPaperBalanceFromDB(): Promise<void> {
   if (botMode === "live") {
     // Live mode: balance is fetched from Kalshi on demand; skip DB computation.
@@ -1748,15 +1784,23 @@ async function _runBotTick(
   const id = `${sym}:${windowKey}:${Date.now()}`;
   // Capture the live coin price at the moment the bet is placed.
   const cryptoPriceAtEntry = getCachedPrediction(sym)?.price ?? null;
+
+  // Compute actual cost using the real fill price (not the estimated fill used for sizing).
+  // YES cost = fillPrice per contract; NO cost = (1 − fillPrice) per contract.
+  const actualFillYesPrice = fillPrice ?? yesPrice ?? 0.5;
+  const actualBetAmount = direction === "yes"
+    ? contractCount * actualFillYesPrice
+    : contractCount * (1 - actualFillYesPrice);
+
   const newPosition: OpenPosition = {
     id,
     symbol: sym,
     windowKey,
     ticker: kalshiTicker,
     direction,
-    entryYesPrice: fillPrice ?? yesPrice ?? 0.5,
+    entryYesPrice: actualFillYesPrice,
     contractCount,
-    betAmount,
+    betAmount: actualBetAmount,
     kalshiTarget,
     openedAt: Date.now(),
     cryptoPriceAtEntry,
@@ -1790,7 +1834,7 @@ async function _runBotTick(
     entryPrice: newPosition.entryYesPrice,
     kalshiTarget,
     contractCount,
-    betAmount,
+    betAmount: actualBetAmount,
     // Use insertId (not existingId) so persistBetRecord INSERTs this row.
     // The exit UPDATE will find it later via existingId: pos.id.
     insertId: id,
@@ -1878,11 +1922,28 @@ async function closePosition(
     if (lastCoinPrice !== null) {
       const priceAboveStrike = lastCoinPrice >= strike;
       const won = pos.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
-      // TEMP paper simulation: win = +50% of bet, loss = -100% of bet
-      pnl = won ? pos.betAmount * PAPER_WIN_RETURN_RATE : -pos.betAmount;
+      if (pos.entryMode === "live") {
+        // Real contract P&L: each contract pays $1.00 (win) or $0.00 (loss)
+        // YES cost = entryYesPrice/contract → profit = (1 − entry) × n   or loss = −entry × n
+        // NO  cost = (1 − entry)/contract  → profit = entry × n           or loss = −(1 − entry) × n
+        const ep = pos.entryYesPrice;
+        const n  = pos.contractCount;
+        pnl = won
+          ? (pos.direction === "yes" ? (1 - ep) * n : ep * n)
+          : (pos.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+      } else {
+        // Paper simulation: fixed win rate
+        pnl = won ? pos.betAmount * PAPER_WIN_RETURN_RATE : -pos.betAmount;
+      }
     } else {
       // No price data — book conservatively as full loss
-      pnl = -pos.betAmount;
+      if (pos.entryMode === "live") {
+        const ep = pos.entryYesPrice;
+        const n  = pos.contractCount;
+        pnl = pos.direction === "yes" ? -ep * n : -(1 - ep) * n;
+      } else {
+        pnl = -pos.betAmount;
+      }
     }
   }
 
@@ -2362,12 +2423,20 @@ export async function evalClosedBets(): Promise<void> {
         const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
         outcome = won ? "win" : "loss";
 
-        // TEMPORARY: paper-mode fixed return (50¢ profit per $1 bet, full loss on lose).
-        // Remove when connecting to live Kalshi — replace with real contract PnL:
-        //   win:  (1 - entryPrice) * count  (YES) / entryPrice * count  (NO)
-        //   loss: -entryPrice * count        (YES) / -(1-entryPrice) * count (NO)
-        const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : entryPrice * count;
-        correctedPnl = won ? betAmt * 0.50 : -betAmt;
+        // Real contract P&L for live bets; paper simulation for paper bets.
+        // Each Kalshi contract pays $1.00 (win) or $0.00 (loss).
+        // YES cost = entryPrice/contract  → profit = (1 − entry) × n   or loss = −entry × n
+        // NO  cost = (1 − entry)/contract → profit = entry × n          or loss = −(1 − entry) × n
+        const ep = entryPrice;
+        const n  = count;
+        if (row.mode === "live") {
+          correctedPnl = won
+            ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+            : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+        } else {
+          const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+          correctedPnl = won ? betAmt * 0.50 : -betAmt;
+        }
 
         logger.info(
           { sym: row.symbol, windowKey: row.windowKey, closePrice, strike, direction: row.direction, outcome, pnl: correctedPnl },
