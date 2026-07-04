@@ -914,10 +914,10 @@ export async function fixLiveExpiredPnlHistorical(): Promise<void> {
     const updated = await db.execute(sql`
       UPDATE kalshi_bot_bets
       SET pnl = CASE
-        WHEN direction = 'yes' AND outcome = 'win'  THEN ((1 - entry_price::numeric) * contract_count)::text
-        WHEN direction = 'yes' AND outcome = 'loss' THEN ((-entry_price::numeric) * contract_count)::text
-        WHEN direction = 'no'  AND outcome = 'win'  THEN (entry_price::numeric * contract_count)::text
-        WHEN direction = 'no'  AND outcome = 'loss' THEN ((-(1 - entry_price::numeric)) * contract_count)::text
+        WHEN direction = 'yes' AND outcome = 'win'  THEN (1 - entry_price::numeric) * contract_count
+        WHEN direction = 'yes' AND outcome = 'loss' THEN (-entry_price::numeric) * contract_count
+        WHEN direction = 'no'  AND outcome = 'win'  THEN entry_price::numeric * contract_count
+        WHEN direction = 'no'  AND outcome = 'loss' THEN (-(1 - entry_price::numeric)) * contract_count
         ELSE pnl
       END
       WHERE mode = 'live'
@@ -3212,6 +3212,85 @@ export async function runBotLoopTick(): Promise<void> {
             confidence: effectiveConfidence,
             score: 0,
             reason: `hard-model gate — only ${hardModelCount}/${MIN_HARD_MODEL_SIGNALS} core models produced a signal (stat=${hardSigs.statAbove ?? "null"} claude=${hardSigs.claudeAbove ?? "null"} ml=${hardSigs.mlAbove ?? "null"})`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+      }
+
+      // ── Price-band gates (market consensus) ─────────────────────────────────
+      // These run before coin-specific quality gates because they are the
+      // single strongest predictor of loss in the historical data:
+      //
+      //   YES lean (<50¢):    0% WR on 3 bets, −$5.94 total.  Market is saying
+      //                       <50% chance of finishing above strike; betting YES
+      //                       into that has no edge.
+      //
+      //   NO favorite (≥65¢): 0–25% WR on 6 bets, −$3.75 total.  When YES is
+      //                       priced at 65¢+, market conviction is too strong
+      //                       to bet NO profitably.
+      //
+      // yesPrice is in 0-1 scale (e.g. 0.43 = 43¢).
+      if (decision.action === "BET_YES" && kalshiData.yesPrice != null && kalshiData.yesPrice < 0.50) {
+        const priceCents = Math.round(kalshiData.yesPrice * 100);
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `YES price gate — market prices YES at ${priceCents}¢ (<50¢); 0% historical WR on lean YES bets`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
+        });
+        continue;
+      }
+
+      if (decision.action === "BET_NO" && kalshiData.yesPrice != null && kalshiData.yesPrice >= 0.65) {
+        const priceCents = Math.round(kalshiData.yesPrice * 100);
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `NO price gate — market prices YES at ${priceCents}¢ (≥65¢); 0–25% historical WR betting NO against strong market consensus`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
+        });
+        continue;
+      }
+
+      // YES below-strike gate: when the live crypto price is already below the
+      // Kalshi strike by more than 0.3%, a YES bet needs a price recovery to win.
+      // Historical data: ETH YES −0.042% and HYPE YES −0.123% below strike both
+      // lost; adding a 0.3% buffer avoids false-positive SKIPs on near-flat markets.
+      if (decision.action === "BET_YES" && kalshiData.value != null) {
+        const livePrice = getCachedPrediction(sym)?.price ?? null;
+        const BELOW_STRIKE_YES_GAP = 0.003; // 0.3% below strike
+        if (livePrice !== null && livePrice < kalshiData.value * (1 - BELOW_STRIKE_YES_GAP)) {
+          const gapPct = ((kalshiData.value - livePrice) / kalshiData.value * 100).toFixed(3);
+          logger.info(
+            { sym, livePrice, kalshiTarget: kalshiData.value, gapPct },
+            `[kalshi-bot] YES below-strike gate — ${sym} price −${gapPct}% below strike`,
+          );
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `YES below-strike gate — price −${gapPct}% below strike; YES needs price to recover`,
             windowKey,
             selected: false,
             evaluatedAt: now,
