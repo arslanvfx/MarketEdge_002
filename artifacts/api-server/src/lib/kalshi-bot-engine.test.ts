@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 
 import {
   computeCorePairDecision,
+  checkMinReturnGate,
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
   CONFIDENCE_BOOST_PER_SIGNAL,
@@ -612,3 +613,75 @@ test("restoreStreakState: entry with no pause and no losses is restored (not fil
   assert.ok(state.has("SOL"), "trivial entry in saved snapshot is still restored");
 });
 
+
+// ---------------------------------------------------------------------------
+// Minimum-return (payout multiple) gate
+// ---------------------------------------------------------------------------
+
+test("min-return gate: off (undefined) allows deep-ITM BET_NO", () => {
+  // yesPrice 0.08 → NO cost 0.92 → return ~1.09x. No gate → bet proceeds.
+  const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, yesPrice: 0.08 }));
+  assert.equal(r.action, "BET_NO");
+});
+
+test("min-return gate: 1.44x skips deep-ITM BET_NO (cost 92c, ret 1.09x)", () => {
+  const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, yesPrice: 0.08, minReturnMultiple: 1.44 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /Return 1\.09x below minimum 1\.44x/);
+});
+
+test("min-return gate: 1.44x skips deep-ITM BET_YES (cost 92c)", () => {
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 70, yesPrice: 0.92, minReturnMultiple: 1.44 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /below minimum 1\.44x/);
+});
+
+test("min-return gate: 1.44x allows a cheap bet (cost 50c, ret 2x)", () => {
+  const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, yesPrice: 0.50, minReturnMultiple: 1.44 }));
+  assert.equal(r.action, "BET_NO");
+});
+
+test("min-return gate: return exactly at threshold passes (2x floor, 2x bet)", () => {
+  // yesPrice 0.50 → NO cost 0.50 → return exactly 2.0x, not below 2.0 → allowed.
+  const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, yesPrice: 0.50, minReturnMultiple: 2.0 }));
+  assert.equal(r.action, "BET_NO");
+});
+
+test("min-return gate: floor of 1 is treated as off", () => {
+  const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, yesPrice: 0.08, minReturnMultiple: 1 }));
+  assert.equal(r.action, "BET_NO");
+});
+
+// checkMinReturnGate — the shared pure helper used by every decision mode
+// (classic, ml_gate, consensus, unanimous). Testing it directly proves the
+// mode-level guards behave correctly without mocking the I/O wrapper.
+
+test("checkMinReturnGate: floor ≤ 1 disables the gate", () => {
+  assert.equal(checkMinReturnGate("BET_NO", 0.08, 1).blocked, false);
+  assert.equal(checkMinReturnGate("BET_YES", 0.92, undefined).blocked, false);
+});
+
+test("checkMinReturnGate: SKIP action is never blocked", () => {
+  assert.equal(checkMinReturnGate("SKIP", 0.92, 1.44).blocked, false);
+});
+
+test("checkMinReturnGate: blocks deep-ITM BET_NO below floor", () => {
+  const g = checkMinReturnGate("BET_NO", 0.08, 1.44); // NO cost 0.92 → 1.09x
+  assert.equal(g.blocked, true);
+  assert.match(g.reason, /Return 1\.09x below minimum 1\.44x/);
+});
+
+test("checkMinReturnGate: allows a bet at/above the floor", () => {
+  assert.equal(checkMinReturnGate("BET_NO", 0.50, 1.44).blocked, false); // 2x
+  assert.equal(checkMinReturnGate("BET_NO", 0.50, 2.0).blocked, false);  // exactly 2x
+});
+
+test("checkMinReturnGate: null yes-price is blocked when gate is active", () => {
+  const g = checkMinReturnGate("BET_YES", null, 1.44);
+  assert.equal(g.blocked, true);
+  assert.match(g.reason, /no yes-price/);
+});
+
+test("checkMinReturnGate: null yes-price is allowed when gate is off", () => {
+  assert.equal(checkMinReturnGate("BET_YES", null, 1).blocked, false);
+});

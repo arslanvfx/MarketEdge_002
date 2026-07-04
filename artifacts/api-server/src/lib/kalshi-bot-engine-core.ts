@@ -92,6 +92,7 @@ export interface CorePairInputs {
   mlMinConfidence?: number | null;  // profile override for ML_PRIMARY_MIN_CONFIDENCE
   kalshiTicker: string | null;
   minConfidence: number;
+  minReturnMultiple?: number | null; // skip bets whose payout multiple (1/cost) is below this; ≤1 = off
 }
 
 export interface CorePairResult {
@@ -129,11 +130,77 @@ function countSignals(
 }
 
 /**
+ * Public decision function — runs the pure core decision, then applies the
+ * minimum-return gate (payout multiple = 1 / cost). A Kalshi contract costing
+ * `cost` dollars pays $1, so its return multiple is 1/cost. When the configured
+ * floor is > 1, any actionable bet whose payout multiple falls below it is
+ * skipped (these are the deep in-the-money "near-certainty" bets with poor
+ * risk/reward, e.g. paying 92¢ to make 8¢ → 1.09x).
+ *   BET_YES cost = yesPrice ; BET_NO cost = 1 - yesPrice
+ */
+export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
+  const result = computeCorePairDecisionUngated(inp);
+
+  const gate = checkMinReturnGate(result.action, inp.yesPrice, inp.minReturnMultiple);
+  if (gate.blocked) {
+    return {
+      action: "SKIP",
+      confidence: result.confidence,
+      reasoning: `${gate.reason} — was ${result.action} (${result.reasoning})`,
+      signalsAgreeing: result.signalsAgreeing,
+      signalsTotal: result.signalsTotal,
+      ev: result.ev,
+    };
+  }
+
+  return result;
+}
+
+/**
+ * Minimum-return (payout multiple) gate — pure and shared across every decision
+ * mode (classic, ml_gate, consensus, unanimous). A Kalshi contract costing
+ * `cost` dollars pays $1, so its payout multiple is 1/cost.
+ *   BET_YES cost = yesPrice ; BET_NO cost = 1 - yesPrice
+ * Returns `blocked: true` (with a reason) when an actionable bet's payout
+ * multiple is below the configured floor. When the floor is > 1 but there is no
+ * yes-price to verify the return, the bet is blocked rather than placed blind.
+ * A floor of ≤ 1 disables the gate entirely.
+ */
+export function checkMinReturnGate(
+  action: BotDecisionAction,
+  yesPrice: number | null,
+  minReturnMultiple: number | null | undefined,
+): { blocked: boolean; reason: string } {
+  const minReturn = minReturnMultiple ?? 0;
+  if (minReturn <= 1 || action === "SKIP") return { blocked: false, reason: "" };
+
+  if (yesPrice == null) {
+    return {
+      blocked: true,
+      reason: `Min-return ${minReturn.toFixed(2)}x enabled but no yes-price to verify return — skipping`,
+    };
+  }
+
+  const cost = action === "BET_YES" ? yesPrice : 1 - yesPrice;
+  if (cost <= 0) return { blocked: false, reason: "" };
+
+  const payoffMultiple = 1 / cost;
+  if (payoffMultiple < minReturn) {
+    return {
+      blocked: true,
+      reason: `Return ${payoffMultiple.toFixed(2)}x below minimum ${minReturn.toFixed(2)}x (cost ${(cost * 100).toFixed(0)}¢)`,
+    };
+  }
+
+  return { blocked: false, reason: "" };
+}
+
+/**
  * Pure decision function — all inputs are values, no I/O.
  *
  * See module header for the three priority paths (A / B / C).
  */
-export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
+function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   const skip = (reason: string, ev: number | null = null): CorePairResult => ({
     action: "SKIP", confidence: 0, reasoning: reason,
     signalsAgreeing: 0, signalsTotal: 0, ev,
@@ -520,6 +587,12 @@ export interface BotConfig {
   // the same window will skip that coin for one window.  Set to 0 to disable.
   maxSlippageCents: number;      // ¢ (default 5)
 
+  // Minimum return (payout) multiple guard: skip any bet whose payout multiple
+  // (1 / contract-cost) is below this floor. A contract costing `cost` pays $1,
+  // so return = 1/cost.  1.44 → only enter when cost ≤ ~69¢.  Set to 1 to
+  // disable (any cost allowed).
+  minReturnMultiple: number;     // × (default 1.44)
+
   // Window Monitor readiness gate: when true, the bot skips entry for a coin
   // until the Window Monitor has collected ≥2 minutes of intra-window data
   // (or ≥5 min on the fallback path without pre-window ER).  This is a
@@ -649,6 +722,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinStreakLossLimit: 3,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 5,
+  minReturnMultiple: 1.44,
   requireMonitorReady: true,
 };
 

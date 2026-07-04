@@ -57,6 +57,7 @@ interface BotConfig {
   coinStreakLossLimit: number;
   coinStreakPauseWindows: number;
   maxSlippageCents: number;
+  minReturnMultiple: number;
 }
 
 interface LogicModeStats {
@@ -1359,6 +1360,21 @@ export default function BotDashboard() {
                     value={merged.maxSlippageCents ?? 5}
                     onChange={e => setConfigDraft(d => ({ ...d, maxSlippageCents: parseInt(e.target.value) }))} />
                   <span className="text-[10px] text-muted-foreground/60">Fill vs expected price warning threshold (0 = off)</span>
+                </label>
+
+                {/* Min Return Multiple */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Min Return (×)</span>
+                  <input type="number" min={1} max={10} step={0.01}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.minReturnMultiple ?? 1.44}
+                    onChange={e => setConfigDraft(d => ({ ...d, minReturnMultiple: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">
+                    Only enter bets paying ≥ this multiple. {(() => {
+                      const r = merged.minReturnMultiple ?? 1.44;
+                      return r > 1 ? `${r}× = max cost ${Math.round((1 / r) * 100)}¢` : "1 = off (any cost)";
+                    })()}
+                  </span>
                 </label>
                 {/* ──────────────────────────────────────────────────────── */}
 

@@ -32,6 +32,7 @@ import { getMLPrediction } from "./ml-store";
 
 import {
   computeCorePairDecision,
+  checkMinReturnGate,
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
   CONFIDENCE_BOOST_PER_SIGNAL,
@@ -65,6 +66,7 @@ import {
 // Re-export constants and types so callers only import from this file.
 export {
   computeCorePairDecision,
+  checkMinReturnGate,
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
   CONFIDENCE_BOOST_PER_SIGNAL,
@@ -292,6 +294,16 @@ function _makeBotDecisionInner(
         };
       }
 
+      const consensusReturnGate = checkMinReturnGate(action, yesPrice, config.minReturnMultiple);
+      if (consensusReturnGate.blocked) {
+        return {
+          action: "SKIP",
+          confidence,
+          reasoning: `consensus: ${consensusReturnGate.reason}`,
+          signals: buildSnapshot(null, agreeingVotes.length, votes.length),
+        };
+      }
+
       return {
         action,
         confidence,
@@ -343,6 +355,16 @@ function _makeBotDecisionInner(
       };
     }
 
+    const unanimousReturnGate = checkMinReturnGate(action, yesPrice, config.minReturnMultiple);
+    if (unanimousReturnGate.blocked) {
+      return {
+        action: "SKIP",
+        confidence,
+        reasoning: `unanimous: ${unanimousReturnGate.reason}`,
+        signals: buildSnapshot(null, 3, 3),
+      };
+    }
+
     return {
       action,
       confidence,
@@ -367,6 +389,7 @@ function _makeBotDecisionInner(
       mlMinConfidence: profile.mlMinConfidence,
       kalshiTicker,
       minConfidence: config.minConfidence,
+      minReturnMultiple: config.minReturnMultiple,
     });
 
     if (coreResult.action !== "SKIP" && mlAbove !== null) {
@@ -429,6 +452,7 @@ function _makeBotDecisionInner(
     mlMinConfidence: profile.mlMinConfidence,
     kalshiTicker,
     minConfidence: config.minConfidence,
+    minReturnMultiple: config.minReturnMultiple,
   });
 
   const snapshot = buildSnapshot(
