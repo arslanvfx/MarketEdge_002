@@ -1,41 +1,48 @@
 ---
 name: Paper/Live mode full isolation
-description: How paper and live bot modes are isolated across positions, streak state, decision mode preference, and stats queries
+description: How paper and live bot modes are isolated across positions, streak state, daily loss counters, decision mode preference, and stats queries
 ---
 
 # Paper/Live Mode Full Isolation
 
 ## Rule
-Four aspects of bot state are fully isolated between paper and live mode. Treat them independently — never aggregate or share them across modes.
+Five aspects of bot state are fully isolated between paper and live mode. Treat them independently — never aggregate or share them across modes.
 
-## What is isolated
+## What is isolated and how
 
-### 1. Open positions (`getBotState`)
-`getBotState()` filters `openPositions` to only return entries where `pos.entryMode === botMode`. Positions opened in paper are invisible while in live mode and vice versa.
+### 1. Bot status (getBotState)
+`getBotState()` computes `modePositionCount` by filtering `openPositions` to entries where `pos.entryMode === botMode`. Status `position_open` only fires when the CURRENT mode has open positions.
 
-### 2. Coin streak state (consecutive losses / pauses)
-Two separate `Map<string, CoinStreakEntry>` instances: `paperCoinStreakState` and `liveCoinStreakState`. Accessors:
-- `activeCoinStreakState()` — returns the map for the current `botMode`
+### 2. Open positions display
+`getBotState()` filters `openPositionsList` to `pos.entryMode === botMode`. Positions from a different mode are invisible.
+
+### 3. Coin streak state (consecutive losses / pauses)
+Two `Map<string, CoinStreakEntry>`: `paperCoinStreakState` and `liveCoinStreakState`.
+- `activeCoinStreakState()` — returns map for current `botMode`
 - `coinStreakStateForMode(mode)` — returns map for a specific mode
-- `streakStoreForMode(mode)` — returns the DB store for a specific mode
+- DB rows: `coin_streak_state_paper` / `coin_streak_state_live`
+- `setBotMode()` triggers `loadCoinStreakStateFromDB()` (fire-and-forget)
 
-DB rows: `coin_streak_state_paper` and `coin_streak_state_live` (stored in `bot_config` table by id).
+### 4. Coin daily loss (per-UTC-day loss cap)
+Two `Map<string, number>`: `paperCoinDailyLoss` and `liveCoinDailyLoss`.
+- `activeCoinDailyLoss()` — returns map for current `botMode`
+- `coinDailyLossForMode(mode)` — returns map for a specific mode
+- `loadCoinDailyLossFromDB()` populates only the current `botMode`'s map (query filters by `botMode`)
+- `closePosition()` uses `coinDailyLossForMode(pos.entryMode)` — writes to the bet's mode, not the live global
+- Midnight reset clears **both** maps (new UTC day for everyone)
+- Phase 1 entry check uses `activeCoinDailyLoss().get(sym)`
 
-`closePosition()` and `evalClosedBets()` use `pos.entryMode` / `row.mode` (not the live global `botMode`) to select the correct streak map. `clearAllPauses()` only clears `activeCoinStreakState()`.
+### 5. Decision mode preference
+`BotConfig.paperDecisionMode?` and `BotConfig.liveDecisionMode?` — saved on `updateBotConfig()`, restored on `setBotMode()`.
 
-`setBotMode()` triggers `loadCoinStreakStateFromDB()` (fire-and-forget) to reload the correct mode's streaks on switch.
+### 6. Stats / queries mode-aware
+All key endpoints infer `getBotState().mode` when `?mode=` is absent:
+- `/crypto/bot/history` — `getBotHistory(limit, filterMode?)`
+- `/crypto/bot/performance-report` — cached as `Map<BotMode, PerformanceReport>`; `runAutoTuneJob` filters DB query by `botMode` and caches per mode
+- `/crypto/bot/logic-performance` — `getBotLogicPerformance(filterMode?)`
+- `/crypto/bot/coin-guard-state` — `getCoinGuardState(mode?)`
 
-### 3. Decision mode preference per mode
-`BotConfig` has `paperDecisionMode?` and `liveDecisionMode?` fields.
-- `updateBotConfig()`: when `decisionMode` changes, saves it as the mode-specific preference (`paper/liveDecisionMode`)
-- `setBotMode()`: restores the saved mode-specific `decisionMode` on switch
-
-### 4. Stats / history queries
-- `getBotLogicPerformance(filterMode?)` accepts an optional mode filter applied as a SQL WHERE clause
-- Route `/crypto/bot/logic-performance` passes `?mode=` query param
-- Frontend passes `activeMode` in the React Query key for both `logicPerfData` and `perfReportData` so they refetch on switch
-
-**Why:** performance-report backend cache is NOT yet mode-split — it still returns combined paper+live data (Task #235 deferred this).
+Frontend React Query keys include `activeMode` for all of these so they refetch on mode switch.
 
 ## How to apply
-Whenever adding new per-bot state (counters, maps, caches), check whether it needs to be split by mode using the same pattern: two Maps + `activeX()` helper + mode-keyed DB rows.
+Whenever adding new per-bot state (counters, maps, caches), check whether it needs to be split by mode using the same pattern: two Maps + `activeX()` helper + `xForMode(mode)` accessor + DB reload on `setBotMode()`.

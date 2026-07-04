@@ -559,8 +559,8 @@ export default function BotDashboard() {
   });
 
   const { data: coinGuardData } = useQuery<CoinGuardState>({
-    queryKey: ["bot-coin-guard-state"],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/coin-guard-state`).then(r => r.json()),
+    queryKey: ["bot-coin-guard-state", activeMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/coin-guard-state?mode=${activeMode}`).then(r => r.json()),
     refetchInterval: 10_000,
   });
 

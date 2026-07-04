@@ -228,9 +228,20 @@ const windowDirectionCounts: Map<"yes" | "no", number> = new Map();
 // Decremented on each window transition; deleted when it reaches 0.
 const pausedCoins: Map<string, number> = new Map();
 
-// Per-coin daily loss accumulator (absolute $ loss, current UTC day + mode).
-// Reset at midnight via resetDailyIfNeeded(); loaded from DB at startup.
-const coinDailyLoss: Map<string, number> = new Map();
+// Per-coin daily loss accumulators — isolated by bot mode so paper losses
+// never block live entries and vice versa.
+const paperCoinDailyLoss: Map<string, number> = new Map();
+const liveCoinDailyLoss: Map<string, number> = new Map();
+
+/** Returns the daily-loss map for the currently-active bot mode. */
+function activeCoinDailyLoss(): Map<string, number> {
+  return botMode === "live" ? liveCoinDailyLoss : paperCoinDailyLoss;
+}
+
+/** Returns the daily-loss map for a specific mode (used when closing a position). */
+function coinDailyLossForMode(mode: BotMode): Map<string, number> {
+  return mode === "live" ? liveCoinDailyLoss : paperCoinDailyLoss;
+}
 
 // Per-coin consecutive window streak state — isolated by bot mode so paper
 // losing streaks never block live entries and vice versa.
@@ -416,8 +427,9 @@ function resetDailyIfNeeded(): void {
     dailyDate = today;
     dailyPnl = 0;
     dailyLossCount = 0;
-    // Reset per-coin daily loss totals at UTC midnight.
-    coinDailyLoss.clear();
+    // Reset per-coin daily loss totals at UTC midnight (both modes).
+    paperCoinDailyLoss.clear();
+    liveCoinDailyLoss.clear();
   }
 }
 
@@ -426,11 +438,14 @@ function resetDailyIfNeeded(): void {
 // ---------------------------------------------------------------------------
 
 export function getBotState(): BotStateSnapshot {
+  const modePositionCount = Array.from(openPositions.values()).filter(
+    (pos) => pos.entryMode === botMode,
+  ).length;
   const status: BotStatus = paused
     ? "paused"
     : dailyPnl <= -config.dailyLossLimit
     ? "daily_limit_hit"
-    : openPositions.size > 0
+    : modePositionCount > 0
     ? "position_open"
     : "idle";
 
@@ -791,16 +806,17 @@ export async function loadCoinDailyLossFromDB(): Promise<void> {
         ),
       );
 
-    coinDailyLoss.clear();
+    const modeMap = coinDailyLossForMode(botMode);
+    modeMap.clear();
     for (const r of rows) {
       const sym = (r.symbol ?? "").toUpperCase();
       const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
       if (sym && p < 0) {
-        coinDailyLoss.set(sym, (coinDailyLoss.get(sym) ?? 0) + Math.abs(p));
+        modeMap.set(sym, (modeMap.get(sym) ?? 0) + Math.abs(p));
       }
     }
     logger.info(
-      { coinDailyLoss: Object.fromEntries(coinDailyLoss) },
+      { coinDailyLoss: Object.fromEntries(modeMap) },
       "[kalshi-bot] per-coin daily loss loaded from DB",
     );
   } catch (err) {
@@ -1542,7 +1558,7 @@ async function _runBotTick(
 
   // ── Per-coin daily loss cap ───────────────────────────────────────────────
   // Skip for the rest of the UTC day when this coin's losses reach the cap.
-  const coinLossToday = coinDailyLoss.get(sym) ?? 0;
+  const coinLossToday = activeCoinDailyLoss().get(sym) ?? 0;
   const maxCoinLoss = config.maxDailyLossPerCoin ?? 3;
   if (checkDailyLossGuard(coinLossToday, maxCoinLoss)) {
     logger.info(
@@ -1886,12 +1902,13 @@ async function closePosition(
   }
 
   // ── Per-coin daily loss accumulator ────────────────────────────────────────
-  // Only count losses that belong to the current mode so paper losses don't
-  // pollute the live daily coin cap and vice versa.
-  coinDailyLoss.set(
+  // Use the mode-specific map so paper losses never pollute live caps and
+  // vice versa; the entryMode determines which map is updated.
+  const modeMap = coinDailyLossForMode(pos.entryMode);
+  modeMap.set(
     pos.symbol,
-    applyDailyLossUpdate(coinDailyLoss, pos.symbol, pnl, pos.entryMode, botMode).get(pos.symbol) ??
-      (coinDailyLoss.get(pos.symbol) ?? 0),
+    applyDailyLossUpdate(modeMap, pos.symbol, pnl, pos.entryMode, pos.entryMode).get(pos.symbol) ??
+      (modeMap.get(pos.symbol) ?? 0),
   );
 
   // ── Per-coin consecutive window streak tracking ────────────────────────────
@@ -3591,17 +3608,18 @@ export interface CoinGuardEntry {
 }
 
 /** Returns per-coin guard state for display in the bot dashboard. */
-export function getCoinGuardState(): {
+export function getCoinGuardState(mode?: BotMode): {
   coins: CoinGuardEntry[];
   maxDailyLossPerCoin: number;
 } {
   const nowMs = Date.now();
   const currentWK = new Date(Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000)).toISOString().slice(0, 16);
-
-  const activeStreak = activeCoinStreakState();
+  const resolvedMode = mode ?? botMode;
+  const activeStreak = coinStreakStateForMode(resolvedMode);
+  const activeLoss = coinDailyLossForMode(resolvedMode);
   const coins: CoinGuardEntry[] = CRYPTO_COINS.map((c) => {
     const sym = c.symbol;
-    const dailyLoss = coinDailyLoss.get(sym) ?? 0;
+    const dailyLoss = activeLoss.get(sym) ?? 0;
     const streak = activeStreak.get(sym) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
     const slip = coinSlippageStrikes.get(sym);
     const slippageStrikes = slip && slip.windowKey === currentWK ? slip.strikes : 0;

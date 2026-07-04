@@ -341,7 +341,7 @@ test("applyDailyLossUpdate: multiple coins → only target coin updated", () => 
 test("applyDailyLossUpdate/wiring: kalshi-bot.ts closePosition calls applyDailyLossUpdate", () => {
   const src = readSrc("kalshi-bot.ts");
   assert.ok(
-    src.includes("applyDailyLossUpdate(coinDailyLoss, pos.symbol, pnl, pos.entryMode, botMode)"),
+    src.includes("applyDailyLossUpdate(") && src.includes("pos.symbol, pnl, pos.entryMode"),
     "closePosition must delegate daily-loss accumulation to applyDailyLossUpdate",
   );
 });

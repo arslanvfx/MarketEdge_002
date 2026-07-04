@@ -76,10 +76,13 @@ function requireAuth(req: any, res: any, next: any) {
   next();
 }
 
-// GET /crypto/bot/coin-guard-state — per-coin streak / daily-loss / slippage state (public — read only)
-router.get("/crypto/bot/coin-guard-state", (_req, res) => {
+// GET /crypto/bot/coin-guard-state?mode=paper|live — per-coin streak / daily-loss / slippage state (public — read only)
+router.get("/crypto/bot/coin-guard-state", (req, res) => {
   try {
-    res.json(getCoinGuardState());
+    const rawMode = req.query.mode;
+    const filterMode: BotMode =
+      rawMode === "paper" || rawMode === "live" ? rawMode : getBotState().mode;
+    res.json(getCoinGuardState(filterMode));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
