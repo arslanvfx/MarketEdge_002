@@ -1482,11 +1482,14 @@ async function _runBotTick(
   // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
   // 0 = disabled (no ceiling — enter at any point).
   if (config.maxEntryMinutes > 0 && secondsElapsed > config.maxEntryMinutes * 60) return;
-  // Floor: skip if fewer than minRemainingMinutes remain in the window.
-  // 0 = disabled (no floor — ROI gate handles unprofitable late entries).
-  const minRemaining = config.minRemainingMinutes ?? 0;
-  if (minRemaining > 0 && 15 * 60 - secondsElapsed < minRemaining * 60) {
-    logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping");
+  // Floor: early-exit the tick if fewer than minRemainingMinutes remain.
+  // This is a soft/configurable guard checked at tick start.  The hard
+  // non-configurable 3-minute floor is re-checked with fresh Date.now()
+  // immediately before the order is placed — see HARD LATE-ENTRY FLOOR below.
+  // Default 3 to match the hard floor; setting it higher gives extra headroom.
+  const minRemaining = config.minRemainingMinutes ?? 3;
+  if (15 * 60 - secondsElapsed < minRemaining * 60) {
+    logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping tick early");
     return;
   }
   if (!kalshiTicker || kalshiTarget === null) return;
@@ -1722,7 +1725,32 @@ async function _runBotTick(
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
-  logger.info({ sym, direction, decision: decision.action, confidence: decision.confidence }, "[kalshi-bot] placing bet");
+  // ── HARD LATE-ENTRY FLOOR (re-checked at order time) ─────────────────────
+  // The minRemainingMinutes guard at the top of this tick uses a `secondsElapsed`
+  // snapshot that was taken when the tick started.  Between that check and now,
+  // tens of seconds of async work may have elapsed (signal reads, decision
+  // engine, balance API, FOK retry latency).  A tick that starts with "3 min
+  // remaining" can easily try to place an order with <1 min remaining.
+  //
+  // This re-check uses fresh Date.now() so it is ALWAYS accurate regardless of
+  // tick latency.  3 minutes is the absolute minimum and cannot be configured
+  // away — the configurable minRemainingMinutes guard above provides additional
+  // tuning on top of this hard floor.
+  const HARD_LATE_ENTRY_FLOOR_S = 3 * 60; // 3 minutes — non-negotiable
+  const nowMs = Date.now();
+  const windowStartMs = new Date(windowKey + ":00Z").getTime();
+  const secondsElapsedNow = isNaN(windowStartMs) ? 0 : (nowMs - windowStartMs) / 1000;
+  const secondsRemainingNow = 15 * 60 - secondsElapsedNow;
+  if (secondsRemainingNow < HARD_LATE_ENTRY_FLOOR_S) {
+    logger.warn(
+      { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS: HARD_LATE_ENTRY_FLOOR_S },
+      "[kalshi-bot] HARD FLOOR — aborting bet, fewer than 3 minutes remain in window",
+    );
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  logger.info({ sym, direction, decision: decision.action, confidence: decision.confidence, secondsRemainingNow: Math.round(secondsRemainingNow) }, "[kalshi-bot] placing bet");
 
   let fillPrice = yesPrice; // paper fill
   let orderId: string | null = null;
