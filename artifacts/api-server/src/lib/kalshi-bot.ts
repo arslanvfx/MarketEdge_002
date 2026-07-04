@@ -25,6 +25,7 @@ import {
 import {
   DEFAULT_BOT_CONFIG,
   BET_PROFILES,
+  computeDynamicBetSize,
   makeBotDecision,
   isInQuietHours,
   applyBetOutcome,
@@ -1632,8 +1633,25 @@ async function _runBotTick(
     direction === "yes"
       ? computeMarketableLimitPrice("bid", yesPrice, config.minReturnMultiple)
       : sideCost; // NO cost ≈ 1 − yesPrice (unaffected by our aggressive ask price)
-  const contractCount = Math.max(1, Math.floor(config.betSize / expectedFillCost));
+  // Confidence-based dynamic sizing: scale the target dollar bet between betSize
+  // (min) and maxBetSize (max) according to the engine's confidence. When
+  // enableDynamicSizing is false this returns config.betSize unchanged (legacy).
+  const targetBetSize = computeDynamicBetSize(decision.confidence, config);
+  const contractCount = Math.max(1, Math.floor(targetBetSize / expectedFillCost));
   const betAmount = contractCount * expectedFillCost; // expected dollars risked
+  if (config.enableDynamicSizing && targetBetSize !== config.betSize) {
+    logger.info(
+      {
+        sym,
+        confidence: decision.confidence,
+        minBet: config.betSize,
+        maxBet: config.maxBetSize,
+        targetBetSize: targetBetSize.toFixed(4),
+        contractCount,
+      },
+      "[kalshi-bot] dynamic sizing — bet scaled by confidence",
+    );
+  }
 
   // ── SAFETY GUARD: hard bet-size cap ─────────────────────────────────────────
   // If the computed betAmount would exceed the configured maxBetSize, abort the

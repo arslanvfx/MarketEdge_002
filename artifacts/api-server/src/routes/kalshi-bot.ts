@@ -183,6 +183,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxSlippageCents,
     minReturnMultiple,
     requireMonitorReady,
+    enableDynamicSizing,
+    dynamicSizingMaxConfidence,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -223,6 +225,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxSlippageCents?: number;
     minReturnMultiple?: number;
     requireMonitorReady?: boolean;
+    enableDynamicSizing?: boolean;
+    dynamicSizingMaxConfidence?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -332,6 +336,11 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof maxSlippageCents === "number" && maxSlippageCents >= 0 && maxSlippageCents <= 50) partial.maxSlippageCents = maxSlippageCents;
   if (typeof minReturnMultiple === "number" && minReturnMultiple >= 1 && minReturnMultiple <= 10) partial.minReturnMultiple = minReturnMultiple;
   if (typeof requireMonitorReady === "boolean") partial.requireMonitorReady = requireMonitorReady;
+  // Confidence-based dynamic bet sizing
+  if (typeof enableDynamicSizing === "boolean") partial.enableDynamicSizing = enableDynamicSizing;
+  if (typeof dynamicSizingMaxConfidence === "number" && dynamicSizingMaxConfidence >= 50 && dynamicSizingMaxConfidence <= 100) {
+    partial.dynamicSizingMaxConfidence = dynamicSizingMaxConfidence;
+  }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
   res.json({ ok: true, config: updated, persisted });

@@ -58,6 +58,8 @@ interface BotConfig {
   coinStreakPauseWindows: number;
   maxSlippageCents: number;
   minReturnMultiple: number;
+  enableDynamicSizing: boolean;
+  dynamicSizingMaxConfidence: number;
 }
 
 interface LogicModeStats {
@@ -1292,6 +1294,32 @@ export default function BotDashboard() {
                     value={merged.maxBetSize ?? 2}
                     onChange={e => setConfigDraft(d => ({ ...d, maxBetSize: parseFloat(e.target.value) }))} />
                   <span className="text-[10px] text-muted-foreground/60">Hard safety cap — any bet above this is blocked</span>
+                </label>
+
+                {/* Dynamic (confidence-based) sizing toggle */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Dynamic Sizing</span>
+                  <button
+                    type="button"
+                    onClick={() => setConfigDraft(d => ({ ...d, enableDynamicSizing: !(merged.enableDynamicSizing ?? false) }))}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium border transition-colors ${(merged.enableDynamicSizing ?? false)
+                      ? "bg-emerald-500/15 border-emerald-500/50 text-emerald-300"
+                      : "bg-background border-border text-muted-foreground"}`}
+                  >
+                    {(merged.enableDynamicSizing ?? false) ? "On — scales with confidence" : "Off — fixed bet size"}
+                  </button>
+                  <span className="text-[10px] text-muted-foreground/60">Bet {`$${(merged.betSize ?? 1).toFixed(2)}`} at min confidence → {`$${(merged.maxBetSize ?? 2).toFixed(2)}`} at max</span>
+                </label>
+
+                {/* Max-bet confidence ceiling */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max-Bet Confidence (%)</span>
+                  <input type="number" min={50} max={100} step={1}
+                    disabled={!(merged.enableDynamicSizing ?? false)}
+                    className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground disabled:opacity-40"
+                    value={merged.dynamicSizingMaxConfidence ?? 85}
+                    onChange={e => setConfigDraft(d => ({ ...d, dynamicSizingMaxConfidence: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Confidence at which the max bet is reached</span>
                 </label>
 
                 {/* ── Live Mode Guards ─────────────────────────────────── */}

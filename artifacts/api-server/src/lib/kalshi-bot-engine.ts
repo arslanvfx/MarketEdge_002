@@ -49,6 +49,7 @@ import {
   resolveStartupMode,
   applyStartupModeRestore,
   DEFAULT_BOT_CONFIG,
+  computeDynamicBetSize,
   buildStreakSnapshot,
   restoreStreakState,
   type BetProfile,
@@ -87,6 +88,9 @@ export {
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,
+  // Confidence-based dynamic bet sizing helper — re-exported so kalshi-bot.ts
+  // and unit tests import it from this barrel like every other engine export.
+  computeDynamicBetSize,
   // Streak-state pure helpers — extracted so kalshi-bot.ts can delegate and
   // unit tests can verify expiry logic without touching the DB.
   buildStreakSnapshot,

@@ -611,6 +611,16 @@ export interface BotConfig {
   // blocked for the whole window.  Set to false to allow immediate entry.
   // Recommended: true — data shows 78% win rate when monitor is ready vs 64% when not.
   requireMonitorReady: boolean;  // (default true)
+
+  // ── Confidence-based dynamic bet sizing ─────────────────────────────────
+  // When enabled, the bet size scales linearly with the engine's confidence:
+  // at minConfidence the bot bets `betSize` (the minimum), and at
+  // `dynamicSizingMaxConfidence` (or higher) it bets `maxBetSize` (the
+  // maximum). Confidences in between are interpolated. When disabled the bot
+  // always bets `betSize` (identical to legacy behavior). The hard maxBetSize
+  // safety cap still applies as a guard regardless of this setting.
+  enableDynamicSizing: boolean;        // (default false)
+  dynamicSizingMaxConfidence: number;  // confidence at which max bet is reached (default 85)
 }
 
 // ---------------------------------------------------------------------------
@@ -736,7 +746,57 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   minReturnMultiple: 1.7,
   minNoEntryMinutes: 1,
   requireMonitorReady: true,
+  // Confidence-based dynamic bet sizing — disabled by default (legacy behavior).
+  enableDynamicSizing: false,
+  dynamicSizingMaxConfidence: 85,
 };
+
+/**
+ * computeDynamicBetSize — confidence-proportional bet sizing.
+ *
+ * Linearly scales the target dollar bet between config.betSize (minimum, at
+ * config.minConfidence) and config.maxBetSize (maximum, at
+ * config.dynamicSizingMaxConfidence). Confidences below the floor return the
+ * minimum; at or above the ceiling return the maximum. Pure — no I/O.
+ *
+ * When config.enableDynamicSizing is false, always returns config.betSize so
+ * behavior is identical to legacy fixed sizing.
+ *
+ * The result is never below betSize nor above maxBetSize, and if the config
+ * is inverted (betSize > maxBetSize) the minimum (betSize) is returned so the
+ * downstream hard maxBetSize cap is never exceeded.
+ */
+export function computeDynamicBetSize(
+  confidence: number,
+  config: Pick<
+    BotConfig,
+    "enableDynamicSizing" | "betSize" | "maxBetSize" | "minConfidence" | "dynamicSizingMaxConfidence"
+  >,
+): number {
+  const minBet = config.betSize;
+  const maxBet = config.maxBetSize ?? minBet;
+
+  // Disabled, a non-widening range, or a non-finite confidence → legacy fixed
+  // (minimum) sizing. Guarding against NaN/Infinity keeps the downstream
+  // contractCount math from producing a bogus (or zero) order size.
+  if (!config.enableDynamicSizing || maxBet <= minBet || !Number.isFinite(confidence)) {
+    return minBet;
+  }
+
+  const floor = config.minConfidence;
+  const ceiling = config.dynamicSizingMaxConfidence;
+
+  // Degenerate range: ceiling not above floor → step function at the floor.
+  if (ceiling <= floor) {
+    return confidence >= floor ? maxBet : minBet;
+  }
+
+  if (confidence <= floor) return minBet;
+  if (confidence >= ceiling) return maxBet;
+
+  const t = (confidence - floor) / (ceiling - floor);
+  return minBet + t * (maxBet - minBet);
+}
 
 // ---------------------------------------------------------------------------
 // Coin streak state — pure persistence helpers
