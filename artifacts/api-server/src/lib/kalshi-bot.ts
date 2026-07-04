@@ -308,11 +308,12 @@ const REGIME_AGAINST_PENALTY_FALLBACK = 8;
 // (contrarian play — fading today's trend). Applied on top of the settlement-
 // based regimeCache penalty when the two regimes agree.
 const CONTRARIAN_LIVE_REGIME_PENALTY = 10;
-// A model must clear this individual confidence floor to count as genuinely
-// "agreeing" in a consensus check. A model at 48–51% is statistical noise,
-// not a real signal — requiring 55% filters out those weak leans.
-// Applied to BOTH YES and NO bets.
-const MODEL_SIGNAL_MIN_CONFIDENCE = 55;
+// A model that fired (non-null) but produced a confidence at or below this
+// level is considered pure noise — its output carries no directional information.
+// Applied to BOTH YES and NO bets.  Kept well below the stat model's typical
+// output range (50–58%) to avoid blocking clean stat signals; targets cases
+// like Claude at 28–44% where the model is genuinely uncertain.
+const NOISE_CONFIDENCE_FLOOR = 45;
 // Minimum number of hard model signals (stat / claude / ML — windowMonitor
 // does NOT count) that must produce a non-null directional output before the
 // bot places any bet.  A single-model signal is too thin regardless of
@@ -3062,32 +3063,40 @@ export async function runBotLoopTick(): Promise<void> {
           continue;
         }
 
-        // Full 3-signal genuine consensus required for YES bets.
-        // A model only counts as genuinely "agreeing" when its own directional
-        // confidence clears MODEL_SIGNAL_MIN_CONFIDENCE (55%). Anything below
-        // that is noise — claudeConf=48 pointing YES does not constitute Claude
-        // agreeing with the YES thesis.
+        // Signal quality gates for YES bets (direction-neutral logic applied
+        // symmetrically to NO bets below):
+        //
+        // Rule A — No opposite signal: if any model that fired points NO while
+        //   we want to bet YES, the signals are contradicted.  A contradicted
+        //   bet (BTC stat=YES but ML=NO) is worse than no signal at all.
+        //
+        // Rule B — No noise-floor signal: if any model that fired produced a
+        //   confidence ≤ NOISE_CONFIDENCE_FLOOR (45%) it carries no information.
+        //   This catches Claude at 28–44% which is genuine uncertainty, not a
+        //   weak lean.  The stat model typically outputs 50–58% so the 45% bar
+        //   does not penalise it; Claude/ML at 46-54% still passes (weak but real).
         const yesSigs = decision.signals as {
           statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
           statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
         };
-        const statGenuineYes   = yesSigs.statAbove   === true && (yesSigs.statConfidence   ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
-        const claudeGenuineYes = yesSigs.claudeAbove === true && (yesSigs.claudeConfidence ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
-        const mlGenuineYes     = yesSigs.mlAbove     === true && (yesSigs.mlConfidence     ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
-        const has3SignalYes = statGenuineYes && claudeGenuineYes && mlGenuineYes;
-        if (!has3SignalYes) {
-          const sig = (above: boolean | null | undefined, conf: number | null | undefined) => {
-            if (above !== true) return above === false ? "N" : "?";
-            return (conf ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE ? "Y" : `weak(${conf ?? "?"}%)`;
-          };
-          const signalSummary = `Stat=${sig(yesSigs.statAbove, yesSigs.statConfidence)} Claude=${sig(yesSigs.claudeAbove, yesSigs.claudeConfidence)} ML=${sig(yesSigs.mlAbove, yesSigs.mlConfidence)}`;
+        const yesViolation: string[] = [];
+        for (const [name, above, conf] of [
+          ["Stat",   yesSigs.statAbove,   yesSigs.statConfidence]   as const,
+          ["Claude", yesSigs.claudeAbove, yesSigs.claudeConfidence] as const,
+          ["ML",     yesSigs.mlAbove,     yesSigs.mlConfidence]     as const,
+        ]) {
+          if (above == null) continue;
+          if (above === false) yesViolation.push(`${name} says NO`);
+          else if ((conf ?? 0) <= NOISE_CONFIDENCE_FLOOR) yesViolation.push(`${name} noise (${conf ?? "?"}%≤${NOISE_CONFIDENCE_FLOOR}%)`);
+        }
+        if (yesViolation.length > 0) {
           filteredByNewGuards.add(sym);
           evalResults.push({
             symbol: sym,
             action: "SKIP",
             confidence: effectiveConfidence,
             score: 0,
-            reason: `YES consensus gate — all 3 signals must genuinely agree ≥${MODEL_SIGNAL_MIN_CONFIDENCE}% (${signalSummary})`,
+            reason: `YES quality gate — ${yesViolation.join("; ")}`,
             windowKey,
             selected: false,
             evaluatedAt: now,
@@ -3099,31 +3108,31 @@ export async function runBotLoopTick(): Promise<void> {
       }
 
       if (decision.action === "BET_NO") {
-        // Full 3-signal genuine consensus required for NO bets — mirrors the YES
-        // gate exactly.  A model pointing NO at <55% confidence is noise, not a
-        // real signal.  This caught BTC (Claude 30%), HYPE (stat 53%, claude 51%
-        // both sub-threshold, ML actually saying YES), and similar weak NO calls.
+        // Rule A — No opposite signal: any model pointing YES contradicts a NO bet.
+        // Rule B — No noise-floor signal: any model at ≤45% confidence is noise.
+        // (Symmetric with YES gate above.)
         const noSigs = decision.signals as {
           statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
           statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
         };
-        const statGenuineNo   = noSigs.statAbove   === false && (noSigs.statConfidence   ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
-        const claudeGenuineNo = noSigs.claudeAbove === false && (noSigs.claudeConfidence ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
-        const mlGenuineNo     = noSigs.mlAbove     === false && (noSigs.mlConfidence     ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE;
-        const has3SignalNo = statGenuineNo && claudeGenuineNo && mlGenuineNo;
-        if (!has3SignalNo) {
-          const sig = (above: boolean | null | undefined, conf: number | null | undefined) => {
-            if (above !== false) return above === true ? "Y" : "?";
-            return (conf ?? 0) >= MODEL_SIGNAL_MIN_CONFIDENCE ? "N" : `weak(${conf ?? "?"}%)`;
-          };
-          const signalSummary = `Stat=${sig(noSigs.statAbove, noSigs.statConfidence)} Claude=${sig(noSigs.claudeAbove, noSigs.claudeConfidence)} ML=${sig(noSigs.mlAbove, noSigs.mlConfidence)}`;
+        const noViolation: string[] = [];
+        for (const [name, above, conf] of [
+          ["Stat",   noSigs.statAbove,   noSigs.statConfidence]   as const,
+          ["Claude", noSigs.claudeAbove, noSigs.claudeConfidence] as const,
+          ["ML",     noSigs.mlAbove,     noSigs.mlConfidence]     as const,
+        ]) {
+          if (above == null) continue;
+          if (above === true) noViolation.push(`${name} says YES`);
+          else if ((conf ?? 0) <= NOISE_CONFIDENCE_FLOOR) noViolation.push(`${name} noise (${conf ?? "?"}%≤${NOISE_CONFIDENCE_FLOOR}%)`);
+        }
+        if (noViolation.length > 0) {
           filteredByNewGuards.add(sym);
           evalResults.push({
             symbol: sym,
             action: "SKIP",
             confidence: effectiveConfidence,
             score: 0,
-            reason: `NO consensus gate — all 3 signals must genuinely agree ≥${MODEL_SIGNAL_MIN_CONFIDENCE}% (${signalSummary})`,
+            reason: `NO quality gate — ${noViolation.join("; ")}`,
             windowKey,
             selected: false,
             evaluatedAt: now,
