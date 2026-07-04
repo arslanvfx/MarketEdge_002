@@ -37,8 +37,64 @@ import {
   resolveStartupMode,
   applyStartupModeRestore,
 } from "./kalshi-bot-engine-core.ts";
+import { computeMarketableLimitPrice } from "./kalshi-trader.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ---------------------------------------------------------------------------
+// Execution-time min-return enforcement (computeMarketableLimitPrice)
+// ---------------------------------------------------------------------------
+// The decision-time min-return gate can't be trusted (cache yesPrice is often
+// null in production), so the authoritative floor is enforced here by capping
+// the marketable-limit price. fill_or_kill then kills any fill below the floor.
+
+test("price-cap: no floor → base marketable-limit behaviour (bid crosses up)", () => {
+  // ref 0.50, +0.15 buffer = 0.65; no cap applied
+  assert.equal(computeMarketableLimitPrice("bid", 0.5, undefined), 0.65);
+  // no ref → fully aggressive
+  assert.equal(computeMarketableLimitPrice("bid", null, undefined), 0.99);
+  assert.equal(computeMarketableLimitPrice("ask", null, 1), 0.01);
+});
+
+test("price-cap: floor unbinding for a high-return YES bet (does not lower price)", () => {
+  // ref 0.50 → 0.65; maxCost for 1.44x = 0.694; 0.65 < 0.694 so cap does not bind
+  assert.equal(computeMarketableLimitPrice("bid", 0.5, 1.44), 0.65);
+});
+
+test("price-cap: floor caps a low-return YES buy at maxCost", () => {
+  // ref 0.85 → +0.15 = 1.0 clamped to 0.99; maxCost 1.44x = 0.6944…
+  // cap binds → price = 1/1.44
+  const p = computeMarketableLimitPrice("bid", 0.85, 1.44);
+  assert.ok(Math.abs(p - 1 / 1.44) < 1e-9, `expected ~${1 / 1.44}, got ${p}`);
+  // A YES fill can now never cost more than the floor allows.
+  assert.ok(1 / p >= 1.44 - 1e-9);
+});
+
+test("price-cap: floor raises the ask-side price so NO cost can't exceed maxCost", () => {
+  // NO cost = 1 - price. For 1.44x, maxCost = 0.6944 → price floor = 0.3056.
+  // ref 0.20 → -0.15 = 0.05; cap raises it to 1 - 1/1.44.
+  const p = computeMarketableLimitPrice("ask", 0.2, 1.44);
+  const floor = 1 - 1 / 1.44;
+  assert.ok(Math.abs(p - floor) < 1e-9, `expected ~${floor}, got ${p}`);
+  const noCost = 1 - p;
+  assert.ok(1 / noCost >= 1.44 - 1e-9);
+});
+
+test("price-cap: high-return NO bet is unaffected by the floor", () => {
+  // ref 0.90 → NO cost 0.10 (10x). ask price 0.90-0.15=0.75; floor 0.3056 doesn't bind.
+  assert.equal(computeMarketableLimitPrice("ask", 0.9, 1.44), 0.75);
+});
+
+test("price-cap: floor ≤ 1 disables the cap entirely", () => {
+  assert.equal(computeMarketableLimitPrice("bid", 0.85, 1), 0.99);
+  assert.equal(computeMarketableLimitPrice("bid", 0.85, 0), 0.99);
+});
+
+test("price-cap: result always clamped to the valid 0.01–0.99 range", () => {
+  const p = computeMarketableLimitPrice("bid", 0.5, 100); // maxCost 0.01
+  assert.ok(p >= 0.01 && p <= 0.99);
+});
+
 function readSrc(file: string): string {
   return fs.readFileSync(path.join(__dirname, file), "utf8");
 }

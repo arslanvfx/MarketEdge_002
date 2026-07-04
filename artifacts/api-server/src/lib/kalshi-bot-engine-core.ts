@@ -162,9 +162,16 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
  * `cost` dollars pays $1, so its payout multiple is 1/cost.
  *   BET_YES cost = yesPrice ; BET_NO cost = 1 - yesPrice
  * Returns `blocked: true` (with a reason) when an actionable bet's payout
- * multiple is below the configured floor. When the floor is > 1 but there is no
- * yes-price to verify the return, the bet is blocked rather than placed blind.
- * A floor of ≤ 1 disables the gate entirely.
+ * multiple is below the configured floor.
+ *
+ * IMPORTANT — null yesPrice is NOT blocked: the decision-time yes-price comes
+ * from the short-lived kalshiTargetCache, which is frequently null at the moment
+ * the bot decides (thin/late-publishing orderbook early in a window). This is
+ * normal — the bot places a *market* order, so the real fill price is resolved
+ * at order-placement time regardless of the cached value. Blocking on null here
+ * would skip essentially every live bet (the cache is null far more often than
+ * not), so we let the bet proceed and enforce the floor only when a price is
+ * actually known. A floor of ≤ 1 disables the gate entirely.
  */
 export function checkMinReturnGate(
   action: BotDecisionAction,
@@ -174,12 +181,9 @@ export function checkMinReturnGate(
   const minReturn = minReturnMultiple ?? 0;
   if (minReturn <= 1 || action === "SKIP") return { blocked: false, reason: "" };
 
-  if (yesPrice == null) {
-    return {
-      blocked: true,
-      reason: `Min-return ${minReturn.toFixed(2)}x enabled but no yes-price to verify return — skipping`,
-    };
-  }
+  // No decision-time price to verify against — do not block. The market order
+  // fills at the real price at placement time (see module note above).
+  if (yesPrice == null) return { blocked: false, reason: "" };
 
   const cost = action === "BET_YES" ? yesPrice : 1 - yesPrice;
   if (cost <= 0) return { blocked: false, reason: "" };

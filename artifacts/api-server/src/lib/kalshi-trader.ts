@@ -177,6 +177,12 @@ export interface PlaceOrderParams {
   count: number;
   type: "market" | "limit";
   yesPrice?: number; // reference YES price as a fraction (0-1); used to bound the marketable-limit price
+  // Minimum payout multiple (1/cost). When > 1, the marketable-limit price is
+  // capped so a contract can NEVER fill at a cost whose payout multiple falls
+  // below this floor. fill_or_kill then kills the order if the real book can't
+  // meet the cap — the authoritative, execution-time enforcement of the floor
+  // (the decision-time cache price is frequently null and can't be trusted).
+  minReturnMultiple?: number;
 }
 
 export interface PlaceOrderResult {
@@ -184,6 +190,49 @@ export interface PlaceOrderResult {
   status: string;
   filledCount: number;
   avgPrice: number | null; // in fraction (0-1)
+}
+
+/**
+ * Compute the YES-side marketable-limit price (fraction 0.01–0.99) for a buy.
+ * Pure and testable — no I/O.
+ *
+ * Base behaviour: with a reference `yesPrice` we cross the spread by
+ * MARKETABLE_BUFFER (0.15) to guarantee a fill while bounding slippage; without
+ * one we go fully aggressive (0.99 bid / 0.01 ask).
+ *
+ * Return-floor cap: when `minReturnMultiple > 1`, cap the price so the contract
+ * cost can never exceed `1 / minReturnMultiple` (payout multiple = 1/cost):
+ *   - bid  (buy YES): cost = price          → price ≤ maxCost
+ *   - ask  (buy NO) : cost = 1 - price      → price ≥ 1 - maxCost
+ * Combined with fill_or_kill, an order that can't fill within the cap is killed
+ * rather than filling a low-return bet.
+ */
+export function computeMarketableLimitPrice(
+  bookSide: "bid" | "ask",
+  yesPrice: number | null | undefined,
+  minReturnMultiple?: number | null,
+): number {
+  const MARKETABLE_BUFFER = 0.15;
+  const ref = yesPrice != null && yesPrice > 0 && yesPrice < 1 ? yesPrice : null;
+  let priceFrac =
+    bookSide === "bid"
+      ? ref != null
+        ? Math.min(ref + MARKETABLE_BUFFER, 0.99)
+        : 0.99
+      : ref != null
+        ? Math.max(ref - MARKETABLE_BUFFER, 0.01)
+        : 0.01;
+
+  const minReturn = minReturnMultiple ?? 0;
+  if (minReturn > 1) {
+    const maxCost = 1 / minReturn;
+    priceFrac =
+      bookSide === "bid"
+        ? Math.min(priceFrac, maxCost) // YES cost ≤ maxCost
+        : Math.max(priceFrac, 1 - maxCost); // NO cost (1-price) ≤ maxCost
+  }
+
+  return Math.min(0.99, Math.max(0.01, priceFrac));
 }
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -212,18 +261,14 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
 
   // Marketable limit price (fixed-point YES-side dollars, clamped 0.01–0.99).
   // With a reference yesPrice we bound slippage to ±MARKETABLE_BUFFER; without
-  // one (e.g. exits) we go fully aggressive to guarantee the fill.
-  const MARKETABLE_BUFFER = 0.15;
-  const ref =
-    params.yesPrice != null && params.yesPrice > 0 && params.yesPrice < 1 ? params.yesPrice : null;
-  const priceFrac =
-    bookSide === "bid"
-      ? ref != null
-        ? Math.min(ref + MARKETABLE_BUFFER, 0.99)
-        : 0.99
-      : ref != null
-        ? Math.max(ref - MARKETABLE_BUFFER, 0.01)
-        : 0.01;
+  // one (e.g. exits) we go fully aggressive to guarantee the fill. When
+  // minReturnMultiple is set (buys only), the price is additionally capped so
+  // the fill can never breach the payout-return floor.
+  const priceFrac = computeMarketableLimitPrice(
+    bookSide,
+    params.yesPrice,
+    params.action === "buy" ? params.minReturnMultiple : undefined,
+  );
   const price = priceFrac.toFixed(4); // FixedPointDollars string
 
   const body: Record<string, unknown> = {

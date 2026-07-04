@@ -676,10 +676,11 @@ test("checkMinReturnGate: allows a bet at/above the floor", () => {
   assert.equal(checkMinReturnGate("BET_NO", 0.50, 2.0).blocked, false);  // exactly 2x
 });
 
-test("checkMinReturnGate: null yes-price is blocked when gate is active", () => {
+test("checkMinReturnGate: null yes-price is NOT blocked even when gate is active", () => {
+  // The decision-time cache price is frequently null; the market order fills at
+  // the real price at placement time, so the gate must not skip on null.
   const g = checkMinReturnGate("BET_YES", null, 1.44);
-  assert.equal(g.blocked, true);
-  assert.match(g.reason, /no yes-price/);
+  assert.equal(g.blocked, false);
 });
 
 test("checkMinReturnGate: null yes-price is allowed when gate is off", () => {

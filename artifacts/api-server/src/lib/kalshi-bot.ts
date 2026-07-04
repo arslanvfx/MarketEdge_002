@@ -1672,6 +1672,10 @@ async function _runBotTick(
         count: contractCount,
         type: "market",
         yesPrice: yesPrice ?? undefined, // bound the marketable-limit price to the current YES quote
+        // Authoritative return-floor enforcement at fill time. The decision-time
+        // gate can't be trusted (cache yesPrice is often null), so cap the order
+        // price here: fill_or_kill kills any fill below the payout floor.
+        minReturnMultiple: config.minReturnMultiple,
       });
       if (result.filledCount === 0) {
         logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] order not filled after retries — skipping entry");
