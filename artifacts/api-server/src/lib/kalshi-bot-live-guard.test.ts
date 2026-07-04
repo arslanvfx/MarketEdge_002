@@ -61,23 +61,23 @@ test("price-cap: floor unbinding for a high-return YES bet (does not lower price
   assert.equal(computeMarketableLimitPrice("bid", 0.5, 1.44), 0.65);
 });
 
-test("price-cap: floor caps a low-return YES buy at maxCost", () => {
-  // ref 0.85 → +0.15 = 1.0 clamped to 0.99; maxCost 1.44x = 0.6944…
-  // cap binds → price = 1/1.44
+test("price-cap: floor caps a low-return YES buy at maxCost (cent-rounded down)", () => {
+  // ref 0.85 → +0.15 = 1.0 clamped to 0.99; maxCost 1.44x ≈ 0.6944
+  // cap binds; bid rounds DOWN to nearest cent → 0.69 (floor(69.44)/100)
+  // → return 1/0.69 ≈ 1.449x > 1.44x — constraint satisfied
   const p = computeMarketableLimitPrice("bid", 0.85, 1.44);
-  assert.ok(Math.abs(p - 1 / 1.44) < 1e-9, `expected ~${1 / 1.44}, got ${p}`);
-  // A YES fill can now never cost more than the floor allows.
-  assert.ok(1 / p >= 1.44 - 1e-9);
+  assert.equal(p, 0.69);
+  assert.ok(1 / p >= 1.44, `return ${(1 / p).toFixed(4)} must be ≥ 1.44`);
 });
 
-test("price-cap: floor raises the ask-side price so NO cost can't exceed maxCost", () => {
-  // NO cost = 1 - price. For 1.44x, maxCost = 0.6944 → price floor = 0.3056.
-  // ref 0.20 → -0.15 = 0.05; cap raises it to 1 - 1/1.44.
+test("price-cap: floor raises the ask-side price so NO cost can't exceed maxCost (cent-rounded up)", () => {
+  // NO cost = 1 - price. For 1.44x, maxCost ≈ 0.6944 → price floor ≈ 0.3056.
+  // ref 0.20 → -0.15 = 0.05; cap raises it; ask rounds UP → 0.31 (ceil(30.56)/100)
+  // NO cost = 1 - 0.31 = 0.69 → return 1/0.69 ≈ 1.449x ≥ 1.44x — constraint satisfied
   const p = computeMarketableLimitPrice("ask", 0.2, 1.44);
-  const floor = 1 - 1 / 1.44;
-  assert.ok(Math.abs(p - floor) < 1e-9, `expected ~${floor}, got ${p}`);
+  assert.equal(p, 0.31);
   const noCost = 1 - p;
-  assert.ok(1 / noCost >= 1.44 - 1e-9);
+  assert.ok(1 / noCost >= 1.44, `return ${(1 / noCost).toFixed(4)} must be ≥ 1.44`);
 });
 
 test("price-cap: high-return NO bet is unaffected by the floor", () => {

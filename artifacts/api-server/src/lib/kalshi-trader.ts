@@ -232,7 +232,14 @@ export function computeMarketableLimitPrice(
         : Math.max(priceFrac, 1 - maxCost); // NO cost (1-price) ≤ maxCost
   }
 
-  return Math.min(0.99, Math.max(0.01, priceFrac));
+  // Round to cent precision (Kalshi only accepts prices at 1-cent resolution).
+  // Bid: round down so we never exceed the maxCost cap.
+  // Ask: round up  so we never fall below the price floor (NO cost stays ≤ maxCost).
+  const rounded =
+    bookSide === "bid"
+      ? Math.floor(priceFrac * 100) / 100
+      : Math.ceil(priceFrac * 100) / 100;
+  return Math.min(0.99, Math.max(0.01, rounded));
 }
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -269,7 +276,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     params.yesPrice,
     params.action === "buy" ? params.minReturnMultiple : undefined,
   );
-  const price = priceFrac.toFixed(4); // FixedPointDollars string
+  const price = priceFrac.toFixed(2); // FixedPointDollars string — cent resolution required by Kalshi
 
   const body: Record<string, unknown> = {
     client_order_id: clientOrderId,
