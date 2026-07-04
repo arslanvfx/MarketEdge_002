@@ -1546,6 +1546,22 @@ async function _runBotTick(
     kalshiTarget,  // pass through so ML doesn't re-fetch a potentially stale cache
   );
 
+  // ── Defense-in-depth coin direction filters ───────────────────────────────
+  // These mirror the Phase-3 selection guards.  Phase-3 only adds a coin to
+  // filteredByNewGuards when its makeBotDecision result is BET_YES at Phase-3
+  // evaluation time.  If signals shift between Phase-3 and this tick, the Phase-3
+  // result may have been SKIP (so the coin was never flagged), yet here
+  // makeBotDecision now returns BET_YES — slipping past the per-coin block.
+  // Re-checking here closes that race window unconditionally.
+  if (decision.action === "BET_YES" && COIN_YES_BLOCKED.has(sym)) {
+    logger.debug({ sym }, "[kalshi-bot] _runBotTick: BET_YES blocked by COIN_YES_BLOCKED (defense-in-depth)");
+    return;
+  }
+  if (decision.action !== "SKIP" && COIN_FULLY_BLOCKED.has(sym)) {
+    logger.debug({ sym }, "[kalshi-bot] _runBotTick: entry blocked by COIN_FULLY_BLOCKED (defense-in-depth)");
+    return;
+  }
+
   // ── RE-ENTRY GUARD ───────────────────────────────────────────────────────
   // If we exited a position mid-window (fast-flip or phase-2), we may re-enter
   // — but only in the OPPOSITE direction, and only with a higher confidence bar
