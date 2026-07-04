@@ -2100,9 +2100,11 @@ async function fetchWindowClosePrice(product: string, windowKey: string): Promis
  * etc.) are skipped and retried on the next 30-second tick.
  */
 // How long to wait before committing the full-loss fallback for expired rows
-// where closePosition() had no cached coin price.  Gives the Coinbase candle
-// time to finalise and the local prediction cache time to repopulate.
-const EVAL_DEFER_MS = 5 * 60_000; // 5 minutes
+// where BOTH the Coinbase candle AND the cached coin price are unavailable.
+// Coinbase publishes 1-min candles within seconds of the candle close, so
+// 90 s is already conservative.  We only hit this path when Coinbase itself
+// is slow or the coin is not listed there (e.g. BNB).
+const EVAL_DEFER_MS = 90_000; // 90 seconds
 
 export async function evalClosedBets(): Promise<void> {
   const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
@@ -2189,31 +2191,18 @@ export async function evalClosedBets(): Promise<void> {
         const count = row.contractCount ?? 1;
         if (strike == null || entryPrice == null) continue;
 
-        // Detect rows where closePosition() had no cached coin price and fell
-        // back to a full-loss estimate (cryptoPriceAtExit === null for expired).
-        // These are ambiguous: the bot might actually have won.
-        const noCoinPriceAtExit = row.cryptoPriceAtExit == null;
-        const exitedAt = row.exitedAt instanceof Date
-          ? row.exitedAt
-          : row.exitedAt != null ? new Date(row.exitedAt as string) : null;
-        const pastDeferWindow = exitedAt == null || exitedAt <= deferCutoff;
-
-        if (noCoinPriceAtExit && !pastDeferWindow) {
-          // Still within the 5-minute deferral — wait for the candle to finalise
-          // and the prediction cache to repopulate before committing.
-          logger.debug(
-            { sym: row.symbol, id: row.id, exitedAt },
-            "[kalshi-bot] evalClosedBets: deferring ambiguous expiry row (within 5-min window)",
-          );
-          continue;
-        }
-
+        // Always attempt to fetch the authoritative Coinbase closing candle first.
+        // Coinbase publishes 1-min candles within seconds of close, so this
+        // succeeds on the first or second 30-s tick after the window ends in
+        // the vast majority of cases — regardless of whether closePosition()
+        // had a cached coin price at exit time.
         closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
 
-        // Coinbase candle unavailable (e.g. BNB is not listed on Coinbase).
-        // Fall back to the coin price recorded at window expiry — it's the same
-        // value closePosition() already used for the initial P&L estimate, so
-        // using it here is consistent and prevents the row staying stuck forever.
+        // Coinbase candle unavailable (e.g. BNB is not listed on Coinbase, or
+        // the candle hasn't published yet).  Fall back to the coin price recorded
+        // at window expiry — it's the same value closePosition() already used for
+        // the initial P&L estimate, so using it here is consistent and prevents
+        // the row staying stuck.
         if (closePrice === null && row.cryptoPriceAtExit != null) {
           closePrice = parseFloat(String(row.cryptoPriceAtExit));
           logger.info(
@@ -2223,28 +2212,39 @@ export async function evalClosedBets(): Promise<void> {
         }
 
         if (closePrice === null) {
-          if (noCoinPriceAtExit && pastDeferWindow) {
-            // Past the deferral window and no price source is available at all.
-            // Commit the full-loss fallback recorded by closePosition() so
-            // the row doesn't stay unevaluated forever.  Log a warning so
-            // the operator knows this outcome may be inaccurate.
-            const fallbackPnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
-            if (fallbackPnl == null) continue;
-            const fallbackOutcome: "win" | "loss" | "push" =
-              fallbackPnl > 0 ? "win" : fallbackPnl < 0 ? "loss" : "push";
-            logger.warn(
-              { sym: row.symbol, id: row.id, windowKey: row.windowKey, pnl: fallbackPnl },
-              "[kalshi-bot] evalClosedBets: committing full-loss fallback — no price source after 5-min deferral; outcome may be inaccurate",
+          // Neither the Coinbase candle nor a cached coin price is available.
+          // Defer briefly (90 s) to give Coinbase time to publish the candle,
+          // then commit the full-loss fallback so the row never stays stuck.
+          const noCoinPriceAtExit = row.cryptoPriceAtExit == null;
+          const exitedAt = row.exitedAt instanceof Date
+            ? row.exitedAt
+            : row.exitedAt != null ? new Date(row.exitedAt as string) : null;
+          const pastDeferWindow = exitedAt == null || exitedAt <= deferCutoff;
+
+          if (!pastDeferWindow) {
+            logger.debug(
+              { sym: row.symbol, id: row.id, exitedAt, noCoinPriceAtExit },
+              "[kalshi-bot] evalClosedBets: candle not yet available — deferring (within 90-s window)",
             );
-            await db
-              .update(kalshiBotBetsTable)
-              .set({ outcome: fallbackOutcome, evaluatedAt: new Date() })
-              .where(eq(kalshiBotBetsTable.id, row.id));
-            evaluated++;
             continue;
           }
-          // No price source available yet — retry next cycle.
-          logger.debug({ sym: row.symbol, id: row.id }, "[kalshi-bot] evalClosedBets: no price source available, will retry");
+
+          // Past the deferral window and no price source at all — commit the
+          // full-loss fallback recorded by closePosition() so the row doesn't
+          // stay unevaluated forever.  Log a warning so any inaccuracy is visible.
+          const fallbackPnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
+          if (fallbackPnl == null) continue;
+          const fallbackOutcome: "win" | "loss" | "push" =
+            fallbackPnl > 0 ? "win" : fallbackPnl < 0 ? "loss" : "push";
+          logger.warn(
+            { sym: row.symbol, id: row.id, windowKey: row.windowKey, pnl: fallbackPnl },
+            "[kalshi-bot] evalClosedBets: committing full-loss fallback — no price source after 90-s deferral; outcome may be inaccurate",
+          );
+          await db
+            .update(kalshiBotBetsTable)
+            .set({ outcome: fallbackOutcome, evaluatedAt: new Date() })
+            .where(eq(kalshiBotBetsTable.id, row.id));
+          evaluated++;
           continue;
         }
 
