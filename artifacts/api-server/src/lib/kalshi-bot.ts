@@ -205,18 +205,19 @@ const lastDecisionWindowKey: Map<string, string> = new Map();
 // local window-key rollover — so the prefetch is not wasted on a stale market.
 const prefetchedTicker: Map<string, string> = new Map();
 
-// Tracks how many bets have been placed per (symbol, windowKey) in the current window.
-// Key format: "${sym}:${windowKey}".
+// Tracks how many bets have been placed per (symbol, windowKey, mode) in the current window.
+// Key format: "${sym}:${windowKey}:${mode}" — mode-aware so paper bets never consume the live cap.
 // Old entries are purged lazily when a new window key is seen for a symbol.
 const windowBetCounts: Map<string, number> = new Map();
 
 // Global total bets this window (all symbols combined).
-// Key: windowKey.  Enforces config.maxBetsPerWindow as a TOTAL cap, not per-coin.
+// Key: "${windowKey}:${mode}".  Enforces config.maxBetsPerWindow as a TOTAL cap, not per-coin.
+// Mode-aware so switching paper→live mid-window resets the global cap correctly.
 const windowTotalBets: Map<string, number> = new Map();
 
 // Bet details stored at placement time so the eval panel can show actual direction +
 // confidence even after the coin switches to SKIP (directional cap, etc.) on later ticks.
-// Key: "${sym}:${windowKey}".
+// Key: "${sym}:${windowKey}:${mode}".
 const windowBetDetails: Map<string, { direction: "yes" | "no"; confidence: number }> = new Map();
 
 // Direction-cap tracking: counts YES and NO bets placed in the current 15-min window
@@ -1073,6 +1074,7 @@ export async function loadWindowBetCountsFromDB(): Promise<void> {
         symbol: kalshiBotBetsTable.symbol,
         direction: kalshiBotBetsTable.direction,
         signals: kalshiBotBetsTable.signals,
+        mode: kalshiBotBetsTable.mode,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -1087,13 +1089,17 @@ export async function loadWindowBetCountsFromDB(): Promise<void> {
 
     for (const row of rows) {
       const sym = row.symbol.toUpperCase();
-      const key = `${sym}:${wk}`;
+      // Mode-aware keys: paper bets never pollute the live cap.
+      const rowMode = row.mode === "live" ? "live" : "paper";
+      const key = `${sym}:${wk}:${rowMode}`;
+      const totalKey = `${wk}:${rowMode}`;
       windowBetCounts.set(key, (windowBetCounts.get(key) ?? 0) + 1);
-      windowTotalBets.set(wk, (windowTotalBets.get(wk) ?? 0) + 1);
+      windowTotalBets.set(totalKey, (windowTotalBets.get(totalKey) ?? 0) + 1);
 
       const dir = row.direction as "yes" | "no" | null;
       if (dir === "yes" || dir === "no") {
         // Restore direction cap counters so maxSameDirectionBets also respects prior bets.
+        // Direction counts are shared across modes (intentional — both modes see the same markets).
         windowDirectionCounts.set(dir, (windowDirectionCounts.get(dir) ?? 0) + 1);
         const sig = row.signals as Record<string, unknown> | null;
         const confidence = typeof sig?.effectiveConfidence === "number"
@@ -1422,13 +1428,14 @@ async function _runBotTick(
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
 
   // Multi-bet guard: purge stale window entries then check the per-window cap.
-  // Purge any entry for this symbol that belongs to an older window key.
+  // Purge any entry for this symbol that belongs to an older window key (any mode).
   for (const [k] of windowBetCounts) {
-    if (k.startsWith(`${sym}:`) && k !== `${sym}:${windowKey}`) {
+    if (k.startsWith(`${sym}:`) && !k.startsWith(`${sym}:${windowKey}:`)) {
       windowBetCounts.delete(k);
     }
   }
-  const windowBetKey = `${sym}:${windowKey}`;
+  // Mode-aware key so paper bets don't count against the live cap and vice-versa.
+  const windowBetKey = `${sym}:${windowKey}:${mode}`;
   const betsThisWindow = windowBetCounts.get(windowBetKey) ?? 0;
   if (betsThisWindow >= config.maxBetsPerWindow) {
     logger.debug({ sym, betsThisWindow, max: config.maxBetsPerWindow }, "[kalshi-bot] maxBetsPerWindow reached — skipping entry");
@@ -1777,7 +1784,9 @@ async function _runBotTick(
   // Increment the per-window bet counter so subsequent ticks respect maxBetsPerWindow.
   windowBetCounts.set(windowBetKey, betsThisWindow + 1);
   // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
-  windowTotalBets.set(windowKey, (windowTotalBets.get(windowKey) ?? 0) + 1);
+  // Mode-aware: paper and live each have their own counter.
+  const totalKey = `${windowKey}:${mode}`;
+  windowTotalBets.set(totalKey, (windowTotalBets.get(totalKey) ?? 0) + 1);
   // Store bet details so the eval panel can display actual direction + confidence
   // even after the coin switches to "directional cap reached" on later ticks.
   windowBetDetails.set(windowBetKey, { direction, confidence: decision.confidence });
@@ -2914,10 +2923,10 @@ export async function runBotLoopTick(): Promise<void> {
   // independently place a bet that the Phase-3 filter just blocked.
   const filteredByNewGuards = new Set<string>();
 
-  // Global bet cap: total bets placed across ALL coins this window.
+  // Global bet cap: total bets placed across ALL coins this window (mode-aware).
   // This is the correct interpretation of maxBetsPerWindow — not per-coin.
   // The per-coin windowBetCounts is still used to prevent a single coin from re-betting.
-  const globalBetsThisWindow = windowTotalBets.get(windowKey) ?? 0;
+  const globalBetsThisWindow = windowTotalBets.get(`${windowKey}:${mode}`) ?? 0;
   const globalCapReached = config.maxBetsPerWindow > 0 && globalBetsThisWindow >= config.maxBetsPerWindow;
 
   // Refresh border-proximity and regime caches once per window transition.
@@ -2976,7 +2985,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Global total-bet cap: if maxBetsPerWindow total bets have already been placed
     // across ALL coins this window, skip any coin that has not yet placed a bet.
     // Coins that already placed a bet are allowed to continue (for display/exit purposes).
-    if (globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}`) ?? 0 > 0)) {
+    if (globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${mode}`) ?? 0 > 0)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -3492,7 +3501,7 @@ export async function runBotLoopTick(): Promise<void> {
   // shows accurate direction/confidence even after the coin switches to SKIP.
   const allResults = [...bets, ...skips];
   for (const e of allResults) {
-    const wbKey = `${e.symbol}:${e.windowKey}`;
+    const wbKey = `${e.symbol}:${e.windowKey}:${mode}`;
     e.betPlacedThisWindow = (windowBetCounts.get(wbKey) ?? 0) > 0;
     if (e.betPlacedThisWindow) {
       const details = windowBetDetails.get(wbKey);
