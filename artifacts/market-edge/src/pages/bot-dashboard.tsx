@@ -1308,19 +1308,43 @@ export default function BotDashboard() {
                   >
                     {(merged.enableDynamicSizing ?? false) ? "On — scales with confidence" : "Off — fixed bet size"}
                   </button>
-                  <span className="text-[10px] text-muted-foreground/60">Bet {`$${(merged.betSize ?? 1).toFixed(2)}`} at min confidence → {`$${(merged.maxBetSize ?? 2).toFixed(2)}`} at max</span>
+                  <span className="text-[10px] text-muted-foreground/60">
+                    {(merged.enableDynamicSizing ?? false)
+                      ? <>Bet {`$${(merged.betSize ?? 1).toFixed(2)}`} at min confidence → {`$${(merged.maxBetSize ?? 2).toFixed(2)}`} at max</>
+                      : <>Turn on to scale bets from {`$${(merged.betSize ?? 1).toFixed(2)}`} to {`$${(merged.maxBetSize ?? 2).toFixed(2)}`} by confidence</>}
+                  </span>
                 </label>
 
                 {/* Max-bet confidence ceiling */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Max-Bet Confidence (%)</span>
-                  <input type="number" min={50} max={100} step={1}
-                    disabled={!(merged.enableDynamicSizing ?? false)}
-                    className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground disabled:opacity-40"
-                    value={merged.dynamicSizingMaxConfidence ?? 85}
-                    onChange={e => setConfigDraft(d => ({ ...d, dynamicSizingMaxConfidence: parseFloat(e.target.value) }))} />
-                  <span className="text-[10px] text-muted-foreground/60">Confidence at which the max bet is reached</span>
-                </label>
+                {(() => {
+                  const dynamicOn = merged.enableDynamicSizing ?? false;
+                  const minConf = merged.minConfidence ?? 60;
+                  const maxBetConf = merged.dynamicSizingMaxConfidence ?? 85;
+                  const belowMin = dynamicOn && maxBetConf < minConf;
+                  return (
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-xs text-muted-foreground">Max-Bet Confidence (%)</span>
+                      <input type="number" min={50} max={100} step={1}
+                        disabled={!dynamicOn}
+                        className={`bg-background border rounded-md px-3 py-1.5 text-sm text-foreground disabled:opacity-40 ${belowMin ? "border-amber-500" : "border-border"}`}
+                        value={maxBetConf}
+                        onChange={e => {
+                          const raw = parseFloat(e.target.value);
+                          setConfigDraft(d => ({
+                            ...d,
+                            dynamicSizingMaxConfidence: Number.isNaN(raw) ? raw : Math.min(100, Math.max(50, raw)),
+                          }));
+                        }} />
+                      {!dynamicOn ? (
+                        <span className="text-[10px] text-muted-foreground/40">No effect while Dynamic Sizing is off</span>
+                      ) : belowMin ? (
+                        <span className="text-[10px] text-amber-400">Below Min Confidence ({minConf}%) — sizing collapses to a step, not a smooth ramp</span>
+                      ) : (
+                        <span className="text-[10px] text-muted-foreground/60">Confidence at which the max bet is reached</span>
+                      )}
+                    </label>
+                  );
+                })()}
 
                 {/* ── Live Mode Guards ─────────────────────────────────── */}
                 <div className="col-span-full border-t border-amber-500/20 pt-3 -mt-1">
