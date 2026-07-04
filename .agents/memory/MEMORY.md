@@ -45,6 +45,7 @@
 - [Kalshi RSA key format](kalshi-rsa-key-format.md) — KALSHI_PRIVATE_KEY stored as raw base64 (no headers); getPrivateKey() must wrap it in PKCS#1 PEM before signing
 - [Kalshi balance API fields](kalshi-balance-api-fields.md) — balance=cash cents, portfolio_value=position cents; total=sum; use balance for guards, not total
 - [Bot mode variable naming](bot-mode-variable-name.md) — runBotLoopTick/_runBotTick use module-level botMode; ${mode} throws ReferenceError in those functions
+- [FOK 409 throw/swallow split](fok-retry-split.md) — placeOrder must re-throw fill_or_kill 409 (exits detect kills via throw); only placeOrderWithRetry swallows+retries (Phase1 same-price, Phase2 +1c escalation)
 - [Kalshi order price format](kalshi-order-price-format.md) — price must be 2-decimal cent-resolution string (e.g. "0.69"); 4-decimal gives invalid_price; size using expectedFillPrice not raw yesPrice
 - [Kalshi live P&L formula](kalshi-live-pnl.md) — real contract math: YES win=(1−ep)×n, YES loss=−ep×n, NO win=ep×n, NO loss=−(1−ep)×n; betAmount=actual fill cost; fixLiveExpiredPnlHistorical() corrects DB on startup; pnl column is numeric (not text)
 - [Price-band entry gates](price-band-gates.md) — YES blocked when yesPrice<0.50 (0% WR), NO blocked when yesPrice≥0.65 (0–25% WR); YES also blocked when live price >0.3% below strike; gates sit before YES/NO quality gates in Phase 3

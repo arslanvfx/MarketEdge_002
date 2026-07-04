@@ -1735,18 +1735,31 @@ async function _runBotTick(
 
   if (entryMode === "live") {
     try {
-      const result = await placeOrderWithRetry({
-        ticker: kalshiTicker,
-        side: direction,
-        action: "buy",
-        count: contractCount,
-        type: "market",
-        yesPrice: yesPrice ?? undefined, // bound the marketable-limit price to the current YES quote
-        // Authoritative return-floor enforcement at fill time. The decision-time
-        // gate can't be trusted (cache yesPrice is often null), so cap the order
-        // price here: fill_or_kill kills any fill below the payout floor.
-        minReturnMultiple: config.minReturnMultiple,
-      });
+      const result = await placeOrderWithRetry(
+        {
+          ticker: kalshiTicker,
+          side: direction,
+          action: "buy",
+          count: contractCount,
+          type: "market",
+          yesPrice: yesPrice ?? undefined, // bound the marketable-limit price to the current YES quote
+          // Authoritative return-floor enforcement at fill time. The decision-time
+          // gate can't be trusted (cache yesPrice is often null), so cap the order
+          // price here: fill_or_kill kills any fill below the payout floor.
+          minReturnMultiple: config.minReturnMultiple,
+        },
+        {
+          // Phase 1: retry immediately a few times at the same price — thin
+          // Kalshi books frequently fill on a quick re-place (the common cause
+          // of fill_or_kill_insufficient_resting_volume kills).
+          immediateAttempts: 4,
+          // Phase 2 (option 2): only if the immediate retries all fail, cross a
+          // little further into the book. Bounded by the slippage tolerance so
+          // we never pay more than the coin's configured max slippage, and the
+          // return-floor cap still clamps every improved price.
+          priceImprovementMaxCents: config.maxSlippageCents ?? 5,
+        },
+      );
       if (result.filledCount === 0) {
         logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] order not filled after retries — skipping entry");
         return;
