@@ -593,9 +593,16 @@ export interface BotConfig {
 
   // Minimum return (payout) multiple guard: skip any bet whose payout multiple
   // (1 / contract-cost) is below this floor. A contract costing `cost` pays $1,
-  // so return = 1/cost.  1.44 → only enter when cost ≤ ~69¢.  Set to 1 to
+  // so return = 1/cost.  1.7 → only enter when cost ≤ ~59¢.  Set to 1 to
   // disable (any cost allowed).
-  minReturnMultiple: number;     // × (default 1.44)
+  minReturnMultiple: number;     // × (default 1.7)
+
+  // Minimum minutes elapsed before allowing a NO-direction bet.  At minute 0
+  // the orderbook is freshly priced and our signals have less edge on NO bets
+  // (53% WR at minute 0 vs 79% at minute 1+, observed in live data).  YES bets
+  // are excluded from this gate — they won at every entry time.
+  // Set to 0 to disable (allow NO bets at any minute).
+  minNoEntryMinutes: number;     // minutes (default 1)
 
   // Window Monitor readiness gate: when true, the bot skips entry for a coin
   // until the Window Monitor has collected ≥2 minutes of intra-window data
@@ -726,7 +733,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinStreakLossLimit: 3,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 5,
-  minReturnMultiple: 1.44,
+  minReturnMultiple: 1.7,
+  minNoEntryMinutes: 1,
   requireMonitorReady: true,
 };
 

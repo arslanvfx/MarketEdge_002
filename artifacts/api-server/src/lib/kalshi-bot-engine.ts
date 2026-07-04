@@ -485,6 +485,20 @@ export function makeBotDecision(
 ): BotDecision {
   const inner = _makeBotDecisionInner(symbol, config, kalshiTicker, yesPrice, minutesElapsed, signalAccuracyPct, kalshiTarget);
 
+  // NO-direction early-minute gate: defer NO bets until minutesElapsed ≥ minNoEntryMinutes.
+  // At minute 0 the orderbook is freshly priced and our signals have less edge on NO bets
+  // (53% WR at minute 0 vs 79% at minute 1+). YES bets are unaffected.
+  // 0 = disabled.
+  const minNoMin = config.minNoEntryMinutes ?? 1;
+  if (inner.action === "BET_NO" && minNoMin > 0 && minutesElapsed < minNoMin) {
+    return {
+      action: "SKIP",
+      confidence: inner.confidence,
+      reasoning: `NO entry deferred: ${minutesElapsed.toFixed(1)}m elapsed < ${minNoMin}m minimum for NO bets (will retry next tick)`,
+      signals: { ...inner.signals, agreementTarget: null },
+    };
+  }
+
   // Compute ROI for the chosen side when yesPrice is available.
   // yesPrice is in cents (0–100); net return = payout / stake.
   if (inner.action !== "SKIP" && yesPrice !== null && yesPrice > 0 && yesPrice < 100) {

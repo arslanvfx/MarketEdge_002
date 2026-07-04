@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import {
   computeCorePairDecision,
   checkMinReturnGate,
+  DEFAULT_BOT_CONFIG,
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
   CONFIDENCE_BOOST_PER_SIGNAL,
@@ -685,4 +686,16 @@ test("checkMinReturnGate: null yes-price is NOT blocked even when gate is active
 
 test("checkMinReturnGate: null yes-price is allowed when gate is off", () => {
   assert.equal(checkMinReturnGate("BET_YES", null, 1).blocked, false);
+});
+
+// ---------------------------------------------------------------------------
+// DEFAULT_BOT_CONFIG defaults
+// ---------------------------------------------------------------------------
+
+test("DEFAULT_BOT_CONFIG: minReturnMultiple default is 1.7", () => {
+  assert.equal(DEFAULT_BOT_CONFIG.minReturnMultiple, 1.7);
+});
+
+test("DEFAULT_BOT_CONFIG: minNoEntryMinutes default is 1", () => {
+  assert.equal(DEFAULT_BOT_CONFIG.minNoEntryMinutes, 1);
 });
