@@ -745,11 +745,11 @@ export default function BotDashboard() {
             <>
               {/* Overlay modal backdrop */}
               <div
-                className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm flex items-center justify-center"
+                className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm flex items-start justify-center overflow-y-auto py-8 px-2"
                 onClick={() => { setConfirmLive(false); setLiveCheckboxChecked(false); }}
               >
                 <div
-                  className="w-96 max-w-[92vw] bg-card border border-red-500/40 rounded-2xl shadow-2xl p-6 flex flex-col gap-4"
+                  className="w-96 max-w-[92vw] bg-card border border-red-500/40 rounded-2xl shadow-2xl p-6 flex flex-col gap-4 my-auto"
                   onClick={e => e.stopPropagation()}
                 >
                   <div className="flex items-center gap-2 text-red-400 font-bold text-base">
@@ -774,12 +774,12 @@ export default function BotDashboard() {
                         : kalshiPreflightData?.ok
                           ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                           : <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
-                      <span className={preflightLoading ? "text-muted-foreground" : kalshiPreflightData?.ok ? "text-emerald-400" : "text-red-400 font-medium"}>
+                      <span className={preflightLoading ? "text-muted-foreground" : kalshiPreflightData?.ok ? "text-emerald-400" : "text-yellow-400 font-medium"}>
                         {preflightLoading
                           ? "Checking Kalshi account balance…"
                           : kalshiPreflightData?.ok
                             ? `Kalshi balance: $${kalshiPreflightData.balance?.toFixed(2)} (above $${(merged.minAccountBalance ?? 5).toFixed(2)} minimum)`
-                            : "Could not verify Kalshi balance — check API key or connection"}
+                            : "Balance check unavailable — you may still proceed if your API key is configured"}
                       </span>
                     </div>
                   </div>
@@ -819,7 +819,7 @@ export default function BotDashboard() {
                       size="sm"
                       variant="destructive"
                       className="flex-1 h-8 font-semibold"
-                      disabled={!status?.configured || !kalshiPreflightData?.ok || !liveCheckboxChecked}
+                      disabled={!status?.configured || !liveCheckboxChecked}
                       onClick={() => { setMode("live"); setConfirmLive(false); setLiveCheckboxChecked(false); }}
                     >
                       {preflightLoading ? "Verifying…" : "Confirm — Go Live"}
