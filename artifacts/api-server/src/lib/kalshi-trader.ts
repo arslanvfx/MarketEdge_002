@@ -199,6 +199,8 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     side: params.side,
     type: params.type,
     count: String(params.count), // v2 API requires count as a string
+    time_in_force: "fill_or_kill", // v2 required field
+    self_trade_prevention_type: "cancel_resting", // v2 required field
   };
   if (params.type === "limit" && params.yesPrice != null) {
     body.yes_price = String(Math.round(params.yesPrice)); // v2 requires string
