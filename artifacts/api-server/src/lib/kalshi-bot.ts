@@ -391,8 +391,10 @@ const windowStabilityCache = new Map<string, TrendStability>();
 // Hard seconds-into-window buffer before any bet entry or window evaluation.
 // All models (Stat snap, Claude analysis, ML prediction) must run AFTER this
 // mark so they use the NEW window's Kalshi strike — not the previous window's.
-// Claude is pre-fetched eagerly on ticker detection so it is warm by ~45 s.
-const WINDOW_ENTRY_BUFFER_S = 45;
+// 120 s (2 min) ensures the current window's Kalshi target lands in
+// recentKalshiTargets before the momentum override evaluates it.
+// Claude is pre-fetched eagerly on ticker detection so it is warm well before 2 min.
+const WINDOW_ENTRY_BUFFER_S = 120;
 
 // --- Per-coin direction filters (Task A, data-driven, 2026-07-03) ---
 // Based on 223 settled production bets. Coins/directions with no historical edge
@@ -1502,14 +1504,18 @@ async function _runBotTick(
     fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget
   }
 
-  // Hard 45-second window buffer: no entry until the window is at least
+    // Hard 2-minute window buffer: no entry until the window is at least
   // WINDOW_ENTRY_BUFFER_S seconds old. This guarantees:
   //   1. The new Kalshi strike has had time to publish (Kalshi can be slow).
-  //   2. Claude's eager prefetch (fired on new-ticker detection above) has
+  //   2. The current window's Kalshi target is appended to recentKalshiTargets
+  //      so the momentum override has a full cross-window picture — not just
+  //      the previous window's strikes (which may show a flat/mixed signal).
+  //   3. Claude's eager prefetch (fired on new-ticker detection above) has
   //      completed so the live-direction cache holds the CURRENT window's
   //      verdict — not the previous window's stale result.
-  //   3. The stat snap has had time to run and update predCache with the
+  //   4. The stat snap has had time to run and update predCache with the
   //      new window's predictions (ML included).
+  // Effective betting window: 2:00 → 12:00 (10 min), enough for all strategies.
   if (secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
     if (lastDecisionWindowKey.get(sym) !== `warmup:${windowKey}`) {
       lastDecisionWindowKey.set(sym, `warmup:${windowKey}`);
