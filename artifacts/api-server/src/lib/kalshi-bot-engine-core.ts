@@ -33,6 +33,10 @@ export const CONFIDENCE_BOOST_PER_SIGNAL = 8;
 export const ML_PRIMARY_MIN_CONFIDENCE = 62;
 // Each agreeing validator (Claude, Stat, WM) adds this when ML leads (Path A).
 export const ML_SIGNAL_BOOST = 6;
+// Penalty applied when a model is available and actively calls the OPPOSITE direction.
+// Symmetric with ML_SIGNAL_BOOST so that one agree+one oppose = net zero boost.
+// Applied in: PATH A (Claude/Stat oppose ML), PATH B (ML opposes Claude).
+export const DISSENT_PENALTY = 6;
 
 // ── Bet Profiles ─────────────────────────────────────────────────────────────
 // Two preset aggression levels the user can switch between in the dashboard.
@@ -260,9 +264,17 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
 
     let confidence = inp.mlConfidence as number;
 
-    if (inp.claudeAbove === mlDir) confidence += ML_SIGNAL_BOOST;
-    if (inp.statAbove   === mlDir) confidence += ML_SIGNAL_BOOST;
+    // Agreeing validator: +ML_SIGNAL_BOOST.  Actively opposing validator (not null,
+    // calls the opposite direction): −DISSENT_PENALTY.  Absent (null): no change.
+    if      (inp.claudeAbove === mlDir)  confidence += ML_SIGNAL_BOOST;
+    else if (inp.claudeAbove !== null)   confidence -= DISSENT_PENALTY;
+
+    if      (inp.statAbove   === mlDir)  confidence += ML_SIGNAL_BOOST;
+    else if (inp.statAbove   !== null)   confidence -= DISSENT_PENALTY;
+
     if (inp.wmDriftAbove === mlDir) confidence += ML_SIGNAL_BOOST;
+    // WM dissent: no penalty — WM is a secondary signal; penalizing it would over-penalise
+    // windows where WM is simply cautious rather than genuinely wrong.
 
     if (confidence < inp.minConfidence) {
       const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
@@ -276,10 +288,10 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
 
     const claudeDesc = inp.claudeAbove !== null
-      ? `Claude:${inp.claudeAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : "—"}`
+      ? `Claude:${inp.claudeAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : `−${DISSENT_PENALTY}`}`
       : "Claude:—";
     const statDesc = inp.statAbove !== null
-      ? `Stat:${inp.statAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : "—"}`
+      ? `Stat:${inp.statAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : `−${DISSENT_PENALTY}`}`
       : "Stat:—";
     const wmDesc = inp.wmDriftAbove !== null
       ? `WM:${inp.wmDriftAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : "—"}`
@@ -310,6 +322,10 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     let confidence = base;
     if (inp.wmDriftAbove === claudeDir) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
 
+    // ML available and actively calls the opposite direction → dissent penalty.
+    // Absent or below-threshold ML (mlAbove===null) → no change.
+    if (inp.mlAbove !== null && inp.mlAbove !== claudeDir) confidence -= DISSENT_PENALTY;
+
     if (confidence < inp.minConfidence) {
       const { signalsAgreeing, signalsTotal } = countSignals(claudeDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
       return {
@@ -322,12 +338,13 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     const { signalsAgreeing, signalsTotal } = countSignals(claudeDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
 
     const statDesc = inp.statAbove !== null ? `Stat:✓` : "Stat:—";
+    const mlDissentDesc = (inp.mlAbove !== null && inp.mlAbove !== claudeDir) ? ` ML:−${DISSENT_PENALTY}` : "";
     const wmBoostDesc = inp.wmDriftAbove === claudeDir ? ` WM:+${CONFIDENCE_BOOST_PER_SIGNAL}` : "";
     const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
 
     return {
       action, confidence, ev, signalsAgreeing, signalsTotal,
-      reasoning: `Claude primary: Claude:✓ ${statDesc}${wmBoostDesc} → ${action} (${confidence}%)${evDesc}`,
+      reasoning: `Claude primary: Claude:✓ ${statDesc}${mlDissentDesc}${wmBoostDesc} → ${action} (${confidence}%)${evDesc}`,
     };
   }
 
