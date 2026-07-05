@@ -1900,18 +1900,20 @@ async function _runBotTick(
       // Tracks CONSECUTIVE bad fills — a clean fill resets the counter.
       // 3 consecutive bad fills → coin skips next window's entry, then counter clears.
       const maxSlipCents = config.maxSlippageCents ?? 10;
-      // Use the live execution baseline (live ask/bid when available, else midpoint)
-      // so the slippage delta reflects what we actually expected to pay — not a
-      // potentially stale cached midpoint that no longer represents our order price.
-      const executionBaseline = liveLimitPrice ?? expectedFillCost;
-      if (maxSlipCents > 0 && result.avgPrice != null) {
+      // Slippage is measured in YES-side terms: result.avgPrice is always the
+      // YES-side fill price returned by Kalshi (for both YES and NO orders).
+      // Use liveLimitPrice (YES-side ask/bid) when available, else fall back to
+      // yesPrice (midpoint) — never expectedFillCost which is in NO-cost basis
+      // and would produce a unit mismatch (~20c false spike on NO fallback).
+      const executionBaseline = liveLimitPrice ?? yesPrice;
+      if (maxSlipCents > 0 && result.avgPrice != null && executionBaseline != null) {
         const slippageCents = Math.abs(result.avgPrice - executionBaseline) * 100;
         if (slippageCents > maxSlipCents) {
           logger.warn(
             {
               sym,
               executionBaseline: executionBaseline.toFixed(4),
-              usedLiveAsk: liveLimitPrice != null,
+              usedLivePrice: liveLimitPrice != null,
               fillPrice: result.avgPrice.toFixed(4),
               slippageCents: slippageCents.toFixed(1),
               maxSlippageCents: maxSlipCents,
