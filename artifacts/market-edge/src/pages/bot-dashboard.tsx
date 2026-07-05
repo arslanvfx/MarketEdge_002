@@ -1261,14 +1261,24 @@ export default function BotDashboard() {
                         ) : null}
                       </td>
                       <td className="px-3 py-2.5">
-                        <button
-                          onClick={() => openManualOrder(e.symbol)}
-                          title={`Place a manual order for ${e.symbol}`}
-                          className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md border border-sky-500/40 text-sky-400 hover:bg-sky-500/15 hover:border-sky-400/60 transition-colors whitespace-nowrap"
-                        >
-                          <ShoppingCart className="w-3 h-3" />
-                          Order
-                        </button>
+                        {openPosList.some(p => p.symbol === e.symbol) ? (
+                          <span
+                            title={`Position already open for ${e.symbol}`}
+                            className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md border border-muted/40 text-muted-foreground cursor-not-allowed whitespace-nowrap opacity-60"
+                          >
+                            <ShoppingCart className="w-3 h-3" />
+                            Open
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => openManualOrder(e.symbol)}
+                            title={`Place a manual order for ${e.symbol}`}
+                            className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md border border-sky-500/40 text-sky-400 hover:bg-sky-500/15 hover:border-sky-400/60 transition-colors whitespace-nowrap"
+                          >
+                            <ShoppingCart className="w-3 h-3" />
+                            Order
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -3051,11 +3061,18 @@ export default function BotDashboard() {
                 <p className="text-xs text-amber-400">Budget too small — increase bet size or wait for prices to change.</p>
               )}
 
+              {openPosList.some(p => p.symbol === manualOrderSym) && (
+                <p className="text-xs text-amber-400 flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                  A position is already open for {manualOrderSym}. Close it before placing a new order.
+                </p>
+              )}
+
               <button
                 onClick={submitManualOrder}
-                disabled={manualSubmitting || contracts < 1}
+                disabled={manualSubmitting || contracts < 1 || openPosList.some(p => p.symbol === manualOrderSym)}
                 className={`w-full py-2.5 rounded-xl font-bold text-sm transition-colors ${
-                  manualSubmitting || contracts < 1
+                  manualSubmitting || contracts < 1 || openPosList.some(p => p.symbol === manualOrderSym)
                     ? "bg-muted text-muted-foreground cursor-not-allowed"
                     : manualDir === "yes"
                     ? "bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30"
@@ -3066,6 +3083,8 @@ export default function BotDashboard() {
                   <span className="flex items-center justify-center gap-2">
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Placing…
                   </span>
+                ) : openPosList.some(p => p.symbol === manualOrderSym) ? (
+                  "Position already open"
                 ) : (
                   `Confirm ${manualDir.toUpperCase()} Order`
                 )}
