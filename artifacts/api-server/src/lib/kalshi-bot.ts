@@ -418,6 +418,13 @@ const windowStabilityCache = new Map<string, TrendStability>();
 // Claude is pre-fetched eagerly on ticker detection so it is warm well before 2 min.
 const WINDOW_ENTRY_BUFFER_S = 120;
 
+// Maximum seconds to wait for the window-open Claude trend-stability analysis
+// before proceeding without it.  The analysis fires async on the first tick
+// after the entry buffer; Claude typically responds in 10–30 s.  240 s (4 min)
+// gives a very generous timeout while still leaving ample window time for entry.
+// If stability never resolves by this ceiling we proceed but log a warning.
+const STABILITY_WAIT_MAX_S = 240;
+
 // --- Per-coin direction filters (Task A, data-driven, 2026-07-03) ---
 // Based on 223 settled production bets. Coins/directions with no historical edge
 // are blocked here rather than relying on signal models to self-correct.
@@ -3569,6 +3576,38 @@ export async function runBotLoopTick(): Promise<void> {
         reason: `window monitor not ready (${minutesElapsed.toFixed(1)}m elapsed — needs ≥2m)`,
         windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
+    }
+
+    // Trend-stability readiness gate: defer new bets until the window-open Claude
+    // trend-stability analysis has resolved for this coin.  Without this gate the
+    // bot bets blind on the trend-quality dimension — e.g. a NO bet placed when
+    // the analysis would have returned "reversing" (force-SKIP) or confirmed a
+    // clear up-trend against the proposed direction.
+    // Only enforced when the crypto_stability AI feature is enabled; if Claude is
+    // off entirely we skip this gate so other signals can still operate.
+    // After STABILITY_WAIT_MAX_S seconds we proceed anyway and log a warning —
+    // this prevents the gate from blocking all entries if Claude is slow or down.
+    if (isAiFeatureEnabled("crypto_stability") && !windowStabilityCache.has(sym)) {
+      if (secondsElapsed < STABILITY_WAIT_MAX_S) {
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: 0,
+          score: 0,
+          reason: `pending trend analysis (${Math.round(secondsElapsed)}s elapsed — waiting up to ${STABILITY_WAIT_MAX_S}s)`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: null,
+          regime,
+        });
+        continue;
+      }
+      // Past the wait ceiling — proceed without stability data but surface the miss.
+      logger.warn(
+        { sym, secondsElapsed: Math.round(secondsElapsed), windowKey },
+        "[kalshi-bot] stability analysis timeout — proceeding without trend data",
+      );
     }
 
     // Cached bot-timing accuracy is used for composite score ranking only.
