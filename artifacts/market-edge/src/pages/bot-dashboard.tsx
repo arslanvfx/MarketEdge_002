@@ -22,6 +22,7 @@ import { BotConfigSection } from "./bot/bot-config-section";
 import { LogicModePerf } from "./bot/logic-mode-perf";
 import { TransactionLog } from "./bot/transaction-log";
 import { PerformanceInsights } from "./bot/performance-insights";
+import { TimingAnalytics, type TimeAnalyticsRow } from "./bot/timing-analytics";
 import { AutoTuneHistory } from "./bot/autotune-history";
 import { ManualOrderModal } from "./bot/manual-order-modal";
 export default function BotDashboard() {
@@ -158,6 +159,13 @@ export default function BotDashboard() {
     queryKey: ["bot-performance-report", activeMode],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/performance-report?mode=${activeMode}`).then(r => r.json()),
     refetchInterval: 5 * 60_000,
+  });
+
+  const { data: timeAnalyticsData } = useQuery<{ rows: TimeAnalyticsRow[]; totalBets: number; lastUpdated: string }>({
+    queryKey: ["bot-time-analytics"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/time-analytics`).then(r => r.json()),
+    refetchInterval: 15 * 60_000,
+    staleTime: 5 * 60_000,
   });
 
   const { data: autoTuneLogData } = useQuery<{ entries: AutoTuneLogEntry[] }>({
@@ -559,6 +567,13 @@ export default function BotDashboard() {
           statsData={statsData}
           activeMode={activeMode}
         />
+        {timeAnalyticsData && (
+          <TimingAnalytics
+            rows={timeAnalyticsData.rows}
+            totalBets={timeAnalyticsData.totalBets}
+            lastUpdated={timeAnalyticsData.lastUpdated}
+          />
+        )}
         <AutoTuneHistory
           tuneEntries={tuneEntries}
           tuneCount={tuneCount}

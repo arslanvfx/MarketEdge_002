@@ -29,8 +29,8 @@ import {
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
-import { db, botConfigTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, botConfigTable, kalshiBotBetsTable } from "@workspace/db";
+import { eq, sql } from "drizzle-orm";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -686,6 +686,46 @@ router.post("/crypto/bot/re-evaluate-bets", async (req, res) => {
     const limit = !isNaN(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 5000) : undefined;
     const result = await reEvaluateSettledBets({ since, limit });
     res.json({ ok: true, ...result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/time-analytics — permanent per-coin win/loss by day + hour
+// Queries ALL historical bets with no rolling window, paper+live combined.
+// This data never gets erased (bets table is the permanent store) and survives
+// any server restart or republish.
+router.get("/crypto/bot/time-analytics", async (_req, res) => {
+  try {
+    const rows = await db.execute(sql`
+      SELECT
+        symbol,
+        EXTRACT(DOW  FROM created_at AT TIME ZONE 'UTC')::int  AS dow,
+        EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int  AS hour,
+        COUNT(*) FILTER (WHERE outcome = 'win')::int  AS wins,
+        COUNT(*) FILTER (WHERE outcome = 'loss')::int AS losses,
+        COUNT(*)::int                                          AS total
+      FROM ${kalshiBotBetsTable}
+      WHERE
+        action    IN ('exit', 'late_recovery_exit', 'expired')
+        AND outcome IN ('win', 'loss')
+        AND (source IS NULL OR source != 'manual')
+      GROUP BY symbol, dow, hour
+      ORDER BY symbol, dow, hour
+    `);
+
+    const data = (rows.rows ?? rows).map((r: Record<string, unknown>) => ({
+      symbol:  String(r.symbol  ?? ""),
+      dow:     Number(r.dow     ?? 0),
+      hour:    Number(r.hour    ?? 0),
+      wins:    Number(r.wins    ?? 0),
+      losses:  Number(r.losses  ?? 0),
+      total:   Number(r.total   ?? 0),
+    }));
+
+    const totalBets = data.reduce((s: number, r: { total: number }) => s + r.total, 0);
+    res.json({ rows: data, totalBets, lastUpdated: new Date().toISOString() });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
