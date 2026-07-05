@@ -425,7 +425,19 @@ export async function checkAllParoles(
         case "contrarian_penalty":   result.contrarian.add(sym);   break;
         case "border_guard":         result.border.add(sym);       break;
         case "coin_yes_blocked":     result.yesBlocked.add(sym);   break;
-        case "coin_fully_blocked":   result.fullyBlocked.add(sym); break;
+        case "coin_fully_blocked":
+          // Parole removes the coin from the mutable COIN_FULLY_BLOCKED set so
+          // both the Phase-3 loop guard and the _runBotTick defence-in-depth
+          // guard are cleared at once — mirrors the pausedCoins pattern used
+          // for auto_tune_pause.  Re-added on next server restart so shadow
+          // data re-accumulates before the coin can re-parole.
+          result.fullyBlocked.add(sym);
+          COIN_FULLY_BLOCKED.delete(sym);
+          logger.info(
+            { sym, winRate: `${(winRate * 100).toFixed(0)}%`, evaluated },
+            "[parole] coin_fully_blocked cleared — coin re-enabled by shadow accuracy",
+          );
+          break;
         case "streak_pause":         streakToResume.push(sym);     break;
         case "direction_cap":
           result.dirCapIncrease = Math.min(result.dirCapIncrease + 1, 2);

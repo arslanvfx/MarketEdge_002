@@ -872,7 +872,7 @@ export async function runBotLoopTick(): Promise<void> {
           action: "SKIP",
           confidence: effectiveConfidence,
           score: 0,
-          reason: `coin filter — ${sym} blocked (no edge in either direction: NO ${sym==="SOL"?"22":"?"}% WR, YES ${sym==="SOL"?"40":"?"}% WR)`,
+          reason: `coin filter — ${sym} soft-blocked (no edge either direction; shadow bets recorded — unblocks at ≥60% WR over ≥3 evaluated bets)`,
           windowKey,
           selected: false,
           evaluatedAt: now,

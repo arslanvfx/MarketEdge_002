@@ -206,7 +206,7 @@ export function ConditionsPanel({
                     extraReason = "IOC 0 fill — will retry next tick";
                   } else if (fullyBlocked) {
                     statusNode = <span className="px-2 py-0.5 rounded-full bg-red-500/15 text-red-300 font-medium border border-red-500/30">No edge ✕</span>;
-                    extraReason = "Permanently filtered — historical no-edge";
+                    extraReason = "Soft-blocked — no historical edge. Shadow bets monitored; unblocks at ≥60% WR";
                   } else if (autoTuneW) {
                     statusNode = <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-medium border border-amber-500/30">Tune pause ({autoTuneW}w)</span>;
                   } else if (streakPaused) {
