@@ -145,7 +145,7 @@ router.get("/stocks/analysis/:ticker", async (req, res) => {
     const cfg = getConfig();
     const earnings = await getEarnings(ticker, cfg.earningsBlackoutHours);
     const signals = await buildSignals(ticker, candles, news, earnings, getSectorMomentum(sector), {
-      useClaude: true,
+      useClaude: false,
     });
     res.json({
       ...signals,

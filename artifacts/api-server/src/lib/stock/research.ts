@@ -105,6 +105,9 @@ function isoDateDaysAgo(days: number): string {
  * Skips tickers already evaluated today. Re-entrant guard prevents double runs.
  */
 export async function runResearchPass(tickers: string[]): Promise<void> {
+  // AI research temporarily disabled — no Claude calls for stocks.
+  void tickers; return;
+  // eslint-disable-next-line no-unreachable
   if (researchRunning) return;
   researchRunning = true;
   const day = todayKey();

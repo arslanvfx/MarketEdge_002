@@ -269,7 +269,7 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         news,
         earnings,
         getSectorMomentum(sector),
-        { useClaude: true },
+        { useClaude: false },
       );
 
       if (signals.combinedDirection !== "up") continue;

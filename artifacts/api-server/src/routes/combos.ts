@@ -6,7 +6,7 @@ import { savedCombosTable, comboLegsTable } from "@workspace/db";
 import { eq, and, inArray } from "drizzle-orm";
 import { fetchMarkets, fetchMarketsForLegs, fetchAllMarkets, listCategories } from "../lib/markets";
 import { optimizeCombos, detectPortfolioOverlap, autoGenerateCombos, RiskLevel } from "../lib/optimizer";
-import { analyzeMarkets } from "../lib/ai-analysis";
+import { analyzeMarkets, type MarketAnalysis } from "../lib/ai-analysis";
 import { isAiGloballyEnabled } from "../lib/crypto";
 
 const router = Router();
@@ -227,11 +227,9 @@ router.post("/combos/smart-picks", async (req, res) => {
       }
     }
 
-    // AI estimates the TRUE probability of each candidate market.
-    // Skipped when AI is globally disabled — autoGenerateCombos falls back to raw market odds.
-    const analyses = isAiGloballyEnabled()
-      ? await analyzeMarkets(candidates)
-      : new Map();
+    // AI market analysis temporarily disabled for Smart Picks / Markets page.
+    // autoGenerateCombos falls back to raw market odds when analyses is empty.
+    const analyses: Map<string, MarketAnalysis> = new Map();
 
     const combos = autoGenerateCombos({
       markets: candidates,
