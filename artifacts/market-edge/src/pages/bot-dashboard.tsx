@@ -6,7 +6,7 @@ import {
   BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus,
   Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders,
-  ChevronLeft, ChevronRight, ShoppingCart, X,
+  ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -141,6 +141,35 @@ interface WindowEval {
   placedBetConfidence?: number;
   trendStability: "clean" | "choppy" | "reversing" | null;
   regime: "trending_up" | "trending_down" | "ranging" | null;
+}
+
+interface BotConditionsSnapshot {
+  windowKey: string;
+  mode: "paper" | "live";
+  botEnabled: boolean;
+  botPaused: boolean;
+  isInQuietHours: boolean;
+  quietHoursStart: number;
+  quietHoursEnd: number;
+  circuitBreakerActive: boolean;
+  circuitBreakerWindowsRemaining: number;
+  dailyLimitHit: boolean;
+  dailyPnl: number;
+  dailyLossLimit: number;
+  dbDegraded: boolean;
+  doubtPenaltyPp: number;
+  warmupSecondsRemaining: number;
+  directionCapEnabled: boolean;
+  maxSameDirectionBets: number;
+  directionCountYes: number;
+  directionCountNo: number;
+  maxBetsPerWindow: number;
+  totalBetsThisWindow: number;
+  emptyBookBlockedCoins: string[];
+  emptyBookAttempts: Record<string, number>;
+  yesBlockedCoins: string[];
+  fullyBlockedCoins: string[];
+  autoTunePausedCoins: Record<string, number>;
 }
 
 interface BotStats {
@@ -405,6 +434,264 @@ function CountdownCell({ reason, windowKey }: { reason: string; windowKey: strin
   );
 }
 
+function ConditionChip({ ok, warn, bad, label }: { ok?: boolean; warn?: boolean; bad?: boolean; label: string }) {
+  const cls = bad
+    ? "bg-red-500/15 text-red-300 border-red-500/30"
+    : warn
+    ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+    : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+  const dot = bad ? "bg-red-400" : warn ? "bg-amber-400" : "bg-emerald-400";
+  return (
+    <span className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full border font-medium whitespace-nowrap ${cls}`}>
+      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dot}`} />
+      {label}
+    </span>
+  );
+}
+
+function ConditionsPanel({
+  conditions,
+  evaluation,
+  status,
+}: {
+  conditions: BotConditionsSnapshot | undefined;
+  evaluation: WindowEval[];
+  status: BotStatus | undefined;
+}) {
+  const { getToken } = useAuth();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [resetState, setResetState] = useState<"idle" | "loading" | "done">("idle");
+
+  async function handleReset() {
+    setResetState("loading");
+    try {
+      const token = await getToken();
+      await fetch(`${API_BASE}/crypto/bot/reset-conditions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({}),
+      });
+      setResetState("done");
+      void qc.invalidateQueries({ queryKey: ["bot-conditions"] });
+      void qc.invalidateQueries({ queryKey: ["bot-status"] });
+      void qc.invalidateQueries({ queryKey: ["bot-window-eval"] });
+      void qc.invalidateQueries({ queryKey: ["bot-coin-guard-state"] });
+      void qc.invalidateQueries({ queryKey: ["bot-perf-report"] });
+      setTimeout(() => setResetState("idle"), 3000);
+    } catch {
+      setResetState("idle");
+    }
+  }
+
+  const restrictionCount = !conditions ? 0 : [
+    !conditions.botEnabled,
+    conditions.botPaused,
+    conditions.isInQuietHours,
+    conditions.circuitBreakerActive,
+    conditions.dailyLimitHit,
+    conditions.dbDegraded,
+    conditions.doubtPenaltyPp > 0,
+    conditions.warmupSecondsRemaining > 0,
+    conditions.emptyBookBlockedCoins.length > 0,
+    Object.keys(conditions.emptyBookAttempts).length > 0,
+    Object.keys(conditions.autoTunePausedCoins).length > 0,
+    Object.values(status?.coinStreakState ?? {}).some(s => s.pauseUntilWindowKey !== null),
+    conditions.directionCapEnabled && (conditions.directionCountYes >= conditions.maxSameDirectionBets || conditions.directionCountNo >= conditions.maxSameDirectionBets),
+    conditions.totalBetsThisWindow >= conditions.maxBetsPerWindow,
+  ].filter(Boolean).length;
+
+  return (
+    <div className="bg-card border border-border rounded-xl overflow-hidden">
+      <div
+        className="flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-muted/30 transition-colors select-none"
+        onClick={() => setOpen(o => !o)}
+      >
+        <Shield className="w-4 h-4 text-sky-400 flex-shrink-0" />
+        <span className="font-semibold text-sm text-foreground flex-1">Bot Conditions</span>
+        {restrictionCount > 0 ? (
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+            {restrictionCount} active
+          </span>
+        ) : conditions ? (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400">
+            All clear
+          </span>
+        ) : null}
+        <button
+          onClick={(e) => { e.stopPropagation(); if (resetState === "idle") handleReset(); }}
+          disabled={resetState !== "idle"}
+          title="Clear all window restrictions, cooldowns, pauses, and circuit breaker — safe to run at any time"
+          className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-lg border transition-colors ${
+            resetState === "done"
+              ? "border-emerald-500/50 text-emerald-400 bg-emerald-500/10"
+              : resetState === "loading"
+              ? "border-sky-500/30 text-sky-400/50 cursor-not-allowed"
+              : "border-sky-500/40 text-sky-400 hover:bg-sky-500/10 cursor-pointer"
+          }`}
+        >
+          <RotateCcw className={`w-3 h-3 ${resetState === "loading" ? "animate-spin" : ""}`} />
+          {resetState === "done" ? "Reset ✓" : resetState === "loading" ? "Resetting…" : "Reset all"}
+        </button>
+        {open ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+      </div>
+
+      {open && (
+        <div className="border-t border-border">
+          {/* ── Global conditions ── */}
+          <div className="px-5 py-3 flex flex-wrap gap-2 border-b border-border/50">
+            <ConditionChip
+              ok={conditions?.botEnabled && !conditions?.botPaused}
+              warn={conditions?.botPaused}
+              bad={!conditions?.botEnabled}
+              label={!conditions?.botEnabled ? "Bot disabled" : conditions?.botPaused ? "Paused" : "Enabled"}
+            />
+            <ConditionChip
+              ok={!conditions?.isInQuietHours}
+              bad={conditions?.isInQuietHours}
+              label={conditions?.isInQuietHours
+                ? `Quiet hrs (${conditions.quietHoursStart}–${conditions.quietHoursEnd} UTC)`
+                : "No quiet hours"}
+            />
+            <ConditionChip
+              ok={!conditions?.circuitBreakerActive}
+              bad={conditions?.circuitBreakerActive}
+              label={conditions?.circuitBreakerActive
+                ? `Circuit breaker (${conditions.circuitBreakerWindowsRemaining}w left)`
+                : "CB off"}
+            />
+            <ConditionChip
+              ok={!conditions?.dailyLimitHit}
+              bad={conditions?.dailyLimitHit}
+              label={conditions?.dailyLimitHit
+                ? `Daily limit hit`
+                : `Daily P&L $${(conditions?.dailyPnl ?? 0).toFixed(2)} / -$${conditions?.dailyLossLimit ?? 0}`}
+            />
+            {conditions?.dbDegraded && <ConditionChip bad label="DB offline" />}
+            {(conditions?.doubtPenaltyPp ?? 0) > 0 && (
+              <ConditionChip warn label={`Doubt penalty +${conditions!.doubtPenaltyPp}pp`} />
+            )}
+            {(conditions?.warmupSecondsRemaining ?? 0) > 0 && (
+              <ConditionChip warn label={`Window warmup ${conditions!.warmupSecondsRemaining}s`} />
+            )}
+            {conditions?.directionCapEnabled && (
+              <>
+                <ConditionChip
+                  ok={conditions.directionCountYes < conditions.maxSameDirectionBets}
+                  bad={conditions.directionCountYes >= conditions.maxSameDirectionBets}
+                  label={`YES ${conditions.directionCountYes}/${conditions.maxSameDirectionBets} bets`}
+                />
+                <ConditionChip
+                  ok={conditions.directionCountNo < conditions.maxSameDirectionBets}
+                  bad={conditions.directionCountNo >= conditions.maxSameDirectionBets}
+                  label={`NO ${conditions.directionCountNo}/${conditions.maxSameDirectionBets} bets`}
+                />
+              </>
+            )}
+            <ConditionChip
+              ok={conditions ? conditions.totalBetsThisWindow < conditions.maxBetsPerWindow : true}
+              bad={conditions ? conditions.totalBetsThisWindow >= conditions.maxBetsPerWindow : false}
+              label={`${conditions?.totalBetsThisWindow ?? 0}/${conditions?.maxBetsPerWindow ?? "?"} window bets`}
+            />
+          </div>
+
+          {/* ── Per-coin table ── */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border/50 bg-muted/20">
+                  <th className="text-left px-5 py-2 font-medium text-muted-foreground">Coin</th>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">Signal</th>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">Conf</th>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">Status</th>
+                  <th className="text-left px-3 py-2 pr-5 font-medium text-muted-foreground">Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {evaluation.map((ev) => {
+                  const emptyBlocked = conditions?.emptyBookBlockedCoins.includes(ev.symbol);
+                  const emptyAttempts = conditions?.emptyBookAttempts[ev.symbol];
+                  const fullyBlocked = conditions?.fullyBlockedCoins.includes(ev.symbol);
+                  const yesBlocked = conditions?.yesBlockedCoins.includes(ev.symbol);
+                  const autoTuneW = conditions?.autoTunePausedCoins[ev.symbol];
+                  const streakPaused = !!status?.coinStreakState?.[ev.symbol]?.pauseUntilWindowKey;
+                  const betPlaced = ev.betPlacedThisWindow;
+
+                  let statusNode: React.ReactNode;
+                  let extraReason = "";
+
+                  if (betPlaced) {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-medium border border-emerald-500/30">Bet placed</span>;
+                  } else if (emptyBlocked) {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-red-500/15 text-red-300 font-medium border border-red-500/30">Empty book ✕</span>;
+                    extraReason = "IOC 0 fills × 2 — blocked this window";
+                  } else if (emptyAttempts) {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-medium border border-amber-500/30">Empty ({emptyAttempts}/2)</span>;
+                    extraReason = "IOC 0 fill — will retry next tick";
+                  } else if (fullyBlocked) {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-red-500/15 text-red-300 font-medium border border-red-500/30">No edge ✕</span>;
+                    extraReason = "Permanently filtered — historical no-edge";
+                  } else if (autoTuneW) {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-medium border border-amber-500/30">Tune pause ({autoTuneW}w)</span>;
+                  } else if (streakPaused) {
+                    const st = status?.coinStreakState?.[ev.symbol];
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-300 font-medium border border-orange-500/30">Streak pause ({st?.consecutiveLosses}L)</span>;
+                  } else if (yesBlocked && ev.action === "BET_YES") {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-medium border border-amber-500/30">YES blocked</span>;
+                    extraReason = "YES bets historically unprofitable for this coin";
+                  } else if (ev.action === "SKIP") {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium">Skip</span>;
+                  } else {
+                    statusNode = (
+                      <span className={`px-2 py-0.5 rounded-full font-medium border ${ev.action === "BET_YES" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-red-500/15 text-red-300 border-red-500/30"}`}>
+                        {ev.action === "BET_YES" ? "▲ YES" : "▼ NO"}
+                      </span>
+                    );
+                  }
+
+                  return (
+                    <tr key={ev.symbol} className="border-b border-border/30 hover:bg-muted/20 transition-colors">
+                      <td className="px-5 py-2.5 font-bold text-foreground">{ev.symbol}</td>
+                      <td className="px-3 py-2.5">
+                        <span className={`font-mono text-[10px] tracking-wide ${ev.action === "SKIP" ? "text-muted-foreground" : ev.action === "BET_YES" ? "text-emerald-400" : "text-red-400"}`}>
+                          {ev.action}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-muted-foreground">
+                        {ev.confidence > 0 ? `${ev.confidence}%` : "—"}
+                      </td>
+                      <td className="px-3 py-2.5">{statusNode}</td>
+                      <td className="px-3 py-2.5 pr-5 text-muted-foreground max-w-[260px] truncate" title={extraReason || ev.reason}>
+                        {extraReason || ev.reason || "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {evaluation.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-5 text-center text-muted-foreground">
+                      No evaluation data yet — waiting for next bot tick
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {/* Window key footer */}
+          {conditions?.windowKey && (
+            <div className="px-5 py-2 border-t border-border/30 text-[10px] text-muted-foreground/50 font-mono">
+              Window: {conditions.windowKey}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ClearPausesButton() {
   const { getToken } = useAuth();
   const qc = useQueryClient();
@@ -574,6 +861,12 @@ export default function BotDashboard() {
     queryKey: ["bot-window-eval"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/window-eval`).then(r => r.json()),
     refetchInterval: 3_000,
+  });
+
+  const { data: conditionsData } = useQuery<BotConditionsSnapshot>({
+    queryKey: ["bot-conditions"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/conditions`).then(r => r.json()),
+    refetchInterval: 5_000,
   });
 
   const { data: perfReportData } = useQuery<{ report: PerformanceReport | null; pausedCoins: Record<string, number> }>({
@@ -1062,6 +1355,13 @@ export default function BotDashboard() {
             <ClearPausesButton />
           </div>
         )}
+
+        {/* ── Bot Conditions & Restrictions ── */}
+        <ConditionsPanel
+          conditions={conditionsData}
+          evaluation={evalData?.evaluation ?? []}
+          status={status}
+        />
 
         {/* ── Active Positions ── */}
         {openPosList.length > 0 && (

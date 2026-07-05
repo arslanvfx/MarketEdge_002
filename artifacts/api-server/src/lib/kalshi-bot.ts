@@ -4293,6 +4293,110 @@ export function clearAllPauses(): { clearedCoins: string[]; cbWasActive: boolean
   return { clearedCoins: [...clearedCoins, ...streakCleared], cbWasActive };
 }
 
+export interface BotConditionsSnapshot {
+  windowKey: string;
+  mode: BotMode;
+  // Global gates
+  botEnabled: boolean;
+  botPaused: boolean;
+  isInQuietHours: boolean;
+  quietHoursStart: number;
+  quietHoursEnd: number;
+  circuitBreakerActive: boolean;
+  circuitBreakerWindowsRemaining: number;
+  dailyLimitHit: boolean;
+  dailyPnl: number;
+  dailyLossLimit: number;
+  dbDegraded: boolean;
+  doubtPenaltyPp: number;
+  warmupSecondsRemaining: number;
+  // Betting caps
+  directionCapEnabled: boolean;
+  maxSameDirectionBets: number;
+  directionCountYes: number;
+  directionCountNo: number;
+  maxBetsPerWindow: number;
+  totalBetsThisWindow: number;
+  // Per-coin window-level restrictions
+  emptyBookBlockedCoins: string[];       // blocked after 2 consecutive 0-fill IOC attempts
+  emptyBookAttempts: Record<string, number>; // first 0-fill only — will retry next tick
+  // Static coin filters (permanent until code changes)
+  yesBlockedCoins: string[];
+  fullyBlockedCoins: string[];
+  // Auto-tune + streak pauses
+  autoTunePausedCoins: Record<string, number>; // sym -> windows remaining
+}
+
+/** Returns a snapshot of every active restriction and condition in the bot. */
+export function getWindowConditions(): BotConditionsSnapshot {
+  const wk = currentWindowKey();
+
+  const firstKalshiCoin = CRYPTO_COINS.find((c) => KALSHI_SERIES[c.symbol]);
+  const winCtx = firstKalshiCoin ? getKalshiWindowContext(firstKalshiCoin.symbol) : null;
+  const secondsIntoWindow = winCtx?.secondsElapsed ?? 0;
+  const warmupSecondsRemaining = Math.max(0, WINDOW_ENTRY_BUFFER_S - secondsIntoWindow);
+
+  const dirYes = windowDirectionCounts.get("yes") ?? 0;
+  const dirNo = windowDirectionCounts.get("no") ?? 0;
+
+  // Parse "sym:windowKey:mode" keys from the window-level sets
+  const emptyBookBlockedCoins: string[] = [];
+  for (const key of windowFailedFills) {
+    const sym = key.split(":")[0];
+    if (sym) emptyBookBlockedCoins.push(sym);
+  }
+
+  const emptyBookAttempts: Record<string, number> = {};
+  for (const [key, count] of windowZeroFillAttempts) {
+    if (windowFailedFills.has(key)) continue; // already in blocked list
+    const sym = key.split(":")[0];
+    if (sym) emptyBookAttempts[sym] = count;
+  }
+
+  return {
+    windowKey: wk,
+    mode: botMode,
+    botEnabled: config.enabled,
+    botPaused: paused,
+    isInQuietHours: isInQuietHours(new Date().getUTCHours(), config.quietHoursStart, config.quietHoursEnd),
+    quietHoursStart: config.quietHoursStart,
+    quietHoursEnd: config.quietHoursEnd,
+    circuitBreakerActive: cbState.circuitBreakerWindowsRemaining > 0,
+    circuitBreakerWindowsRemaining: cbState.circuitBreakerWindowsRemaining,
+    dailyLimitHit: dailyPnl <= -config.dailyLossLimit,
+    dailyPnl,
+    dailyLossLimit: config.dailyLossLimit,
+    dbDegraded: dbDegradedSince !== null,
+    doubtPenaltyPp: currentWindowDoubtPenalty,
+    warmupSecondsRemaining,
+    directionCapEnabled: config.enableDirectionCap,
+    maxSameDirectionBets: config.maxSameDirectionBets,
+    directionCountYes: dirYes,
+    directionCountNo: dirNo,
+    maxBetsPerWindow: config.maxBetsPerWindow,
+    totalBetsThisWindow: dirYes + dirNo,
+    emptyBookBlockedCoins,
+    emptyBookAttempts,
+    yesBlockedCoins: [...COIN_YES_BLOCKED],
+    fullyBlockedCoins: [...COIN_FULLY_BLOCKED],
+    autoTunePausedCoins: Object.fromEntries(pausedCoins),
+  };
+}
+
+/** Clears all window-level restrictions, direction counts, and coin pauses.
+ *  The nuclear "why is nothing happening?" reset — safe to call at any time. */
+export function resetWindowConditions(): { cleared: string[]; cbWasActive: boolean } {
+  windowFailedFills.clear();
+  windowZeroFillAttempts.clear();
+  windowDirectionCounts.clear();
+  const pauseResult = clearAllPauses();
+  logger.info(
+    { cleared: pauseResult.clearedCoins, cbWasActive: pauseResult.cbWasActive },
+    "[kalshi-bot] all window conditions and pauses reset manually",
+  );
+  return { cleared: pauseResult.clearedCoins, cbWasActive: pauseResult.cbWasActive };
+}
+
 export async function getBotAutoTuneLog(limit = 20): Promise<unknown[]> {
   try {
     return await db

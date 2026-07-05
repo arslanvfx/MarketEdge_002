@@ -22,6 +22,8 @@ import {
   getCoinGuardState,
   placeManualOrder,
   closeManualPosition,
+  getWindowConditions,
+  resetWindowConditions,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -575,6 +577,32 @@ router.post("/crypto/bot/close-manual-position", requireAuth, async (req, res) =
 router.post("/crypto/bot/clear-pauses", requireAuth, (_req, res) => {
   try {
     const result = clearAllPauses();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/conditions — current snapshot of every active restriction and
+// condition in the bot: global gates, direction caps, per-coin window blocks,
+// and static coin filters. Refreshed on every request (no caching).
+router.get("/crypto/bot/conditions", (_req, res) => {
+  try {
+    res.json(getWindowConditions());
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/reset-conditions — nuclear reset: clears all window-level
+// restrictions (empty-book cooldowns, direction counts), auto-tune pauses,
+// coin streak pauses, and the circuit-breaker countdown. Safe to call at any
+// time; does not affect mode, config, or open positions.
+router.post("/crypto/bot/reset-conditions", requireAuth, (_req, res) => {
+  try {
+    const result = resetWindowConditions();
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
