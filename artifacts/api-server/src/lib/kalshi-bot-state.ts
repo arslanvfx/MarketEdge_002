@@ -191,12 +191,12 @@ export const WINDOW_ENTRY_BUFFER_S = 60;
 export const STABILITY_WAIT_MAX_S = 240;
 // Mutable — parole system can remove coins when YES shadow accuracy reaches ≥60%.
 // Re-initialised from the hardcoded list on every server restart.
-export const COIN_YES_BLOCKED: Set<string> = new Set(["BTC", "ETH", "DOGE"]);
+export const COIN_YES_BLOCKED: Set<string> = new Set();
 // Mutable — parole system can remove coins when shadow accuracy reaches ≥60%.
 // Re-initialised from the hardcoded list on every server restart (so shadow
 // data re-accumulates to re-parole the coin).  Never use `as const` or
 // ReadonlySet here — checkAllParoles must be able to call .delete().
-export const COIN_FULLY_BLOCKED: Set<string> = new Set(["SOL"]);
+export const COIN_FULLY_BLOCKED: Set<string> = new Set();
 export const TIMING_CACHE_TTL = 5 * 60_000;
 
 // ---------------------------------------------------------------------------
