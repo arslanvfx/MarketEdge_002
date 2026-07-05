@@ -425,31 +425,6 @@ async function _runBotTick(
   // Place the bet
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
 
-  // ── Signal accuracy guard ─────────────────────────────────────────────────
-  // If the coin's recent signal accuracy is below 50 %, every bet is EV-negative
-  // by definition (win rate < cost of a 50¢ contract).  The engine's own EV gate
-  // can't catch this because yesPrice is null at decision time — this is the
-  // direct backstop.  Skip when null to avoid blocking coins with no history.
-  {
-    const sigAcc = (decision.signals as Record<string, unknown>).signalAccuracyPct;
-    if (typeof sigAcc === "number" && sigAcc < 50) {
-      logger.info(
-        { sym, direction, signalAccuracyPct: sigAcc },
-        "[kalshi-bot] SKIP — signal accuracy below 50 % (EV-negative regardless of agreement)",
-      );
-      if (lastDecisionWindowKey.get(sym) !== windowKey) {
-        lastDecisionWindowKey.set(sym, windowKey);
-        await persistBetRecord({
-          symbol: sym, windowKey, ticker: kalshiTicker, direction,
-          action: "skip",
-          signals: { ...decision.signals, reason: "signal-accuracy-below-50", signalAccuracyPct: sigAcc },
-          entryPrice: yesPrice, kalshiTarget,
-        });
-      }
-      return;
-    }
-  }
-
   // ── Candle momentum guard ─────────────────────────────────────────────────
   // Skip entry when the last 4 one-minute candles are clearly running against
   // the bet direction. Catches intra-window reversals that the snap-time model
