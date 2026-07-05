@@ -1747,8 +1747,9 @@ async function _runBotTick(
     ? _cachedKalshi.yesBid
     : null;
 
-  // The YES-side price we submit to Kalshi (0.01–0.99).
-  // For YES: bid at yes_ask. For NO: ask at yes_bid (crosses the spread).
+  // The YES-side reference price (raw cached ask/bid).
+  // Used for expectedFillCost sizing and the return-floor gate — NOT for the
+  // actual order price (see orderLimitPrice below).
   const liveLimitPrice: number | null =
     direction === "yes" ? liveYesAsk : liveYesBid;
 
@@ -1763,6 +1764,29 @@ async function _runBotTick(
       : (liveYesBid != null && liveYesBid > 0
           ? (1 - liveYesBid)
           : legacySideCost);
+
+  // Crossing buffer: bid 3 cents above the cached ask (or 3 cents below the cached
+  // bid for NO) so that minor ask drift between prefetch and order arrival still fills.
+  // Without this, even a 1-cent move in the ask causes our IOC to return 0 fills.
+  // The buffer is capped at the return floor — we never bid above what minReturnMultiple
+  // allows. The exchange always price-improves us to the actual resting ask, so paying
+  // the buffer price is the ceiling, not the typical outcome.
+  //   YES: bid at min(yesAsk + 0.03, maxCost),  cent-floored
+  //   NO:  ask at max(yesBid − 0.03, 1−maxCost), cent-ceiled
+  const _entryReturnFloor = config.minReturnMultiple ?? 1.45;
+  const _entryMaxCost = 1 / _entryReturnFloor;
+  const orderLimitPrice: number | null = (() => {
+    const CROSSING_BUFFER = 0.03;
+    if (direction === "yes") {
+      if (liveYesAsk == null) return null;
+      const raw = liveYesAsk + CROSSING_BUFFER;
+      return Math.floor(Math.min(raw, _entryMaxCost) * 100) / 100;
+    } else {
+      if (liveYesBid == null) return null;
+      const raw = liveYesBid - CROSSING_BUFFER;
+      return Math.ceil(Math.max(raw, 1 - _entryMaxCost) * 100) / 100;
+    }
+  })();
 
   // ── RETURN FLOOR GATE (actual fill cost) ────────────────────────────────
   // The decision engine already gates on minReturnMultiple using the midpoint
@@ -1925,7 +1949,15 @@ async function _runBotTick(
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
-  logger.info({ sym, direction, decision: decision.action, confidence: decision.confidence, secondsRemainingNow: Math.round(secondsRemainingNow) }, "[kalshi-bot] placing bet");
+  logger.info(
+    {
+      sym, direction, decision: decision.action, confidence: decision.confidence,
+      secondsRemainingNow: Math.round(secondsRemainingNow),
+      cachedAsk: direction === "yes" ? liveYesAsk : liveYesBid,
+      orderPrice: orderLimitPrice,
+    },
+    "[kalshi-bot] placing bet",
+  );
 
   let fillPrice = yesPrice; // paper fill
   let orderId: string | null = null;
@@ -1945,10 +1977,11 @@ async function _runBotTick(
           action: "buy",
           count: contractCount,
           type: "market",
-          // When the live bid/ask is available, submit at exactly that price.
-          // Fall back to midpoint mode when no live price is cached.
-          ...(liveLimitPrice != null
-            ? { limitPrice: liveLimitPrice }
+          // Use the crossing-buffered price (ask + 3c, capped at return floor)
+          // so minor ask drift between prefetch and order arrival still fills.
+          // Falls back to midpoint mode when no live price is cached.
+          ...(orderLimitPrice != null
+            ? { limitPrice: orderLimitPrice }
             : {
                 yesPrice: yesPrice ?? undefined,
                 minReturnMultiple: config.minReturnMultiple,
@@ -2177,6 +2210,20 @@ export async function placeManualOrder(opts: {
           ? (1 - yesBid)
           : (1 - (yesPrice ?? 0.5)));
 
+  // Crossing buffer — same 3-cent spread-crossing buffer as the bot path.
+  const _manualReturnFloor = config.minReturnMultiple ?? 1.45;
+  const _manualMaxCost = 1 / _manualReturnFloor;
+  const orderLimitPrice: number | null = (() => {
+    const CROSSING_BUFFER = 0.03;
+    if (direction === "yes") {
+      if (yesAsk == null || yesAsk <= 0) return null;
+      return Math.floor(Math.min(yesAsk + CROSSING_BUFFER, _manualMaxCost) * 100) / 100;
+    } else {
+      if (yesBid == null || yesBid <= 0) return null;
+      return Math.ceil(Math.max(yesBid - CROSSING_BUFFER, 1 - _manualMaxCost) * 100) / 100;
+    }
+  })();
+
   // Return floor guard — mirrors the bot entry path gate. Manual orders must
   // also respect the 1.45x floor so the user can't accidentally buy a contract
   // that would need to win to barely break even.
@@ -2229,8 +2276,8 @@ export async function placeManualOrder(opts: {
         action: "buy",
         count: contractCount,
         type: "market",
-        ...(liveLimitPrice != null
-          ? { limitPrice: liveLimitPrice }
+        ...(orderLimitPrice != null
+          ? { limitPrice: orderLimitPrice }
           : {
               yesPrice: yesPrice ?? undefined,
               minReturnMultiple: config.minReturnMultiple,
