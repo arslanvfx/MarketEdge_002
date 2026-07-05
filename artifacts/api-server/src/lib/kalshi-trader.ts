@@ -379,6 +379,11 @@ export interface PlaceOrderRetryOptions {
   // still clamped under the return-floor cap, so the payout floor always wins.
   priceImprovementMaxCents?: number; // default 0 (off)
   priceImprovementDelayMs?: number; // spacing between escalation attempts (default 300)
+  // Hard wall-clock deadline across the entire retry loop (ms). When elapsed
+  // time exceeds this the loop stops immediately and returns unfilled, so the
+  // next bot tick can re-evaluate signals with fresh data before deciding
+  // whether to keep trying. Undefined / 0 = no deadline.
+  maxDurationMs?: number;
 }
 
 // Place a fill_or_kill order, retrying until it fills or all attempts are
@@ -401,6 +406,8 @@ export async function placeOrderWithRetry(
   const immediateDelayMs = opts.immediateDelayMs ?? 200;
   const priceImprovementMaxCents = Math.max(0, opts.priceImprovementMaxCents ?? 0);
   const priceImprovementDelayMs = opts.priceImprovementDelayMs ?? 300;
+  const maxDurationMs = opts.maxDurationMs ?? 0; // 0 = no deadline
+  const startedAt = Date.now();
 
   let lastResult: PlaceOrderResult = { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null };
 
@@ -420,8 +427,21 @@ export async function placeOrderWithRetry(
     }
   };
 
+  const deadlineExceeded = (phase: string): boolean => {
+    if (maxDurationMs <= 0) return false;
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= maxDurationMs) {
+      console.warn(
+        `[kalshi] placeOrderWithRetry deadline hit after ${elapsed}ms — stopping ${phase}; next tick will re-evaluate signals`,
+      );
+      return true;
+    }
+    return false;
+  };
+
   // Phase 1 — immediate retries at the base price.
   for (let i = 0; i < immediateAttempts; i++) {
+    if (deadlineExceeded("Phase 1")) return lastResult;
     lastResult = await attempt(params);
     if (lastResult.filledCount > 0) return lastResult; // filled
     if (i < immediateAttempts - 1) await sleep(immediateDelayMs);
@@ -429,6 +449,7 @@ export async function placeOrderWithRetry(
 
   // Phase 2 — bounded price-improvement escalation (option 2).
   for (let cents = 1; cents <= priceImprovementMaxCents; cents++) {
+    if (deadlineExceeded("Phase 2")) return lastResult;
     await sleep(priceImprovementDelayMs);
     lastResult = await attempt({ ...params, priceImprovementCents: cents });
     if (lastResult.filledCount > 0) return lastResult; // filled after improving

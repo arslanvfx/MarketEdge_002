@@ -1807,6 +1807,12 @@ async function _runBotTick(
           // maxSlippageCents so we never pay more than configured, and the
           // return-floor cap still clamps every improved price.
           priceImprovementMaxCents: config.maxSlippageCents ?? 10,
+          // Hard deadline: if the retry loop takes longer than this we stop and
+          // return unfilled so the next tick can re-evaluate signals with fresh
+          // data before deciding whether to keep trying. This prevents stale
+          // signal commits — a direction that looked right 30 s ago may no
+          // longer look right once the price has moved.
+          maxDurationMs: 25_000,
         },
       );
       if (result.filledCount === 0) {
