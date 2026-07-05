@@ -9,12 +9,8 @@ import {
 } from "./kalshi-trader.ts";
 
 const FILLED: PlaceOrderResult = { orderId: "o1", status: "filled", filledCount: 5, avgPrice: 0.6 };
+const PARTIAL: PlaceOrderResult = { orderId: "o2", status: "filled", filledCount: 3, avgPrice: 0.6 };
 const UNFILLED: PlaceOrderResult = { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null };
-const FOK_ERR = new Error(
-  'Kalshi POST /portfolio/events/orders → 409: {"error":{"code":"fill_or_kill_insufficient_resting_volume"}}',
-);
-// Fast opts so tests don't sleep for real.
-const FAST = { immediateDelayMs: 0, priceImprovementDelayMs: 0 } as const;
 
 const baseParams: PlaceOrderParams = {
   ticker: "T",
@@ -28,9 +24,8 @@ const baseParams: PlaceOrderParams = {
 // ---------------------------------------------------------------------------
 // Option-2 price improvement (computeMarketableLimitPrice improvementCents)
 //
-// When a fill_or_kill order is repeatedly killed for insufficient resting
-// volume, the bot crosses further into the book by an extra cent per attempt.
-// These tests pin the pure pricing behavior of that escalation.
+// computeMarketableLimitPrice is still used for the limitPrice calculation;
+// these tests pin the pure pricing behavior and remain unchanged.
 // ---------------------------------------------------------------------------
 
 test("no improvement → base marketable price (bid crosses up by 0.15 buffer)", () => {
@@ -85,93 +80,67 @@ test("improvement works up to the floor cap but not beyond", () => {
 });
 
 // ---------------------------------------------------------------------------
-// placeOrderWithRetry orchestration (via injected placer — no network I/O)
+// placeOrderWithRetry — IOC (immediate_or_cancel) behavior
+//
+// IOC fills whatever the book has at the limit price immediately, then
+// cancels the rest. Partial fills are fully accepted — the bot tracks
+// position by actual fill count, not requested count.
 // ---------------------------------------------------------------------------
 
-test("fills on the first attempt → no retries, no price improvement", async () => {
+test("IOC: full fill → filledCount equals requested count", async () => {
   let calls = 0;
+  let receivedTif: string | undefined;
   const res = await placeOrderWithRetry(
     baseParams,
-    { immediateAttempts: 4, priceImprovementMaxCents: 5, ...FAST },
-    async () => {
+    {},
+    async (p) => {
       calls++;
+      receivedTif = p.timeInForce;
       return FILLED;
     },
   );
   assert.equal(res.filledCount, 5);
-  assert.equal(calls, 1);
+  assert.equal(calls, 1, "IOC submits exactly one order — no retry loop");
+  assert.equal(receivedTif, "immediate_or_cancel", "must use IOC, not FOK");
 });
 
-test("Phase 1: retries immediately at the SAME price until it fills", async () => {
-  const seen: (number | undefined)[] = [];
+test("IOC: partial fill → filledCount < requested, still a success", async () => {
+  const res = await placeOrderWithRetry(
+    baseParams,
+    {},
+    async () => PARTIAL,
+  );
+  assert.equal(res.filledCount, 3, "partial fill is accepted, not retried");
+  assert.equal(res.status, "filled");
+});
+
+test("IOC: zero fill (empty book) → filledCount 0, no retry attempted", async () => {
   let calls = 0;
   const res = await placeOrderWithRetry(
     baseParams,
-    { immediateAttempts: 4, priceImprovementMaxCents: 5, ...FAST },
-    async (p) => {
-      seen.push(p.priceImprovementCents);
-      calls++;
-      return calls < 3 ? UNFILLED : FILLED; // fill on the 3rd immediate attempt
-    },
-  );
-  assert.equal(res.filledCount, 5);
-  assert.equal(calls, 3);
-  // All Phase-1 attempts used the base price (no improvement).
-  assert.deepEqual(seen, [undefined, undefined, undefined]);
-});
-
-test("Phase 2: escalates +1 cent per attempt after immediate retries fail", async () => {
-  const improvements: (number | undefined)[] = [];
-  const res = await placeOrderWithRetry(
-    baseParams,
-    { immediateAttempts: 2, priceImprovementMaxCents: 5, ...FAST },
-    async (p) => {
-      improvements.push(p.priceImprovementCents);
-      return p.priceImprovementCents === 3 ? FILLED : UNFILLED; // fills at +3c
-    },
-  );
-  assert.equal(res.filledCount, 5);
-  // 2 immediate (base) attempts, then +1c, +2c, +3c (fills).
-  assert.deepEqual(improvements, [undefined, undefined, 1, 2, 3]);
-});
-
-test("FOK 409 is treated as unfilled and retried (not thrown)", async () => {
-  let calls = 0;
-  const res = await placeOrderWithRetry(
-    baseParams,
-    { immediateAttempts: 3, priceImprovementMaxCents: 0, ...FAST },
-    async () => {
-      calls++;
-      if (calls < 3) throw FOK_ERR; // killed twice, then fills
-      return FILLED;
-    },
-  );
-  assert.equal(res.filledCount, 5);
-  assert.equal(calls, 3);
-});
-
-test("all attempts exhausted → returns unfilled result", async () => {
-  let calls = 0;
-  const res = await placeOrderWithRetry(
-    baseParams,
-    { immediateAttempts: 2, priceImprovementMaxCents: 2, ...FAST },
-    async () => {
-      calls++;
-      throw FOK_ERR; // never fills
-    },
+    {},
+    async () => { calls++; return UNFILLED; },
   );
   assert.equal(res.filledCount, 0);
-  assert.equal(calls, 4); // 2 immediate + 2 escalation
+  assert.equal(calls, 1, "no retry — caller handles 0-fill by skipping the window");
 });
 
-test("CRITICAL: a non-FOK error is re-thrown, never swallowed", async () => {
+test("IOC: overrides any timeInForce already set on params", async () => {
+  let received: string | undefined;
+  await placeOrderWithRetry(
+    { ...baseParams, timeInForce: "fill_or_kill" }, // caller tried to set FOK
+    {},
+    async (p) => { received = p.timeInForce; return FILLED; },
+  );
+  assert.equal(received, "immediate_or_cancel", "placeOrderWithRetry always uses IOC");
+});
+
+test("CRITICAL: any error from the exchange is re-thrown immediately", async () => {
   await assert.rejects(
     placeOrderWithRetry(
       baseParams,
-      { immediateAttempts: 3, priceImprovementMaxCents: 3, ...FAST },
-      async () => {
-        throw new Error("Kalshi POST → 401: unauthorized");
-      },
+      {},
+      async () => { throw new Error("Kalshi POST → 401: unauthorized"); },
     ),
     /401: unauthorized/,
   );

@@ -1900,13 +1900,8 @@ async function _runBotTick(
           action: "buy",
           count: contractCount,
           type: "market",
-          // When the live bid/ask is available, submit at exactly that price so
-          // the FOK order crosses the spread without the old midpoint+buffer+cap
-          // interaction that blocked fills when the ask was a few cents above the
-          // midpoint+15c−(return-floor cap). The return-multiple was already
-          // enforced as a decision gate in Phase 3; double-capping here only
-          // prevents legitimate fills. Fall back to midpoint mode when no live
-          // price is cached.
+          // When the live bid/ask is available, submit at exactly that price.
+          // Fall back to midpoint mode when no live price is cached.
           ...(liveLimitPrice != null
             ? { limitPrice: liveLimitPrice }
             : {
@@ -1914,27 +1909,11 @@ async function _runBotTick(
                 minReturnMultiple: config.minReturnMultiple,
               }),
         },
-        {
-          // Phase 1: retry twice at the same price — a quick re-place often
-          // fills on thin books without waiting. Kept short so we reach Phase 2
-          // price escalation quickly when the book is genuinely thin.
-          immediateAttempts: 2,
-          // Phase 2: cross further into the book 1 cent at a time. Bounded by
-          // maxSlippageCents so we never pay more than configured, and the
-          // return-floor cap still clamps every improved price.
-          priceImprovementMaxCents: config.maxSlippageCents ?? 10,
-          // Hard deadline: if the retry loop takes longer than this we stop and
-          // return unfilled so the next tick can re-evaluate signals with fresh
-          // data before deciding whether to keep trying. This prevents stale
-          // signal commits — a direction that looked right 30 s ago may no
-          // longer look right once the price has moved.
-          maxDurationMs: 25_000,
-        },
       );
       if (result.filledCount === 0) {
-        logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] order not filled after retries — skipping entry");
-        // Mark this coin as having exhausted fills in this window so Phase 3 won't
-        // retry it on subsequent ticks. The set is cleared on every window transition.
+        logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] IOC order returned 0 fills — book empty, skipping entry");
+        // Mark this coin as having an empty book this window so Phase 3 won't
+        // hammer it on subsequent ticks. Cleared on every window transition.
         const failWk = currentWindowKey();
         windowFailedFills.add(`${sym}:${failWk}:${botMode}`);
         return;
@@ -2194,14 +2173,9 @@ export async function placeManualOrder(opts: {
               minReturnMultiple: config.minReturnMultiple,
             }),
       },
-      {
-        immediateAttempts: 2,
-        priceImprovementMaxCents: config.maxSlippageCents ?? 10,
-        maxDurationMs: 25_000,
-      },
     );
     if (result.filledCount === 0) {
-      throw new Error("Order was not filled after retries — the book may be empty right now");
+      throw new Error("IOC order returned 0 fills — the book may be empty right now");
     }
     fillPrice = result.avgPrice ?? yesAsk ?? yesPrice ?? 0.5;
     orderId = result.orderId;
@@ -3532,12 +3506,12 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    // FOK cooldown: if this coin already exhausted fill attempts in the current window
-    // (all retries failed against an empty book) skip it for the rest of the window.
+    // Empty-book cooldown: if this coin's IOC order returned 0 fills earlier this
+    // window, skip it for the rest of the window — the book is likely still empty.
     // windowFailedFills is cleared on every window transition so next window always retries.
     if (windowFailedFills.has(`${sym}:${windowKey}:${botMode}`)) {
       filteredByNewGuards.add(sym);
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no-fill cooldown — book was empty earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "empty-book cooldown — IOC returned 0 fills earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     if (secondsElapsed < WINDOW_ENTRY_BUFFER_S) {

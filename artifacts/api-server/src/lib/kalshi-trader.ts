@@ -176,6 +176,14 @@ export interface PlaceOrderParams {
   action: "buy" | "sell";
   count: number;
   type: "market" | "limit";
+  // Execution policy for this order.
+  //   "fill_or_kill"       — all contracts must fill immediately or the order is cancelled.
+  //                          Used for exits so we never leave a partial position open.
+  //   "immediate_or_cancel"— fill whatever the book has at this price right now,
+  //                          cancel the rest. Used for entries: a partial fill is
+  //                          accepted and the position is tracked by actual fill count.
+  // Defaults to "fill_or_kill" so existing callers (buyYes/buyNo/sellYes/sellNo) are unchanged.
+  timeInForce?: "fill_or_kill" | "immediate_or_cancel";
   yesPrice?: number; // reference YES price as a fraction (0-1); used to bound the marketable-limit price
   // Minimum payout multiple (1/cost). When > 1, the marketable-limit price is
   // capped so a contract can NEVER fill at a cost whose payout multiple falls
@@ -183,9 +191,7 @@ export interface PlaceOrderParams {
   // meet the cap — the authoritative, execution-time enforcement of the floor
   // (the decision-time cache price is frequently null and can't be trusted).
   minReturnMultiple?: number;
-  // Option-2 escalation: extra cents to cross further into the book when a
-  // fill_or_kill order is repeatedly killed for insufficient resting volume.
-  // Bounded by the caller and still clamped under the return-floor cap.
+  // Extra cents to cross further into the book; kept for backward compat.
   priceImprovementCents?: number;
   // When provided, this YES-side price is used directly as the order limit
   // price instead of computing it from yesPrice + MARKETABLE_BUFFER + return-
@@ -325,7 +331,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     side: bookSide, // BookSide: "bid" | "ask"
     count: String(params.count), // FixedPointCount string
     price, // required in v2 (YES-side)
-    time_in_force: "fill_or_kill",
+    time_in_force: params.timeInForce ?? "fill_or_kill",
     self_trade_prevention_type: "taker_at_cross",
   };
 
@@ -388,95 +394,38 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Kept for interface compatibility with existing callers; options are no longer used.
 export interface PlaceOrderRetryOptions {
-  // Phase 1 — immediate re-places at the SAME price. Kalshi's book is often
-  // thin for a moment and a fresh FOK a fraction of a second later fills. This
-  // is the primary lever: hammer the same price a few times before paying more.
-  immediateAttempts?: number; // total attempts at the base price (default 4)
-  immediateDelayMs?: number; // spacing between immediate attempts (default 200)
-  // Phase 2 (option 2) — if still unfilled, cross further into the book by an
-  // extra cent per attempt, up to this many cents, to capture resting volume
-  // sitting past our marketable price. 0 disables the escalation. Each cent is
-  // still clamped under the return-floor cap, so the payout floor always wins.
-  priceImprovementMaxCents?: number; // default 0 (off)
-  priceImprovementDelayMs?: number; // spacing between escalation attempts (default 300)
-  // Hard wall-clock deadline across the entire retry loop (ms). When elapsed
-  // time exceeds this the loop stops immediately and returns unfilled, so the
-  // next bot tick can re-evaluate signals with fresh data before deciding
-  // whether to keep trying. Undefined / 0 = no deadline.
+  immediateAttempts?: number;
+  immediateDelayMs?: number;
+  priceImprovementMaxCents?: number;
+  priceImprovementDelayMs?: number;
   maxDurationMs?: number;
 }
 
-// Place a fill_or_kill order, retrying until it fills or all attempts are
-// exhausted. FOK orders never rest on the book — each attempt either fully
-// fills immediately or is killed — so there is nothing to poll or cancel
-// between attempts; we simply re-place a fresh order.
-//
-// Strategy:
-//   Phase 1: retry immediately at the same price (thin books fill on a retry).
-//   Phase 2: only if Phase 1 fails, walk the price up one cent at a time
-//            (bounded), crossing further into the book to find resting volume.
+/**
+ * Place an immediate_or_cancel (IOC) entry order.
+ *
+ * IOC fills whatever resting contracts the book has at our limit price
+ * right now and cancels the remainder — so a partial fill is perfectly fine.
+ * The position is tracked by actual fill count, not the requested count.
+ *
+ * Why IOC instead of FOK:
+ *   - FOK requires ALL requested contracts to be available simultaneously;
+ *     a thin book causes a 409 that forces a multi-second retry loop.
+ *   - IOC fills immediately with whatever the book offers — 3 out of 5
+ *     contracts is a successful entry, not a failure. This is far faster
+ *     and more reliable for time-sensitive 15-minute windows.
+ *
+ * Exits (buyYes/buyNo/sellYes/sellNo) still use FOK via placeOrder directly
+ * so we never leave a partial position stranded on the exchange.
+ */
 export async function placeOrderWithRetry(
   params: PlaceOrderParams,
-  opts: PlaceOrderRetryOptions = {},
-  // Injectable order placer — defaults to the real placeOrder. Overridden in
-  // unit tests to exercise the retry/escalation logic without network I/O.
+  _opts: PlaceOrderRetryOptions = {}, // kept for interface compat; no longer used
   placeFn: (p: PlaceOrderParams) => Promise<PlaceOrderResult> = placeOrder,
 ): Promise<PlaceOrderResult> {
-  const immediateAttempts = Math.max(1, opts.immediateAttempts ?? 4);
-  const immediateDelayMs = opts.immediateDelayMs ?? 200;
-  const priceImprovementMaxCents = Math.max(0, opts.priceImprovementMaxCents ?? 0);
-  const priceImprovementDelayMs = opts.priceImprovementDelayMs ?? 300;
-  const maxDurationMs = opts.maxDurationMs ?? 0; // 0 = no deadline
-  const startedAt = Date.now();
-
-  let lastResult: PlaceOrderResult = { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null };
-
-  // A fill_or_kill order killed for insufficient resting volume throws a 409.
-  // In the RETRY (entry) path that is a soft "no fill — try again", so treat it
-  // as an unfilled result. Any OTHER error (auth, bad price, network, or a
-  // different 409) is a genuine failure and re-thrown.
-  const attempt = async (p: PlaceOrderParams): Promise<PlaceOrderResult> => {
-    try {
-      return await placeFn(p);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("fill_or_kill_insufficient_resting_volume")) {
-        return { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null };
-      }
-      throw err;
-    }
-  };
-
-  const deadlineExceeded = (phase: string): boolean => {
-    if (maxDurationMs <= 0) return false;
-    const elapsed = Date.now() - startedAt;
-    if (elapsed >= maxDurationMs) {
-      console.warn(
-        `[kalshi] placeOrderWithRetry deadline hit after ${elapsed}ms — stopping ${phase}; next tick will re-evaluate signals`,
-      );
-      return true;
-    }
-    return false;
-  };
-
-  // Phase 1 — immediate retries at the base price.
-  for (let i = 0; i < immediateAttempts; i++) {
-    if (deadlineExceeded("Phase 1")) return lastResult;
-    lastResult = await attempt(params);
-    if (lastResult.filledCount > 0) return lastResult; // filled
-    if (i < immediateAttempts - 1) await sleep(immediateDelayMs);
-  }
-
-  // Phase 2 — bounded price-improvement escalation (option 2).
-  for (let cents = 1; cents <= priceImprovementMaxCents; cents++) {
-    if (deadlineExceeded("Phase 2")) return lastResult;
-    await sleep(priceImprovementDelayMs);
-    lastResult = await attempt({ ...params, priceImprovementCents: cents });
-    if (lastResult.filledCount > 0) return lastResult; // filled after improving
-  }
-
-  return lastResult;
+  return placeFn({ ...params, timeInForce: "immediate_or_cancel" });
 }
 
 // ---------------------------------------------------------------------------
