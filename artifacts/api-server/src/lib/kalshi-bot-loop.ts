@@ -1008,11 +1008,10 @@ export async function runBotLoopTick(): Promise<void> {
         //   we want to bet YES, the signals are contradicted.  A contradicted
         //   bet (BTC stat=YES but ML=NO) is worse than no signal at all.
         //
-        // Rule B — No noise-floor signal: if any model that fired produced a
-        //   confidence ≤ NOISE_CONFIDENCE_FLOOR (45%) it carries no information.
-        //   This catches Claude at 28–44% which is genuine uncertainty, not a
-        //   weak lean.  The stat model typically outputs 50–58% so the 45% bar
-        //   does not penalise it; Claude/ML at 46-54% still passes (weak but real).
+        // Note: we intentionally do NOT block on low-confidence agreeing signals.
+        //   When all models agree on direction, a weakly-confident model (e.g.
+        //   Claude at 35%) still votes the right way — the EV gate handles the
+        //   math.  Only direction contradictions (above === false) are hard stops.
         const yesSigs = decision.signals as {
           statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
           statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
@@ -1025,7 +1024,6 @@ export async function runBotLoopTick(): Promise<void> {
         ]) {
           if (above == null) continue;
           if (above === false) yesViolation.push(`${name} says NO`);
-          else if ((conf ?? 0) <= NOISE_CONFIDENCE_FLOOR) yesViolation.push(`${name} noise (${conf ?? "?"}%≤${NOISE_CONFIDENCE_FLOOR}%)`);
         }
         if (yesViolation.length > 0) {
           filteredByNewGuards.add(sym);
@@ -1054,8 +1052,8 @@ export async function runBotLoopTick(): Promise<void> {
 
       if (decision.action === "BET_NO") {
         // Rule A — No opposite signal: any model pointing YES contradicts a NO bet.
-        // Rule B — No noise-floor signal: any model at ≤45% confidence is noise.
-        // (Symmetric with YES gate above.)
+        // Only direction contradictions block — same logic as YES gate above.
+        // Low-confidence agreeing signals are accepted; the EV gate handles math.
         const noSigs = decision.signals as {
           statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
           statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
@@ -1068,7 +1066,6 @@ export async function runBotLoopTick(): Promise<void> {
         ]) {
           if (above == null) continue;
           if (above === true) noViolation.push(`${name} says YES`);
-          else if ((conf ?? 0) <= NOISE_CONFIDENCE_FLOOR) noViolation.push(`${name} noise (${conf ?? "?"}%≤${NOISE_CONFIDENCE_FLOOR}%)`);
         }
         if (noViolation.length > 0) {
           filteredByNewGuards.add(sym);
