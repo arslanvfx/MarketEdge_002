@@ -58,6 +58,11 @@ import {
 import { closePosition, persistBetRecord, BetRecordArgs } from "./kalshi-bot-close";
 import { getTimingAccuracy } from "./kalshi-bot-db";
 
+// Minimum cashout value (per contract) required to allow any mid-window exit.
+// At $0 sell value there is no benefit over holding to expiry — the position
+// might still recover. Only exit when there is meaningful value to capture.
+const MIN_EXIT_CASHOUT_PER_CONTRACT = 0.15;
+
 
 export async function runBotTickForCoin(
   symbol: string,
@@ -225,14 +230,28 @@ async function _runBotTick(
       }, "[kalshi-bot] exit-guard result");
 
       if (guard.recommendation === "EXIT") {
-        const isLateRecovery = guard.phase === 2;
-        const exitReason = guard.phase === 2 ? "mid_exit_phase2" : "mid_exit_phase1";
-        logger.info({ sym, exitReason, guardReason: guard.reason }, "[kalshi-bot] mid-exit triggered");
-        await closePosition(pos, effectiveYesPrice, kalshiTarget, exitReason, isLateRecovery);
-        openPositions.delete(sym);
-        // Record that we exited mid-window so the entry loop can re-enter in
-        // the opposite direction ("sell and rebuy") with a higher confidence bar.
-        midExitedWindows.set(sym, { windowKey, direction: pos.direction });
+        // Cashout floor: never exit mid-window if the sell value is below the
+        // minimum. At near-$0 payout there is no advantage over holding to expiry
+        // and the position may still recover. Hold this tick and re-evaluate next.
+        const currentSellValue = effectiveYesPrice !== null
+          ? (pos.direction === "yes" ? effectiveYesPrice : 1 - effectiveYesPrice) * pos.contractCount
+          : null;
+        const minCashout = MIN_EXIT_CASHOUT_PER_CONTRACT * pos.contractCount;
+        if (currentSellValue !== null && currentSellValue < minCashout) {
+          logger.info(
+            { sym, direction: pos.direction, sellValue: currentSellValue.toFixed(3), minCashout: minCashout.toFixed(2), guardReason: guard.reason },
+            "[kalshi-bot] HOLD — cashout value below floor; waiting for recovery before exit",
+          );
+        } else {
+          const isLateRecovery = guard.phase === 2;
+          const exitReason = guard.phase === 2 ? "mid_exit_phase2" : "mid_exit_phase1";
+          logger.info({ sym, exitReason, guardReason: guard.reason }, "[kalshi-bot] mid-exit triggered");
+          await closePosition(pos, effectiveYesPrice, kalshiTarget, exitReason, isLateRecovery);
+          openPositions.delete(sym);
+          // Record that we exited mid-window so the entry loop can re-enter in
+          // the opposite direction ("sell and rebuy") with a higher confidence bar.
+          midExitedWindows.set(sym, { windowKey, direction: pos.direction });
+        }
       }
 
       // Guaranteed time-stop: if < 2 minutes remain in the 15-min window AND the
@@ -248,19 +267,32 @@ async function _runBotTick(
             (pos.direction === "no"  && cryptoPrice >= pos.kalshiTarget)
           );
           if (isPositionLosing) {
-            logger.info(
-              {
-                sym,
-                minutesRemaining,
-                cryptoPrice,
-                strike: pos.kalshiTarget,
-                direction: pos.direction,
-                yesPrice: effectiveYesPrice,
-              },
-              "[kalshi-bot] time-stop triggered — exiting losing position before expiry",
-            );
-            await closePosition(pos, effectiveYesPrice, kalshiTarget, "mid_exit_time");
-            openPositions.delete(sym);
+            // Same cashout floor as the exit guard — if sell value is near-$0
+            // there is nothing to recover by closing; let it expire instead.
+            const tseSellValue = effectiveYesPrice !== null
+              ? (pos.direction === "yes" ? effectiveYesPrice : 1 - effectiveYesPrice) * pos.contractCount
+              : null;
+            const tseMinCashout = MIN_EXIT_CASHOUT_PER_CONTRACT * pos.contractCount;
+            if (tseSellValue !== null && tseSellValue < tseMinCashout) {
+              logger.info(
+                { sym, minutesRemaining, tseSellValue: tseSellValue.toFixed(3), tseMinCashout: tseMinCashout.toFixed(2) },
+                "[kalshi-bot] time-stop HOLD — sell value below floor; letting position expire",
+              );
+            } else {
+              logger.info(
+                {
+                  sym,
+                  minutesRemaining,
+                  cryptoPrice,
+                  strike: pos.kalshiTarget,
+                  direction: pos.direction,
+                  yesPrice: effectiveYesPrice,
+                },
+                "[kalshi-bot] time-stop triggered — exiting losing position before expiry",
+              );
+              await closePosition(pos, effectiveYesPrice, kalshiTarget, "mid_exit_time");
+              openPositions.delete(sym);
+            }
           }
         }
       }
