@@ -577,6 +577,7 @@ export async function runBotLoopTick(): Promise<void> {
     // suspended by the auto-tune engine (5 consecutive losses).
     if (pausedCoins.has(sym)) {
       const remaining = pausedCoins.get(sym) ?? 0;
+      filteredByNewGuards.add(sym);
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `auto-tune S.paused (${remaining} windows remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
