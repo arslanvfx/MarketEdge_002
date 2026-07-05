@@ -1708,7 +1708,23 @@ async function _runBotTick(
   // (min) and maxBetSize (max) according to the engine's confidence. When
   // enableDynamicSizing is false this returns config.betSize unchanged (legacy).
   const targetBetSize = computeDynamicBetSize(decision.confidence, config);
-  const contractCount = Math.max(1, Math.floor(targetBetSize / expectedFillCost));
+  const contractCount = Math.floor(targetBetSize / expectedFillCost);
+  // If budget can't buy even one contract at the live ask, skip this entry and
+  // engage the FOK-cooldown so this coin doesn't retry the same window.
+  if (contractCount < 1) {
+    logger.warn(
+      {
+        sym,
+        targetBetSize: targetBetSize.toFixed(4),
+        expectedFillCost: expectedFillCost.toFixed(4),
+        direction,
+        mode: botMode,
+      },
+      "[kalshi-bot] SKIP — budget cannot buy 1 contract at current ask; engaging fill cooldown",
+    );
+    windowFailedFills.add(`${sym}:${windowKey}:${botMode}`);
+    return;
+  }
   const betAmount = contractCount * expectedFillCost; // expected dollars risked
   if (config.enableDynamicSizing && targetBetSize !== config.betSize) {
     logger.info(

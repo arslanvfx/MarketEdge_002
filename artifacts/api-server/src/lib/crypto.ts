@@ -1958,7 +1958,9 @@ export const KALSHI_SERIES: Record<string, string> = {
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
 // Stores the event ticker so window transitions can be detected by callers.
 const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number; closeTime?: string; yesPrice?: number | null; yesAsk?: number | null; yesBid?: number | null }>();
-const KALSHI_TARGET_LIB_TTL = 12_000;
+// Reduced to 5s so bid/ask data used at order time is always ≤5s stale,
+// matching the near-boundary TTL that was already applied at window edges.
+const KALSHI_TARGET_LIB_TTL = 5_000;
 
 // Tracks when each symbol's new-window Kalshi target was first confirmed.
 // Set the moment a NEW ticker is seen in fetchKalshiTarget (i.e. Kalshi published).
