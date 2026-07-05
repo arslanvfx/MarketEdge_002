@@ -1,0 +1,237 @@
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
+
+export interface BotConfig {
+  betSize: number;
+  dailyLossLimit: number;
+  signalThreshold: number;
+  minConfidence: number;
+  decisionMode: DecisionMode;
+  paperDecisionMode?: DecisionMode;
+  liveDecisionMode?: DecisionMode;
+  midExitSensitivity: "conservative" | "balanced" | "aggressive";
+  phase2ThresholdPp: number;
+  maxEntryMinutes: number;
+  minRemainingMinutes: number;
+  maxBetsPerWindow: number;
+  enabled: boolean;
+  quietHoursStart: number;
+  quietHoursEnd: number;
+  maxConsecutiveLosses: number;
+  circuitBreakerPauseWindows: number;
+  enableDirectionCap: boolean;
+  maxSameDirectionBets: number;
+  enableMomentumFilter: boolean;
+  momentumWindowCount: number;
+  enableAutoTuning: boolean;
+  autoTuneWindowSize: number;
+  enableBorderGuard: boolean;
+  borderProximityPct: number;
+  borderLookbackBets: number;
+  requireMonitorReady: boolean;
+  regimePenalty: number;
+  mlVetoMinConfidence: number;
+  betProfile: "normal" | "aggressive";
+  paperStartingBalance: number;
+  paperWinReturnRate: number;
+  paperBalanceResetAt: string | null;
+  maxBetSize: number;
+  minAccountBalance: number;
+  maxTotalExposure: number;
+  maxDailyLossPerCoin: number;
+  coinStreakLossLimit: number;
+  coinStreakPauseWindows: number;
+  maxSlippageCents: number;
+  minReturnMultiple: number;
+  enableDynamicSizing: boolean;
+  dynamicSizingMaxConfidence: number;
+}
+
+export interface LogicModeStats {
+  mode: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  avgConfidence: number | null;
+}
+
+export interface BacktestModeStats {
+  mode: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  coverage: number;
+}
+
+export interface OpenPosition {
+  id: string; symbol: string; windowKey: string; ticker: string;
+  direction: "yes" | "no"; entryYesPrice: number; contractCount: number;
+  betAmount: number; kalshiTarget: number; openedAt: number;
+  cryptoPriceAtEntry: number | null;
+  currentYesPrice: number | null;
+  unrealizedPnl: number | null;
+  guardStates: GuardStates | null;
+  guardReason: string | null;
+  source?: "bot" | "manual";
+}
+
+export interface GuardStates {
+  holdDurationMet?: boolean; flipConfirmed?: boolean;
+  erSupports?: boolean; timingSupports?: boolean; phase2Active?: boolean;
+  [key: string]: boolean | undefined;
+}
+
+export interface BotStatus {
+  mode: "paper" | "live"; status: string; paused: boolean;
+  config: BotConfig; openPositions: OpenPosition[];
+  dailyPnl: number; accountBalance: number | null;
+  warmupSecondsRemaining: number | null; configured: boolean;
+  circuitBreakerWindowsRemaining: number;
+  consecutiveLosses: number;
+  isInQuietHours: boolean;
+  dbDegraded?: boolean;
+  dbDegradedSince?: string | null;
+  isProductionEnv?: boolean;
+  mlStatus?: {
+    ready: boolean; readyCount: number; totalCount: number;
+    minWindows: number; minRequired: number;
+  };
+  coinStreakState?: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
+}
+
+export interface HistoryRecord {
+  id: string; symbol: string; windowKey: string; ticker: string | null;
+  direction: string | null; action: string; mode: string;
+  signals: Record<string, unknown> | null;
+  entryPrice: string | null; exitPrice: string | null;
+  contractCount: number | null; betAmount: string | null;
+  pnl: string | null; exitReason: string | null;
+  phase2Activated: boolean | null; outcome: string | null;
+  kalshiTarget: string | null;
+  cryptoPriceAtEntry: string | null; cryptoPriceAtExit: string | null;
+  createdAt: string; exitedAt: string | null;
+  decisionMode: string | null;
+  source: string | null;
+}
+
+export interface WindowEval {
+  symbol: string; action: "BET_YES" | "BET_NO" | "SKIP";
+  confidence: number; score: number; reason: string;
+  windowKey: string; selected: boolean; betPlacedThisWindow: boolean; evaluatedAt: string;
+  placedBetDirection?: "yes" | "no";
+  placedBetConfidence?: number;
+  trendStability: "clean" | "choppy" | "reversing" | null;
+  regime: "trending_up" | "trending_down" | "ranging" | null;
+}
+
+export interface BotConditionsSnapshot {
+  windowKey: string;
+  mode: "paper" | "live";
+  botEnabled: boolean;
+  botPaused: boolean;
+  isInQuietHours: boolean;
+  quietHoursStart: number;
+  quietHoursEnd: number;
+  circuitBreakerActive: boolean;
+  circuitBreakerWindowsRemaining: number;
+  dailyLimitHit: boolean;
+  dailyPnl: number;
+  dailyLossLimit: number;
+  dbDegraded: boolean;
+  doubtPenaltyPp: number;
+  warmupSecondsRemaining: number;
+  directionCapEnabled: boolean;
+  maxSameDirectionBets: number;
+  directionCountYes: number;
+  directionCountNo: number;
+  maxBetsPerWindow: number;
+  totalBetsThisWindow: number;
+  emptyBookBlockedCoins: string[];
+  emptyBookAttempts: Record<string, number>;
+  yesBlockedCoins: string[];
+  fullyBlockedCoins: string[];
+  autoTunePausedCoins: Record<string, number>;
+}
+
+export interface BotStats {
+  totalBets: number; wins: number; losses: number; totalPnl: number;
+  paperBets: number; liveBets: number;
+  bySymbol: Array<{ symbol: string; bets: number; wins: number; losses: number; pnl: number }>;
+}
+
+export interface SymbolStats {
+  wins: number; losses: number; betCount: number; winRate: number | null;
+  currentConsecutiveLosses: number;
+}
+
+export interface HourBandStats {
+  band: string; wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
+export interface DirectionStats {
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
+export interface ConfidenceBandStats {
+  band: string; lowerBound: number;
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
+export interface AgreementLevelStats {
+  level: string; agreeing: number; total: number;
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+
+export interface DayOfWeekStats {
+  day: number; dayName: string;
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+export interface HourOfDayStats {
+  hour: number;
+  wins: number; losses: number; betCount: number; winRate: number | null;
+}
+export interface PerformanceReport {
+  totalBets: number; wins: number; losses: number;
+  overallWinRate: number | null;
+  last10WinRate: number | null;
+  last30WinRate: number | null;
+  last24hWinRate: number | null;
+  bySymbol: Record<string, SymbolStats>;
+  byHourBand: Record<string, HourBandStats>;
+  byDirection: { yes: DirectionStats; no: DirectionStats };
+  byConfidenceBand: Record<string, ConfidenceBandStats>;
+  byAgreementLevel: Record<string, AgreementLevelStats>;
+  byDayOfWeek: Record<string, DayOfWeekStats>;
+  byHourOfDay: Record<string, HourOfDayStats>;
+  optimalConfidenceThreshold: number | null;
+  avgConfidenceWinners: number | null; avgConfidenceLosers: number | null;
+  exitReasonBreakdown: Record<string, number>;
+  circuitBreakerTriggers: number;
+  recommendations: string[];
+  computedAt: string;
+}
+
+export interface AutoTuneLogEntry {
+  id: number; createdAt: string;
+  ruleName: string; oldValue: string | null; newValue: string | null;
+  triggerReason: string;
+}
+
+export interface CoinGuardEntry {
+  symbol: string;
+  dailyLoss: number;
+  consecutiveLosses: number;
+  pauseUntilWindowKey: string | null;
+  slippageStrikes: number;
+}
+
+export interface CoinGuardState {
+  coins: CoinGuardEntry[];
+  maxDailyLossPerCoin: number;
+}
+
