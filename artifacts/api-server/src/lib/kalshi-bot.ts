@@ -1664,24 +1664,46 @@ async function _runBotTick(
 
   // Place the bet
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
-  // Cost per contract: YES contracts cost yesPrice per $1 face; NO contracts cost (1-yesPrice)
-  const sideCost = direction === "yes" ? (yesPrice ?? 0.5) : (1 - (yesPrice ?? 0.5));
 
-  // Size using the expected ACTUAL COST per contract, not the raw quote or the API ask price.
+  // ── LIVE-ASK FILL PRICE ──────────────────────────────────────────────────
+  // Use the live Kalshi bid/ask (cached from the most recent fetchKalshiTarget
+  // call, typically ≤12s old) to compute the order price and contract count.
   //
-  // YES buy (bid): worst-case cost = the bid price we submit (fill can only improve).
-  //   Use computeMarketableLimitPrice("bid") — it accounts for the +0.15 buffer.
-  //   e.g. yesPrice=0.50, bid=0.65, 2 contracts fit in $2 (floor(2/0.65)=3 at $1.95).
+  // This eliminates the midpoint-anchor + return-multiple-cap interaction that
+  // blocked fills: the old logic added +0.15 to the midpoint but then capped
+  // the result at 1/minReturnMultiple (≈0.714 for 1.4×), so a YES ask at 72c
+  // would never fill even with Phase 2 escalation.
   //
-  // NO buy (ask):  actual NO cost = (1 − YES_fill) ≈ sideCost = (1 − yesPrice).
-  //   The ask price we submit only needs to cross the spread; the fill happens at
-  //   the resting YES bid, and we receive that bid as a credit.  The ask price
-  //   itself is NOT our cost — using computeMarketableLimitPrice("ask") here would
-  //   return the low YES-side ask (e.g. 0.22) and massively overcount contracts.
-  const expectedFillCost =
+  //   YES: submit a BID at yes_ask  → cost per contract = yes_ask
+  //   NO:  submit an ASK at yes_bid → cost per contract = 1 − yes_bid
+  //        (placing our ask at the bid price crosses the spread for NO fills)
+  //
+  // Falls back to the midpoint-buffer calculation when live prices are absent.
+  const _cachedKalshi = getKalshiCachedData(sym);
+  const liveYesAsk = _cachedKalshi?.yesAsk != null && _cachedKalshi.yesAsk > 0
+    ? _cachedKalshi.yesAsk
+    : null;
+  const liveYesBid = _cachedKalshi?.yesBid != null && _cachedKalshi.yesBid > 0
+    ? _cachedKalshi.yesBid
+    : null;
+
+  // The YES-side price we submit to Kalshi (0.01–0.99).
+  // For YES: bid at yes_ask. For NO: ask at yes_bid (crosses the spread).
+  const liveLimitPrice: number | null =
+    direction === "yes" ? liveYesAsk : liveYesBid;
+
+  // Cost per contract (dollars actually at risk per contract):
+  //   YES: = yes_ask (the price we pay)
+  //   NO:  = 1 − yes_bid (complement of the YES bid credit we receive on fill)
+  // Legacy fallback uses the midpoint-based buffer + return-floor cap.
+  const legacySideCost = direction === "yes" ? (yesPrice ?? 0.5) : (1 - (yesPrice ?? 0.5));
+  const expectedFillCost: number =
     direction === "yes"
-      ? computeMarketableLimitPrice("bid", yesPrice, config.minReturnMultiple)
-      : sideCost; // NO cost ≈ 1 − yesPrice (unaffected by our aggressive ask price)
+      ? (liveLimitPrice ?? computeMarketableLimitPrice("bid", yesPrice, config.minReturnMultiple))
+      : (liveYesBid != null && liveYesBid > 0
+          ? (1 - liveYesBid)
+          : legacySideCost);
+
   // Confidence-based dynamic sizing: scale the target dollar bet between betSize
   // (min) and maxBetSize (max) according to the engine's confidence. When
   // enableDynamicSizing is false this returns config.betSize unchanged (legacy).
@@ -1816,11 +1838,19 @@ async function _runBotTick(
           action: "buy",
           count: contractCount,
           type: "market",
-          yesPrice: yesPrice ?? undefined, // bound the marketable-limit price to the current YES quote
-          // Authoritative return-floor enforcement at fill time. The decision-time
-          // gate can't be trusted (cache yesPrice is often null), so cap the order
-          // price here: fill_or_kill kills any fill below the payout floor.
-          minReturnMultiple: config.minReturnMultiple,
+          // When the live bid/ask is available, submit at exactly that price so
+          // the FOK order crosses the spread without the old midpoint+buffer+cap
+          // interaction that blocked fills when the ask was a few cents above the
+          // midpoint+15c−(return-floor cap). The return-multiple was already
+          // enforced as a decision gate in Phase 3; double-capping here only
+          // prevents legitimate fills. Fall back to midpoint mode when no live
+          // price is cached.
+          ...(liveLimitPrice != null
+            ? { limitPrice: liveLimitPrice }
+            : {
+                yesPrice: yesPrice ?? undefined,
+                minReturnMultiple: config.minReturnMultiple,
+              }),
         },
         {
           // Phase 1: retry twice at the same price — a quick re-place often

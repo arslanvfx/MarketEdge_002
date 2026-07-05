@@ -187,6 +187,12 @@ export interface PlaceOrderParams {
   // fill_or_kill order is repeatedly killed for insufficient resting volume.
   // Bounded by the caller and still clamped under the return-floor cap.
   priceImprovementCents?: number;
+  // When provided, this YES-side price is used directly as the order limit
+  // price instead of computing it from yesPrice + MARKETABLE_BUFFER + return-
+  // floor cap. Use when the caller has already fetched the live ask and wants
+  // to place at exactly that price. priceImprovementCents still escalates from
+  // this baseline. minReturnMultiple is ignored when limitPrice is set.
+  limitPrice?: number;
 }
 
 export interface PlaceOrderResult {
@@ -286,16 +292,31 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   const bookSide = wantYesExposure ? "bid" : "ask";
 
   // Marketable limit price (fixed-point YES-side dollars, clamped 0.01–0.99).
-  // With a reference yesPrice we bound slippage to ±MARKETABLE_BUFFER; without
-  // one (e.g. exits) we go fully aggressive to guarantee the fill. When
-  // minReturnMultiple is set (buys only), the price is additionally capped so
-  // the fill can never breach the payout-return floor.
-  const priceFrac = computeMarketableLimitPrice(
-    bookSide,
-    params.yesPrice,
-    params.action === "buy" ? params.minReturnMultiple : undefined,
-    params.priceImprovementCents,
-  );
+  //
+  // Two modes:
+  //   a) limitPrice provided — caller already has the live ask; use it directly
+  //      plus any priceImprovementCents escalation. No buffer, no return-floor cap.
+  //   b) yesPrice provided — legacy midpoint mode: add MARKETABLE_BUFFER to cross
+  //      the spread and optionally cap by minReturnMultiple.
+  let priceFrac: number;
+  if (params.limitPrice != null) {
+    const improve = Math.max(0, params.priceImprovementCents ?? 0) / 100;
+    const raw = bookSide === "bid"
+      ? params.limitPrice + improve   // YES: pay more to fill
+      : params.limitPrice - improve;  // NO (ask side): price lower to cross the bid
+    // cent-precision rounding: bid floors, ask ceils (mirrors computeMarketableLimitPrice)
+    priceFrac = bookSide === "bid"
+      ? Math.floor(raw * 100) / 100
+      : Math.ceil(raw * 100) / 100;
+    priceFrac = Math.min(0.99, Math.max(0.01, priceFrac));
+  } else {
+    priceFrac = computeMarketableLimitPrice(
+      bookSide,
+      params.yesPrice,
+      params.action === "buy" ? params.minReturnMultiple : undefined,
+      params.priceImprovementCents,
+    );
+  }
   const price = priceFrac.toFixed(2); // FixedPointDollars string — cent resolution required by Kalshi
 
   const body: Record<string, unknown> = {

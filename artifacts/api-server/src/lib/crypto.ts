@@ -1957,7 +1957,7 @@ export const KALSHI_SERIES: Record<string, string> = {
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
 // Stores the event ticker so window transitions can be detected by callers.
-const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number; closeTime?: string; yesPrice?: number | null }>();
+const kalshiTargetCache = new Map<string, { value: number | null; ticker?: string; at: number; closeTime?: string; yesPrice?: number | null; yesAsk?: number | null; yesBid?: number | null }>();
 const KALSHI_TARGET_LIB_TTL = 12_000;
 
 // Tracks when each symbol's new-window Kalshi target was first confirmed.
@@ -2026,6 +2026,8 @@ export function getKalshiCachedData(symbol: string): {
   value: number | null;
   ticker?: string;
   yesPrice?: number | null;
+  yesAsk?: number | null;
+  yesBid?: number | null;
   closeTime?: string;
 } | null {
   return kalshiTargetCache.get(symbol.toUpperCase()) ?? null;
@@ -2131,6 +2133,11 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
         at: Date.now(),
         closeTime: (selected as Record<string, unknown>).close_time as string | undefined,
         yesPrice,
+        // Store raw bid/ask so callers can place at the live market price
+        // rather than the midpoint. Used by the bot to eliminate the
+        // midpoint-anchor + return-multiple-cap interaction that can block fills.
+        yesAsk,
+        yesBid,
       });
       // Register the window ticker immediately so minutesElapsed is accurate from first sight.
       // priceAtOpen is filled in lazily by updateKalshiWindowPrice (first caller with coin price).
