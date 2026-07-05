@@ -2098,12 +2098,19 @@ export async function placeManualOrder(opts: {
 
   // Guard: live mode prerequisites
   if (targetMode === "live") {
+    if (!config.enabled) {
+      throw new Error("Bot is currently disabled — enable it before placing live orders");
+    }
     if (!isKalshiConfigured()) {
       throw new Error("Kalshi is not configured — add API credentials before placing live orders");
     }
-    const bal = accountBalance;
+    // Always fetch a fresh balance rather than relying on the nullable in-memory value
+    const bal = await getCachedKalshiBalance();
     const minBal = config.minAccountBalance ?? 5;
-    if (bal != null && bal < minBal) {
+    if (bal == null) {
+      throw new Error("Unable to verify account balance — please try again in a few seconds");
+    }
+    if (bal < minBal) {
       throw new Error(`Account balance $${bal.toFixed(2)} is below the minimum $${minBal.toFixed(2)} — top up before betting`);
     }
   }
