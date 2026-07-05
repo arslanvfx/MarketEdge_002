@@ -456,15 +456,30 @@ export function isKalshiConfigured(): boolean {
 let _balanceCache: { availableBalance: number; fetchedAt: number } | null = null;
 const BALANCE_CACHE_TTL_MS = 10_000;
 
-/** Return Kalshi available balance in dollars, cached for up to 10 seconds. */
+/** Return Kalshi available balance in dollars, cached for up to 10 seconds.
+ *  On fetch failure, falls back to the stale cached value (if any) rather than
+ *  aborting the trade — a transient Kalshi API timeout should not kill all bets
+ *  when we already have a recent balance reading. */
 export async function getCachedKalshiBalance(): Promise<number> {
   const now = Date.now();
   if (_balanceCache && now - _balanceCache.fetchedAt < BALANCE_CACHE_TTL_MS) {
     return _balanceCache.availableBalance;
   }
-  const bal = await getBalance();
-  _balanceCache = { availableBalance: bal.availableBalance, fetchedAt: now };
-  return bal.availableBalance;
+  try {
+    const bal = await getBalance();
+    _balanceCache = { availableBalance: bal.availableBalance, fetchedAt: now };
+    return bal.availableBalance;
+  } catch (err) {
+    if (_balanceCache) {
+      const staleAgeMs = now - _balanceCache.fetchedAt;
+      // Use stale cache (up to 60 s old) rather than aborting the trade
+      if (staleAgeMs < 60_000) {
+        console.warn(`[kalshi] balance fetch failed — using stale cache (${Math.round(staleAgeMs / 1000)}s old):`, err);
+        return _balanceCache.availableBalance;
+      }
+    }
+    throw err;
+  }
 }
 
 /** Invalidate the cached balance (call after a bet is placed so the next guard
