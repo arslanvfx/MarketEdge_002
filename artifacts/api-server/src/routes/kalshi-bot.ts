@@ -681,7 +681,10 @@ router.post("/crypto/bot/re-evaluate-bets", async (req, res) => {
     return;
   }
   try {
-    const result = await reEvaluateSettledBets();
+    const since = typeof req.query.since === "string" ? req.query.since : undefined;
+    const limitRaw = parseInt(String(req.query.limit ?? ""), 10);
+    const limit = !isNaN(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 5000) : undefined;
+    const result = await reEvaluateSettledBets({ since, limit });
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

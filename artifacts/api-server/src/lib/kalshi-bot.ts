@@ -3399,7 +3399,7 @@ export async function evalClosedBets(): Promise<void> {
  *
  * Returns a summary of how many bets were corrected.
  */
-export async function reEvaluateSettledBets(): Promise<{
+export async function reEvaluateSettledBets(opts: { since?: string; limit?: number } = {}): Promise<{
   checked: number;
   corrected: number;
   errors: number;
@@ -3408,8 +3408,27 @@ export async function reEvaluateSettledBets(): Promise<{
   type ReEvalDetail = { id: string; symbol: string; windowKey: string; oldOutcome: string; newOutcome: string; oldPnl: string; newPnl: string };
   const result = { checked: 0, corrected: 0, errors: 0, details: [] as ReEvalDetail[] };
 
+  const limitVal = opts.limit ?? 500;
+
   try {
-    // Fetch all evaluated expired bets that have a ticker stored
+    // Fetch evaluated expired bets that have a ticker stored.
+    // Orders DESC so the most recent bets are checked first (most likely to
+    // have been evaluated against Coinbase rather than Kalshi RTI).
+    const whereClause = opts.since
+      ? and(
+          isNotNull(kalshiBotBetsTable.evaluatedAt),
+          isNotNull(kalshiBotBetsTable.ticker),
+          eq(kalshiBotBetsTable.action, "expired"),
+          isNotNull(kalshiBotBetsTable.outcome),
+          sql`${kalshiBotBetsTable.windowKey} >= ${opts.since}`,
+        )
+      : and(
+          isNotNull(kalshiBotBetsTable.evaluatedAt),
+          isNotNull(kalshiBotBetsTable.ticker),
+          eq(kalshiBotBetsTable.action, "expired"),
+          isNotNull(kalshiBotBetsTable.outcome),
+        );
+
     const rows = await db
       .select({
         id: kalshiBotBetsTable.id,
@@ -3427,16 +3446,9 @@ export async function reEvaluateSettledBets(): Promise<{
         source: kalshiBotBetsTable.source,
       })
       .from(kalshiBotBetsTable)
-      .where(
-        and(
-          isNotNull(kalshiBotBetsTable.evaluatedAt),
-          isNotNull(kalshiBotBetsTable.ticker),
-          eq(kalshiBotBetsTable.action, "expired"),
-          isNotNull(kalshiBotBetsTable.outcome),
-        ),
-      )
-      .orderBy(asc(kalshiBotBetsTable.windowKey))
-      .limit(500);
+      .where(whereClause)
+      .orderBy(desc(kalshiBotBetsTable.windowKey))
+      .limit(limitVal);
 
     logger.info({ count: rows.length }, "[kalshi-bot] reEvaluateSettledBets: starting re-evaluation");
 
