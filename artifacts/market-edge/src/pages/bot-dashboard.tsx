@@ -386,7 +386,7 @@ function CountdownCell({ reason, windowKey }: { reason: string; windowKey: strin
   }, [scenario]);
 
   if (!scenario) {
-    return <span className="text-muted-foreground text-xs truncate max-w-[200px] block">{reason}</span>;
+    return <span className="text-muted-foreground text-xs break-words leading-snug" title={reason}>{reason}</span>;
   }
 
   const remaining = Math.max(0, Math.round((scenario.endsAt - now) / 1000));
@@ -1631,7 +1631,7 @@ export default function BotDashboard() {
                           </span>
                         ) : <span className="text-muted-foreground text-xs">—</span>}
                       </td>
-                      <td className="px-3 py-2.5"><CountdownCell reason={e.reason} windowKey={e.windowKey} /></td>
+                      <td className="px-3 py-2.5 min-w-[240px] max-w-[320px]"><CountdownCell reason={e.reason} windowKey={e.windowKey} /></td>
                       <td className="px-3 py-2.5">
                         {e.betPlacedThisWindow ? (
                           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap">
