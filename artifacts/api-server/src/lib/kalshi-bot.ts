@@ -54,7 +54,7 @@ import {
   type ExitState,
   type GuardStates,
 } from "./kalshi-bot-exit";
-import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry, getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice } from "./kalshi-trader";
+import { buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry, getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice, fetchKalshiMarketResult, fetchKalshiSettledMarkets } from "./kalshi-trader";
 import {
   getKalshiWindowContext,
   getWindowBetSignal,
@@ -3153,6 +3153,7 @@ export async function evalClosedBets(): Promise<void> {
         id: kalshiBotBetsTable.id,
         symbol: kalshiBotBetsTable.symbol,
         windowKey: kalshiBotBetsTable.windowKey,
+        ticker: kalshiBotBetsTable.ticker,
         direction: kalshiBotBetsTable.direction,
         action: kalshiBotBetsTable.action,
         mode: kalshiBotBetsTable.mode,
@@ -3181,12 +3182,18 @@ export async function evalClosedBets(): Promise<void> {
 
     let evaluated = 0;
     for (const row of rows) {
-      let outcome: "win" | "loss" | "push";
+      let outcome: "win" | "loss" | "push" = "loss"; // always overwritten before use; TS needs initialization
       let correctedPnl: number | null = null;
       let closePrice: number | null = null;
 
       if (row.action === "expired") {
-        // ── Settlement evaluation: fetch actual candle close at window end ──
+        // ── Settlement evaluation ─────────────────────────────────────────────
+        // Priority order:
+        //   1. Kalshi's own settlement result (authoritative — Kalshi settles via
+        //      CF Benchmarks RTI which differs from Coinbase candle close prices).
+        //   2. Coinbase 1-min candle close at the window boundary (legacy fallback).
+        //   3. cryptoPriceAtExit (live ticker captured at expiry — last resort).
+        //   4. Full-loss fallback after 90-s deferral (ensures row never gets stuck).
         const coin = CRYPTO_COINS.find((c) => c.symbol === row.symbol);
         if (!coin || !row.windowKey || row.direction == null) continue;
 
@@ -3195,86 +3202,106 @@ export async function evalClosedBets(): Promise<void> {
         const count = row.contractCount ?? 1;
         if (strike == null || entryPrice == null) continue;
 
-        // Always attempt to fetch the authoritative Coinbase closing candle first.
-        // Coinbase publishes 1-min candles within seconds of close, so this
-        // succeeds on the first or second 30-s tick after the window ends in
-        // the vast majority of cases — regardless of whether closePosition()
-        // had a cached coin price at exit time.
-        closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
-
-        // Coinbase candle unavailable (e.g. BNB is not listed on Coinbase, or
-        // the candle hasn't published yet).  Fall back to the coin price recorded
-        // at window expiry — it's the same value closePosition() already used for
-        // the initial P&L estimate, so using it here is consistent and prevents
-        // the row staying stuck.
-        if (closePrice === null && row.cryptoPriceAtExit != null) {
-          closePrice = parseFloat(String(row.cryptoPriceAtExit));
-          logger.info(
-            { sym: row.symbol, id: row.id, windowKey: row.windowKey, closePrice },
-            "[kalshi-bot] evalClosedBets: Coinbase candle unavailable — using cryptoPriceAtExit as close price",
-          );
+        // ── Step 1: Kalshi settlement result (primary — no price comparison needed) ──
+        let kalshiSettled = false;
+        if (row.ticker) {
+          const settled = await fetchKalshiMarketResult(row.ticker);
+          if (settled.result === "yes" || settled.result === "no") {
+            const won = row.direction === "yes"
+              ? settled.result === "yes"
+              : settled.result === "no";
+            outcome = won ? "win" : "loss";
+            const ep = entryPrice;
+            const n  = count;
+            if (row.mode === "live") {
+              correctedPnl = won
+                ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+                : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+            } else {
+              const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+              correctedPnl = won ? betAmt * 0.50 : -betAmt;
+            }
+            logger.info(
+              { sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: settled.result, direction: row.direction, outcome, pnl: correctedPnl },
+              "[kalshi-bot] evalClosedBets: expired bet settled via Kalshi result (authoritative)",
+            );
+            kalshiSettled = true;
+          } else {
+            logger.debug(
+              { sym: row.symbol, id: row.id, ticker: row.ticker, status: settled.status },
+              "[kalshi-bot] evalClosedBets: Kalshi market not yet settled — falling back to Coinbase candle",
+            );
+          }
         }
 
-        if (closePrice === null) {
-          // Neither the Coinbase candle nor a cached coin price is available.
-          // Defer briefly (90 s) to give Coinbase time to publish the candle,
-          // then commit the full-loss fallback so the row never stays stuck.
-          const noCoinPriceAtExit = row.cryptoPriceAtExit == null;
-          const exitedAt = row.exitedAt instanceof Date
-            ? row.exitedAt
-            : row.exitedAt != null ? new Date(row.exitedAt as string) : null;
-          const pastDeferWindow = exitedAt == null || exitedAt <= deferCutoff;
+        if (!kalshiSettled) {
+          // ── Step 2: Coinbase 1-min candle close (legacy fallback) ─────────────
+          // Coinbase publishes 1-min candles within seconds of close, so this
+          // succeeds on the first or second 30-s tick after the window ends.
+          closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
 
-          if (!pastDeferWindow) {
-            logger.debug(
-              { sym: row.symbol, id: row.id, exitedAt, noCoinPriceAtExit },
-              "[kalshi-bot] evalClosedBets: candle not yet available — deferring (within 90-s window)",
+          // ── Step 3: cryptoPriceAtExit (live ticker captured at expiry) ────────
+          if (closePrice === null && row.cryptoPriceAtExit != null) {
+            closePrice = parseFloat(String(row.cryptoPriceAtExit));
+            logger.info(
+              { sym: row.symbol, id: row.id, windowKey: row.windowKey, closePrice },
+              "[kalshi-bot] evalClosedBets: Coinbase candle unavailable — using cryptoPriceAtExit as close price",
             );
+          }
+
+          if (closePrice === null) {
+            // ── Step 4: defer / full-loss fallback ──────────────────────────────
+            const noCoinPriceAtExit = row.cryptoPriceAtExit == null;
+            const exitedAt = row.exitedAt instanceof Date
+              ? row.exitedAt
+              : row.exitedAt != null ? new Date(row.exitedAt as string) : null;
+            const pastDeferWindow = exitedAt == null || exitedAt <= deferCutoff;
+
+            if (!pastDeferWindow) {
+              logger.debug(
+                { sym: row.symbol, id: row.id, exitedAt, noCoinPriceAtExit },
+                "[kalshi-bot] evalClosedBets: candle not yet available — deferring (within 90-s window)",
+              );
+              continue;
+            }
+
+            const fallbackPnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
+            if (fallbackPnl == null) continue;
+            const fallbackOutcome: "win" | "loss" | "push" =
+              fallbackPnl > 0 ? "win" : fallbackPnl < 0 ? "loss" : "push";
+            logger.warn(
+              { sym: row.symbol, id: row.id, windowKey: row.windowKey, pnl: fallbackPnl },
+              "[kalshi-bot] evalClosedBets: committing full-loss fallback — no price source after 90-s deferral; outcome may be inaccurate",
+            );
+            await db
+              .update(kalshiBotBetsTable)
+              .set({ outcome: fallbackOutcome, evaluatedAt: new Date() })
+              .where(eq(kalshiBotBetsTable.id, row.id));
+            evaluated++;
             continue;
           }
 
-          // Past the deferral window and no price source at all — commit the
-          // full-loss fallback recorded by closePosition() so the row doesn't
-          // stay unevaluated forever.  Log a warning so any inaccuracy is visible.
-          const fallbackPnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
-          if (fallbackPnl == null) continue;
-          const fallbackOutcome: "win" | "loss" | "push" =
-            fallbackPnl > 0 ? "win" : fallbackPnl < 0 ? "loss" : "push";
-          logger.warn(
-            { sym: row.symbol, id: row.id, windowKey: row.windowKey, pnl: fallbackPnl },
-            "[kalshi-bot] evalClosedBets: committing full-loss fallback — no price source after 90-s deferral; outcome may be inaccurate",
+          const priceAboveStrike = closePrice >= strike;
+          const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
+          outcome = won ? "win" : "loss";
+
+          // Real contract P&L for live bets; paper simulation for paper bets.
+          const ep = entryPrice;
+          const n  = count;
+          if (row.mode === "live") {
+            correctedPnl = won
+              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          } else {
+            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+            correctedPnl = won ? betAmt * 0.50 : -betAmt;
+          }
+
+          logger.info(
+            { sym: row.symbol, windowKey: row.windowKey, closePrice, strike, direction: row.direction, outcome, pnl: correctedPnl },
+            "[kalshi-bot] evalClosedBets: expired bet settled via Coinbase candle (fallback)",
           );
-          await db
-            .update(kalshiBotBetsTable)
-            .set({ outcome: fallbackOutcome, evaluatedAt: new Date() })
-            .where(eq(kalshiBotBetsTable.id, row.id));
-          evaluated++;
-          continue;
         }
-
-        const priceAboveStrike = closePrice >= strike;
-        const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
-        outcome = won ? "win" : "loss";
-
-        // Real contract P&L for live bets; paper simulation for paper bets.
-        // Each Kalshi contract pays $1.00 (win) or $0.00 (loss).
-        // YES cost = entryPrice/contract  → profit = (1 − entry) × n   or loss = −entry × n
-        // NO  cost = (1 − entry)/contract → profit = entry × n          or loss = −(1 − entry) × n
-        const ep = entryPrice;
-        const n  = count;
-        if (row.mode === "live") {
-          correctedPnl = won
-            ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-            : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-        } else {
-          const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
-          correctedPnl = won ? betAmt * 0.50 : -betAmt;
-        }
-
-        logger.info(
-          { sym: row.symbol, windowKey: row.windowKey, closePrice, strike, direction: row.direction, outcome, pnl: correctedPnl },
-          "[kalshi-bot] evalClosedBets: expired bet settled",
-        );
       } else {
         // ── Mid-window exit: pnl already computed from real exit price ────────
         const pnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
@@ -3353,6 +3380,137 @@ export async function evalClosedBets(): Promise<void> {
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] evalClosedBets error (non-fatal)");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Retroactive outcome re-evaluation (fix bets stored with wrong outcome)
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-evaluate all previously-evaluated expired bets that have a Kalshi ticker
+ * by fetching the authoritative settlement result from Kalshi's API.
+ *
+ * This corrects bets that were evaluated using Coinbase candle close prices
+ * (or live-ticker fallbacks) which can differ from Kalshi's CF Benchmarks RTI
+ * settlement price — particularly near the strike boundary.
+ *
+ * Returns a summary of how many bets were corrected.
+ */
+export async function reEvaluateSettledBets(): Promise<{
+  checked: number;
+  corrected: number;
+  errors: number;
+  details: Array<{ id: string; symbol: string; windowKey: string; oldOutcome: string; newOutcome: string; oldPnl: string; newPnl: string }>;
+}> {
+  type ReEvalDetail = { id: string; symbol: string; windowKey: string; oldOutcome: string; newOutcome: string; oldPnl: string; newPnl: string };
+  const result = { checked: 0, corrected: 0, errors: 0, details: [] as ReEvalDetail[] };
+
+  try {
+    // Fetch all evaluated expired bets that have a ticker stored
+    const rows = await db
+      .select({
+        id: kalshiBotBetsTable.id,
+        symbol: kalshiBotBetsTable.symbol,
+        windowKey: kalshiBotBetsTable.windowKey,
+        ticker: kalshiBotBetsTable.ticker,
+        direction: kalshiBotBetsTable.direction,
+        mode: kalshiBotBetsTable.mode,
+        outcome: kalshiBotBetsTable.outcome,
+        pnl: kalshiBotBetsTable.pnl,
+        kalshiTarget: kalshiBotBetsTable.kalshiTarget,
+        entryPrice: kalshiBotBetsTable.entryPrice,
+        contractCount: kalshiBotBetsTable.contractCount,
+        betAmount: kalshiBotBetsTable.betAmount,
+        source: kalshiBotBetsTable.source,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNotNull(kalshiBotBetsTable.evaluatedAt),
+          isNotNull(kalshiBotBetsTable.ticker),
+          eq(kalshiBotBetsTable.action, "expired"),
+          isNotNull(kalshiBotBetsTable.outcome),
+        ),
+      )
+      .orderBy(asc(kalshiBotBetsTable.windowKey))
+      .limit(500);
+
+    logger.info({ count: rows.length }, "[kalshi-bot] reEvaluateSettledBets: starting re-evaluation");
+
+    for (const row of rows) {
+      if (!row.ticker || !row.direction || !row.outcome) continue;
+      result.checked++;
+
+      try {
+        const settled = await fetchKalshiMarketResult(row.ticker);
+        if (settled.result !== "yes" && settled.result !== "no") continue; // not settled yet or API error
+
+        const won = row.direction === "yes"
+          ? settled.result === "yes"
+          : settled.result === "no";
+        const correctOutcome: "win" | "loss" = won ? "win" : "loss";
+
+        if (correctOutcome === row.outcome) continue; // already correct — no change needed
+
+        // Outcome is wrong — recompute P&L and correct the record
+        const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
+        const count = row.contractCount ?? 1;
+        let correctedPnl: number | null = null;
+
+        if (entryPrice != null) {
+          const ep = entryPrice;
+          const n  = count;
+          if (row.mode === "live") {
+            correctedPnl = won
+              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          } else {
+            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+            correctedPnl = won ? betAmt * 0.50 : -betAmt;
+          }
+        }
+
+        const oldPnl = row.pnl != null ? String(row.pnl) : "null";
+        const newPnl = correctedPnl != null ? String(correctedPnl) : oldPnl;
+
+        await db
+          .update(kalshiBotBetsTable)
+          .set({
+            outcome: correctOutcome,
+            ...(correctedPnl != null ? { pnl: String(correctedPnl) } : {}),
+          })
+          .where(eq(kalshiBotBetsTable.id, row.id));
+
+        result.corrected++;
+        result.details.push({
+          id: row.id,
+          symbol: row.symbol,
+          windowKey: row.windowKey ?? "",
+          oldOutcome: row.outcome,
+          newOutcome: correctOutcome,
+          oldPnl,
+          newPnl,
+        });
+
+        logger.warn(
+          { id: row.id, sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: settled.result, direction: row.direction, oldOutcome: row.outcome, newOutcome: correctOutcome, oldPnl, newPnl },
+          "[kalshi-bot] reEvaluateSettledBets: CORRECTED — outcome was wrong",
+        );
+      } catch (err) {
+        result.errors++;
+        logger.warn({ err, id: row.id, sym: row.symbol }, "[kalshi-bot] reEvaluateSettledBets: error evaluating bet");
+      }
+    }
+
+    logger.info(
+      { checked: result.checked, corrected: result.corrected, errors: result.errors },
+      "[kalshi-bot] reEvaluateSettledBets: complete",
+    );
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] reEvaluateSettledBets: query error");
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------

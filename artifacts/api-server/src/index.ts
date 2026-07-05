@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, fixLiveExpiredPnlHistorical } from "./lib/kalshi-bot";
+import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -392,6 +392,26 @@ app.listen(port, (err) => {
       await fixLiveExpiredPnlHistorical().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] historical P&L fix failed (non-fatal)"),
       );
+
+      // Re-evaluate all historical expired bets against Kalshi's authoritative
+      // settlement result (RTI).  Corrects any bets that were mis-evaluated
+      // using Coinbase candle close prices, which can differ from Kalshi's RTI
+      // settlement at the boundary.  Fire-and-forget — non-blocking.
+      reEvaluateSettledBets()
+        .then((r) => {
+          if (r.corrected > 0) {
+            logger.warn(
+              { checked: r.checked, corrected: r.corrected, details: r.details },
+              "[kalshi-bot] startup re-evaluation: CORRECTED mis-evaluated bets",
+            );
+          } else {
+            logger.info(
+              { checked: r.checked },
+              "[kalshi-bot] startup re-evaluation: all historical bets verified correct",
+            );
+          }
+        })
+        .catch((err) => logger.warn({ err }, "[kalshi-bot] startup re-evaluation failed (non-fatal)"));
 
       // Single consolidated summary so operators can confirm state at a glance.
       const s = getBotState();

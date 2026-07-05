@@ -18,6 +18,7 @@ import {
 } from "./autopilot";
 import { mlSnapPrice, computeStatWindowCall, SNAP_QUARTER_MS } from "./prediction-utils";
 import { logger } from "./logger";
+import { fetchKalshiSettledMarkets } from "./kalshi-trader";
 
 // Real-time crypto price predictor.
 //
@@ -2875,9 +2876,31 @@ export function startPredictionTracker(
         const records = historyStore.get(sym)!;
 
         // 1. Evaluate pending records whose target time has passed.
-        for (const rec of records) {
-          if (rec.status === "pending" && new Date(rec.targetTime).getTime() <= nowMs) {
-            try {
+        //
+        // Fetch recently settled Kalshi markets for this coin's series once
+        // per tick (if this coin has pending records to evaluate).  This gives
+        // us the authoritative RTI settlement result to use instead of a live
+        // Coinbase/Kraken ticker price — which can differ at the boundary.
+        const pendingToEval = records.filter(
+          (r) => r.status === "pending" && new Date(r.targetTime).getTime() <= nowMs,
+        );
+        let kalshiSettledMap = new Map<string, "yes" | "no">(); // targetTime ISO → result
+        if (pendingToEval.length > 0 && KALSHI_SERIES[sym]) {
+          try {
+            const settled = await fetchKalshiSettledMarkets(KALSHI_SERIES[sym], 20);
+            for (const m of settled) {
+              // close_time from Kalshi matches target_time in prediction_records
+              // (both represent the 15-min boundary at which the window expires).
+              kalshiSettledMap.set(m.closeTime, m.result);
+            }
+          } catch {
+            // non-fatal — fall back to live price comparison below
+          }
+        }
+
+        for (const rec of pendingToEval) {
+          if (rec.status !== "pending") continue; // guard for concurrent mutation
+          try {
               const actual = await getTicker(coin.product);
               const snapshotPrice = rec.priceAtSnapshot;
               const actualDir: "up" | "down" | "flat" =
@@ -2890,6 +2913,22 @@ export function startPredictionTracker(
               if (rec.kalshiTarget !== null && rec.kalshiTarget !== undefined) {
                 // Kalshi target known: a "hit" = model predicted the same side of
                 // the target as where price actually landed (mirrors Kalshi YES/NO).
+
+                // Determine the actual ABOVE/BELOW result.  Priority:
+                //   1. Kalshi settlement result (authoritative — RTI, not Coinbase).
+                //   2. Live ticker price vs strike (fallback if Kalshi not settled yet).
+                const kalshiResult = kalshiSettledMap.get(rec.targetTime);
+                const actualAbove: boolean = kalshiResult != null
+                  ? kalshiResult === "yes"               // YES = price was above strike at settlement
+                  : actual >= rec.kalshiTarget;          // fallback: live price comparison
+
+                if (kalshiResult != null) {
+                  logger.debug(
+                    { sym, targetTime: rec.targetTime, kalshiResult, actualAbove },
+                    "[tracker] using Kalshi settlement result for prediction evaluation",
+                  );
+                }
+
                 // For Claude/ensemble: prefer liveDirectionAbove (direct binary call
                 // from fetchLiveDirection, written after the stat snap) over the
                 // price-prediction-to-binary mapping — avoids boundary rounding error.
@@ -2898,7 +2937,6 @@ export function startPredictionTracker(
                   rec.liveDirectionAbove !== null && rec.liveDirectionAbove !== undefined
                     ? rec.liveDirectionAbove
                     : rec.predictedPrice >= rec.kalshiTarget;
-                const actualAbove    = actual >= rec.kalshiTarget;
                 correct = predictedAbove === actualAbove;
                 // ML: label this window's snapshot with the actual ABOVE/BELOW
                 // outcome and trigger an incremental retrain.  Only the stat
@@ -2930,10 +2968,13 @@ export function startPredictionTracker(
                 const wStartMs = new Date(rec.targetTime).getTime() - 15 * 60_000;
                 const wmKey = new Date(wStartMs).toISOString().slice(0, 16);
                 const wmId = `${sym}:${wmKey}`;
-                const wActualAbove = actual > rec.kalshiTarget;
-                const wActualBelow = actual < rec.kalshiTarget;
+                // Use Kalshi settlement result if available; otherwise fall back to price
+                const kalshiResult = kalshiSettledMap.get(rec.targetTime);
+                const wActualAbove = kalshiResult != null ? kalshiResult === "yes" : actual > rec.kalshiTarget;
+                const wActualBelow = kalshiResult != null ? kalshiResult === "no" : actual < rec.kalshiTarget;
                 const wStatAbove = rec.predictedPrice >= rec.kalshiTarget;
                 // push: actual landed exactly on the strike (within float precision)
+                // When using Kalshi result, there's no push case (it's always yes/no).
                 const wOutcome =
                   !wActualAbove && !wActualBelow
                     ? "push"
@@ -2947,11 +2988,8 @@ export function startPredictionTracker(
                   .catch(() => {});
 
                 // Score intra-window timing snapshots for this window.
-                // correct = was price_above at that minute mark the same as the
-                // actual final outcome?  Uses >= (inclusive) consistent with the
-                // main prediction evaluation rule.
                 // direction: strict `>` per spec (exact-strike = BELOW / push)
-                const timingActualAbove = actual > rec.kalshiTarget;
+                const timingActualAbove = kalshiResult != null ? kalshiResult === "yes" : actual > rec.kalshiTarget;
                 db.update(windowTimingSnapshotsTable)
                   .set({
                     actualAbove: timingActualAbove,
@@ -2971,7 +3009,6 @@ export function startPredictionTracker(
             } catch {
               // retry on next tick
             }
-          }
         }
 
         // 2. Snapshot a new prediction for the next boundary if not already done.

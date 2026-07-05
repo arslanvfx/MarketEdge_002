@@ -100,6 +100,88 @@ async function kalshiFetch<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Market Settlement
+// ---------------------------------------------------------------------------
+
+export interface KalshiMarketResult {
+  result: "yes" | "no" | null;   // null = not yet settled or unknown
+  status: string | null;          // "open" | "closed" | "settled" | etc.
+  floorStrike: number | null;
+}
+
+/**
+ * Fetch the settled result for a specific Kalshi market ticker.
+ * Returns { result: "yes" | "no" } when settled, or { result: null }
+ * if the market is still open/not-yet-settled, or on any error.
+ *
+ * This is the authoritative source for bet outcome evaluation —
+ * Kalshi settles using CF Benchmarks RTI which differs from Coinbase
+ * candle close prices.  Always prefer this over price comparison.
+ */
+export async function fetchKalshiMarketResult(ticker: string): Promise<KalshiMarketResult> {
+  try {
+    const data = await kalshiFetch<{
+      market?: { status?: string; result?: string; floor_strike?: number };
+    }>("GET", `/markets/${encodeURIComponent(ticker)}`, undefined, 8_000);
+
+    const m = data.market;
+    if (!m) return { result: null, status: null, floorStrike: null };
+
+    const result =
+      m.result === "yes" ? "yes"
+      : m.result === "no" ? "no"
+      : null;
+
+    return {
+      result,
+      status: typeof m.status === "string" ? m.status : null,
+      floorStrike: typeof m.floor_strike === "number" ? m.floor_strike : null,
+    };
+  } catch {
+    return { result: null, status: null, floorStrike: null };
+  }
+}
+
+/**
+ * Fetch recently settled markets for a series.
+ * Returns an array of { ticker, result, closeTime, floorStrike }.
+ * closeTime matches the target_time stored in prediction_records, enabling
+ * retroactive re-evaluation of model accuracy against the true settlement.
+ */
+export async function fetchKalshiSettledMarkets(
+  seriesTicker: string,
+  limit = 100,
+): Promise<Array<{ ticker: string; result: "yes" | "no"; closeTime: string; floorStrike: number }>> {
+  try {
+    const data = await kalshiFetch<{
+      markets?: Array<{
+        ticker?: string;
+        result?: string;
+        close_time?: string;
+        floor_strike?: number;
+      }>;
+    }>("GET", `/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=settled&limit=${limit}`, undefined, 10_000);
+
+    return (data.markets ?? [])
+      .filter(
+        (m): m is typeof m & { ticker: string; result: "yes" | "no"; close_time: string; floor_strike: number } =>
+          typeof m.ticker === "string" &&
+          (m.result === "yes" || m.result === "no") &&
+          typeof m.close_time === "string" &&
+          typeof m.floor_strike === "number",
+      )
+      .map((m) => ({
+        ticker: m.ticker,
+        result: m.result,
+        closeTime: m.close_time,
+        floorStrike: m.floor_strike,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Account
 // ---------------------------------------------------------------------------
 

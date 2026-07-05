@@ -24,6 +24,7 @@ import {
   closeManualPosition,
   getWindowConditions,
   resetWindowConditions,
+  reEvaluateSettledBets,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -659,6 +660,29 @@ router.delete("/crypto/bot/bets/old", async (req, res) => {
   try {
     const result = await clearBetHistoryOld(hours);
     res.json({ ok: true, deleted: result.deleted, hours });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/re-evaluate-bets — re-check all historical expired bets
+// against Kalshi's authoritative settlement result (RTI) and correct any that
+// were mis-evaluated using Coinbase candle prices.
+// Accepts Clerk admin auth OR X-Clear-Password header.
+router.post("/crypto/bot/re-evaluate-bets", async (req, res) => {
+  const clerkAuth = getAuth(req);
+  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
+  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
+  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
+  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
+  if (!hasClerkAuth && !hasClearPassword) {
+    res.status(401).json({ error: "Unauthorized — sign in as admin or supply X-Clear-Password" });
+    return;
+  }
+  try {
+    const result = await reEvaluateSettledBets();
+    res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
