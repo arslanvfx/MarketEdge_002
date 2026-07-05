@@ -573,15 +573,6 @@ export async function runBotLoopTick(): Promise<void> {
       ? deriveRegime(recentStrikes, S.config.momentumWindowCount)
       : null;
 
-    // Per-coin auto-tune pause guard: skip entry when this coin has been
-    // suspended by the auto-tune engine (5 consecutive losses).
-    if (pausedCoins.has(sym)) {
-      const remaining = pausedCoins.get(sym) ?? 0;
-      filteredByNewGuards.add(sym);
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `auto-tune S.paused (${remaining} windows remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
-      continue;
-    }
-
     if (!kalshiData?.ticker || kalshiData.value === null) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
@@ -751,6 +742,29 @@ export async function runBotLoopTick(): Promise<void> {
         });
         continue;
       }
+    }
+
+    // ── Per-coin auto-tune pause (shadow probe) ───────────────────────────────
+    // Fires after `decision` is computed so we can record a directional shadow
+    // bet. checkAllParoles() clears pausedCoins early when shadow accuracy
+    // reaches ≥60% over ≥3 evaluated bets (blockedBy="auto_tune_pause").
+    if (pausedCoins.has(sym)) {
+      const remaining = pausedCoins.get(sym) ?? 0;
+      if (decision.action !== "SKIP") {
+        const _pauseDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+        void recordShadowBet(
+          sym, _pauseDir, effectiveConfidence, decision.signals,
+          kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
+          "auto_tune_pause",
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] auto-tune-pause record failed (non-fatal)"));
+      }
+      filteredByNewGuards.add(sym);
+      evalResults.push({
+        symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
+        reason: `auto-tune pause (${remaining} window${remaining === 1 ? "" : "s"} remaining)`,
+        windowKey, selected: false, evaluatedAt: now, trendStability: stability, regime,
+      });
+      continue;
     }
 
     // Reversing: apply a -20pp penalty instead of a hard skip. Only very

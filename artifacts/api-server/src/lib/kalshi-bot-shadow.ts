@@ -383,6 +383,7 @@ export async function checkAllParoles(
     const result: ParoleState = { ...empty };
 
     const streakToResume: string[] = [];
+    const autoTunePauseToResume: string[] = [];
 
     for (const row of rows) {
       const { symbol: sym, blockedBy, evaluated, wins } = row;
@@ -412,6 +413,7 @@ export async function checkAllParoles(
         case "auto_tune":
           // Side effect handled below after the loop.
           break;
+        case "auto_tune_pause":      autoTunePauseToResume.push(sym); break;
         case "reversing_caution":    result.reversing.add(sym);    break;
         case "momentum_override":    result.momentum.add(sym);     break;
         case "price_band_yes":       result.priceBandYes.add(sym); break;
@@ -469,6 +471,21 @@ export async function checkAllParoles(
       persistCoinStreakState(streakMap, streakStore).catch(err =>
         logger.warn({ err }, "[parole] streak-pause DB persist failed (non-fatal)"),
       );
+    }
+
+    // ── Auto-tune pause clearance ─────────────────────────────────────────────
+    // Clear pausedCoins in-memory for any coin whose shadow accuracy (while paused)
+    // reached ≥60% over ≥3 evaluated bets. No DB persist needed — pausedCoins is
+    // rebuilt from scratch on restart, and the window-by-window countdown handles
+    // the normal expiry path.
+    for (const sym of autoTunePauseToResume) {
+      if (pausedCoins.has(sym)) {
+        logger.info(
+          { sym, remaining: pausedCoins.get(sym) },
+          "[parole] auto_tune_pause cleared by shadow accuracy — coin re-enabled early",
+        );
+        pausedCoins.delete(sym);
+      }
     }
 
     // ── Doubt penalty reduction log ───────────────────────────────────────────
