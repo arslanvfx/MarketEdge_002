@@ -334,10 +334,36 @@ const windowCBBuffer: Map<string, { wins: number; losses: number }> = new Map();
 // Null before the first run fires (typically ~15 min after startup).
 const cachedPerformanceReportByMode = new Map<BotMode, PerformanceReport>();
 
-// Shadow-parole result cache: avoids a DB hit on every 30-second bot tick.
-// The cache is keyed to the number of evaluated shadow bets so it refreshes
-// automatically whenever a new shadow bet is evaluated (not just on TTL).
-let _shadowParoleCache: { reducedBy: number; evaluatedCount: number; windowCutoff: string } | null = null;
+/**
+ * Per-restriction parole bypass state, computed once per tick by checkAllParoles().
+ * Per-coin Sets mean "this coin is cleared to pass despite the named restriction".
+ * Global fields (doubtPenaltyReduction, dirCapIncrease) apply to the whole tick.
+ */
+interface ParoleState {
+  doubtPenaltyReduction: number;    // pp reduction to windowDoubtPenalty (0 or 4)
+  reversing: Set<string>;           // coins bypassing reversing-caution -20pp block
+  momentum: Set<string>;            // coins bypassing momentum-override skip
+  priceBandYes: Set<string>;        // coins bypassing YES price-band (<50¢) block
+  priceBandNo: Set<string>;         // coins bypassing NO price-band (≥65¢) block
+  yesBelowStrike: Set<string>;      // coins bypassing YES below-strike gate
+  hardModel: Set<string>;           // coins bypassing hard-model-signal gate
+  noGate: Set<string>;              // coins bypassing position-relative NO gate
+  regime: Set<string>;              // coins bypassing regime-penalty drop
+  contrarian: Set<string>;          // coins bypassing contrarian-penalty drop
+  border: Set<string>;              // coins bypassing border-proximity guard
+  yesBlocked: Set<string>;          // coins bypassing COIN_YES_BLOCKED
+  fullyBlocked: Set<string>;        // coins bypassing COIN_FULLY_BLOCKED
+  dirCapIncrease: number;           // effective increase to maxSameDirectionBets cap
+}
+
+// Shadow-parole result cache: avoids a DB round-trip on every 30-second bot tick.
+// Invalidated (set to null) by evalShadowBets whenever new outcomes are stamped.
+let _shadowParoleCache: {
+  state: ParoleState;
+  evaluatedCount: number;
+  windowCutoff: string;
+  mode: BotMode;
+} | null = null;
 
 // Recent Kalshi strike prices per symbol (chronological, oldest first).
 // Maintained from DB on startup and updated after each position close.
@@ -2754,14 +2780,17 @@ const EVAL_DEFER_MS = 90_000; // 90 seconds
 
 /**
  * Record a shadow (probe) bet: a virtual bet that fires when a coin would have
- * been traded normally but was blocked solely by the doubt-penalty confidence
- * floor.  No Kalshi order is placed.  The outcome is evaluated at window close
- * against the real price and feeds the parole check.
+ * been traded normally but was blocked by a restriction gate.  No Kalshi order
+ * is placed.  The outcome is evaluated at window close against the real price
+ * and feeds checkAllParoles() which can lift the corresponding restriction.
  *
  * Shadow bets are completely isolated from all real-bet state — they never
  * touch openPositions, recentWindowOutcomes, P&L, balance guards, or streak
- * counters.  The `id` uses a deterministic prefix so duplicate recording on
- * the same window/coin pair is silently ignored.
+ * counters.  The deterministic ID (includes blockedBy) allows one shadow per
+ * coin × window × mode × restriction — silently ignores re-recording.
+ *
+ * @param blockedBy  The restriction gate that blocked this bet.  Stored in
+ *   signals.blockedBy so checkAllParoles can aggregate accuracy per restriction.
  */
 async function recordShadowBet(
   sym: string,
@@ -2772,9 +2801,14 @@ async function recordShadowBet(
   windowKey: string,
   mode: BotMode,
   ticker: string | null,
+  blockedBy: string,
 ): Promise<void> {
-  // Deterministic ID: one shadow bet per coin per window per mode.
-  const id = `shadow:${sym}:${windowKey}:${mode}`;
+  // Deterministic ID: one shadow bet per (coin, window, mode, restriction).
+  const id = `shadow:${sym}:${windowKey}:${mode}:${blockedBy}`;
+  const enrichedSignals = {
+    ...(signals as Record<string, unknown> ?? {}),
+    blockedBy,
+  };
   try {
     await db
       .insert(kalshiBotBetsTable)
@@ -2786,17 +2820,17 @@ async function recordShadowBet(
         direction,
         action: "shadow",
         mode,
-        signals: signals as Record<string, unknown>,
+        signals: enrichedSignals,
         kalshiTarget: kalshiTarget != null ? String(kalshiTarget) : null,
         source: "bot",
       })
-      .onConflictDoNothing(); // idempotent — ignore re-recording the same window
+      .onConflictDoNothing(); // idempotent — silently skip re-recording
     logger.info(
-      { sym, direction, confidence, windowKey, mode },
-      `[shadow-bet] recorded probe bet — blocked solely by doubt penalty`,
+      { sym, direction, confidence, windowKey, mode, blockedBy },
+      `[shadow-bet] probe recorded — ${blockedBy}`,
     );
   } catch (err) {
-    logger.warn({ err, sym, windowKey }, "[shadow-bet] failed to record (non-fatal)");
+    logger.warn({ err, sym, windowKey, blockedBy }, "[shadow-bet] failed to record (non-fatal)");
   }
 }
 
@@ -2888,94 +2922,189 @@ export async function evalShadowBets(): Promise<void> {
 }
 
 /**
- * Check whether shadow bet accuracy justifies an early parole — reducing the
- * active doubt-penalty by 4pp so marginally-blocked coins can re-enter.
+ * Compute per-restriction parole bypasses for the current tick.
  *
- * Returns the pp reduction to apply (0 or 4).  The result is cached per
- * evaluated-count so it refreshes automatically when new shadow outcomes land
- * without a fixed TTL that might go stale.
+ * Queries all evaluated shadow bets from the last 3 windows, groups them by
+ * (symbol, blockedBy), and applies the parole threshold (≥60% WR / ≥3 bets)
+ * independently for each restriction type.  Returns a ParoleState whose fields
+ * are used throughout the per-coin Phase-3 loop to bypass the corresponding
+ * gates.
  *
- * Win-rate ≥ 60% over ≥ 3 evaluated bets → reduce by 4pp.
- * Win-rate < 40% over ≥ 5 evaluated bets → log warning, no change.
+ * Side effects (when parole threshold is met):
+ *   - "auto_tune"    → reverts the temporary confidence raise in config + DB
+ *   - "streak_pause" → clears pauseUntilWindowKey in-memory + DB for paroled coins
+ *
+ * Result is cached by (totalEvaluated, windowCutoff, mode) and invalidated by
+ * evalShadowBets() whenever new shadow outcomes are stamped.
  */
-async function checkShadowParole(): Promise<number> {
+async function checkAllParoles(
+  mode: BotMode,
+  streakMap: Map<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>,
+  streakStore: { getAll(): Promise<unknown[]>; upsert(k: string, v: unknown): Promise<void> },
+): Promise<ParoleState> {
+  const empty: ParoleState = {
+    doubtPenaltyReduction: 0,
+    reversing: new Set(),
+    momentum: new Set(),
+    priceBandYes: new Set(),
+    priceBandNo: new Set(),
+    yesBelowStrike: new Set(),
+    hardModel: new Set(),
+    noGate: new Set(),
+    regime: new Set(),
+    contrarian: new Set(),
+    border: new Set(),
+    yesBlocked: new Set(),
+    fullyBlocked: new Set(),
+    dirCapIncrease: 0,
+  };
+
   try {
-    // Bound to the current restriction period: last 3 windows (45 min).
-    // Using a rolling window prevents old historical probes (from months ago)
-    // from polluting the parole decision for the current lockout.
+    // Rolling window: last 3 × 15-min windows (~45 min).
+    // Prevents stale historical probes from influencing current-lockout decisions.
     const nowMs = Date.now();
     const windowCutoff = new Date(
       Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - 3 * 15 * 60_000
     ).toISOString().slice(0, 16);
 
+    // Query per (symbol, blockedBy) — one row per restriction type per coin.
     const rows = await db
-      .select({ outcome: kalshiBotBetsTable.outcome })
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        blockedBy: sql<string>`${kalshiBotBetsTable.signals}->>'blockedBy'`,
+        evaluated: sql<number>`(COUNT(*) FILTER (WHERE ${kalshiBotBetsTable.outcome} IN ('win','loss')))::int`,
+        wins: sql<number>`(COUNT(*) FILTER (WHERE ${kalshiBotBetsTable.outcome} = 'win'))::int`,
+      })
       .from(kalshiBotBetsTable)
       .where(
         and(
           eq(kalshiBotBetsTable.action, "shadow"),
           isNotNull(kalshiBotBetsTable.evaluatedAt),
           sql`${kalshiBotBetsTable.windowKey} >= ${windowCutoff}`,
+          eq(kalshiBotBetsTable.mode, mode),
         ),
       )
-      .orderBy(desc(kalshiBotBetsTable.evaluatedAt))
-      .limit(10);
+      .groupBy(
+        kalshiBotBetsTable.symbol,
+        sql`${kalshiBotBetsTable.signals}->>'blockedBy'`,
+      );
 
-    const evaluated = rows.filter(r => r.outcome === "win" || r.outcome === "loss");
+    const totalEvaluated = rows.reduce((s, r) => s + (r.evaluated ?? 0), 0);
 
-    // Cache keyed on count + windowCutoff — invalidated when new evaluations arrive
-    // OR when the rolling window shifts (same count, different composition).
+    // Cache hit: same data, same window, same mode — skip recompute.
     if (
       _shadowParoleCache &&
-      _shadowParoleCache.evaluatedCount === evaluated.length &&
-      _shadowParoleCache.windowCutoff === windowCutoff
+      _shadowParoleCache.evaluatedCount === totalEvaluated &&
+      _shadowParoleCache.windowCutoff === windowCutoff &&
+      _shadowParoleCache.mode === mode
     ) {
-      return _shadowParoleCache.reducedBy;
+      return _shadowParoleCache.state;
     }
 
-    if (evaluated.length < 3) {
-      _shadowParoleCache = { reducedBy: 0, evaluatedCount: evaluated.length, windowCutoff };
-      return 0;
-    }
+    const result: ParoleState = { ...empty };
 
-    const wins = evaluated.filter(r => r.outcome === "win").length;
-    const winRate = wins / evaluated.length;
-    let reducedBy = 0;
+    const streakToResume: string[] = [];
 
-    if (winRate >= 0.6) {
-      reducedBy = 4;
-      logger.info(
-        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length, reducedBy, windowCutoff },
-        `[parole] shadow accuracy ${(winRate * 100).toFixed(0)}% over ${evaluated.length} bets — doubt penalty -${reducedBy}pp`,
-      );
+    for (const row of rows) {
+      const { symbol: sym, blockedBy, evaluated, wins } = row;
+      if (!blockedBy || !sym || !evaluated || evaluated < 3) continue;
+      const winRate = (wins ?? 0) / evaluated;
 
-      // If an auto-tune temp raise is also active, revert it early — same path
-      // as the time-based revert in runBotLoopTick.  The in-memory config
-      // update takes effect on the next per-coin evaluation in this same tick.
-      if (config.autoTuneConfidenceRevertTo != null) {
-        const revertTo = config.autoTuneConfidenceRevertTo;
-        logger.info(
-          { from: config.minConfidence, to: revertTo, winRate: `${(winRate * 100).toFixed(0)}%` },
-          "[parole] shadow accuracy sufficient — reverting auto-tune confidence raise early",
-        );
-        await updateBotConfig({
-          minConfidence: revertTo,
-          autoTuneConfidenceRevertAt: null,
-          autoTuneConfidenceRevertTo: null,
-        }).catch(err => logger.warn({ err }, "[parole] auto-tune early revert DB write failed (non-fatal)"));
+      if (winRate < 0.6) {
+        if (winRate < 0.4 && evaluated >= 5) {
+          logger.warn(
+            { sym, blockedBy, winRate: `${(winRate * 100).toFixed(0)}%`, evaluated },
+            `[parole] ${blockedBy}/${sym} shadow accuracy ${(winRate * 100).toFixed(0)}% < 40% — restriction maintained`,
+          );
+        }
+        continue;
       }
-    } else if (winRate < 0.4 && evaluated.length >= 5) {
-      logger.warn(
-        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length, windowCutoff },
-        `[parole] shadow accuracy insufficient (${(winRate * 100).toFixed(0)}% < 40%) — restriction maintained`,
+
+      // ≥60% WR with ≥3 bets — parole granted for this (sym, restriction) pair.
+      logger.info(
+        { sym, blockedBy, winRate: `${(winRate * 100).toFixed(0)}%`, evaluated },
+        `[parole] ${blockedBy}/${sym} ≥60% accuracy — bypass granted`,
+      );
+
+      switch (blockedBy) {
+        case "doubt_penalty":
+          result.doubtPenaltyReduction = Math.max(result.doubtPenaltyReduction, 4);
+          break;
+        case "auto_tune":
+          // Side effect handled below after the loop.
+          break;
+        case "reversing_caution":    result.reversing.add(sym);    break;
+        case "momentum_override":    result.momentum.add(sym);     break;
+        case "price_band_yes":       result.priceBandYes.add(sym); break;
+        case "price_band_no":        result.priceBandNo.add(sym);  break;
+        case "yes_below_strike":     result.yesBelowStrike.add(sym); break;
+        case "hard_model":           result.hardModel.add(sym);    break;
+        case "no_gate":              result.noGate.add(sym);       break;
+        case "regime_penalty":       result.regime.add(sym);       break;
+        case "contrarian_penalty":   result.contrarian.add(sym);   break;
+        case "border_guard":         result.border.add(sym);       break;
+        case "coin_yes_blocked":     result.yesBlocked.add(sym);   break;
+        case "coin_fully_blocked":   result.fullyBlocked.add(sym); break;
+        case "streak_pause":         streakToResume.push(sym);     break;
+        case "direction_cap":
+          result.dirCapIncrease = Math.min(result.dirCapIncrease + 1, 2);
+          break;
+        default:
+          // yes_quality_gate, no_quality_gate, chop_filter — track accuracy only,
+          // no structural bypass (signal contradictions indicate data quality issues).
+          break;
+      }
+    }
+
+    // ── Auto-tune early revert ────────────────────────────────────────────────
+    const autoTuneParoled = rows.some(
+      r => r.blockedBy === "auto_tune" && (r.evaluated ?? 0) >= 3 && ((r.wins ?? 0) / (r.evaluated ?? 1)) >= 0.6,
+    );
+    if (autoTuneParoled && config.autoTuneConfidenceRevertTo != null) {
+      const revertTo = config.autoTuneConfidenceRevertTo;
+      logger.info(
+        { from: config.minConfidence, to: revertTo },
+        "[parole] auto_tune shadow ≥60% — reverting confidence raise early",
+      );
+      await updateBotConfig({
+        minConfidence: revertTo,
+        autoTuneConfidenceRevertAt: null,
+        autoTuneConfidenceRevertTo: null,
+      }).catch(err => logger.warn({ err }, "[parole] auto-tune early revert failed (non-fatal)"));
+    }
+
+    // ── Streak-pause clearance ────────────────────────────────────────────────
+    // Clear in-memory pause + persist to DB for any coin paroled from streak_pause.
+    for (const sym of streakToResume) {
+      const entry = streakMap.get(sym);
+      if (entry?.pauseUntilWindowKey) {
+        logger.info(
+          { sym, pauseUntilWindowKey: entry.pauseUntilWindowKey },
+          "[parole] streak_pause cleared by shadow accuracy — coin re-enabled",
+        );
+        entry.pauseUntilWindowKey = null;
+        streakMap.set(sym, entry);
+      }
+    }
+    if (streakToResume.length > 0) {
+      persistCoinStreakState(streakMap, streakStore).catch(err =>
+        logger.warn({ err }, "[parole] streak-pause DB persist failed (non-fatal)"),
       );
     }
 
-    _shadowParoleCache = { reducedBy, evaluatedCount: evaluated.length, windowCutoff };
-    return reducedBy;
+    // ── Doubt penalty reduction log ───────────────────────────────────────────
+    if (result.doubtPenaltyReduction > 0) {
+      logger.info(
+        { reduction: result.doubtPenaltyReduction, windowCutoff },
+        `[parole] doubt_penalty shadow accuracy sufficient — penalty -${result.doubtPenaltyReduction}pp`,
+      );
+    }
+
+    _shadowParoleCache = { state: result, evaluatedCount: totalEvaluated, windowCutoff, mode };
+    return result;
   } catch (err) {
-    logger.warn({ err }, "[parole] checkShadowParole error (non-fatal)");
-    return 0;
+    logger.warn({ err }, "[parole] checkAllParoles error (non-fatal)");
+    return empty;
   }
 }
 
@@ -3855,24 +3984,22 @@ export async function runBotLoopTick(): Promise<void> {
   // Store for Task-C signal enrichment: _runBotTick includes this in the signals JSON.
   currentWindowDoubtPenalty = windowDoubtPenalty;
 
-  // Shadow-parole: if recent probe bets (recorded during penalty lockouts) show
-  // ≥60% win rate over ≥3 evaluated bets, reduce the effective doubt penalty by
-  // 4pp for THIS tick only.  The time-based decay (Task 257) handles the long-term
-  // clearing; parole provides an earlier lift when the market has genuinely settled.
-  // Run parole check whenever ANY restriction is active — either a doubt penalty
-  // OR an auto-tune temporary confidence raise.  This ensures shadow probe
-  // accuracy can trigger early auto-tune revert even when the doubt penalty is 0.
-  // The 4pp doubt reduction is only applied when windowDoubtPenalty is actually >0.
+  // Universal shadow parole — computed once per tick, covers ALL restriction types.
+  // checkAllParoles queries shadow bet accuracy grouped by (symbol, blockedBy) and
+  // returns bypass sets that each gate in the per-coin loop checks before blocking.
+  // Side effects: auto-tune early revert + streak-pause clearance when thresholds met.
+  const activeStreakMapForParole = activeCoinStreakState();
+  const activeStreakStoreForParole = streakStoreForMode(botMode);
+  const paroleState = await checkAllParoles(botMode, activeStreakMapForParole, activeStreakStoreForParole);
+
+  // Apply doubt penalty reduction from shadow parole.
   let effectiveDoubtPenalty = windowDoubtPenalty;
-  if (windowDoubtPenalty > 0 || config.autoTuneConfidenceRevertTo != null) {
-    const paroleReduction = await checkShadowParole();
-    if (paroleReduction > 0 && windowDoubtPenalty > 0) {
-      effectiveDoubtPenalty = Math.max(0, windowDoubtPenalty - paroleReduction);
-      logger.info(
-        { windowDoubtPenalty, paroleReduction, effectiveDoubtPenalty },
-        `[kalshi-bot] [parole] doubt penalty reduced ${windowDoubtPenalty}pp → ${effectiveDoubtPenalty}pp for this tick`,
-      );
-    }
+  if (paroleState.doubtPenaltyReduction > 0 && windowDoubtPenalty > 0) {
+    effectiveDoubtPenalty = Math.max(0, windowDoubtPenalty - paroleState.doubtPenaltyReduction);
+    logger.info(
+      { windowDoubtPenalty, reduction: paroleState.doubtPenaltyReduction, effectiveDoubtPenalty },
+      `[kalshi-bot] [parole] doubt penalty reduced ${windowDoubtPenalty}pp → ${effectiveDoubtPenalty}pp for this tick`,
+    );
   }
 
   // Symbols blocked by the new regime-aware guards (momentum override, directional cap, border guard).
@@ -4068,11 +4195,41 @@ export async function runBotLoopTick(): Promise<void> {
     const _betProfile = BET_PROFILES[config.betProfile ?? "normal"];
     let effectiveConfidence = Math.min(decision.confidence, _betProfile.effectiveConfidenceCap);
 
+    // ── Per-coin streak pause (Phase-3 shadow probe) ──────────────────────────
+    // checkAllParoles() already cleared in-memory pauses for paroled coins, so
+    // any coin still showing a pause here has not yet met the accuracy threshold.
+    // Record a shadow probe and skip the rest of Phase-3 evaluation.  The actual
+    // placement block lives in Phase-4 (_runBotTick); this continue is safe because
+    // filteredByNewGuards prevents Phase-4 from independently placing the order.
+    {
+      const _streakEntry = activeCoinStreakState().get(sym);
+      const _isStreakPaused = _streakEntry?.pauseUntilWindowKey != null
+        && windowKey <= _streakEntry.pauseUntilWindowKey;
+      if (_isStreakPaused) {
+        if (decision.action !== "SKIP") {
+          const _shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+          void recordShadowBet(
+            sym, _shadowDir, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "streak_pause",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] streak-pause record failed (non-fatal)"));
+        }
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
+          reason: `streak pause — blocked until window ${_streakEntry!.pauseUntilWindowKey} (${_streakEntry!.consecutiveLosses} consecutive losses)`,
+          windowKey, selected: false, evaluatedAt: now, trendStability: stability, regime,
+        });
+        continue;
+      }
+    }
+
     // Reversing: apply a -20pp penalty instead of a hard skip. Only very
     // high-conviction entries still clear minConfidence after the penalty.
     // Subtracts from the already-profile-capped value for consistency.
+    // Bypassed when parole accuracy for this coin/restriction meets the threshold.
     let reversingCaution = false;
-    if (stability === "reversing" && decision.action !== "SKIP") {
+    if (stability === "reversing" && decision.action !== "SKIP" && !paroleState.reversing.has(sym)) {
       effectiveConfidence = effectiveConfidence - 20;
       reversingCaution = true;
       if (effectiveConfidence < config.minConfidence) {
@@ -4088,13 +4245,22 @@ export async function runBotLoopTick(): Promise<void> {
           trendStability: "reversing",
           regime,
         });
+        if (decision.action !== "SKIP") {
+          const _sd: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+          void recordShadowBet(
+            sym, _sd, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "reversing_caution",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] reversing_caution record failed"));
+        }
         continue;
       }
     }
 
     // Momentum override filter: skip when price trend opposes the proposed direction.
+    // Bypassed when shadow accuracy for this coin/restriction meets the parole threshold.
     // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
-    if (decision.action !== "SKIP" && config.enableMomentumFilter) {
+    if (decision.action !== "SKIP" && config.enableMomentumFilter && !paroleState.momentum.has(sym)) {
       const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
       if (checkMomentumOverride(proposedDir, recentStrikes, 0.5, config.momentumWindowCount)) {
         logger.info({ sym, proposedDir, recentStrikes, windowCount: config.momentumWindowCount },
@@ -4112,6 +4278,11 @@ export async function runBotLoopTick(): Promise<void> {
           trendStability: stability,
           regime,
         });
+        void recordShadowBet(
+          sym, proposedDir, effectiveConfidence, decision.signals,
+          kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+          "momentum_override",
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] momentum_override record failed"));
         continue;
       }
     }
@@ -4123,7 +4294,7 @@ export async function runBotLoopTick(): Promise<void> {
     // first it would increment phase3DirectionCounts["no"] to 3, then get SKIP'd here,
     // leaving only 3 real NO slots (instead of 4) for the remaining coins.
     if (decision.action !== "SKIP") {
-      if (COIN_FULLY_BLOCKED.has(sym)) {
+      if (COIN_FULLY_BLOCKED.has(sym) && !paroleState.fullyBlocked.has(sym)) {
         filteredByNewGuards.add(sym);
         evalResults.push({
           symbol: sym,
@@ -4137,6 +4308,12 @@ export async function runBotLoopTick(): Promise<void> {
           trendStability: stability,
           regime,
         });
+        const _cbDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+        void recordShadowBet(
+          sym, _cbDir, effectiveConfidence, decision.signals,
+          kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+          "coin_fully_blocked",
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] coin_fully_blocked record failed"));
         continue;
       }
 
@@ -4155,7 +4332,7 @@ export async function runBotLoopTick(): Promise<void> {
           (hardSigs.statAbove   != null ? 1 : 0) +
           (hardSigs.claudeAbove != null ? 1 : 0) +
           (hardSigs.mlAbove     != null ? 1 : 0);
-        if (hardModelCount < MIN_HARD_MODEL_SIGNALS) {
+        if (hardModelCount < MIN_HARD_MODEL_SIGNALS && !paroleState.hardModel.has(sym)) {
           filteredByNewGuards.add(sym);
           evalResults.push({
             symbol: sym,
@@ -4169,6 +4346,12 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          const _hmDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+          void recordShadowBet(
+            sym, _hmDir, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "hard_model",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] hard_model record failed"));
           continue;
         }
       }
@@ -4186,7 +4369,7 @@ export async function runBotLoopTick(): Promise<void> {
       //                       to bet NO profitably.
       //
       // yesPrice is in 0-1 scale (e.g. 0.43 = 43¢).
-      if (decision.action === "BET_YES" && kalshiData.yesPrice != null && kalshiData.yesPrice < 0.50) {
+      if (decision.action === "BET_YES" && kalshiData.yesPrice != null && kalshiData.yesPrice < 0.50 && !paroleState.priceBandYes.has(sym)) {
         const priceCents = Math.round(kalshiData.yesPrice * 100);
         filteredByNewGuards.add(sym);
         evalResults.push({
@@ -4201,10 +4384,15 @@ export async function runBotLoopTick(): Promise<void> {
           trendStability: stability,
           regime,
         });
+        void recordShadowBet(
+          sym, "yes", effectiveConfidence, decision.signals,
+          kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+          "price_band_yes",
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] price_band_yes record failed"));
         continue;
       }
 
-      if (decision.action === "BET_NO" && kalshiData.yesPrice != null && kalshiData.yesPrice >= 0.65) {
+      if (decision.action === "BET_NO" && kalshiData.yesPrice != null && kalshiData.yesPrice >= 0.65 && !paroleState.priceBandNo.has(sym)) {
         const priceCents = Math.round(kalshiData.yesPrice * 100);
         filteredByNewGuards.add(sym);
         evalResults.push({
@@ -4219,6 +4407,11 @@ export async function runBotLoopTick(): Promise<void> {
           trendStability: stability,
           regime,
         });
+        void recordShadowBet(
+          sym, "no", effectiveConfidence, decision.signals,
+          kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+          "price_band_no",
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] price_band_no record failed"));
         continue;
       }
 
@@ -4226,7 +4419,7 @@ export async function runBotLoopTick(): Promise<void> {
       // Kalshi strike by more than 0.3%, a YES bet needs a price recovery to win.
       // Historical data: ETH YES −0.042% and HYPE YES −0.123% below strike both
       // lost; adding a 0.3% buffer avoids false-positive SKIPs on near-flat markets.
-      if (decision.action === "BET_YES" && kalshiData.value != null) {
+      if (decision.action === "BET_YES" && kalshiData.value != null && !paroleState.yesBelowStrike.has(sym)) {
         const livePrice = getCachedPrediction(sym)?.price ?? null;
         const BELOW_STRIKE_YES_GAP = 0.003; // 0.3% below strike
         if (livePrice !== null && livePrice < kalshiData.value * (1 - BELOW_STRIKE_YES_GAP)) {
@@ -4248,12 +4441,17 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          void recordShadowBet(
+            sym, "yes", effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "yes_below_strike",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] yes_below_strike record failed"));
           continue;
         }
       }
 
       if (decision.action === "BET_YES") {
-        if (COIN_YES_BLOCKED.has(sym)) {
+        if (COIN_YES_BLOCKED.has(sym) && !paroleState.yesBlocked.has(sym)) {
           filteredByNewGuards.add(sym);
           evalResults.push({
             symbol: sym,
@@ -4267,6 +4465,11 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          void recordShadowBet(
+            sym, "yes", effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "coin_yes_blocked",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] coin_yes_blocked record failed"));
           continue;
         }
 
@@ -4310,6 +4513,13 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          // Track accuracy only — signal contradiction is a data-quality issue,
+          // not a structural market gate, so no bypass is issued.
+          void recordShadowBet(
+            sym, "yes", effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "yes_quality_gate",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] yes_quality_gate record failed"));
           continue;
         }
       }
@@ -4346,6 +4556,12 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          // Track accuracy only — no structural bypass for signal contradictions.
+          void recordShadowBet(
+            sym, "no", effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "no_quality_gate",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] no_quality_gate record failed"));
           continue;
         }
       }
@@ -4354,13 +4570,13 @@ export async function runBotLoopTick(): Promise<void> {
 
     // Regime filter: if recent settlements consistently closed on one side of the strike,
     // penalise bets going against that regime by raising the minimum confidence bar.
-    // This prevents the bot from fighting a persistent directional bias.
+    // Bypassed when shadow accuracy for this coin/restriction meets the parole threshold.
     if (decision.action !== "SKIP") {
       const kalshiRegime = regimeCache.get(sym);
       const isAgainstRegime =
         (kalshiRegime === "above" && decision.action === "BET_NO") ||
         (kalshiRegime === "below" && decision.action === "BET_YES");
-      if (isAgainstRegime) {
+      if (isAgainstRegime && !paroleState.regime.has(sym)) {
         const penalised = effectiveConfidence - (config.regimePenalty ?? REGIME_AGAINST_PENALTY_FALLBACK);
         logger.info(
           { sym, kalshiRegime, action: decision.action, confidence: effectiveConfidence, penalised },
@@ -4380,6 +4596,12 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          const _rgDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+          void recordShadowBet(
+            sym, _rgDir, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "regime_penalty",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] regime_penalty record failed"));
           continue;
         }
         effectiveConfidence = penalised;
@@ -4389,10 +4611,8 @@ export async function runBotLoopTick(): Promise<void> {
     // Contrarian momentum gate: when the Kalshi strike-price trend (from recent
     // windows) is moving strongly against the proposed bet direction, the bot is
     // making a mean-reversion call that needs extra conviction.
-    // - Strikes trending DOWN + BET_YES (betting above while trend is falling) → contrarian
-    // - Strikes trending UP  + BET_NO  (betting below while trend is rising)   → contrarian
-    // These plays require CONTRARIAN_LIVE_REGIME_PENALTY extra confidence.
-    if (decision.action !== "SKIP" && regime !== null) {
+    // Bypassed when shadow accuracy for this coin/restriction meets the parole threshold.
+    if (decision.action !== "SKIP" && regime !== null && !paroleState.contrarian.has(sym)) {
       const isContrarian =
         (regime === "trending_down" && decision.action === "BET_YES") ||
         (regime === "trending_up"   && decision.action === "BET_NO");
@@ -4416,6 +4636,12 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          const _ctDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+          void recordShadowBet(
+            sym, _ctDir, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "contrarian_penalty",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] contrarian_penalty record failed"));
           continue;
         }
         effectiveConfidence = penalised;
@@ -4426,8 +4652,8 @@ export async function runBotLoopTick(): Promise<void> {
     // Kalshi strike by > 0.1%, a NO bet is a mean-reversion call into a trending
     // market. Historical data shows 7/7 NO losses in exactly this configuration.
     // Require ML confirmation (mlAbove === false) OR broad 3-signal agreement to
-    // allow entry — otherwise skip.
-    if (decision.action === "BET_NO" && kalshiData.value !== null) {
+    // allow entry — otherwise skip.  Bypassed by shadow parole when accuracy qualifies.
+    if (decision.action === "BET_NO" && kalshiData.value !== null && !paroleState.noGate.has(sym)) {
       const livePrice = getCachedPrediction(sym)?.price ?? null;
       const ABOVE_STRIKE_NO_GAP = 0.001; // 0.1% above strike
       if (livePrice !== null && livePrice > kalshiData.value * (1 + ABOVE_STRIKE_NO_GAP)) {
@@ -4453,6 +4679,11 @@ export async function runBotLoopTick(): Promise<void> {
             trendStability: stability,
             regime,
           });
+          void recordShadowBet(
+            sym, "no", effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+            "no_gate",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] no_gate record failed"));
           continue;
         }
       }
@@ -4463,7 +4694,8 @@ export async function runBotLoopTick(): Promise<void> {
     // These windows are essentially noise — near-50/50 regardless of signal direction.
     // NOTE: this gate runs BEFORE the doubt filter so that any shadow bet recorded
     // inside the doubt filter is guaranteed to have already cleared this gate.
-    if (decision.action !== "SKIP" && config.enableBorderGuard) {
+    // Bypassed by shadow parole when accuracy qualifies.
+    if (decision.action !== "SKIP" && config.enableBorderGuard && !paroleState.border.has(sym)) {
       const proximity = borderProximityCache.get(sym);
       if (proximity !== undefined && proximity < config.borderProximityPct) {
         logger.info(
@@ -4483,6 +4715,12 @@ export async function runBotLoopTick(): Promise<void> {
           trendStability: stability,
           regime,
         });
+        const _bgDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+        void recordShadowBet(
+          sym, _bgDir, effectiveConfidence, decision.signals,
+          kalshiData?.value ?? null, windowKey, botMode, kalshiData?.ticker ?? null,
+          "border_guard",
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] border_guard record failed"));
         continue;
       }
     }
@@ -4511,9 +4749,8 @@ export async function runBotLoopTick(): Promise<void> {
       });
 
       // Record a shadow (probe) bet: the coin passed every non-confidence gate
-      // (regime, contrarian, NO gate, border guard — all above) but is blocked
-      // solely by the doubt-penalty confidence floor.  Shadow bets track accuracy
-      // during restriction windows so parole can lift the penalty earlier.
+      // but is blocked solely by the doubt-penalty confidence floor.  Shadow
+      // accuracy feeds checkAllParoles() which can reduce the penalty early.
       if (
         effectiveDoubtPenalty > 0 &&
         effectiveConfidence >= config.minConfidence &&
@@ -4529,6 +4766,7 @@ export async function runBotLoopTick(): Promise<void> {
           windowKey,
           botMode,
           kalshiData?.ticker ?? null,
+          "doubt_penalty",
         ).catch(err => logger.warn({ err, sym }, "[shadow-bet] record failed (non-fatal)"));
       }
 
@@ -4576,6 +4814,7 @@ export async function runBotLoopTick(): Promise<void> {
         windowKey,
         botMode,
         kalshiData?.ticker ?? null,
+        "auto_tune",
       ).catch(err => logger.warn({ err, sym }, "[shadow-bet] auto-tune record failed (non-fatal)"));
     }
 
@@ -4606,10 +4845,12 @@ export async function runBotLoopTick(): Promise<void> {
   // windowDirectionCounts reflects bets placed in PREVIOUS ticks this window;
   // `remaining` is how many more same-direction bets are still allowed.
   if (config.enableDirectionCap && config.maxSameDirectionBets > 0) {
+    // Effective cap is raised by parole when direction_cap shadow accuracy qualifies.
+    const effectiveDirCap = config.maxSameDirectionBets + paroleState.dirCapIncrease;
     for (const dir of ["yes", "no"] as const) {
       const action = dir === "yes" ? "BET_YES" : "BET_NO";
       const alreadyPlaced = windowDirectionCounts.get(dir) ?? 0;
-      const remaining = Math.max(0, config.maxSameDirectionBets - alreadyPlaced);
+      const remaining = Math.max(0, effectiveDirCap - alreadyPlaced);
       // bets[] is sorted score DESC — dirBets preserves that order.
       const dirBets = bets.filter(e => e.action === action);
       if (dirBets.length > remaining) {
@@ -4617,7 +4858,7 @@ export async function runBotLoopTick(): Promise<void> {
         const toCap = dirBets.slice(remaining);
         const cappedSyms = toCap.map(e => e.symbol);
         logger.info(
-          { dir, alreadyPlaced, remaining, cap: config.maxSameDirectionBets, dropped: cappedSyms },
+          { dir, alreadyPlaced, remaining, cap: effectiveDirCap, paroleBoost: paroleState.dirCapIncrease, dropped: cappedSyms },
           `[kalshi-bot] directional cap — keeping top ${remaining} ${dir.toUpperCase()} bets, dropping ${toCap.length} weakest`,
         );
         for (const e of toCap) {
@@ -4627,6 +4868,13 @@ export async function runBotLoopTick(): Promise<void> {
           const idx = bets.indexOf(e);
           if (idx !== -1) bets.splice(idx, 1);
           skips.push(e);
+          // Record shadow probe: direction_cap accuracy feeds paroleState.dirCapIncrease.
+          const _dcKalshi = getKalshiCachedData(e.symbol);
+          void recordShadowBet(
+            e.symbol, dir, e.confidence, {},
+            _dcKalshi?.value ?? null, windowKey, botMode, _dcKalshi?.ticker ?? null,
+            "direction_cap",
+          ).catch(err => logger.warn({ err, sym: e.symbol }, "[shadow-bet] direction_cap record failed"));
         }
       }
     }
