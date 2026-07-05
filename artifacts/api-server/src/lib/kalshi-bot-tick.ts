@@ -145,6 +145,43 @@ async function _runBotTick(
         direction: pos.direction,
       }, "[kalshi-bot] exit-tick price check");
 
+      // ── Profit-lock early cash-out ────────────────────────────────────────
+      // When the position has captured ≥ profitLockPct% of its maximum possible
+      // payout, cash out immediately rather than risk a late reversal.
+      // Two guards prevent redundant triggers:
+      //   • held ≥ 2 min (no opening-spike false trigger)
+      //   • ≥ 2 min remaining (window resolves on its own if almost over)
+      const profitLockThreshold = (S.config.profitLockPct ?? 0) / 100;
+      if (
+        profitLockThreshold > 0 &&
+        effectiveYesPrice !== null &&
+        Date.now() - pos.openedAt >= 2 * 60_000 &&
+        15 - minutesElapsed >= 2
+      ) {
+        const ep = pos.entryYesPrice;
+        const lockRatio =
+          pos.direction === "yes"
+            ? (effectiveYesPrice - ep) / (1 - ep)
+            : (ep - effectiveYesPrice) / ep;
+        if (lockRatio >= profitLockThreshold) {
+          logger.info(
+            {
+              sym,
+              direction: pos.direction,
+              lockRatioPct: `${(lockRatio * 100).toFixed(1)}%`,
+              thresholdPct: `${(profitLockThreshold * 100).toFixed(0)}%`,
+              minutesRemaining: (15 - minutesElapsed).toFixed(1),
+              yesPrice: effectiveYesPrice,
+              entryYesPrice: ep,
+            },
+            "[kalshi-bot] profit-lock triggered — cashing out early",
+          );
+          await closePosition(pos, effectiveYesPrice, kalshiTarget, "profit_lock");
+          openPositions.delete(sym);
+          return;
+        }
+      }
+
       // Run exit guard for the current position
       const timingAcc = await getTimingAccuracy(sym, minutesElapsed);
       const guard = runExitGuard(

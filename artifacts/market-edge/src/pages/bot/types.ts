@@ -46,6 +46,7 @@ export interface BotConfig {
   minReturnMultiple: number;
   enableDynamicSizing: boolean;
   dynamicSizingMaxConfidence: number;
+  profitLockPct: number;
 }
 
 export interface LogicModeStats {

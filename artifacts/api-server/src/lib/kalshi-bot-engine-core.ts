@@ -621,6 +621,7 @@ export interface BotConfig {
   // safety cap still applies as a guard regardless of this setting.
   enableDynamicSizing: boolean;        // (default false)
   dynamicSizingMaxConfidence: number;  // confidence at which max bet is reached (default 85)
+  profitLockPct: number;               // 0 = disabled; 1–99 = cash out when current value reaches this % of max payout
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +750,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Confidence-based dynamic bet sizing — disabled by default (legacy behavior).
   enableDynamicSizing: false,
   dynamicSizingMaxConfidence: 90,
+  profitLockPct: 0,
 };
 
 /**

@@ -413,6 +413,27 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   })()}
                 </div>
 
+                {/* Profit Lock */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Profit Lock</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {([0, 90, 92, 95, 97, 99] as const).map(pct => (
+                      <button key={pct} type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, profitLockPct: pct }))}
+                        className={`rounded-md px-3 py-1.5 text-sm font-medium border transition-colors ${(merged.profitLockPct ?? 0) === pct
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background text-foreground border-border hover:bg-muted"}`}>
+                        {pct === 0 ? "Off" : `${pct}%`}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {(merged.profitLockPct ?? 0) === 0
+                      ? "Disabled — hold until window expires or exit guard fires"
+                      : `Cash out when position reaches ${merged.profitLockPct}% of max payout (with ≥2 min remaining)`}
+                  </span>
+                </div>
+
                 {/* Exit Sensitivity */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Exit Sensitivity</span>
