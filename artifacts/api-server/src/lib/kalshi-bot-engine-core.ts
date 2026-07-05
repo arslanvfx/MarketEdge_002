@@ -752,20 +752,22 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
 };
 
 /**
- * computeDynamicBetSize — Kelly²-motivated confidence-proportional bet sizing.
+ * computeDynamicBetSize — Kelly³-motivated confidence-proportional bet sizing.
  *
  * Scales the target dollar bet between config.betSize (minimum, at
  * config.minConfidence) and config.maxBetSize (maximum, at
- * config.dynamicSizingMaxConfidence) using a quadratic (t²) curve.
+ * config.dynamicSizingMaxConfidence) using a cubic (t³) curve.
  *
- * Why quadratic: Kelly's growth function is approximately quadratic in edge
- * near the optimum, so squaring the normalized confidence produces a curve
- * that hugs the minimum through modest conviction and accelerates sharply only
- * at genuine high-confidence bets — matching how edge compounds in practice.
+ * Why cubic: the curve deliberately hugs the minimum through low-to-moderate
+ * conviction and only accelerates sharply near the ceiling. On a typical
+ * $1–$10 range with floor=65% and ceiling=90%, the dollar midpoint ($5)
+ * requires roughly 85% confidence — ensuring significant capital is only
+ * deployed when all models are in strong agreement. This protects against
+ * large losses on medium-confidence bets that turn out to be wrong.
  *
- * Concretely, at the midpoint of the confidence range the bet is only 25% of
- * the way from min to max (instead of 50% with linear scaling), so outsized
- * positions are reserved for near-certainty entries.
+ * Curve reference (floor=65%, ceiling=90%, min=$1, max=$10):
+ *   65% → $1.00  |  75% → $1.58  |  80% → $2.94
+ *   85% → $5.61  |  87.5% → $7.56  |  90% → $10.00
  *
  * When config.enableDynamicSizing is false, always returns config.betSize so
  * behavior is identical to legacy fixed sizing.
@@ -802,9 +804,11 @@ export function computeDynamicBetSize(
   if (confidence <= floor) return minBet;
   if (confidence >= ceiling) return maxBet;
 
-  // Kelly²: square the normalized position so the curve accelerates toward the
-  // ceiling — sizing stays near minimum until conviction is genuinely high.
-  const t = ((confidence - floor) / (ceiling - floor)) ** 2;
+  // Kelly³: cube the normalized position so the curve stays near the minimum
+  // through moderate conviction and only accelerates steeply near the ceiling.
+  // On a $1–$10 range with the default 65–90% window, the dollar midpoint ($5)
+  // requires ~85% confidence — protecting capital on medium-confidence bets.
+  const t = ((confidence - floor) / (ceiling - floor)) ** 3;
   return minBet + t * (maxBet - minBet);
 }
 

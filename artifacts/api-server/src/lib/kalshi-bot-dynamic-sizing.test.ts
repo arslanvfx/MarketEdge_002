@@ -2,13 +2,15 @@
 //
 // The helper scales the target dollar bet between betSize (min, at
 // minConfidence) and maxBetSize (max, at dynamicSizingMaxConfidence) using a
-// quadratic (Kelly²) curve: t = ((conf - floor) / (ceiling - floor))².
-// This hugs the minimum until high conviction, then accelerates sharply.
+// cubic (Kelly³) curve: t = ((conf - floor) / (ceiling - floor))³.
+// The curve hugs the minimum through moderate conviction, then accelerates
+// steeply near the ceiling — on a $1–$10 range with a 65–90% window, the
+// dollar midpoint ($5) requires ~85% confidence.
 // It must:
 //   1. Return betSize unchanged when disabled (legacy behavior).
 //   2. Return betSize at/below the confidence floor.
 //   3. Return maxBetSize at/above the confidence ceiling.
-//   4. Interpolate quadratically in between (midpoint → 25% of range, not 50%).
+//   4. Interpolate cubically in between (midpoint conf → 12.5% of range, not 50%).
 //   5. Never exceed maxBetSize nor drop below betSize, even for bad configs.
 //
 // Run with:  pnpm --filter @workspace/api-server test
@@ -48,16 +50,17 @@ test("at or above the ceiling → maximum bet", () => {
   assert.equal(computeDynamicBetSize(100, base), 2);
 });
 
-test("Kelly²: at the midpoint confidence, bet is only 25% of the range (not 50%)", () => {
-  // Midpoint of [65, 90] is 77.5%: t = (12.5/25)² = 0.5² = 0.25
-  // Bet = $1 + 0.25 × $1 = $1.25 — well below the $1.50 a linear curve would give.
-  assert.equal(computeDynamicBetSize(77.5, base), 1.25);
+test("Kelly³: at the midpoint confidence, bet is only 12.5% of the range (not 50%)", () => {
+  // Midpoint of [65, 90] is 77.5%: t = (12.5/25)³ = 0.5³ = 0.125
+  // Bet = $1 + 0.125 × $1 = $1.125 — far below the $1.50 a linear curve gives.
+  // This means on a $1–$10 scale you'd need ~85% confidence to unlock $5.
+  assert.equal(computeDynamicBetSize(77.5, base), 1.125);
 });
 
-test("Kelly²: at 71.25% confidence, bet is 6.25% of the range above minimum", () => {
-  // 71.25 is 25% of the way from 65→90: t = (6.25/25)² = 0.25² = 0.0625
-  // Bet = $1 + 0.0625 × $1 = $1.0625
-  assert.equal(computeDynamicBetSize(71.25, base), 1.0625);
+test("Kelly³: at 71.25% confidence, bet is only 1.5625% of the range above minimum", () => {
+  // 71.25 is 25% of the way from 65→90: t = (6.25/25)³ = 0.25³ = 0.015625
+  // Bet = $1 + 0.015625 × $1 = $1.015625 — nearly at the floor
+  assert.equal(computeDynamicBetSize(71.25, base), 1.015625);
 });
 
 test("never exceeds maxBetSize nor drops below betSize", () => {
@@ -149,8 +152,8 @@ test("betting-path: higher confidence buys MORE contracts, still within the cap"
   assert.equal(low.betAmount, 1);
   assert.equal(low.blocked, false);
 
-  // 85% — Kelly² gives t=(20/25)²=0.64, target≈$1.64 → 3 contracts, $1.50 risked.
-  // (Quadratic curve keeps mid-range bet lower than linear would: $1.64 not $1.80.)
+  // 85% — Kelly³ gives t=(20/25)³=0.512, target≈$1.51 → 3 contracts, $1.50 risked.
+  // (Cubic curve keeps mid-range bets far lower than linear: $1.51 not $1.80.)
   const mid = runSizingPipeline(85, "no", 0.5, cfg);
   assert.equal(mid.contractCount, 3);
   assert.equal(mid.blocked, false);
