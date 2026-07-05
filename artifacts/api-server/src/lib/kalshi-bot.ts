@@ -3854,10 +3854,14 @@ export async function runBotLoopTick(): Promise<void> {
   // ≥60% win rate over ≥3 evaluated bets, reduce the effective doubt penalty by
   // 4pp for THIS tick only.  The time-based decay (Task 257) handles the long-term
   // clearing; parole provides an earlier lift when the market has genuinely settled.
+  // Run parole check whenever ANY restriction is active — either a doubt penalty
+  // OR an auto-tune temporary confidence raise.  This ensures shadow probe
+  // accuracy can trigger early auto-tune revert even when the doubt penalty is 0.
+  // The 4pp doubt reduction is only applied when windowDoubtPenalty is actually >0.
   let effectiveDoubtPenalty = windowDoubtPenalty;
-  if (windowDoubtPenalty > 0) {
+  if (windowDoubtPenalty > 0 || config.autoTuneConfidenceRevertTo != null) {
     const paroleReduction = await checkShadowParole();
-    if (paroleReduction > 0) {
+    if (paroleReduction > 0 && windowDoubtPenalty > 0) {
       effectiveDoubtPenalty = Math.max(0, windowDoubtPenalty - paroleReduction);
       logger.info(
         { windowDoubtPenalty, paroleReduction, effectiveDoubtPenalty },
