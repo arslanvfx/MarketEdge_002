@@ -91,6 +91,7 @@ interface OpenPosition {
   unrealizedPnl: number | null;
   guardStates: GuardStates | null;
   guardReason: string | null;
+  source?: "bot" | "manual";
 }
 
 interface GuardStates {
@@ -455,6 +456,31 @@ export default function BotDashboard() {
   // user can browse paper history while live or vice versa.
   const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
   const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual">("all");
+
+  // ── Close manual position state ──────────────────────────────────────────
+  const [closingManualSym, setClosingManualSym] = useState<string | null>(null);
+  const [closeManualError, setCloseManualError] = useState<string | null>(null);
+
+  async function closeManualPos(symbol: string) {
+    if (closingManualSym) return;
+    setClosingManualSym(symbol);
+    setCloseManualError(null);
+    try {
+      const data = await authPost("/crypto/bot/close-manual-position", { symbol }) as { ok?: boolean; error?: string };
+      if (!data.ok) {
+        setCloseManualError(data.error ?? "Close failed");
+        setTimeout(() => setCloseManualError(null), 6000);
+      } else {
+        qc.invalidateQueries({ queryKey: ["bot-status"] });
+        qc.invalidateQueries({ queryKey: ["bot-all-history"] });
+      }
+    } catch (err) {
+      setCloseManualError(err instanceof Error ? err.message : "Network error — please try again");
+      setTimeout(() => setCloseManualError(null), 6000);
+    } finally {
+      setClosingManualSym(null);
+    }
+  }
 
   // ── Manual order modal state ─────────────────────────────────────────────
   const [manualOrderSym, setManualOrderSym] = useState<string | null>(null);
@@ -1029,25 +1055,56 @@ export default function BotDashboard() {
                 <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 font-mono">{openPosList.length}</span>
               </div>
             )}
-            {openPosList.map((pos) => (
+            {closeManualError && (
+              <div className="flex items-center gap-2 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-2">
+                <XCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{closeManualError}</span>
+              </div>
+            )}
+            {openPosList.map((pos) => {
+              const isManual = pos.source === "manual" || pos.id.startsWith("manual:");
+              const isClosing = closingManualSym === pos.symbol;
+              return (
               <div key={pos.id} className={`border rounded-xl p-5 ${pos.direction === "yes" ? "border-emerald-500/40 bg-emerald-950/20" : "border-red-500/40 bg-red-950/20"}`}>
                 <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 flex-wrap">
                     <div className={`text-2xl font-black ${pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
                       {pos.symbol}
                     </div>
                     <span className={`text-sm font-bold px-3 py-1 rounded-full ${pos.direction === "yes" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300"}`}>
                       {pos.direction === "yes" ? "▲ YES" : "▼ NO"}
                     </span>
+                    {isManual && (
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30 tracking-wide">
+                        MANUAL
+                      </span>
+                    )}
                     <span className="text-xs text-muted-foreground">
                       Opened {new Date(pos.openedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                     </span>
                   </div>
-                  <div className="text-right">
-                    <div className="text-xs text-muted-foreground">Unrealized P&L</div>
-                    <div className={`text-lg font-bold ${(pos.unrealizedPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      {fmt$(pos.unrealizedPnl)}
+                  <div className="flex items-start gap-3">
+                    <div className="text-right">
+                      <div className="text-xs text-muted-foreground">Unrealized P&L</div>
+                      <div className={`text-lg font-bold ${(pos.unrealizedPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {fmt$(pos.unrealizedPnl)}
+                      </div>
                     </div>
+                    {isManual && (
+                      <button
+                        onClick={() => closeManualPos(pos.symbol)}
+                        disabled={isClosing}
+                        className="mt-0.5 flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 border border-red-500/30 hover:bg-red-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        title="Close this manual position now"
+                      >
+                        {isClosing ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <X className="w-3 h-3" />
+                        )}
+                        {isClosing ? "Closing…" : "Close"}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1086,7 +1143,8 @@ export default function BotDashboard() {
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
 

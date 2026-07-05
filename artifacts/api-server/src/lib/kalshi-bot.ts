@@ -109,6 +109,9 @@ export interface OpenPosition {
   // Kalshi sell order even if the user has since switched the bot to paper.
   // Otherwise real money would be stranded on the exchange.
   entryMode: BotMode;
+  // How the position was opened. "manual" = placed from the dashboard manually.
+  // Undefined / absent means "bot" for backward compatibility with DB-restored rows.
+  source?: "bot" | "manual";
 }
 
 // OpenPosition augmented with live display data (P&L, guard states) for the
@@ -1106,6 +1109,11 @@ export async function loadOpenPositionFromDB(): Promise<void> {
         // Recover the mode the position was opened in so its exit uses a real
         // sell order when it was a live bet, regardless of the current mode.
         entryMode: row.mode === "live" ? "live" : "paper",
+        // Infer source from ID prefix (manual:...) or persisted signals flag so
+        // closeManualPosition still works correctly after a server restart.
+        source: row.id.startsWith("manual:") || (row.signals as Record<string, unknown> | null)?.["manual"] === true
+          ? "manual"
+          : "bot",
       });
 
       logger.info(
@@ -2182,6 +2190,7 @@ export async function placeManualOrder(opts: {
     },
     phase2Activated: false,
     entryMode: targetMode,
+    source: "manual",
   };
   openPositions.set(sym, newPosition);
 
@@ -2218,6 +2227,40 @@ export async function placeManualOrder(opts: {
     pnlProjected,
     ticker: kalshiTicker,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Close manual position (public API)
+// ---------------------------------------------------------------------------
+
+export async function closeManualPosition(symbol: string): Promise<{ pnl: number | null }> {
+  const sym = symbol.toUpperCase();
+  const pos = openPositions.get(sym);
+  if (!pos) {
+    throw new Error(`No open position for ${sym}`);
+  }
+  if (pos.source !== "manual") {
+    throw new Error(`Position for ${sym} was opened by the bot — use the bot controls to manage it`);
+  }
+
+  const cachedKalshi = getKalshiCachedData(sym);
+  const currentYesPrice = cachedKalshi?.yesPrice ?? null;
+  const currentKalshiTarget = cachedKalshi?.value ?? null;
+
+  await closePosition(pos, currentYesPrice, currentKalshiTarget, "manual_close");
+  openPositions.delete(sym);
+
+  // Compute final P&L to return to caller. Mirrors mid-window exit formula.
+  let pnl: number | null = null;
+  if (currentYesPrice != null) {
+    const priceDelta = pos.direction === "yes"
+      ? currentYesPrice - pos.entryYesPrice
+      : pos.entryYesPrice - currentYesPrice;
+    pnl = priceDelta * pos.contractCount;
+  }
+
+  logger.info({ sym, pnl }, "[kalshi-bot] manual position closed via dashboard");
+  return { pnl };
 }
 
 // ---------------------------------------------------------------------------

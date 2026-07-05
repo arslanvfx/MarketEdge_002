@@ -21,6 +21,7 @@ import {
   clearAllPauses,
   getCoinGuardState,
   placeManualOrder,
+  closeManualPosition,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -546,6 +547,24 @@ router.post("/crypto/bot/manual-order", requireAuth, async (req, res) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     // 400 for business-rule rejections (open position, insufficient funds, etc.)
+    res.status(400).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/close-manual-position — close a manually-placed position early.
+// Only works on positions with source="manual"; bot-opened positions must be
+// managed by the automated engine.
+router.post("/crypto/bot/close-manual-position", requireAuth, async (req, res) => {
+  const { symbol } = req.body as { symbol?: string };
+  if (!symbol || typeof symbol !== "string") {
+    res.status(400).json({ error: "symbol is required" });
+    return;
+  }
+  try {
+    const result = await closeManualPosition(symbol);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
     res.status(400).json({ error: msg });
   }
 });
