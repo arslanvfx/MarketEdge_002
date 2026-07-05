@@ -74,6 +74,35 @@ export interface HourOfDayStats {
   winRate: number | null;
 }
 
+export interface HourBandDowStats {
+  wins: number;
+  losses: number;
+  betCount: number;
+  winRate: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Quiet-hours auto-expand thresholds
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum total bets in a 2h band before the quiet_hours_expand rule can fire.
+ * ~150 bets per band needs roughly 5-7 weeks of normal volume to accumulate.
+ */
+export const QUIET_HOURS_MIN_BETS = 150;
+
+/**
+ * Minimum bets *on a single day of the week* in that band for that day to count
+ * as evidence of a persistent pattern.
+ */
+export const QUIET_HOURS_MIN_BETS_PER_DAY = 10;
+
+/**
+ * Number of distinct days of the week that must independently show < 40% win rate
+ * before the band is considered consistently bad (not just a one-off bad night).
+ */
+export const QUIET_HOURS_MIN_BAD_DAYS = 3;
+
 export interface PerformanceReport {
   totalBets: number;
   wins: number;
@@ -89,6 +118,7 @@ export interface PerformanceReport {
   byAgreementLevel: Record<string, AgreementLevelStats>;
   byDayOfWeek: Record<number, DayOfWeekStats>;
   byHourOfDay: Record<number, HourOfDayStats>;
+  byHourBandDow: Record<string, Record<number, HourBandDowStats>>;
   optimalConfidenceThreshold: number | null;
   avgConfidenceWinners: number | null;
   avgConfidenceLosers: number | null;
@@ -258,6 +288,27 @@ export function computePerformanceReport(
   }
   for (const s of Object.values(byDayOfWeek)) {
     s.winRate = s.betCount > 0 ? s.wins / s.betCount : null;
+  }
+
+  // Per-hour-band × day-of-week stats — used by quiet_hours_expand for DOW consistency check
+  const byHourBandDow: Record<string, Record<number, HourBandDowStats>> = {};
+  for (const b of settled) {
+    const ts = b.exitedAt ?? b.createdAt;
+    const dt = toDate(ts);
+    const band = hourBand(dt.getUTCHours());
+    const dow = dt.getUTCDay();
+    if (!byHourBandDow[band]) byHourBandDow[band] = {};
+    if (!byHourBandDow[band][dow]) {
+      byHourBandDow[band][dow] = { wins: 0, losses: 0, betCount: 0, winRate: null };
+    }
+    byHourBandDow[band][dow].betCount++;
+    if (b.outcome === "win") byHourBandDow[band][dow].wins++;
+    else byHourBandDow[band][dow].losses++;
+  }
+  for (const bandStats of Object.values(byHourBandDow)) {
+    for (const s of Object.values(bandStats)) {
+      s.winRate = s.betCount > 0 ? s.wins / s.betCount : null;
+    }
   }
 
   // Per-hour-of-day stats (UTC hour, 0-23)
@@ -454,6 +505,7 @@ export function computePerformanceReport(
     byAgreementLevel,
     byDayOfWeek,
     byHourOfDay,
+    byHourBandDow,
     optimalConfidenceThreshold,
     avgConfidenceWinners,
     avgConfidenceLosers,
@@ -555,13 +607,25 @@ export function runAutoTuneRules(
   }
 
   // Rule 1 — Quiet-hours auto-expand
-  // Any 2-hour UTC band with ≥ 20 bets and < 40% win rate gets flagged for
-  // quiet-hour coverage. Only one band is expanded per run to avoid thrashing.
+  // A 2-hour UTC band must meet ALL of the following before quiet hours are expanded:
+  //   • ≥ QUIET_HOURS_MIN_BETS total bets in the band (~5-7 weeks of data)
+  //   • < 40% win rate across all those bets
+  //   • Bad win rate (<40%) on ≥ QUIET_HOURS_MIN_BAD_DAYS distinct days of the week
+  //     (each day must have ≥ QUIET_HOURS_MIN_BETS_PER_DAY bets to count)
+  // Only one band is expanded per run to avoid thrashing.
   const worstBands = Object.values(report.byHourBand)
-    .filter(b => b.betCount >= 20 && b.winRate !== null && b.winRate < 0.4)
+    .filter(b => b.betCount >= QUIET_HOURS_MIN_BETS && b.winRate !== null && b.winRate < 0.4)
     .sort((a, b) => (a.winRate ?? 1) - (b.winRate ?? 1));
 
   for (const stats of worstBands.slice(0, 1)) {
+    // Day-of-week consistency check: the pattern must hold on multiple days,
+    // not just one bad night that collapses the overall average.
+    const bandDow = report.byHourBandDow[stats.band] ?? {};
+    const badDays = Object.values(bandDow).filter(
+      d => d.betCount >= QUIET_HOURS_MIN_BETS_PER_DAY && d.winRate !== null && d.winRate < 0.4,
+    );
+    if (badDays.length < QUIET_HOURS_MIN_BAD_DAYS) continue;
+
     const bandStart = parseInt(stats.band.split("-")[0], 10);
     const bandEnd = (bandStart + 2) % 24;
 
@@ -582,7 +646,7 @@ export function runAutoTuneRules(
       oldValue: `${config.quietHoursStart}-${config.quietHoursEnd}`,
       newValue: `${newWindow.quietHoursStart}-${newWindow.quietHoursEnd}`,
       triggerReason:
-        `Hour band ${stats.band} UTC: ${Math.round((stats.winRate ?? 0) * 100)}% win rate over ${stats.betCount} bets (< 40% threshold)`,
+        `Hour band ${stats.band} UTC: ${Math.round((stats.winRate ?? 0) * 100)}% win rate over ${stats.betCount} bets across ${badDays.length} days of the week (< 40% threshold)`,
       configMutation: newWindow,
     });
     break;
