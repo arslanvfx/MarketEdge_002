@@ -2673,8 +2673,9 @@ export default function BotDashboard() {
                 const pnlNum = r.pnl != null ? parseFloat(r.pnl) : null;
                 const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
                 const xp = r.exitPrice != null ? parseFloat(r.exitPrice) : null;
+                const isShadow = r.action === "shadow";
                 const isOpen = r.action === "bet";
-                const isPendingEval = !isOpen && r.outcome == null;
+                const isPendingEval = !isOpen && !isShadow && r.outcome == null;
                 const isWin = r.outcome === "win";
                 const isLoss = r.outcome === "loss";
                 const sigs = r.signals as Record<string, unknown> | null;
@@ -2688,15 +2689,17 @@ export default function BotDashboard() {
                 const mlAbove = sigs?.mlAbove as boolean | null ?? null;
                 const agreementTarget = sigs?.agreementTarget as string | null ?? null;
 
-                const cardBg = isOpen
-                  ? "border-sky-500/30 bg-sky-950/10"
-                  : isWin
-                    ? "border-emerald-500/30 bg-emerald-950/10"
-                    : isLoss
-                      ? "border-red-500/30 bg-red-950/10"
-                      : isPendingEval
-                        ? "border-amber-500/20 bg-amber-950/5"
-                        : "border-border bg-card/60";
+                const cardBg = isShadow
+                  ? "border-violet-500/20 bg-violet-950/5"
+                  : isOpen
+                    ? "border-sky-500/30 bg-sky-950/10"
+                    : isWin
+                      ? "border-emerald-500/30 bg-emerald-950/10"
+                      : isLoss
+                        ? "border-red-500/30 bg-red-950/10"
+                        : isPendingEval
+                          ? "border-amber-500/20 bg-amber-950/5"
+                          : "border-border bg-card/60";
 
                 return (
                   <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
@@ -2711,7 +2714,27 @@ export default function BotDashboard() {
                         </span>
                       )}
 
-                      {isOpen ? (
+                      {isShadow ? (
+                        <>
+                          <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300"
+                            title="Probe bet — recorded during doubt-penalty lockout. No real order placed.">
+                            PROBE
+                          </span>
+                          {r.outcome === "win" ? (
+                            <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
+                              <Trophy className="w-3 h-3" /> WOULD WIN
+                            </span>
+                          ) : r.outcome === "loss" ? (
+                            <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400">
+                              <XCircle className="w-3 h-3" /> WOULD LOSE
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-400/70 animate-pulse">
+                              <Activity className="w-3 h-3" /> PENDING
+                            </span>
+                          )}
+                        </>
+                      ) : isOpen ? (
                         <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 animate-pulse">
                           <Activity className="w-3 h-3" /> ACTIVE
                         </span>

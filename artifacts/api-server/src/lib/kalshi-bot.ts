@@ -334,6 +334,11 @@ const windowCBBuffer: Map<string, { wins: number; losses: number }> = new Map();
 // Null before the first run fires (typically ~15 min after startup).
 const cachedPerformanceReportByMode = new Map<BotMode, PerformanceReport>();
 
+// Shadow-parole result cache: avoids a DB hit on every 30-second bot tick.
+// The cache is keyed to the number of evaluated shadow bets so it refreshes
+// automatically whenever a new shadow bet is evaluated (not just on TTL).
+let _shadowParoleCache: { reducedBy: number; evaluatedCount: number } | null = null;
+
 // Recent Kalshi strike prices per symbol (chronological, oldest first).
 // Maintained from DB on startup and updated after each position close.
 // Used for momentum filter and regime indicator.
@@ -2743,6 +2748,208 @@ async function fetchWindowClosePrice(product: string, windowKey: string): Promis
 // is slow or the coin is not listed there (e.g. BNB).
 const EVAL_DEFER_MS = 90_000; // 90 seconds
 
+// ---------------------------------------------------------------------------
+// Shadow bet helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a shadow (probe) bet: a virtual bet that fires when a coin would have
+ * been traded normally but was blocked solely by the doubt-penalty confidence
+ * floor.  No Kalshi order is placed.  The outcome is evaluated at window close
+ * against the real price and feeds the parole check.
+ *
+ * Shadow bets are completely isolated from all real-bet state — they never
+ * touch openPositions, recentWindowOutcomes, P&L, balance guards, or streak
+ * counters.  The `id` uses a deterministic prefix so duplicate recording on
+ * the same window/coin pair is silently ignored.
+ */
+async function recordShadowBet(
+  sym: string,
+  direction: "yes" | "no",
+  confidence: number,
+  signals: unknown,
+  kalshiTarget: number | null,
+  windowKey: string,
+  mode: BotMode,
+  ticker: string | null,
+): Promise<void> {
+  // Deterministic ID: one shadow bet per coin per window per mode.
+  const id = `shadow:${sym}:${windowKey}:${mode}`;
+  try {
+    await db
+      .insert(kalshiBotBetsTable)
+      .values({
+        id,
+        symbol: sym,
+        windowKey,
+        ticker: ticker ?? null,
+        direction,
+        action: "shadow",
+        mode,
+        signals: signals as Record<string, unknown>,
+        kalshiTarget: kalshiTarget != null ? String(kalshiTarget) : null,
+        source: "bot",
+      })
+      .onConflictDoNothing(); // idempotent — ignore re-recording the same window
+    logger.info(
+      { sym, direction, confidence, windowKey, mode },
+      `[shadow-bet] recorded probe bet — blocked solely by doubt penalty`,
+    );
+  } catch (err) {
+    logger.warn({ err, sym, windowKey }, "[shadow-bet] failed to record (non-fatal)");
+  }
+}
+
+/**
+ * Evaluate shadow bets from prior windows that have not yet been assessed.
+ * For each, fetch the window close price, determine if the direction was
+ * correct, and stamp outcome + evaluatedAt.
+ *
+ * Shadow outcomes MUST NOT update recentWindowOutcomes — that map is real-bets-only.
+ * They also must not touch P&L, balance, or streak state.
+ *
+ * After evaluating new rows, the shadow parole cache is invalidated so the
+ * next parole check reflects fresh accuracy data.
+ */
+export async function evalShadowBets(): Promise<void> {
+  try {
+    const currentKey = currentWindowKey();
+    const rows = await db
+      .select({
+        id: kalshiBotBetsTable.id,
+        symbol: kalshiBotBetsTable.symbol,
+        windowKey: kalshiBotBetsTable.windowKey,
+        direction: kalshiBotBetsTable.direction,
+        kalshiTarget: kalshiBotBetsTable.kalshiTarget,
+        signals: kalshiBotBetsTable.signals,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          eq(kalshiBotBetsTable.action, "shadow"),
+          isNull(kalshiBotBetsTable.evaluatedAt),
+          sql`${kalshiBotBetsTable.windowKey} < ${currentKey}`,
+        ),
+      )
+      .limit(20);
+
+    if (rows.length === 0) return;
+
+    let evaluated = 0;
+    for (const row of rows) {
+      const coin = CRYPTO_COINS.find((c) => c.symbol === row.symbol);
+      if (!coin || !row.windowKey || !row.direction) continue;
+      const strike = row.kalshiTarget != null ? parseFloat(String(row.kalshiTarget)) : null;
+      if (strike == null) continue;
+
+      // Fetch the real close price — same source as expired real bets.
+      let closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
+      if (closePrice === null) {
+        // Try cached price from signals blob as fallback.
+        const sigs = row.signals as Record<string, unknown> | null;
+        const cached = sigs?.cryptoPriceAtEntry as number | null ?? null;
+        if (cached != null) closePrice = cached;
+      }
+      if (closePrice === null) {
+        logger.debug({ sym: row.symbol, windowKey: row.windowKey },
+          "[shadow-bet] close price unavailable — deferring evaluation");
+        continue;
+      }
+
+      const priceAboveStrike = closePrice >= strike;
+      const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
+      const outcome: "win" | "loss" = won ? "win" : "loss";
+
+      const updatedSignals = {
+        ...(row.signals as Record<string, unknown> ?? {}),
+        closePriceAtEval: closePrice,
+      };
+
+      await db
+        .update(kalshiBotBetsTable)
+        .set({ outcome, evaluatedAt: new Date(), signals: updatedSignals })
+        .where(eq(kalshiBotBetsTable.id, row.id));
+
+      logger.info(
+        { sym: row.symbol, windowKey: row.windowKey, direction: row.direction, closePrice, strike, outcome },
+        `[shadow-bet] evaluated — ${outcome}`,
+      );
+      evaluated++;
+    }
+
+    if (evaluated > 0) {
+      // Invalidate parole cache so next parole check picks up fresh accuracy.
+      _shadowParoleCache = null;
+      logger.info({ evaluated }, "[shadow-bet] evaluation batch complete");
+    }
+  } catch (err) {
+    logger.warn({ err }, "[shadow-bet] evalShadowBets error (non-fatal)");
+  }
+}
+
+/**
+ * Check whether shadow bet accuracy justifies an early parole — reducing the
+ * active doubt-penalty by 4pp so marginally-blocked coins can re-enter.
+ *
+ * Returns the pp reduction to apply (0 or 4).  The result is cached per
+ * evaluated-count so it refreshes automatically when new shadow outcomes land
+ * without a fixed TTL that might go stale.
+ *
+ * Win-rate ≥ 60% over ≥ 3 evaluated bets → reduce by 4pp.
+ * Win-rate < 40% over ≥ 5 evaluated bets → log warning, no change.
+ */
+async function checkShadowParole(): Promise<number> {
+  try {
+    // Read last 10 evaluated shadow bets.
+    const rows = await db
+      .select({ outcome: kalshiBotBetsTable.outcome })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          eq(kalshiBotBetsTable.action, "shadow"),
+          isNotNull(kalshiBotBetsTable.evaluatedAt),
+        ),
+      )
+      .orderBy(desc(kalshiBotBetsTable.evaluatedAt))
+      .limit(10);
+
+    const evaluated = rows.filter(r => r.outcome === "win" || r.outcome === "loss");
+
+    // Cache keyed on count — invalidated when new evaluations arrive.
+    if (_shadowParoleCache && _shadowParoleCache.evaluatedCount === evaluated.length) {
+      return _shadowParoleCache.reducedBy;
+    }
+
+    if (evaluated.length < 3) {
+      _shadowParoleCache = { reducedBy: 0, evaluatedCount: evaluated.length };
+      return 0;
+    }
+
+    const wins = evaluated.filter(r => r.outcome === "win").length;
+    const winRate = wins / evaluated.length;
+    let reducedBy = 0;
+
+    if (winRate >= 0.6) {
+      reducedBy = 4;
+      logger.info(
+        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length, reducedBy },
+        `[parole] shadow accuracy ${(winRate * 100).toFixed(0)}% over ${evaluated.length} bets — doubt penalty -${reducedBy}pp`,
+      );
+    } else if (winRate < 0.4 && evaluated.length >= 5) {
+      logger.info(
+        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length },
+        `[parole] shadow accuracy insufficient (${(winRate * 100).toFixed(0)}% < 40%) — restriction maintained`,
+      );
+    }
+
+    _shadowParoleCache = { reducedBy, evaluatedCount: evaluated.length };
+    return reducedBy;
+  } catch (err) {
+    logger.warn({ err }, "[parole] checkShadowParole error (non-fatal)");
+    return 0;
+  }
+}
+
 export async function evalClosedBets(): Promise<void> {
   const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
 
@@ -3282,6 +3489,8 @@ export async function runBotLoopTick(): Promise<void> {
   // Evaluate any closed bets that haven't been stamped with outcome yet.
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
   evalClosedBets().catch(() => {});
+  // Evaluate shadow (probe) bets from prior windows — also fire-and-forget.
+  evalShadowBets().catch(() => {});
 
   // Always run window-expiry check, even when paused or disabled.
   // If the 15-minute window rolls over while a position is still open (e.g.
@@ -3616,6 +3825,23 @@ export async function runBotLoopTick(): Promise<void> {
   }
   // Store for Task-C signal enrichment: _runBotTick includes this in the signals JSON.
   currentWindowDoubtPenalty = windowDoubtPenalty;
+
+  // Shadow-parole: if recent probe bets (recorded during penalty lockouts) show
+  // ≥60% win rate over ≥3 evaluated bets, reduce the effective doubt penalty by
+  // 4pp for THIS tick only.  The time-based decay (Task 257) handles the long-term
+  // clearing; parole provides an earlier lift when the market has genuinely settled.
+  let effectiveDoubtPenalty = windowDoubtPenalty;
+  if (windowDoubtPenalty > 0) {
+    const paroleReduction = await checkShadowParole();
+    if (paroleReduction > 0) {
+      effectiveDoubtPenalty = Math.max(0, windowDoubtPenalty - paroleReduction);
+      logger.info(
+        { windowDoubtPenalty, paroleReduction, effectiveDoubtPenalty },
+        `[kalshi-bot] [parole] doubt penalty reduced ${windowDoubtPenalty}pp → ${effectiveDoubtPenalty}pp for this tick`,
+      );
+    }
+  }
+
   // Symbols blocked by the new regime-aware guards (momentum override, directional cap, border guard).
   // These must be excluded from Phase-4 orderedSymbols so runBotTickForCoin cannot
   // independently place a bet that the Phase-3 filter just blocked.
@@ -4158,20 +4384,49 @@ export async function runBotLoopTick(): Promise<void> {
     // Window-doubt filter: if recent windows had poor win rates, require higher conviction
     // for both YES and NO bets. This prevents the bot from over-betting during choppy
     // uncertain regimes when all signals are marginal.
-    if (windowDoubtPenalty > 0 && effectiveConfidence < config.minConfidence + windowDoubtPenalty) {
+    // effectiveDoubtPenalty is windowDoubtPenalty minus any parole reduction from
+    // shadow-bet accuracy (see checkShadowParole above).
+    if (effectiveDoubtPenalty > 0 && effectiveConfidence < config.minConfidence + effectiveDoubtPenalty) {
       filteredByNewGuards.add(sym);
       evalResults.push({
         symbol: sym,
         action: "SKIP",
         confidence: effectiveConfidence,
         score: 0,
-        reason: `doubt filter — ${weakWindowCount} weak recent window(s), ${effectiveConfidence}% < ${config.minConfidence + windowDoubtPenalty}% floor (+${windowDoubtPenalty}pp)`,
+        reason: `doubt filter — ${weakWindowCount} weak recent window(s), ${effectiveConfidence}% < ${config.minConfidence + effectiveDoubtPenalty}% floor (+${effectiveDoubtPenalty}pp)`,
         windowKey,
         selected: false,
         evaluatedAt: now,
         trendStability: stability,
         regime,
       });
+
+      // Record a shadow (probe) bet if the coin would have passed the BASE
+      // confidence floor without the doubt penalty.  Shadow bets track whether
+      // the bot's signals are accurate during restriction windows so the parole
+      // check can lift the penalty earlier when accuracy recovers.
+      // Only record when the coin has a clear direction (not SKIP from makeBotDecision).
+      if (
+        effectiveDoubtPenalty > 0 &&
+        effectiveConfidence >= config.minConfidence &&
+        decision.action !== "SKIP"
+      ) {
+        const shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+        const shadowTicker = kalshiData?.ticker ?? null;
+        const shadowTarget = kalshiData?.value ?? null;
+        // Fire-and-forget — shadow recording is non-blocking
+        void recordShadowBet(
+          sym,
+          shadowDir,
+          effectiveConfidence,
+          decision.signals,
+          shadowTarget,
+          windowKey,
+          botMode,
+          shadowTicker,
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] record failed (non-fatal)"));
+      }
+
       continue;
     }
 
