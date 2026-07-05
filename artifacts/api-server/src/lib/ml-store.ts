@@ -28,6 +28,7 @@ import {
   getCoinState,
   resetAllState,
 } from "./ml-core.ts";
+import { logger } from "./logger.ts";
 
 // Re-export types that callers need
 export type { MLPrediction };
@@ -270,8 +271,10 @@ export async function initMLFromDB(): Promise<void> {
     if (firstWithFeatures) {
       const storedLen = (firstWithFeatures.features as number[]).length;
       if (storedLen !== N_FEATURES) {
-        console.warn(
-          `[ml-store] N_FEATURES mismatch: DB snapshots have ${storedLen} features but current N_FEATURES=${N_FEATURES}. Wiping ML data — backfill will re-seed with correct feature count.`,
+        logger.warn(
+          "[ml-store] N_FEATURES mismatch: DB snapshots have %d features but current N_FEATURES=%d. Wiping ML data — backfill will re-seed with correct feature count.",
+          storedLen,
+          N_FEATURES,
         );
         await clearMLData();
         return; // runMLBackfillIfNeeded will run immediately after this call
@@ -313,7 +316,7 @@ export async function initMLFromDB(): Promise<void> {
     for (const sym of coinSymbols) {
       const r = reconcileStateFromExamples(sym);
       if (r.wasInconsistent) {
-        console.info(`[ml-store] reconciled ${sym}: windows set to ${r.windows} from labeled snapshots (retrained)`);
+        logger.info("[ml-store] reconciled %s: windows set to %d from labeled snapshots (retrained)", sym, r.windows);
       }
     }
 
@@ -323,12 +326,15 @@ export async function initMLFromDB(): Promise<void> {
     const readyCoins  = allStatus.filter(c => c.ready).map(c => `${c.symbol}(${c.valAccuracy ?? "?"}%)`);
     const warmingCoins = allStatus.filter(c => !c.ready).map(c => `${c.symbol}(${c.windows}/${30})`);
 
-    console.info(
-      `[ml-store] hydrated ${savedModels.length} models, ${labeledCount} labeled + ${pendingCount} pending snapshots` +
-      (readyCoins.length  ? `; ready: ${readyCoins.join(", ")}`          : "") +
-      (warmingCoins.length ? `; warming: ${warmingCoins.join(", ")}`      : ""),
+    logger.info(
+      "[ml-store] hydrated %d models, %d labeled + %d pending snapshots%s%s",
+      savedModels.length,
+      labeledCount,
+      pendingCount,
+      readyCoins.length   ? `; ready: ${readyCoins.join(", ")}`   : "",
+      warmingCoins.length ? `; warming: ${warmingCoins.join(", ")}` : "",
     );
   } catch (err) {
-    console.warn("[ml-store] initMLFromDB failed (non-fatal):", err);
+    logger.warn({ err }, "[ml-store] initMLFromDB failed (non-fatal)");
   }
 }

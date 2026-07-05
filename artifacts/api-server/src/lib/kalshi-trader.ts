@@ -13,6 +13,7 @@
 //   KALSHI-ACCESS-SIGNATURE — base64(RSA-PSS-SHA256(timestamp + method + path))
 
 import crypto from "crypto";
+import { logger } from "./logger.ts";
 
 const KALSHI_TRADE_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
@@ -547,7 +548,7 @@ export async function getCachedKalshiBalance(): Promise<number> {
       const staleAgeMs = now - _balanceCache.fetchedAt;
       // Use stale cache (up to 60 s old) rather than aborting the trade
       if (staleAgeMs < 60_000) {
-        console.warn(`[kalshi] balance fetch failed — using stale cache (${Math.round(staleAgeMs / 1000)}s old):`, err);
+        logger.warn({ err }, "[kalshi] balance fetch failed — using stale cache (%ds old)", Math.round(staleAgeMs / 1000));
         return _balanceCache.availableBalance;
       }
     }

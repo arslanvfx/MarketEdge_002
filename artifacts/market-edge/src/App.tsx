@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/reac
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
+import NotFound from "./pages/not-found";
 import Home from "./pages/home";
 import Markets from "./pages/markets";
 import Builder from "./pages/builder";
@@ -204,11 +205,7 @@ function ClerkProviderWithRoutes() {
             </Route>
             
             <Route>
-              <Layout>
-                <div className="flex h-full items-center justify-center p-8">
-                  <h1 className="text-2xl font-bold">404 Not Found</h1>
-                </div>
-              </Layout>
+              <NotFound />
             </Route>
           </Switch>
         </BuilderProvider>

@@ -2103,7 +2103,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
         if (!selected) {
           // Close_time data is available but no market fits this window yet.
           // Return null so the tracker retries on the next 30-second tick.
-          console.info(`[kalshi] ${sym}: no market within 8 min of ${targetTime.toISOString()} — will retry`);
+          logger.info("[kalshi] %s: no market within 8 min of %s — will retry", sym, targetTime.toISOString());
           return null;
         }
       } else {
@@ -2111,7 +2111,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
         // a warning so we know the strict guard couldn't run.
         selected = markets[0];
         if (selected) {
-          console.warn(`[kalshi] ${sym}: close_time absent from API response — using first market (strike ${selected.floor_strike}). Consider checking the API format.`);
+          logger.warn({ sym, floor_strike: selected.floor_strike }, "[kalshi] close_time absent from API response — using first market. Consider checking the API format.");
         }
       }
     } else {
@@ -2292,7 +2292,7 @@ async function initHistoryFromDB(): Promise<void> {
       historyStore.set(sym, coinRows.map(rowToRecord));
     }
   } catch (err) {
-    console.error("[initHistoryFromDB] failed (non-fatal):", err);
+    logger.error({ err }, "[initHistoryFromDB] failed (non-fatal)");
   }
 }
 
@@ -2304,12 +2304,15 @@ async function pruneOldPredictionRecords(): Promise<void> {
       .where(lt(predictionRecordsTable.snappedAt, cutoff));
     const count = (result as unknown as { rowCount?: number }).rowCount ?? 0;
     if (count > 0) {
-      console.info(
-        `[pruneOldRecords] deleted ${count} records older than ${RETENTION_DAYS} days (before ${cutoff.toISOString()})`,
+      logger.info(
+        "[pruneOldRecords] deleted %d records older than %d days (before %s)",
+        count,
+        RETENTION_DAYS,
+        cutoff.toISOString(),
       );
     }
   } catch (err) {
-    console.error("[pruneOldRecords] failed (non-fatal):", err);
+    logger.error({ err }, "[pruneOldRecords] failed (non-fatal)");
   }
 }
 
@@ -2338,7 +2341,7 @@ function dbInsertRecord(rec: PredictionRecord): void {
       liveDirectionAbove: null,
     })
     .onConflictDoNothing()
-    .catch((err) => console.error("[dbInsertRecord] failed:", err));
+    .catch((err) => logger.error({ err }, "[dbInsertRecord] failed"));
 }
 
 function dbUpdateRecord(rec: PredictionRecord): void {
@@ -2351,7 +2354,7 @@ function dbUpdateRecord(rec: PredictionRecord): void {
       status: rec.status,
     })
     .where(eq(predictionRecordsTable.id, rec.id))
-    .catch((err) => console.error("[dbUpdateRecord] failed:", err));
+    .catch((err) => logger.error({ err }, "[dbUpdateRecord] failed"));
 }
 
 // Write the liveDirection binary call back to the claude/ensemble DB records
@@ -2364,14 +2367,14 @@ function dbUpdateLiveDirection(symbol: string, targetTime: string, aboveKalshi: 
     db.update(predictionRecordsTable)
       .set({ liveDirectionAbove: aboveKalshi })
       .where(eq(predictionRecordsTable.id, id))
-      .catch((err) => console.error(`[dbUpdateLiveDirection] ${symbol} ${source} failed:`, err));
+      .catch((err) => logger.error({ err }, "[dbUpdateLiveDirection] %s %s failed", symbol, source));
     // Also update the in-memory record so the accuracy eval path uses the new
     // value immediately without waiting for a DB round-trip.
     const recs = historyStore.get(symbol.toUpperCase()) ?? [];
     const rec = recs.find((r) => r.id === id);
     if (rec) rec.liveDirectionAbove = aboveKalshi;
   }
-  console.info(`[live-dir] ${symbol}: liveDirectionAbove=${aboveKalshi} written to DB (claude + ensemble)`);
+  logger.info("[live-dir] %s: liveDirectionAbove=%s written to DB (claude + ensemble)", symbol, aboveKalshi);
 }
 
 // ---------------------------------------------------------------------------
@@ -3444,7 +3447,7 @@ export function startPredictionTracker(
                 const freshPrice = freshTicker > 0 ? freshTicker : undefined;
                 const freshAnalysis = analyzeCoin(coin, freshCandles, freshStats, new Date(nowMs), freshPrice);
                 predCache.set(sym, { at: Date.now(), value: freshAnalysis });
-                console.info(`[mid-snap] ${sym}: predCache refreshed at T+${Math.round(timeIntoWindow / 60_000)}min`);
+                logger.info("[mid-snap] %s: predCache refreshed at T+%dmin", sym, Math.round(timeIntoWindow / 60_000));
               } catch {
                 // non-fatal — main snap result remains in predCache
               } finally {
@@ -3508,7 +3511,7 @@ export function startPredictionTracker(
               const isInitialTrigger = triggerReason === "initial (stat snap ready)";
               liveDirectionInFlight.add(sym);
               liveDirectionLastAutoTrigger.set(sym, nowMs);
-              console.info(`[live-dir] ${sym}: ${triggerReason} — re-checking Claude`);
+              logger.info("[live-dir] %s: %s — re-checking Claude", sym, triggerReason);
               fetchLiveDirection(sym, true)
                 .then((result) => {
                   // On the initial trigger only: write the direct binary ABOVE/BELOW
@@ -3763,7 +3766,7 @@ Return ONLY valid JSON:
     }
     return result;
   } catch (err) {
-    console.error("[fetchKalshiBtcCall] error:", err);
+    logger.error({ err }, "[fetchKalshiBtcCall] error");
     return null;
   }
 }
@@ -4536,12 +4539,13 @@ async function recoverUnevaluatedTimingSnapshots(): Promise<void> {
     }
 
     if (recovered > 0) {
-      console.info(
-        `[timing-recovery] back-filled ${recovered} unevaluated timing window(s) from closed prediction records`,
+      logger.info(
+        "[timing-recovery] back-filled %d unevaluated timing window(s) from closed prediction records",
+        recovered,
       );
     }
   } catch (err) {
-    console.warn("[timing-recovery] failed (non-fatal):", err);
+    logger.warn({ err }, "[timing-recovery] failed (non-fatal)");
   }
 }
 

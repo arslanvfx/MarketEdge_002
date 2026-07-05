@@ -18,6 +18,7 @@
 
 import { db, botConfigTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { logger } from "./logger";
 
 export type AiSpendLevel = "off" | "eco" | "balanced" | "max";
 
@@ -108,7 +109,7 @@ export function setAiSpendLevel(level: AiSpendLevel): void {
       target: botConfigTable.id,
       set: { config: { level } as Record<string, unknown>, updatedAt: new Date() },
     })
-    .catch((e: unknown) => console.error("[ai-spend] persist error:", e));
+    .catch((e: unknown) => logger.error({ err: e }, "[ai-spend] persist error"));
 }
 
 /** Returns true when the given Claude feature should run at the current spend level. */
@@ -137,10 +138,10 @@ export async function initAiSpend(): Promise<void> {
       const lvl = cfg?.level;
       if (lvl === "off" || lvl === "eco" || lvl === "balanced" || lvl === "max") {
         currentLevel = lvl;
-        console.info(`[ai-spend] restored spend level: ${lvl}`);
+        logger.info("[ai-spend] restored spend level: %s", lvl);
       }
     }
   } catch (e) {
-    console.error("[ai-spend] failed to load from DB:", e);
+    logger.error({ err: e }, "[ai-spend] failed to load from DB");
   }
 }

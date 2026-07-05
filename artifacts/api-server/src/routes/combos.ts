@@ -8,6 +8,7 @@ import { fetchMarkets, fetchMarketsForLegs, fetchAllMarkets, listCategories } fr
 import { optimizeCombos, detectPortfolioOverlap, autoGenerateCombos, RiskLevel } from "../lib/optimizer";
 import { analyzeMarkets, type MarketAnalysis } from "../lib/ai-analysis";
 import { isAiGloballyEnabled } from "../lib/crypto";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -244,7 +245,7 @@ router.post("/combos/smart-picks", async (req, res) => {
 
     return res.json({ combos, generatedAt: new Date().toISOString() });
   } catch (err) {
-    console.error("[smart-picks]", err);
+    logger.error({ err }, "[smart-picks] generation failed");
     return res.status(500).json({ error: "Generation failed" });
   }
 });
@@ -255,7 +256,7 @@ router.get("/combos/categories", async (_req, res) => {
     const categories = await listCategories();
     return res.json({ categories });
   } catch (err) {
-    console.error("[categories]", err);
+    logger.error({ err }, "[categories] failed to load");
     return res.status(500).json({ error: "Failed to load categories" });
   }
 });
