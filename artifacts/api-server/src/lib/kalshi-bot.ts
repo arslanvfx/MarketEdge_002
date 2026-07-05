@@ -21,6 +21,9 @@ import {
   checkExposureGuard,
   applyDailyLossUpdate,
   applyStreakUpdate,
+  checkDuplicatePositionGuard,
+  checkManualPositionExistsGuard,
+  checkManualSourceGuard,
 } from "./kalshi-bot-guards";
 import {
   DEFAULT_BOT_CONFIG,
@@ -2072,7 +2075,7 @@ export async function placeManualOrder(opts: {
   }
 
   // Guard: position already open for this coin
-  if (openPositions.has(sym)) {
+  if (checkDuplicatePositionGuard(openPositions.has(sym))) {
     throw new Error(`Position already open for ${sym} — close it before placing a new order`);
   }
 
@@ -2243,12 +2246,8 @@ export async function placeManualOrder(opts: {
 export async function closeManualPosition(symbol: string): Promise<{ pnl: number | null }> {
   const sym = symbol.toUpperCase();
   const pos = openPositions.get(sym);
-  if (!pos) {
-    throw new Error(`No open position for ${sym}`);
-  }
-  if (pos.source !== "manual") {
-    throw new Error(`Position for ${sym} was opened by the bot — use the bot controls to manage it`);
-  }
+  checkManualPositionExistsGuard(pos, sym);
+  checkManualSourceGuard(pos!.source, sym);
 
   const cachedKalshi = getKalshiCachedData(sym);
   const currentYesPrice = cachedKalshi?.yesPrice ?? null;

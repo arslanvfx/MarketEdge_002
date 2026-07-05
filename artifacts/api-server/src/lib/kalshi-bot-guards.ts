@@ -107,6 +107,53 @@ export function checkExposureGuard(
 }
 
 // ---------------------------------------------------------------------------
+// Manual-order guards — checked by placeManualOrder / closeManualPosition
+// ---------------------------------------------------------------------------
+
+/**
+ * Guard: duplicate manual position.
+ *
+ * Returns true (blocked) when there is already an open position for the symbol.
+ * Prevents placing a second order before the first is closed.
+ */
+export function checkDuplicatePositionGuard(hasPosition: boolean): boolean {
+  return hasPosition;
+}
+
+/**
+ * Guard: position must exist for manual close.
+ *
+ * Throws when no position is found in the map.  Extracted so tests can verify
+ * the error message and condition without importing kalshi-bot.ts (which has
+ * DB-importing transitive deps incompatible with the native-ESM test runner).
+ */
+export function checkManualPositionExistsGuard(
+  pos: unknown,
+  sym: string,
+): void {
+  if (!pos) {
+    throw new Error(`No open position for ${sym}`);
+  }
+}
+
+/**
+ * Guard: position must have been opened via placeManualOrder.
+ *
+ * Throws when the position's source is not "manual" — bot-opened positions
+ * must be managed through the bot controls, not the manual-close endpoint.
+ */
+export function checkManualSourceGuard(
+  source: string,
+  sym: string,
+): void {
+  if (source !== "manual") {
+    throw new Error(
+      `Position for ${sym} was opened by the bot — use the bot controls to manage it`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // closePosition state helpers
 // ---------------------------------------------------------------------------
 
