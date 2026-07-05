@@ -2027,6 +2027,192 @@ async function _runBotTick(
 }
 
 // ---------------------------------------------------------------------------
+// Manual order — triggered by the dashboard "Place Order" button
+// ---------------------------------------------------------------------------
+
+export interface ManualOrderResult {
+  filled: boolean;
+  fillPrice: number;
+  contractCount: number;
+  betAmount: number;
+  pnlProjected: number;
+  ticker: string;
+}
+
+export async function placeManualOrder(opts: {
+  symbol: string;
+  direction: "yes" | "no";
+  betSize?: number;
+  mode?: BotMode;
+}): Promise<ManualOrderResult> {
+  const sym = opts.symbol.toUpperCase();
+  const direction = opts.direction;
+  const targetMode: BotMode = opts.mode ?? botMode;
+  const targetBetSize = opts.betSize ?? config.betSize;
+
+  // Guard: bet size cap
+  const maxBetCap = config.maxBetSize ?? 2;
+  if (targetBetSize > maxBetCap + 0.01) {
+    throw new Error(`betSize $${targetBetSize.toFixed(2)} exceeds maxBetSize $${maxBetCap.toFixed(2)}`);
+  }
+
+  // Guard: position already open for this coin
+  if (openPositions.has(sym)) {
+    throw new Error(`Position already open for ${sym} — close it before placing a new order`);
+  }
+
+  // Get live Kalshi bid/ask from the shared 5s cache (same data source as bot)
+  const cachedKalshi = getKalshiCachedData(sym);
+  const kalshiTicker = cachedKalshi?.ticker ?? null;
+  const kalshiTarget = cachedKalshi?.value ?? null;
+  const yesAsk = cachedKalshi?.yesAsk ?? null;
+  const yesBid = cachedKalshi?.yesBid ?? null;
+  const yesPrice = cachedKalshi?.yesPrice ?? null;
+
+  if (!kalshiTicker) {
+    throw new Error(`No active Kalshi market found for ${sym} — try again in a few seconds`);
+  }
+  if (kalshiTarget == null) {
+    throw new Error(`Kalshi strike price not available for ${sym}`);
+  }
+
+  // Compute fill price and cost per contract (mirrors bot Phase-3 logic)
+  const liveLimitPrice: number | null =
+    direction === "yes"
+      ? (yesAsk != null && yesAsk > 0 ? yesAsk : null)
+      : (yesBid != null && yesBid > 0 ? yesBid : null);
+
+  const expectedFillCost: number =
+    direction === "yes"
+      ? (liveLimitPrice ?? computeMarketableLimitPrice("bid", yesPrice, config.minReturnMultiple))
+      : (yesBid != null && yesBid > 0
+          ? (1 - yesBid)
+          : (1 - (yesPrice ?? 0.5)));
+
+  const contractCount = Math.floor(targetBetSize / expectedFillCost);
+  if (contractCount < 1) {
+    throw new Error(
+      `Budget $${targetBetSize.toFixed(2)} cannot buy 1 contract — current cost is $${expectedFillCost.toFixed(2)}/contract`,
+    );
+  }
+
+  // Guard: live mode prerequisites
+  if (targetMode === "live") {
+    if (!isKalshiConfigured()) {
+      throw new Error("Kalshi is not configured — add API credentials before placing live orders");
+    }
+    const bal = accountBalance;
+    const minBal = config.minAccountBalance ?? 5;
+    if (bal != null && bal < minBal) {
+      throw new Error(`Account balance $${bal.toFixed(2)} is below the minimum $${minBal.toFixed(2)} — top up before betting`);
+    }
+  }
+
+  const windowKey = currentWindowKey();
+  let fillPrice: number;
+  let orderId: string | null = null;
+
+  if (targetMode === "live") {
+    const result = await placeOrderWithRetry(
+      {
+        ticker: kalshiTicker,
+        side: direction,
+        action: "buy",
+        count: contractCount,
+        type: "market",
+        ...(liveLimitPrice != null
+          ? { limitPrice: liveLimitPrice }
+          : {
+              yesPrice: yesPrice ?? undefined,
+              minReturnMultiple: config.minReturnMultiple,
+            }),
+      },
+      {
+        immediateAttempts: 2,
+        priceImprovementMaxCents: config.maxSlippageCents ?? 10,
+        maxDurationMs: 25_000,
+      },
+    );
+    if (result.filledCount === 0) {
+      throw new Error("Order was not filled after retries — the book may be empty right now");
+    }
+    fillPrice = result.avgPrice ?? yesAsk ?? yesPrice ?? 0.5;
+    orderId = result.orderId;
+    invalidateBalanceCache();
+  } else {
+    // Paper: simulate fill at live ask/bid (or midpoint as fallback)
+    fillPrice = direction === "yes"
+      ? (yesAsk ?? yesPrice ?? 0.5)
+      : (yesBid ?? yesPrice ?? 0.5);
+  }
+
+  const actualFillYesPrice = fillPrice;
+  const actualBetAmount = direction === "yes"
+    ? contractCount * actualFillYesPrice
+    : contractCount * (1 - actualFillYesPrice);
+
+  const id = `manual:${sym}:${windowKey}:${Date.now()}`;
+  const cryptoPriceAtEntry = getCachedPrediction(sym)?.price ?? null;
+
+  const newPosition: OpenPosition = {
+    id,
+    symbol: sym,
+    windowKey,
+    ticker: kalshiTicker,
+    direction,
+    entryYesPrice: actualFillYesPrice,
+    contractCount,
+    betAmount: actualBetAmount,
+    kalshiTarget,
+    openedAt: Date.now(),
+    cryptoPriceAtEntry,
+    exitState: makeInitialExitState(actualFillYesPrice),
+    entryDecision: {
+      action: direction === "yes" ? "BET_YES" : "BET_NO",
+      confidence: 0,
+      reasoning: "manual order placed via dashboard",
+      signals: {},
+    },
+    phase2Activated: false,
+    entryMode: targetMode,
+  };
+  openPositions.set(sym, newPosition);
+
+  await persistBetRecord({
+    symbol: sym,
+    windowKey,
+    ticker: kalshiTicker,
+    direction,
+    action: "bet",
+    signals: { manual: true, orderId: orderId ?? undefined },
+    entryPrice: actualFillYesPrice,
+    kalshiTarget,
+    contractCount,
+    betAmount: actualBetAmount,
+    insertId: id,
+    cryptoPriceAtEntry,
+    decisionMode: config.decisionMode ?? "classic",
+    mode: targetMode,
+  });
+
+  logger.info({ sym, direction, fillPrice, contractCount, targetMode, manual: true }, "[kalshi-bot] manual order placed");
+
+  // Projected payout on win: YES win = (1 − entryPrice) × n; NO win = entryPrice × n
+  const pnlProjected = direction === "yes"
+    ? contractCount * (1 - actualFillYesPrice)
+    : contractCount * actualFillYesPrice;
+
+  return {
+    filled: true,
+    fillPrice: actualFillYesPrice,
+    contractCount,
+    betAmount: actualBetAmount,
+    pnlProjected,
+    ticker: kalshiTicker,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Close position helper
 // ---------------------------------------------------------------------------
 

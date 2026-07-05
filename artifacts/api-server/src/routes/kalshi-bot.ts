@@ -20,6 +20,7 @@ import {
   getBacktestModes,
   clearAllPauses,
   getCoinGuardState,
+  placeManualOrder,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -500,6 +501,52 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/manual-order — place a single order immediately from the dashboard
+// Accepts { symbol, direction: "yes"|"no", betSize?, mode? }
+// Uses the same live-ask fill logic as the automated bot (Task #242).
+router.post("/crypto/bot/manual-order", requireAuth, async (req, res) => {
+  const { symbol, direction, betSize, mode } = req.body as {
+    symbol?: string;
+    direction?: string;
+    betSize?: number;
+    mode?: string;
+  };
+
+  if (!symbol || typeof symbol !== "string") {
+    res.status(400).json({ error: "symbol is required" });
+    return;
+  }
+  if (direction !== "yes" && direction !== "no") {
+    res.status(400).json({ error: "direction must be 'yes' or 'no'" });
+    return;
+  }
+  if (betSize !== undefined && (typeof betSize !== "number" || betSize <= 0)) {
+    res.status(400).json({ error: "betSize must be a positive number" });
+    return;
+  }
+  const resolvedMode = mode === "paper" || mode === "live" ? mode : undefined;
+  // Live manual orders are only permitted in production
+  if (resolvedMode === "live" && !isLiveModePermitted(process.env.NODE_ENV)) {
+    res.status(403).json({ error: "Live orders are only available in the production deployment." });
+    return;
+  }
+
+  try {
+    const result = await placeManualOrder({
+      symbol,
+      direction,
+      betSize,
+      mode: resolvedMode,
+    });
+    // Invalidate any internal caches that the next status poll depends on
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    // 400 for business-rule rejections (open position, insufficient funds, etc.)
+    res.status(400).json({ error: msg });
   }
 });
 

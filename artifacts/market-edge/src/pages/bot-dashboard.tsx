@@ -6,7 +6,7 @@ import {
   BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus,
   Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, ShoppingCart, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -454,6 +454,13 @@ export default function BotDashboard() {
   // user can browse paper history while live or vice versa.
   const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
 
+  // ── Manual order modal state ─────────────────────────────────────────────
+  const [manualOrderSym, setManualOrderSym] = useState<string | null>(null);
+  const [manualDir, setManualDir] = useState<"yes" | "no">("yes");
+  const [manualBetSize, setManualBetSize] = useState<string>("");
+  const [manualSubmitting, setManualSubmitting] = useState(false);
+  const [manualToast, setManualToast] = useState<{ ok: boolean; msg: string } | null>(null);
+
   // ── Data fetching ────────────────────────────────────────────────────────
   const { data: status, isLoading } = useQuery<BotStatus>({
     queryKey: ["bot-status"],
@@ -567,6 +574,24 @@ export default function BotDashboard() {
     refetchInterval: 10_000,
   });
 
+  // Live Kalshi prices for the manual order modal — polls every 5s while modal is open
+  const { data: manualOrderKalshiData } = useQuery<{
+    target: number | null;
+    ticker: string | null;
+    yesPrice: number | null;
+    yesAsk: number | null;
+    yesBid: number | null;
+  }>({
+    queryKey: ["manual-order-kalshi", manualOrderSym],
+    queryFn: async () => {
+      const r = await fetch(`${API_BASE}/crypto/kalshi-target?symbol=${manualOrderSym}`);
+      return r.json();
+    },
+    enabled: manualOrderSym !== null,
+    refetchInterval: 5_000,
+    staleTime: 0,
+  });
+
   const [btPerfTab, setBtPerfTab] = useState<"live" | "backtest">("live");
   const [savingPreset, setSavingPreset] = useState(false);
   const [presetMsg, setPresetMsg] = useState<string | null>(null);
@@ -584,6 +609,56 @@ export default function BotDashboard() {
     });
     await qc.invalidateQueries({ queryKey: ["bot-status"] });
     return res.json();
+  }
+
+  async function submitManualOrder() {
+    if (!manualOrderSym || manualSubmitting) return;
+    setManualSubmitting(true);
+    try {
+      const token = await getToken();
+      const betSizeNum = parseFloat(manualBetSize);
+      const body: Record<string, unknown> = {
+        symbol: manualOrderSym,
+        direction: manualDir,
+        mode: activeMode,
+      };
+      if (!isNaN(betSizeNum) && betSizeNum > 0) body.betSize = betSizeNum;
+      const resp = await fetch(`${API_BASE}/crypto/bot/manual-order`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json() as { ok?: boolean; error?: string; fillPrice?: number; contractCount?: number; betAmount?: number; pnlProjected?: number };
+      if (!resp.ok || data.error) {
+        setManualToast({ ok: false, msg: data.error ?? "Order failed" });
+      } else {
+        const fp = data.fillPrice != null ? `${(data.fillPrice * 100).toFixed(0)}¢` : "—";
+        const contracts = data.contractCount ?? "?";
+        const payout = data.pnlProjected != null ? `$${data.pnlProjected.toFixed(2)}` : "—";
+        setManualToast({
+          ok: true,
+          msg: `Filled ${contracts} contract${contracts === 1 ? "" : "s"} at ${fp} — projected win: ${payout}`,
+        });
+        setManualOrderSym(null);
+        void qc.invalidateQueries({ queryKey: ["bot-status"] });
+        void qc.invalidateQueries({ queryKey: ["bot-all-history"] });
+      }
+    } catch {
+      setManualToast({ ok: false, msg: "Network error — please try again" });
+    } finally {
+      setManualSubmitting(false);
+      setTimeout(() => setManualToast(null), 6000);
+    }
+  }
+
+  function openManualOrder(sym: string) {
+    setManualOrderSym(sym);
+    setManualDir("yes");
+    setManualBetSize(String(status?.config?.betSize ?? "1"));
+    setManualToast(null);
   }
 
   async function togglePause() {
@@ -1113,6 +1188,7 @@ export default function BotDashboard() {
                     <th className="px-3 py-2">Regime</th>
                     <th className="px-3 py-2">Reason</th>
                     <th className="px-3 py-2">Selected</th>
+                    <th className="px-3 py-2">Order</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1183,6 +1259,16 @@ export default function BotDashboard() {
                         ) : e.selected ? (
                           <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
                         ) : null}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <button
+                          onClick={() => openManualOrder(e.symbol)}
+                          title={`Place a manual order for ${e.symbol}`}
+                          className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md border border-sky-500/40 text-sky-400 hover:bg-sky-500/15 hover:border-sky-400/60 transition-colors whitespace-nowrap"
+                        >
+                          <ShoppingCart className="w-3 h-3" />
+                          Order
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -2851,6 +2937,158 @@ export default function BotDashboard() {
           )}
         </div>
       </div>
+
+      {/* ── Manual Order Modal ── */}
+      {manualOrderSym && (() => {
+        const ask = manualOrderKalshiData?.yesAsk ?? null;
+        const bid = manualOrderKalshiData?.yesBid ?? null;
+        const mid = manualOrderKalshiData?.yesPrice ?? null;
+        const yesAskC = ask != null ? (ask * 100).toFixed(0) : mid != null ? (mid * 100).toFixed(0) : "—";
+        const noAskC  = bid != null ? ((1 - bid) * 100).toFixed(0) : mid != null ? ((1 - mid) * 100).toFixed(0) : "—";
+        const betSizeNum = parseFloat(manualBetSize);
+        const costPerContract = manualDir === "yes"
+          ? (ask ?? mid ?? 0.5)
+          : (bid != null ? 1 - bid : mid != null ? 1 - mid : 0.5);
+        const contracts = (!isNaN(betSizeNum) && betSizeNum > 0 && costPerContract > 0)
+          ? Math.floor(betSizeNum / costPerContract)
+          : 0;
+        const payout = contracts > 0 && costPerContract > 0
+          ? (manualDir === "yes"
+            ? contracts * (1 - (ask ?? mid ?? 0.5))
+            : contracts * (bid ?? mid ?? 0.5))
+          : 0;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setManualOrderSym(null)}>
+            <div
+              className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 space-y-5"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ShoppingCart className="w-4 h-4 text-sky-400" />
+                  <h3 className="font-bold text-base">Place Order — {manualOrderSym}</h3>
+                </div>
+                <button onClick={() => setManualOrderSym(null)} className="text-muted-foreground hover:text-foreground transition-colors">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Live prices */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-3 text-center">
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">YES ask</div>
+                  <div className="text-lg font-bold text-emerald-400 font-mono">{yesAskC}¢</div>
+                </div>
+                <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-3 text-center">
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">NO ask</div>
+                  <div className="text-lg font-bold text-red-400 font-mono">{noAskC}¢</div>
+                </div>
+              </div>
+
+              {/* Direction toggle */}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setManualDir("yes")}
+                  className={`flex-1 py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                    manualDir === "yes"
+                      ? "bg-emerald-500/20 border-emerald-500/60 text-emerald-400"
+                      : "bg-background border-border text-muted-foreground hover:border-emerald-500/30"
+                  }`}
+                >
+                  YES
+                </button>
+                <button
+                  onClick={() => setManualDir("no")}
+                  className={`flex-1 py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                    manualDir === "no"
+                      ? "bg-red-500/20 border-red-500/60 text-red-400"
+                      : "bg-background border-border text-muted-foreground hover:border-red-500/30"
+                  }`}
+                >
+                  NO
+                </button>
+              </div>
+
+              {/* Bet size */}
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs text-muted-foreground">Bet Size ($)</span>
+                <input
+                  type="number"
+                  min={0.5}
+                  max={status?.config?.maxBetSize ?? 25}
+                  step={0.5}
+                  value={manualBetSize}
+                  onChange={e => setManualBetSize(e.target.value)}
+                  className="bg-background border border-border rounded-md px-3 py-2 text-sm text-foreground focus:outline-none focus:border-sky-500/60"
+                />
+              </label>
+
+              {/* Preview */}
+              <div className="rounded-xl bg-muted/30 border border-border p-3 space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Contracts</span>
+                  <span className="font-mono font-bold">{contracts > 0 ? contracts : "—"}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Cost/contract</span>
+                  <span className="font-mono">{costPerContract > 0 ? `${(costPerContract * 100).toFixed(0)}¢` : "—"}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Projected win</span>
+                  <span className={`font-mono font-bold ${payout > 0 ? "text-emerald-400" : "text-muted-foreground"}`}>
+                    {payout > 0 ? `$${payout.toFixed(2)}` : "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Mode</span>
+                  <span className={`font-bold ${activeMode === "live" ? "text-red-400" : "text-yellow-400"}`}>
+                    {activeMode.toUpperCase()}
+                  </span>
+                </div>
+              </div>
+
+              {contracts < 1 && !isNaN(betSizeNum) && betSizeNum > 0 && (
+                <p className="text-xs text-amber-400">Budget too small — increase bet size or wait for prices to change.</p>
+              )}
+
+              <button
+                onClick={submitManualOrder}
+                disabled={manualSubmitting || contracts < 1}
+                className={`w-full py-2.5 rounded-xl font-bold text-sm transition-colors ${
+                  manualSubmitting || contracts < 1
+                    ? "bg-muted text-muted-foreground cursor-not-allowed"
+                    : manualDir === "yes"
+                    ? "bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30"
+                    : "bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30"
+                }`}
+              >
+                {manualSubmitting ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Placing…
+                  </span>
+                ) : (
+                  `Confirm ${manualDir.toUpperCase()} Order`
+                )}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Toast notification ── */}
+      {manualToast && (
+        <div className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-xl border text-sm font-medium max-w-sm text-center ${
+          manualToast.ok
+            ? "bg-emerald-950 border-emerald-500/40 text-emerald-300"
+            : "bg-red-950 border-red-500/40 text-red-300"
+        }`}>
+          {manualToast.ok ? <CheckCircle2 className="w-4 h-4 flex-shrink-0" /> : <XCircle className="w-4 h-4 flex-shrink-0" />}
+          <span>{manualToast.msg}</span>
+          <button onClick={() => setManualToast(null)} className="ml-1 opacity-60 hover:opacity-100">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
