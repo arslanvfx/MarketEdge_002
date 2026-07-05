@@ -1722,6 +1722,34 @@ async function _runBotTick(
           ? (1 - liveYesBid)
           : legacySideCost);
 
+  // ── RETURN FLOOR GATE (actual fill cost) ────────────────────────────────
+  // The decision engine already gates on minReturnMultiple using the midpoint
+  // yesPrice. This second check uses the ACTUAL cost we will pay (live ask or
+  // legacy midpoint+buffer) so a live ask that drifted above the midpoint can
+  // never produce a sub-1.45x fill.
+  //   YES: cost = yes_ask;  return = 1/cost. Need cost ≤ 1/1.45 ≈ 0.6897.
+  //   NO:  cost = 1−yes_bid; return = 1/cost. Same threshold.
+  // 1/1.45 ≈ 0.6897 → nearest cent-aligned ceiling is 0.68 (return 1.471x).
+  // We compare against the raw 1/1.45 float so a 0.69 cost (1.449x) is blocked.
+  {
+    const minReturnFloor = config.minReturnMultiple ?? 1.45;
+    const maxAllowedCost = 1 / minReturnFloor;
+    if (expectedFillCost > maxAllowedCost) {
+      logger.warn(
+        {
+          sym,
+          direction,
+          expectedFillCost: expectedFillCost.toFixed(4),
+          maxAllowedCost: maxAllowedCost.toFixed(4),
+          impliedReturn: (1 / expectedFillCost).toFixed(3),
+          minReturnFloor,
+        },
+        "[kalshi-bot] SKIP — live fill cost exceeds return floor; actual return < minReturnMultiple",
+      );
+      return;
+    }
+  }
+
   // Confidence-based dynamic sizing: scale the target dollar bet between betSize
   // (min) and maxBetSize (max) according to the engine's confidence. When
   // enableDynamicSizing is false this returns config.betSize unchanged (legacy).
@@ -2106,6 +2134,20 @@ export async function placeManualOrder(opts: {
       : (yesBid != null && yesBid > 0
           ? (1 - yesBid)
           : (1 - (yesPrice ?? 0.5)));
+
+  // Return floor guard — mirrors the bot entry path gate. Manual orders must
+  // also respect the 1.45x floor so the user can't accidentally buy a contract
+  // that would need to win to barely break even.
+  {
+    const minReturnFloor = config.minReturnMultiple ?? 1.45;
+    const maxAllowedCost = 1 / minReturnFloor;
+    if (expectedFillCost > maxAllowedCost) {
+      throw new Error(
+        `Fill cost ${(expectedFillCost * 100).toFixed(0)}¢ implies a ${(1 / expectedFillCost).toFixed(3)}× return — below the ${minReturnFloor}× floor. ` +
+        `For YES bets, price must be ≤${Math.floor(maxAllowedCost * 100)}¢; for NO bets, YES price must be ≥${Math.ceil((1 - maxAllowedCost) * 100)}¢.`,
+      );
+    }
+  }
 
   const contractCount = Math.floor(targetBetSize / expectedFillCost);
   if (contractCount < 1) {

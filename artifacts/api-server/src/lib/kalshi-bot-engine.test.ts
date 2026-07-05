@@ -692,8 +692,8 @@ test("checkMinReturnGate: null yes-price is allowed when gate is off", () => {
 // DEFAULT_BOT_CONFIG defaults
 // ---------------------------------------------------------------------------
 
-test("DEFAULT_BOT_CONFIG: minReturnMultiple default is 1.4", () => {
-  assert.equal(DEFAULT_BOT_CONFIG.minReturnMultiple, 1.4);
+test("DEFAULT_BOT_CONFIG: minReturnMultiple default is 1.45", () => {
+  assert.equal(DEFAULT_BOT_CONFIG.minReturnMultiple, 1.45);
 });
 
 test("DEFAULT_BOT_CONFIG: minNoEntryMinutes default is 1", () => {
