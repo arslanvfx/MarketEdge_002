@@ -595,7 +595,7 @@ export interface BotConfig {
   // (1 / contract-cost) is below this floor. A contract costing `cost` pays $1,
   // so return = 1/cost.  1.7 → only enter when cost ≤ ~59¢.  Set to 1 to
   // disable (any cost allowed).
-  minReturnMultiple: number;     // × (default 1.7)
+  minReturnMultiple: number;     // × (default 1.4)
 
   // Minimum minutes elapsed before allowing a NO-direction bet.  At minute 0
   // the orderbook is freshly priced and our signals have less edge on NO bets
@@ -743,7 +743,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinStreakLossLimit: 3,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 10,
-  minReturnMultiple: 1.7,
+  minReturnMultiple: 1.4,
   minNoEntryMinutes: 1,
   requireMonitorReady: true,
   // Confidence-based dynamic bet sizing — disabled by default (legacy behavior).
