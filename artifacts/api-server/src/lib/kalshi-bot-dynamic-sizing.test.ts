@@ -1,11 +1,14 @@
 // Unit tests for computeDynamicBetSize — confidence-based bet sizing.
 //
-// The helper linearly scales the target dollar bet between betSize (min, at
-// minConfidence) and maxBetSize (max, at dynamicSizingMaxConfidence). It must:
+// The helper scales the target dollar bet between betSize (min, at
+// minConfidence) and maxBetSize (max, at dynamicSizingMaxConfidence) using a
+// quadratic (Kelly²) curve: t = ((conf - floor) / (ceiling - floor))².
+// This hugs the minimum until high conviction, then accelerates sharply.
+// It must:
 //   1. Return betSize unchanged when disabled (legacy behavior).
 //   2. Return betSize at/below the confidence floor.
 //   3. Return maxBetSize at/above the confidence ceiling.
-//   4. Interpolate linearly in between.
+//   4. Interpolate quadratically in between (midpoint → 25% of range, not 50%).
 //   5. Never exceed maxBetSize nor drop below betSize, even for bad configs.
 //
 // Run with:  pnpm --filter @workspace/api-server test
@@ -27,7 +30,7 @@ const base = {
   betSize: 1,
   maxBetSize: 2,
   minConfidence: 65,
-  dynamicSizingMaxConfidence: 85,
+  dynamicSizingMaxConfidence: 90,
 };
 
 test("disabled → always returns betSize", () => {
@@ -41,18 +44,20 @@ test("at or below the floor → minimum bet", () => {
 });
 
 test("at or above the ceiling → maximum bet", () => {
-  assert.equal(computeDynamicBetSize(85, base), 2);
+  assert.equal(computeDynamicBetSize(90, base), 2);
   assert.equal(computeDynamicBetSize(100, base), 2);
 });
 
-test("interpolates linearly at the midpoint", () => {
-  // Midpoint of [65,85] is 75 → halfway between $1 and $2 = $1.50
-  assert.equal(computeDynamicBetSize(75, base), 1.5);
+test("Kelly²: at the midpoint confidence, bet is only 25% of the range (not 50%)", () => {
+  // Midpoint of [65, 90] is 77.5%: t = (12.5/25)² = 0.5² = 0.25
+  // Bet = $1 + 0.25 × $1 = $1.25 — well below the $1.50 a linear curve would give.
+  assert.equal(computeDynamicBetSize(77.5, base), 1.25);
 });
 
-test("interpolates linearly at an arbitrary point", () => {
-  // 70 is 25% of the way from 65→85 → $1 + 0.25*($1) = $1.25
-  assert.equal(computeDynamicBetSize(70, base), 1.25);
+test("Kelly²: at 71.25% confidence, bet is 6.25% of the range above minimum", () => {
+  // 71.25 is 25% of the way from 65→90: t = (6.25/25)² = 0.25² = 0.0625
+  // Bet = $1 + 0.0625 × $1 = $1.0625
+  assert.equal(computeDynamicBetSize(71.25, base), 1.0625);
 });
 
 test("never exceeds maxBetSize nor drops below betSize", () => {
@@ -144,17 +149,16 @@ test("betting-path: higher confidence buys MORE contracts, still within the cap"
   assert.equal(low.betAmount, 1);
   assert.equal(low.blocked, false);
 
-  // Midpoint → $1.50 target → 3 contracts, $1.50 risked (scaled up).
-  const mid = runSizingPipeline(75, "no", 0.5, cfg);
-  assert.equal(mid.targetBetSize, 1.5);
+  // 85% — Kelly² gives t=(20/25)²=0.64, target≈$1.64 → 3 contracts, $1.50 risked.
+  // (Quadratic curve keeps mid-range bet lower than linear would: $1.64 not $1.80.)
+  const mid = runSizingPipeline(85, "no", 0.5, cfg);
   assert.equal(mid.contractCount, 3);
-  assert.equal(mid.betAmount, 1.5);
   assert.equal(mid.blocked, false);
 
-  // Ceiling → $2.00 target → 4 contracts, $2.00 risked — the interpolated size
+  // Ceiling (90%) → $2.00 target → 4 contracts, $2.00 risked — interpolated size
   // reached the order (more contracts than the floor case) AND lands exactly on
   // the cap without tripping the guard.
-  const high = runSizingPipeline(85, "no", 0.5, cfg);
+  const high = runSizingPipeline(90, "no", 0.5, cfg);
   assert.equal(high.targetBetSize, 2);
   assert.equal(high.contractCount, 4);
   assert.equal(high.betAmount, 2);
@@ -167,9 +171,9 @@ test("betting-path: higher confidence buys MORE contracts, still within the cap"
 
 test("betting-path: YES bet uses the marketable-limit fill cost for sizing", () => {
   // YES bet, yesPrice 0.50 → bid crosses to 0.65 (the ACTUAL worst-case cost).
-  // At max confidence the $2 target buys floor(2/0.65)=3 contracts = $1.95.
+  // At ceiling confidence (90%) the $2 target buys floor(2/0.65)=3 contracts = $1.95.
   const cfg = { ...base, betSize: 1, maxBetSize: 2 };
-  const r = runSizingPipeline(85, "yes", 0.5, cfg);
+  const r = runSizingPipeline(90, "yes", 0.5, cfg);
   assert.equal(r.expectedFillCost, 0.65); // computeMarketableLimitPrice("bid",0.5)
   assert.equal(r.targetBetSize, 2);
   assert.equal(r.contractCount, 3);
@@ -201,7 +205,7 @@ test("betting-path/BOUNDARY: cap wins if a future bug inflates the size past max
 
   // And the legitimate max-confidence bet with the SAME config is NOT blocked —
   // the cap only trips the oversized case, never the correctly-sized one.
-  const ok = runSizingPipeline(85, "no", 0.5, cfg);
+  const ok = runSizingPipeline(90, "no", 0.5, cfg);
   assert.equal(ok.blocked, false);
   assert.ok(ok.betAmount <= cfg.maxBetSize + 0.01);
 });

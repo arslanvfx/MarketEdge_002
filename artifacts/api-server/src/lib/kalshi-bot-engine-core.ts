@@ -748,16 +748,24 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   requireMonitorReady: true,
   // Confidence-based dynamic bet sizing — disabled by default (legacy behavior).
   enableDynamicSizing: false,
-  dynamicSizingMaxConfidence: 85,
+  dynamicSizingMaxConfidence: 90,
 };
 
 /**
- * computeDynamicBetSize — confidence-proportional bet sizing.
+ * computeDynamicBetSize — Kelly²-motivated confidence-proportional bet sizing.
  *
- * Linearly scales the target dollar bet between config.betSize (minimum, at
+ * Scales the target dollar bet between config.betSize (minimum, at
  * config.minConfidence) and config.maxBetSize (maximum, at
- * config.dynamicSizingMaxConfidence). Confidences below the floor return the
- * minimum; at or above the ceiling return the maximum. Pure — no I/O.
+ * config.dynamicSizingMaxConfidence) using a quadratic (t²) curve.
+ *
+ * Why quadratic: Kelly's growth function is approximately quadratic in edge
+ * near the optimum, so squaring the normalized confidence produces a curve
+ * that hugs the minimum through modest conviction and accelerates sharply only
+ * at genuine high-confidence bets — matching how edge compounds in practice.
+ *
+ * Concretely, at the midpoint of the confidence range the bet is only 25% of
+ * the way from min to max (instead of 50% with linear scaling), so outsized
+ * positions are reserved for near-certainty entries.
  *
  * When config.enableDynamicSizing is false, always returns config.betSize so
  * behavior is identical to legacy fixed sizing.
@@ -794,7 +802,9 @@ export function computeDynamicBetSize(
   if (confidence <= floor) return minBet;
   if (confidence >= ceiling) return maxBet;
 
-  const t = (confidence - floor) / (ceiling - floor);
+  // Kelly²: square the normalized position so the curve accelerates toward the
+  // ceiling — sizing stays near minimum until conviction is genuinely high.
+  const t = ((confidence - floor) / (ceiling - floor)) ** 2;
   return minBet + t * (maxBet - minBet);
 }
 

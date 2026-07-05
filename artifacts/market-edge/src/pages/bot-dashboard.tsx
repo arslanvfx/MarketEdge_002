@@ -1838,6 +1838,8 @@ export default function BotDashboard() {
                         <span className="text-[10px] text-muted-foreground/40">Enable Dynamic Sizing above to use this</span>
                       ) : belowMin ? (
                         <span className="text-[10px] text-amber-400">Below Min Confidence ({minConf}%) — sizing will collapse to a flat step</span>
+                      ) : maxBetConf >= 90 ? (
+                        <span className="text-[10px] text-muted-foreground">90% = all models in strong agreement — rare, high-conviction entries only</span>
                       ) : (
                         <span className="text-[10px] text-muted-foreground/60">Confidence % where the max bet is reached — type any value 50–100</span>
                       )}
