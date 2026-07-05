@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
-import { db, predictionRecordsTable } from "@workspace/db";
+import { db, predictionRecordsTable, withRetry } from "@workspace/db";
 import { logger } from "./logger";
 
 export interface PredictionRecord {
@@ -215,32 +215,34 @@ export async function pruneOldPredictionRecords(): Promise<void> {
 
 export async function dbInsertRecord(rec: PredictionRecord): Promise<void> {
   try {
-    await db
-      .insert(predictionRecordsTable)
-      .values({
-        id:                  rec.id,
-        symbol:              rec.symbol,
-        snappedAt:           new Date(rec.snappedAt),
-        targetTime:          new Date(rec.targetTime),
-        targetLabel:         rec.targetLabel,
-        priceAtSnapshot:     String(rec.priceAtSnapshot),
-        predictedPrice:      String(rec.predictedPrice),
-        predictedDirection:  rec.predictedDirection,
-        confidence:          rec.confidence,
-        kalshiTarget:        rec.kalshiTarget != null ? String(rec.kalshiTarget) : null,
-        actualPrice:         null,
-        errorPct:            null,
-        correct:             null,
-        evaluatedAt:         null,
-        status:              "pending",
-        source:              rec.source,
-        abstained:           rec.abstained ?? null,
-        efficiencyRatio:     rec.efficiencyRatio != null ? String(rec.efficiencyRatio) : null,
-        rawConfidence:       rec.rawConfidence ?? null,
-        archivedAt:          null,
-        liveDirectionAbove:  null,
-      })
-      .onConflictDoNothing();
+    await withRetry(() =>
+      db
+        .insert(predictionRecordsTable)
+        .values({
+          id:                  rec.id,
+          symbol:              rec.symbol,
+          snappedAt:           new Date(rec.snappedAt),
+          targetTime:          new Date(rec.targetTime),
+          targetLabel:         rec.targetLabel,
+          priceAtSnapshot:     String(rec.priceAtSnapshot),
+          predictedPrice:      String(rec.predictedPrice),
+          predictedDirection:  rec.predictedDirection,
+          confidence:          rec.confidence,
+          kalshiTarget:        rec.kalshiTarget != null ? String(rec.kalshiTarget) : null,
+          actualPrice:         null,
+          errorPct:            null,
+          correct:             null,
+          evaluatedAt:         null,
+          status:              "pending",
+          source:              rec.source,
+          abstained:           rec.abstained ?? null,
+          efficiencyRatio:     rec.efficiencyRatio != null ? String(rec.efficiencyRatio) : null,
+          rawConfidence:       rec.rawConfidence ?? null,
+          archivedAt:          null,
+          liveDirectionAbove:  null,
+        })
+        .onConflictDoNothing()
+    );
   } catch (err) {
     logger.warn({ err, id: rec.id }, "[history] dbInsertRecord failed (non-fatal)");
   }
@@ -248,16 +250,18 @@ export async function dbInsertRecord(rec: PredictionRecord): Promise<void> {
 
 export async function dbUpdateRecord(rec: PredictionRecord): Promise<void> {
   try {
-    await db
-      .update(predictionRecordsTable)
-      .set({
-        actualPrice:  rec.actualPrice != null ? String(rec.actualPrice) : null,
-        errorPct:     rec.errorPct != null ? String(rec.errorPct) : null,
-        correct:      rec.correct ?? null,
-        evaluatedAt:  rec.evaluatedAt ? new Date(rec.evaluatedAt) : null,
-        status:       rec.status,
-      })
-      .where(eq(predictionRecordsTable.id, rec.id));
+    await withRetry(() =>
+      db
+        .update(predictionRecordsTable)
+        .set({
+          actualPrice:  rec.actualPrice != null ? String(rec.actualPrice) : null,
+          errorPct:     rec.errorPct != null ? String(rec.errorPct) : null,
+          correct:      rec.correct ?? null,
+          evaluatedAt:  rec.evaluatedAt ? new Date(rec.evaluatedAt) : null,
+          status:       rec.status,
+        })
+        .where(eq(predictionRecordsTable.id, rec.id))
+    );
   } catch (err) {
     logger.warn({ err, id: rec.id }, "[history] dbUpdateRecord failed (non-fatal)");
   }

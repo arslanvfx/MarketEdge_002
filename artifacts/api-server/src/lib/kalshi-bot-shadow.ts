@@ -1,4 +1,4 @@
-import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
+import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable, withRetry } from "@workspace/db";
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
@@ -278,10 +278,12 @@ export async function evalShadowBets(): Promise<void> {
       }
 
       const now = new Date();
-      await db
-        .update(kalshiBotBetsTable)
-        .set({ outcome, exitedAt: now, evaluatedAt: now, signals: updatedSignals })
-        .where(eq(kalshiBotBetsTable.id, row.id));
+      await withRetry(() =>
+        db
+          .update(kalshiBotBetsTable)
+          .set({ outcome, exitedAt: now, evaluatedAt: now, signals: updatedSignals })
+          .where(eq(kalshiBotBetsTable.id, row.id))
+      );
 
       logger.info(
         { sym: row.symbol, windowKey: row.windowKey, direction: row.direction, outcome, evalSource },

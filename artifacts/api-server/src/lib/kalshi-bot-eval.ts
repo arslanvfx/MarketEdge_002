@@ -1,4 +1,4 @@
-import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
+import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable, withRetry } from "@workspace/db";
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
@@ -90,10 +90,12 @@ export async function evalClosedBets(): Promise<void> {
         { id: orphan.id, symbol: orphan.symbol, windowKey: orphan.windowKey, currentKey },
         "[kalshi-bot] evalClosedBets: transitioning orphaned expired bet row",
       );
-      await db
-        .update(kalshiBotBetsTable)
-        .set({ action: "expired", exitedAt: new Date() })
-        .where(eq(kalshiBotBetsTable.id, orphan.id));
+      await withRetry(() =>
+        db
+          .update(kalshiBotBetsTable)
+          .set({ action: "expired", exitedAt: new Date() })
+          .where(eq(kalshiBotBetsTable.id, orphan.id))
+      );
     }
 
     const rows = await db
@@ -221,10 +223,12 @@ export async function evalClosedBets(): Promise<void> {
               { sym: row.symbol, id: row.id, windowKey: row.windowKey, pnl: fallbackPnl },
               "[kalshi-bot] evalClosedBets: committing full-loss fallback — no price source after 90-s deferral; outcome may be inaccurate",
             );
-            await db
-              .update(kalshiBotBetsTable)
-              .set({ outcome: fallbackOutcome, evaluatedAt: new Date() })
-              .where(eq(kalshiBotBetsTable.id, row.id));
+            await withRetry(() =>
+              db
+                .update(kalshiBotBetsTable)
+                .set({ outcome: fallbackOutcome, evaluatedAt: new Date() })
+                .where(eq(kalshiBotBetsTable.id, row.id))
+            );
             evaluated++;
             continue;
           }
@@ -265,15 +269,19 @@ export async function evalClosedBets(): Promise<void> {
       };
 
       if (correctedPnl !== null) {
-        await db
-          .update(kalshiBotBetsTable)
-          .set({ outcome, pnl: String(correctedPnl), evaluatedAt: new Date(), signals: updatedSignals })
-          .where(eq(kalshiBotBetsTable.id, row.id));
+        await withRetry(() =>
+          db
+            .update(kalshiBotBetsTable)
+            .set({ outcome, pnl: String(correctedPnl), evaluatedAt: new Date(), signals: updatedSignals })
+            .where(eq(kalshiBotBetsTable.id, row.id))
+        );
       } else {
-        await db
-          .update(kalshiBotBetsTable)
-          .set({ outcome, evaluatedAt: new Date(), signals: updatedSignals })
-          .where(eq(kalshiBotBetsTable.id, row.id));
+        await withRetry(() =>
+          db
+            .update(kalshiBotBetsTable)
+            .set({ outcome, evaluatedAt: new Date(), signals: updatedSignals })
+            .where(eq(kalshiBotBetsTable.id, row.id))
+        );
       }
 
       // Update in-memory window outcome map for the doubt-penalty signal.
