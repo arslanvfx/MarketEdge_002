@@ -189,7 +189,9 @@ export const DB_DEGRADED_MIN_WINDOW_MS = 60_000;
 export const REGIME_STRIKES_MAX = 6;
 export const WINDOW_ENTRY_BUFFER_S = 60;
 export const STABILITY_WAIT_MAX_S = 240;
-export const COIN_YES_BLOCKED: ReadonlySet<string> = new Set(["BTC", "ETH", "DOGE"]);
+// Mutable — parole system can remove coins when YES shadow accuracy reaches ≥60%.
+// Re-initialised from the hardcoded list on every server restart.
+export const COIN_YES_BLOCKED: Set<string> = new Set(["BTC", "ETH", "DOGE"]);
 // Mutable — parole system can remove coins when shadow accuracy reaches ≥60%.
 // Re-initialised from the hardcoded list on every server restart (so shadow
 // data re-accumulates to re-parole the coin).  Never use `as const` or

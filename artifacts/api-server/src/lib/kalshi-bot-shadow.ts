@@ -424,7 +424,17 @@ export async function checkAllParoles(
         case "regime_penalty":       result.regime.add(sym);       break;
         case "contrarian_penalty":   result.contrarian.add(sym);   break;
         case "border_guard":         result.border.add(sym);       break;
-        case "coin_yes_blocked":     result.yesBlocked.add(sym);   break;
+        case "coin_yes_blocked":
+          // Same pattern as coin_fully_blocked — remove from the mutable set so
+          // both the Phase-3 loop guard and the _runBotTick defence-in-depth
+          // guard are cleared at once.  Re-added on next server restart.
+          result.yesBlocked.add(sym);
+          COIN_YES_BLOCKED.delete(sym);
+          logger.info(
+            { sym, winRate: `${(winRate * 100).toFixed(0)}%`, evaluated },
+            "[parole] coin_yes_blocked cleared — YES bets re-enabled by shadow accuracy",
+          );
+          break;
         case "coin_fully_blocked":
           // Parole removes the coin from the mutable COIN_FULLY_BLOCKED set so
           // both the Phase-3 loop guard and the _runBotTick defence-in-depth
