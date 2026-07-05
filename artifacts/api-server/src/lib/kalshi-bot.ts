@@ -236,6 +236,10 @@ const windowDirectionCounts: Map<"yes" | "no", number> = new Map();
 // always gets a fresh attempt. Prevents the bot from hammering an empty order book
 // every tick when liquidity is genuinely absent.
 const windowFailedFills: Set<string> = new Set();
+// Tracks consecutive IOC 0-fill attempts per coin/window/mode before we give up.
+// Allows 2 attempts (spaced by bot ticks ~30s apart) before blocking the coin for
+// the rest of the window. Cleared on every window transition alongside windowFailedFills.
+const windowZeroFillAttempts: Map<string, number> = new Map();
 
 // Per-coin auto-pause: coins with ≥5 consecutive losses are paused for 4
 // windows by the auto-tune job. Maps symbol → windows remaining paused.
@@ -347,7 +351,7 @@ let borderProximityCacheWindow = "";
 let regimeCache: Map<string, "above" | "below" | "neutral"> = new Map();
 let regimeCacheWindow = "";
 // Fallback regime penalty used only before config is loaded from DB.
-// The live value is config.regimePenalty (default 8pp via DEFAULT_BOT_CONFIG).
+// The live value is config.regimePenalty (default 15pp via DEFAULT_BOT_CONFIG).
 const REGIME_AGAINST_PENALTY_FALLBACK = 8;
 // Extra confidence penalty when betting against the current live-price position
 // (contrarian play — fading today's trend). Applied on top of the settlement-
@@ -1911,11 +1915,29 @@ async function _runBotTick(
         },
       );
       if (result.filledCount === 0) {
-        logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] IOC order returned 0 fills — book empty, skipping entry");
-        // Mark this coin as having an empty book this window so Phase 3 won't
-        // hammer it on subsequent ticks. Cleared on every window transition.
+        // IOC returned 0 fills — the Kalshi book had no resting contracts at our
+        // limit price right now. Allow up to 2 attempts (spaced by ~30s bot ticks)
+        // before blocking the coin for the rest of the window. This gives the book
+        // time to build liquidity (especially early in a window) without hammering
+        // an empty book every tick.
         const failWk = currentWindowKey();
-        windowFailedFills.add(`${sym}:${failWk}:${botMode}`);
+        const attemptKey = `${sym}:${failWk}:${botMode}`;
+        const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
+        const attempts = prev + 1;
+        windowZeroFillAttempts.set(attemptKey, attempts);
+        const MAX_ZERO_FILL_ATTEMPTS = 2;
+        if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
+          logger.warn(
+            { sym, ticker: kalshiTicker, direction, attempts },
+            "[kalshi-bot] IOC returned 0 fills after max attempts — blocking for rest of window",
+          );
+          windowFailedFills.add(attemptKey);
+        } else {
+          logger.warn(
+            { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS },
+            "[kalshi-bot] IOC returned 0 fills — book empty, will retry next tick",
+          );
+        }
         return;
       }
       fillPrice = result.avgPrice ?? yesPrice;
@@ -3224,6 +3246,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Reset per-window counters so all caps apply fresh each 15-min window.
     windowDirectionCounts.clear();
     windowFailedFills.clear();
+    windowZeroFillAttempts.clear();
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
     // Clear bet details older than the current window to prevent map growth.
     for (const k of windowBetDetails.keys()) {
@@ -3506,9 +3529,9 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    // Empty-book cooldown: if this coin's IOC order returned 0 fills earlier this
-    // window, skip it for the rest of the window — the book is likely still empty.
-    // windowFailedFills is cleared on every window transition so next window always retries.
+    // Empty-book cooldown: if this coin's IOC order returned 0 fills on both attempts
+    // this window, skip it — the book is genuinely empty. Cleared on window transition.
+    // (First 0-fill does NOT block; bot retries once more ~30s later before giving up.)
     if (windowFailedFills.has(`${sym}:${windowKey}:${botMode}`)) {
       filteredByNewGuards.add(sym);
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "empty-book cooldown — IOC returned 0 fills earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
