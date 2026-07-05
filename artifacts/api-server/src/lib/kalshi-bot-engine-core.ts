@@ -752,7 +752,53 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
 };
 
 /**
- * computeDynamicBetSize — Kelly³-motivated confidence-proportional bet sizing.
+ * computeKellyMultiplier — per-position Kelly fraction for a YES or NO bet.
+ *
+ * Returns a value in [0, 1] that represents the fractional edge of the bet at
+ * the given market price, using the standard Kelly criterion formula:
+ *
+ *   Kelly = (p − q) / odds
+ *
+ * where:
+ *   p    = confidence / 100   (our estimated probability of winning)
+ *   q    = 1 − p
+ *   odds = net payout per unit wagered
+ *          YES: (1 − yesPrice) / yesPrice
+ *          NO:  yesPrice / (1 − yesPrice)
+ *
+ * A YES at 0.70 has much higher odds than a YES at 0.52 for the same
+ * confidence, so the Kelly fraction is correspondingly larger and the final
+ * bet is scaled up relative to a thin-edge position.
+ *
+ * The result is clamped to [0, 1]: negative fractions (confidence < 50%, no
+ * edge) become 0; fractions above 1 (massive edge) are treated as "full size"
+ * to avoid going over-Kelly.  Degenerate prices (0 or 1) return 1 as a safe
+ * neutral fallback.
+ */
+export function computeKellyMultiplier(
+  confidence: number,
+  yesPrice: number,
+  direction: "yes" | "no",
+): number {
+  if (!Number.isFinite(yesPrice) || yesPrice <= 0 || yesPrice >= 1) return 1;
+
+  const p = confidence / 100;
+  const q = 1 - p;
+
+  const odds =
+    direction === "yes"
+      ? (1 - yesPrice) / yesPrice
+      : yesPrice / (1 - yesPrice);
+
+  if (odds <= 0) return 1;
+
+  const kelly = (p - q) / odds;
+  return Math.min(1, Math.max(0, kelly));
+}
+
+/**
+ * computeDynamicBetSize — Kelly³-motivated confidence-proportional bet sizing
+ * with an optional per-position Kelly-fraction multiplier.
  *
  * Scales the target dollar bet between config.betSize (minimum, at
  * config.minConfidence) and config.maxBetSize (maximum, at
@@ -769,6 +815,12 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
  *   65% → $1.00  |  75% → $1.58  |  80% → $2.94
  *   85% → $5.61  |  87.5% → $7.56  |  90% → $10.00
  *
+ * When `yesPrice` and `direction` are supplied the increment above betSize is
+ * further scaled by the per-position Kelly fraction (p−q)/odds.  A thin-edge
+ * YES at 0.52 shrinks toward betSize while a high-value YES at 0.70 approaches
+ * the full t²-sized increment.  Omitting these params preserves the original
+ * behaviour (Kelly multiplier = 1).
+ *
  * When config.enableDynamicSizing is false, always returns config.betSize so
  * behavior is identical to legacy fixed sizing.
  *
@@ -782,6 +834,8 @@ export function computeDynamicBetSize(
     BotConfig,
     "enableDynamicSizing" | "betSize" | "maxBetSize" | "minConfidence" | "dynamicSizingMaxConfidence"
   >,
+  yesPrice?: number | null,
+  direction?: "yes" | "no" | null,
 ): number {
   const minBet = config.betSize;
   const maxBet = config.maxBetSize ?? minBet;
@@ -802,14 +856,29 @@ export function computeDynamicBetSize(
   }
 
   if (confidence <= floor) return minBet;
-  if (confidence >= ceiling) return maxBet;
+  if (confidence >= ceiling) {
+    // Even at the ceiling, apply the Kelly fraction to the full increment.
+    const kellyMult =
+      yesPrice != null && direction != null
+        ? computeKellyMultiplier(confidence, yesPrice, direction)
+        : 1;
+    return minBet + kellyMult * (maxBet - minBet);
+  }
 
   // Kelly³: cube the normalized position so the curve stays near the minimum
   // through moderate conviction and only accelerates steeply near the ceiling.
   // On a $1–$10 range with the default 65–90% window, the dollar midpoint ($5)
   // requires ~85% confidence — protecting capital on medium-confidence bets.
   const t = ((confidence - floor) / (ceiling - floor)) ** 3;
-  return minBet + t * (maxBet - minBet);
+
+  // Per-position Kelly multiplier: shrinks the increment above minBet when the
+  // market price implies thin edge, leaving it untouched when edge is high.
+  const kellyMult =
+    yesPrice != null && direction != null
+      ? computeKellyMultiplier(confidence, yesPrice, direction)
+      : 1;
+
+  return minBet + kellyMult * t * (maxBet - minBet);
 }
 
 // ---------------------------------------------------------------------------

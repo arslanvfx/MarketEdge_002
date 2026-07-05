@@ -1,17 +1,23 @@
-// Unit tests for computeDynamicBetSize — confidence-based bet sizing.
+// Unit tests for computeDynamicBetSize and computeKellyMultiplier.
 //
-// The helper scales the target dollar bet between betSize (min, at
+// computeDynamicBetSize scales the target dollar bet between betSize (min, at
 // minConfidence) and maxBetSize (max, at dynamicSizingMaxConfidence) using a
 // cubic (Kelly³) curve: t = ((conf - floor) / (ceiling - floor))³.
 // The curve hugs the minimum through moderate conviction, then accelerates
 // steeply near the ceiling — on a $1–$10 range with a 65–90% window, the
 // dollar midpoint ($5) requires ~85% confidence.
-// It must:
+//
+// computeKellyMultiplier applies a per-position Kelly fraction (p−q)/odds on
+// top of the t³ result, shrinking bets at thin-edge prices (e.g. YES at 0.52)
+// relative to high-value prices (YES at 0.70) for the same confidence.
+//
+// Together they must:
 //   1. Return betSize unchanged when disabled (legacy behavior).
 //   2. Return betSize at/below the confidence floor.
-//   3. Return maxBetSize at/above the confidence ceiling.
+//   3. Approach maxBetSize at/above the confidence ceiling (subject to Kelly).
 //   4. Interpolate cubically in between (midpoint conf → 12.5% of range, not 50%).
 //   5. Never exceed maxBetSize nor drop below betSize, even for bad configs.
+//   6. Scale the increment by the Kelly fraction when yesPrice+direction given.
 //
 // Run with:  pnpm --filter @workspace/api-server test
 
@@ -21,7 +27,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { computeDynamicBetSize } from "./kalshi-bot-engine-core.ts";
+import { computeDynamicBetSize, computeKellyMultiplier } from "./kalshi-bot-engine-core.ts";
 import { computeMarketableLimitPrice } from "./kalshi-trader.ts";
 import { checkMaxBetSizeGuard } from "./kalshi-bot-guards.ts";
 
@@ -87,6 +93,117 @@ test("degenerate confidence range (ceiling <= floor) → step at floor", () => {
   assert.equal(computeDynamicBetSize(79, cfg), 1);
   assert.equal(computeDynamicBetSize(80, cfg), 2);
   assert.equal(computeDynamicBetSize(95, cfg), 2);
+});
+
+// ===========================================================================
+// computeKellyMultiplier — per-position Kelly fraction tests
+//
+// Formula: Kelly = (p − q) / odds
+//   YES: odds = (1 − yesPrice) / yesPrice
+//   NO:  odds = yesPrice / (1 − yesPrice)
+// Result is clamped to [0, 1].
+// ===========================================================================
+
+test("Kelly multiplier: YES at 0.50 (even odds) with 90% confidence → 0.8", () => {
+  // p=0.9, q=0.1, odds=1.0 → kelly=(0.9-0.1)/1.0=0.8
+  const k = computeKellyMultiplier(90, 0.5, "yes");
+  assert.ok(Math.abs(k - 0.8) < 1e-9, `expected 0.8, got ${k}`);
+});
+
+test("Kelly multiplier: YES at 0.70 (long shot) with 90% confidence → clamped to 1", () => {
+  // p=0.9, q=0.1, odds=(0.30/0.70)≈0.4286 → kelly=0.8/0.4286≈1.867 → clamped to 1
+  const k = computeKellyMultiplier(90, 0.7, "yes");
+  assert.equal(k, 1);
+});
+
+test("Kelly multiplier: YES at 0.52 (thin edge) with 90% confidence → ≈0.867", () => {
+  // p=0.9, q=0.1, odds=(0.48/0.52)≈0.9231 → kelly=0.8/0.9231≈0.867
+  const k = computeKellyMultiplier(90, 0.52, "yes");
+  const expected = 0.8 / (0.48 / 0.52);
+  assert.ok(Math.abs(k - expected) < 1e-9, `expected ${expected}, got ${k}`);
+  assert.ok(k < 1, "thin-edge YES should produce a multiplier below 1");
+});
+
+test("Kelly multiplier: NO at 0.50 (even odds) with 90% confidence → 0.8", () => {
+  // p=0.9, q=0.1, odds=(0.50/0.50)=1.0 → kelly=0.8
+  const k = computeKellyMultiplier(90, 0.5, "no");
+  assert.ok(Math.abs(k - 0.8) < 1e-9, `expected 0.8, got ${k}`);
+});
+
+test("Kelly multiplier: NO at 0.30 yesPrice (good NO value) with 90% confidence → clamped to 1", () => {
+  // p=0.9, q=0.1, odds=(0.30/0.70)≈0.4286 → kelly≈1.867 → clamped to 1
+  const k = computeKellyMultiplier(90, 0.3, "no");
+  assert.equal(k, 1);
+});
+
+test("Kelly multiplier: below-50% confidence produces 0 (clamped)", () => {
+  // p=0.45, q=0.55: p-q < 0 → kelly < 0 → clamped to 0
+  const k = computeKellyMultiplier(45, 0.5, "yes");
+  assert.equal(k, 0);
+});
+
+test("Kelly multiplier: degenerate yesPrice (0 or 1) → neutral fallback of 1", () => {
+  assert.equal(computeKellyMultiplier(90, 0, "yes"), 1);
+  assert.equal(computeKellyMultiplier(90, 1, "yes"), 1);
+  assert.equal(computeKellyMultiplier(90, 0, "no"), 1);
+});
+
+test("Kelly multiplier: non-finite yesPrice → neutral fallback of 1", () => {
+  assert.equal(computeKellyMultiplier(90, NaN, "yes"), 1);
+  assert.equal(computeKellyMultiplier(90, Infinity, "yes"), 1);
+});
+
+// ===========================================================================
+// computeDynamicBetSize with yesPrice + direction — Kelly-scaled sizing tests
+// ===========================================================================
+
+test("sizing with Kelly: omitting yesPrice/direction preserves original behavior", () => {
+  // No yesPrice → kellyMult defaults to 1 → unchanged result.
+  assert.equal(computeDynamicBetSize(90, base), 2);
+  // Midpoint of [65,90] is 77.5%: t=0.5³=0.125 → $1.125 (cubic curve).
+  assert.equal(computeDynamicBetSize(77.5, base), 1.125);
+});
+
+test("sizing with Kelly: YES at 0.50 with 90% confidence → kelly=0.8 shrinks increment", () => {
+  // At ceiling (90), kelly=0.8 → result = minBet + 0.8*(maxBet-minBet) = 1+0.8=1.8
+  const size = computeDynamicBetSize(90, base, 0.5, "yes");
+  assert.ok(Math.abs(size - 1.8) < 1e-9, `expected 1.8, got ${size}`);
+});
+
+test("sizing with Kelly: YES at 0.70 with 90% confidence → kelly=1 → full maxBet", () => {
+  // odds=(0.30/0.70)→kelly>1→clamped to 1 → result = maxBet = 2
+  const size = computeDynamicBetSize(90, base, 0.7, "yes");
+  assert.equal(size, 2);
+});
+
+test("sizing with Kelly: at midpoint confidence, Kelly also shrinks the increment", () => {
+  // conf=77.5 (midpoint), YES at 0.50: kelly=0.55, t³=0.125
+  // result = 1 + 0.55 * 0.125 * 1 = 1.06875
+  // p=0.775, q=0.225, odds=1.0 → kelly=(0.775-0.225)/1.0=0.55
+  const size = computeDynamicBetSize(77.5, base, 0.5, "yes");
+  const expected = 1 + 0.55 * 0.125 * 1;
+  assert.ok(Math.abs(size - expected) < 1e-9, `expected ${expected}, got ${size}`);
+  assert.ok(size < 1.125, "Kelly-scaled midpoint bet must be below the no-Kelly midpoint");
+});
+
+test("sizing with Kelly: thin-edge YES bets smaller than high-value YES at same confidence", () => {
+  // At ceiling: thin-edge (0.52) < high-value (0.70)
+  const thin = computeDynamicBetSize(90, base, 0.52, "yes");
+  const highValue = computeDynamicBetSize(90, base, 0.7, "yes");
+  assert.ok(thin < highValue, `thin-edge (${thin}) should be less than high-value (${highValue})`);
+});
+
+test("sizing with Kelly: never below betSize or above maxBetSize across all prices", () => {
+  const prices = [0.10, 0.25, 0.40, 0.50, 0.52, 0.60, 0.70, 0.80, 0.90];
+  for (const yp of prices) {
+    for (const dir of ["yes", "no"] as const) {
+      for (let c = 0; c <= 100; c++) {
+        const size = computeDynamicBetSize(c, base, yp, dir);
+        assert.ok(size >= base.betSize, `size ${size} below min at conf ${c} yp ${yp} dir ${dir}`);
+        assert.ok(size <= base.maxBetSize, `size ${size} above max at conf ${c} yp ${yp} dir ${dir}`);
+      }
+    }
+  }
 });
 
 // ===========================================================================
@@ -237,11 +354,11 @@ test("betting-path: cap never fires across the full confidence range (well-confi
 test("betting-path/wiring: kalshi-bot.ts sizes then applies the hard cap (in that order)", () => {
   const src = fs.readFileSync(path.join(__dirname, "kalshi-bot.ts"), "utf8");
 
-  const sizingIdx = src.indexOf("computeDynamicBetSize(decision.confidence, config)");
+  const sizingIdx = src.indexOf("computeDynamicBetSize(decision.confidence, config, yesPrice, direction)");
   const contractIdx = src.indexOf("Math.floor(targetBetSize / expectedFillCost)");
   const capIdx = src.indexOf("checkMaxBetSizeGuard(betAmount, maxBetCap)");
 
-  assert.ok(sizingIdx !== -1, "must call computeDynamicBetSize(decision.confidence, config)");
+  assert.ok(sizingIdx !== -1, "must call computeDynamicBetSize(decision.confidence, config, yesPrice, direction)");
   assert.ok(contractIdx !== -1, "contractCount must be derived from targetBetSize / expectedFillCost");
   assert.ok(capIdx !== -1, "must call checkMaxBetSizeGuard(betAmount, maxBetCap)");
 

@@ -1793,9 +1793,12 @@ async function _runBotTick(
   }
 
   // Confidence-based dynamic sizing: scale the target dollar bet between betSize
-  // (min) and maxBetSize (max) according to the engine's confidence. When
-  // enableDynamicSizing is false this returns config.betSize unchanged (legacy).
-  const targetBetSize = computeDynamicBetSize(decision.confidence, config);
+  // (min) and maxBetSize (max) according to the engine's confidence, further
+  // shrunk by the per-position Kelly fraction (p−q)/odds so thin-edge prices
+  // (e.g. YES at 0.52) receive smaller bets than high-value prices (YES at
+  // 0.70) even at the same confidence score.  When enableDynamicSizing is
+  // false this returns config.betSize unchanged (legacy).
+  const targetBetSize = computeDynamicBetSize(decision.confidence, config, yesPrice, direction);
   const contractCount = Math.floor(targetBetSize / expectedFillCost);
   // If budget can't buy even one contract at the live ask, skip this entry and
   // engage the FOK-cooldown so this coin doesn't retry the same window.
