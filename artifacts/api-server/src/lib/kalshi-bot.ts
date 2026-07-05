@@ -2856,6 +2856,7 @@ export async function evalShadowBets(): Promise<void> {
         id: kalshiBotBetsTable.id,
         symbol: kalshiBotBetsTable.symbol,
         windowKey: kalshiBotBetsTable.windowKey,
+        ticker: kalshiBotBetsTable.ticker,
         direction: kalshiBotBetsTable.direction,
         kalshiTarget: kalshiBotBetsTable.kalshiTarget,
         signals: kalshiBotBetsTable.signals,
@@ -2879,36 +2880,63 @@ export async function evalShadowBets(): Promise<void> {
       const strike = row.kalshiTarget != null ? parseFloat(String(row.kalshiTarget)) : null;
       if (strike == null) continue;
 
-      // Fetch the real close price — same authoritative source as expired real bets.
-      // Never fall back to cryptoPriceAtEntry (that's the entry price, not window close).
-      // If the Coinbase candle isn't available yet, defer — shadow bets are not financial
-      // commitments, so a wrong outcome label is worse than a brief delay.
-      const closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
-      if (closePrice === null) {
-        logger.debug({ sym: row.symbol, windowKey: row.windowKey },
-          "[shadow-bet] close price unavailable — deferring evaluation");
-        continue;
-      }
-
-      const priceAboveStrike = closePrice >= strike;
-      const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
-      const outcome: "win" | "loss" = won ? "win" : "loss";
-      const now = new Date();
-
-      const updatedSignals = {
+      let outcome: "win" | "loss";
+      let evalSource: "kalshi" | "coinbase";
+      const updatedSignals: Record<string, unknown> = {
         ...(row.signals as Record<string, unknown> ?? {}),
-        closePriceAtEval: closePrice,
       };
 
+      // ── 1. Try Kalshi settlement (authoritative — CF Benchmarks RTI) ────────
+      // Same source as real bets: avoids Coinbase-vs-RTI discrepancies near strike.
+      if (row.ticker) {
+        const settled = await fetchKalshiMarketResult(row.ticker);
+        if (settled.result === "yes" || settled.result === "no") {
+          const won = row.direction === "yes"
+            ? settled.result === "yes"
+            : settled.result === "no";
+          outcome = won ? "win" : "loss";
+          evalSource = "kalshi";
+          updatedSignals.kalshiResult = settled.result;
+          updatedSignals.evalSource = "kalshi";
+          logger.info(
+            { sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, direction: row.direction, kalshiResult: settled.result, outcome },
+            "[shadow-bet] evaluated via Kalshi RTI (authoritative)",
+          );
+        } else {
+          // Kalshi hasn't settled yet — defer until next tick.
+          logger.debug({ sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker },
+            "[shadow-bet] Kalshi not yet settled — deferring evaluation");
+          continue;
+        }
+      } else {
+        // ── 2. No ticker stored — fall back to Coinbase candle close ──────────
+        // If the candle isn't available yet, defer rather than risk a wrong label.
+        const closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
+        if (closePrice === null) {
+          logger.debug({ sym: row.symbol, windowKey: row.windowKey },
+            "[shadow-bet] close price unavailable — deferring evaluation");
+          continue;
+        }
+        const priceAboveStrike = closePrice >= strike;
+        const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
+        outcome = won ? "win" : "loss";
+        evalSource = "coinbase";
+        updatedSignals.closePriceAtEval = closePrice;
+        updatedSignals.evalSource = "coinbase";
+        logger.info(
+          { sym: row.symbol, windowKey: row.windowKey, direction: row.direction, closePrice, strike, outcome },
+          "[shadow-bet] evaluated via Coinbase candle (no ticker — fallback)",
+        );
+      }
+
+      const now = new Date();
       await db
         .update(kalshiBotBetsTable)
-        // Stamp exitedAt (window settlement point) + evaluatedAt + outcome.
-        // Both fields are set together so the lifecycle mirrors real expired bets.
         .set({ outcome, exitedAt: now, evaluatedAt: now, signals: updatedSignals })
         .where(eq(kalshiBotBetsTable.id, row.id));
 
       logger.info(
-        { sym: row.symbol, windowKey: row.windowKey, direction: row.direction, closePrice, strike, outcome },
+        { sym: row.symbol, windowKey: row.windowKey, direction: row.direction, outcome, evalSource },
         `[shadow-bet] evaluated — ${outcome}`,
       );
       evaluated++;
