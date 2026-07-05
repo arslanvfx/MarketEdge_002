@@ -357,8 +357,14 @@ const MIN_HARD_MODEL_SIGNALS = 2;
 // DB health watchdog
 // ---------------------------------------------------------------------------
 // Consecutive DB write failures before entering degraded mode (no new bets).
-const DB_DEGRADED_THRESHOLD = 3;
+// Raised from 3 → 10 and gated by a minimum sustained-failure window (60 s)
+// to avoid transient connection resets (which are chronic in this environment)
+// freezing all bet placement. The DB is only needed to *record* bets — the
+// actual Kalshi order placement makes no DB calls.
+const DB_DEGRADED_THRESHOLD = 10;
+const DB_DEGRADED_MIN_WINDOW_MS = 60_000; // must be failing for ≥60 s to block
 let dbConsecutiveFailures = 0;
+let dbFirstFailureAt: Date | null = null; // timestamp of first failure in current streak
 let dbDegradedSince: Date | null = null; // null = healthy
 
 /** True when the DB has been unreachable long enough to suppress new bets. */
@@ -2280,12 +2286,20 @@ async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> {
       dbDegradedSince = null;
     }
     dbConsecutiveFailures = 0;
+    dbFirstFailureAt = null;
   } catch (err) {
+    const now = new Date();
     dbConsecutiveFailures++;
-    if (dbConsecutiveFailures >= DB_DEGRADED_THRESHOLD && dbDegradedSince === null) {
-      dbDegradedSince = new Date();
+    if (dbFirstFailureAt === null) dbFirstFailureAt = now;
+    const streakMs = now.getTime() - dbFirstFailureAt.getTime();
+    if (
+      dbConsecutiveFailures >= DB_DEGRADED_THRESHOLD &&
+      streakMs >= DB_DEGRADED_MIN_WINDOW_MS &&
+      dbDegradedSince === null
+    ) {
+      dbDegradedSince = now;
       logger.warn(
-        { failures: dbConsecutiveFailures },
+        { failures: dbConsecutiveFailures, streakSeconds: Math.round(streakMs / 1000) },
         "[kalshi-bot] DB degraded — pausing new bets until connection restores (open positions still managed)",
       );
     }
@@ -2925,6 +2939,7 @@ export async function runBotLoopTick(): Promise<void> {
       );
       dbDegradedSince = null;
       dbConsecutiveFailures = 0;
+      dbFirstFailureAt = null;
     } else {
       logger.warn(
         { degradedSince: dbDegradedSince.toISOString() },
