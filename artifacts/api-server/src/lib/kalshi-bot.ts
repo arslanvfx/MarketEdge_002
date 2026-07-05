@@ -2842,14 +2842,11 @@ export async function evalShadowBets(): Promise<void> {
       const strike = row.kalshiTarget != null ? parseFloat(String(row.kalshiTarget)) : null;
       if (strike == null) continue;
 
-      // Fetch the real close price — same source as expired real bets.
-      let closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
-      if (closePrice === null) {
-        // Try cached price from signals blob as fallback.
-        const sigs = row.signals as Record<string, unknown> | null;
-        const cached = sigs?.cryptoPriceAtEntry as number | null ?? null;
-        if (cached != null) closePrice = cached;
-      }
+      // Fetch the real close price — same authoritative source as expired real bets.
+      // Never fall back to cryptoPriceAtEntry (that's the entry price, not window close).
+      // If the Coinbase candle isn't available yet, defer — shadow bets are not financial
+      // commitments, so a wrong outcome label is worse than a brief delay.
+      const closePrice = await fetchWindowClosePrice(coin.product, row.windowKey);
       if (closePrice === null) {
         logger.debug({ sym: row.symbol, windowKey: row.windowKey },
           "[shadow-bet] close price unavailable — deferring evaluation");
@@ -2859,6 +2856,7 @@ export async function evalShadowBets(): Promise<void> {
       const priceAboveStrike = closePrice >= strike;
       const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
       const outcome: "win" | "loss" = won ? "win" : "loss";
+      const now = new Date();
 
       const updatedSignals = {
         ...(row.signals as Record<string, unknown> ?? {}),
@@ -2867,7 +2865,9 @@ export async function evalShadowBets(): Promise<void> {
 
       await db
         .update(kalshiBotBetsTable)
-        .set({ outcome, evaluatedAt: new Date(), signals: updatedSignals })
+        // Stamp exitedAt (window settlement point) + evaluatedAt + outcome.
+        // Both fields are set together so the lifecycle mirrors real expired bets.
+        .set({ outcome, exitedAt: now, evaluatedAt: now, signals: updatedSignals })
         .where(eq(kalshiBotBetsTable.id, row.id));
 
       logger.info(
@@ -2900,7 +2900,14 @@ export async function evalShadowBets(): Promise<void> {
  */
 async function checkShadowParole(): Promise<number> {
   try {
-    // Read last 10 evaluated shadow bets.
+    // Bound to the current restriction period: last 3 windows (45 min).
+    // Using a rolling window prevents old historical probes (from months ago)
+    // from polluting the parole decision for the current lockout.
+    const nowMs = Date.now();
+    const windowCutoff = new Date(
+      Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - 3 * 15 * 60_000
+    ).toISOString().slice(0, 16);
+
     const rows = await db
       .select({ outcome: kalshiBotBetsTable.outcome })
       .from(kalshiBotBetsTable)
@@ -2908,6 +2915,7 @@ async function checkShadowParole(): Promise<number> {
         and(
           eq(kalshiBotBetsTable.action, "shadow"),
           isNotNull(kalshiBotBetsTable.evaluatedAt),
+          sql`${kalshiBotBetsTable.windowKey} >= ${windowCutoff}`,
         ),
       )
       .orderBy(desc(kalshiBotBetsTable.evaluatedAt))
@@ -2932,12 +2940,28 @@ async function checkShadowParole(): Promise<number> {
     if (winRate >= 0.6) {
       reducedBy = 4;
       logger.info(
-        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length, reducedBy },
+        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length, reducedBy, windowCutoff },
         `[parole] shadow accuracy ${(winRate * 100).toFixed(0)}% over ${evaluated.length} bets — doubt penalty -${reducedBy}pp`,
       );
+
+      // If an auto-tune temp raise is also active, revert it early — same path
+      // as the time-based revert in runBotLoopTick.  The in-memory config
+      // update takes effect on the next per-coin evaluation in this same tick.
+      if (config.autoTuneConfidenceRevertTo != null) {
+        const revertTo = config.autoTuneConfidenceRevertTo;
+        logger.info(
+          { from: config.minConfidence, to: revertTo, winRate: `${(winRate * 100).toFixed(0)}%` },
+          "[parole] shadow accuracy sufficient — reverting auto-tune confidence raise early",
+        );
+        await updateBotConfig({
+          minConfidence: revertTo,
+          autoTuneConfidenceRevertAt: null,
+          autoTuneConfidenceRevertTo: null,
+        }).catch(err => logger.warn({ err }, "[parole] auto-tune early revert DB write failed (non-fatal)"));
+      }
     } else if (winRate < 0.4 && evaluated.length >= 5) {
-      logger.info(
-        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length },
+      logger.warn(
+        { winRate: `${(winRate * 100).toFixed(0)}%`, count: evaluated.length, windowCutoff },
         `[parole] shadow accuracy insufficient (${(winRate * 100).toFixed(0)}% < 40%) — restriction maintained`,
       );
     }
@@ -3984,6 +4008,36 @@ export async function runBotLoopTick(): Promise<void> {
     const stability = windowStabilityCache.get(sym) ?? null;
     const reason = decision.reasoning;
 
+    // Auto-tune shadow detection: if a temporary confidence-raise is active
+    // (autoTuneConfidenceRevertTo != null) AND the primary decision is SKIP,
+    // re-run makeBotDecision with the original (pre-raise) floor to see if the
+    // coin would have a clear direction at the lower floor.  The result is stored
+    // in _autoTuneShadowDecision and consumed at the end of the loop where the
+    // coin reaches the final evalResults.push as a SKIP.  Any coin that hits an
+    // earlier `continue` (regime gate, doubt filter, border guard, etc.) never
+    // reaches that push, so the shadow is only recorded when the SOLE reason for
+    // SKIP was the raised confidence floor.
+    let _autoTuneShadowDecision: { action: string; signals: unknown } | null = null;
+    if (
+      config.autoTuneConfidenceRevertTo != null &&
+      config.minConfidence > config.autoTuneConfidenceRevertTo &&
+      decision.action === "SKIP"
+    ) {
+      const origFloorConfig = { ...config, minConfidence: config.autoTuneConfidenceRevertTo };
+      const altDec = makeBotDecision(
+        sym,
+        origFloorConfig,
+        kalshiData.ticker,
+        kalshiData.yesPrice ?? null,
+        minutesElapsed,
+        signalAcc,
+        kalshiData.value,
+      );
+      if (altDec.action !== "SKIP") {
+        _autoTuneShadowDecision = { action: altDec.action, signals: altDec.signals };
+      }
+    }
+
     // Apply the bet profile's confidence cap before any further filters.
     // In aggressive mode this clamps at 80% — preventing the false-unanimity
     // problem where all signals agree in choppy markets and produce inflated 85-92%
@@ -4478,6 +4532,26 @@ export async function runBotLoopTick(): Promise<void> {
     const finalReason = reversingCaution
       ? `[reversing-caution] ${reason.slice(0, 60)}`
       : reason;
+
+    // Auto-tune shadow bet: if the coin reached here as SKIP and the auto-tune
+    // temp raise was the sole reason (the original-floor re-run returned a BET),
+    // record a probe bet.  Coins filtered by earlier gates (regime, doubt filter,
+    // border guard, etc.) hit `continue` and never reach this point — so
+    // _autoTuneShadowDecision is only consumed when ALL other gates passed.
+    if (_autoTuneShadowDecision !== null && decision.action === "SKIP") {
+      const shadowDir: "yes" | "no" =
+        _autoTuneShadowDecision.action === "BET_YES" ? "yes" : "no";
+      void recordShadowBet(
+        sym,
+        shadowDir,
+        effectiveConfidence,
+        _autoTuneShadowDecision.signals,
+        kalshiData?.value ?? null,
+        windowKey,
+        botMode,
+        kalshiData?.ticker ?? null,
+      ).catch(err => logger.warn({ err, sym }, "[shadow-bet] auto-tune record failed (non-fatal)"));
+    }
 
     evalResults.push({
       symbol: sym,
