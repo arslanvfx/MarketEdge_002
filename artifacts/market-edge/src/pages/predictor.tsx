@@ -7,7 +7,7 @@ import type {
   CoinPrediction, CoinPrice, AiEntry, AiSettings, AutoPilotDecision,
   KalshiTarget, TrackerWindowCall, WindowBetSignal, WMAccuracyStats,
   LiveDirectionResult, MLPredResponse, EnsembleWeights, DriftAlert,
-  TimingAnalysisRow,
+  TimingAnalysisRow, CoinAnalytics, AIPredictionItem,
 } from "./predictor/types";
 import { KALSHI_COINS, API_BASE, fetchJson, estClock, etAbbrev, formatPct } from "./predictor/utils";
 import { Sparkline, LivePrice } from "./predictor/sparkline";

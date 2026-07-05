@@ -297,7 +297,7 @@ export default function BotDashboard() {
       setPersistMsg(result.persisted ? "saved" : "failed");
       setTimeout(() => setPersistMsg(null), 3000);
     } catch (err) {
-      setPersistMsg("error");
+      setPersistMsg("failed");
       setTimeout(() => setPersistMsg(null), 4000);
       console.error("[saveConfig] failed:", err);
     } finally {
@@ -547,6 +547,7 @@ export default function BotDashboard() {
           histPage={clampedHistPage}
           setHistPage={setHistPage}
           totalHistPages={totalHistPages}
+          totalBets={bets.length}
           historyMode={historyMode}
           setHistoryMode={setHistoryMode}
           histSourceFilter={histSourceFilter}

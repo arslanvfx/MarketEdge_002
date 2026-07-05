@@ -1,13 +1,16 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
 import React from "react";
 import type { HistoryRecord } from "./types";
-import { fmt$, fmtPct } from "./utils";
+import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtDuration, wkToEst } from "./utils";
+
+const HIST_PAGE_SIZE = 20;
 
 interface TransactionLogProps {
   pagedBets: HistoryRecord[];
   histPage: number;
   setHistPage: React.Dispatch<React.SetStateAction<number>>;
   totalHistPages: number;
+  totalBets: number;
   historyMode: "paper" | "live";
   setHistoryMode: React.Dispatch<React.SetStateAction<"paper" | "live">>;
   histSourceFilter: "all" | "bot" | "manual";
@@ -15,7 +18,8 @@ interface TransactionLogProps {
   activeMode: "paper" | "live";
 }
 
-export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPages, historyMode, setHistoryMode, histSourceFilter, setHistSourceFilter, activeMode }: TransactionLogProps) {
+export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPages, totalBets, historyMode, setHistoryMode, histSourceFilter, setHistSourceFilter, activeMode }: TransactionLogProps) {
+  const clampedHistPage = Math.min(histPage, Math.max(0, totalHistPages - 1));
   return (
     <>
         {/* ── Transaction Log ── */}
@@ -48,7 +52,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 </button>
               ))}
             </div>
-            <span className="text-xs text-muted-foreground">{bets.length} record{bets.length !== 1 ? "s" : ""}</span>
+            <span className="text-xs text-muted-foreground">{totalBets} record{totalBets !== 1 ? "s" : ""}</span>
             {totalHistPages > 1 && (
               <div className="ml-auto flex items-center gap-1">
                 <button
@@ -72,7 +76,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
             )}
           </div>
 
-          {bets.length === 0 ? (
+          {totalBets === 0 ? (
             <div className="px-5 py-12 text-center">
               <Bot className="w-8 h-8 text-muted-foreground/40 mx-auto mb-3" />
               <p className="text-sm text-muted-foreground">No bets placed yet. The bot is watching the markets.</p>
@@ -81,7 +85,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
             <div className="p-4 space-y-3">
               {totalHistPages > 1 && (
                 <div className="flex items-center justify-between text-xs text-muted-foreground pb-1">
-                  <span>Showing {clampedHistPage * HIST_PAGE_SIZE + 1}–{Math.min((clampedHistPage + 1) * HIST_PAGE_SIZE, bets.length)} of {bets.length}</span>
+                  <span>Showing {clampedHistPage * HIST_PAGE_SIZE + 1}–{Math.min((clampedHistPage + 1) * HIST_PAGE_SIZE, totalBets)} of {totalBets}</span>
                 </div>
               )}
               {pagedBets.map((r) => {

@@ -2,8 +2,8 @@ import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart
 import { Button } from "@/components/ui/button";
 import type { QueryClient } from "@tanstack/react-query";
 import React from "react";
-import type { BotStatus, BotConfig, BacktestModeStats } from "./types";
-import { utcToEst, ET_LABEL, fmtPct, API_BASE } from "./utils";
+import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode } from "./types";
+import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 
 interface BotConfigSectionProps {
   cfg: BotConfig | undefined;

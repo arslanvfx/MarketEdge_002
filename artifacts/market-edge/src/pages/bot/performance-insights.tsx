@@ -1,7 +1,7 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
 import { useState } from "react";
 import type { PerformanceReport, BotStats } from "./types";
-import { fmt$, fmtPct } from "./utils";
+import { fmt$, fmtPct, bandToEst, EST } from "./utils";
 
 interface PerformanceInsightsProps {
   perfReportData: { report: PerformanceReport | null; pausedCoins: Record<string, number> } | undefined;

@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { ComposedChart, Area, Line, XAxis, YAxis, ResponsiveContainer, Tooltip as RTooltip, ReferenceLine } from "recharts";
-import { Activity, TrendingUp, TrendingDown, Minus, Zap, Sparkles, Loader2, CheckCircle2, Clock, ExternalLink, ArrowUp, ArrowDown, RefreshCw, Check, AlertTriangle, Bot, Lock, ChevronDown, ChevronUp } from "lucide-react";
+import { Activity, TrendingUp, TrendingDown, Minus, Zap, Sparkles, Loader2, CheckCircle2, Clock, ExternalLink, ArrowUp, ArrowDown, RefreshCw, Check, AlertTriangle, Bot, Lock, ChevronDown, ChevronUp, Radio, Gauge, Waves } from "lucide-react";
 import { Card } from "@/components/ui/card";
-import type { CoinPrediction, AiEntry, AutoPilotDecision, KalshiTarget, TrackerWindowCall, WindowBetSignal, WMAccuracyStats, LiveDirectionResult, MLPredResponse, EnsembleWeights, Prediction, DriftAlert } from "./types";
+import type { CoinPrediction, AiEntry, AutoPilotDecision, KalshiTarget, TrackerWindowCall, WindowBetSignal, WMAccuracyStats, LiveDirectionResult, MLPredResponse, EnsembleWeights, Prediction, DriftAlert, BetSignal } from "./types";
 import { computeBetSignal } from "./types";
 import { COIN_STYLE, KALSHI_COINS, DIR, formatPrice, formatPct, estCandleLabel } from "./utils";
 import { Sparkline, LivePrice } from "./sparkline";
