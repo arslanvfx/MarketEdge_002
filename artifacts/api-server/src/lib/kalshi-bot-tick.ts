@@ -392,6 +392,23 @@ async function _runBotTick(
     streakMap.set(sym, streakInfo);
   }
 
+  // ── Pre-entry streak block ────────────────────────────────────────────────
+  // The pause fires AFTER the Nth loss is settled — meaning the Nth bet is
+  // always placed before the pause kicks in. This guard prevents the Nth bet
+  // from being entered at all: if the coin has already lost (limit - 1) windows
+  // in a row, skip entry and let the next window decide fresh.
+  {
+    const streakLimit = S.config.coinStreakLossLimit ?? 3;
+    const currentLosses = streakInfo?.consecutiveLosses ?? 0;
+    if (streakLimit > 0 && currentLosses >= streakLimit - 1) {
+      logger.info(
+        { sym, currentLosses, streakLimit },
+        "[kalshi-bot] SKIP — pre-entry streak block: would be the Nth consecutive loss",
+      );
+      return;
+    }
+  }
+
   // ── Per-coin daily loss cap ───────────────────────────────────────────────
   // Skip for the rest of the UTC day when this coin's losses reach the cap.
   const coinLossToday = activeCoinDailyLoss().get(sym) ?? 0;
@@ -408,6 +425,31 @@ async function _runBotTick(
   // Place the bet
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
 
+  // ── Signal accuracy guard ─────────────────────────────────────────────────
+  // If the coin's recent signal accuracy is below 50 %, every bet is EV-negative
+  // by definition (win rate < cost of a 50¢ contract).  The engine's own EV gate
+  // can't catch this because yesPrice is null at decision time — this is the
+  // direct backstop.  Skip when null to avoid blocking coins with no history.
+  {
+    const sigAcc = (decision.signals as Record<string, unknown>).signalAccuracyPct;
+    if (typeof sigAcc === "number" && sigAcc < 50) {
+      logger.info(
+        { sym, direction, signalAccuracyPct: sigAcc },
+        "[kalshi-bot] SKIP — signal accuracy below 50 % (EV-negative regardless of agreement)",
+      );
+      if (lastDecisionWindowKey.get(sym) !== windowKey) {
+        lastDecisionWindowKey.set(sym, windowKey);
+        await persistBetRecord({
+          symbol: sym, windowKey, ticker: kalshiTicker, direction,
+          action: "skip",
+          signals: { ...decision.signals, reason: "signal-accuracy-below-50", signalAccuracyPct: sigAcc },
+          entryPrice: yesPrice, kalshiTarget,
+        });
+      }
+      return;
+    }
+  }
+
   // ── Candle momentum guard ─────────────────────────────────────────────────
   // Skip entry when the last 4 one-minute candles are clearly running against
   // the bet direction. Catches intra-window reversals that the snap-time model
@@ -418,32 +460,54 @@ async function _runBotTick(
   {
     const pred = getCachedPrediction(sym);
     const candles = pred?.candles ?? [];
-    if (candles.length >= 4) {
-      const recent = candles.slice(-4);
-      const firstClose = recent[0].c;
-      const lastClose  = recent[3].c;
-      if (firstClose > 0) {
-        const netChangePct = ((lastClose - firstClose) / firstClose) * 100;
-        const MOMENTUM_REVERSAL_PCT = 0.15;
-        const opposing =
-          (direction === "yes" && netChangePct < -MOMENTUM_REVERSAL_PCT) ||
-          (direction === "no"  && netChangePct >  MOMENTUM_REVERSAL_PCT);
-        if (opposing) {
-          logger.info(
-            { sym, direction, netChangePct: +netChangePct.toFixed(3) },
-            "[kalshi-bot] SKIP — candle momentum opposes bet direction (reversal guard)",
-          );
-          if (lastDecisionWindowKey.get(sym) !== windowKey) {
-            lastDecisionWindowKey.set(sym, windowKey);
-            await persistBetRecord({
-              symbol: sym, windowKey, ticker: kalshiTicker, direction,
-              action: "skip",
-              signals: { ...decision.signals, reason: "candle-momentum-reversal", netChangePct: +netChangePct.toFixed(3) },
-              entryPrice: yesPrice, kalshiTarget,
-            });
-          }
-          return;
+
+    // ── Missing-data block ────────────────────────────────────────────────
+    // If the prediction cache isn't warm (no entry, or fewer than 4 candles),
+    // we can't evaluate momentum — block rather than silently pass.
+    // At T+2 with a healthy tracker the cache should always be populated;
+    // < 4 candles almost certainly means a fresh server restart where the
+    // snap loop hasn't completed its first cycle for this coin yet.
+    if (pred == null || candles.length < 4) {
+      logger.info(
+        { sym, direction, candleCount: candles.length, predCached: pred != null },
+        "[kalshi-bot] SKIP — prediction cache not warm enough for momentum check (< 4 candles)",
+      );
+      if (lastDecisionWindowKey.get(sym) !== windowKey) {
+        lastDecisionWindowKey.set(sym, windowKey);
+        await persistBetRecord({
+          symbol: sym, windowKey, ticker: kalshiTicker, direction,
+          action: "skip",
+          signals: { ...decision.signals, reason: "candle-cache-not-warm", candleCount: candles.length },
+          entryPrice: yesPrice, kalshiTarget,
+        });
+      }
+      return;
+    }
+
+    const recent = candles.slice(-4);
+    const firstClose = recent[0].c;
+    const lastClose  = recent[3].c;
+    if (firstClose > 0) {
+      const netChangePct = ((lastClose - firstClose) / firstClose) * 100;
+      const MOMENTUM_REVERSAL_PCT = 0.15;
+      const opposing =
+        (direction === "yes" && netChangePct < -MOMENTUM_REVERSAL_PCT) ||
+        (direction === "no"  && netChangePct >  MOMENTUM_REVERSAL_PCT);
+      if (opposing) {
+        logger.info(
+          { sym, direction, netChangePct: +netChangePct.toFixed(3) },
+          "[kalshi-bot] SKIP — candle momentum opposes bet direction (reversal guard)",
+        );
+        if (lastDecisionWindowKey.get(sym) !== windowKey) {
+          lastDecisionWindowKey.set(sym, windowKey);
+          await persistBetRecord({
+            symbol: sym, windowKey, ticker: kalshiTicker, direction,
+            action: "skip",
+            signals: { ...decision.signals, reason: "candle-momentum-reversal", netChangePct: +netChangePct.toFixed(3) },
+            entryPrice: yesPrice, kalshiTarget,
+          });
         }
+        return;
       }
     }
 
