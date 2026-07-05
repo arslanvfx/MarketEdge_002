@@ -3568,17 +3568,36 @@ export async function runBotLoopTick(): Promise<void> {
   // If the last 1-2 completed windows had a poor win rate (<40%) the market
   // is in an uncertain/choppy regime. Raise the effective confidence floor
   // by 4pp (one bad window) or 8pp (two consecutive bad windows) to avoid
-  // over-betting into noise. We inspect completed windows only (wk < windowKey).
+  // over-betting into noise.
+  //
+  // IMPORTANT: the lookback is TIME-based, not data-based.  We generate the
+  // last 2 completed window keys from Date.now() regardless of whether any
+  // bets were placed in those windows.  Windows with no entries in
+  // recentWindowOutcomes are treated as NEUTRAL (the total >= 1 guard skips
+  // them).  This prevents a deadlock where the penalty is high enough to stop
+  // all bets, but no bets means no new map entries, so the bad windows from
+  // before the lockout are permanently "the last 2" and the penalty never clears.
+  //
+  // With time-based lookback: after one empty window passes, the penalty
+  // drops from 8pp → 4pp (only 1 bad window in the last 2).  After two empty
+  // windows it clears entirely.
   const DOUBT_WIN_RATE_THRESHOLD = 0.4;
-  const completedWindowKeys = [...recentWindowOutcomes.keys()]
-    .filter(wk => wk < windowKey)
-    .sort()
-    .reverse()
-    .slice(0, 2);
+  const nowMs = Date.now();
+  // Generate the 2 most-recently-completed window keys from wall-clock time.
+  const completedWindowKeys: string[] = [1, 2].map(i => {
+    const ms = Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - i * 15 * 60_000;
+    return new Date(ms).toISOString().slice(0, 16);
+  });
   let windowDoubtPenalty = 0;
   let weakWindowCount = 0;
+  const neutralWindows: string[] = [];
   for (const wk of completedWindowKeys) {
-    const wo = recentWindowOutcomes.get(wk)!;
+    const wo = recentWindowOutcomes.get(wk);
+    if (!wo) {
+      // No bet data for this window — treat as neutral, not weak.
+      neutralWindows.push(wk);
+      continue;
+    }
     const total = wo.wins + wo.losses;
     if (total >= 1 && wo.wins / total < DOUBT_WIN_RATE_THRESHOLD) weakWindowCount++;
   }
@@ -3586,8 +3605,13 @@ export async function runBotLoopTick(): Promise<void> {
   else if (weakWindowCount === 1) windowDoubtPenalty = 4;
   if (windowDoubtPenalty > 0) {
     logger.info(
-      { windowDoubtPenalty, weakWindowCount, checkedWindows: completedWindowKeys },
+      { windowDoubtPenalty, weakWindowCount, checkedWindows: completedWindowKeys, neutralWindows },
       `[kalshi-bot] doubt penalty: ${weakWindowCount} recent window(s) <${DOUBT_WIN_RATE_THRESHOLD * 100}% win rate — confidence floor +${windowDoubtPenalty}pp`,
+    );
+  } else if (neutralWindows.length > 0) {
+    logger.info(
+      { checkedWindows: completedWindowKeys, neutralWindows },
+      "[kalshi-bot] doubt penalty cleared — recent windows have no bet data (treated as neutral)",
     );
   }
   // Store for Task-C signal enrichment: _runBotTick includes this in the signals JSON.
