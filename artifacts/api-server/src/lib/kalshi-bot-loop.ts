@@ -127,6 +127,21 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
     );
   }
 
+  // ── Immediate post-Step-1 bot tick ─────────────────────────────────────
+  // Fire the bot decision loop as soon as Kalshi data is confirmed for at
+  // least one coin.  This eliminates the 0–30 s dead zone that previously
+  // existed between prefetch completion and the next scheduled tick.
+  // Stability results from Step 2 arrive asynchronously; the bot handles
+  // "pending" stability gracefully (×1.0 multiplier) and the scheduler's
+  // next tick will re-evaluate once those values are resolved.
+  // tickInFlight prevents the overlapping scheduler tick from doing redundant work.
+  if (confirmed.length > 0) {
+    logger.info({ windowKey, confirmed }, "[prefetch] firing immediate post-prefetch bot tick");
+    runBotLoopTick().catch(err =>
+      logger.warn({ err, windowKey }, "[prefetch] immediate tick failed (non-fatal)"),
+    );
+  }
+
   // ── Step 2: stability analysis, gated on Step 1 per coin ────────────────
   // Only coins that PASSED step 1 are dispatched here.  The shared
   // S.stabilityFiredForCoins guard prevents double-dispatch with the bot loop.
@@ -167,11 +182,24 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
   );
 }
 
+// Prevents two runBotLoopTick invocations from running concurrently.
+// The prefetch-triggered immediate tick and the scheduler tick can otherwise
+// overlap if Claude stability analysis is still in-flight when the interval fires.
+// The openPositions guard already prevents double-bets, but this lock avoids
+// redundant Kalshi API calls and confusing interleaved log output.
+let tickInFlight = false;
+
 // Iterates over all Kalshi-enabled coins, ensures fresh Kalshi market data is
 // available (fetching from the public API if the cache is stale), then runs
 // the bot tick for each coin.  The Kalshi market-data endpoint is public and
 // requires no API key, so this works in both paper and live modes.
 export async function runBotLoopTick(): Promise<void> {
+  if (tickInFlight) {
+    logger.debug("[kalshi-bot] tick already in flight — skipping concurrent call");
+    return;
+  }
+  tickInFlight = true;
+  try {
   // Evaluate any closed bets that haven't been stamped with outcome yet.
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
   evalClosedBets().catch(() => {});
@@ -1520,6 +1548,9 @@ export async function runBotLoopTick(): Promise<void> {
       const dir = openPositions.get(sym)!.direction;
       windowDirectionCounts.set(dir, (windowDirectionCounts.get(dir) ?? 0) + 1);
     }
+  }
+  } finally {
+    tickInFlight = false;
   }
 }
 

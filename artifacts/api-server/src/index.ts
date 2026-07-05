@@ -442,14 +442,17 @@ app.listen(port, (err) => {
       );
       logger.info("Prediction tracker started");
 
-      // Kalshi bot loop — runs every 30 s alongside the main tracker.
+      // Kalshi bot loop — runs every 15 s alongside the main tracker.
+      // Reduced from 30 s: the prefetch pipeline now fires an immediate tick
+      // on window-open, so the scheduler is mainly a re-evaluation safety net
+      // for mid-window scenarios (failed guards, retry candidates).
       // Reads from the cached state that the main tracker populates, so no
       // extra network calls are made when the caches are warm.
       setInterval(() => {
         runBotLoopTick().catch((err) =>
           logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
         );
-      }, 30_000);
+      }, 15_000);
 
       // Auto-tune performance analytics: runs every 15 min, aligned to UTC
       // 15-minute window boundaries (00, 15, 30, 45) so the analytics window
