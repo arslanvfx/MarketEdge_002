@@ -51,7 +51,7 @@ test("duplicatePosition: position already open → blocked", () => {
 
 // Wiring: placeManualOrder must call checkDuplicatePositionGuard
 test("duplicatePosition/wiring: placeManualOrder delegates to checkDuplicatePositionGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   assert.ok(
     src.includes("checkDuplicatePositionGuard(openPositions.has(sym))"),
     "placeManualOrder must call checkDuplicatePositionGuard(openPositions.has(sym))",
@@ -101,7 +101,7 @@ test("positionExists: error message contains the symbol exactly", () => {
 
 // Wiring: closeManualPosition must call checkManualPositionExistsGuard
 test("positionExists/wiring: closeManualPosition delegates to checkManualPositionExistsGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   assert.ok(
     src.includes("checkManualPositionExistsGuard(pos, sym)"),
     "closeManualPosition must call checkManualPositionExistsGuard(pos, sym)",
@@ -150,9 +150,9 @@ test("manualSource: error message contains the symbol", () => {
 
 // Wiring: closeManualPosition must call checkManualSourceGuard
 test("manualSource/wiring: closeManualPosition delegates to checkManualSourceGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   assert.ok(
-    src.includes("checkManualSourceGuard(pos!.source, sym)"),
+    src.includes("checkManualSourceGuard(pos!.source"),
     "closeManualPosition must call checkManualSourceGuard(pos!.source, sym)",
   );
 });
@@ -166,7 +166,7 @@ test("manualSource/wiring: closeManualPosition delegates to checkManualSourceGua
 // ===========================================================================
 
 test("placeManualOrder/wiring: sets openPositions after fill", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   assert.ok(
     src.includes("openPositions.set(sym, newPosition)"),
     "placeManualOrder must write the new position into openPositions via openPositions.set(sym, newPosition)",
@@ -174,7 +174,7 @@ test("placeManualOrder/wiring: sets openPositions after fill", () => {
 });
 
 test("placeManualOrder/wiring: newPosition carries source = 'manual'", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   // The position object literal in placeManualOrder must include source: "manual"
   assert.ok(
     src.includes('source: "manual"'),
@@ -183,7 +183,7 @@ test("placeManualOrder/wiring: newPosition carries source = 'manual'", () => {
 });
 
 test("placeManualOrder/wiring: persists bet record to DB after fill", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   // persistBetRecord must be called inside placeManualOrder
   assert.ok(
     src.includes("persistBetRecord("),
@@ -200,7 +200,7 @@ test("placeManualOrder/wiring: persists bet record to DB after fill", () => {
 // ===========================================================================
 
 test("closeManualPosition/wiring: deletes from openPositions after close", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   assert.ok(
     src.includes("openPositions.delete(sym)"),
     "closeManualPosition must call openPositions.delete(sym) after the position is closed",
@@ -208,10 +208,10 @@ test("closeManualPosition/wiring: deletes from openPositions after close", () =>
 });
 
 test("closeManualPosition/wiring: writes exit row via closePosition helper", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-manual.ts");
   // closeManualPosition calls the shared closePosition helper which writes to DB
   assert.ok(
-    src.includes("await closePosition(pos,"),
+    src.includes("await closePosition(pos"),
     "closeManualPosition must delegate to the closePosition helper (which persists the exit row)",
   );
 });

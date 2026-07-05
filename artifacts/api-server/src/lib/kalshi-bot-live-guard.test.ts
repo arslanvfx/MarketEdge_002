@@ -329,7 +329,7 @@ test("Layer3/startup: paper+undefined → effective=paper, didDowngrade=false", 
 // Wiring check: loadBotConfigFromDB source must delegate to applyStartupModeRestore
 // and set botMode BEFORE _persistModeToConfig (ordering guarantee)
 test("Layer3/wiring: loadBotConfigFromDB delegates to applyStartupModeRestore; botMode set before persist", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-db.ts");
   const fnIdx = src.indexOf("export async function loadBotConfigFromDB(");
   assert.ok(fnIdx !== -1, "loadBotConfigFromDB must be exported");
   const body = src.slice(fnIdx, fnIdx + 1500);

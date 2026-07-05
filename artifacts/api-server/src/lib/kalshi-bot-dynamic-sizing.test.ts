@@ -352,13 +352,13 @@ test("betting-path: cap never fires across the full confidence range (well-confi
 // checkMaxBetSizeGuard abort happens AFTER — with a `return` on block.
 // ---------------------------------------------------------------------------
 test("betting-path/wiring: kalshi-bot.ts sizes then applies the hard cap (in that order)", () => {
-  const src = fs.readFileSync(path.join(__dirname, "kalshi-bot.ts"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "kalshi-bot-tick.ts"), "utf8");
 
-  const sizingIdx = src.indexOf("computeDynamicBetSize(decision.confidence, config, yesPrice, direction)");
+  const sizingIdx = src.indexOf("computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction)");
   const contractIdx = src.indexOf("Math.floor(targetBetSize / expectedFillCost)");
   const capIdx = src.indexOf("checkMaxBetSizeGuard(betAmount, maxBetCap)");
 
-  assert.ok(sizingIdx !== -1, "must call computeDynamicBetSize(decision.confidence, config, yesPrice, direction)");
+  assert.ok(sizingIdx !== -1, "must call computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction)");
   assert.ok(contractIdx !== -1, "contractCount must be derived from targetBetSize / expectedFillCost");
   assert.ok(capIdx !== -1, "must call checkMaxBetSizeGuard(betAmount, maxBetCap)");
 

@@ -70,7 +70,7 @@ test("maxBetSize: zero cap — any positive bet is blocked", () => {
 
 // Wiring check: kalshi-bot.ts must call checkMaxBetSizeGuard in the entry path
 test("maxBetSize/wiring: kalshi-bot.ts calls checkMaxBetSizeGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-tick.ts");
   assert.ok(
     src.includes("checkMaxBetSizeGuard(betAmount, maxBetCap)"),
     "kalshi-bot.ts must delegate to checkMaxBetSizeGuard — guard has been removed or renamed",
@@ -106,7 +106,7 @@ test("dailyLoss: zero loss, positive cap → not blocked", () => {
 
 // Wiring check: kalshi-bot.ts must call checkDailyLossGuard
 test("dailyLoss/wiring: kalshi-bot.ts calls checkDailyLossGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-tick.ts");
   assert.ok(
     src.includes("checkDailyLossGuard(coinLossToday, maxCoinLoss)"),
     "kalshi-bot.ts must delegate to checkDailyLossGuard",
@@ -152,7 +152,7 @@ test("streakPause: empty string pauseUntil treated as no pause", () => {
 
 // Wiring check: kalshi-bot.ts must call checkStreakPauseGuard
 test("streakPause/wiring: kalshi-bot.ts calls checkStreakPauseGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-tick.ts");
   assert.ok(
     src.includes("checkStreakPauseGuard("),
     "kalshi-bot.ts must delegate to checkStreakPauseGuard",
@@ -194,7 +194,7 @@ test("slippage: 3 strikes from a future windowKey (clock skew) → not blocked",
 
 // Wiring check: kalshi-bot.ts must call checkSlippageStrikeGuard
 test("slippage/wiring: kalshi-bot.ts calls checkSlippageStrikeGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-tick.ts");
   assert.ok(
     src.includes("checkSlippageStrikeGuard(slipInfo, windowKey)"),
     "kalshi-bot.ts must delegate to checkSlippageStrikeGuard",
@@ -235,7 +235,7 @@ test("balance: zero min (disabled) → never blocked", () => {
 
 // Wiring check: kalshi-bot.ts must call checkBalanceGuard
 test("balance/wiring: kalshi-bot.ts calls checkBalanceGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-tick.ts");
   assert.ok(
     src.includes("checkBalanceGuard(liveBal, minBal)"),
     "kalshi-bot.ts must delegate to checkBalanceGuard",
@@ -280,7 +280,7 @@ test("exposure: zero cap → any non-trivial bet blocked", () => {
 
 // Wiring check: kalshi-bot.ts must call checkExposureGuard
 test("exposure/wiring: kalshi-bot.ts calls checkExposureGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-tick.ts");
   assert.ok(
     src.includes("checkExposureGuard(openExposure, betAmount, maxExposure)"),
     "kalshi-bot.ts must delegate to checkExposureGuard",
@@ -339,7 +339,7 @@ test("applyDailyLossUpdate: multiple coins → only target coin updated", () => 
 
 // Wiring check: kalshi-bot.ts must call applyDailyLossUpdate in closePosition
 test("applyDailyLossUpdate/wiring: kalshi-bot.ts closePosition calls applyDailyLossUpdate", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-close.ts");
   assert.ok(
     src.includes("applyDailyLossUpdate(") && src.includes("pos.symbol, pnl, pos.entryMode"),
     "closePosition must delegate daily-loss accumulation to applyDailyLossUpdate",
@@ -430,7 +430,7 @@ test("streak: does not mutate the input state object", () => {
 
 // Wiring check: kalshi-bot.ts must call applyStreakUpdate in closePosition
 test("streak/wiring: kalshi-bot.ts closePosition calls applyStreakUpdate", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-close.ts");
   assert.ok(
     src.includes("applyStreakUpdate("),
     "closePosition must delegate streak tracking to applyStreakUpdate",
@@ -467,13 +467,13 @@ test("wmReady: monitor ready, gate disabled → not blocked", () => {
 });
 
 test("wmReady/wiring: kalshi-bot.ts imports and calls checkWindowMonitorReadyGuard", () => {
-  const src = readSrc("kalshi-bot.ts");
+  const src = readSrc("kalshi-bot-loop.ts");
   assert.ok(
     src.includes("checkWindowMonitorReadyGuard"),
     "kalshi-bot.ts must import checkWindowMonitorReadyGuard from kalshi-bot-guards",
   );
   assert.ok(
-    src.includes("config.requireMonitorReady"),
+    src.includes("S.config.requireMonitorReady"),
     "kalshi-bot.ts Phase-3 loop must pass config.requireMonitorReady to the gate",
   );
 });

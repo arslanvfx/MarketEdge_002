@@ -192,7 +192,7 @@ const timingSnapshotWritten = new Set<string>();
 
 // Returns the ISO-minute string for the START of the current 15-min window,
 // e.g. "2026-06-25T15:30". Used as the window lock key.
-function currentWindowKey(now: Date): string {
+export function currentWindowKey(now: Date = new Date()): string {
   const ms = now.getTime();
   const windowMs = Math.floor(ms / (15 * 60_000)) * (15 * 60_000);
   return new Date(windowMs).toISOString().slice(0, 16);
