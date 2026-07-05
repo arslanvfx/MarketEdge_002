@@ -408,6 +408,78 @@ async function _runBotTick(
   // Place the bet
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
 
+  // ── Candle momentum guard ─────────────────────────────────────────────────
+  // Skip entry when the last 4 one-minute candles are clearly running against
+  // the bet direction. Catches intra-window reversals that the snap-time model
+  // missed because it was trained on data from the prior window.
+  // Threshold: 0.15 % net move over the last 4 closes. Calibrated so that
+  // normal noise (~0.05 %) doesn't trigger it, but a steady directional push
+  // (like the 10:00 UTC multi-coin upswing) does.
+  {
+    const pred = getCachedPrediction(sym);
+    const candles = pred?.candles ?? [];
+    if (candles.length >= 4) {
+      const recent = candles.slice(-4);
+      const firstClose = recent[0].c;
+      const lastClose  = recent[3].c;
+      if (firstClose > 0) {
+        const netChangePct = ((lastClose - firstClose) / firstClose) * 100;
+        const MOMENTUM_REVERSAL_PCT = 0.15;
+        const opposing =
+          (direction === "yes" && netChangePct < -MOMENTUM_REVERSAL_PCT) ||
+          (direction === "no"  && netChangePct >  MOMENTUM_REVERSAL_PCT);
+        if (opposing) {
+          logger.info(
+            { sym, direction, netChangePct: +netChangePct.toFixed(3) },
+            "[kalshi-bot] SKIP — candle momentum opposes bet direction (reversal guard)",
+          );
+          if (lastDecisionWindowKey.get(sym) !== windowKey) {
+            lastDecisionWindowKey.set(sym, windowKey);
+            await persistBetRecord({
+              symbol: sym, windowKey, ticker: kalshiTicker, direction,
+              action: "skip",
+              signals: { ...decision.signals, reason: "candle-momentum-reversal", netChangePct: +netChangePct.toFixed(3) },
+              entryPrice: yesPrice, kalshiTarget,
+            });
+          }
+          return;
+        }
+      }
+    }
+
+    // ── Strike proximity guard ─────────────────────────────────────────────
+    // Skip when the live price is within 0.15 % of the Kalshi target.
+    // A paper-thin cushion means a single tick crosses the strike and flips
+    // the outcome. The 10:00 UTC BNB/ETH/XRP losses were all ≤ 0.06 % away.
+    // Only applied when direction matches "at risk" side:
+    //   NO  bet + price barely below target → one tick up = loss
+    //   YES bet + price barely above target → one tick down = loss
+    const livePrice = pred?.price;
+    if (livePrice != null && livePrice > 0 && kalshiTarget > 0) {
+      const STRIKE_PROXIMITY_PCT = 0.15;
+      const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
+      const tooClose =
+        (direction === "no"  && livePrice <  kalshiTarget && distancePct < STRIKE_PROXIMITY_PCT) ||
+        (direction === "yes" && livePrice >= kalshiTarget && distancePct < STRIKE_PROXIMITY_PCT);
+      if (tooClose) {
+        logger.info(
+          { sym, direction, livePrice, kalshiTarget, distancePct: +distancePct.toFixed(4) },
+          "[kalshi-bot] SKIP — price within strike proximity threshold (proximity guard)",
+        );
+        if (lastDecisionWindowKey.get(sym) !== windowKey) {
+          lastDecisionWindowKey.set(sym, windowKey);
+          await persistBetRecord({
+            symbol: sym, windowKey, ticker: kalshiTicker, direction,
+            action: "skip",
+            signals: { ...decision.signals, reason: "strike-proximity", livePrice, kalshiTarget, distancePct: +distancePct.toFixed(4) },
+            entryPrice: yesPrice, kalshiTarget,
+          });
+        }
+        return;
+      }
+    }
+  }
+
   // ── LIVE-ASK FILL PRICE ──────────────────────────────────────────────────
   // Use the live Kalshi bid/ask (cached from the most recent fetchKalshiTarget
   // call, typically ≤12s old) to compute the order price and contract count.
