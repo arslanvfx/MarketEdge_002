@@ -2842,10 +2842,27 @@ function isCoinClaudeEnabled(symbol: string): boolean {
   });
 }
 
-export function startPredictionTracker(onInitComplete?: () => void): void {
+export function startPredictionTracker(
+  onInitComplete?: () => void,
+  onNewWindow?: (windowKey: string) => void,
+): void {
+  // Tracks the window key seen on the previous tracker tick so that
+  // onNewWindow fires exactly once per 15-min boundary transition.
+  let lastTrackerWindowKey = "";
+
   const tick = async () => {
     const nowMs = Date.now();
     const nextBoundary = new Date(Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS);
+
+    // Detect window transitions: if the current 15-min window key differs from
+    // the last tick, notify the bot layer so it can fire the pre-fetch burst
+    // as early as possible — independently of the bot-loop phase offset.
+    const currentWindowMs = Math.floor(nowMs / QUARTER_MS) * QUARTER_MS;
+    const currentTrackerWindowKey = new Date(currentWindowMs).toISOString().slice(0, 16);
+    if (currentTrackerWindowKey !== lastTrackerWindowKey) {
+      lastTrackerWindowKey = currentTrackerWindowKey;
+      onNewWindow?.(currentTrackerWindowKey);
+    }
 
     // Refresh auto-pilot decisions from the latest accuracy before snapping, so
     // this tick's Claude on/off choices reflect the most recent performance.

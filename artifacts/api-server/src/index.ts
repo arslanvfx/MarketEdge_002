@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, fixLiveExpiredPnlHistorical } from "./lib/kalshi-bot";
+import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, fixLiveExpiredPnlHistorical } from "./lib/kalshi-bot";
 import { pool } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -409,10 +409,17 @@ app.listen(port, (err) => {
       // 15-min boundary and evaluates them against actual prices once the window closes.
       // The onInitComplete callback runs after initMLFromDB() resolves — backfill
       // runs at that point so it sees the true post-hydration warming status.
-      startPredictionTracker(() => {
-        runMLBackfillIfNeeded(96)
-          .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
-      });
+      startPredictionTracker(
+        () => {
+          runMLBackfillIfNeeded(96)
+            .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
+        },
+        (windowKey) => {
+          // Tracker fires onNewWindow before the bot loop detects the boundary,
+          // giving the prefetch a head-start of up to 30s (the bot-loop phase gap).
+          runWindowOpenPrefetch(windowKey).catch(() => {});
+        },
+      );
       logger.info("Prediction tracker started");
 
       // Kalshi bot loop — runs every 30 s alongside the main tracker.

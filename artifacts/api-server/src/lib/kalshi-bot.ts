@@ -3175,6 +3175,105 @@ export async function getBotStats(filterSymbol?: string, filterMode?: BotMode): 
 // Bot loop — called from index.ts every 30 s
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Window-open pre-fetch orchestrator
+// ---------------------------------------------------------------------------
+// Fires once per window the moment EITHER the bot loop OR the prediction
+// tracker detects a new window key.  Runs all prerequisite data collection
+// in a strict checks-and-balances chain:
+//
+//   Step 1 — Parallel Kalshi target fetch (all coins simultaneously).
+//             Each coin is checked independently.  A coin is only considered
+//             "confirmed" when its Kalshi cache has a non-null strike AND a
+//             non-null yes-price.  Coins where Kalshi has not yet published
+//             the new market are logged as deferred — they fall back to the
+//             per-tick retry in runBotLoopTick.
+//
+//   Step 2 — Stability analysis dispatch (gated on Step 1 per coin).
+//             Only fires for coins that PASSED Step 1.  Uses the shared
+//             stabilityFiredForCoins guard so bot-loop retries cannot
+//             double-dispatch.  On error/null result the coin is removed
+//             from the guard so the bot loop can retry on the next tick.
+//
+// This ensures all signals are warm before the 120-second entry buffer
+// clears, so the first eligible bet fires immediately rather than waiting
+// an extra 30-60 seconds for lazy signal resolution.
+export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
+  const kalshiCoins = CRYPTO_COINS.filter(c => KALSHI_SERIES[c.symbol]);
+
+  // ── Step 1: parallel Kalshi target fetches ──────────────────────────────
+  // All coins fetched simultaneously.  Each result is checked for completeness
+  // (non-null strike + yes-price) before Step 2 is allowed for that coin.
+  const step1Results = await Promise.allSettled(
+    kalshiCoins.map(async (c) => {
+      const sym = c.symbol.toUpperCase();
+      await fetchKalshiTarget(sym);
+      const kd = getKalshiCachedData(sym);
+      if (!kd?.value || kd.yesPrice == null) {
+        throw new Error("Kalshi market not yet published");
+      }
+      return sym;
+    }),
+  );
+
+  const confirmed: string[] = [];
+  const deferred: string[] = [];
+  step1Results.forEach((r, i) => {
+    const sym = kalshiCoins[i].symbol.toUpperCase();
+    if (r.status === "fulfilled") confirmed.push(sym);
+    else deferred.push(sym);
+  });
+
+  if (confirmed.length > 0) {
+    logger.info({ confirmed, windowKey }, "[prefetch] step 1 complete — Kalshi data confirmed");
+  }
+  if (deferred.length > 0) {
+    logger.warn(
+      { deferred, windowKey },
+      "[prefetch] step 1 partial — Kalshi market not yet published for these coins; bot tick will retry",
+    );
+  }
+
+  // ── Step 2: stability analysis, gated on Step 1 per coin ────────────────
+  // Only coins that PASSED step 1 are dispatched here.  The shared
+  // stabilityFiredForCoins guard prevents double-dispatch with the bot loop.
+  if (!isAiFeatureEnabled("crypto_stability") || confirmed.length === 0) return;
+
+  const toDispatch = confirmed.filter(sym => !stabilityFiredForCoins.has(sym));
+  if (toDispatch.length === 0) return;
+
+  // Mark synchronously before any await — mirrors the bot-loop guard pattern.
+  toDispatch.forEach(sym => stabilityFiredForCoins.add(sym));
+  logger.info(
+    { coins: toDispatch, windowKey },
+    "[prefetch] step 2 — dispatching stability analysis (Kalshi confirmed for each)",
+  );
+
+  void Promise.all(
+    toDispatch.map(sym =>
+      fetchTrendStabilityForBot(sym, windowKey)
+        .then(r => {
+          if (r) {
+            windowStabilityCache.set(sym, r.trendStability);
+            logger.info(
+              { sym, result: r.trendStability, windowKey },
+              "[prefetch] step 2 complete — stability resolved",
+            );
+          } else {
+            // Null result means no data came back — remove guard so bot loop retries.
+            stabilityFiredForCoins.delete(sym);
+            logger.warn({ sym, windowKey }, "[prefetch] step 2 null result — bot loop will retry");
+          }
+        })
+        .catch(() => {
+          // Error (Claude down, timeout, etc.) — remove guard so bot loop retries.
+          stabilityFiredForCoins.delete(sym);
+          logger.warn({ sym, windowKey }, "[prefetch] step 2 failed — bot loop will retry");
+        }),
+    ),
+  );
+}
+
 // Iterates over all Kalshi-enabled coins, ensures fresh Kalshi market data is
 // available (fetching from the public API if the cache is stale), then runs
 // the bot tick for each coin.  The Kalshi market-data endpoint is public and
@@ -3321,47 +3420,59 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
-  // Phase 1: refresh market data for all Kalshi-enabled coins.
-  for (const coin of CRYPTO_COINS) {
-    if (!KALSHI_SERIES[coin.symbol]) continue;
-    await fetchKalshiTarget(coin.symbol).catch(() => null);
-  }
+  // Phase 1: refresh market data for all Kalshi-enabled coins — in parallel.
+  // All Kalshi API calls fire simultaneously so the slowest coin sets the wait
+  // time, not the sum of all coins.  Failures per-coin are swallowed here;
+  // the prefetch orchestrator (runWindowOpenPrefetch) handles retry logging.
+  await Promise.allSettled(
+    CRYPTO_COINS
+      .filter(c => KALSHI_SERIES[c.symbol])
+      .map(c => fetchKalshiTarget(c.symbol).catch(() => null)),
+  );
 
-  // Window-open stability analysis: fire Claude trend-stability for every Kalshi coin
-  // that now has valid strike + yes price data. Tracks per-coin dispatch so that coins
-  // whose markets publish later (10-30s delay) get picked up on subsequent ticks within
-  // the same window rather than being silently skipped.
+  // Window-open prefetch + stability orchestration.
+  // On a new window: clear per-window caches and immediately void-launch the
+  // prefetch orchestrator (runWindowOpenPrefetch).  That function handles the
+  // full Step-1 → Step-2 chain with proper checks-and-balances logging.
+  //
+  // Fallback per-tick retry (below): covers coins whose Kalshi market wasn't
+  // published when the prefetch ran.  Uses the same stabilityFiredForCoins
+  // guard so there is never a double-dispatch between the prefetch and here.
   const newWindowKey = currentWindowKey();
   if (newWindowKey !== lastStabilityWindowKey) {
     lastStabilityWindowKey = newWindowKey;
     stabilityFiredForCoins.clear();
     windowStabilityCache.clear();
+    // Fire the window-open pre-fetch burst immediately — runs in background.
+    void runWindowOpenPrefetch(newWindowKey).catch(() => {});
   }
-  // Re-check every tick for coins that weren't ready on earlier ticks of this window.
+  // Per-tick fallback: pick up any coins the prefetch couldn't reach because
+  // their Kalshi market wasn't published yet when the prefetch ran.
   const pendingCoins = CRYPTO_COINS.filter(c => {
     if (!KALSHI_SERIES[c.symbol]) return false;
     const sym = c.symbol.toUpperCase();
-    if (stabilityFiredForCoins.has(sym)) return false;  // already dispatched
+    if (stabilityFiredForCoins.has(sym)) return false;  // prefetch or earlier tick handled it
     const kd = getKalshiCachedData(sym);
     return kd?.value != null && kd.yesPrice != null;
   });
   if (pendingCoins.length > 0 && isAiFeatureEnabled("crypto_stability")) {
-    // Mark synchronously before any await to prevent double-dispatch on overlapping ticks.
     pendingCoins.forEach(c => stabilityFiredForCoins.add(c.symbol.toUpperCase()));
     void Promise.all(
       pendingCoins.map(c => {
         const sym = c.symbol.toUpperCase();
         return fetchTrendStabilityForBot(sym, newWindowKey)
           .then(r => {
-            if (r) windowStabilityCache.set(sym, r.trendStability);
+            if (r) {
+              windowStabilityCache.set(sym, r.trendStability);
+              logger.info({ sym, result: r.trendStability, windowKey: newWindowKey }, "[kalshi-bot] fallback stability resolved");
+            } else {
+              stabilityFiredForCoins.delete(sym);
+            }
           })
-          .catch(() => {
-            // Remove from dispatched set so the next tick retries for this coin.
-            stabilityFiredForCoins.delete(sym);
-          });
+          .catch(() => { stabilityFiredForCoins.delete(sym); });
       }),
     );
-    logger.info({ windowKey: newWindowKey, coins: pendingCoins.map(c => c.symbol) }, "[kalshi-bot] window-open trend stability analysis fired");
+    logger.info({ windowKey: newWindowKey, coins: pendingCoins.map(c => c.symbol) }, "[kalshi-bot] fallback stability dispatch — coins not yet handled by prefetch");
   }
 
   // Phase 2: manage exit for every open position (one tick per symbol).
