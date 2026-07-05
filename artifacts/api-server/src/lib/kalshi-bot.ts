@@ -710,6 +710,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
         kalshiTarget: kalshiBotBetsTable.kalshiTarget,
         windowKey: kalshiBotBetsTable.windowKey,
         exitedAt: kalshiBotBetsTable.exitedAt,
+        source: kalshiBotBetsTable.source,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -723,8 +724,11 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       .limit(REGIME_STRIKES_MAX * 8); // fetch enough to populate targets for all coins
 
     // Streak: count consecutive losses from most-recent row backwards.
+    // Manual bets are excluded so user-placed trades don't skew the bot's
+    // circuit-breaker state or auto-tune logic.
     let streak = 0;
     for (const r of recentRows) {
+      if (r.source === "manual") continue;
       const p = r.pnl != null ? parseFloat(String(r.pnl)) : 0;
       if (p < 0) streak++;
       else break; // first non-loss resets the streak
@@ -755,6 +759,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     const STARTUP_PAUSE_RECENCY_MS = 90 * 60_000; // 90 minutes = 6 windows
     const nowForPause = Date.now();
     for (const r of recentRows) {
+      if (r.source === "manual") continue; // manual bets must not trip per-coin auto-pause
       const sym = (r.symbol ?? "").toUpperCase();
       if (!sym || perCoinStreakDone.has(sym)) continue;
       // Track most-recent bet timestamp per coin (rows are newest-first).
@@ -787,8 +792,10 @@ export async function loadDailyPnlFromDB(): Promise<void> {
 
     // Populate per-window outcome tracking from recent settled rows.
     // recentRows is newest-first; we just iterate and bucket by windowKey.
+    // Manual bets are excluded so they don't skew the window-doubt penalty.
     recentWindowOutcomes.clear();
     for (const r of recentRows) {
+      if (r.source === "manual") continue;
       const wk = r.windowKey;
       if (!wk || r.pnl == null) continue;
       const p = parseFloat(String(r.pnl));
@@ -2748,6 +2755,7 @@ export async function evalClosedBets(): Promise<void> {
         exitedAt: kalshiBotBetsTable.exitedAt,
         cryptoPriceAtExit: kalshiBotBetsTable.cryptoPriceAtExit,
         signals: kalshiBotBetsTable.signals,
+        source: kalshiBotBetsTable.source,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -2885,8 +2893,9 @@ export async function evalClosedBets(): Promise<void> {
       }
 
       // Update in-memory window outcome map for the doubt-penalty signal.
+      // Manual bets are excluded so user-placed trades don't skew the chop filter.
       const wk = row.windowKey;
-      if (wk && correctedPnl !== null) {
+      if (wk && correctedPnl !== null && row.source !== "manual") {
         const wo = recentWindowOutcomes.get(wk) ?? { wins: 0, losses: 0 };
         if (correctedPnl > 0) wo.wins++;
         else if (correctedPnl < 0) wo.losses++;
@@ -2897,7 +2906,8 @@ export async function evalClosedBets(): Promise<void> {
       // closePosition() deferred this so that the confirmed candle close —
       // not the provisional estimate — drives coinStreakState.
       // Use the bet's mode so each mode's streak is updated independently.
-      if (row.action === "expired") {
+      // Manual bets are excluded so they don't trigger or reset per-coin pauses.
+      if (row.action === "expired" && row.source !== "manual") {
         const finalPnl = correctedPnl ?? (row.pnl != null ? parseFloat(String(row.pnl)) : 0);
         const rowMode: BotMode = row.mode === "live" ? "live" : "paper";
         const evalStreakMap = coinStreakStateForMode(rowMode);
@@ -4448,7 +4458,9 @@ export async function getBacktestModes(): Promise<BacktestModeStats[]> {
  */
 export async function runAutoTuneJob(): Promise<void> {
   try {
-    // Fetch settled bets (oldest first so last-30 slice is correct)
+    // Fetch settled bets (oldest first so last-30 slice is correct).
+    // Manual bets are excluded so user-placed trades don't skew the auto-tune
+    // Rules 1–4 (confidence threshold adjustment, coin pausing, etc.).
     const rows = await db
       .select({
         symbol: kalshiBotBetsTable.symbol,
@@ -4464,7 +4476,8 @@ export async function runAutoTuneJob(): Promise<void> {
       .where(
         sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
           AND ${kalshiBotBetsTable.outcome} IS NOT NULL
-          AND ${kalshiBotBetsTable.mode} = ${botMode}`,
+          AND ${kalshiBotBetsTable.mode} = ${botMode}
+          AND (${kalshiBotBetsTable.source} IS NULL OR ${kalshiBotBetsTable.source} != 'manual')`,
       )
       .orderBy(desc(kalshiBotBetsTable.createdAt)) // most-recent first → reverse below
       .limit(config.autoTuneWindowSize ?? 100);
