@@ -187,7 +187,7 @@ export const MIN_HARD_MODEL_SIGNALS = 2;
 export const DB_DEGRADED_THRESHOLD = 10;
 export const DB_DEGRADED_MIN_WINDOW_MS = 60_000;
 export const REGIME_STRIKES_MAX = 6;
-export const WINDOW_ENTRY_BUFFER_S = 120;
+export const WINDOW_ENTRY_BUFFER_S = 60;
 export const STABILITY_WAIT_MAX_S = 240;
 export const COIN_YES_BLOCKED: ReadonlySet<string> = new Set(["BTC", "ETH", "DOGE"]);
 // Mutable — parole system can remove coins when shadow accuracy reaches ≥60%.
