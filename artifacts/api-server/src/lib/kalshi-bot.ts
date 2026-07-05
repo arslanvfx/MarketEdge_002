@@ -4439,58 +4439,11 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // Window-doubt filter: if recent windows had poor win rates, require higher conviction
-    // for both YES and NO bets. This prevents the bot from over-betting during choppy
-    // uncertain regimes when all signals are marginal.
-    // effectiveDoubtPenalty is windowDoubtPenalty minus any parole reduction from
-    // shadow-bet accuracy (see checkShadowParole above).
-    if (effectiveDoubtPenalty > 0 && effectiveConfidence < config.minConfidence + effectiveDoubtPenalty) {
-      filteredByNewGuards.add(sym);
-      evalResults.push({
-        symbol: sym,
-        action: "SKIP",
-        confidence: effectiveConfidence,
-        score: 0,
-        reason: `doubt filter — ${weakWindowCount} weak recent window(s), ${effectiveConfidence}% < ${config.minConfidence + effectiveDoubtPenalty}% floor (+${effectiveDoubtPenalty}pp)`,
-        windowKey,
-        selected: false,
-        evaluatedAt: now,
-        trendStability: stability,
-        regime,
-      });
-
-      // Record a shadow (probe) bet if the coin would have passed the BASE
-      // confidence floor without the doubt penalty.  Shadow bets track whether
-      // the bot's signals are accurate during restriction windows so the parole
-      // check can lift the penalty earlier when accuracy recovers.
-      // Only record when the coin has a clear direction (not SKIP from makeBotDecision).
-      if (
-        effectiveDoubtPenalty > 0 &&
-        effectiveConfidence >= config.minConfidence &&
-        decision.action !== "SKIP"
-      ) {
-        const shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
-        const shadowTicker = kalshiData?.ticker ?? null;
-        const shadowTarget = kalshiData?.value ?? null;
-        // Fire-and-forget — shadow recording is non-blocking
-        void recordShadowBet(
-          sym,
-          shadowDir,
-          effectiveConfidence,
-          decision.signals,
-          shadowTarget,
-          windowKey,
-          botMode,
-          shadowTicker,
-        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] record failed (non-fatal)"));
-      }
-
-      continue;
-    }
-
     // Border-proximity guard: skip when the coin's close prices have been landing
     // within config.borderProximityPct % of the strike over the last N settled bets.
     // These windows are essentially noise — near-50/50 regardless of signal direction.
+    // NOTE: this gate runs BEFORE the doubt filter so that any shadow bet recorded
+    // inside the doubt filter is guaranteed to have already cleared this gate.
     if (decision.action !== "SKIP" && config.enableBorderGuard) {
       const proximity = borderProximityCache.get(sym);
       if (proximity !== undefined && proximity < config.borderProximityPct) {
@@ -4513,6 +4466,54 @@ export async function runBotLoopTick(): Promise<void> {
         });
         continue;
       }
+    }
+
+    // Window-doubt filter: if recent windows had poor win rates, require higher conviction
+    // for both YES and NO bets. This prevents the bot from over-betting during choppy
+    // uncertain regimes when all signals are marginal.
+    // effectiveDoubtPenalty is windowDoubtPenalty minus any parole reduction from
+    // shadow-bet accuracy (see checkShadowParole above).
+    // NOTE: this gate runs AFTER border guard — so any shadow probe recorded here has
+    // already cleared every non-confidence gate in the loop (regime, contrarian, NO
+    // gate, border guard).  Coins blocked by those earlier gates never reach this point.
+    if (effectiveDoubtPenalty > 0 && effectiveConfidence < config.minConfidence + effectiveDoubtPenalty) {
+      filteredByNewGuards.add(sym);
+      evalResults.push({
+        symbol: sym,
+        action: "SKIP",
+        confidence: effectiveConfidence,
+        score: 0,
+        reason: `doubt filter — ${weakWindowCount} weak recent window(s), ${effectiveConfidence}% < ${config.minConfidence + effectiveDoubtPenalty}% floor (+${effectiveDoubtPenalty}pp)`,
+        windowKey,
+        selected: false,
+        evaluatedAt: now,
+        trendStability: stability,
+        regime,
+      });
+
+      // Record a shadow (probe) bet: the coin passed every non-confidence gate
+      // (regime, contrarian, NO gate, border guard — all above) but is blocked
+      // solely by the doubt-penalty confidence floor.  Shadow bets track accuracy
+      // during restriction windows so parole can lift the penalty earlier.
+      if (
+        effectiveDoubtPenalty > 0 &&
+        effectiveConfidence >= config.minConfidence &&
+        decision.action !== "SKIP"
+      ) {
+        const shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+        void recordShadowBet(
+          sym,
+          shadowDir,
+          effectiveConfidence,
+          decision.signals,
+          kalshiData?.value ?? null,
+          windowKey,
+          botMode,
+          kalshiData?.ticker ?? null,
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] record failed (non-fatal)"));
+      }
+
+      continue;
     }
 
     // clean → ×1.2 bonus for stable directional momentum; choppy/unknown → ×1.0
