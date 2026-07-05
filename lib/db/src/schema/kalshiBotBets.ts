@@ -32,4 +32,7 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   // Decision mode active when the bet was placed: "classic" | "ml_gate" | "consensus" | "ml_primary".
   // Null for bets placed before this field was added (treated as "classic").
   decisionMode: text("decision_mode"),
+  // Originating source of the bet: "bot" (automated) | "manual" (placed via dashboard button).
+  // Null for rows written before this field was added (treated as "bot").
+  source: text("source"),
 });

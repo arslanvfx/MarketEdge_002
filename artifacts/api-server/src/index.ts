@@ -167,6 +167,17 @@ async function runStartupMigrations(): Promise<void> {
       CREATE INDEX IF NOT EXISTS bat_log_created
         ON bot_auto_tune_log (created_at DESC)
     `);
+    // Source column: "bot" for automated bets, "manual" for dashboard-placed orders.
+    // Historical rows (null) are treated as "bot" in the UI.
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ADD COLUMN IF NOT EXISTS source TEXT
+    `);
+    // Decision mode per bet: "classic" | "ml_gate" | "consensus" | "ml_primary".
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ADD COLUMN IF NOT EXISTS decision_mode TEXT
+    `);
   } finally {
     client.release();
   }

@@ -129,6 +129,7 @@ interface HistoryRecord {
   cryptoPriceAtEntry: string | null; cryptoPriceAtExit: string | null;
   createdAt: string; exitedAt: string | null;
   decisionMode: string | null;
+  source: string | null;
 }
 
 interface WindowEval {
@@ -453,6 +454,7 @@ export default function BotDashboard() {
   // Defaults to the active bot mode but can be toggled independently so the
   // user can browse paper history while live or vice versa.
   const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
+  const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual">("all");
 
   // ── Manual order modal state ─────────────────────────────────────────────
   const [manualOrderSym, setManualOrderSym] = useState<string | null>(null);
@@ -702,7 +704,12 @@ export default function BotDashboard() {
   const merged = { ...cfg, ...configDraft } as BotConfig;
   const hasDraft = Object.keys(configDraft).length > 0;
   const history = historyData?.history ?? [];
-  const bets = history.filter(r => r.action === "bet" || r.action === "exit" || r.action === "late_recovery_exit" || r.action === "expired");
+  const bets = history.filter(r => {
+    if (r.action !== "bet" && r.action !== "exit" && r.action !== "late_recovery_exit" && r.action !== "expired") return false;
+    if (histSourceFilter === "manual") return r.source === "manual" || (r.signals as Record<string, unknown> | null)?.manual === true;
+    if (histSourceFilter === "bot") return r.source !== "manual" && (r.signals as Record<string, unknown> | null)?.manual !== true;
+    return true;
+  });
 
   const HIST_PAGE_SIZE = 20;
   const totalHistPages = Math.max(1, Math.ceil(bets.length / HIST_PAGE_SIZE));
@@ -2239,6 +2246,18 @@ export default function BotDashboard() {
                 </button>
               ))}
             </div>
+            {/* Source filter — All / Bot / Manual */}
+            <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
+              {(["all", "bot", "manual"] as const).map(s => (
+                <button
+                  key={s}
+                  onClick={() => { setHistSourceFilter(s); setHistPage(0); }}
+                  className={`px-2.5 py-1 transition-colors capitalize ${histSourceFilter === s ? (s === "manual" ? "bg-purple-500/20 text-purple-300" : "bg-muted text-foreground") : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
             <span className="text-xs text-muted-foreground">{bets.length} record{bets.length !== 1 ? "s" : ""}</span>
             {totalHistPages > 1 && (
               <div className="ml-auto flex items-center gap-1">
@@ -2357,6 +2376,13 @@ export default function BotDashboard() {
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
                         {r.mode?.toUpperCase()}
                       </span>
+
+                      {/* Manual badge — shown when the bet was placed via the dashboard button */}
+                      {(r.source === "manual" || (r.signals as Record<string, unknown> | null)?.manual === true) && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300">
+                          MANUAL
+                        </span>
+                      )}
 
                       {/* Decision mode badge */}
                       {(() => {

@@ -2200,6 +2200,7 @@ export async function placeManualOrder(opts: {
     cryptoPriceAtEntry,
     decisionMode: config.decisionMode ?? "classic",
     mode: targetMode,
+    source: "manual",
   });
 
   logger.info({ sym, direction, fillPrice, contractCount, targetMode, manual: true }, "[kalshi-bot] manual order placed");
@@ -2484,6 +2485,9 @@ interface BetRecordArgs {
   // Bot mode (paper/live) captured at entry. Falls back to the global botMode
   // when omitted (e.g. skip/warmup rows). Prevents mid-fill flips mislabeling rows.
   mode?: BotMode;
+  // Originating source: "bot" (automated loop) | "manual" (dashboard button).
+  // Omitting defaults to "bot" in the DB insert.
+  source?: "bot" | "manual";
 }
 
 async function persistBetRecord(args: BetRecordArgs): Promise<void> {
@@ -2541,6 +2545,7 @@ async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> {
         betAmount: args.betAmount != null ? String(args.betAmount) : undefined,
         cryptoPriceAtEntry: args.cryptoPriceAtEntry != null ? String(args.cryptoPriceAtEntry) : undefined,
         decisionMode: args.decisionMode ?? null,
+        source: args.source ?? "bot",
         createdAt: new Date(),
       }).onConflictDoNothing();
     }
