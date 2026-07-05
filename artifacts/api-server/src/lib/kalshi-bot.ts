@@ -225,6 +225,12 @@ const windowBetDetails: Map<string, { direction: "yes" | "no"; confidence: numbe
 // across all symbols. Reset on each window transition. Key: "yes" | "no".
 const windowDirectionCounts: Map<"yes" | "no", number> = new Map();
 
+// Tracks coins that failed to fill (all retries exhausted) in the current window.
+// Key: "${sym}:${windowKey}:${mode}". Cleared on window transition so a new window
+// always gets a fresh attempt. Prevents the bot from hammering an empty order book
+// every tick when liquidity is genuinely absent.
+const windowFailedFills: Set<string> = new Set();
+
 // Per-coin auto-pause: coins with ≥5 consecutive losses are paused for 4
 // windows by the auto-tune job. Maps symbol → windows remaining paused.
 // Decremented on each window transition; deleted when it reaches 0.
@@ -630,7 +636,19 @@ export async function loadBotConfigFromDB(): Promise<void> {
       }
       logger.info({ config }, "[kalshi-bot] config loaded from DB");
     } else {
-      logger.info("[kalshi-bot] no saved config in DB — using defaults");
+      logger.info("[kalshi-bot] no saved config in DB — seeding defaults");
+      // Seed the table so production starts with an explicit config row rather than
+      // relying on code defaults that differ from the values tuned in development.
+      try {
+        await db.execute(sql`
+          INSERT INTO bot_config (id, config, updated_at)
+          VALUES ('default', ${JSON.stringify({ ...DEFAULT_BOT_CONFIG, mode: botMode })}::jsonb, NOW())
+          ON CONFLICT (id) DO NOTHING
+        `);
+        logger.info("[kalshi-bot] default config seeded to DB");
+      } catch (seedErr) {
+        logger.warn({ seedErr }, "[kalshi-bot] failed to seed default config (non-fatal)");
+      }
     }
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to load config from DB — using defaults (non-fatal)");
@@ -1823,6 +1841,10 @@ async function _runBotTick(
       );
       if (result.filledCount === 0) {
         logger.warn({ sym, ticker: kalshiTicker, direction }, "[kalshi-bot] order not filled after retries — skipping entry");
+        // Mark this coin as having exhausted fills in this window so Phase 3 won't
+        // retry it on subsequent ticks. The set is cleared on every window transition.
+        const failWk = currentWindowKey();
+        windowFailedFills.add(`${sym}:${failWk}:${botMode}`);
         return;
       }
       fillPrice = result.avgPrice ?? yesPrice;
@@ -2882,6 +2904,7 @@ export async function runBotLoopTick(): Promise<void> {
     lastCircuitBreakerWindowKey = cbWindowNow;
     // Reset per-window counters so all caps apply fresh each 15-min window.
     windowDirectionCounts.clear();
+    windowFailedFills.clear();
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
     // Clear bet details older than the current window to prevent map growth.
     for (const k of windowBetDetails.keys()) {
@@ -3097,7 +3120,7 @@ export async function runBotLoopTick(): Promise<void> {
   for (const wk of completedWindowKeys) {
     const wo = recentWindowOutcomes.get(wk)!;
     const total = wo.wins + wo.losses;
-    if (total >= 3 && wo.wins / total < DOUBT_WIN_RATE_THRESHOLD) weakWindowCount++;
+    if (total >= 1 && wo.wins / total < DOUBT_WIN_RATE_THRESHOLD) weakWindowCount++;
   }
   if (weakWindowCount >= 2) windowDoubtPenalty = 8;
   else if (weakWindowCount === 1) windowDoubtPenalty = 4;
@@ -3162,6 +3185,14 @@ export async function runBotLoopTick(): Promise<void> {
 
     if (!kalshiData?.ticker || kalshiData.value === null) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      continue;
+    }
+    // FOK cooldown: if this coin already exhausted fill attempts in the current window
+    // (all retries failed against an empty book) skip it for the rest of the window.
+    // windowFailedFills is cleared on every window transition so next window always retries.
+    if (windowFailedFills.has(`${sym}:${windowKey}:${botMode}`)) {
+      filteredByNewGuards.add(sym);
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no-fill cooldown — book was empty earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     if (secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
