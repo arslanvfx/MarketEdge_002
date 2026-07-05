@@ -15,9 +15,10 @@ interface ManualOrderModalProps {
   submitManualOrder: () => Promise<void>;
   manualOrderKalshiData: { target: number | null; ticker: string | null; yesPrice: number | null; yesAsk: number | null; yesBid: number | null } | undefined;
   status: BotStatus | undefined;
+  activeMode: "paper" | "live";
 }
 
-export function ManualOrderModal({ manualOrderSym, setManualOrderSym, manualDir, setManualDir, manualBetSize, setManualBetSize, manualSubmitting, submitManualOrder, manualOrderKalshiData, status }: ManualOrderModalProps) {
+export function ManualOrderModal({ manualOrderSym, setManualOrderSym, manualDir, setManualDir, manualBetSize, setManualBetSize, manualSubmitting, submitManualOrder, manualOrderKalshiData, status, activeMode }: ManualOrderModalProps) {
   if (!manualOrderSym) return null;
   const openPosList = status?.openPositions ?? [];
   const ask = manualOrderKalshiData?.yesAsk ?? null;

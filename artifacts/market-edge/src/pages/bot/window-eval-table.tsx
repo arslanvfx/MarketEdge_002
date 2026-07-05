@@ -1,14 +1,15 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
-import type { WindowEval } from "./types";
+import type { WindowEval, OpenPosition } from "./types";
 import { wkToEst } from "./utils";
 import { CountdownCell } from "./countdown-cell";
 
 interface WindowEvalTableProps {
   evaluation: WindowEval[];
+  openPosList: OpenPosition[];
   openManualOrder: (sym: string) => void;
 }
 
-export function WindowEvalTable({ evaluation, openManualOrder }: WindowEvalTableProps) {
+export function WindowEvalTable({ evaluation, openPosList, openManualOrder }: WindowEvalTableProps) {
   return (
         <div className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="px-5 py-3 border-b border-border flex items-center gap-2">

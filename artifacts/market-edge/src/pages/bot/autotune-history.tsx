@@ -2,6 +2,7 @@ import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart
 import React from "react";
 import { useState } from "react";
 import type { AutoTuneLogEntry } from "./types";
+import { EST } from "./utils";
 
 interface AutoTuneHistoryProps {
   tuneEntries: AutoTuneLogEntry[];
@@ -12,7 +13,7 @@ interface AutoTuneHistoryProps {
 
 export function AutoTuneHistory({ tuneEntries, tuneCount, tuneLogOpen, setTuneLogOpen }: AutoTuneHistoryProps) {
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  const recentTuneEntry = tuneEntries.find((e) => e.ts > oneHourAgo) ?? null;
+  const recentTuneEntry = tuneEntries.find((e) => new Date(e.createdAt).getTime() > oneHourAgo) ?? null;
   return (
     <>
         {/* ── Auto-Tune History ── */}
@@ -38,13 +39,13 @@ export function AutoTuneHistory({ tuneEntries, tuneCount, tuneLogOpen, setTuneLo
           </button>
           {tuneLogOpen && (
             <div className="p-5">
-              {(autoTuneLogData?.entries?.length ?? 0) === 0 ? (
+              {tuneEntries.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   No parameter changes yet — auto-tune mutations will appear here once the rules trigger.
                 </p>
               ) : (
                 <div className="space-y-2">
-                  {autoTuneLogData!.entries.map(entry => {
+                  {tuneEntries.map(entry => {
                     const ruleColor = entry.ruleName === "confidence_floor_raise"
                       ? "text-amber-400"
                       : entry.ruleName === "per_coin_pause"

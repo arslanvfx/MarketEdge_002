@@ -27,6 +27,7 @@ interface BotConfigSectionProps {
 }
 
 export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, status, activeMode, presetsData, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
+  const hasDraft = Object.keys(configDraft).length > 0;
   return (
     <>
         {/* ── Config Settings ── */}

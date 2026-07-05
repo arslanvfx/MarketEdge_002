@@ -479,7 +479,7 @@ export default function BotDashboard() {
           openManualOrder={openManualOrder}
         />
         <PerCoinGuard coinGuardData={coinGuardData} />
-        <WindowEvalTable evaluation={evaluation} openManualOrder={openManualOrder} />
+        <WindowEvalTable evaluation={evaluation} openPosList={openPosList} openManualOrder={openManualOrder} />
         <BotConfigSection
           cfg={cfg}
           merged={merged}
@@ -576,6 +576,7 @@ export default function BotDashboard() {
         submitManualOrder={submitManualOrder}
         manualOrderKalshiData={manualOrderKalshiData}
         status={status}
+        activeMode={activeMode}
       />
       {/* ── Toast notification ── */}
       {manualToast && (

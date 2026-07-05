@@ -34,7 +34,7 @@ export function BotHeader({ status, openPosList, statusLabel, cfg, merged, confi
             {status?.mode?.toUpperCase() ?? "PAPER"}
           </span>
           <span className={`text-xs px-2 py-1 rounded-full ${status?.paused ? "bg-muted text-muted-foreground" : openPosList.length > 0 ? "bg-emerald-500/15 text-emerald-400" : "bg-sky-500/10 text-sky-400"}`}>
-            {statusLabel()}
+            {statusLabel}
           </span>
           {(status?.circuitBreakerWindowsRemaining ?? 0) > 0 ? (
             <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-red-500/15 text-red-400 border border-red-500/30" title={`Circuit breaker active — ${status!.circuitBreakerWindowsRemaining} window(s) remaining`}>
