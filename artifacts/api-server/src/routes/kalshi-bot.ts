@@ -190,6 +190,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     requireMonitorReady,
     enableDynamicSizing,
     dynamicSizingMaxConfidence,
+    profitLockPct,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -232,6 +233,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     requireMonitorReady?: boolean;
     enableDynamicSizing?: boolean;
     dynamicSizingMaxConfidence?: number;
+    profitLockPct?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -345,6 +347,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof enableDynamicSizing === "boolean") partial.enableDynamicSizing = enableDynamicSizing;
   if (typeof dynamicSizingMaxConfidence === "number" && dynamicSizingMaxConfidence >= 50 && dynamicSizingMaxConfidence <= 100) {
     partial.dynamicSizingMaxConfidence = dynamicSizingMaxConfidence;
+  }
+  if (typeof profitLockPct === "number" && profitLockPct >= 0 && profitLockPct <= 99) {
+    partial.profitLockPct = profitLockPct;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

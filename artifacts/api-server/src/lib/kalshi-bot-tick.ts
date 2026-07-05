@@ -156,7 +156,7 @@ async function _runBotTick(
         profitLockThreshold > 0 &&
         effectiveYesPrice !== null &&
         Date.now() - pos.openedAt >= 2 * 60_000 &&
-        15 - minutesElapsed >= 2
+        secondsElapsed <= 13 * 60
       ) {
         const ep = pos.entryYesPrice;
         const lockRatio =
