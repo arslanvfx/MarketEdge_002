@@ -77,9 +77,35 @@ router.get("/crypto/ai-predict", async (req, res) => {
     res.status(400).json({ error: "symbol query param required" });
     return;
   }
+  // Serve the tracker's opening snap for free when available.
+  // Pass ?force=1 to bypass and always call Claude fresh (e.g. manual Enhance).
+  const force = req.query.force === "1";
+  if (!force) {
+    const snap = getTrackerWindowCall(symbol);
+    if (snap) {
+      const QUARTER_MS = 15 * 60_000;
+      const nowMs = Date.now();
+      const nextBoundaryMs = Math.ceil(nowMs / QUARTER_MS) * QUARTER_MS;
+      const minutesAhead = Math.max(1, Math.round((nextBoundaryMs - nowMs) / 60_000));
+      res.json({
+        coin: symbol,
+        predictions: [{
+          minutesAhead,
+          predictedPrice: snap.predictedPrice,
+          low: snap.predictedPrice,
+          high: snap.predictedPrice,
+          direction: snap.direction,
+          confidence: snap.confidence,
+        }],
+        generatedAt: snap.snappedAt,
+        source: "snap",
+      });
+      return;
+    }
+  }
   try {
     const result = await fetchAIPredictions(symbol);
-    res.json(result);
+    res.json({ ...result, source: "live" });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: `AI prediction failed: ${msg}` });

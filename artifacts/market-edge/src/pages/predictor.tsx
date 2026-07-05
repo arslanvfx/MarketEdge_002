@@ -2787,11 +2787,6 @@ export default function Predictor() {
   const [aiError, setAiError] = useState<string | null>(null);
   const [autoTriggerReason, setAutoTriggerReason] = useState<string | null>(null);
   const [driftAlerts, setDriftAlerts] = useState<Record<string, DriftAlert>>({});
-  const lastAutoTriggerRef = useRef<number>(0);
-  // Separate cooldown for new-window triggers so a recent stat-flip never
-  // blocks the most important re-analysis (when a new Kalshi window opens).
-  const lastNewWindowTriggerRef = useRef<number>(0);
-  const prevStatAboveRef = useRef<boolean | null>(null);
   // Tracks the locked prediction call at window-open for each coin
   const windowOpenCallRef = useRef<Record<string, { windowTarget: string; aboveKalshi: boolean | null; direction: "up" | "down" | "flat" }>>({});
   const enhanceAbortRef = useRef<AbortController | null>(null);
@@ -3075,7 +3070,7 @@ export default function Predictor() {
     enhanceAbortRef.current = abort;
     const timer = setTimeout(() => abort.abort(), 60_000);
     try {
-      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${sym}`, { signal: abort.signal });
+      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${sym}&force=1`, { signal: abort.signal });
       if (!res.ok) {
         const body = await res.text();
         throw new Error(`Server error ${res.status}: ${body}`);
@@ -3192,68 +3187,11 @@ export default function Predictor() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.predictions[0]?.target, selected, kalshiTarget]);
 
-  // ── Auto-trigger logic ────────────────────────────────────────────────────
-  // Two triggers: new Kalshi window opens, or stat model flips Above/Below.
-  // Guarded by a 90-second cooldown so we don't burn API calls on noise.
-  const COOLDOWN_MS = 90_000;
-
-  useEffect(() => {
-    if (!KALSHI_COINS.includes(selected)) return;
-    if (!kalshiIsLive || kalshiTarget === null) return;
-    // Auto-trigger only fires when the user has enabled Claude for this coin
-    if (!claudeEnabledSet.has(selected)) return;
-
-    const entry = aiData[selected] ?? null;
-
-    // ── Trigger 1: New Kalshi window ──────────────────────────────────────
-    // Uses its OWN 30-second cooldown so a recent stat-flip can never block
-    // the window-open re-analysis.  The shared COOLDOWN_MS only guards flips.
-    // Also guard with hysteresis: if price is within 0.15% of the strike at
-    // window open, the binary is too close to call — skip the auto-trigger.
-    const NEW_WINDOW_COOLDOWN_MS = 30_000;
-    if (entry && kalshiEventTicker && kalshiEventTicker !== entry.eventTickerAtRun) {
-      const now = Date.now();
-      if (now - lastNewWindowTriggerRef.current >= NEW_WINDOW_COOLDOWN_MS) {
-        const newWindowGapPct =
-          statPred0 != null && kalshiTarget !== null
-            ? Math.abs(statPred0.predictedPrice - kalshiTarget) / kalshiTarget
-            : 1; // unknown gap → allow trigger
-        if (newWindowGapPct >= 0.0015) {
-          lastNewWindowTriggerRef.current = now;
-          lastAutoTriggerRef.current = now; // also block stat-flip for 90s after window trigger
-          setAutoTriggerReason("New Kalshi window");
-          void handleEnhance();
-          return;
-        }
-      }
-    }
-
-    // ── Trigger 2: Stat model direction flip ──────────────────────────────
-    // Hysteresis: only count as a real flip if predicted price is >= 0.15%
-    // away from the Kalshi strike. Closer than that is noise — don't fire.
-    if (statAboveNow !== null && statPred0 != null && kalshiTarget !== null) {
-      const gapPct = Math.abs(statPred0.predictedPrice - kalshiTarget) / kalshiTarget;
-      const convincingFlip = gapPct >= 0.0015;
-      const prev = prevStatAboveRef.current;
-      if (prev !== null && prev !== statAboveNow && convincingFlip) {
-        const now = Date.now();
-        if (now - lastAutoTriggerRef.current >= COOLDOWN_MS) {
-          lastAutoTriggerRef.current = now;
-          setAutoTriggerReason(`Direction flip: stat → ${statAboveNow ? "Above" : "Below"} target`);
-          void handleEnhance();
-          prevStatAboveRef.current = statAboveNow;
-          return;
-        }
-      }
-      if (convincingFlip) {
-        prevStatAboveRef.current = statAboveNow;
-      }
-    }
-  // statPred0?.predictedPrice included so the effect reruns as price drifts —
-  // a noisy cross that later becomes convincing (>=0.15% gap) without another
-  // side change would otherwise be missed.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statAboveNow, statPred0?.predictedPrice, kalshiEventTicker, kalshiIsLive, kalshiTarget]);
+  // Auto-triggers removed: the trackerSnapshotQuery already refetches at window
+  // open and displays the snap via the trackerSnapshot display path (free, no
+  // Claude call).  Both the window-change trigger and the stat-flip trigger
+  // were causing redundant Claude API calls the background tracker had already
+  // made.  Manual "Enhance" button (force=1) is the only path that calls Claude.
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
