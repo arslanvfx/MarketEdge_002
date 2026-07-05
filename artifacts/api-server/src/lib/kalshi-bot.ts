@@ -337,7 +337,7 @@ const cachedPerformanceReportByMode = new Map<BotMode, PerformanceReport>();
 // Shadow-parole result cache: avoids a DB hit on every 30-second bot tick.
 // The cache is keyed to the number of evaluated shadow bets so it refreshes
 // automatically whenever a new shadow bet is evaluated (not just on TTL).
-let _shadowParoleCache: { reducedBy: number; evaluatedCount: number } | null = null;
+let _shadowParoleCache: { reducedBy: number; evaluatedCount: number; windowCutoff: string } | null = null;
 
 // Recent Kalshi strike prices per symbol (chronological, oldest first).
 // Maintained from DB on startup and updated after each position close.
@@ -2923,13 +2923,18 @@ async function checkShadowParole(): Promise<number> {
 
     const evaluated = rows.filter(r => r.outcome === "win" || r.outcome === "loss");
 
-    // Cache keyed on count — invalidated when new evaluations arrive.
-    if (_shadowParoleCache && _shadowParoleCache.evaluatedCount === evaluated.length) {
+    // Cache keyed on count + windowCutoff — invalidated when new evaluations arrive
+    // OR when the rolling window shifts (same count, different composition).
+    if (
+      _shadowParoleCache &&
+      _shadowParoleCache.evaluatedCount === evaluated.length &&
+      _shadowParoleCache.windowCutoff === windowCutoff
+    ) {
       return _shadowParoleCache.reducedBy;
     }
 
     if (evaluated.length < 3) {
-      _shadowParoleCache = { reducedBy: 0, evaluatedCount: evaluated.length };
+      _shadowParoleCache = { reducedBy: 0, evaluatedCount: evaluated.length, windowCutoff };
       return 0;
     }
 
@@ -2966,7 +2971,7 @@ async function checkShadowParole(): Promise<number> {
       );
     }
 
-    _shadowParoleCache = { reducedBy, evaluatedCount: evaluated.length };
+    _shadowParoleCache = { reducedBy, evaluatedCount: evaluated.length, windowCutoff };
     return reducedBy;
   } catch (err) {
     logger.warn({ err }, "[parole] checkShadowParole error (non-fatal)");
@@ -4008,19 +4013,31 @@ export async function runBotLoopTick(): Promise<void> {
     const timingAcc = timingCache.get(`${sym}:${closest * 60}`) ?? timingCache.get(`ALL:${closest * 60}`) ?? null;
 
     const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
-    const decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
+    // `let` so the auto-tune shadow path can temporarily substitute the alt-floor
+    // decision for gate evaluation (see below).
+    let decision = makeBotDecision(sym, config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
+    // Save the original decision immediately — used at the final push to restore
+    // the real action/confidence when `decision` is overridden for gate evaluation.
+    const originalDecision = decision;
     const stability = windowStabilityCache.get(sym) ?? null;
     const reason = decision.reasoning;
 
     // Auto-tune shadow detection: if a temporary confidence-raise is active
     // (autoTuneConfidenceRevertTo != null) AND the primary decision is SKIP,
-    // re-run makeBotDecision with the original (pre-raise) floor to see if the
-    // coin would have a clear direction at the lower floor.  The result is stored
-    // in _autoTuneShadowDecision and consumed at the end of the loop where the
-    // coin reaches the final evalResults.push as a SKIP.  Any coin that hits an
-    // earlier `continue` (regime gate, doubt filter, border guard, etc.) never
-    // reaches that push, so the shadow is only recorded when the SOLE reason for
-    // SKIP was the raised confidence floor.
+    // re-run makeBotDecision with the original (pre-raise) floor.
+    //
+    // If the alt-floor call returns a BET, override `decision` with `altDec`.
+    // Because all downstream gates in this loop are guarded by
+    // `decision.action !== "SKIP"`, overriding here causes every non-confidence
+    // gate (reversing, momentum, price bands, regime, NO gate, border guard) to
+    // evaluate the hypothetical BET direction correctly.  Any gate that fires
+    // issues a `continue` — so `_autoTuneShadowDecision` is only consumed at the
+    // FINAL evalResults.push when every non-confidence gate passed.
+    //
+    // Note: makeBotDecision returns the same `confidence` value regardless of
+    // which floor is passed (confidence is signal-derived; the floor only changes
+    // `action`).  So `effectiveConfidence` is identical for both calls, and
+    // all gate thresholds evaluate consistently.
     let _autoTuneShadowDecision: { action: string; signals: unknown } | null = null;
     if (
       config.autoTuneConfidenceRevertTo != null &&
@@ -4039,6 +4056,8 @@ export async function runBotLoopTick(): Promise<void> {
       );
       if (altDec.action !== "SKIP") {
         _autoTuneShadowDecision = { action: altDec.action, signals: altDec.signals };
+        // Override decision so downstream gates evaluate the hypothetical direction.
+        decision = altDec;
       }
     }
 
@@ -4538,12 +4557,14 @@ export async function runBotLoopTick(): Promise<void> {
       ? `[reversing-caution] ${reason.slice(0, 60)}`
       : reason;
 
-    // Auto-tune shadow bet: if the coin reached here as SKIP and the auto-tune
-    // temp raise was the sole reason (the original-floor re-run returned a BET),
-    // record a probe bet.  Coins filtered by earlier gates (regime, doubt filter,
-    // border guard, etc.) hit `continue` and never reach this point — so
-    // _autoTuneShadowDecision is only consumed when ALL other gates passed.
-    if (_autoTuneShadowDecision !== null && decision.action === "SKIP") {
+    // Auto-tune shadow bet: `_autoTuneShadowDecision` is set only when the
+    // auto-tune temp raise is the reason for SKIP.  `decision` was overridden to
+    // `altDec` so that all downstream gates evaluated the hypothetical BET direction.
+    // Any gate that fired issued a `continue` — so if the coin reached here,
+    // ALL non-confidence gates passed for the hypothetical direction.
+    // We use `originalDecision.action === "SKIP"` (not `decision.action`) because
+    // `decision` was overridden to the BET alt-decision for gate evaluation.
+    if (_autoTuneShadowDecision !== null && originalDecision.action === "SKIP") {
       const shadowDir: "yes" | "no" =
         _autoTuneShadowDecision.action === "BET_YES" ? "yes" : "no";
       void recordShadowBet(
@@ -4560,7 +4581,9 @@ export async function runBotLoopTick(): Promise<void> {
 
     evalResults.push({
       symbol: sym,
-      action: decision.action as "BET_YES" | "BET_NO" | "SKIP",
+      // Use originalDecision.action so auto-tune shadow coins push as SKIP
+      // (not BET_YES/BET_NO from the overridden alt-floor `decision`).
+      action: originalDecision.action as "BET_YES" | "BET_NO" | "SKIP",
       confidence: effectiveConfidence,
       score,
       reason: finalReason,
