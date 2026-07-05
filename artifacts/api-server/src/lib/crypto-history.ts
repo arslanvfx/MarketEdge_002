@@ -50,45 +50,81 @@ export function getPredictionHeadlines(
     .map((r, i) => ({ ...r, predictionIndex: i }));
 }
 
-export async function clearPredictionHistoryOld(symbol: string): Promise<void> {
-  const sym = symbol.toUpperCase();
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  await db
-    .update(predictionRecordsTable)
-    .set({ archivedAt: new Date().toISOString() })
-    .where(
-      and(
-        eq(predictionRecordsTable.symbol, sym),
-        lt(predictionRecordsTable.snappedAt, cutoff),
-      ),
-    );
-  const store = historyStore.get(sym) ?? [];
+// Soft clear — archives records older than 48 h (matching the original global behaviour).
+// When symbol is omitted the operation applies to all coins.
+export async function clearPredictionHistoryOld(symbol?: string): Promise<void> {
+  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
   const cutoffIso = cutoff.toISOString();
-  for (const r of store) {
-    if (r.snappedAt < cutoffIso && r.archivedAt == null) {
-      r.archivedAt = new Date().toISOString();
+  const now = new Date().toISOString();
+
+  if (symbol) {
+    const sym = symbol.toUpperCase();
+    await db
+      .update(predictionRecordsTable)
+      .set({ archivedAt: now })
+      .where(
+        and(
+          eq(predictionRecordsTable.symbol, sym),
+          lt(predictionRecordsTable.snappedAt, cutoff),
+        ),
+      );
+    for (const r of historyStore.get(sym) ?? []) {
+      if (r.snappedAt < cutoffIso && r.archivedAt == null) r.archivedAt = now;
+    }
+  } else {
+    await db
+      .update(predictionRecordsTable)
+      .set({ archivedAt: now })
+      .where(lt(predictionRecordsTable.snappedAt, cutoff));
+    for (const [, store] of historyStore) {
+      for (const r of store) {
+        if (r.snappedAt < cutoffIso && r.archivedAt == null) r.archivedAt = now;
+      }
     }
   }
 }
 
-export async function clearAccuracyLogsOnly(symbol: string): Promise<void> {
-  const sym = symbol.toUpperCase();
-  await db
-    .update(predictionRecordsTable)
-    .set({ archivedAt: new Date().toISOString() })
-    .where(eq(predictionRecordsTable.symbol, sym));
-  const store = historyStore.get(sym) ?? [];
+// Accuracy-only clear — archives ALL prediction records so accuracy stats restart
+// from zero; ML snapshots and model weights are left untouched.
+// When symbol is omitted the operation applies to all coins.
+export async function clearAccuracyLogsOnly(symbol?: string): Promise<void> {
   const now = new Date().toISOString();
-  for (const r of store) r.archivedAt = now;
+
+  if (symbol) {
+    const sym = symbol.toUpperCase();
+    await db
+      .update(predictionRecordsTable)
+      .set({ archivedAt: now })
+      .where(eq(predictionRecordsTable.symbol, sym));
+    for (const r of historyStore.get(sym) ?? []) r.archivedAt = now;
+  } else {
+    await db
+      .update(predictionRecordsTable)
+      .set({ archivedAt: now });
+    for (const [, store] of historyStore) {
+      for (const r of store) r.archivedAt = now;
+    }
+  }
 }
 
-export async function clearPredictionHistory(symbol: string): Promise<void> {
-  const sym = symbol.toUpperCase();
-  await db
-    .update(predictionRecordsTable)
-    .set({ archivedAt: new Date().toISOString() })
-    .where(eq(predictionRecordsTable.symbol, sym));
-  historyStore.set(sym, []);
+// Full reset — archives all prediction records and clears the in-memory store.
+// When symbol is omitted the operation applies to all coins.
+export async function clearPredictionHistory(symbol?: string): Promise<void> {
+  const now = new Date().toISOString();
+
+  if (symbol) {
+    const sym = symbol.toUpperCase();
+    await db
+      .update(predictionRecordsTable)
+      .set({ archivedAt: now })
+      .where(eq(predictionRecordsTable.symbol, sym));
+    historyStore.set(sym, []);
+  } else {
+    await db
+      .update(predictionRecordsTable)
+      .set({ archivedAt: now });
+    historyStore.clear();
+  }
 }
 
 export function rowToRecord(row: Record<string, unknown>): PredictionRecord {
