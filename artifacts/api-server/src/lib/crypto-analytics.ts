@@ -3,8 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { desc, inArray } from "drizzle-orm";
-import { db } from "@workspace/db/connection";
-import { predictionRecordsTable } from "@workspace/db/schema";
+import { db, predictionRecordsTable } from "@workspace/db";
 import { clamp, mean } from "./crypto-indicators";
 import { CRYPTO_COINS } from "./crypto-data";
 import { regimeFromER, type PromptRegime } from "./crypto-stat";

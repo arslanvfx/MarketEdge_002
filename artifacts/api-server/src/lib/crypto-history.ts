@@ -3,12 +3,32 @@
 // ---------------------------------------------------------------------------
 
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
-import { db } from "@workspace/db/connection";
-import { predictionRecordsTable } from "@workspace/db/schema";
+import { db, predictionRecordsTable } from "@workspace/db";
 import { logger } from "./logger";
-import type { PredictionRecord } from "./crypto-data";
 
-export type { PredictionRecord };
+export interface PredictionRecord {
+  id: string;
+  symbol: string;
+  snappedAt: string;
+  targetTime: string;
+  targetLabel: string;
+  priceAtSnapshot: number;
+  predictedPrice: number;
+  predictedDirection: "up" | "down" | "flat";
+  confidence: number;
+  kalshiTarget: number | null;
+  actualPrice: number | null;
+  errorPct: number | null;
+  correct: boolean | null;
+  evaluatedAt: string | null;
+  status: "pending" | "evaluated";
+  source: "stat" | "claude" | "ensemble" | "ml";
+  abstained: boolean | null;
+  rawConfidence: number | null;
+  archivedAt: string | null;
+  liveDirectionAbove: boolean | null;
+  efficiencyRatio?: number;
+}
 
 export function recordId(symbol: string, targetTime: string, source: PredictionRecord["source"]): string {
   return `${symbol}-${targetTime}-${source}`;

@@ -3,11 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { and, eq, gt, isNotNull, isNull, sql } from "drizzle-orm";
-import { db } from "@workspace/db/connection";
-import {
-  windowMonitorOutcomesTable,
-  windowTimingSnapshotsTable,
-} from "@workspace/db/schema";
+import { db, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
 import {
   AUTOPILOT_MAX_ACTIVE,
   type AutoPilotDecision,
