@@ -288,9 +288,22 @@ const GUARD_LABELS: Record<string, string> = {
   mlFlipped: "ML",
 };
 
-// EST ↔ UTC helpers (EST = UTC − 5; no DST adjustment — bot config uses fixed offset)
-const utcToEst = (h: number) => (h - 5 + 24) % 24;
-const estToUtc = (h: number) => (h + 5) % 24;
+// Eastern Time ↔ UTC helpers — accounts for DST (EDT = UTC−4 in summer, EST = UTC−5 in winter)
+function getEtUtcOffset(): number {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  // DST starts: second Sunday of March at 2AM ET (= 7AM UTC)
+  const marchFirst = new Date(Date.UTC(year, 2, 1));
+  const dstStart = new Date(Date.UTC(year, 2, 8 + (7 - marchFirst.getUTCDay()) % 7, 7));
+  // DST ends: first Sunday of November at 2AM ET (= 6AM UTC)
+  const novFirst = new Date(Date.UTC(year, 10, 1));
+  const dstEnd = new Date(Date.UTC(year, 10, (7 - novFirst.getUTCDay()) % 7 + 1, 6));
+  return now >= dstStart && now < dstEnd ? 4 : 5;
+}
+const ET_OFFSET = getEtUtcOffset(); // 4 = EDT (summer), 5 = EST (winter)
+const ET_LABEL = ET_OFFSET === 4 ? "EDT" : "EST";
+const utcToEst = (h: number) => (h - ET_OFFSET + 24) % 24;
+const estToUtc = (h: number) => (h + ET_OFFSET) % 24;
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -705,6 +718,10 @@ export default function BotDashboard() {
       setConfigDraft({});
       setPersistMsg(result.persisted ? "saved" : "failed");
       setTimeout(() => setPersistMsg(null), 3000);
+    } catch (err) {
+      setPersistMsg("error");
+      setTimeout(() => setPersistMsg(null), 4000);
+      console.error("[saveConfig] failed:", err);
     } finally {
       setSaving(false);
     }
@@ -808,7 +825,7 @@ export default function BotDashboard() {
             </span>
           )}
           {status?.isInQuietHours && (
-            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title={`Quiet hours active (${String(utcToEst(cfg?.quietHoursStart ?? 0)).padStart(2,"0")}:00–${String(utcToEst(cfg?.quietHoursEnd ?? 0)).padStart(2,"0")}:00 EST) — no new entries`}>
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground border border-border" title={`Quiet hours active (${String(utcToEst(cfg?.quietHoursStart ?? 0)).padStart(2,"0")}:00–${String(utcToEst(cfg?.quietHoursEnd ?? 0)).padStart(2,"0")}:00 ${ET_LABEL}) — no new entries`}>
               <Clock className="w-3 h-3" />
               Quiet
             </span>
@@ -1795,24 +1812,24 @@ export default function BotDashboard() {
 
                 {/* Quiet Hours Start */}
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Quiet Hours Start (EST)</span>
+                  <span className="text-xs text-muted-foreground">Quiet Hours Start ({ET_LABEL})</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={utcToEst(merged.quietHoursStart ?? 0)}
                     onChange={e => setConfigDraft(d => ({ ...d, quietHoursStart: estToUtc(parseInt(e.target.value)) }))}>
                     {Array.from({ length: 24 }, (_, i) => (
-                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 EST</option>
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 {ET_LABEL}</option>
                     ))}
                   </select>
                 </label>
 
                 {/* Quiet Hours End */}
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Quiet Hours End (EST) — set equal to start to disable</span>
+                  <span className="text-xs text-muted-foreground">Quiet Hours End ({ET_LABEL}) — set equal to start to disable</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={utcToEst(merged.quietHoursEnd ?? 0)}
                     onChange={e => setConfigDraft(d => ({ ...d, quietHoursEnd: estToUtc(parseInt(e.target.value)) }))}>
                     {Array.from({ length: 24 }, (_, i) => (
-                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 EST{i === utcToEst(merged.quietHoursStart ?? 0) ? " (disabled)" : ""}</option>
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 {ET_LABEL}{i === utcToEst(merged.quietHoursStart ?? 0) ? " (disabled)" : ""}</option>
                     ))}
                   </select>
                 </label>

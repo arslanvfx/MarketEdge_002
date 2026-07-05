@@ -147,6 +147,13 @@ export interface AutoTuneBotConfig {
  */
 export const CONFIDENCE_FLOOR_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
 
+/**
+ * How long (ms) must elapse before quiet_hours_expand can fire again.
+ * 48 hours gives the new window time to accumulate meaningful data before
+ * another expansion is considered.
+ */
+export const QUIET_HOURS_EXPAND_COOLDOWN_MS = 48 * 60 * 60 * 1_000;
+
 export interface AutoTuneMutation {
   ruleName: string;
   oldValue: string;
@@ -613,7 +620,15 @@ export function runAutoTuneRules(
   //   • Bad win rate (<40%) on ≥ QUIET_HOURS_MIN_BAD_DAYS distinct days of the week
   //     (each day must have ≥ QUIET_HOURS_MIN_BETS_PER_DAY bets to count)
   // Only one band is expanded per run to avoid thrashing.
-  const worstBands = Object.values(report.byHourBand)
+  //
+  // Skip entirely when:
+  //   • start === end → user explicitly disabled quiet hours; never auto-re-enable
+  //   • Rule last fired within QUIET_HOURS_EXPAND_COOLDOWN_MS (48h)
+  const quietHoursUserDisabled = config.quietHoursStart === config.quietHoursEnd;
+  const quietHoursOnCooldown =
+    (now.getTime() - (lastFiredAt.get("quiet_hours_expand")?.getTime() ?? 0)) < QUIET_HOURS_EXPAND_COOLDOWN_MS;
+
+  const worstBands = quietHoursUserDisabled || quietHoursOnCooldown ? [] : Object.values(report.byHourBand)
     .filter(b => b.betCount >= QUIET_HOURS_MIN_BETS && b.winRate !== null && b.winRate < 0.4)
     .sort((a, b) => (a.winRate ?? 1) - (b.winRate ?? 1));
 
