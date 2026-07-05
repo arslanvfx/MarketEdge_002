@@ -1738,7 +1738,7 @@ async function _runBotTick(
         maxBetSize: maxBetCap,
         configuredBetSize: config.betSize,
         contractCount,
-        sideCost: sideCost.toFixed(4),
+        costPerContract: expectedFillCost.toFixed(4),
         direction,
         mode: botMode,
       },
@@ -1884,13 +1884,18 @@ async function _runBotTick(
       // Tracks CONSECUTIVE bad fills — a clean fill resets the counter.
       // 3 consecutive bad fills → coin skips next window's entry, then counter clears.
       const maxSlipCents = config.maxSlippageCents ?? 10;
-      if (maxSlipCents > 0 && result.avgPrice != null && yesPrice != null) {
-        const slippageCents = Math.abs(result.avgPrice - yesPrice) * 100;
+      // Use the live execution baseline (live ask/bid when available, else midpoint)
+      // so the slippage delta reflects what we actually expected to pay — not a
+      // potentially stale cached midpoint that no longer represents our order price.
+      const executionBaseline = liveLimitPrice ?? expectedFillCost;
+      if (maxSlipCents > 0 && result.avgPrice != null) {
+        const slippageCents = Math.abs(result.avgPrice - executionBaseline) * 100;
         if (slippageCents > maxSlipCents) {
           logger.warn(
             {
               sym,
-              expectedYesPrice: yesPrice.toFixed(4),
+              executionBaseline: executionBaseline.toFixed(4),
+              usedLiveAsk: liveLimitPrice != null,
               fillPrice: result.avgPrice.toFixed(4),
               slippageCents: slippageCents.toFixed(1),
               maxSlippageCents: maxSlipCents,
