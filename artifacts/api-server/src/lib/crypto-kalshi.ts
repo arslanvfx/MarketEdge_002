@@ -194,15 +194,17 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
         floor_strike?: number;
         ticker?: string;
         close_time?: string;
-        // Legacy integer-cent fields (no longer returned by Kalshi API)
+        // Current API: YES-side dollar strings (primary — confirmed present as of mid-2026)
+        yes_ask_dollars?: string;
+        yes_bid_dollars?: string;
+        last_price_dollars?: string;
+        // Current API: NO-side dollar strings (secondary — complement of YES)
+        no_ask_dollars?: string;
+        no_bid_dollars?: string;
+        // Legacy integer-cent fields (removed from Kalshi API in mid-2026; kept for fallback)
         yes_ask?: number;
         yes_bid?: number;
         last_price?: number;
-        // Current API: NO-side dollar strings (0–1 scale).
-        // YES prices are the complement: yes_ask = 1−no_bid, yes_bid = 1−no_ask
-        no_ask_dollars?: string;
-        no_bid_dollars?: string;
-        last_price_dollars?: string;
       }[];
     };
 
@@ -246,16 +248,36 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       const toFrac = (v: number | undefined | null) =>
         typeof v === "number" && v > 0 && v < 100 ? v / 100 : null;
 
-      // Current API returns NO-side prices as dollar strings.
-      // YES and NO are complements: yes_ask = 1 − no_bid, yes_bid = 1 − no_ask
+      // Priority 1: direct YES-side dollar strings (current Kalshi API, mid-2026+)
+      // Priority 2: NO-side dollar strings — YES is the complement (yes_ask = 1−no_bid)
+      // Priority 3: legacy integer-cent fields (pre-mid-2026, kept as last resort)
       const noAsk = parseDollar(selected.no_ask_dollars);
       const noBid = parseDollar(selected.no_bid_dollars);
-      const lastPDollars = parseDollar(selected.last_price_dollars);
 
-      // Fall back to legacy integer-cent fields if the new ones are absent
-      const yesAsk = (noBid != null ? 1 - noBid : null) ?? toFrac(selected.yes_ask);
-      const yesBid = (noAsk != null ? 1 - noAsk : null) ?? toFrac(selected.yes_bid);
-      const lastP  = lastPDollars ?? toFrac(selected.last_price);
+      const yesAsk =
+        parseDollar(selected.yes_ask_dollars) ??
+        (noBid != null ? 1 - noBid : null) ??
+        toFrac(selected.yes_ask);
+      const yesBid =
+        parseDollar(selected.yes_bid_dollars) ??
+        (noAsk != null ? 1 - noAsk : null) ??
+        toFrac(selected.yes_bid);
+      const lastP =
+        parseDollar(selected.last_price_dollars) ??
+        toFrac(selected.last_price);
+
+      // Canary: if all price paths resolved null, log the actual field names present
+      // so the next API format change is immediately diagnosable from logs alone.
+      if (yesAsk == null && yesBid == null && lastP == null) {
+        const priceFields = Object.keys(selected as object).filter(k =>
+          k.includes("ask") || k.includes("bid") || k.includes("price") || k.includes("dollar")
+        );
+        logger.warn(
+          { sym, ticker: selected.ticker, priceFields },
+          "[kalshi] WARNING: all price fields resolved null — Kalshi API format may have changed. " +
+          "Check the priceFields list above against the parser in crypto-kalshi.ts and update accordingly.",
+        );
+      }
 
       const yesPrice =
         yesAsk !== null && yesBid !== null ? (yesAsk + yesBid) / 2

@@ -188,6 +188,12 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
 // redundant Kalshi API calls and confusing interleaved log output.
 let tickInFlight = false;
 
+// Tracks how many consecutive bot-evaluation windows had every coin skipped because
+// yesPrice was null.  Three or more in a row almost certainly means the Kalshi API
+// format changed and the parser needs updating — an ERROR is logged at that threshold.
+let consecutiveAllNullPriceWindows = 0;
+let lastAllNullPriceWindowKey = "";
+
 // Iterates over all Kalshi-enabled coins, ensures fresh Kalshi market data is
 // available (fetching from the public API if the cache is stale), then runs
 // the bot tick for each coin.  The Kalshi market-data endpoint is public and
@@ -1504,6 +1510,34 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
   S.lastWindowEvaluation = allResults;
+
+  // ── Kalshi price-parser health check ────────────────────────────────────
+  // If every coin in this window was skipped because yesPrice was null, count it.
+  // Three consecutive windows like this means the Kalshi API format likely changed
+  // and the parser in crypto-kalshi.ts needs updating — surface as a loud ERROR.
+  const allNullPrice = allResults.length > 0 &&
+    allResults.every(e => e.reason === "no order book price — market illiquid");
+  if (allNullPrice && windowKey !== lastAllNullPriceWindowKey) {
+    consecutiveAllNullPriceWindows++;
+    lastAllNullPriceWindowKey = windowKey;
+    if (consecutiveAllNullPriceWindows >= 3) {
+      logger.error(
+        { consecutiveWindows: consecutiveAllNullPriceWindows, windowKey },
+        "[kalshi-bot] ERROR: Kalshi price parsing broken — yesPrice=null for ALL coins " +
+        `across ${consecutiveAllNullPriceWindows} consecutive windows. ` +
+        "The Kalshi API likely changed its response format. " +
+        "Check the WARN log in crypto-kalshi.ts for the actual price field names " +
+        "currently returned, then update the parser (parseDollar/toFrac priority chain).",
+      );
+    } else {
+      logger.warn(
+        { consecutiveWindows: consecutiveAllNullPriceWindows, windowKey },
+        "[kalshi-bot] all coins null-price this window — monitoring for API format change",
+      );
+    }
+  } else if (!allNullPrice) {
+    consecutiveAllNullPriceWindows = 0;
+  }
 
   // Phase 4: run all eligible coins in parallel.
   // Phase 3 is the authoritative filter — it has already enforced the global bet cap,
