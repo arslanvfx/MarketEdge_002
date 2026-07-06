@@ -27,6 +27,7 @@ import {
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
+  liveDirectionCache, liveDirectionInFlight,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
@@ -367,6 +368,37 @@ async function _runBotTick(
       });
     }
     return;
+  }
+
+  // ── Live signal readiness gate ─────────────────────────────────────────────
+  // The opening Claude snap (historyStore) is written once at T~+1 min and
+  // never updated.  liveDirectionCache is kept fresh by fetchLiveDirection
+  // (2-min TTL) and is what the engine now uses as the authoritative Claude
+  // signal.  Before placing any bet, ensure we have a fresh live verdict:
+  //
+  //   • Cache hit (<2 min old) → proceed; the engine will use the live result.
+  //   • Cache miss / stale     → fire a refresh (fire-and-forget) and defer
+  //                              this tick.  The next tick (~10–30 s later)
+  //                              will have a warm cache and proceed normally.
+  //
+  // The eager prefetch on new-ticker detection (above) should pre-warm the
+  // cache before the entry buffer clears in most windows.  This gate only
+  // fires when that prefetch hasn't finished yet or the result has aged out
+  // (late bets at T+4+ min).
+  {
+    const LIVE_SIGNAL_MAX_AGE_MS = 2 * 60_000;
+    const liveDirEntry = liveDirectionCache.get(sym);
+    const liveDirAge = liveDirEntry ? Date.now() - liveDirEntry.at : Infinity;
+    if (liveDirAge > LIVE_SIGNAL_MAX_AGE_MS) {
+      if (!liveDirectionInFlight.has(sym)) {
+        fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget refresh
+      }
+      logger.debug(
+        { sym, liveDirAgeS: liveDirEntry ? Math.round(liveDirAge / 1000) : null },
+        "[kalshi-bot] live signal stale — deferring bet 1 tick for fresh Claude verdict",
+      );
+      return;
+    }
   }
 
   // Use ensemble signal accuracy (from prediction_records historyStore) for the

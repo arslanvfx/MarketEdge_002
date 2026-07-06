@@ -22,6 +22,7 @@ import {
   getCachedPrediction,
   getKalshiCachedData,
   getKalshiWindowContext,
+  liveDirectionCache,
   TRAINING_COINS,
   type TrackerWindowCall,
   type WindowBetSignal,
@@ -172,7 +173,30 @@ function _makeBotDecisionInner(
   const wmSignal: WindowBetSignal | null = getWindowBetSignal(sym);
 
   const statAbove: boolean | null = statCall?.aboveKalshi ?? null;
-  const claudeAbove: boolean | null = claudeCall?.aboveKalshi ?? null;
+
+  // claudeAbove: prefer the live direction cache over the frozen opening snap.
+  //
+  // getTrackerWindowCall reads historyStore — written once at window-open
+  // (T~+1 min) and never updated again.  liveDirectionCache is populated by
+  // fetchLiveDirection (2-min TTL) and reflects market conditions right now.
+  //
+  // If the live cache has a result newer than the opening snap, use it so that
+  // a bet fired 5–6 minutes into the window is evaluated against current
+  // conditions, not the direction Claude saw at window-open.
+  //
+  // Flip detection: when live direction contradicts the opening call the bot
+  // now naturally sees a disagreement between Claude (flipped) and Stat
+  // (opening), which will tighten the signal agreement gate appropriately.
+  let claudeAbove: boolean | null = claudeCall?.aboveKalshi ?? null;
+  let claudeSourceIsLive = false;
+  const liveDirEntry = liveDirectionCache.get(sym);
+  if (liveDirEntry) {
+    const openingSnapMs = claudeCall?.snappedAt ? new Date(claudeCall.snappedAt).getTime() : 0;
+    if (liveDirEntry.at > openingSnapMs && liveDirEntry.result.aboveKalshi !== null) {
+      claudeAbove = liveDirEntry.result.aboveKalshi;
+      claudeSourceIsLive = true;
+    }
+  }
   const wmRec = wmSignal?.recommendation ?? null;
   const wmReady = wmSignal?.ready ?? false;
 
@@ -453,10 +477,13 @@ function _makeBotDecisionInner(
             ? ` (ML disagrees at ${mlConfidence ?? 0}% < ${config.mlVetoMinConfidence ?? 57}% threshold — veto skipped)`
             : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
     }
+    // Append a short note whenever Claude's signal was sourced from the live
+    // re-check rather than the frozen opening snap.
+    const claudeLiveNote = claudeSourceIsLive ? " [Claude:live-refresh]" : "";
     return {
       action: coreResult.action,
       confidence: coreResult.confidence,
-      reasoning: coreResult.reasoning + mlReasonSuffix,
+      reasoning: coreResult.reasoning + mlReasonSuffix + claudeLiveNote,
       signals: coreSnap,
     };
   }
@@ -481,10 +508,11 @@ function _makeBotDecisionInner(
     result.action !== "SKIP" ? result.action : null,
   );
 
+  const claudeLiveNote = claudeSourceIsLive ? " [Claude:live-refresh]" : "";
   return {
     action: result.action,
     confidence: result.confidence,
-    reasoning: result.reasoning,
+    reasoning: result.reasoning + claudeLiveNote,
     signals: snapshot,
   };
 }
