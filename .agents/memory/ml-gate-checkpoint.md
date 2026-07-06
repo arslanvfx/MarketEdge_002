@@ -18,3 +18,12 @@ In `ml_gate` decisionMode, `mlAbove === null` (ML model not ready) is a hard BLO
 **Location:** `artifacts/api-server/src/lib/kalshi-bot-loop.ts` — Phase 3 loop, after the `hardModelCount` gate block.
 
 **Not tested in engine-core unit tests** — the pure `computeCorePairDecision` function is decisionMode-agnostic; this gate is loop-level only.
+
+## Companion fix: ML init startup retry
+`initMLFromDB` can fail on boot if DB pool hasn't recovered from autoscale sleep. Without a retry it stays permanently uninitialized → ml_gate blocks all bets forever.
+
+- `ml-store.ts` exports `wasMLInitSuccessful()` (flag set true at end of successful try block)
+- `crypto-tracker.ts` `scheduleMLInitRetry(attempt)` fires when `wasMLInitSuccessful()` is false after first attempt
+- Backoff: 5s → 15s → 30s → 60s → 120s → 5 min, max 8 attempts
+- On retry success: calls `runMLBackfillIfNeeded(96)` so backfill also runs
+- Tracker startup is NOT blocked — all retries via `setTimeout` (background)

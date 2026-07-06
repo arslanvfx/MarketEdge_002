@@ -238,7 +238,13 @@ async function persistModelState(
  * After this call, any coin that has accumulated ≥ MIN_TRAINING_WINDOWS
  * labeled windows will immediately serve predictions — no wait needed.
  */
+// Set to true once initMLFromDB completes without throwing.
+// Callers can inspect this to decide whether a background retry is needed.
+let _mlInitOk = false;
+export function wasMLInitSuccessful(): boolean { return _mlInitOk; }
+
 export async function initMLFromDB(): Promise<void> {
+  _mlInitOk = false;
   try {
     // 1. Restore model weights first (fast — one row per coin).
     //    This gives the model working weights immediately so predictions
@@ -334,6 +340,7 @@ export async function initMLFromDB(): Promise<void> {
       readyCoins.length   ? `; ready: ${readyCoins.join(", ")}`   : "",
       warmingCoins.length ? `; warming: ${warmingCoins.join(", ")}` : "",
     );
+    _mlInitOk = true;
   } catch (err) {
     logger.warn({ err }, "[ml-store] initMLFromDB failed (non-fatal)");
   }

@@ -71,9 +71,11 @@ import {
   captureMLSnapshot,
   labelWindowAndRetrain,
   initMLFromDB,
+  wasMLInitSuccessful,
   getMLPrediction,
   getMLStatus,
 } from "./ml-store";
+import { runMLBackfillIfNeeded } from "./ml-backfill";
 import {
   extractMLFeatures,
   deriveMLSignalDirections,
@@ -972,10 +974,50 @@ export function startPredictionTracker(
     );
   };
 
+  // Background ML-init retry loop.
+  // If initMLFromDB() fails (DB not yet ready at startup), we must not leave
+  // ML permanently uninitialized — in ml_gate mode that blocks every bet
+  // indefinitely.  This schedules automatic retries with exponential backoff,
+  // without blocking tracker startup or the first tick.
+  function scheduleMLInitRetry(attempt: number): void {
+    const MAX_ATTEMPTS = 8;
+    // Backoff: 5 s, 15 s, 30 s, 60 s, 120 s, then 5 min for remaining attempts.
+    const DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000, 300_000, 300_000];
+    if (attempt > MAX_ATTEMPTS) {
+      logger.error(
+        "[ml-store] ML init failed after %d attempts — ML gate will block all bets until next restart",
+        MAX_ATTEMPTS,
+      );
+      return;
+    }
+    const delayMs = DELAYS_MS[attempt - 1] ?? 300_000;
+    logger.warn(
+      "[ml-store] scheduling ML init retry %d/%d in %ds",
+      attempt, MAX_ATTEMPTS, Math.round(delayMs / 1000),
+    );
+    setTimeout(() => {
+      logger.info("[ml-store] ML init retry %d/%d — attempting initMLFromDB", attempt, MAX_ATTEMPTS);
+      initMLFromDB().then(() => {
+        if (wasMLInitSuccessful()) {
+          logger.info("[ml-store] ML init retry %d succeeded — triggering backfill check", attempt);
+          runMLBackfillIfNeeded(96).catch((err) =>
+            logger.warn({ err }, "[ml-backfill] post-retry backfill failed (non-fatal)"),
+          );
+        } else {
+          scheduleMLInitRetry(attempt + 1);
+        }
+      }).catch(() => scheduleMLInitRetry(attempt + 1));
+    }, delayMs);
+  }
+
   Promise.all([
     initHistoryFromDB().catch(() => {}),
     initMLFromDB().catch(() => {}),
   ]).finally(() => {
+    // If ML init failed, start the background retry loop before the first tick.
+    if (!wasMLInitSuccessful()) {
+      scheduleMLInitRetry(1);
+    }
     recoverUnevaluatedTimingSnapshots().catch(() => {});
     tick().catch(() => {});
     setInterval(() => tick().catch(() => {}), 30_000);
