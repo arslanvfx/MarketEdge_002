@@ -5,7 +5,7 @@ import { startPredictionTracker } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
 import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
-import { pool } from "@workspace/db";
+import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
@@ -347,6 +347,10 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Start the pool keep-alive pinger immediately so idle connections
+  // never go stale between the periodic DB activity bursts.
+  startPoolPinger();
 
   // Pre-warm the market cache so the first user request is instant.
   fetchAllMarkets()

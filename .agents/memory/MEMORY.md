@@ -1,3 +1,4 @@
+- [DB pool connection fix](db-pool-fix.md) — Replit PostgreSQL kills idle connections at protocol level; fix: max:5, min:1, SQL-level pinger every 20s, 5-retry exponential backoff
 - [Same-game combo architecture](same-game-combos.md) — how gameKey/eventTicker flow from markets.ts through optimizer to picks UI
 - [Polymarket single-bet mode](polymarket-single-bet.md) — Polymarket always emits size-1; Kalshi non-sport categories also forced single
 - [sideLabel prop NO side](sidelabel-props.md) — Over→Under flip logic for NO side of prop market subtitles
