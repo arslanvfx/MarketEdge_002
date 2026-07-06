@@ -644,6 +644,14 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no market data", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
+    // No order-book price: Kalshi returned a strike but no bid/ask/last_price —
+    // the market is illiquid or market makers haven't posted quotes yet.  Surface
+    // this clearly in the UI instead of computing a bet that the completeness gate
+    // would silently abort downstream.
+    if (kalshiData.yesPrice == null) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no order book price — market illiquid", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      continue;
+    }
     // Empty-book cooldown: if this coin's IOC order returned 0 fills on both attempts
     // this window, skip it — the book is genuinely empty. Cleared on window transition.
     // (First 0-fill does NOT block; bot retries once more ~30s later before giving up.)

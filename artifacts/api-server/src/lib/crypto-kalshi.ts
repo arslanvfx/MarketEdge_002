@@ -2,6 +2,7 @@
 // crypto-kalshi.ts — Kalshi 15-min target fetching, window context, ML cache
 // ---------------------------------------------------------------------------
 
+import crypto from "crypto";
 import { logger } from "./logger";
 
 // Map of symbol → Kalshi series ticker for coins that have 15-min markets.
@@ -91,6 +92,78 @@ export function getKalshiCachedData(symbol: string): {
   return kalshiTargetCache.get(symbol.toUpperCase()) ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// Authenticated Kalshi orderbook fallback
+// ---------------------------------------------------------------------------
+// When the public /markets list returns a valid strike but no bid/ask/last_price
+// (common during early-window periods before market makers post quotes) we
+// attempt an authenticated GET /markets/{ticker}/orderbook call.  The signed
+// request typically reveals the live best-bid/ask even when the public endpoint
+// is stale or missing price fields.
+// ---------------------------------------------------------------------------
+
+async function fetchOrderbookPrices(
+  ticker: string,
+): Promise<{ yesAsk: number | null; yesBid: number | null } | null> {
+  const keyId = process.env["KALSHI_API_KEY_ID"] ?? null;
+  const rawKey = process.env["KALSHI_PRIVATE_KEY"] ?? null;
+  if (!keyId || !rawKey) return null;
+
+  // Reconstruct PEM (mirrors the pattern in kalshi-trader.ts)
+  let pem: string;
+  if (rawKey.includes("-----BEGIN")) {
+    pem = rawKey.includes("\\n") ? rawKey.replace(/\\n/g, "\n") : rawKey;
+  } else {
+    const b64 = rawKey.replace(/\s+/g, "");
+    const lines = b64.match(/.{1,64}/g) ?? [];
+    pem = ["-----BEGIN RSA PRIVATE KEY-----", ...lines, "-----END RSA PRIVATE KEY-----"].join("\n");
+  }
+
+  const path = `/markets/${encodeURIComponent(ticker)}/orderbook`;
+  const tsMs = Date.now().toString();
+  const message = tsMs + "GET" + "/trade-api/v2" + path;
+  let signature: string;
+  try {
+    const sign = crypto.createSign("SHA256");
+    sign.update(message);
+    sign.end();
+    signature = sign.sign({ key: pem, padding: crypto.constants.RSA_PKCS1_PSS_PADDING }, "base64");
+  } catch {
+    return null;
+  }
+
+  try {
+    const resp = await fetch(`https://api.elections.kalshi.com/trade-api/v2${path}`, {
+      headers: {
+        Accept: "application/json",
+        "KALSHI-ACCESS-KEY": keyId,
+        "KALSHI-ACCESS-TIMESTAMP": tsMs,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+      },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as {
+      orderbook?: { yes?: [number, number][]; no?: [number, number][] };
+    };
+    const ob = body.orderbook;
+    const yesBids = ob?.yes ?? [];
+    const noBids  = ob?.no  ?? [];
+    // Orderbook prices are in cents (0-100).
+    //   best YES bid = highest price a buyer will pay for YES
+    //   best YES ask = 100 - highest price a buyer will pay for NO
+    const bestYesBidCents = yesBids.length > 0 ? yesBids[0][0] : null;
+    const bestYesAskCents = noBids.length  > 0 ? (100 - noBids[0][0]) : null;
+    if (bestYesBidCents == null && bestYesAskCents == null) return null;
+    return {
+      yesBid: bestYesBidCents != null ? bestYesBidCents / 100 : null,
+      yesAsk: bestYesAskCents != null ? bestYesAskCents / 100 : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Promise<number | null> {
   const sym = symbol.toUpperCase();
   const series = KALSHI_SERIES[sym];
@@ -174,6 +247,35 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
         yesAsk,
         yesBid,
       });
+
+      // ── Authenticated orderbook fallback ──────────────────────────────────
+      // If the public market endpoint returned no bid/ask/last_price (empty order
+      // book or market makers not yet active), try the authenticated orderbook
+      // endpoint which has access to live resting orders even when the public
+      // market summary is stale or missing price fields.
+      if (yesPrice == null && selected.ticker) {
+        const ob = await fetchOrderbookPrices(selected.ticker);
+        if (ob != null) {
+          const obYesAsk = ob.yesAsk;
+          const obYesBid = ob.yesBid;
+          const obPrice = obYesAsk != null && obYesBid != null
+            ? (obYesAsk + obYesBid) / 2
+            : obYesAsk ?? obYesBid ?? null;
+          if (obPrice != null) {
+            logger.info(
+              { sym, ticker: selected.ticker, obYesBid, obYesAsk, obPrice },
+              "[kalshi] orderbook fallback resolved price — was null from public API",
+            );
+            kalshiTargetCache.set(sym, {
+              ...kalshiTargetCache.get(sym)!,
+              yesPrice: obPrice,
+              yesAsk: obYesAsk,
+              yesBid: obYesBid,
+            });
+          }
+        }
+      }
+
       if (selected.ticker && !kalshiWindowStore.has(selected.ticker)) {
         kalshiWindowStore.set(selected.ticker, { priceAtOpen: null, openedAt: Date.now() });
       }
