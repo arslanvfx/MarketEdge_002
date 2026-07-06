@@ -161,7 +161,7 @@ function calcROI(action: BotDecisionAction, yesPrice: number): number {
 
 // Pure override helpers live in kalshi-bot-engine-core.ts (zero-dependency
 // module) so they can be unit-tested without mocking the I/O stores.
-export { applyClaudeLiveOverride, applyStatPredCacheOverride } from "./kalshi-bot-engine-core";
+export { applyClaudeLiveOverride, applyStatPredCacheOverride, shouldDeferForLiveSignal } from "./kalshi-bot-engine-core";
 
 function _makeBotDecisionInner(
   symbol: string,

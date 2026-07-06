@@ -12,7 +12,7 @@ import {
   DEFAULT_BOT_CONFIG, BET_PROFILES, computeDynamicBetSize, makeBotDecision,
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
-  applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
+  applyStartupModeRestore, buildStreakSnapshot, restoreStreakState, shouldDeferForLiveSignal,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -377,9 +377,10 @@ async function _runBotTick(
   // signal.  Before placing any bet, ensure we have a fresh live verdict:
   //
   //   • Cache hit (<2 min old) → proceed; the engine will use the live result.
-  //   • Cache miss / stale     → fire a refresh (fire-and-forget) and defer
-  //                              this tick.  The next tick (~10–30 s later)
-  //                              will have a warm cache and proceed normally.
+  //   • Cache miss / stale, within first 90 s past buffer → defer one tick;
+  //     fire a background refresh so the next tick (~10–30 s) has a warm cache.
+  //   • Cache miss / stale, >90 s past buffer (Claude API down) → fall through
+  //     to the opening snap rather than deferring for the rest of the window.
   //
   // The eager prefetch on new-ticker detection (above) should pre-warm the
   // cache before the entry buffer clears in most windows.  This gate only
@@ -387,17 +388,34 @@ async function _runBotTick(
   // (late bets at T+4+ min).
   {
     const LIVE_SIGNAL_MAX_AGE_MS = 2 * 60_000;
+    // 90 s past the entry buffer = ~4.5 min into the window.  After this we
+    // stop waiting and fall through so no entry window is lost to a down API.
+    const LIVE_SIGNAL_MAX_DEFER_S = 90;
+    const nowMs = Date.now();
     const liveDirEntry = liveDirectionCache.get(sym);
-    const liveDirAge = liveDirEntry ? Date.now() - liveDirEntry.at : Infinity;
-    if (liveDirAge > LIVE_SIGNAL_MAX_AGE_MS) {
+    const secondsPastBuffer = Math.max(0, secondsElapsed - WINDOW_ENTRY_BUFFER_S);
+    const signalGate = shouldDeferForLiveSignal(
+      liveDirEntry,
+      nowMs,
+      LIVE_SIGNAL_MAX_AGE_MS,
+      secondsPastBuffer,
+      LIVE_SIGNAL_MAX_DEFER_S,
+    );
+    if (signalGate.defer) {
       if (!liveDirectionInFlight.has(sym)) {
         fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget refresh
       }
       logger.debug(
-        { sym, liveDirAgeS: liveDirEntry ? Math.round(liveDirAge / 1000) : null },
+        { sym, liveDirAgeS: liveDirEntry ? Math.round((nowMs - liveDirEntry.at) / 1000) : null },
         "[kalshi-bot] live signal stale — deferring bet 1 tick for fresh Claude verdict",
       );
       return;
+    }
+    if (signalGate.usedFallback) {
+      logger.warn(
+        { sym, secondsPastBuffer },
+        "[kalshi-bot] live signal stale beyond max-defer limit — falling back to opening snap",
+      );
     }
   }
 

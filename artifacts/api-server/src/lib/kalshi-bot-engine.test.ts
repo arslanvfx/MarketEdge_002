@@ -41,6 +41,7 @@ import {
 import {
   applyClaudeLiveOverride,
   applyStatPredCacheOverride,
+  shouldDeferForLiveSignal,
 } from "./kalshi-bot-engine-core.ts";
 
 const DEFAULT_MIN_CONFIDENCE = 60;
@@ -1023,4 +1024,147 @@ test("applyStatPredCacheOverride: opening null → flipped=false even when direc
   assert.equal(r.statAbove, false);
   assert.equal(r.isLive, true);
   assert.equal(r.flipped, false); // null opening → no flip to detect
+});
+
+// ---------------------------------------------------------------------------
+// shouldDeferForLiveSignal — staleness gate with max-defer fallback
+// ---------------------------------------------------------------------------
+
+const MAX_AGE_MS  = 2 * 60_000; // 2 min — production value
+const MAX_DEFER_S = 90;          // 90 s past buffer — production value
+
+test("shouldDeferForLiveSignal: fresh cache → no defer, no fallback", () => {
+  const nowMs = Date.now();
+  const entry = { at: nowMs - 30_000 }; // 30 s old → well within 2-min window
+  const r = shouldDeferForLiveSignal(entry, nowMs, MAX_AGE_MS, 10, MAX_DEFER_S);
+  assert.equal(r.defer, false);
+  assert.equal(r.usedFallback, false);
+});
+
+test("shouldDeferForLiveSignal: cache exactly at age limit → still fresh (≤ boundary)", () => {
+  const nowMs = Date.now();
+  const entry = { at: nowMs - MAX_AGE_MS }; // exactly at limit → still ok
+  const r = shouldDeferForLiveSignal(entry, nowMs, MAX_AGE_MS, 10, MAX_DEFER_S);
+  assert.equal(r.defer, false, "boundary: at maxAgeMs is still fresh");
+  assert.equal(r.usedFallback, false);
+});
+
+test("shouldDeferForLiveSignal: stale cache, well within defer window → defer=true (tick 1)", () => {
+  // Simulates the first tick after buffer clears: cache 5 min old (well stale),
+  // but only 5 s have elapsed since the buffer cleared → should defer once.
+  const nowMs = Date.now();
+  const entry = { at: nowMs - 5 * 60_000 }; // 5 min old — stale
+  const r = shouldDeferForLiveSignal(entry, nowMs, MAX_AGE_MS, 5, MAX_DEFER_S);
+  assert.equal(r.defer, true,  "first-tick defer: cache stale, within max-defer window");
+  assert.equal(r.usedFallback, false);
+});
+
+test("shouldDeferForLiveSignal: stale cache, retry tick with now-fresh cache → proceeds (no defer)", () => {
+  // Simulates the retry tick after Claude responds: cache updated 10 s ago → fresh.
+  const nowMs = Date.now();
+  const freshEntry = { at: nowMs - 10_000 }; // 10 s old — fresh
+  const r = shouldDeferForLiveSignal(freshEntry, nowMs, MAX_AGE_MS, 35, MAX_DEFER_S);
+  assert.equal(r.defer, false, "retry tick: fresh cache — proceed to decision");
+  assert.equal(r.usedFallback, false);
+});
+
+test("shouldDeferForLiveSignal: no cache entry, within defer window → defer=true", () => {
+  // Empty cache (Claude has never responded this window yet), early tick.
+  const r = shouldDeferForLiveSignal(undefined, Date.now(), MAX_AGE_MS, 5, MAX_DEFER_S);
+  assert.equal(r.defer, true);
+  assert.equal(r.usedFallback, false);
+});
+
+test("shouldDeferForLiveSignal: permanently stale cache, beyond max-defer → fallback (no defer)", () => {
+  // Claude API has been down since window open.  After 90 s past the buffer
+  // the gate gives up and falls through so the bet is not blocked indefinitely.
+  const nowMs = Date.now();
+  const staleEntry = { at: nowMs - 10 * 60_000 }; // 10 min old — very stale
+  const r = shouldDeferForLiveSignal(staleEntry, nowMs, MAX_AGE_MS, MAX_DEFER_S, MAX_DEFER_S);
+  assert.equal(r.defer, false,       "max-defer elapsed — must not keep deferring");
+  assert.equal(r.usedFallback, true, "usedFallback=true so caller can log the event");
+});
+
+test("shouldDeferForLiveSignal: empty cache, beyond max-defer → fallback (no defer)", () => {
+  // No cache at all and max-defer elapsed — must fall through to opening snap.
+  const r = shouldDeferForLiveSignal(undefined, Date.now(), MAX_AGE_MS, MAX_DEFER_S + 1, MAX_DEFER_S);
+  assert.equal(r.defer, false);
+  assert.equal(r.usedFallback, true);
+});
+
+test("shouldDeferForLiveSignal: stale cache, exactly at max-defer boundary → fallback fires", () => {
+  // secondsPastBuffer === maxDeferSeconds → the >= boundary gives up immediately.
+  const nowMs = Date.now();
+  const entry = { at: nowMs - 5 * 60_000 };
+  const r = shouldDeferForLiveSignal(entry, nowMs, MAX_AGE_MS, MAX_DEFER_S, MAX_DEFER_S);
+  assert.equal(r.defer, false);
+  assert.equal(r.usedFallback, true, "exactly at boundary triggers fallback");
+});
+
+test("shouldDeferForLiveSignal: stale cache, one second before max-defer → still deferring", () => {
+  // One second shy of max-defer → should still defer this tick.
+  const nowMs = Date.now();
+  const entry = { at: nowMs - 5 * 60_000 };
+  const r = shouldDeferForLiveSignal(entry, nowMs, MAX_AGE_MS, MAX_DEFER_S - 1, MAX_DEFER_S);
+  assert.equal(r.defer, true,  "one second before max-defer — still deferring");
+  assert.equal(r.usedFallback, false);
+});
+
+// ---------------------------------------------------------------------------
+// Stat flip downstream effect on computeCorePairDecision
+//
+// These tests verify that applyStatPredCacheOverride's output, when fed into
+// computeCorePairDecision, produces the correct bet decision — specifically
+// that a mid-window stat flip never incorrectly blocks a bet that should go
+// through via a tiebreaker signal.
+// ---------------------------------------------------------------------------
+
+test("stat flip downstream: flip above→below + Claude=below → BET_NO (agree on new direction)", () => {
+  // Opening: stat=above.  Mid-snap flips stat to below.  Claude also says below.
+  // Both signals agree on below → should BET_NO, not SKIP.
+  const r = computeCorePairDecision(inp({ claudeAbove: false, statAbove: false }));
+  assert.equal(r.action, "BET_NO", "agreed-below after flip must bet NO, not SKIP");
+});
+
+test("stat flip downstream: flip above→below + Claude=above, ML=null → SKIP (genuine disagreement)", () => {
+  // Stat has flipped to below but Claude still says above.  No ML to arbitrate.
+  // PATH B: Claude≠Stat, no ML → SKIP (correct — genuine conflicting reads).
+  const r = computeCorePairDecision(inp({ claudeAbove: true, statAbove: false, mlAbove: null }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /no ML to arbitrate/);
+});
+
+test("stat flip downstream: flip above→below + Claude=above + ML=above → BET_YES (ML tiebreaker)", () => {
+  // Stat has flipped to below, but Claude + ML both say above → 2-of-3 vote.
+  // PATH B tiebreaker: ML sides with Claude → bet proceeds in the YES direction.
+  // The stat flip must NOT block the entry when other signals have the quorum.
+  const r = computeCorePairDecision(inp({
+    claudeAbove: true,
+    statAbove: false,  // stat has been flipped to below
+    mlAbove: true,
+    mlConfidence: 55,  // below ML_PRIMARY_MIN_CONFIDENCE → PATH B (Claude leads)
+  }));
+  assert.equal(r.action, "BET_YES", "ML tiebreaker with Claude must override a lone dissenting stat flip");
+  assert.equal(r.confidence, BASE_CONFIDENCE_HALF_PAIR, "half-pair base since stat dissents");
+});
+
+test("stat flip downstream: no flip (stat stays above) + Claude=above → BET_YES unchanged", () => {
+  // Sanity check: when stat does NOT flip, normal PATH B full-pair behaviour.
+  const r = computeCorePairDecision(inp({ claudeAbove: true, statAbove: true }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
+});
+
+test("stat flip downstream: flip above→below + ML=above (PATH A, stat dissents) → BET_YES with dissent penalty", () => {
+  // ML leads (PATH A).  Stat has been flipped to below (dissents).
+  // Expected: ML+Claude boost partially cancelled by stat dissent (net zero on those two).
+  const r = computeCorePairDecision(inp({
+    mlAbove: true,
+    mlConfidence: 66,
+    claudeAbove: true,   // Claude agrees with ML
+    statAbove: false,    // stat has flipped to below (dissents)
+  }));
+  assert.equal(r.action, "BET_YES");
+  // Claude agrees: +ML_SIGNAL_BOOST; Stat disagrees: −DISSENT_PENALTY; net = 66 + boost − penalty = 66
+  assert.equal(r.confidence, 66, "ML_SIGNAL_BOOST and DISSENT_PENALTY cancel → net 66");
 });

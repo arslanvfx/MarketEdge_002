@@ -1034,6 +1034,50 @@ export function restoreStreakState(
 }
 
 // ---------------------------------------------------------------------------
+// Pure staleness gate helper — live signal readiness (exported for unit testing)
+// ---------------------------------------------------------------------------
+
+/**
+ * Decides whether the bot tick should defer entry to wait for a fresh live
+ * Claude direction, or fall through because we've been waiting too long.
+ *
+ * Design:
+ *  • cache fresh (age ≤ maxAgeMs) → proceed immediately (defer: false)
+ *  • cache stale AND time-past-buffer < maxDeferSeconds → defer one tick
+ *  • cache stale AND time-past-buffer ≥ maxDeferSeconds → fall through to
+ *    opening snap (usedFallback: true) so the window is never permanently
+ *    blocked by a down Claude API.
+ *
+ * Parameters:
+ *  liveDirEntry        — current cache entry (undefined = cache empty)
+ *  nowMs               — current timestamp (injectable for testing)
+ *  maxAgeMs            — maximum acceptable cache age (default: 2 min)
+ *  secondsPastBuffer   — how many seconds have elapsed since the entry buffer
+ *                        cleared (secondsElapsed − WINDOW_ENTRY_BUFFER_S)
+ *  maxDeferSeconds     — how long to keep deferring before giving up and using
+ *                        the opening snap (default: 90 s)
+ */
+export function shouldDeferForLiveSignal(
+  liveDirEntry: { at: number } | undefined,
+  nowMs: number,
+  maxAgeMs: number,
+  secondsPastBuffer: number,
+  maxDeferSeconds: number,
+): { defer: boolean; usedFallback: boolean } {
+  const liveDirAge = liveDirEntry ? nowMs - liveDirEntry.at : Infinity;
+  if (liveDirAge <= maxAgeMs) {
+    return { defer: false, usedFallback: false };
+  }
+  // Cache is stale.  Give up deferring once maxDeferSeconds have elapsed
+  // past the entry buffer so a permanently-down Claude API can't block bets
+  // for the entire window.
+  if (secondsPastBuffer >= maxDeferSeconds) {
+    return { defer: false, usedFallback: true };
+  }
+  return { defer: true, usedFallback: false };
+}
+
+// ---------------------------------------------------------------------------
 // Pure override helpers — live signal freshness (exported for unit testing)
 // ---------------------------------------------------------------------------
 
