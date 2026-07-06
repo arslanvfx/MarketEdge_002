@@ -462,17 +462,17 @@ async function _runBotTick(
   }
 
   // ── Pre-entry streak block ────────────────────────────────────────────────
-  // The pause fires AFTER the Nth loss is settled — meaning the Nth bet is
-  // always placed before the pause kicks in. This guard prevents the Nth bet
-  // from being entered at all: if the coin has already lost (limit - 1) windows
-  // in a row, skip entry and let the next window decide fresh.
+  // Block entry only after the Nth loss has already been recorded — the coin
+  // gets to attempt the recovery bet and the pause only kicks in if it loses
+  // again.  The post-loss pause (coinStreakPauseWindows) handles the cooldown
+  // after the limit is reached and that pause is set by the eval/close path.
   {
     const streakLimit = S.config.coinStreakLossLimit ?? 3;
     const currentLosses = streakInfo?.consecutiveLosses ?? 0;
-    if (streakLimit > 0 && currentLosses >= streakLimit - 1) {
+    if (streakLimit > 0 && currentLosses >= streakLimit) {
       logger.info(
         { sym, currentLosses, streakLimit },
-        "[kalshi-bot] SKIP — pre-entry streak block: would be the Nth consecutive loss",
+        "[kalshi-bot] SKIP — pre-entry streak block: already at streak limit",
       );
       return;
     }
