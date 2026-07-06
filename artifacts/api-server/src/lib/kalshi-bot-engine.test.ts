@@ -1168,3 +1168,48 @@ test("stat flip downstream: flip above→below + ML=above (PATH A, stat dissents
   // Claude agrees: +ML_SIGNAL_BOOST; Stat disagrees: −DISSENT_PENALTY; net = 66 + boost − penalty = 66
   assert.equal(r.confidence, 66, "ML_SIGNAL_BOOST and DISSENT_PENALTY cancel → net 66");
 });
+
+// ---------------------------------------------------------------------------
+// Stat flip → Claude re-check scenarios
+// ---------------------------------------------------------------------------
+
+test("applyStatPredCacheOverride: mid-snap flip surfaces new direction (above→below) — should trigger Claude re-check", () => {
+  // This case is what the tracker detects to fire fetchLiveDirection.
+  // Opening said price was ABOVE the strike; mid-snap re-run now shows BELOW.
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true,            // opening: price was above strike
+    now - 7 * 60_000, // opening snap 7 min ago
+    { at: now - 30_000, value: { price: 97_000, kalshiTarget: 98_000 } }, // mid-snap: price < strike
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, false);  // flipped direction is surfaced
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, true);     // caller sees the flip and triggers Claude re-check
+});
+
+test("stale Claude override from prior window is evicted when stat flips — applyClaudeLiveOverride ignores prior-window entry", () => {
+  // Scenario: stat flips at T+7. The liveDirectionCache entry was written at
+  // window-open (T+1) and is OLDER than the mid-snap opening-snap timestamp
+  // we treat as the new reference point (the opening snap itself, taken at T+1).
+  //
+  // After the stat flip, crypto-tracker.ts deletes the liveDirectionCache entry.
+  // Before that delete completes (or if it hasn't yet), applyClaudeLiveOverride
+  // must NOT surface an entry whose timestamp predates the opening snap — it
+  // falls back to the opening Claude value instead, effectively evicting stale data.
+  const openingSnapAtMs = Date.now() - 7 * 60_000; // opening snap was 7 min ago
+
+  // Prior-window Claude entry: written BEFORE the opening snap (from last window)
+  const staleEntry = { at: openingSnapAtMs - 60_000, result: { aboveKalshi: true as boolean | null } };
+
+  const r = applyClaudeLiveOverride(
+    false,          // opening Claude call said below
+    openingSnapAtMs,
+    staleEntry,     // cache entry is older than opening snap → must not override
+  );
+
+  assert.equal(r.claudeAbove, false); // opening value preserved — stale entry evicted
+  assert.equal(r.isLive, false);
+  assert.equal(r.flipped, false);
+});

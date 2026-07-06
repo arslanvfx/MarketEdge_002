@@ -859,6 +859,7 @@ export function startPredictionTracker(
           ) {
             midSnapFired.add(midKey);
             snapInFlight.add(midKey);
+            const prevPredEntry = predCache.get(sym);
             (async () => {
               try {
                 const [freshCandles, freshStats, freshTicker] = await Promise.all([
@@ -870,6 +871,23 @@ export function startPredictionTracker(
                 const freshAnalysis = analyzeCoin(coin, freshCandles, freshStats, new Date(nowMs), freshPrice);
                 predCache.set(sym, { at: Date.now(), value: freshAnalysis });
                 logger.info("[mid-snap] %s: predCache refreshed at T+%dmin", sym, Math.round(timeIntoWindow / 60_000));
+
+                // ── Detect stat direction flip and auto-trigger Claude re-check ──
+                const kal = freshAnalysis.kalshiTarget ?? prevPredEntry?.value?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
+                if (kal != null && prevPredEntry?.value?.price != null) {
+                  const oldStatAbove = prevPredEntry.value.price >= kal;
+                  const newStatAbove = freshAnalysis.price >= kal;
+                  if (oldStatAbove !== newStatAbove && isCoinClaudeEnabled(sym) && isAiFeatureEnabled("crypto_live_dir")) {
+                    logger.info(
+                      "[mid-snap] %s: stat flipped %s→%s — triggering Claude re-check",
+                      sym,
+                      oldStatAbove,
+                      newStatAbove,
+                    );
+                    liveDirectionCache.delete(sym);
+                    fetchLiveDirection(sym, true).catch(() => {});
+                  }
+                }
               } catch {
                 // non-fatal
               } finally {
