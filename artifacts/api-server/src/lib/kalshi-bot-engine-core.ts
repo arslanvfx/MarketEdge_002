@@ -229,6 +229,19 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     };
   }
 
+  // Claude-ML alignment gate — applied before any path decision.
+  // When both Claude and ML have live opinions but call opposite directions,
+  // historical data shows the bet is poor regardless of what Stat says.
+  // Claude is a strong directional signal; we require it to agree with ML
+  // before entering any position.  Stat may still disagree (it only shifts
+  // confidence via boost/penalty) but cannot override this alignment check.
+  if (inp.claudeAbove !== null && inp.mlAbove !== null && inp.claudeAbove !== inp.mlAbove) {
+    return skip(
+      `Claude-ML misalignment: Claude=${inp.claudeAbove ? "YES" : "NO"} ML=${inp.mlAbove ? "YES" : "NO"} — skipping until they agree`,
+      ev,
+    );
+  }
+
   // Whether the ML model is ready to lead
   const mlMinConf = inp.mlMinConfidence ?? ML_PRIMARY_MIN_CONFIDENCE;
   let mlLeadReady =

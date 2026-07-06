@@ -1124,23 +1124,23 @@ export async function runBotLoopTick(): Promise<void> {
         // Signal quality gates for YES bets (direction-neutral logic applied
         // symmetrically to NO bets below):
         //
-        // Rule A — No opposite signal: if any model that fired points NO while
-        //   we want to bet YES, the signals are contradicted.  A contradicted
-        //   bet (BTC stat=YES but ML=NO) is worse than no signal at all.
+        // Claude and ML are the authoritative directional signals.  A YES bet
+        // is only placed when neither Claude nor ML calls NO.  Stat is a
+        // confidence modifier only (±pp via PATH A boost/penalty) and does NOT
+        // block a bet on its own — the engine already penalises Stat dissent
+        // in the confidence score.
         //
-        // Note: we intentionally do NOT block on low-confidence agreeing signals.
-        //   When all models agree on direction, a weakly-confident model (e.g.
-        //   Claude at 35%) still votes the right way — the EV gate handles the
-        //   math.  Only direction contradictions (above === false) are hard stops.
+        // Note: Claude-ML misalignment is caught earlier (alignment gate in the
+        //   core engine) so by the time we reach here both are guaranteed to
+        //   agree with the bet direction if both are available.
         const yesSigs = decision.signals as {
           statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
           statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
         };
         const yesViolation: string[] = [];
-        for (const [name, above, conf] of [
-          ["Stat",   yesSigs.statAbove,   yesSigs.statConfidence]   as const,
-          ["Claude", yesSigs.claudeAbove, yesSigs.claudeConfidence] as const,
-          ["ML",     yesSigs.mlAbove,     yesSigs.mlConfidence]     as const,
+        for (const [name, above] of [
+          ["Claude", yesSigs.claudeAbove] as const,
+          ["ML",     yesSigs.mlAbove]     as const,
         ]) {
           if (above == null) continue;
           if (above === false) yesViolation.push(`${name} says NO`);
@@ -1171,18 +1171,17 @@ export async function runBotLoopTick(): Promise<void> {
       }
 
       if (decision.action === "BET_NO") {
-        // Rule A — No opposite signal: any model pointing YES contradicts a NO bet.
-        // Only direction contradictions block — same logic as YES gate above.
-        // Low-confidence agreeing signals are accepted; the EV gate handles math.
+        // Claude and ML are the authoritative directional signals.  A NO bet
+        // is only placed when neither Claude nor ML calls YES.  Stat is a
+        // confidence modifier only and does not block a NO bet on its own.
         const noSigs = decision.signals as {
           statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
           statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
         };
         const noViolation: string[] = [];
-        for (const [name, above, conf] of [
-          ["Stat",   noSigs.statAbove,   noSigs.statConfidence]   as const,
-          ["Claude", noSigs.claudeAbove, noSigs.claudeConfidence] as const,
-          ["ML",     noSigs.mlAbove,     noSigs.mlConfidence]     as const,
+        for (const [name, above] of [
+          ["Claude", noSigs.claudeAbove] as const,
+          ["ML",     noSigs.mlAbove]     as const,
         ]) {
           if (above == null) continue;
           if (above === true) noViolation.push(`${name} says YES`);
