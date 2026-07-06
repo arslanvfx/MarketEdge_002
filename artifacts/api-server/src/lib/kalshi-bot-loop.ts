@@ -955,6 +955,39 @@ export async function runBotLoopTick(): Promise<void> {
         }
       }
 
+      // ── ML Gate hard checkpoint ────────────────────────────────────────────
+      // In ml_gate mode the ML model's vote is MANDATORY — it is a checkpoint,
+      // not an optional signal.  If mlAbove === null (model failed to init,
+      // still warming up, or backfill not yet complete) the bet is blocked
+      // unconditionally.  We never silently skip a checkpoint: Step 1 must
+      // unlock Step 2.  No parole override: a null ML vote is a missing
+      // prerequisite, not a low-accuracy result.
+      if (S.config.decisionMode === "ml_gate") {
+        const _mlGateSigs = decision.signals as {
+          mlAbove?: boolean | null;
+          statAbove?: boolean | null;
+          claudeAbove?: boolean | null;
+        };
+        if (_mlGateSigs.mlAbove == null) {
+          logger.info(
+            { sym, windowKey, statAbove: _mlGateSigs.statAbove, claudeAbove: _mlGateSigs.claudeAbove },
+            `[kalshi-bot] ml_gate checkpoint BLOCKED — ML not ready for ${sym}`,
+          );
+          evalResults.push({
+            symbol: sym,
+            action: "SKIP",
+            confidence: effectiveConfidence,
+            score: 0,
+            reason: `ml_gate checkpoint: ML not ready — model must vote before any bet fires (stat=${_mlGateSigs.statAbove ?? "null"} claude=${_mlGateSigs.claudeAbove ?? "null"})`,
+            windowKey,
+            selected: false,
+            evaluatedAt: now,
+            trendStability: stability,
+            regime,
+          });
+          continue;
+        }
+      }
 
       if (decision.action === "BET_YES") {
         if (!S.config.freeRunMode && COIN_YES_BLOCKED.has(sym) && !paroleState.yesBlocked.has(sym)) {

@@ -60,3 +60,4 @@
 - [Window-open pre-fetch pipeline](window-open-prefetch.md) — checks-and-balances orchestrator: Step 1=parallel Kalshi fetch, Step 2=stability only for confirmed coins; fired by both tracker (onNewWindow) and bot loop; fallback per-tick retry for late-publishing markets
 - [Kalshi market API price format](kalshi-api-price-format.md) — API now returns no_ask_dollars/no_bid_dollars (string 0–1); yes prices are complements (yes_ask=1−no_bid); old yes_ask/yes_bid integer-cent fields gone
 - [Bot config DB patch vs in-memory](bot-config-db-patch.md) — psql patching bot_config does NOT update live in-memory S.config; server restart required; always set paperDecisionMode=decisionMode when patching so mode-switch doesn't revert it
+- [ml_gate hard checkpoint](ml-gate-checkpoint.md) — ml_gate mode MUST block bets when mlAbove===null; gate lives in Phase 3 loop (kalshi-bot-loop.ts) after hardModelCount check; no parole override
