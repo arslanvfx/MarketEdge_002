@@ -220,7 +220,7 @@ export function applyStreakUpdate(
   updated.consecutiveLosses++;
 
   const limit = coinStreakLossLimit ?? 3;
-  const pauseWindows = coinStreakPauseWindows ?? 2;
+  const pauseWindows = coinStreakPauseWindows ?? 4;
 
   if (limit > 0 && updated.consecutiveLosses >= limit && !updated.pauseUntilWindowKey) {
     const pauseMs = pauseWindows * 15 * 60_000;

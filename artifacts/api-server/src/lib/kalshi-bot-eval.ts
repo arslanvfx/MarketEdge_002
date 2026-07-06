@@ -323,7 +323,7 @@ export async function evalClosedBets(): Promise<void> {
           existingStreak,
           finalPnl,
           S.config.coinStreakLossLimit ?? 3,
-          S.config.coinStreakPauseWindows ?? 2,
+          S.config.coinStreakPauseWindows ?? 4,
           Date.now(),
         );
         if (updatedStreak.pauseUntilWindowKey && !existingStreak.pauseUntilWindowKey) {

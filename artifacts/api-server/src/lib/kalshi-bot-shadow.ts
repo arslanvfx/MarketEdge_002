@@ -343,11 +343,13 @@ export async function checkAllParoles(
   };
 
   try {
-    // Rolling window: last 3 × 15-min windows (~45 min).
-    // Prevents stale historical probes from influencing current-lockout decisions.
     const nowMs = Date.now();
+    // 5-window lookback (~75 min): streak_pause redemption needs 4 windows of shadow
+    // data to accumulate ≥3 evaluated bets before parole can fire.  Other tags (doubt
+    // penalty, near-strike, etc.) benefit from the extra signal too — still requires
+    // ≥60% WR so older stale bets can't prematurely grant parole.
     const windowCutoff = new Date(
-      Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - 3 * 15 * 60_000
+      Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - 5 * 15 * 60_000
     ).toISOString().slice(0, 16);
 
     // Query per (symbol, blockedBy) — one row per restriction type per coin.
