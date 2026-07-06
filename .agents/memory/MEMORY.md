@@ -42,7 +42,8 @@
 - [Paper/Live mode entry-mode safety](paper-live-mode-safety.md) — real-money exit actions must key off pos.entryMode (captured pre-await), never the live global botMode, or flipping to paper strands live funds
 - [ML Gate reference config](ml-gate-reference-config.md) — canonical restore point for ml_gate mode: all engine constants, bot config values, and veto logic; use this whenever switching decisionMode to ml_gate
 - [User context default](user-context-default.md) — user always references production unless explicitly stated otherwise; always query production DB and check production logs first
-- [Per-coin direction filters](per-coin-direction-filters.md) — COIN_YES_BLOCKED={BTC,ETH,DOGE} (≤25% YES WR); COIN_FULLY_BLOCKED={SOL} (no edge either direction); startup migration ml_gate→classic on loadBotConfigFromDB
+- [Per-coin direction filters](per-coin-direction-filters.md) — COIN_YES_BLOCKED/COIN_FULLY_BLOCKED start empty; sets are mutable via parole; no coins hardcoded blocked
+- [YES/NO direction neutrality](direction-neutrality.md) — regime filter, contrarian-momentum gate, momentum override all REMOVED; each 15-min window is independent; direction decided by signals only
 - [Learning improvements defaults](learning-improvements-defaults.md) — 4 guard default changes from production data; wmReady gate defers NOT blocks
 - [Paper/Live mode full isolation](paper-live-isolation.md) — per-mode streak+dailyloss maps, status from mode-filtered count, decisionMode preference per mode, all stat endpoints infer mode; two-Map pattern for any new per-bot state
 - [Kalshi RSA key format](kalshi-rsa-key-format.md) — KALSHI_PRIVATE_KEY stored as raw base64 (no headers); getPrivateKey() must wrap it in PKCS#1 PEM before signing

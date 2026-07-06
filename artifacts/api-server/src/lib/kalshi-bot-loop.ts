@@ -10,7 +10,7 @@ import {
 } from "./kalshi-bot-guards";
 import {
   DEFAULT_BOT_CONFIG, BET_PROFILES, computeDynamicBetSize, makeBotDecision,
-  isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
+  isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
@@ -47,7 +47,6 @@ import {
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
-  REGIME_AGAINST_PENALTY_FALLBACK, CONTRARIAN_LIVE_REGIME_PENALTY,
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX, WINDOW_ENTRY_BUFFER_S,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
@@ -598,7 +597,7 @@ export async function runBotLoopTick(): Promise<void> {
     );
   }
 
-  // Symbols blocked by the new regime-aware guards (momentum override, directional cap, border guard).
+  // Symbols blocked by directional-cap or border guard filters.
   // These must be excluded from Phase-4 orderedSymbols so runBotTickForCoin cannot
   // independently place a bet that the Phase-3 filter just blocked.
   const filteredByNewGuards = new Set<string>();
@@ -868,35 +867,10 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // Momentum override filter: skip when price trend opposes the proposed direction.
-    // Bypassed when shadow accuracy for this coin/restriction meets the parole threshold.
-    // filteredByNewGuards ensures Phase-4 cannot bypass this by calling runBotTickForCoin.
-    if (decision.action !== "SKIP" && S.config.enableMomentumFilter && !paroleState.momentum.has(sym)) {
-      const proposedDir = decision.action === "BET_YES" ? "yes" : "no";
-      if (checkMomentumOverride(proposedDir, recentStrikes, 0.5, S.config.momentumWindowCount)) {
-        logger.info({ sym, proposedDir, recentStrikes, windowCount: S.config.momentumWindowCount },
-          `[kalshi-bot] momentum override — ${sym} trending against ${proposedDir.toUpperCase()} entry`);
-        filteredByNewGuards.add(sym);
-        evalResults.push({
-          symbol: sym,
-          action: "SKIP",
-          confidence: effectiveConfidence,
-          score: 0,
-          reason: `momentum override — trending against ${proposedDir.toUpperCase()} entry`,
-          windowKey,
-          selected: false,
-          evaluatedAt: now,
-          trendStability: stability,
-          regime,
-        });
-        void recordShadowBet(
-          sym, proposedDir, effectiveConfidence, decision.signals,
-          kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
-          "momentum_override",
-        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] momentum_override record failed"));
-        continue;
-      }
-    }
+    // Momentum override removed: multi-window strike trend does NOT predict a single
+    // 15-min window outcome. Each window is independent — YES/NO must be decided by
+    // signal quality (Claude, ML, Stat), not by whether the market was going up or
+    // down in previous windows.
 
     // --- Per-coin blocking filters BEFORE directional cap ---
     // These must run before phase3DirectionCounts is incremented so that coins which will
@@ -1215,85 +1189,15 @@ export async function runBotLoopTick(): Promise<void> {
     }
 
 
-    // Regime filter: if recent settlements consistently closed on one side of the strike,
-    // penalise bets going against that regime by raising the minimum confidence bar.
-    // Bypassed when shadow accuracy for this coin/restriction meets the parole threshold.
-    if (decision.action !== "SKIP") {
-      const kalshiRegime = S.regimeCache.get(sym);
-      const isAgainstRegime =
-        (kalshiRegime === "above" && decision.action === "BET_NO") ||
-        (kalshiRegime === "below" && decision.action === "BET_YES");
-      if (isAgainstRegime && !paroleState.regime.has(sym)) {
-        const penalised = effectiveConfidence - (S.config.regimePenalty ?? REGIME_AGAINST_PENALTY_FALLBACK);
-        logger.info(
-          { sym, kalshiRegime, action: decision.action, confidence: effectiveConfidence, penalised },
-          `[kalshi-bot] regime filter — ${sym} regime=${kalshiRegime} vs ${decision.action}: confidence ${effectiveConfidence}→${penalised}`,
-        );
-        if (penalised < S.config.minConfidence) {
-          filteredByNewGuards.add(sym);
-          evalResults.push({
-            symbol: sym,
-            action: "SKIP",
-            confidence: effectiveConfidence,
-            score: 0,
-            reason: `regime filter — ${kalshiRegime} regime, against-direction penalty → ${penalised}% < ${S.config.minConfidence}%`,
-            windowKey,
-            selected: false,
-            evaluatedAt: now,
-            trendStability: stability,
-            regime,
-          });
-          const _rgDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
-          void recordShadowBet(
-            sym, _rgDir, effectiveConfidence, decision.signals,
-            kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
-            "regime_penalty",
-          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] regime_penalty record failed"));
-          continue;
-        }
-        effectiveConfidence = penalised;
-      }
-    }
+    // Regime filter removed: historical "above/below strike" regime is a macro bias
+    // that unfairly penalises YES bets when the market is currently trending up.
+    // Each 15-min window is independent — direction is determined by current signals
+    // (Claude, ML, Stat) evaluating the last few candles vs this specific strike.
 
-    // Contrarian momentum gate: when the Kalshi strike-price trend (from recent
-    // windows) is moving strongly against the proposed bet direction, the bot is
-    // making a mean-reversion call that needs extra conviction.
-    // Bypassed when shadow accuracy for this coin/restriction meets the parole threshold.
-    if (decision.action !== "SKIP" && regime !== null && !paroleState.contrarian.has(sym)) {
-      const isContrarian =
-        (regime === "trending_down" && decision.action === "BET_YES") ||
-        (regime === "trending_up"   && decision.action === "BET_NO");
-      if (isContrarian) {
-        const penalised = effectiveConfidence - CONTRARIAN_LIVE_REGIME_PENALTY;
-        logger.info(
-          { sym, regime, action: decision.action, confidence: effectiveConfidence, penalised },
-          `[kalshi-bot] contrarian-momentum gate — ${sym} strike trend=${regime} vs ${decision.action}: ${effectiveConfidence}→${penalised}`,
-        );
-        if (penalised < S.config.minConfidence) {
-          filteredByNewGuards.add(sym);
-          evalResults.push({
-            symbol: sym,
-            action: "SKIP",
-            confidence: effectiveConfidence,
-            score: 0,
-            reason: `contrarian-momentum gate — strikes ${regime === "trending_down" ? "falling" : "rising"}, betting ${decision.action === "BET_YES" ? "YES" : "NO"} needs +${CONTRARIAN_LIVE_REGIME_PENALTY}pp → ${penalised}% < ${S.config.minConfidence}%`,
-            windowKey,
-            selected: false,
-            evaluatedAt: now,
-            trendStability: stability,
-            regime,
-          });
-          const _ctDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
-          void recordShadowBet(
-            sym, _ctDir, effectiveConfidence, decision.signals,
-            kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
-            "contrarian_penalty",
-          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] contrarian_penalty record failed"));
-          continue;
-        }
-        effectiveConfidence = penalised;
-      }
-    }
+    // Contrarian-momentum gate removed: same reason. Strike-price trend across
+    // multiple windows does not predict where price will close in THIS window.
+    // YES and NO are always equally valid entries — the signal agreement gates
+    // below already ensure quality without adding directional prejudice.
 
     // Position-relative NO gate: when the live crypto price is already above the
     // Kalshi strike by > 0.1%, a NO bet is a mean-reversion call into a trending

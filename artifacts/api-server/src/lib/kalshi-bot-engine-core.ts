@@ -61,22 +61,22 @@ export const BET_PROFILES: Record<BetProfile, BetProfileConfig> = {
     // Classic confidence ranges:
     //   PATH A (ML leads, ≥62%): 62–80% base + 6pp per supporting signal (Stat/Claude/WM)
     //   PATH B (Stat+Claude): 65% base; no cap → high-conviction entries pass through cleanly
-    //   Strict 15pp regime penalty keeps quality high — fewer total bets
-    description: "Balanced — ML leads at 62%+; confidence uncapped (PATH A up to 80%+); 15pp regime penalty. Fewer bets, higher conviction.",
+    //   No regime penalty — each 15-min window is independent; YES and NO are equally valid
+    description: "Balanced — ML leads at 62%+; confidence uncapped (PATH A up to 80%+); no regime bias. Direction decided purely by signal agreement.",
     mlMinConfidence: 62,
     effectiveConfidenceCap: 100,
-    regimePenalty: 15,
+    regimePenalty: 0,
   },
   aggressive: {
     label: "Aggressive",
     // Classic confidence ranges:
     //   PATH A (ML leads, ≥58%): 58–80% effective (capped) — ML at 58% + Stat+Claude = 70%, all 3 = 76%
     //   PATH B (Stat+Claude): 65% base, capped at 80 — prevents borderline ML signals from inflating to 87-90%
-    //   10pp regime penalty allows more cross-regime entries than Normal
-    description: "More bets — ML leads at 58%+; 10pp regime penalty; confidence capped at 80% (PATH A with full support peaks at ~76–80%).",
+    //   No regime penalty — direction decided by signals, not historical macro trend
+    description: "More bets — ML leads at 58%+; no regime penalty; confidence capped at 80% (PATH A with full support peaks at ~76–80%).",
     mlMinConfidence: 58,
     effectiveConfidenceCap: 80,
-    regimePenalty: 10,
+    regimePenalty: 0,
   },
 };
 
@@ -761,8 +761,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableBorderGuard: true,
   borderProximityPct: 3.0,
   borderLookbackBets: 3,
-  // Regime penalty: 15pp deduction for against-regime bets — high bar keeps quality high
-  regimePenalty: 15,
+  // Regime penalty: 0 — each 15-min window is independent; YES/NO equally valid
+  regimePenalty: 0,
   // ML Gate soft veto: only veto when ML is ≥57% confident in opposition.
   // Values 50-70; 50 = always veto on any disagreement (original hard veto).
   mlVetoMinConfidence: 57,
