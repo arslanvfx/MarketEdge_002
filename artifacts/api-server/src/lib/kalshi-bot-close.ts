@@ -322,7 +322,7 @@ export interface BetRecordArgs {
 }
 
 export async function persistBetRecord(args: BetRecordArgs): Promise<void> {
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = 4;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -331,9 +331,11 @@ export async function persistBetRecord(args: BetRecordArgs): Promise<void> {
     } catch (err) {
       lastErr = err;
       if (attempt < MAX_ATTEMPTS) {
-        // Brief pause lets the connection pool free up a slot (window-expiry
-        // often fires 6-7 simultaneous writes that exhaust the pool).
-        await new Promise(r => setTimeout(r, attempt * 600));
+        // Give the pool time to drain — window-expiry fires 6-7 simultaneous
+        // writes that can exhaust all slots. Use longer backoff than the old
+        // 600 ms so a 8 s connection timeout on the previous attempt has
+        // actually resolved before we hammer again.
+        await new Promise(r => setTimeout(r, attempt * 2000));
       }
     }
   }
@@ -408,6 +410,10 @@ export async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> 
       );
     }
     logger.warn({ err }, "[kalshi-bot] DB persist error (non-fatal)");
+    // Re-throw so the caller's retry loop (persistBetRecord) can retry.
+    // Without this the outer loop never sees the failure and silently gives up
+    // after a single attempt.
+    throw err;
   }
 }
 

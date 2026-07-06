@@ -12,10 +12,12 @@ if (!process.env.DATABASE_URL) {
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 5,
+  max: 10,
   min: 1,
   idleTimeoutMillis: 20000,
-  connectionTimeoutMillis: 30000,
+  // Short acquire timeout so failed attempts fail fast and retry logic kicks in
+  // quickly instead of blocking the bot tick for 30 s.
+  connectionTimeoutMillis: 8000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 1000,
   allowExitOnIdle: false,
@@ -40,7 +42,7 @@ export function startPoolPinger() {
     } catch {
       // non-fatal — pool will self-heal on next real query
     }
-    setTimeout(run, 20_000);
+    setTimeout(run, 10_000);
   };
   setTimeout(run, 5_000);
 }
