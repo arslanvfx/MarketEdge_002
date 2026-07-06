@@ -330,12 +330,25 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     const claudeDir = inp.claudeAbove;
     const action: BotDecisionAction = claudeDir ? "BET_YES" : "BET_NO";
 
-    // If Stat is available and disagrees with Claude → no tiebreaker, skip
+    // If Stat is available and disagrees with Claude → ML can arbitrate.
+    // The Claude-ML misalignment pre-check above already handled the case
+    // where ML disagrees with Claude (returning SKIP before reaching here),
+    // so if mlAbove is non-null here it is guaranteed to agree with Claude.
     if (inp.statAbove !== null && inp.statAbove !== claudeDir) {
-      return skip(
-        `Claude and Stat disagree: Claude=${claudeDir} Stat=${inp.statAbove} — no ML to arbitrate`,
-        ev,
-      );
+      if (inp.mlAbove == null) {
+        return skip(
+          `Claude and Stat disagree: Claude=${claudeDir} Stat=${inp.statAbove} — no ML to arbitrate`,
+          ev,
+        );
+      }
+      if (inp.mlAbove !== claudeDir) {
+        // Safety net: ML sides with Stat against Claude — skip
+        return skip(
+          `Claude/Stat split: Claude=${claudeDir} Stat=${inp.statAbove} ML=${inp.mlAbove} — ML+Stat oppose Claude direction`,
+          ev,
+        );
+      }
+      // ML sides with Claude (Claude+ML vs Stat, 2-of-3) — proceed at half-pair confidence
     }
 
     const base = inp.statAbove === claudeDir ? BASE_CONFIDENCE_FULL_PAIR : BASE_CONFIDENCE_HALF_PAIR;

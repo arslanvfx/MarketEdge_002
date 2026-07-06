@@ -176,10 +176,24 @@ test("PATH B: Claude alone (Stat null) → BASE_CONFIDENCE_HALF_PAIR", () => {
   assert.equal(r.confidence, BASE_CONFIDENCE_HALF_PAIR);
 });
 
-test("PATH B: Claude and Stat disagree → SKIP (no ML to arbitrate)", () => {
-  const r = computeCorePairDecision(inp({ claudeAbove: true, statAbove: false }));
+test("PATH B: Claude and Stat disagree, ML null → SKIP (no ML to arbitrate)", () => {
+  const r = computeCorePairDecision(inp({ claudeAbove: true, statAbove: false, mlAbove: null }));
   assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /disagree/);
+  assert.match(r.reasoning, /no ML to arbitrate/);
+});
+
+test("PATH B: Claude and Stat disagree, ML sides with Claude → BET (2-of-3 agreement)", () => {
+  // Claude=YES, Stat=NO, ML=YES → ML+Claude (2) vs Stat (1) → proceed BET_YES
+  const r = computeCorePairDecision(inp({ claudeAbove: true, statAbove: false, mlAbove: true, mlConfidence: 55 }));
+  assert.equal(r.action, "BET_YES");
+  // Confidence at half-pair level since Stat dissents
+  assert.equal(r.confidence, BASE_CONFIDENCE_HALF_PAIR);
+});
+
+test("PATH B: Claude=NO, Stat=YES, ML=NO → ML sides with Claude → BET_NO", () => {
+  const r = computeCorePairDecision(inp({ claudeAbove: false, statAbove: true, mlAbove: false, mlConfidence: 55 }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, BASE_CONFIDENCE_HALF_PAIR);
 });
 
 test("PATH B: WM agrees with Claude → +CONFIDENCE_BOOST_PER_SIGNAL", () => {

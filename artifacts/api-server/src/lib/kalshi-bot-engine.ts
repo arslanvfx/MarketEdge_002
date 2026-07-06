@@ -388,19 +388,24 @@ function _makeBotDecisionInner(
   }
 
   // ── Decision Mode: ml_gate ────────────────────────────────────────────────
-  // Rule: compute the Stat+Claude core-pair decision WITHOUT ML (so ML is not
-  // promoted to PATH A), then veto the resulting bet if ML is available and
-  // disagrees with the direction. If ML is unavailable, fall through to normal
-  // classic behavior (ML will still boost confidence if it agrees at the end).
+  // Rule: compute the Stat+Claude core-pair decision with ML as a tiebreaker
+  // but NOT as Path A primary.  mlMinConfidence is set impossibly high (999)
+  // so ML cannot promote itself to PATH A; it only participates in:
+  //   • PATH B disagreement arbitration (Claude+ML vs Stat, 2-of-3)
+  //   • confidence modifiers (dissent penalty / boost) in PATH B/C
+  //   • post-core veto (if ML opposes the agreed direction with high confidence)
+  // If ML is unavailable (mlAbove===null) and Claude/Stat disagree, the core
+  // returns SKIP "no ML to arbitrate" as before.
   if (decisionMode === "ml_gate") {
     const coreResult = computeCorePairDecision({
       statAbove, claudeAbove,
-      mlAbove: null, mlConfidence: null, // exclude ML from the core direction decision
+      mlAbove,              // pass real mlAbove so PATH B can use it as tiebreaker
+      mlConfidence,
+      mlMinConfidence: 999, // prevent ML from taking PATH A primary role
       wmDriftAbove, wmRec, wmReady,
       yesPrice, signalAccuracyPct, minutesElapsed,
       statConfidence: statCall?.confidence ?? null,
       claudeConfidence: claudeCall?.confidence ?? null,
-      mlMinConfidence: profile.mlMinConfidence,
       kalshiTicker,
       minConfidence: config.minConfidence,
       minReturnMultiple: config.minReturnMultiple,
