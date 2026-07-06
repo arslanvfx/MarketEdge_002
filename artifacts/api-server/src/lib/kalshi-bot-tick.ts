@@ -556,15 +556,15 @@ async function _runBotTick(
     }
 
     // ── Strike proximity guard ─────────────────────────────────────────────
-    // Skip when the live price is within 0.15 % of the Kalshi target.
-    // A paper-thin cushion means a single tick crosses the strike and flips
-    // the outcome. The 10:00 UTC BNB/ETH/XRP losses were all ≤ 0.06 % away.
-    // Only applied when direction matches "at risk" side:
+    // Skip when the live price is within 0.05% of the Kalshi target.
+    // At that proximity a single tick crosses the strike and flips the
+    // outcome — the bet is effectively a coin flip regardless of signals.
+    // Only applied on the "at risk" side for each direction:
     //   NO  bet + price barely below target → one tick up = loss
     //   YES bet + price barely above target → one tick down = loss
     const livePrice = pred?.price;
     if (livePrice != null && livePrice > 0 && kalshiTarget > 0) {
-      const STRIKE_PROXIMITY_PCT = 0.025;
+      const STRIKE_PROXIMITY_PCT = 0.05;
       const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
       const tooClose =
         (direction === "no"  && livePrice <  kalshiTarget && distancePct < STRIKE_PROXIMITY_PCT) ||
@@ -580,6 +580,39 @@ async function _runBotTick(
             symbol: sym, windowKey, ticker: kalshiTicker, direction,
             action: "skip",
             signals: { ...decision.signals, reason: "strike-proximity", livePrice, kalshiTarget, distancePct: +distancePct.toFixed(4) },
+            entryPrice: yesPrice, kalshiTarget,
+          });
+        }
+        return;
+      }
+    }
+
+    // ── Strike-oscillation filter ─────────────────────────────────────────
+    // Skip when price has been bouncing repeatedly across the strike in
+    // the last 6 one-minute candles.  Two or more crossings mean the market
+    // is chopping around the target — no directional edge regardless of what
+    // the models say.  One crossing is fine (directional momentum shift);
+    // zero crossings means price is cleanly on one side (ideal entry).
+    if (kalshiTarget > 0 && pred != null && pred.candles.length >= 6) {
+      const recent6 = pred.candles.slice(-6);
+      let crossings = 0;
+      let prevSide: boolean | null = null;
+      for (const candle of recent6) {
+        const side = candle.c >= kalshiTarget;
+        if (prevSide !== null && side !== prevSide) crossings++;
+        prevSide = side;
+      }
+      if (crossings >= 2) {
+        logger.info(
+          { sym, direction, crossings, kalshiTarget },
+          "[kalshi-bot] SKIP — strike-oscillation: price crossing strike repeatedly",
+        );
+        if (lastDecisionWindowKey.get(sym) !== windowKey) {
+          lastDecisionWindowKey.set(sym, windowKey);
+          await persistBetRecord({
+            symbol: sym, windowKey, ticker: kalshiTicker, direction,
+            action: "skip",
+            signals: { ...decision.signals, reason: "strike-oscillation", crossings, kalshiTarget },
             entryPrice: yesPrice, kalshiTarget,
           });
         }

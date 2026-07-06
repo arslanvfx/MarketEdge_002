@@ -306,6 +306,28 @@ export function runExitGuard(
     };
   }
 
+  // Strike-cross urgency exit for NO bets.
+  // When a NO position has been open for 3+ minutes and the yes price has
+  // clearly moved above 0.60 (market pricing >60% chance the price is ABOVE
+  // the strike) with at least one model confirming, exit rather than ride to
+  // near-certain full loss at expiry.  This is more sensitive than full
+  // Phase 1 because NO reversals (price bouncing back above strike after we
+  // bet it would stay below) are the dominant loss pattern.
+  if (
+    direction === "no" &&
+    holdDurationMs >= 3 * 60_000 &&
+    yp !== null && yp > 0.60 &&
+    !timingOverride &&
+    (statSaysAdverse || claudeSaysAdverse || mlFlipped)
+  ) {
+    return {
+      recommendation: "EXIT",
+      reason: `Strike-cross urgency: NO bet, yes price ${(yp * 100).toFixed(0)}¢ (market says ABOVE strike) with model confirmation after ${Math.round(holdDurationMs / 60_000)}min`,
+      phase: 1,
+      guardStates,
+    };
+  }
+
   // Timing override: always hold if high accuracy at this minute
   if (timingOverride) {
     return {

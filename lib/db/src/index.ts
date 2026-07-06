@@ -12,11 +12,12 @@ if (!process.env.DATABASE_URL) {
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 25,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 30000,
+  max: 20,
+  idleTimeoutMillis: 15000,
+  connectionTimeoutMillis: 10000,
   keepAlive: true,
-  keepAliveInitialDelayMillis: 5000,
+  keepAliveInitialDelayMillis: 3000,
+  allowExitOnIdle: false,
 });
 
 pool.on("error", (err) => {
@@ -31,6 +32,10 @@ const RETRYABLE = [
   "timeout exceeded when trying to connect",
   "connect ECONNREFUSED",
   "Connection refused",
+  "Authentication timed out",
+  "SASL",
+  "SSL SYSCALL error",
+  "Client was closed",
 ];
 
 function isRetryable(err: unknown): boolean {
@@ -40,8 +45,8 @@ function isRetryable(err: unknown): boolean {
 
 export async function withRetry<T>(
   fn: () => Promise<T>,
-  retries = 2,
-  delayMs = 500,
+  retries = 3,
+  delayMs = 300,
 ): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
