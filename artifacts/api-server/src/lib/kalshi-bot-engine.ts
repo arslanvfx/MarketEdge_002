@@ -23,10 +23,12 @@ import {
   getKalshiCachedData,
   getKalshiWindowContext,
   liveDirectionCache,
+  predCache,
   TRAINING_COINS,
   type TrackerWindowCall,
   type WindowBetSignal,
 } from "./crypto";
+import { logger } from "./logger";
 
 import { extractMLFeatures } from "./ml-features";
 import { getMLPrediction } from "./ml-store";
@@ -157,6 +159,10 @@ function calcROI(action: BotDecisionAction, yesPrice: number): number {
 // Public decision engine — gathers live signals then calls the pure core
 // ---------------------------------------------------------------------------
 
+// Pure override helpers live in kalshi-bot-engine-core.ts (zero-dependency
+// module) so they can be unit-tested without mocking the I/O stores.
+export { applyClaudeLiveOverride, applyStatPredCacheOverride } from "./kalshi-bot-engine-core";
+
 function _makeBotDecisionInner(
   symbol: string,
   config: BotConfig,
@@ -172,30 +178,49 @@ function _makeBotDecisionInner(
   const claudeCall: TrackerWindowCall | null = getTrackerWindowCall(sym);
   const wmSignal: WindowBetSignal | null = getWindowBetSignal(sym);
 
-  const statAbove: boolean | null = statCall?.aboveKalshi ?? null;
+  // ── Stat signal — prefer mid-snap predCache when fresher than opening snap ─
+  //
+  // getStatWindowCall reads historyStore written once at window-open (~T+1 min).
+  // The tracker fires a mid-window analyzeCoin re-run at T+7 and stores the
+  // result in predCache.  If that entry is newer than the opening stat snap
+  // and less than 10 minutes old, derive a fresher statAbove from the live
+  // price vs Kalshi strike.
+  const statSnapAtMs = statCall?.snappedAt ? new Date(statCall.snappedAt).getTime() : 0;
+  const statPredResult = applyStatPredCacheOverride(
+    statCall?.aboveKalshi ?? null,
+    statSnapAtMs,
+    predCache.get(sym),
+    kalshiTarget ?? null,
+  );
+  let statAbove = statPredResult.statAbove;
+  if (statPredResult.flipped) {
+    logger.info(
+      { sym, openingStatAbove: statCall?.aboveKalshi ?? null, midSnapStatAbove: statAbove, snapAgeS: Math.round((Date.now() - statSnapAtMs) / 1000) },
+      "[kalshi-bot] stat mid-snap FLIP: direction reversed vs opening call",
+    );
+  }
 
-  // claudeAbove: prefer the live direction cache over the frozen opening snap.
+  // ── Claude signal — prefer liveDirectionCache over the frozen opening snap ─
   //
-  // getTrackerWindowCall reads historyStore — written once at window-open
+  // getTrackerWindowCall reads historyStore written once at window-open
   // (T~+1 min) and never updated again.  liveDirectionCache is populated by
-  // fetchLiveDirection (2-min TTL) and reflects market conditions right now.
+  // fetchLiveDirection (2-min TTL) and reflects Claude's current read.
   //
-  // If the live cache has a result newer than the opening snap, use it so that
-  // a bet fired 5–6 minutes into the window is evaluated against current
-  // conditions, not the direction Claude saw at window-open.
-  //
-  // Flip detection: when live direction contradicts the opening call the bot
-  // now naturally sees a disagreement between Claude (flipped) and Stat
-  // (opening), which will tighten the signal agreement gate appropriately.
-  let claudeAbove: boolean | null = claudeCall?.aboveKalshi ?? null;
-  let claudeSourceIsLive = false;
-  const liveDirEntry = liveDirectionCache.get(sym);
-  if (liveDirEntry) {
-    const openingSnapMs = claudeCall?.snappedAt ? new Date(claudeCall.snappedAt).getTime() : 0;
-    if (liveDirEntry.at > openingSnapMs && liveDirEntry.result.aboveKalshi !== null) {
-      claudeAbove = liveDirEntry.result.aboveKalshi;
-      claudeSourceIsLive = true;
-    }
+  // When the live direction contradicts the opening call the bot sees Claude
+  // disagreeing with Stat, which tightens the agreement gate appropriately.
+  const claudeSnapAtMs = claudeCall?.snappedAt ? new Date(claudeCall.snappedAt).getTime() : 0;
+  const claudeLiveResult = applyClaudeLiveOverride(
+    claudeCall?.aboveKalshi ?? null,
+    claudeSnapAtMs,
+    liveDirectionCache.get(sym),
+  );
+  let claudeAbove = claudeLiveResult.claudeAbove;
+  const claudeSourceIsLive = claudeLiveResult.isLive;
+  if (claudeLiveResult.flipped) {
+    logger.info(
+      { sym, openingClaudeAbove: claudeCall?.aboveKalshi ?? null, liveClaudeAbove: claudeAbove, openingAgeS: Math.round((Date.now() - claudeSnapAtMs) / 1000) },
+      "[kalshi-bot] Claude live direction FLIP: live verdict contradicts opening call",
+    );
   }
   const wmRec = wmSignal?.recommendation ?? null;
   const wmReady = wmSignal?.ready ?? false;
@@ -477,13 +502,15 @@ function _makeBotDecisionInner(
             ? ` (ML disagrees at ${mlConfidence ?? 0}% < ${config.mlVetoMinConfidence ?? 57}% threshold — veto skipped)`
             : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
     }
-    // Append a short note whenever Claude's signal was sourced from the live
-    // re-check rather than the frozen opening snap.
-    const claudeLiveNote = claudeSourceIsLive ? " [Claude:live-refresh]" : "";
+    // Append short notes whenever signals were sourced from live re-checks
+    // rather than the frozen opening snaps.
+    const liveSourceNotes =
+      (claudeSourceIsLive ? " [Claude:live-refresh]" : "") +
+      (statPredResult.isLive ? " [Stat:mid-snap]" : "");
     return {
       action: coreResult.action,
       confidence: coreResult.confidence,
-      reasoning: coreResult.reasoning + mlReasonSuffix + claudeLiveNote,
+      reasoning: coreResult.reasoning + mlReasonSuffix + liveSourceNotes,
       signals: coreSnap,
     };
   }
@@ -508,11 +535,13 @@ function _makeBotDecisionInner(
     result.action !== "SKIP" ? result.action : null,
   );
 
-  const claudeLiveNote = claudeSourceIsLive ? " [Claude:live-refresh]" : "";
+  const liveSourceNotes =
+    (claudeSourceIsLive ? " [Claude:live-refresh]" : "") +
+    (statPredResult.isLive ? " [Stat:mid-snap]" : "");
   return {
     action: result.action,
     confidence: result.confidence,
-    reasoning: result.reasoning + claudeLiveNote,
+    reasoning: result.reasoning + liveSourceNotes,
     signals: snapshot,
   };
 }

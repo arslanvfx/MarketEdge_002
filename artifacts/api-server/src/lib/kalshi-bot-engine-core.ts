@@ -1032,3 +1032,71 @@ export function restoreStreakState(
   }
   return { state: out, clearedSyms };
 }
+
+// ---------------------------------------------------------------------------
+// Pure override helpers — live signal freshness (exported for unit testing)
+// ---------------------------------------------------------------------------
+
+/**
+ * Applies the live-direction cache override to Claude's opening snap.
+ *
+ * The opening snap (historyStore) is written once at window-open and never
+ * updated.  liveDirectionCache is refreshed by fetchLiveDirection (2-min TTL)
+ * and represents Claude's current market read.
+ *
+ * Returns the resolved claudeAbove value, whether the live cache was used,
+ * and whether the live direction contradicts the opening call (a "flip").
+ */
+export function applyClaudeLiveOverride(
+  openingAbove: boolean | null,
+  openingSnapAtMs: number,
+  liveDirEntry: { at: number; result: { aboveKalshi: boolean | null } } | undefined,
+): { claudeAbove: boolean | null; isLive: boolean; flipped: boolean } {
+  if (!liveDirEntry || liveDirEntry.result.aboveKalshi === null) {
+    return { claudeAbove: openingAbove, isLive: false, flipped: false };
+  }
+  if (liveDirEntry.at <= openingSnapAtMs) {
+    return { claudeAbove: openingAbove, isLive: false, flipped: false };
+  }
+  const liveAbove = liveDirEntry.result.aboveKalshi;
+  return {
+    claudeAbove: liveAbove,
+    isLive: true,
+    flipped: openingAbove !== null && liveAbove !== openingAbove,
+  };
+}
+
+/**
+ * Applies the mid-snap predCache override to the opening stat signal.
+ *
+ * The stat snap in historyStore is written once at window-open (~T+1 min).
+ * The tracker fires a mid-window analyzeCoin re-run at T+7 and writes the
+ * result to predCache.  If that cache entry is newer than the opening snap
+ * and recent enough (< 10 min), derive a fresher statAbove by comparing the
+ * live price in the cache entry against the Kalshi target.
+ *
+ * `nowMs` is injectable for deterministic testing (defaults to Date.now()).
+ */
+export function applyStatPredCacheOverride(
+  openingAbove: boolean | null,
+  openingSnapAtMs: number,
+  predCacheEntry: { at: number; value: { price: number; kalshiTarget?: number | null } } | undefined,
+  kalshiTarget: number | null,
+  nowMs: number = Date.now(),
+): { statAbove: boolean | null; isLive: boolean; flipped: boolean } {
+  const PRED_CACHE_MAX_AGE_MS = 10 * 60_000;
+  if (!predCacheEntry) {
+    return { statAbove: openingAbove, isLive: false, flipped: false };
+  }
+  const kal = predCacheEntry.value.kalshiTarget ?? kalshiTarget;
+  const predAge = nowMs - predCacheEntry.at;
+  if (predCacheEntry.at <= openingSnapAtMs || predAge >= PRED_CACHE_MAX_AGE_MS || kal == null) {
+    return { statAbove: openingAbove, isLive: false, flipped: false };
+  }
+  const midSnapStatAbove = predCacheEntry.value.price >= kal;
+  return {
+    statAbove: midSnapStatAbove,
+    isLive: true,
+    flipped: openingAbove !== null && midSnapStatAbove !== openingAbove,
+  };
+}

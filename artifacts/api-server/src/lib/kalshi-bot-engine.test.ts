@@ -38,6 +38,11 @@ import {
   type CircuitBreakerState,
 } from "./kalshi-bot-engine-core.ts";
 
+import {
+  applyClaudeLiveOverride,
+  applyStatPredCacheOverride,
+} from "./kalshi-bot-engine-core.ts";
+
 const DEFAULT_MIN_CONFIDENCE = 60;
 
 // ---------------------------------------------------------------------------
@@ -822,4 +827,200 @@ test("DEFAULT_BOT_CONFIG: minReturnMultiple default is 1.45", () => {
 
 test("DEFAULT_BOT_CONFIG: minNoEntryMinutes default is 1", () => {
   assert.equal(DEFAULT_BOT_CONFIG.minNoEntryMinutes, 1);
+});
+
+// ---------------------------------------------------------------------------
+// applyClaudeLiveOverride — live direction cache override for Claude signal
+// ---------------------------------------------------------------------------
+
+test("applyClaudeLiveOverride: no cache entry → opening value, isLive=false, flipped=false", () => {
+  const r = applyClaudeLiveOverride(true, 1000, undefined);
+  assert.equal(r.claudeAbove, true);
+  assert.equal(r.isLive, false);
+  assert.equal(r.flipped, false);
+});
+
+test("applyClaudeLiveOverride: cache entry older than opening snap → not overridden", () => {
+  const r = applyClaudeLiveOverride(
+    true,
+    2000, // opening snap at t=2000
+    { at: 1500, result: { aboveKalshi: false } }, // cache at t=1500 (older)
+  );
+  assert.equal(r.claudeAbove, true); // opening preserved
+  assert.equal(r.isLive, false);
+  assert.equal(r.flipped, false);
+});
+
+test("applyClaudeLiveOverride: live result is null → not overridden", () => {
+  const r = applyClaudeLiveOverride(
+    true,
+    1000,
+    { at: 2000, result: { aboveKalshi: null } },
+  );
+  assert.equal(r.claudeAbove, true);
+  assert.equal(r.isLive, false);
+  assert.equal(r.flipped, false);
+});
+
+test("applyClaudeLiveOverride: live newer, same direction → isLive=true, flipped=false", () => {
+  const r = applyClaudeLiveOverride(
+    true,
+    1000,
+    { at: 2000, result: { aboveKalshi: true } },
+  );
+  assert.equal(r.claudeAbove, true);
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, false);
+});
+
+test("applyClaudeLiveOverride: live newer, contradicts opening → isLive=true, flipped=true", () => {
+  const r = applyClaudeLiveOverride(
+    true,  // opening said above
+    1000,
+    { at: 2000, result: { aboveKalshi: false } }, // live says below
+  );
+  assert.equal(r.claudeAbove, false); // live wins
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, true);
+});
+
+test("applyClaudeLiveOverride: opening null + live true → isLive=true, flipped=false (no opening to flip)", () => {
+  const r = applyClaudeLiveOverride(
+    null, // opening was absent
+    0,
+    { at: 2000, result: { aboveKalshi: true } },
+  );
+  assert.equal(r.claudeAbove, true);
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, false); // null opening cannot produce a flip
+});
+
+test("applyClaudeLiveOverride: live exactly at opening snapAt timestamp → not overridden (must be strictly newer)", () => {
+  const r = applyClaudeLiveOverride(
+    true,
+    5000,
+    { at: 5000, result: { aboveKalshi: false } }, // same ms, not newer
+  );
+  assert.equal(r.claudeAbove, true); // opening preserved
+  assert.equal(r.isLive, false);
+});
+
+// ---------------------------------------------------------------------------
+// applyStatPredCacheOverride — mid-snap predCache override for stat signal
+// ---------------------------------------------------------------------------
+
+test("applyStatPredCacheOverride: no cache entry → opening value, isLive=false", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(true, 0, undefined, 50000, now);
+  assert.equal(r.statAbove, true);
+  assert.equal(r.isLive, false);
+  assert.equal(r.flipped, false);
+});
+
+test("applyStatPredCacheOverride: cache older than opening snap → not overridden", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true,
+    now - 60_000, // opening snap 60s ago
+    { at: now - 90_000, value: { price: 40000, kalshiTarget: 50000 } }, // cache even older
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, true); // opening preserved
+  assert.equal(r.isLive, false);
+});
+
+test("applyStatPredCacheOverride: cache too old (>10 min) → not overridden", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true,
+    now - 12 * 60_000, // opening snap 12 min ago
+    { at: now - 11 * 60_000, value: { price: 40000, kalshiTarget: 50000 } }, // cache 11 min old — over limit
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, true);
+  assert.equal(r.isLive, false);
+});
+
+test("applyStatPredCacheOverride: no kalshiTarget in entry or argument → not overridden", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true,
+    now - 60_000,
+    { at: now - 30_000, value: { price: 60000, kalshiTarget: null } },
+    null, // also no fallback
+    now,
+  );
+  assert.equal(r.statAbove, true);
+  assert.equal(r.isLive, false);
+});
+
+test("applyStatPredCacheOverride: price above target → statAbove=true, isLive=true, flipped=false (opening agreed)", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true, // opening also said above
+    now - 60_000,
+    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59000 } }, // price > target
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, true);
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, false);
+});
+
+test("applyStatPredCacheOverride: price below target → statAbove=false, flipped=true when opening was true", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true,  // opening said above
+    now - 60_000,
+    { at: now - 30_000, value: { price: 58000, kalshiTarget: 59000 } }, // price < target
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, false);
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, true);
+});
+
+test("applyStatPredCacheOverride: price exactly at target counts as above (>= is inclusive)", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    false,
+    now - 60_000,
+    { at: now - 30_000, value: { price: 59000, kalshiTarget: 59000 } }, // price === target
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, true); // >= is inclusive
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, true); // opening said false → mid-snap says true
+});
+
+test("applyStatPredCacheOverride: uses entry.value.kalshiTarget when argument is null", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    null,
+    now - 60_000,
+    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59500 } },
+    null, // no fallback target — must use entry's
+    now,
+  );
+  assert.equal(r.statAbove, true); // 60000 > 59500
+  assert.equal(r.isLive, true);
+});
+
+test("applyStatPredCacheOverride: opening null → flipped=false even when direction changes", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    null, // no opening signal
+    now - 60_000,
+    { at: now - 30_000, value: { price: 58000, kalshiTarget: 59000 } },
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, false);
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, false); // null opening → no flip to detect
 });
