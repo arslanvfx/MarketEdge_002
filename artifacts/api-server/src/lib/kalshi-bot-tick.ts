@@ -352,7 +352,7 @@ async function _runBotTick(
   //   4. The stat snap has had time to run and update predCache with the
   //      new window's predictions (ML included).
   // Effective betting window: 2:00 → 12:00 (10 min), enough for all strategies.
-  if (secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
+  if (!S.config.freeRunMode && secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
     if (lastDecisionWindowKey.get(sym) !== `warmup:${windowKey}`) {
       lastDecisionWindowKey.set(sym, `warmup:${windowKey}`);
       await persistBetRecord({
@@ -389,11 +389,11 @@ async function _runBotTick(
   // result may have been SKIP (so the coin was never flagged), yet here
   // makeBotDecision now returns BET_YES — slipping past the per-coin block.
   // Re-checking here closes that race window unconditionally.
-  if (decision.action === "BET_YES" && COIN_YES_BLOCKED.has(sym)) {
+  if (!S.config.freeRunMode && decision.action === "BET_YES" && COIN_YES_BLOCKED.has(sym)) {
     logger.debug({ sym }, "[kalshi-bot] _runBotTick: BET_YES blocked by COIN_YES_BLOCKED (defense-in-depth)");
     return;
   }
-  if (decision.action !== "SKIP" && COIN_FULLY_BLOCKED.has(sym)) {
+  if (!S.config.freeRunMode && decision.action !== "SKIP" && COIN_FULLY_BLOCKED.has(sym)) {
     logger.debug({ sym }, "[kalshi-bot] _runBotTick: entry blocked by COIN_FULLY_BLOCKED (defense-in-depth)");
     return;
   }
@@ -449,7 +449,7 @@ async function _runBotTick(
   const streakMap = activeCoinStreakState();
   const streakInfo = streakMap.get(sym);
   const streakPause = checkStreakPauseGuard(streakInfo?.pauseUntilWindowKey ?? null, windowKey);
-  if (streakPause.blocked) {
+  if (!S.config.freeRunMode && streakPause.blocked) {
     logger.info(
       { sym, pauseUntilWindowKey: streakInfo!.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo!.consecutiveLosses },
       "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
@@ -466,7 +466,7 @@ async function _runBotTick(
   // gets to attempt the recovery bet and the pause only kicks in if it loses
   // again.  The post-loss pause (coinStreakPauseWindows) handles the cooldown
   // after the limit is reached and that pause is set by the eval/close path.
-  {
+  if (!S.config.freeRunMode) {
     const streakLimit = S.config.coinStreakLossLimit ?? 3;
     const currentLosses = streakInfo?.consecutiveLosses ?? 0;
     if (streakLimit > 0 && currentLosses >= streakLimit) {
@@ -563,7 +563,7 @@ async function _runBotTick(
     //   NO  bet + price barely below target → one tick up = loss
     //   YES bet + price barely above target → one tick down = loss
     const livePrice = pred?.price;
-    if (livePrice != null && livePrice > 0 && kalshiTarget > 0) {
+    if (!S.config.freeRunMode && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
       const STRIKE_PROXIMITY_PCT = 0.05;
       const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
       const tooClose =
@@ -593,7 +593,7 @@ async function _runBotTick(
     // is chopping around the target — no directional edge regardless of what
     // the models say.  One crossing is fine (directional momentum shift);
     // zero crossings means price is cleanly on one side (ideal entry).
-    if (kalshiTarget > 0 && pred != null && pred.candles.length >= 6) {
+    if (!S.config.freeRunMode && kalshiTarget > 0 && pred != null && pred.candles.length >= 6) {
       const recent6 = pred.candles.slice(-6);
       let crossings = 0;
       let prevSide: boolean | null = null;

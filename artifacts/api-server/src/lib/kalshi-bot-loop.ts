@@ -420,7 +420,7 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   // Quiet-hours gate: skip new entries during the configured UTC hour range.
-  if (isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd)) {
+  if (!S.config.freeRunMode && isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd)) {
     logger.debug(
       { utcHour: new Date().getUTCHours(), quietHoursStart: S.config.quietHoursStart, quietHoursEnd: S.config.quietHoursEnd },
       "[kalshi-bot] quiet hours — skipping new entry",
@@ -538,6 +538,7 @@ export async function runBotLoopTick(): Promise<void> {
     );
   }
   // Store for Task-C signal enrichment: _runBotTick includes this in the signals JSON.
+  if (S.config.freeRunMode) windowDoubtPenalty = 0;
   S.currentWindowDoubtPenalty = windowDoubtPenalty;
 
   // Unanimous-failure guard: secondary penalty that fires when ALL models have been
@@ -566,6 +567,7 @@ export async function runBotLoopTick(): Promise<void> {
       `[kalshi-bot] unanimous failure guard: ${unanimousWeakWindowCount} window(s) unanimous <${UNANIMOUS_FAILURE_THRESHOLD * 100}% WR — confidence floor +${unanimousFailurePenalty}pp`,
     );
   }
+  if (S.config.freeRunMode) unanimousFailurePenalty = 0;
   S.currentUnanimousFailurePenalty = unanimousFailurePenalty;
 
   // Universal shadow parole — computed once per tick, covers ALL restriction types.
@@ -651,7 +653,7 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "empty-book cooldown — IOC returned 0 fills earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    if (secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
+    if (!S.config.freeRunMode && secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
       const remaining = Math.ceil(WINDOW_ENTRY_BUFFER_S - secondsElapsed);
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `window buffer (${remaining}s remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
@@ -903,7 +905,7 @@ export async function runBotLoopTick(): Promise<void> {
     // first it would increment phase3DirectionCounts["no"] to 3, then get SKIP'd here,
     // leaving only 3 real NO slots (instead of 4) for the remaining coins.
     if (decision.action !== "SKIP") {
-      if (COIN_FULLY_BLOCKED.has(sym) && !paroleState.fullyBlocked.has(sym)) {
+      if (!S.config.freeRunMode && COIN_FULLY_BLOCKED.has(sym) && !paroleState.fullyBlocked.has(sym)) {
         filteredByNewGuards.add(sym);
         evalResults.push({
           symbol: sym,
@@ -978,7 +980,7 @@ export async function runBotLoopTick(): Promise<void> {
       //                       to bet NO profitably.
       //
       // yesPrice is in 0-1 scale (e.g. 0.43 = 43¢).
-      if (decision.action === "BET_YES" && kalshiData.yesPrice != null && kalshiData.yesPrice < 0.50 && !paroleState.priceBandYes.has(sym)) {
+      if (!S.config.freeRunMode && decision.action === "BET_YES" && kalshiData.yesPrice != null && kalshiData.yesPrice < 0.50 && !paroleState.priceBandYes.has(sym)) {
         const priceCents = Math.round(kalshiData.yesPrice * 100);
         filteredByNewGuards.add(sym);
         evalResults.push({
@@ -1001,7 +1003,7 @@ export async function runBotLoopTick(): Promise<void> {
         continue;
       }
 
-      if (decision.action === "BET_NO" && kalshiData.yesPrice != null && kalshiData.yesPrice >= 0.65 && !paroleState.priceBandNo.has(sym)) {
+      if (!S.config.freeRunMode && decision.action === "BET_NO" && kalshiData.yesPrice != null && kalshiData.yesPrice >= 0.65 && !paroleState.priceBandNo.has(sym)) {
         const priceCents = Math.round(kalshiData.yesPrice * 100);
         filteredByNewGuards.add(sym);
         evalResults.push({
@@ -1034,6 +1036,7 @@ export async function runBotLoopTick(): Promise<void> {
       const NEAR_STRIKE_BAND = 0.08;
       const NEAR_STRIKE_MAX_CONF = 70;
       if (
+        !S.config.freeRunMode &&
         decision.action !== "SKIP" &&
         kalshiData.yesPrice != null &&
         Math.abs(kalshiData.yesPrice - 0.50) < NEAR_STRIKE_BAND &&
@@ -1099,7 +1102,7 @@ export async function runBotLoopTick(): Promise<void> {
       }
 
       if (decision.action === "BET_YES") {
-        if (COIN_YES_BLOCKED.has(sym) && !paroleState.yesBlocked.has(sym)) {
+        if (!S.config.freeRunMode && COIN_YES_BLOCKED.has(sym) && !paroleState.yesBlocked.has(sym)) {
           filteredByNewGuards.add(sym);
           evalResults.push({
             symbol: sym,
@@ -1499,7 +1502,7 @@ export async function runBotLoopTick(): Promise<void> {
   // last in CRYPTO_COINS iteration order.
   // windowDirectionCounts reflects bets placed in PREVIOUS ticks this window;
   // `remaining` is how many more same-direction bets are still allowed.
-  if (S.config.enableDirectionCap && S.config.maxSameDirectionBets > 0) {
+  if (!S.config.freeRunMode && S.config.enableDirectionCap && S.config.maxSameDirectionBets > 0) {
     // Effective cap is raised by parole when direction_cap shadow accuracy qualifies.
     const effectiveDirCap = S.config.maxSameDirectionBets + paroleState.dirCapIncrease;
     for (const dir of ["yes", "no"] as const) {
@@ -1543,7 +1546,7 @@ export async function runBotLoopTick(): Promise<void> {
   const LOW_CONVICTION_BAND = 58;
   const CHOP_MIN_COINS = 4;
   const lowConvCount = bets.filter(e => e.confidence <= LOW_CONVICTION_BAND).length;
-  if (lowConvCount >= CHOP_MIN_COINS) {
+  if (!S.config.freeRunMode && lowConvCount >= CHOP_MIN_COINS) {
     const capped = bets.splice(2); // keep top 2, remove the rest
     for (const e of capped) {
       e.action = "SKIP";

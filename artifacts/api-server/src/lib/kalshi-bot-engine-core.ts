@@ -652,6 +652,14 @@ export interface BotConfig {
   enableDynamicSizing: boolean;        // (default false)
   dynamicSizingMaxConfidence: number;  // confidence at which max bet is reached (default 85)
   profitLockPct: number;               // 0 = disabled; 1–99 = cash out when current value reaches this % of max payout
+
+  // ── Free-run mode ────────────────────────────────────────────────────────
+  // When true, all restriction layers are bypassed so the bot places any bet
+  // the models decide — no penalties, no proximity/oscillation gates, no
+  // direction cap, no quiet hours, no chop filter, no streak pauses.
+  // Safety rails that are NEVER bypassed: circuit breaker, daily loss limit,
+  // max bets per window, and the ML-Claude alignment gate.
+  freeRunMode?: boolean;               // (default false)
 }
 
 // ---------------------------------------------------------------------------
@@ -781,6 +789,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableDynamicSizing: false,
   dynamicSizingMaxConfidence: 90,
   profitLockPct: 0,
+  freeRunMode: false,
 };
 
 /**

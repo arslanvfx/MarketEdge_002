@@ -602,6 +602,29 @@ router.get("/crypto/bot/conditions", (_req, res) => {
   }
 });
 
+// POST /crypto/bot/free-run  { enabled: boolean }
+// Toggle free-run mode: when true, all restriction/penalty layers are bypassed
+// (proximity gate, oscillation filter, quiet hours, doubt penalties, direction
+// cap, chop filter, per-coin pauses, price-band gates, near-strike filter).
+// Safety rails that are NEVER bypassed: circuit breaker, daily loss limit,
+// max bets per window, and the ML-Claude alignment gate.
+router.post("/crypto/bot/free-run", requireAuth, async (req, res) => {
+  try {
+    const { enabled } = req.body as { enabled: boolean };
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled must be a boolean" });
+    }
+    const { S } = await import("../lib/kalshi-bot-state");
+    const { updateBotConfig } = await import("../lib/kalshi-bot-db");
+    S.config = { ...S.config, freeRunMode: enabled };
+    await updateBotConfig({ freeRunMode: enabled });
+    return res.json({ ok: true, freeRunMode: enabled });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    return res.status(500).json({ error: msg });
+  }
+});
+
 // POST /crypto/bot/reset-conditions — nuclear reset: clears all window-level
 // restrictions (empty-book cooldowns, direction counts), auto-tune pauses,
 // coin streak pauses, and the circuit-breaker countdown. Safe to call at any

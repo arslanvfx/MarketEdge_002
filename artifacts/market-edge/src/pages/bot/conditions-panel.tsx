@@ -35,6 +35,27 @@ export function ConditionsPanel({
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [resetState, setResetState] = useState<"idle" | "loading" | "done">("idle");
+  const [freeRunLoading, setFreeRunLoading] = useState(false);
+
+  async function handleFreeRunToggle() {
+    if (freeRunLoading) return;
+    setFreeRunLoading(true);
+    try {
+      const token = await getToken();
+      const next = !(conditions?.freeRunMode ?? false);
+      await fetch(`${API_BASE}/crypto/bot/free-run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ enabled: next }),
+      });
+      void qc.invalidateQueries({ queryKey: ["bot-conditions"] });
+    } finally {
+      setFreeRunLoading(false);
+    }
+  }
 
   async function handleReset() {
     setResetState("loading");
@@ -96,6 +117,23 @@ export function ConditionsPanel({
             All clear
           </span>
         ) : null}
+        <button
+          onClick={(e) => { e.stopPropagation(); handleFreeRunToggle(); }}
+          disabled={freeRunLoading}
+          title={conditions?.freeRunMode
+            ? "Free Run is ON — all restriction layers bypassed. Safety rails (circuit breaker, daily loss, max bets, ML-Claude gate) still active. Click to turn off."
+            : "Free Run OFF — click to bypass all restriction/penalty layers for unrestricted model-driven betting"}
+          className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-lg border transition-colors font-medium ${
+            conditions?.freeRunMode
+              ? "border-amber-500/60 text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 cursor-pointer"
+              : freeRunLoading
+              ? "border-zinc-500/30 text-zinc-500 cursor-not-allowed"
+              : "border-zinc-600/40 text-zinc-400 hover:bg-zinc-700/30 cursor-pointer"
+          }`}
+        >
+          <Zap className={`w-3 h-3 ${freeRunLoading ? "animate-pulse" : ""} ${conditions?.freeRunMode ? "fill-amber-400 text-amber-400" : ""}`} />
+          {conditions?.freeRunMode ? "Free Run ON" : "Free Run"}
+        </button>
         <button
           onClick={(e) => { e.stopPropagation(); if (resetState === "idle") handleReset(); }}
           disabled={resetState !== "idle"}

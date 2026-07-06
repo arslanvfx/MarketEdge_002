@@ -47,6 +47,7 @@ export interface BotConfig {
   enableDynamicSizing: boolean;
   dynamicSizingMaxConfidence: number;
   profitLockPct: number;
+  freeRunMode?: boolean;
 }
 
 export interface LogicModeStats {
@@ -133,6 +134,7 @@ export interface WindowEval {
 export interface BotConditionsSnapshot {
   windowKey: string;
   mode: "paper" | "live";
+  freeRunMode: boolean;
   botEnabled: boolean;
   botPaused: boolean;
   isInQuietHours: boolean;

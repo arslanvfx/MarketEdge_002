@@ -148,6 +148,7 @@ export function clearAllPauses(): { clearedCoins: string[]; cbWasActive: boolean
 export interface BotConditionsSnapshot {
   windowKey: string;
   mode: BotMode;
+  freeRunMode: boolean;
   // Global gates
   botEnabled: boolean;
   botPaused: boolean;
@@ -210,6 +211,7 @@ export function getWindowConditions(): BotConditionsSnapshot {
   return {
     windowKey: wk,
     mode: S.botMode,
+    freeRunMode: S.config.freeRunMode ?? false,
     botEnabled: S.config.enabled,
     botPaused: S.paused,
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
