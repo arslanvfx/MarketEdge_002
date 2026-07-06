@@ -602,7 +602,7 @@ async function _runBotTick(
         if (prevSide !== null && side !== prevSide) crossings++;
         prevSide = side;
       }
-      if (crossings >= 2) {
+      if (crossings >= 3) {
         logger.info(
           { sym, direction, crossings, kalshiTarget },
           "[kalshi-bot] SKIP — strike-oscillation: price crossing strike repeatedly",
