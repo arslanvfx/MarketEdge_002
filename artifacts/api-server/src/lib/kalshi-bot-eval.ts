@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -292,6 +292,20 @@ export async function evalClosedBets(): Promise<void> {
         if (correctedPnl > 0) wo.wins++;
         else if (correctedPnl < 0) wo.losses++;
         recentWindowOutcomes.set(wk, wo);
+
+        // Track unanimous-model outcomes separately: only bets where ALL 3
+        // non-null models agreed with the bet direction (signalsAgreeing === signalsTotal
+        // and signalsTotal >= 2). This feeds the unanimous_failure_guard penalty
+        // which is a secondary layer on top of the general doubt penalty.
+        const sigs = (row.signals ?? {}) as Record<string, unknown>;
+        const sAgreeing = typeof sigs["signalsAgreeing"] === "number" ? sigs["signalsAgreeing"] : null;
+        const sTotal    = typeof sigs["signalsTotal"]    === "number" ? sigs["signalsTotal"]    : null;
+        if (sAgreeing !== null && sTotal !== null && sTotal >= 2 && sAgreeing === sTotal) {
+          const uo = recentUnanimousOutcomes.get(wk) ?? { wins: 0, losses: 0 };
+          if (correctedPnl > 0) uo.wins++;
+          else if (correctedPnl < 0) uo.losses++;
+          recentUnanimousOutcomes.set(wk, uo);
+        }
       }
 
       // Apply real outcome to per-coin streak for expired rows.

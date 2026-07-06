@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -325,6 +325,7 @@ export async function checkAllParoles(
 ): Promise<ParoleState> {
   const empty: ParoleState = {
     doubtPenaltyReduction: 0,
+    unanimousFailurePenaltyReduction: 0,
     reversing: new Set(),
     momentum: new Set(),
     priceBandYes: new Set(),
@@ -337,6 +338,7 @@ export async function checkAllParoles(
     border: new Set(),
     yesBlocked: new Set(),
     fullyBlocked: new Set(),
+    nearStrike: new Set(),
     dirCapIncrease: 0,
   };
 
@@ -411,6 +413,12 @@ export async function checkAllParoles(
       switch (blockedBy) {
         case "doubt_penalty":
           result.doubtPenaltyReduction = Math.max(result.doubtPenaltyReduction, 4);
+          break;
+        case "unanimous_failure_guard":
+          result.unanimousFailurePenaltyReduction = Math.max(result.unanimousFailurePenaltyReduction, 3);
+          break;
+        case "near_strike_ev_filter":
+          result.nearStrike.add(sym);
           break;
         case "auto_tune":
           // Side effect handled below after the loop.

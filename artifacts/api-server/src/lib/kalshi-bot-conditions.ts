@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -161,6 +161,7 @@ export interface BotConditionsSnapshot {
   dailyLossLimit: number;
   dbDegraded: boolean;
   doubtPenaltyPp: number;
+  unanimousFailurePenaltyPp: number;
   warmupSecondsRemaining: number;
   // Betting caps
   directionCapEnabled: boolean;
@@ -172,6 +173,7 @@ export interface BotConditionsSnapshot {
   // Per-coin window-level restrictions
   emptyBookBlockedCoins: string[];       // blocked after 2 consecutive 0-fill IOC attempts
   emptyBookAttempts: Record<string, number>; // first 0-fill only — will retry next tick
+  nearStrikeFilteredCoins: string[];     // coins filtered by the near-strike EV gate this window
   // Static coin filters (permanent until code changes)
   yesBlockedCoins: string[];
   fullyBlockedCoins: string[];
@@ -220,6 +222,7 @@ export function getWindowConditions(): BotConditionsSnapshot {
     dailyLossLimit: S.config.dailyLossLimit,
     dbDegraded: S.dbDegradedSince !== null,
     doubtPenaltyPp: S.currentWindowDoubtPenalty,
+    unanimousFailurePenaltyPp: S.currentUnanimousFailurePenalty,
     warmupSecondsRemaining,
     directionCapEnabled: S.config.enableDirectionCap,
     maxSameDirectionBets: S.config.maxSameDirectionBets,
@@ -229,6 +232,9 @@ export function getWindowConditions(): BotConditionsSnapshot {
     totalBetsThisWindow: dirYes + dirNo,
     emptyBookBlockedCoins,
     emptyBookAttempts,
+    nearStrikeFilteredCoins: S.lastWindowEvaluation
+      .filter(ev => ev.action === "SKIP" && ev.reason.includes("near-strike EV filter"))
+      .map(ev => ev.symbol),
     yesBlockedCoins: [...COIN_YES_BLOCKED],
     fullyBlockedCoins: [...COIN_FULLY_BLOCKED],
     autoTunePausedCoins: Object.fromEntries(pausedCoins),

@@ -68,9 +68,11 @@ export function ConditionsPanel({
     conditions.dailyLimitHit,
     conditions.dbDegraded,
     conditions.doubtPenaltyPp > 0,
+    (conditions.unanimousFailurePenaltyPp ?? 0) > 0,
     conditions.warmupSecondsRemaining > 0,
     conditions.emptyBookBlockedCoins.length > 0,
     Object.keys(conditions.emptyBookAttempts).length > 0,
+    (conditions.nearStrikeFilteredCoins ?? []).length > 0,
     Object.keys(conditions.autoTunePausedCoins).length > 0,
     Object.values(status?.coinStreakState ?? {}).some(s => s.pauseUntilWindowKey !== null),
     conditions.directionCapEnabled && (conditions.directionCountYes >= conditions.maxSameDirectionBets || conditions.directionCountNo >= conditions.maxSameDirectionBets),
@@ -147,6 +149,9 @@ export function ConditionsPanel({
             {(conditions?.doubtPenaltyPp ?? 0) > 0 && (
               <ConditionChip warn label={`Doubt penalty +${conditions!.doubtPenaltyPp}pp`} />
             )}
+            {(conditions?.unanimousFailurePenaltyPp ?? 0) > 0 && (
+              <ConditionChip warn label={`Unanimous fail +${conditions!.unanimousFailurePenaltyPp}pp`} />
+            )}
             {(conditions?.warmupSecondsRemaining ?? 0) > 0 && (
               <ConditionChip warn label={`Window warmup ${conditions!.warmupSecondsRemaining}s`} />
             )}
@@ -191,6 +196,7 @@ export function ConditionsPanel({
                   const yesBlocked = conditions?.yesBlockedCoins.includes(ev.symbol);
                   const autoTuneW = conditions?.autoTunePausedCoins[ev.symbol];
                   const streakPaused = !!status?.coinStreakState?.[ev.symbol]?.pauseUntilWindowKey;
+                  const nearStrikeFiltered = (conditions?.nearStrikeFilteredCoins ?? []).includes(ev.symbol);
                   const betPlaced = ev.betPlacedThisWindow;
 
                   let statusNode: React.ReactNode;
@@ -212,6 +218,9 @@ export function ConditionsPanel({
                   } else if (streakPaused) {
                     const st = status?.coinStreakState?.[ev.symbol];
                     statusNode = <span className="px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-300 font-medium border border-orange-500/30">Streak pause ({st?.consecutiveLosses}L)</span>;
+                  } else if (nearStrikeFiltered) {
+                    statusNode = <span className="px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 font-medium border border-sky-500/30">Near-strike ✕</span>;
+                    extraReason = "Market near 50/50 — shadow bets monitored; unblocks at ≥60% WR in this zone";
                   } else if (yesBlocked && ev.action === "BET_YES") {
                     statusNode = <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-medium border border-amber-500/30">YES blocked</span>;
                     extraReason = "YES bets historically unprofitable for this coin";

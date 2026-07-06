@@ -145,6 +145,7 @@ export interface BotConditionsSnapshot {
   dailyLossLimit: number;
   dbDegraded: boolean;
   doubtPenaltyPp: number;
+  unanimousFailurePenaltyPp: number;
   warmupSecondsRemaining: number;
   directionCapEnabled: boolean;
   maxSameDirectionBets: number;
@@ -154,6 +155,7 @@ export interface BotConditionsSnapshot {
   totalBetsThisWindow: number;
   emptyBookBlockedCoins: string[];
   emptyBookAttempts: Record<string, number>;
+  nearStrikeFilteredCoins: string[];
   yesBlockedCoins: string[];
   fullyBlockedCoins: string[];
   autoTunePausedCoins: Record<string, number>;

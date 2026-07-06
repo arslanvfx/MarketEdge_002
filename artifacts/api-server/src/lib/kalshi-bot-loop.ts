@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -540,6 +540,34 @@ export async function runBotLoopTick(): Promise<void> {
   // Store for Task-C signal enrichment: _runBotTick includes this in the signals JSON.
   S.currentWindowDoubtPenalty = windowDoubtPenalty;
 
+  // Unanimous-failure guard: secondary penalty that fires when ALL models have been
+  // agreeing and still losing together.  Separate from the general doubt penalty
+  // (which fires on any losing window) — this targets specifically the "correlated
+  // model failure" pattern where stat+Claude+ML all call the same direction wrong.
+  //
+  // Same time-based lookback as doubt penalty so it self-clears after 1–2 empty
+  // windows: after one empty window the weak-count drops 2→1 (3pp→0) and after
+  // two it's fully gone.  Shadow parole can also reduce it early.
+  const UNANIMOUS_FAILURE_THRESHOLD = 0.4;
+  const UNANIMOUS_FAILURE_PENALTY_PP = 6;
+  let unanimousFailurePenalty = 0;
+  let unanimousWeakWindowCount = 0;
+  for (const wk of completedWindowKeys) {
+    const uo = recentUnanimousOutcomes.get(wk);
+    if (!uo) continue; // no unanimous bets in that window → neutral
+    const uTotal = uo.wins + uo.losses;
+    if (uTotal >= 1 && uo.wins / uTotal < UNANIMOUS_FAILURE_THRESHOLD) unanimousWeakWindowCount++;
+  }
+  if (unanimousWeakWindowCount >= 2) unanimousFailurePenalty = UNANIMOUS_FAILURE_PENALTY_PP;
+  else if (unanimousWeakWindowCount === 1) unanimousFailurePenalty = Math.floor(UNANIMOUS_FAILURE_PENALTY_PP / 2);
+  if (unanimousFailurePenalty > 0) {
+    logger.info(
+      { unanimousFailurePenalty, unanimousWeakWindowCount, checkedWindows: completedWindowKeys },
+      `[kalshi-bot] unanimous failure guard: ${unanimousWeakWindowCount} window(s) unanimous <${UNANIMOUS_FAILURE_THRESHOLD * 100}% WR — confidence floor +${unanimousFailurePenalty}pp`,
+    );
+  }
+  S.currentUnanimousFailurePenalty = unanimousFailurePenalty;
+
   // Universal shadow parole — computed once per tick, covers ALL restriction types.
   // checkAllParoles queries shadow bet accuracy grouped by (symbol, blockedBy) and
   // returns bypass sets that each gate in the per-coin loop checks before blocking.
@@ -555,6 +583,16 @@ export async function runBotLoopTick(): Promise<void> {
     logger.info(
       { windowDoubtPenalty, reduction: paroleState.doubtPenaltyReduction, effectiveDoubtPenalty },
       `[kalshi-bot] [parole] doubt penalty reduced ${windowDoubtPenalty}pp → ${effectiveDoubtPenalty}pp for this tick`,
+    );
+  }
+
+  // Apply unanimous failure penalty reduction from shadow parole.
+  let effectiveUnanimousFailurePenalty = unanimousFailurePenalty;
+  if (paroleState.unanimousFailurePenaltyReduction > 0 && unanimousFailurePenalty > 0) {
+    effectiveUnanimousFailurePenalty = Math.max(0, unanimousFailurePenalty - paroleState.unanimousFailurePenaltyReduction);
+    logger.info(
+      { unanimousFailurePenalty, reduction: paroleState.unanimousFailurePenaltyReduction, effectiveUnanimousFailurePenalty },
+      `[kalshi-bot] [parole] unanimous failure penalty reduced ${unanimousFailurePenalty}pp → ${effectiveUnanimousFailurePenalty}pp for this tick`,
     );
   }
 
@@ -986,6 +1024,45 @@ export async function runBotLoopTick(): Promise<void> {
         continue;
       }
 
+      // ── Near-strike EV filter ────────────────────────────────────────────────
+      // When the market prices the bet between 42¢ and 58¢ (within 8¢ of 50-50)
+      // and model confidence is below 70%, the expected value is too thin.
+      // At YES=50¢, a 53.7% win rate (our unanimous average) gives effectively
+      // zero edge after variance.  This gate requires either price conviction
+      // (outside the ±8¢ band) OR high model confidence (≥70%) to proceed.
+      // Bypassed by shadow parole per-coin when accuracy in this zone reaches ≥60%.
+      const NEAR_STRIKE_BAND = 0.08;
+      const NEAR_STRIKE_MAX_CONF = 70;
+      if (
+        decision.action !== "SKIP" &&
+        kalshiData.yesPrice != null &&
+        Math.abs(kalshiData.yesPrice - 0.50) < NEAR_STRIKE_BAND &&
+        effectiveConfidence < NEAR_STRIKE_MAX_CONF &&
+        !paroleState.nearStrike.has(sym)
+      ) {
+        const priceCents = Math.round(kalshiData.yesPrice * 100);
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym,
+          action: "SKIP",
+          confidence: effectiveConfidence,
+          score: 0,
+          reason: `near-strike EV filter — ${priceCents}¢ is within ±8¢ of 50/50 with conf ${effectiveConfidence}% < 70%; insufficient edge (≥60% shadow WR unlocks this coin)`,
+          windowKey,
+          selected: false,
+          evaluatedAt: now,
+          trendStability: stability,
+          regime,
+        });
+        const nearDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
+        void recordShadowBet(
+          sym, nearDir, effectiveConfidence, decision.signals,
+          kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
+          "near_strike_ev_filter",
+        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] near_strike_ev_filter record failed"));
+        continue;
+      }
+
       // YES below-strike gate: when the live crypto price is already below the
       // Kalshi strike by more than 0.3%, a YES bet needs a price recovery to win.
       // Historical data: ETH YES −0.042% and HYPE YES −0.123% below strike both
@@ -1301,14 +1378,26 @@ export async function runBotLoopTick(): Promise<void> {
     // NOTE: this gate runs AFTER border guard — so any shadow probe recorded here has
     // already cleared every non-confidence gate in the loop (regime, contrarian, NO
     // gate, border guard).  Coins blocked by those earlier gates never reach this point.
-    if (effectiveDoubtPenalty > 0 && effectiveConfidence < S.config.minConfidence + effectiveDoubtPenalty) {
+    // Combined confidence floor = base minConfidence + doubt penalty + unanimous failure penalty.
+    // Each penalty eases independently: doubt via time (empty windows) + shadow parole,
+    // unanimous failure via time (empty unanimous windows) + shadow parole.
+    const totalPenalty = effectiveDoubtPenalty + effectiveUnanimousFailurePenalty;
+    if (totalPenalty > 0 && effectiveConfidence < S.config.minConfidence + totalPenalty) {
       filteredByNewGuards.add(sym);
+
+      // Build the reason string, showing which penalties are active.
+      const penaltyParts: string[] = [];
+      if (effectiveDoubtPenalty > 0)
+        penaltyParts.push(`doubt+${effectiveDoubtPenalty}pp`);
+      if (effectiveUnanimousFailurePenalty > 0)
+        penaltyParts.push(`unanimous-fail+${effectiveUnanimousFailurePenalty}pp`);
+      const penaltyStr = penaltyParts.join(" ");
       evalResults.push({
         symbol: sym,
         action: "SKIP",
         confidence: effectiveConfidence,
         score: 0,
-        reason: `doubt filter — ${weakWindowCount} weak recent window(s), ${effectiveConfidence}% < ${S.config.minConfidence + effectiveDoubtPenalty}% floor (+${effectiveDoubtPenalty}pp)`,
+        reason: `confidence floor — ${effectiveConfidence}% < ${S.config.minConfidence + totalPenalty}% (${penaltyStr})`,
         windowKey,
         selected: false,
         evaluatedAt: now,
@@ -1316,26 +1405,25 @@ export async function runBotLoopTick(): Promise<void> {
         regime,
       });
 
-      // Record a shadow (probe) bet: the coin passed every non-confidence gate
-      // but is blocked solely by the doubt-penalty confidence floor.  Shadow
-      // accuracy feeds checkAllParoles() which can reduce the penalty early.
-      if (
-        effectiveDoubtPenalty > 0 &&
-        effectiveConfidence >= S.config.minConfidence &&
-        decision.action !== "SKIP"
-      ) {
+      // Record shadow bets for each active penalty so they can be paroled
+      // independently.  Only record when the coin's raw confidence already clears
+      // the base minConfidence (it was the penalty that blocked it, not the signal).
+      if (effectiveConfidence >= S.config.minConfidence && decision.action !== "SKIP") {
         const shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
-        void recordShadowBet(
-          sym,
-          shadowDir,
-          effectiveConfidence,
-          decision.signals,
-          kalshiData?.value ?? null,
-          windowKey,
-          S.botMode,
-          kalshiData?.ticker ?? null,
-          "doubt_penalty",
-        ).catch(err => logger.warn({ err, sym }, "[shadow-bet] record failed (non-fatal)"));
+        if (effectiveDoubtPenalty > 0) {
+          void recordShadowBet(
+            sym, shadowDir, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
+            "doubt_penalty",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] doubt_penalty record failed (non-fatal)"));
+        }
+        if (effectiveUnanimousFailurePenalty > 0) {
+          void recordShadowBet(
+            sym, shadowDir, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
+            "unanimous_failure_guard",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] unanimous_failure_guard record failed (non-fatal)"));
+        }
       }
 
       continue;

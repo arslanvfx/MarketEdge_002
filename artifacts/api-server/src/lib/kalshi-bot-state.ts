@@ -90,6 +90,7 @@ export interface WindowCoinEvaluation {
 
 export interface ParoleState {
   doubtPenaltyReduction: number;
+  unanimousFailurePenaltyReduction: number;
   reversing: Set<string>;
   momentum: Set<string>;
   priceBandYes: Set<string>;
@@ -102,6 +103,7 @@ export interface ParoleState {
   border: Set<string>;
   yesBlocked: Set<string>;
   fullyBlocked: Set<string>;
+  nearStrike: Set<string>;
   dirCapIncrease: number;
 }
 
@@ -143,6 +145,7 @@ export const S = {
   lastStabilityWindowKey: "",
   stabilityFiredForCoins: new Set<string>(),
   currentWindowDoubtPenalty: 0,
+  currentUnanimousFailurePenalty: 0,
   timingCache: new Map<string, number | null>(),
   timingCacheAt: 0,
   lastWindowEvaluation: [] as WindowCoinEvaluation[],
@@ -171,6 +174,7 @@ export const paperCoinStreakState = new Map<string, CoinStreakEntry>();
 export const liveCoinStreakState = new Map<string, CoinStreakEntry>();
 export const coinSlippageStrikes = new Map<string, { strikes: number; windowKey: string }>();
 export const recentWindowOutcomes = new Map<string, { wins: number; losses: number }>();
+export const recentUnanimousOutcomes = new Map<string, { wins: number; losses: number }>();
 export const windowCBBuffer = new Map<string, { wins: number; losses: number }>();
 export const cachedPerformanceReportByMode = new Map<BotMode, PerformanceReport>();
 export const recentKalshiTargets = new Map<string, number[]>();

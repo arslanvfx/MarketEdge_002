@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -251,6 +251,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     // recentRows is newest-first; we just iterate and bucket by windowKey.
     // Manual bets are excluded so they don't skew the window-doubt penalty.
     recentWindowOutcomes.clear();
+    recentUnanimousOutcomes.clear();
     for (const r of recentRows) {
       if (r.source === "manual") continue;
       const wk = r.windowKey;
@@ -260,6 +261,17 @@ export async function loadDailyPnlFromDB(): Promise<void> {
       if (p > 0) wo.wins++;
       else if (p < 0) wo.losses++;
       recentWindowOutcomes.set(wk, wo);
+
+      // Unanimous-model tracking: only bets where all non-null models agreed.
+      const sigs = (r.signals ?? {}) as Record<string, unknown>;
+      const sAgreeing = typeof sigs["signalsAgreeing"] === "number" ? sigs["signalsAgreeing"] : null;
+      const sTotal    = typeof sigs["signalsTotal"]    === "number" ? sigs["signalsTotal"]    : null;
+      if (sAgreeing !== null && sTotal !== null && sTotal >= 2 && sAgreeing === sTotal) {
+        const uo = recentUnanimousOutcomes.get(wk) ?? { wins: 0, losses: 0 };
+        if (p > 0) uo.wins++;
+        else if (p < 0) uo.losses++;
+        recentUnanimousOutcomes.set(wk, uo);
+      }
     }
 
     // Restore consecutive-loss streak for in-session tracking only.
