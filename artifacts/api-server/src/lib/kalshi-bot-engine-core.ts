@@ -119,6 +119,29 @@ function computeEV(yesPrice: number | null, signalAccuracyPct: number | null): n
   return accFrac * winPayoff - (1 - accFrac);
 }
 
+/**
+ * Direction-correct EV — uses the actual cost structure for the chosen side.
+ *   BET_YES: pays yesPrice, wins (1 − yesPrice)  → payoff = (1−p)/p
+ *   BET_NO:  pays (1−yesPrice), wins yesPrice     → payoff = p/(1−p)
+ * This must be called AFTER direction is known so YES and NO bets are treated
+ * symmetrically.  The old pre-direction gate always used the YES formula, which
+ * incorrectly penalised cheap NO contracts (high yes_price) and rewarded
+ * expensive NO contracts (low yes_price).
+ */
+function computeEVForDirection(
+  action: "BET_YES" | "BET_NO",
+  yesPrice: number | null,
+  signalAccuracyPct: number | null,
+): number | null {
+  if (yesPrice == null || yesPrice <= 0 || yesPrice >= 1 || signalAccuracyPct == null) return null;
+  const accFrac = signalAccuracyPct / 100;
+  if (action === "BET_YES") {
+    return accFrac * (1 - yesPrice) / yesPrice - (1 - accFrac);
+  } else {
+    return accFrac * yesPrice / (1 - yesPrice) - (1 - accFrac);
+  }
+}
+
 function countSignals(
   direction: boolean,
   statAbove: boolean | null,
@@ -144,6 +167,24 @@ function countSignals(
  */
 export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
   const result = computeCorePairDecisionUngated(inp);
+
+  // Direction-aware EV gate — applied after direction is decided so YES and NO
+  // bets each use the correct payoff formula for their actual cost structure.
+  // Pre-direction EV used the YES formula for all bets, which incorrectly
+  // blocked cheap NO contracts (high yes_price = low NO cost = high payoff).
+  if (result.action === "BET_YES" || result.action === "BET_NO") {
+    const dirEV = computeEVForDirection(result.action, inp.yesPrice, inp.signalAccuracyPct);
+    if (dirEV !== null && dirEV < -0.05) {
+      return {
+        action: "SKIP",
+        confidence: result.confidence,
+        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}%`,
+        signalsAgreeing: result.signalsAgreeing,
+        signalsTotal: result.signalsTotal,
+        ev: dirEV,
+      };
+    }
+  }
 
   const gate = checkMinReturnGate(result.action, inp.yesPrice, inp.minReturnMultiple);
   if (gate.blocked) {
@@ -219,15 +260,6 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   }
 
   const ev = computeEV(inp.yesPrice, inp.signalAccuracyPct);
-
-  // EV gate — applied to all paths
-  if (ev !== null && ev < -0.05) {
-    return {
-      action: "SKIP", confidence: 0,
-      reasoning: `Negative EV (${ev.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}%`,
-      signalsAgreeing: 0, signalsTotal: 0, ev,
-    };
-  }
 
   // Claude-ML alignment gate — applied before any path decision.
   // When both Claude and ML have live opinions but call opposite directions,

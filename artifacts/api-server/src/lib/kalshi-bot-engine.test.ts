@@ -349,35 +349,61 @@ test("No Kalshi ticker → SKIP", () => {
 });
 
 // ---------------------------------------------------------------------------
-// EV gate
+// EV gate — direction-aware (YES and NO on equal footing)
+// Gate runs AFTER direction is decided; each side uses its own payoff formula:
+//   BET_YES: EV = acc*(1−p)/p − (1−acc)
+//   BET_NO:  EV = acc*p/(1−p) − (1−acc)
 // ---------------------------------------------------------------------------
 
-test("Negative EV fires when signalAccuracyPct is low (40% at 50¢ yes)", () => {
-  // accFrac=0.40, winPayoff=1.0 → EV = 0.40*1 - 0.60 = -0.20 < -0.05
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 70, yesPrice: 0.50, signalAccuracyPct: 40 }));
+test("Negative EV fires when signalAccuracyPct is low (40% at 50¢ YES)", () => {
+  // BET_YES: EV = 0.40*(0.50/0.50) − 0.60 = −0.20 < −0.05
+  // claudeAbove provided so ML-solo gate doesn't fire before EV gate.
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 70, claudeAbove: true, yesPrice: 0.50, signalAccuracyPct: 40 }));
   assert.equal(r.action, "SKIP");
   assert.match(r.reasoning, /Negative EV/);
 });
 
-test("Negative EV fires at 45% accuracy at 50¢ yes (borderline negative EV)", () => {
-  // accFrac=0.45, winPayoff=1.0 → EV = 0.45*1 - 0.55 = -0.10 < -0.05
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 70, yesPrice: 0.50, signalAccuracyPct: 45 }));
+test("Negative EV fires at 45% accuracy at 50¢ YES (borderline)", () => {
+  // BET_YES: EV = 0.45*1 − 0.55 = −0.10 < −0.05
+  // claudeAbove provided so ML-solo gate doesn't fire before EV gate.
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 70, claudeAbove: true, yesPrice: 0.50, signalAccuracyPct: 45 }));
   assert.equal(r.action, "SKIP");
   assert.match(r.reasoning, /Negative EV/);
 });
 
-test("EV gate passes when signalAccuracyPct is 60% at 50¢ yes", () => {
-  // accFrac=0.60, winPayoff=1.0 → EV = 0.60*1 - 0.40 = +0.20 ≥ -0.05
-  // claudeAbove provided so ML isn't solo (ML-solo gate doesn't block first).
+test("EV gate passes when signalAccuracyPct is 60% at 50¢ YES", () => {
+  // BET_YES: EV = 0.60*1 − 0.40 = +0.20 ≥ −0.05 → proceeds
   const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 70, claudeAbove: true, yesPrice: 0.50, signalAccuracyPct: 60 }));
   assert.equal(r.action, "BET_YES");
 });
 
 test("EV gate skipped when signalAccuracyPct is null (no history yet)", () => {
-  // No accuracy data → ev=null → gate doesn't fire → entry proceeds
-  // claudeAbove provided so ML isn't solo (ML-solo gate doesn't block first).
+  // null acc → dirEV=null → gate doesn't fire
   const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 70, claudeAbove: true, signalAccuracyPct: null }));
   assert.equal(r.action, "BET_YES");
+});
+
+test("EV gate symmetry: expensive NO (low yes_price) blocked just like bad YES", () => {
+  // BET_NO at yes=0.08 (NO costs 0.92): EV = 0.40*(0.08/0.92) − 0.60 = −0.565 < −0.05
+  const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, claudeAbove: false, yesPrice: 0.08, signalAccuracyPct: 40 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /Negative EV/);
+});
+
+test("EV gate symmetry: cheap NO (high yes_price) passes despite low acc", () => {
+  // BET_NO at yes=0.92 (NO costs 0.08): EV = 0.40*(0.92/0.08) − 0.60 = +4.0 ≥ −0.05
+  const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, claudeAbove: false, yesPrice: 0.92, signalAccuracyPct: 40 }));
+  assert.equal(r.action, "BET_NO");
+});
+
+test("EV gate: 50¢ market is identical for YES and NO at same accuracy", () => {
+  // Both directions at 50¢ with 40% acc: EV = 0.40*1 − 0.60 = −0.20 → both block
+  const rYes = computeCorePairDecision(inp({ mlAbove: true,  mlConfidence: 70, claudeAbove: true,  yesPrice: 0.50, signalAccuracyPct: 40 }));
+  const rNo  = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 70, claudeAbove: false, yesPrice: 0.50, signalAccuracyPct: 40 }));
+  assert.equal(rYes.action, "SKIP");
+  assert.equal(rNo.action,  "SKIP");
+  // Both should report the same EV magnitude (symmetric market)
+  assert.ok(rYes.ev != null && rNo.ev != null && Math.abs(rYes.ev - rNo.ev) < 0.001, "EV symmetric at 50¢");
 });
 
 // ---------------------------------------------------------------------------
