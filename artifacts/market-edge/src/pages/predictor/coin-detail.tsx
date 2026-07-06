@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ComposedChart, Area, Line, XAxis, YAxis, ResponsiveContainer, Tooltip as RTooltip, ReferenceLine } from "recharts";
 import { Activity, TrendingUp, TrendingDown, Minus, Zap, Sparkles, Loader2, CheckCircle2, Clock, ExternalLink, ArrowUp, ArrowDown, RefreshCw, Check, AlertTriangle, Bot, Lock, ChevronDown, ChevronUp, Radio, Gauge, Waves } from "lucide-react";
 import { Card } from "@/components/ui/card";
-import type { CoinPrediction, AiEntry, AutoPilotDecision, KalshiTarget, TrackerWindowCall, WindowBetSignal, WMAccuracyStats, LiveDirectionResult, MLPredResponse, EnsembleWeights, Prediction, DriftAlert, BetSignal } from "./types";
+import type { CoinPrediction, AiEntry, AutoPilotDecision, KalshiTarget, TrackerWindowCall, WindowBetSignal, WMAccuracyStats, LiveDirectionResult, LiveDirectionHistoryEntry, MLPredResponse, EnsembleWeights, Prediction, DriftAlert, BetSignal } from "./types";
 import { computeBetSignal } from "./types";
 import { COIN_STYLE, KALSHI_COINS, DIR, formatPrice, formatPct, estCandleLabel } from "./utils";
 import { Sparkline, LivePrice } from "./sparkline";
@@ -142,6 +143,20 @@ export function CoinDetail({
   statLoading: boolean;
 }) {
   const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
+
+  // Live-direction history — ring buffer from server (max 5 per window, clears on new window).
+  // Only poll when Claude is active for this coin; mirrors the same condition as liveDirectionQuery.
+  const liveDirectionHistoryQuery = useQuery<{ symbol: string; history: LiveDirectionHistoryEntry[] }>({
+    queryKey: ["live-direction-history", coin.symbol],
+    queryFn: () => fetch(`/api/crypto/live-direction-history/${coin.symbol}`).then((r) => r.json()),
+    refetchInterval: 30_000,
+    enabled: isTrainingCoin || claudeActive,
+    staleTime: 25_000,
+  });
+  const liveDirectionHistoryEntries = liveDirectionHistoryQuery.data?.history ?? [];
+  // Show last 3 entries in the UI.
+  const dirHistoryTail = liveDirectionHistoryEntries.slice(-3);
+
   const kalshiAvailable = KALSHI_COINS.includes(coin.symbol) && ktd?.available === true;
   // Computed locally from available props so CoinCard doesn't need an extra prop.
   const windowExpiredLocal = Boolean(ktd?.closeTime && new Date(ktd.closeTime).getTime() < Date.now());
@@ -1046,6 +1061,30 @@ export function CoinDetail({
                         <div className="text-[11px] text-muted-foreground/60 italic">run Enhance</div>
                       );
                     })()}
+                    {/* Live-direction confidence timeline — last 3 Claude re-checks this window */}
+                    {dirHistoryTail.length > 0 && (
+                      <div className="mt-2.5 flex items-center justify-center gap-1" title="Claude live re-check history this window (oldest → newest)">
+                        {dirHistoryTail.map((h, i) => {
+                          const isAbove = h.aboveKalshi !== null ? h.aboveKalshi : h.direction === "up";
+                          const isLast = i === dirHistoryTail.length - 1;
+                          const timeStr = new Date(h.at).toLocaleTimeString("en-US", {
+                            hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
+                          });
+                          return (
+                            <span key={h.at} title={`${timeStr} ET — ${isAbove ? "ABOVE" : "BELOW"} ${h.confidence}% conf`}
+                              className={`inline-flex flex-col items-center gap-0.5 rounded px-1 py-0.5 ${
+                                isAbove
+                                  ? isLast ? "bg-emerald-500/20 text-emerald-400" : "bg-emerald-500/8 text-emerald-400/50"
+                                  : isLast ? "bg-red-500/20 text-red-400" : "bg-red-500/8 text-red-400/50"
+                              }`}>
+                              <span className="text-[8px] font-black leading-none">{isAbove ? "▲" : "▼"}</span>
+                              <span className="text-[7px] font-semibold tabular-nums leading-none">{h.confidence}%</span>
+                            </span>
+                          );
+                        })}
+                        <span className="text-[7px] text-muted-foreground/30 ml-0.5">pulse</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Auto-Pilot */}

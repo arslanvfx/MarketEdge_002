@@ -204,6 +204,14 @@ export interface LiveDirectionResult {
   cached: boolean;
 }
 
+export interface LiveDirectionHistoryEntry {
+  aboveKalshi: boolean | null;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  at: string;
+  windowKey: string;
+}
+
 // Shape returned by the /crypto/trading-windows endpoint
 export interface TradingWindowBucket {
   count: number;

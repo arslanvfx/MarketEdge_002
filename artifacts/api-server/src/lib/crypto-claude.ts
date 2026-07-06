@@ -9,7 +9,7 @@ import {
   priceDp, obBucket, formatOrderBook,
   type Candle, type OrderBook,
 } from "./crypto-indicators";
-import { CRYPTO_COINS, getCandles, getStats, getTicker, get5mCandles, getOrderBook, type CoinPrediction, type Prediction } from "./crypto-data";
+import { CRYPTO_COINS, getCandles, getStats, getTicker, get5mCandles, getOrderBook, currentWindowKey, type CoinPrediction, type Prediction } from "./crypto-data";
 import { historyStore, type PredictionRecord } from "./crypto-history";
 import { KALSHI_SERIES, fetchKalshiTarget, kalshiTargetCache, getKalshiWindowContext, updateKalshiWindowPrice, getLastKalshiTicker, lastMLAboveCache } from "./crypto-kalshi";
 import { computeStatWindowCall } from "./prediction-utils";
@@ -802,6 +802,42 @@ export const liveDirectionInFlight = new Set<string>();
 export const liveDirectionLastAutoTrigger = new Map<string, number>();
 export const LIVE_DIR_AUTO_COOLDOWN = 2 * 60_000;
 
+// ---------------------------------------------------------------------------
+// Live-direction history ring buffer (max 5 entries per coin per window)
+// ---------------------------------------------------------------------------
+export interface LiveDirectionHistoryEntry {
+  aboveKalshi: boolean | null;
+  direction: "up" | "down" | "flat";
+  confidence: number;
+  at: string;
+  windowKey: string;
+}
+
+const MAX_LIVE_DIR_HISTORY = 5;
+// Key: `${SYM}:${windowKey}` — cleared automatically when a new window starts.
+const liveDirectionHistory = new Map<string, LiveDirectionHistoryEntry[]>();
+
+export function getLiveDirectionHistory(symbol: string): LiveDirectionHistoryEntry[] {
+  const sym = symbol.toUpperCase();
+  const wk = currentWindowKey();
+  const key = `${sym}:${wk}`;
+  return liveDirectionHistory.get(key) ?? [];
+}
+
+function pushLiveDirectionHistory(symbol: string, entry: LiveDirectionHistoryEntry): void {
+  const sym = symbol.toUpperCase();
+  const wk = currentWindowKey();
+  const key = `${sym}:${wk}`;
+  const arr = liveDirectionHistory.get(key) ?? [];
+  arr.push(entry);
+  if (arr.length > MAX_LIVE_DIR_HISTORY) arr.shift();
+  liveDirectionHistory.set(key, arr);
+  // Prune stale windows (keys from a different windowKey for this coin).
+  for (const k of liveDirectionHistory.keys()) {
+    if (k.startsWith(`${sym}:`) && k !== key) liveDirectionHistory.delete(k);
+  }
+}
+
 export async function fetchLiveDirection(symbol: string, force = false): Promise<LiveDirectionResult | null> {
   const nowMs = Date.now();
   const entry = liveDirectionCache.get(symbol.toUpperCase());
@@ -900,6 +936,13 @@ JSON only: {"direction":"up","confidence":65}`;
 
     const result: LiveDirectionResult = { aboveKalshi, direction, confidence, at: new Date().toISOString(), cached: false };
     liveDirectionCache.set(symbol.toUpperCase(), { result, at: nowMs });
+    pushLiveDirectionHistory(symbol, {
+      aboveKalshi,
+      direction,
+      confidence,
+      at: result.at,
+      windowKey: currentWindowKey(),
+    });
     return result;
   } catch {
     return null;

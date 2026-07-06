@@ -27,6 +27,7 @@ import {
   getStatWindowCall,
   getWindowBetSignal,
   fetchLiveDirection,
+  getLiveDirectionHistory,
   getTradingWindows,
   getCachedPrediction,
   getWindowMonitorAccuracy,
@@ -578,6 +579,18 @@ router.get("/crypto/live-direction/:symbol", async (req, res) => {
   } catch {
     res.status(500).json({ error: "Internal error" });
   }
+});
+
+// Per-window ring buffer of Claude live-direction checks (max 5 per coin).
+// Cleared automatically when the 15-min window rolls over.
+// Returns an empty array if no calls have been recorded yet this window.
+router.get("/crypto/live-direction-history/:symbol", (req, res) => {
+  const symbol = (req.params.symbol ?? "").toUpperCase();
+  if (!CRYPTO_COINS.find((c) => c.symbol === symbol)) {
+    res.status(404).json({ error: "Unknown symbol" });
+    return;
+  }
+  res.json({ symbol, history: getLiveDirectionHistory(symbol) });
 });
 
 // ── ML Model prediction ───────────────────────────────────────────────────────

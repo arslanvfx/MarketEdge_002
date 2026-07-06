@@ -115,11 +115,13 @@ export {
   liveDirectionLastAutoTrigger,
   LIVE_DIR_AUTO_COOLDOWN,
   fetchLiveDirection,
+  getLiveDirectionHistory,
   fetchTrendStabilityForBot,
 } from "./crypto-claude";
 export type {
   AIPrediction,
   LiveDirectionResult,
+  LiveDirectionHistoryEntry,
   TrendStability,
   TrendStabilityResult,
 } from "./crypto-claude";
