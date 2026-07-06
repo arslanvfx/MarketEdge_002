@@ -241,18 +241,64 @@ export function getWindowConditions(): BotConditionsSnapshot {
   };
 }
 
-/** Clears all window-level restrictions, direction counts, and coin pauses.
- *  The nuclear "why is nothing happening?" reset — safe to call at any time. */
+/** Nuclear reset — clears every per-window and per-coin restriction so all
+ *  coins can bet freely on the next tick.  Does NOT touch mode, config, daily
+ *  P&L, open positions, or trade history. */
 export function resetWindowConditions(): { cleared: string[]; cbWasActive: boolean } {
+  // ── Window-level blocks ───────────────────────────────────────────────────
   windowFailedFills.clear();
   windowZeroFillAttempts.clear();
   windowDirectionCounts.clear();
+
+  // ── Doubt & unanimous-failure confidence penalties ────────────────────────
+  // Clear the per-window outcome maps that drive penalty computation AND zero
+  // the cached penalty values so the next tick doesn't carry over stale state.
+  recentWindowOutcomes.clear();
+  recentUnanimousOutcomes.clear();
+  S.currentWindowDoubtPenalty = 0;
+  S.currentUnanimousFailurePenalty = 0;
+
+  // ── Per-coin slippage strikes ─────────────────────────────────────────────
+  coinSlippageStrikes.clear();
+
+  // ── Shadow parole cache ───────────────────────────────────────────────────
+  // Invalidate so the next checkAllParoles() re-reads fresh shadow data
+  // rather than serving a cached state that may now be stale.
+  S._shadowParoleCache = null;
+
+  // ── Auto-tune pauses, circuit-breaker, streak pauses ─────────────────────
   const pauseResult = clearAllPauses();
+
+  // ── Consecutive loss counters for all coins (not just paused ones) ────────
+  // clearAllPauses() only zeros losses for coins that have an active pause.
+  // A coin sitting at 2 consecutive losses (below the pause threshold) still
+  // carries that state — reset it here so no coin enters the next window
+  // with a strike count.
+  const activeStreakMap = activeCoinStreakState();
+  const streakReset: string[] = [];
+  for (const [sym, entry] of activeStreakMap.entries()) {
+    if (entry.consecutiveLosses > 0) {
+      activeStreakMap.set(sym, { ...entry, consecutiveLosses: 0, pauseUntilWindowKey: null });
+      streakReset.push(sym);
+    }
+  }
+  if (streakReset.length > 0) {
+    persistCoinStreakState(activeStreakMap, streakStoreForMode(S.botMode)).catch(() => {});
+  }
+
+  const allCleared = [...new Set([...pauseResult.clearedCoins, ...streakReset])];
   logger.info(
-    { cleared: pauseResult.clearedCoins, cbWasActive: pauseResult.cbWasActive },
-    "[kalshi-bot] all window conditions and pauses reset manually",
+    {
+      cleared: allCleared,
+      cbWasActive: pauseResult.cbWasActive,
+      doubtPenaltyCleared: true,
+      unanimousPenaltyCleared: true,
+      slippageStrikesCleared: true,
+      streakCountersReset: streakReset,
+    },
+    "[kalshi-bot] full reset — all restrictions, penalties, and streak counters cleared",
   );
-  return { cleared: pauseResult.clearedCoins, cbWasActive: pauseResult.cbWasActive };
+  return { cleared: allCleared, cbWasActive: pauseResult.cbWasActive };
 }
 
 /**
