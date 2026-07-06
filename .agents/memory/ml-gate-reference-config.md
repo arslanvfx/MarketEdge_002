@@ -7,6 +7,7 @@ description: Complete specification of ml_gate mode — engine constants, bot co
 
 > **Intent:** When the user says "switch to ML Gate mode", restore ALL of these exact values.
 > Last captured: 2026-07-03 from live DB + source code.
+> **Status:** Active in production as of 2026-07-06. minConfidence kept at 65 (auto-tuned) rather than reverting to 60.
 
 ---
 
