@@ -845,6 +845,39 @@ async function _runBotTick(
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // ── PRE-BET DATA COMPLETENESS GATE ──────────────────────────────────────
+  // Final hard check: ALL data required to place a bet must be confirmed
+  // non-null before we ever touch the Kalshi API.  This is the last line of
+  // defense — individual guards above catch most cases, but this unified
+  // gate ensures nothing slips through via a missing null-check upstream.
+  //
+  // Required before any bet:
+  //   1. A known price reference: yesPrice OR orderLimitPrice must be non-null.
+  //      Without a price we cannot verify cost, sizing, or expected return.
+  //   2. At least one model signal in the decision: signalsTotal ≥ 1.
+  //      A signalsTotal of 0 means the engine fired on zero data — impossible
+  //      to reach in normal operation but caught here as an ultimate guard.
+  //   3. kalshiTarget must be non-null (should always be true at this point).
+  {
+    const noPrice = yesPrice == null && orderLimitPrice == null;
+    const noSignals = (decision.signals?.signalsTotal ?? 0) < 1;
+    const noTarget = kalshiTarget == null;
+
+    if (noPrice || noSignals || noTarget) {
+      logger.error(
+        {
+          sym, direction, windowKey,
+          noPrice, noSignals, noTarget,
+          yesPrice, orderLimitPrice, kalshiTarget,
+          signalsTotal: decision.signals?.signalsTotal ?? 0,
+        },
+        "[kalshi-bot] SAFETY ABORT — pre-bet completeness gate failed; trade cancelled",
+      );
+      return;
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   logger.info(
     {
       sym, direction, decision: decision.action, confidence: decision.confidence,

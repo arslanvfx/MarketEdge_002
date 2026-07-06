@@ -266,11 +266,18 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     const mlDir = inp.mlAbove as boolean;
     const action: BotDecisionAction = mlDir ? "BET_YES" : "BET_NO";
 
-    // Guard: when ML is the ONLY available signal (no Stat, no Claude) and WM
-    // signals caution, skip rather than betting on a single unvalidated signal.
-    if (inp.statAbove === null && inp.claudeAbove === null && inp.wmRec === "caution") {
+    // Hard gate: ML must have at least one core signal (Stat or Claude) to
+    // validate it. ML is an ensemble learner that encodes both signals as
+    // features — when both are null, those features are 0.5 (neutral) during
+    // inference, which may not match what the model learned during training.
+    // More importantly, betting on ML alone with zero human-interpretable
+    // signal is a single unvalidated opinion — not an ensemble decision.
+    // When Claude is null because it's still pending, the Claude-pending guard
+    // above already blocks; this guard fires for the rare case where Claude
+    // never responded in 3+ minutes and Stat is also unavailable.
+    if (inp.statAbove === null && inp.claudeAbove === null) {
       return skip(
-        `ML only + caution: no core signals to validate ML(${mlDir}) and WM signals caution — skipping`,
+        `ML solo: no core signals available (Stat=null, Claude=null) — require at least one validator before betting`,
         ev,
       );
     }

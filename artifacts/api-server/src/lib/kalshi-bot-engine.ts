@@ -176,13 +176,21 @@ function _makeBotDecisionInner(
   const wmRec = wmSignal?.recommendation ?? null;
   const wmReady = wmSignal?.ready ?? false;
 
-  // Guard: training coins always run Claude. If Claude hasn't responded yet and
-  // we're within the first 90 s of the window, hold off rather than entering on
-  // stat alone — Claude's opening call takes 15–60 s after the snapshot fires at
-  // t+45 s, so the first bot tick (t+60 s) can race ahead of Claude's response.
-  const CLAUDE_PENDING_THRESHOLD_MIN = 1.5; // 90 s expressed in minutes
+  // Guard: Claude must have responded before we enter any position.
+  //
+  // Claude's opening call fires at window-open prefetch time and typically
+  // completes in 15–60 s (extended thinking). The entry buffer (60 s) means
+  // the first bot tick can arrive before Claude's response. We wait up to
+  // 3 minutes (CLAUDE_PENDING_THRESHOLD_MIN) for Claude before allowing any
+  // bet. After 3 minutes, if Claude still hasn't responded, the bet is allowed
+  // to proceed on Stat + ML alone — but the engine's core-signal gate still
+  // requires at least one of Stat or ML to be available and confident.
+  //
+  // This guard applies to ALL coins — not just training coins — because every
+  // coin the bot trades has a Claude call fired at window open, and entering
+  // without Claude's view violates the "all signals ready before betting" rule.
+  const CLAUDE_PENDING_THRESHOLD_MIN = 3.0; // 180 s — allow Claude time to respond
   if (
-    TRAINING_COINS.has(sym) &&
     claudeAbove === null &&
     minutesElapsed < CLAUDE_PENDING_THRESHOLD_MIN
   ) {
@@ -199,7 +207,7 @@ function _makeBotDecisionInner(
     return {
       action: "SKIP",
       confidence: 0,
-      reasoning: "Claude opening call pending — waiting up to 90 s before evaluating entry",
+      reasoning: `Claude opening call pending — waiting up to 3 min before evaluating entry (${minutesElapsed.toFixed(1)} min elapsed)`,
       signals: pendingSnapshot,
     };
   }
