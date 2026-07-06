@@ -75,7 +75,6 @@ import {
   getMLPrediction,
   getMLStatus,
 } from "./ml-store";
-import { runMLBackfillIfNeeded } from "./ml-backfill";
 import {
   extractMLFeatures,
   deriveMLSignalDirections,
@@ -411,6 +410,7 @@ export function getWindowBetSignal(symbol: string): WindowBetSignal | null {
 export function startPredictionTracker(
   onInitComplete?: () => void,
   onNewWindow?: (windowKey: string) => void,
+  onMLRetrySuccess?: () => void,
 ): void {
   let lastTrackerWindowKey = "";
 
@@ -1000,9 +1000,7 @@ export function startPredictionTracker(
       initMLFromDB().then(() => {
         if (wasMLInitSuccessful()) {
           logger.info("[ml-store] ML init retry %d succeeded — triggering backfill check", attempt);
-          runMLBackfillIfNeeded(96).catch((err) =>
-            logger.warn({ err }, "[ml-backfill] post-retry backfill failed (non-fatal)"),
-          );
+          onMLRetrySuccess?.();
         } else {
           scheduleMLInitRetry(attempt + 1);
         }

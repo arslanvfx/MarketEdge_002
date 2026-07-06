@@ -443,6 +443,13 @@ app.listen(port, (err) => {
           // giving the prefetch a head-start of up to 30s (the bot-loop phase gap).
           runWindowOpenPrefetch(windowKey).catch(() => {});
         },
+        // onMLRetrySuccess — called when initMLFromDB eventually succeeds on a
+        // background retry (e.g. DB was not ready at startup). Triggers the same
+        // backfill check that onInitComplete would have run on a clean start.
+        () => {
+          runMLBackfillIfNeeded(96)
+            .catch((err) => logger.warn({ err }, "[ml-backfill] post-retry backfill failed (non-fatal)"));
+        },
       );
       logger.info("Prediction tracker started");
 
