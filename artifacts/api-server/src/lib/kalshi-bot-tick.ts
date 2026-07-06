@@ -564,7 +564,7 @@ async function _runBotTick(
     //   YES bet + price barely above target → one tick down = loss
     const livePrice = pred?.price;
     if (!S.config.freeRunMode && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
-      const STRIKE_PROXIMITY_PCT = 0.05;
+      const STRIKE_PROXIMITY_PCT = 0.03;
       const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
       const tooClose =
         (direction === "no"  && livePrice <  kalshiTarget && distancePct < STRIKE_PROXIMITY_PCT) ||
