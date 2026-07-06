@@ -46,6 +46,7 @@
 - [YES/NO direction neutrality](direction-neutrality.md) — regime filter, contrarian-momentum gate, momentum override all REMOVED; each 15-min window is independent; direction decided by signals only
 - [Learning improvements defaults](learning-improvements-defaults.md) — 4 guard default changes from production data; wmReady gate defers NOT blocks
 - [Paper/Live mode full isolation](paper-live-isolation.md) — per-mode streak+dailyloss maps, status from mode-filtered count, decisionMode preference per mode, all stat endpoints infer mode; two-Map pattern for any new per-bot state
+- [Kalshi API type drift](kalshi-api-type-drift.md) — Kalshi progressively converts numeric fields to strings; use Number(x) > 0 not typeof checks; floor_strike and yes_ask both affected
 - [Kalshi RSA key format](kalshi-rsa-key-format.md) — KALSHI_PRIVATE_KEY stored as raw base64 (no headers); getPrivateKey() must wrap it in PKCS#1 PEM before signing
 - [Kalshi balance API fields](kalshi-balance-api-fields.md) — balance=cash cents, portfolio_value=position cents; total=sum; use balance for guards, not total
 - [Bot mode variable naming](bot-mode-variable-name.md) — runBotLoopTick/_runBotTick use module-level botMode; ${mode} throws ReferenceError in those functions

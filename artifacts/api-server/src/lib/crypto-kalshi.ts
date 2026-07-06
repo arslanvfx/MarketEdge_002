@@ -191,7 +191,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     }
     const body = (await resp.json()) as {
       markets?: {
-        floor_strike?: number;
+        floor_strike?: number | string;
         ticker?: string;
         close_time?: string;
         // Current API: YES-side dollar strings (primary — confirmed present as of mid-2026)
@@ -209,7 +209,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     };
 
     const markets = (body.markets ?? []).filter(
-      (m) => typeof m.floor_strike === "number" && (m.floor_strike as number) > 0,
+      (m) => Number(m.floor_strike) > 0,
     );
 
     let selected: (typeof markets)[0] | undefined;
