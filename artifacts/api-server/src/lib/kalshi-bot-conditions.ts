@@ -244,9 +244,14 @@ export function getWindowConditions(): BotConditionsSnapshot {
 }
 
 /** Nuclear reset — clears every per-window and per-coin restriction so all
- *  coins can bet freely on the next tick.  Does NOT touch mode, config, daily
- *  P&L, open positions, or trade history. */
-export function resetWindowConditions(): { cleared: string[]; cbWasActive: boolean } {
+ *  coins can bet freely on the next tick.  Does NOT touch mode, daily P&L,
+ *  open positions, or trade history.
+ *
+ *  Also resets in-memory direction-block sets (COIN_YES_BLOCKED /
+ *  COIN_FULLY_BLOCKED) so no coin is silently suppressed after the reset.
+ *  The caller (route handler) is responsible for persisting any config field
+ *  resets (e.g. regimePenalty → 0) to the DB. */
+export function resetWindowConditions(): { cleared: string[]; cbWasActive: boolean; coinBlocksCleared: string[] } {
   // ── Window-level blocks ───────────────────────────────────────────────────
   windowFailedFills.clear();
   windowZeroFillAttempts.clear();
@@ -267,6 +272,16 @@ export function resetWindowConditions(): { cleared: string[]; cbWasActive: boole
   // Invalidate so the next checkAllParoles() re-reads fresh shadow data
   // rather than serving a cached state that may now be stale.
   S._shadowParoleCache = null;
+
+  // ── Directional coin blocks (YES-blocked and fully-blocked sets) ──────────
+  // These in-memory Sets are populated by the auto-tune system and the shadow
+  // parole evaluator. On a full reset the user explicitly wants all coins
+  // unblocked so every coin can bet freely in the next window.
+  const yesBlockedCleared = [...COIN_YES_BLOCKED];
+  const fullyBlockedCleared = [...COIN_FULLY_BLOCKED];
+  COIN_YES_BLOCKED.clear();
+  COIN_FULLY_BLOCKED.clear();
+  const coinBlocksCleared = [...new Set([...yesBlockedCleared, ...fullyBlockedCleared])];
 
   // ── Auto-tune pauses, circuit-breaker, streak pauses ─────────────────────
   const pauseResult = clearAllPauses();
@@ -297,10 +312,11 @@ export function resetWindowConditions(): { cleared: string[]; cbWasActive: boole
       unanimousPenaltyCleared: true,
       slippageStrikesCleared: true,
       streakCountersReset: streakReset,
+      coinBlocksCleared,
     },
-    "[kalshi-bot] full reset — all restrictions, penalties, and streak counters cleared",
+    "[kalshi-bot] full reset — all restrictions, penalties, coin blocks, and streak counters cleared",
   );
-  return { cleared: allCleared, cbWasActive: pauseResult.cbWasActive };
+  return { cleared: allCleared, cbWasActive: pauseResult.cbWasActive, coinBlocksCleared };
 }
 
 /**

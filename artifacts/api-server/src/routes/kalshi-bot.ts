@@ -627,11 +627,23 @@ router.post("/crypto/bot/free-run", requireAuth, async (req, res) => {
 
 // POST /crypto/bot/reset-conditions — nuclear reset: clears all window-level
 // restrictions (empty-book cooldowns, direction counts), auto-tune pauses,
-// coin streak pauses, and the circuit-breaker countdown. Safe to call at any
-// time; does not affect mode, config, or open positions.
-router.post("/crypto/bot/reset-conditions", requireAuth, (_req, res) => {
+// coin streak pauses, the circuit-breaker countdown, directional coin blocks
+// (COIN_YES_BLOCKED / COIN_FULLY_BLOCKED), and resets restriction-related
+// config fields (regimePenalty → 0) so the bot runs with clean settings
+// exactly matching the current defaults. Safe to call at any time; does not
+// affect mode, daily P&L, open positions, or trade history.
+router.post("/crypto/bot/reset-conditions", requireAuth, async (_req, res) => {
   try {
     const result = resetWindowConditions();
+
+    // Reset restriction-related config fields to their clean defaults and
+    // persist to DB so the settings survive a restart. Only touches fields
+    // that represent active restrictions — leaves betSize, dailyLossLimit,
+    // and all other user-configured values untouched.
+    await updateBotConfig({
+      regimePenalty: 0,
+    });
+
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
