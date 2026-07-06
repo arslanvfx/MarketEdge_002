@@ -194,9 +194,15 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
         floor_strike?: number;
         ticker?: string;
         close_time?: string;
+        // Legacy integer-cent fields (no longer returned by Kalshi API)
         yes_ask?: number;
         yes_bid?: number;
         last_price?: number;
+        // Current API: NO-side dollar strings (0–1 scale).
+        // YES prices are the complement: yes_ask = 1−no_bid, yes_bid = 1−no_ask
+        no_ask_dollars?: string;
+        no_bid_dollars?: string;
+        last_price_dollars?: string;
       }[];
     };
 
@@ -230,11 +236,27 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     }
 
     if (selected) {
+      // Parse a dollar-string (e.g. "0.6100") that the current Kalshi API returns.
+      const parseDollar = (s: string | undefined | null): number | null => {
+        if (!s) return null;
+        const n = parseFloat(s);
+        return Number.isFinite(n) && n > 0 && n < 1 ? n : null;
+      };
+      // Legacy: integer cents (Kalshi used to return yes_ask/yes_bid as cents 0-100)
       const toFrac = (v: number | undefined | null) =>
-        typeof v === "number" && v > 0 ? v / 100 : null;
-      const yesAsk   = toFrac(selected.yes_ask);
-      const yesBid   = toFrac(selected.yes_bid);
-      const lastP    = toFrac(selected.last_price);
+        typeof v === "number" && v > 0 && v < 100 ? v / 100 : null;
+
+      // Current API returns NO-side prices as dollar strings.
+      // YES and NO are complements: yes_ask = 1 − no_bid, yes_bid = 1 − no_ask
+      const noAsk = parseDollar(selected.no_ask_dollars);
+      const noBid = parseDollar(selected.no_bid_dollars);
+      const lastPDollars = parseDollar(selected.last_price_dollars);
+
+      // Fall back to legacy integer-cent fields if the new ones are absent
+      const yesAsk = (noBid != null ? 1 - noBid : null) ?? toFrac(selected.yes_ask);
+      const yesBid = (noAsk != null ? 1 - noAsk : null) ?? toFrac(selected.yes_bid);
+      const lastP  = lastPDollars ?? toFrac(selected.last_price);
+
       const yesPrice =
         yesAsk !== null && yesBid !== null ? (yesAsk + yesBid) / 2
         : yesAsk ?? yesBid ?? lastP ?? null;
