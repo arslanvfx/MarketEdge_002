@@ -66,6 +66,6 @@
 - [Kalshi market API price format](kalshi-api-price-format.md) — API now returns no_ask_dollars/no_bid_dollars (string 0–1); yes prices are complements (yes_ask=1−no_bid); old yes_ask/yes_bid integer-cent fields gone
 - [Bot config DB patch vs in-memory](bot-config-db-patch.md) — psql patching bot_config does NOT update live in-memory S.config; server restart required; always set paperDecisionMode=decisionMode when patching so mode-switch doesn't revert it
 - [ml_gate hard checkpoint](ml-gate-checkpoint.md) — ml_gate mode MUST block bets when mlAbove===null; gate lives in Phase 3 loop (kalshi-bot-loop.ts) after hardModelCount check; no parole override
-- [EV gate direction asymmetry](ev-gate-direction.md) — EV gate must run AFTER direction; use BET_YES formula for YES, BET_NO formula for NO; pre-direction gate with YES formula incorrectly blocks cheap NO contracts
+- [EV gate direction asymmetry](ev-gate-direction.md) — EV gate thresholds: YES=−0.05, NO=−0.15; NO needs wider floor because accuracy metric is calibrated on YES bets only; min-return gate (1.45×) still hard-blocks yesPrice<31%
 - [Bot signal pipeline architecture](bot-signal-pipeline.md) — stale-signal gate replaced by window-keyed pipeline; no more TTL gaps; Claude prompt includes explicit window close time; see kalshi-bot-pipeline.ts
 - [ml_gate Path A sentinel removal](ml-gate-path-a.md) — mlMinConfidence:999 blocked ML from ever leading; replaced with per-coin overrides via BotConfig.mlPrimaryMinConfidenceOverrides; ETH/XRP/SOL default 58

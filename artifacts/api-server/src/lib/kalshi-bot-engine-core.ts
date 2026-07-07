@@ -188,13 +188,24 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
   // bets each use the correct payoff formula for their actual cost structure.
   // Pre-direction EV used the YES formula for all bets, which incorrectly
   // blocked cheap NO contracts (high yes_price = low NO cost = high payoff).
+  //
+  // Thresholds are asymmetric:
+  //   YES: −0.05  — tight, since historical accuracy is calibrated on YES bets.
+  //   NO : −0.15  — relaxed, because the accuracy metric is derived almost entirely
+  //                 from YES-bet history.  Applying the same threshold to NO bets
+  //                 treats YES-calibrated accuracy as a perfect proxy for NO win
+  //                 rate, which over-rejects valid NO entries in bearish windows
+  //                 where the Kalshi market has partially but not fully priced in
+  //                 the move (yesPrice 30–40%).  The min-return gate (1.45×) still
+  //                 hard-blocks truly overpriced NO bets (yesPrice < 31%).
   if (result.action === "BET_YES" || result.action === "BET_NO") {
     const dirEV = computeEVForDirection(result.action, inp.yesPrice, inp.signalAccuracyPct);
-    if (dirEV !== null && dirEV < -0.05) {
+    const evFloor = result.action === "BET_NO" ? -0.15 : -0.05;
+    if (dirEV !== null && dirEV < evFloor) {
       return {
         action: "SKIP",
         confidence: result.confidence,
-        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}%`,
+        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}% (floor ${evFloor})`,
         signalsAgreeing: result.signalsAgreeing,
         signalsTotal: result.signalsTotal,
         ev: dirEV,
