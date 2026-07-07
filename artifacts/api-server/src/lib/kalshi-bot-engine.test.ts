@@ -239,10 +239,10 @@ test("2-vs-1 null confidence: ML=72%, stat=BELOW (conf null), claude=BELOW (conf
   assert.equal(r.action, "SKIP");
 });
 
-test("2-vs-1 ML not strong enough: ML=68% (below primary), stat=BELOW 55%, claude=BELOW 55% → ML cannot override → SKIP", () => {
-  // Both signals are weak, but ML itself is below ML_PRIMARY_MIN_CONFIDENCE (70%) — cannot lead.
+test("2-vs-1 ML not strong enough: ML=64% (below primary 65%), stat=BELOW 55%, claude=BELOW 55% → ML cannot override → SKIP", () => {
+  // Both signals are weak, but ML itself is below ML_PRIMARY_MIN_CONFIDENCE (65%) — cannot lead.
   const r = computeCorePairDecision(inp({
-    mlAbove: true, mlConfidence: 68,
+    mlAbove: true, mlConfidence: 64,
     statAbove: false, statConfidence: 55,
     claudeAbove: false, claudeConfidence: 55,
     minConfidence: 50,

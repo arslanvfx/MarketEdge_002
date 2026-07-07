@@ -30,7 +30,7 @@ export const BASE_CONFIDENCE_HALF_PAIR = 60;
 // Each validating signal adds this when it agrees in Path B/C (WM).
 export const CONFIDENCE_BOOST_PER_SIGNAL = 8;
 // Minimum ML confidence required for ML to lead (Path A).
-export const ML_PRIMARY_MIN_CONFIDENCE = 70;
+export const ML_PRIMARY_MIN_CONFIDENCE = 65;
 // Minimum ML confidence at which ML's direction is considered meaningful enough
 // to trigger the Claude-ML alignment gate.  Below this threshold ML is treated
 // as noise — a weak ML dissent (50–55%) should not block a strong stat+claude
@@ -326,25 +326,41 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     inp.mlConfidence >= mlMinConf;
 
   // Veto PATH A: ML must have at least one confirming signal to lead.
-  // Exception: both Stat and Claude actively oppose ML but are BOTH weak
+  // Exception A: both Stat and Claude actively oppose ML but are BOTH weak
   // (< STAT_CLAUDE_DOMINANCE_THRESHOLD).  The alignment gate above already
   // blocked the "strong opposition" case, so if we reach here with both
-  // opposing, their confidences are confirmed < 60% — ML's 70%+ overrides.
+  // opposing, their confidences are confirmed < 60% — ML overrides.
+  // Exception B (ML dominance): exactly one signal opposes (the other is absent)
+  // and that signal is weak AND ML confidence exceeds it by ≥ ML_DOMINANCE_MARGIN
+  // pp.  A single weak, complement-absent signal cannot block a clearly stronger
+  // ML read.  Strong opposition (≥ STAT_CLAUDE_DOMINANCE_THRESHOLD) is never
+  // overridden here — the alignment gate above already handles that case.
+  const ML_DOMINANCE_MARGIN = 10;
   const mlDir = inp.mlAbove;
   const mlHasConfirmation =
     (inp.statAbove !== null && inp.statAbove === mlDir) ||
     (inp.claudeAbove !== null && inp.claudeAbove === mlDir);
   if (mlLeadReady && mlDir !== null && !mlHasConfirmation) {
-    // Check whether the gate granted the "both weak" exception above.
-    // If it did, both statAbove and claudeAbove must be non-null and opposing.
+    const mlConf = inp.mlConfidence ?? 0;
+    // Exception A: both weakly oppose (alignment gate confirmed both < 60%).
     const bothWeaklyOppose =
       inp.statAbove !== null && inp.statAbove !== mlDir &&
       inp.claudeAbove !== null && inp.claudeAbove !== mlDir;
-    if (!bothWeaklyOppose) {
+    // Exception B: stat opposes alone (claude absent), stat is weak, ML dominates.
+    const statOpposes   = inp.statAbove   !== null && inp.statAbove   !== mlDir;
+    const claudeOpposes = inp.claudeAbove !== null && inp.claudeAbove !== mlDir;
+    const mlDominatesStatAlone =
+      statOpposes && inp.claudeAbove === null &&
+      (inp.statConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD) < STAT_CLAUDE_DOMINANCE_THRESHOLD &&
+      mlConf >= (inp.statConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD) + ML_DOMINANCE_MARGIN;
+    // Exception B (mirror): claude opposes alone (stat absent), claude is weak, ML dominates.
+    const mlDominatesClaudeAlone =
+      claudeOpposes && inp.statAbove === null &&
+      (inp.claudeConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD) < STAT_CLAUDE_DOMINANCE_THRESHOLD &&
+      mlConf >= (inp.claudeConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD) + ML_DOMINANCE_MARGIN;
+    if (!bothWeaklyOppose && !mlDominatesStatAlone && !mlDominatesClaudeAlone) {
       mlLeadReady = false; // standard veto: no confirming signal
     }
-    // If bothWeaklyOppose === true: gate already confirmed both are < 60% weak
-    // → allow ML to lead without a confirming signal.
   }
 
   // ── PATH A: ML primary ────────────────────────────────────────────────────
@@ -961,7 +977,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   freeRunMode: false,
   consensusMinCents: 25,
   momentumLookbackCandles: 8,
-  mlPrimaryMinConfidenceOverrides: {},
+  // SOL/DOGE/XRP ML accuracy sits at ~59-60%, just under the global 65% gate.
+  // Lower per-coin floors so they qualify for PATH A at their realistic confidence range.
+  mlPrimaryMinConfidenceOverrides: { SOL: 60, DOGE: 62, XRP: 60 },
 };
 
 /**
