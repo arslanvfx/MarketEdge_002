@@ -172,7 +172,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           type SkipMeta = { label: string; icon: React.ReactNode; detail?: string };
                           const SKIP_META: Record<string, SkipMeta> = {
                             "market-consensus-gate":      { label: "Consensus gate",      icon: <Users className="w-3 h-3" />,       detail: "YES price below 25¢ floor" },
-                            "live-signal-stale-hard-stop":{ label: "Stale signal",        icon: <Timer className="w-3 h-3" />,       detail: "Live signal too old to trust" },
+                            "pipeline-not-ready":         { label: "Pipeline pending",    icon: <Timer className="w-3 h-3" />,       detail: "Window signal pipeline not yet complete" },
                             "candle-cache-not-warm":      { label: "Candles not ready",   icon: <Thermometer className="w-3 h-3" />, detail: "Candle cache still warming up" },
                             "candle-momentum-reversal":   { label: "Momentum reversal",   icon: <Waves className="w-3 h-3" />,       detail: "Last candles show counter-trend move" },
                             "strike-proximity":           { label: "Near strike",         icon: <Crosshair className="w-3 h-3" />,   detail: "Price too close to strike" },

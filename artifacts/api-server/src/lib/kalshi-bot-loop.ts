@@ -459,7 +459,11 @@ export async function runBotLoopTick(): Promise<void> {
         if (!currentPos || currentPos.windowKey !== pos.windowKey) return;
 
         const betAbove = currentPos.direction === "yes";
-        const signals = [result.statAbove, result.claudeAbove, result.mlAbove];
+        // Re-check consensus is intentionally stat + Claude only.  ML is not
+        // re-run during re-checks (its feature vector doesn't change mid-window);
+        // including a stale ML signal in exit consensus can override a genuine
+        // Claude flip, which defeats the purpose of the re-check.
+        const signals = [result.statAbove, result.claudeAbove];
         const signalsForBet = signals.filter(s => s === betAbove).length;
         const signalsAgainstBet = signals.filter(s => s !== null && s !== betAbove).length;
 

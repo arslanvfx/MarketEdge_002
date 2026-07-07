@@ -77,10 +77,20 @@ export function getPipelineResult(sym: string, windowKey: string): PipelineResul
  * (fallback for coins whose Kalshi market wasn't yet published at prefetch time).
  */
 export function triggerWindowPipeline(sym: string, windowKey: string): void {
-  const key = `${sym.toUpperCase()}:${windowKey}`;
+  const symUp = sym.toUpperCase();
+  const key = `${symUp}:${windowKey}`;
   if (pipelineResults.has(key) || pipelineInFlight.has(key)) return;
+
+  // Prune results from previous windows for this coin so the map doesn't grow
+  // unboundedly over long uptime.  Keep only the entry for the current windowKey.
+  for (const existingKey of pipelineResults.keys()) {
+    if (existingKey.startsWith(`${symUp}:`) && existingKey !== key) {
+      pipelineResults.delete(existingKey);
+    }
+  }
+
   pipelineInFlight.add(key);
-  _runPipeline(sym.toUpperCase(), windowKey, false)
+  _runPipeline(symUp, windowKey, false)
     .finally(() => pipelineInFlight.delete(key));
 }
 
@@ -167,27 +177,35 @@ async function _runPipeline(
     }
   }
 
-  // ── Step 4: ML prediction ────────────────────────────────────────────────
+  // ── Step 4: ML prediction — initial pipeline only ────────────────────────
+  // Re-checks are limited to stat + Claude (the two signals that can meaningfully
+  // shift mid-window based on fresh market data).  ML is trained once per window
+  // at snap time and does not benefit from re-calling at minute 5 or 7 — its
+  // feature vector is dominated by time-invariant window-open indicators.
+  // Including ML in re-check exit consensus would create a risk-sensitive path
+  // where the ML signal (unchanged from window-open) can override a Claude flip.
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
-  const pred = getCachedPrediction(sym);
-  if (pred && kalshiTarget != null) {
-    try {
-      const winCtx = getKalshiWindowContext(sym);
-      // windowKey is "YYYY-MM-DDTHH:MM" — parse as UTC window start
-      const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
-      const elapsedFraction = Math.min((Date.now() - windowStartMs) / (15 * 60_000), 1);
-      const features = extractMLFeatures(
-        pred, kalshiTarget, elapsedFraction, winCtx?.priceAtOpen,
-        statAbove, claudeAbove, null,
-      );
-      const mlResult = getMLPrediction(sym, features);
-      if (mlResult.ready && mlResult.prediction) {
-        mlAbove = mlResult.prediction.above;
-        mlConfidence = mlResult.prediction.confidence ?? null;
+  if (!isRecheck) {
+    const pred = getCachedPrediction(sym);
+    if (pred && kalshiTarget != null) {
+      try {
+        const winCtx = getKalshiWindowContext(sym);
+        // windowKey is "YYYY-MM-DDTHH:MM" — parse as UTC window start
+        const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
+        const elapsedFraction = Math.min((Date.now() - windowStartMs) / (15 * 60_000), 1);
+        const features = extractMLFeatures(
+          pred, kalshiTarget, elapsedFraction, winCtx?.priceAtOpen,
+          statAbove, claudeAbove, null,
+        );
+        const mlResult = getMLPrediction(sym, features);
+        if (mlResult.ready && mlResult.prediction) {
+          mlAbove = mlResult.prediction.above;
+          mlConfidence = mlResult.prediction.confidence ?? null;
+        }
+      } catch (err) {
+        logger.warn({ sym, windowKey, err }, "[pipeline] ML inference failed");
       }
-    } catch (err) {
-      logger.warn({ sym, windowKey, err }, "[pipeline] ML inference failed");
     }
   }
 
