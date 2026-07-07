@@ -12,7 +12,7 @@ import {
   DEFAULT_BOT_CONFIG, BET_PROFILES, computeDynamicBetSize, makeBotDecision,
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
-  applyStartupModeRestore, buildStreakSnapshot, restoreStreakState, shouldDeferForLiveSignal,
+  applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -26,11 +26,11 @@ import {
 } from "./kalshi-trader";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
-  getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
-  liveDirectionCache, liveDirectionInFlight,
+  getCachedPrediction, getKalshiCachedData, fetchKalshiTarget,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
+import { getPipelineResult, triggerWindowPipeline } from "./kalshi-bot-pipeline";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
@@ -334,12 +334,16 @@ async function _runBotTick(
   }
   if (!kalshiTicker || kalshiTarget === null) return;
 
-  // Eager Claude prefetch: fire when a *new Kalshi ticker* is first seen per symbol.
-  // Keyed on the actual ticker string (not the local window key) so we don't prefetch
-  // against a stale market if the new ticker hasn't published yet at window rollover.
+  // New-ticker detection: when a new Kalshi ticker is first seen for a symbol,
+  // trigger the window pipeline (fire-and-forget, idempotent).  The pipeline
+  // runs Claude with a rich prompt that includes the explicit window-close time,
+  // stat direction, and fresh indicators — replacing the old eager fetchLiveDirection.
+  // If runWindowOpenPrefetch already fired the pipeline, triggerWindowPipeline is a
+  // no-op.  This block acts as a fallback for coins whose Kalshi market wasn't yet
+  // published at prefetch time.
   if (prefetchedTicker.get(sym) !== kalshiTicker) {
     prefetchedTicker.set(sym, kalshiTicker);
-    fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget
+    triggerWindowPipeline(sym, windowKey); // fire-and-forget, idempotent
   }
 
     // Hard 2-minute window buffer: no entry until the window is at least
@@ -371,67 +375,23 @@ async function _runBotTick(
     return;
   }
 
-  // ── Live signal readiness gate ─────────────────────────────────────────────
-  // The opening Claude snap (historyStore) is written once at T~+1 min and
-  // never updated.  liveDirectionCache is kept fresh by fetchLiveDirection
-  // (2-min TTL) and is what the engine now uses as the authoritative Claude
-  // signal.  Before placing any bet, ensure we have a fresh live verdict:
+  // ── Pipeline readiness gate ────────────────────────────────────────────────
+  // All signals (Kalshi target → stat → Claude → ML) must be ready before
+  // any bet is placed.  The pipeline fires at window-open (from prefetch or
+  // from the new-ticker detection above) and runs sequentially, writing its
+  // Claude verdict to liveDirectionCache so the engine picks it up via
+  // applyClaudeLiveOverride with no engine changes.
   //
-  //   • Cache hit (<2 min old) → proceed; the engine will use the live result.
-  //   • Cache miss / stale, within first 90 s past buffer → defer one tick;
-  //     fire a background refresh so the next tick (~10–30 s) has a warm cache.
-  //   • Cache miss / stale, >90 s past buffer (Claude API down) → fall through
-  //     to the opening snap rather than deferring for the rest of the window.
-  //
-  // The eager prefetch on new-ticker detection (above) should pre-warm the
-  // cache before the entry buffer clears in most windows.  This gate only
-  // fires when that prefetch hasn't finished yet or the result has aged out
-  // (late bets at T+4+ min).
+  // If the pipeline hasn't completed for this window yet, defer this tick.
+  // There is no time-based fallback — we would rather miss the window entry
+  // than bet with incomplete or stale signal data.
   {
-    const LIVE_SIGNAL_MAX_AGE_MS = 2 * 60_000;
-    // 90 s past the entry buffer = ~4.5 min into the window.  After this we
-    // stop waiting and fall through so no entry window is lost to a down API.
-    const LIVE_SIGNAL_MAX_DEFER_S = 90;
-    const nowMs = Date.now();
-    const liveDirEntry = liveDirectionCache.get(sym);
-    const secondsPastBuffer = Math.max(0, secondsElapsed - WINDOW_ENTRY_BUFFER_S);
-    const signalGate = shouldDeferForLiveSignal(
-      liveDirEntry,
-      nowMs,
-      LIVE_SIGNAL_MAX_AGE_MS,
-      secondsPastBuffer,
-      LIVE_SIGNAL_MAX_DEFER_S,
-    );
-    if (signalGate.defer) {
-      if (!liveDirectionInFlight.has(sym)) {
-        fetchLiveDirection(sym, true).catch(() => {}); // fire-and-forget refresh
-      }
+    const pipelineResult = getPipelineResult(sym, windowKey);
+    if (pipelineResult === null) {
       logger.debug(
-        { sym, liveDirAgeS: liveDirEntry ? Math.round((nowMs - liveDirEntry.at) / 1000) : null },
-        "[kalshi-bot] live signal stale — deferring bet 1 tick for fresh Claude verdict",
+        { sym, windowKey, secondsElapsed },
+        "[kalshi-bot] pipeline not yet ready for this window — deferring tick",
       );
-      return;
-    }
-    if (signalGate.usedFallback) {
-      // Live Claude direction unavailable after max-defer. Never bet on stale
-      // opening-snap reasoning — that's a blind bet. Skip this tick and keep
-      // refreshing in the background; the next tick with a fresh live signal proceeds.
-      if (!liveDirectionInFlight.has(sym)) {
-        fetchLiveDirection(sym, true).catch(() => {});
-      }
-      logger.info(
-        { sym, secondsPastBuffer },
-        "[kalshi-bot] SKIP — live signal stale (hard stop): not betting on stale opening snap",
-      );
-      if (lastDecisionWindowKey.get(sym) !== `stale-signal:${windowKey}`) {
-        lastDecisionWindowKey.set(sym, `stale-signal:${windowKey}`);
-        await persistBetRecord({
-          symbol: sym, windowKey, ticker: kalshiTicker ?? "", direction: null,
-          action: "skip",
-          signals: { reason: "live-signal-stale-hard-stop", secondsPastBuffer },
-          entryPrice: yesPrice, kalshiTarget,
-        });
-      }
       return;
     }
   }

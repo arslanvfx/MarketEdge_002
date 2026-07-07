@@ -57,6 +57,7 @@ import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition } from "./kalshi-bot-close";
 import { runBotTickForCoin } from "./kalshi-bot-tick";
+import { triggerWindowPipeline, runPipelineRecheck } from "./kalshi-bot-pipeline";
 import {
   _persistModeToConfig, updateBotConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadWindowBetCountsFromDB, loadRegimeCache,
@@ -118,6 +119,14 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
 
   if (confirmed.length > 0) {
     logger.info({ confirmed, windowKey }, "[prefetch] step 1 complete — Kalshi data confirmed");
+    // Fire the window pipeline for every confirmed coin immediately after their
+    // Kalshi target is available.  The pipeline runs sequentially per coin:
+    //   Kalshi target → stat → Claude (rich prompt, explicit close time) → ML
+    // Results are stored in pipelineResults; the bot tick gate will defer until
+    // the pipeline completes rather than betting on stale cached signals.
+    for (const sym of confirmed) {
+      triggerWindowPipeline(sym, windowKey);
+    }
   }
   if (deferred.length > 0) {
     logger.warn(
@@ -186,6 +195,10 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
 // overlap if Claude stability analysis is still in-flight when the interval fires.
 // The openPositions guard already prevents double-bets, but this lock avoids
 // redundant Kalshi API calls and confusing interleaved log output.
+// Tracks the last time a pipeline re-check was run for each open position.
+// Keyed by sym — cleared on window change by the position-expiry logic.
+const pipelineRecheckAt = new Map<string, number>();
+
 let tickInFlight = false;
 
 // Tracks how many consecutive bot-evaluation windows had every coin skipped because
@@ -421,6 +434,74 @@ export async function runBotLoopTick(): Promise<void> {
       } catch (err) {
         logger.warn({ err, sym }, "[kalshi-bot] exit tick error (non-fatal)");
       }
+    }
+  }
+
+  // ── Pipeline re-check for open positions ──────────────────────────────────
+  // Every PIPELINE_RECHECK_INTERVAL_MS (~2.5 min) re-run the signal pipeline
+  // (Claude + stat + ML) for each open position.  If the resulting consensus
+  // contradicts the direction we bet AND the current exit value is ≥ 25% of
+  // the original entry cost, close the position immediately.
+  //
+  // This supplements (not replaces) the existing Phase-2 exit guards:
+  //   • Phase 2 handles profit-lock, phase2-threshold, and time-based exits.
+  //   • Re-check handles signal-flip exits (Claude/stat/ML changed their mind).
+  const PIPELINE_RECHECK_INTERVAL_MS = 150_000; // 2.5 min
+  if (openPositions.size > 0) {
+    for (const [sym, pos] of Array.from(openPositions.entries())) {
+      const lastRecheck = pipelineRecheckAt.get(sym) ?? 0;
+      if (Date.now() - lastRecheck < PIPELINE_RECHECK_INTERVAL_MS) continue;
+      pipelineRecheckAt.set(sym, Date.now());
+
+      void runPipelineRecheck(sym, pos.windowKey).then(async (result) => {
+        if (!result) return;
+        const currentPos = openPositions.get(sym);
+        if (!currentPos || currentPos.windowKey !== pos.windowKey) return;
+
+        const betAbove = currentPos.direction === "yes";
+        const signals = [result.statAbove, result.claudeAbove, result.mlAbove];
+        const signalsForBet = signals.filter(s => s === betAbove).length;
+        const signalsAgainstBet = signals.filter(s => s !== null && s !== betAbove).length;
+
+        logger.info(
+          { sym, betAbove, signalsForBet, signalsAgainstBet,
+            statAbove: result.statAbove, claudeAbove: result.claudeAbove, mlAbove: result.mlAbove },
+          "[pipeline-recheck] consensus check for open position",
+        );
+
+        if (signalsAgainstBet === 0 || signalsAgainstBet <= signalsForBet) return;
+
+        const kd = getKalshiCachedData(sym);
+        const currentYesPrice = kd?.yesPrice ?? null;
+        if (currentYesPrice == null) return;
+
+        const exitValue = betAbove ? currentYesPrice : (1 - currentYesPrice);
+        const entryCost = betAbove ? currentPos.entryYesPrice : (1 - currentPos.entryYesPrice);
+        const exitRatio = exitValue / Math.max(entryCost, 0.01);
+
+        if (exitRatio < 0.25) {
+          logger.info(
+            { sym, exitRatio: exitRatio.toFixed(3), signalsAgainstBet },
+            "[pipeline-recheck] consensus flipped but exit value < 25% of entry cost — holding",
+          );
+          return;
+        }
+
+        logger.warn(
+          { sym, betAbove, exitRatio: exitRatio.toFixed(3), signalsForBet, signalsAgainstBet },
+          "[pipeline-recheck] consensus flipped with meaningful exit value — closing position",
+        );
+
+        // Synchronously delete before the async close to prevent double-close.
+        openPositions.delete(sym);
+        try {
+          await closePosition(currentPos, currentYesPrice, kd?.value ?? null, "pipeline_recheck_flip");
+        } catch (err) {
+          // Close failed (e.g. Kalshi API error) — restore position so Phase 2 retries.
+          openPositions.set(sym, currentPos);
+          logger.error({ err, sym }, "[pipeline-recheck] close failed — position restored");
+        }
+      }).catch(() => {});
     }
   }
 
