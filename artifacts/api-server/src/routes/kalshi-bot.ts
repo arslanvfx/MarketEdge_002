@@ -112,7 +112,16 @@ function pipelineStatusHandler(_req: any, res: any) {
     // Legacy field for any consumers that haven't updated yet
     const inFlightSyms = inFlight.map(e => e.sym);
 
-    res.json({ results, inFlight, inFlightSyms, windowKey: currentWindowKey });
+    // Live unified signals — sourced from the same predictor-layer functions as
+    // the Crypto Predictor page so stat/claude/ml always match what the page shows.
+    // Keyed by symbol for all coins in the current window (completed + in-flight).
+    const allSyms = Array.from(new Set([
+      ...results.map(r => r.sym),
+      ...inFlight.map(e => e.sym),
+    ]));
+    const liveSignals = Object.fromEntries(allSyms.map(sym => [sym, getLatestCoinSignals(sym)]));
+
+    res.json({ results, inFlight, inFlightSyms, windowKey: currentWindowKey, liveSignals });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
