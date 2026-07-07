@@ -26,15 +26,12 @@ import {
   analyzeCoin,
   getKalshiCachedData, fetchKalshiTarget, getKalshiWindowContext,
   getCachedPrediction,
-  getStatWindowCall, getTrackerWindowCall, getWindowBetSignal,
-  isCoinClaudeEnabled,
   liveDirectionCache,
+  getLatestCoinSignals,
   type CoinDef,
   type CoinPrediction,
   type LiveDirectionResult,
 } from "./crypto";
-import { extractMLFeatures } from "./ml-features";
-import { getMLPrediction } from "./ml-store";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -270,154 +267,82 @@ async function _runPipeline(
     return null;
   }
 
-  // ── Step 2: Fetch live market data + stat model signal ───────────────────
-  // Stat uses the SAME model the Crypto Predictor page shows: getStatWindowCall()
-  // reads from historyStore (RSI, ER, momentum, candle analysis) and computes
-  // aboveKalshi = predictedPrice >= kalshiTarget.  The old approach
-  // (livePrice >= kalshiTarget) was a raw price snapshot, not a model signal,
-  // and could invert all three downstream signals via the cascade below.
+  // ── Steps 2–4: Read all signals from the unified predictor layer ─────────
+  // getLatestCoinSignals reads from the SAME sources as the Crypto Predictor page:
+  //   stat   → getStatWindowCall     (null when historyStore snap not ready yet)
+  //   claude → getTrackerWindowCall  (null when autopilot off OR tracker not done yet)
+  //   ml     → fresh inference with tracker's latest pred snapshot (~30 s cadence)
+  //   wm     → getWindowBetSignal
+  //
+  // Replacing independent stat/claude/ML computation with a single unified read
+  // eliminates every signal divergence: the pipeline can never show a different
+  // direction than the predictor page for the same coin and window.
   if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "fetching-data");
-
-  const pred = getCachedPrediction(sym);
-  const [candles, stats, tickerPrice] = await Promise.all([
-    getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
-    getStats(coin.product).catch(() => null),
-    getTicker(coin.product).catch(() => 0),
-  ]);
-  const livePrice = tickerPrice > 0 ? tickerPrice : (pred?.price ?? 0);
-
-  // Use the real stat model signal (same as predictor page).
-  // Fallback to raw price comparison only if historyStore has no snap yet.
-  const statCall = getStatWindowCall(sym);
-  let statAbove: boolean | null = statCall?.aboveKalshi ?? null;
-  const statConfidence: number | null = statCall?.confidence ?? null;
-  if (statAbove === null && livePrice > 0) {
-    // historyStore snap not yet available — use raw price as temporary fallback
-    statAbove = livePrice >= kalshiTarget;
-    logger.debug({ sym, windowKey, livePrice, kalshiTarget },
-      "[pipeline] stat model snap not ready — using raw price fallback for stat");
-  } else {
-    logger.debug({ sym, windowKey, statAbove, statConfidence, predictedPrice: statCall?.predictedPrice },
-      "[pipeline] stat signal from model");
-  }
-
-  // ── Step 3: Claude — use tracker opening call (same as Crypto Predictor) ─
-  // The Crypto Predictor page's "auto-ran at window open" Claude call is stored
-  // in historyStore via getTrackerWindowCall().  Using the same result ensures
-  // the bot and the predictor page always show identical Claude directions.
-  //
-  // Cascade protection: the old approach ran a SEPARATE Claude call that
-  // received the (wrong) raw-price statAbove as context, which biased Claude
-  // toward the wrong direction, which then poisoned ML features 14 & 15.
-  // Now all three signals are consistent with what the predictor page shows.
-  //
-  // Fallback: if the tracker call hasn't finished yet (rare race at T+0),
-  // fall back to a fresh _callPipelineClaude call so we never ship null.
-  let claudeAbove: boolean | null = null;
-  let claudeConfidence: number | null = null;
+  const signals = getLatestCoinSignals(sym);
+  const statAbove: boolean | null = signals.statAbove;
+  const statConfidence: number | null = signals.statConfidence;
+  let claudeAbove: boolean | null = signals.claudeAbove;
+  let claudeConfidence: number | null = signals.claudeConfidence;
+  const mlAbove: boolean | null = signals.mlAbove;
+  const mlConfidence: number | null = signals.mlConfidence;
   let claudeCallMs = 0;
 
-  if (isAiFeatureEnabled("crypto_live_dir")) {
+  logger.debug(
+    { sym, windowKey, statAbove, statConfidence, claudeAbove, mlAbove, wmRecommendation: signals.wmRecommendation, isRecheck },
+    "[pipeline] unified signals read from predictor layer",
+  );
+
+  // ── Claude race-fallback ──────────────────────────────────────────────────
+  // claudeAbove is null in two cases:
+  //   (a) Auto-pilot OFF  — predictor not running Claude → leave null (matches page).
+  //   (b) Race at T+0     — auto-pilot on but tracker's opening call hasn't resolved
+  //                         yet (takes 15–60 s); fall back to a fresh pipeline call
+  //                         so we don't miss the opening window bet entirely.
+  //
+  // signals.claudeEnabled distinguishes them: true = auto-pilot on (case b); false = off (case a).
+  if (isAiFeatureEnabled("crypto_live_dir") && claudeAbove === null && signals.claudeEnabled) {
     if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "claude-analyzing");
     try {
-      const trackerCall = getTrackerWindowCall(sym);
-      if (trackerCall !== null && trackerCall.aboveKalshi !== null) {
-        // Predictor page's opening Claude call is available — use it directly.
-        claudeAbove = trackerCall.aboveKalshi;
-        claudeConfidence = trackerCall.confidence ?? null;
-        logger.info(
-          { sym, windowKey, claudeAbove, claudeConfidence, isRecheck },
-          "[pipeline] Claude verdict from tracker window call (predictor-page source)",
-        );
-      } else if (!isCoinClaudeEnabled(sym)) {
-        // Auto-pilot is OFF for this coin — the predictor page is not running Claude
-        // on it, so the bot must not run a separate Claude call either.
-        // claudeAbove stays null, matching the predictor page's signal state.
-        // The bot respects the predictor's judgment that this coin doesn't warrant
-        // AI analysis right now, rather than spending tokens on a divergent call.
-        logger.info({ sym, windowKey, isRecheck },
-          "[pipeline] auto-pilot off for this coin — skipping Claude fallback (predictor not running it)");
-      } else {
-        // Auto-pilot IS on but tracker call hasn't completed yet (genuine race at
-        // window open — Claude call fires at T+0 and may take 15–60 s).
-        // Fall back to a fresh pipeline call so we never ship null when Claude is
-        // expected but just hasn't responded yet.
-        logger.info({ sym, windowKey, isRecheck }, "[pipeline] tracker Claude not ready — running fresh pipeline call (auto-pilot on, race at window open)");
-        const claudeResult = await _callPipelineClaude(
-          sym, coin, kalshiTarget, windowKey,
-          pred, candles, stats, livePrice,
-          statAbove, statConfidence,
-        );
-        claudeAbove = claudeResult.aboveKalshi;
-        claudeConfidence = claudeResult.confidence;
-        claudeCallMs = claudeResult.callMs;
-        logger.info(
-          { sym, windowKey, claudeAbove, claudeConfidence, callMs: claudeCallMs, isRecheck },
-          "[pipeline] Claude verdict from fresh pipeline call (fallback)",
-        );
-      }
+      // Lazy-fetch market data — only needed for the Claude prompt context.
+      const pred = getCachedPrediction(sym);
+      const [candles, stats, tickerPrice] = await Promise.all([
+        getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
+        getStats(coin.product).catch(() => null),
+        getTicker(coin.product).catch(() => 0),
+      ]);
+      const livePrice = tickerPrice > 0 ? tickerPrice : (pred?.price ?? 0);
+      if (livePrice === 0) throw new Error("no live price available for Claude fallback");
 
-      // Write to liveDirectionCache so _makeBotDecisionInner sees the fresh
-      // signal via applyClaudeLiveOverride with no engine changes.
-      if (claudeAbove !== null) {
-        const liveResult: LiveDirectionResult = {
-          aboveKalshi: claudeAbove,
-          direction: claudeAbove ? "up" : "down",
-          confidence: claudeConfidence ?? 50,
-          at: new Date().toISOString(),
-          cached: false,
-        };
-        liveDirectionCache.set(sym, { result: liveResult, at: Date.now() });
-      }
+      logger.info({ sym, windowKey, isRecheck },
+        "[pipeline] tracker Claude not ready — running fresh pipeline call (auto-pilot on, race at window open)");
+      const claudeResult = await _callPipelineClaude(
+        sym, coin, kalshiTarget, windowKey,
+        pred, candles, stats, livePrice,
+        statAbove, statConfidence,
+      );
+      claudeAbove = claudeResult.aboveKalshi;
+      claudeConfidence = claudeResult.confidence;
+      claudeCallMs = claudeResult.callMs;
+      logger.info(
+        { sym, windowKey, claudeAbove, claudeConfidence, callMs: claudeCallMs, isRecheck },
+        "[pipeline] Claude verdict from fresh pipeline call (fallback)",
+      );
     } catch (err) {
-      logger.warn({ sym, windowKey, err }, "[pipeline] Claude step failed — proceeding without Claude signal");
+      logger.warn({ sym, windowKey, err }, "[pipeline] Claude fallback failed — proceeding without Claude signal");
     }
   }
 
-  // ── Step 4: ML prediction ────────────────────────────────────────────────
-  // Runs on both initial pipeline and mid-window rechecks.  Using the latest
-  // pred snapshot (updated every ~30 s by the tracker) keeps the bot dashboard
-  // in sync with the predictor page's continuously-refreshed ML signal.
-  const existingResult = pipelineResults.get(`${sym}:${windowKey}`);
-  let mlAbove: boolean | null = null;
-  let mlConfidence: number | null = null;
-  // ML runs on both initial pipeline and rechecks.
-  // During rechecks, getCachedPrediction returns the tracker's latest 30-s snap —
-  // the same data the predictor page uses — so re-running inference here keeps the
-  // bot dashboard in sync with the predictor's continuously-updated ML signal.
-  // The wmRec is also passed to features (matching the bot engine's own inference call)
-  // instead of the previous `null` which caused a divergence in features 14-16.
-  {
-    if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "ml-analyzing");
-    if (pred && kalshiTarget != null) {
-      try {
-        const winCtx = getKalshiWindowContext(sym);
-        const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
-        const elapsedFraction = Math.min((Date.now() - windowStartMs) / (15 * 60_000), 1);
-        const wmSigForML = getWindowBetSignal(sym);
-        const features = extractMLFeatures(
-          pred, kalshiTarget, elapsedFraction, winCtx?.priceAtOpen,
-          statAbove, claudeAbove, wmSigForML?.recommendation ?? null,
-        );
-        const mlResult = getMLPrediction(sym, features);
-        if (mlResult.ready && mlResult.prediction) {
-          mlAbove = mlResult.prediction.above;
-          mlConfidence = mlResult.prediction.confidence ?? null;
-        }
-      } catch (err) {
-        logger.warn({ sym, windowKey, err }, "[pipeline] ML inference failed");
-        // On failure during a recheck, carry forward the last known result so the
-        // bot dashboard doesn't regress to null for a coin that had a good ML signal.
-        if (isRecheck && existingResult) {
-          mlAbove = existingResult.mlAbove;
-          mlConfidence = existingResult.mlConfidence;
-        }
-      }
-    } else if (isRecheck && existingResult) {
-      // pred not yet available (unlikely mid-window) — carry forward last known result
-      mlAbove = existingResult.mlAbove;
-      mlConfidence = existingResult.mlConfidence;
-    }
+  // Write to liveDirectionCache so _makeBotDecisionInner picks up the Claude
+  // verdict via applyClaudeLiveOverride without any engine changes.
+  if (isAiFeatureEnabled("crypto_live_dir") && claudeAbove !== null) {
+    const liveResult: LiveDirectionResult = {
+      aboveKalshi: claudeAbove,
+      direction: claudeAbove ? "up" : "down",
+      confidence: claudeConfidence ?? 50,
+      at: new Date().toISOString(),
+      cached: false,
+    };
+    liveDirectionCache.set(sym, { result: liveResult, at: Date.now() });
   }
 
   // ── Step 5: Store and return ─────────────────────────────────────────────
