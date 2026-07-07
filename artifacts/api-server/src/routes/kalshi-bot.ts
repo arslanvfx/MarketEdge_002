@@ -31,7 +31,7 @@ import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
 import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pipeline";
 import { getLatestCoinSignals } from "../lib/crypto-signals";
-import { db, botConfigTable, kalshiBotBetsTable } from "@workspace/db";
+import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
@@ -664,9 +664,20 @@ router.post("/crypto/bot/close-manual-position", requireAuth, async (req, res) =
 // POST /crypto/bot/clear-pauses — immediately clear all per-coin auto-tune pauses
 // and reset the circuit-breaker countdown. Safe to call at any time; does not
 // affect mode, positions, or config.
-router.post("/crypto/bot/clear-pauses", requireAuth, (_req, res) => {
+router.post("/crypto/bot/clear-pauses", requireAuth, async (_req, res) => {
   try {
     const result = clearAllPauses();
+    // Write a synthetic per_coin_pause log entry so the cooldown guard in
+    // runAutoTuneRules prevents the auto-tune job from immediately re-pausing
+    // the same coin on the next window tick (consecutive losses are still in DB).
+    // Without this, clearing the in-memory pausedCoins map has no lasting effect.
+    await db.insert(botAutoTuneLogTable).values({
+      ruleName: "per_coin_pause",
+      oldValue: result.clearedCoins.join(",") || "none",
+      newValue: "user_cleared",
+      triggerReason: "Manual clear-pauses action — cooldown guard applied for 1 hour",
+      createdAt: new Date(),
+    }).catch(() => {}); // non-fatal: cooldown skipped if write fails
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -727,6 +738,17 @@ router.post("/crypto/bot/reset-conditions", requireAuth, async (_req, res) => {
     await updateBotConfig({
       regimePenalty: 0,
     });
+
+    // Same cooldown guard as clear-pauses: write a synthetic per_coin_pause
+    // log entry so the auto-tune job cannot immediately re-pause any coin
+    // that was just unblocked by this full reset.
+    await db.insert(botAutoTuneLogTable).values({
+      ruleName: "per_coin_pause",
+      oldValue: result.cleared.join(",") || "none",
+      newValue: "user_reset",
+      triggerReason: "Manual reset-conditions action — cooldown guard applied for 1 hour",
+      createdAt: new Date(),
+    }).catch(() => {}); // non-fatal
 
     res.json({ ok: true, ...result });
   } catch (err) {

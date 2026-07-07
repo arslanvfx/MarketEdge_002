@@ -154,6 +154,13 @@ export const CONFIDENCE_FLOOR_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
  */
 export const QUIET_HOURS_EXPAND_COOLDOWN_MS = 48 * 60 * 60 * 1_000;
 
+/**
+ * How long (ms) the per_coin_pause rule is suppressed after it last fired
+ * (or after a manual clear-pauses action writes a synthetic log entry).
+ * 1 hour = 4 windows of grace so a manual clear is actually respected.
+ */
+export const PER_COIN_PAUSE_COOLDOWN_MS = 1 * 60 * 60 * 1_000;
+
 export interface AutoTuneMutation {
   ruleName: string;
   oldValue: string;
@@ -605,12 +612,13 @@ export function runAutoTuneRules(
 
   /**
    * Returns true when the named rule is still within its cooldown window.
-   * A rule is on cooldown if it was last applied less than CONFIDENCE_FLOOR_COOLDOWN_MS ago.
+   * Default cooldown is CONFIDENCE_FLOOR_COOLDOWN_MS (6h); pass a custom
+   * durationMs for rules with a different cadence (e.g. per_coin_pause = 1h).
    */
-  function isOnCooldown(ruleName: string): boolean {
+  function isOnCooldown(ruleName: string, durationMs: number = CONFIDENCE_FLOOR_COOLDOWN_MS): boolean {
     const last = lastFiredAt.get(ruleName);
     if (!last) return false;
-    return now.getTime() - last.getTime() < CONFIDENCE_FLOOR_COOLDOWN_MS;
+    return now.getTime() - last.getTime() < durationMs;
   }
 
   // Rule 1 — Quiet-hours auto-expand
@@ -670,15 +678,22 @@ export function runAutoTuneRules(
   // Rule 2 — Per-coin auto-pause
   // A coin with ≥ 5 current consecutive losses (not already paused) gets
   // suspended for 4 windows.
-  for (const [sym, stats] of Object.entries(report.bySymbol)) {
-    if (stats.currentConsecutiveLosses >= 5 && !currentPausedCoins.has(sym)) {
-      mutations.push({
-        ruleName: "per_coin_pause",
-        oldValue: "active",
-        newValue: "paused:4windows",
-        triggerReason: `${sym}: ${stats.currentConsecutiveLosses} consecutive losses`,
-        pauseCoin: { symbol: sym, windows: 4 },
-      });
+  // Guarded by PER_COIN_PAUSE_COOLDOWN_MS (1 hour) so a manual "Clear pauses"
+  // action — which writes a synthetic log entry — actually takes effect for
+  // at least 4 windows before the rule can re-fire. Without this guard, clearing
+  // the pausedCoins map immediately causes the next auto-tune tick to re-pause
+  // the same coin (consecutive losses are still in the DB history).
+  if (!isOnCooldown("per_coin_pause", PER_COIN_PAUSE_COOLDOWN_MS)) {
+    for (const [sym, stats] of Object.entries(report.bySymbol)) {
+      if (stats.currentConsecutiveLosses >= 5 && !currentPausedCoins.has(sym)) {
+        mutations.push({
+          ruleName: "per_coin_pause",
+          oldValue: "active",
+          newValue: "paused:4windows",
+          triggerReason: `${sym}: ${stats.currentConsecutiveLosses} consecutive losses`,
+          pauseCoin: { symbol: sym, windows: 4 },
+        });
+      }
     }
   }
 
