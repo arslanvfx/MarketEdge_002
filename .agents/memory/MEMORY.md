@@ -1,3 +1,4 @@
+- [Window open elapsed timing](window-open-elapsed-timing.md) — kalshiWindowStore.openedAt must be the 15-min UTC boundary (getCurrentWindowOpenMs()), not Date.now(); late confirmation causes minutesElapsed=0 → spurious minNoEntryMinutes skip + silent downstream blocks
 - [DB pool connection fix](db-pool-fix.md) — Replit PostgreSQL kills idle connections at protocol level; fix: max:5, min:1, SQL-level pinger every 20s, 5-retry exponential backoff
 - [Same-game combo architecture](same-game-combos.md) — how gameKey/eventTicker flow from markets.ts through optimizer to picks UI
 - [Polymarket single-bet mode](polymarket-single-bet.md) — Polymarket always emits size-1; Kalshi non-sport categories also forced single

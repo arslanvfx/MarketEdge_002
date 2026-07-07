@@ -46,11 +46,23 @@ export function getLastKalshiTicker(symbol: string): string | undefined {
 // Tracks the coin price when each Kalshi window opened, keyed by event ticker.
 export const kalshiWindowStore = new Map<string, { priceAtOpen: number | null; openedAt: number }>();
 
+/**
+ * Returns the UTC timestamp (ms) of the most recent 15-minute window boundary.
+ * Kalshi 15-min markets align to XX:00, XX:15, XX:30, XX:45 UTC.
+ * Using the actual boundary (not Date.now()) ensures minutesElapsed in
+ * getKalshiWindowContext always reflects true elapsed time since window open,
+ * regardless of when the Kalshi ticker was first confirmed by the prefetch.
+ */
+function getCurrentWindowOpenMs(): number {
+  const WINDOW_MS = 15 * 60 * 1_000;
+  return Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS;
+}
+
 export function updateKalshiWindowPrice(ticker: string | undefined, coinPrice: number): void {
   if (!ticker || coinPrice <= 0) return;
   const existing = kalshiWindowStore.get(ticker);
   if (!existing) {
-    kalshiWindowStore.set(ticker, { priceAtOpen: coinPrice, openedAt: Date.now() });
+    kalshiWindowStore.set(ticker, { priceAtOpen: coinPrice, openedAt: getCurrentWindowOpenMs() });
   } else if (existing.priceAtOpen === null) {
     existing.priceAtOpen = coinPrice;
   }
@@ -321,7 +333,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
       }
 
       if (selected.ticker && !kalshiWindowStore.has(selected.ticker)) {
-        kalshiWindowStore.set(selected.ticker, { priceAtOpen: null, openedAt: Date.now() });
+        kalshiWindowStore.set(selected.ticker, { priceAtOpen: null, openedAt: getCurrentWindowOpenMs() });
       }
       if (selected.ticker) {
         const prevConf = confirmedTargetStore.get(sym);
