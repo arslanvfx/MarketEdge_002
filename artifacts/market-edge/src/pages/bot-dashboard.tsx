@@ -398,7 +398,13 @@ export default function BotDashboard() {
   const tuneEntries = autoTuneLogData?.entries ?? [];
   const tuneCount = tuneEntries.length;
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  const recentTuneEntry = tuneEntries.find(e => new Date(e.createdAt).getTime() > oneHourAgo) ?? null;
+  // Exclude synthetic cooldown-guard entries written by "Reset all" / "Clear pauses" — those
+  // have newValue "user_reset" or "user_cleared" and are NOT real auto-tune events.
+  const recentTuneEntry = tuneEntries.find(e =>
+    new Date(e.createdAt).getTime() > oneHourAgo &&
+    e.newValue !== "user_cleared" &&
+    e.newValue !== "user_reset"
+  ) ?? null;
   const pausedCoins = perfReportData?.pausedCoins ?? {};
 
   // Coins currently blocked by the per-coin streak loss limit (coinStreakState).

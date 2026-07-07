@@ -13,7 +13,13 @@ interface AutoTuneHistoryProps {
 
 export function AutoTuneHistory({ tuneEntries, tuneCount, tuneLogOpen, setTuneLogOpen }: AutoTuneHistoryProps) {
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  const recentTuneEntry = tuneEntries.find((e) => new Date(e.createdAt).getTime() > oneHourAgo) ?? null;
+  // Exclude synthetic cooldown-guard entries ("user_cleared" / "user_reset") so manual
+  // resets don't light up the "last Xm ago" badge as if auto-tune fired.
+  const recentTuneEntry = tuneEntries.find((e) =>
+    new Date(e.createdAt).getTime() > oneHourAgo &&
+    e.newValue !== "user_cleared" &&
+    e.newValue !== "user_reset"
+  ) ?? null;
   return (
     <>
         {/* ── Auto-Tune History ── */}
