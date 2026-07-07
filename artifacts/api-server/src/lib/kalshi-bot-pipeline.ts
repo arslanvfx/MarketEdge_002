@@ -26,6 +26,7 @@ import {
   analyzeCoin,
   getKalshiCachedData, fetchKalshiTarget, getKalshiWindowContext,
   getCachedPrediction,
+  getStatWindowCall, getTrackerWindowCall,
   liveDirectionCache,
   type CoinDef,
   type CoinPrediction,
@@ -268,9 +269,12 @@ async function _runPipeline(
     return null;
   }
 
-  // ── Step 2: Fetch live market data ───────────────────────────────────────
-  // Stat is pure math — resolves in milliseconds. We fetch live data directly
-  // so the pipeline doesn't wait for the tracker's historyStore snap (~T+30-60s).
+  // ── Step 2: Fetch live market data + stat model signal ───────────────────
+  // Stat uses the SAME model the Crypto Predictor page shows: getStatWindowCall()
+  // reads from historyStore (RSI, ER, momentum, candle analysis) and computes
+  // aboveKalshi = predictedPrice >= kalshiTarget.  The old approach
+  // (livePrice >= kalshiTarget) was a raw price snapshot, not a model signal,
+  // and could invert all three downstream signals via the cascade below.
   if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "fetching-data");
 
   const pred = getCachedPrediction(sym);
@@ -281,17 +285,33 @@ async function _runPipeline(
   ]);
   const livePrice = tickerPrice > 0 ? tickerPrice : (pred?.price ?? 0);
 
-  let statAbove: boolean | null = null;
-  const statConfidence: number | null = null; // stat is a binary price-vs-strike signal; no model confidence score
-  if (livePrice > 0) {
+  // Use the real stat model signal (same as predictor page).
+  // Fallback to raw price comparison only if historyStore has no snap yet.
+  const statCall = getStatWindowCall(sym);
+  let statAbove: boolean | null = statCall?.aboveKalshi ?? null;
+  const statConfidence: number | null = statCall?.confidence ?? null;
+  if (statAbove === null && livePrice > 0) {
+    // historyStore snap not yet available — use raw price as temporary fallback
     statAbove = livePrice >= kalshiTarget;
+    logger.debug({ sym, windowKey, livePrice, kalshiTarget },
+      "[pipeline] stat model snap not ready — using raw price fallback for stat");
+  } else {
+    logger.debug({ sym, windowKey, statAbove, statConfidence, predictedPrice: statCall?.predictedPrice },
+      "[pipeline] stat signal from model");
   }
 
-  // ── Step 3: Claude — extended thinking with full context ─────────────────
-  // Claude receives the confirmed new-window target, full indicator set, and
-  // stat signal. Extended thinking (budget 8000 tokens) gives Claude the
-  // reasoning depth needed for a proper directional judgment.
-  // This is gated on the crypto_live_dir AI feature flag.
+  // ── Step 3: Claude — use tracker opening call (same as Crypto Predictor) ─
+  // The Crypto Predictor page's "auto-ran at window open" Claude call is stored
+  // in historyStore via getTrackerWindowCall().  Using the same result ensures
+  // the bot and the predictor page always show identical Claude directions.
+  //
+  // Cascade protection: the old approach ran a SEPARATE Claude call that
+  // received the (wrong) raw-price statAbove as context, which biased Claude
+  // toward the wrong direction, which then poisoned ML features 14 & 15.
+  // Now all three signals are consistent with what the predictor page shows.
+  //
+  // Fallback: if the tracker call hasn't finished yet (rare race at T+0),
+  // fall back to a fresh _callPipelineClaude call so we never ship null.
   let claudeAbove: boolean | null = null;
   let claudeConfidence: number | null = null;
   let claudeCallMs = 0;
@@ -299,32 +319,46 @@ async function _runPipeline(
   if (isAiFeatureEnabled("crypto_live_dir")) {
     if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "claude-analyzing");
     try {
-      const claudeResult = await _callPipelineClaude(
-        sym, coin, kalshiTarget, windowKey,
-        pred, candles, stats, livePrice,
-        statAbove, statConfidence,
-      );
-      claudeAbove = claudeResult.aboveKalshi;
-      claudeConfidence = claudeResult.confidence;
-      claudeCallMs = claudeResult.callMs;
+      const trackerCall = getTrackerWindowCall(sym);
+      if (trackerCall !== null && trackerCall.aboveKalshi !== null) {
+        // Predictor page's opening Claude call is available — use it directly.
+        claudeAbove = trackerCall.aboveKalshi;
+        claudeConfidence = trackerCall.confidence ?? null;
+        logger.info(
+          { sym, windowKey, claudeAbove, claudeConfidence, isRecheck },
+          "[pipeline] Claude verdict from tracker window call (predictor-page source)",
+        );
+      } else {
+        // Tracker call not ready yet (race at window open) — run fresh pipeline call.
+        logger.info({ sym, windowKey, isRecheck }, "[pipeline] tracker Claude not ready — running fresh pipeline call");
+        const claudeResult = await _callPipelineClaude(
+          sym, coin, kalshiTarget, windowKey,
+          pred, candles, stats, livePrice,
+          statAbove, statConfidence,
+        );
+        claudeAbove = claudeResult.aboveKalshi;
+        claudeConfidence = claudeResult.confidence;
+        claudeCallMs = claudeResult.callMs;
+        logger.info(
+          { sym, windowKey, claudeAbove, claudeConfidence, callMs: claudeCallMs, isRecheck },
+          "[pipeline] Claude verdict from fresh pipeline call (fallback)",
+        );
+      }
 
       // Write to liveDirectionCache so _makeBotDecisionInner sees the fresh
       // signal via applyClaudeLiveOverride with no engine changes.
-      const liveResult: LiveDirectionResult = {
-        aboveKalshi: claudeAbove,
-        direction: claudeAbove === null ? "flat" : claudeAbove ? "up" : "down",
-        confidence: claudeConfidence ?? 50,
-        at: new Date().toISOString(),
-        cached: false,
-      };
-      liveDirectionCache.set(sym, { result: liveResult, at: Date.now() });
-
-      logger.info(
-        { sym, windowKey, claudeAbove, claudeConfidence, callMs: claudeCallMs, isRecheck },
-        "[pipeline] Claude verdict ready",
-      );
+      if (claudeAbove !== null) {
+        const liveResult: LiveDirectionResult = {
+          aboveKalshi: claudeAbove,
+          direction: claudeAbove ? "up" : "down",
+          confidence: claudeConfidence ?? 50,
+          at: new Date().toISOString(),
+          cached: false,
+        };
+        liveDirectionCache.set(sym, { result: liveResult, at: Date.now() });
+      }
     } catch (err) {
-      logger.warn({ sym, windowKey, err }, "[pipeline] Claude call failed — proceeding without Claude signal");
+      logger.warn({ sym, windowKey, err }, "[pipeline] Claude step failed — proceeding without Claude signal");
     }
   }
 
