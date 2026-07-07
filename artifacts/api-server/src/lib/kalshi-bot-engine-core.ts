@@ -291,7 +291,7 @@ export function checkFastAgreementEntry(
   mlAbove: boolean | null,
   statConfidence: number | null,
   mlConfidence: number | null,
-  minConf = 60,
+  minConf = 52,
 ): boolean {
   const agree = statAbove !== null && mlAbove !== null && statAbove === mlAbove;
   const confident = (mlConfidence ?? 0) >= minConf || (statConfidence ?? 0) >= minConf;

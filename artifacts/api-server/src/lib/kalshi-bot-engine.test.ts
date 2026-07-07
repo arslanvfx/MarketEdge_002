@@ -1041,7 +1041,7 @@ test("fastAgreement: stat+ML agree bullish, stat confident → true", () => {
 });
 
 test("fastAgreement: stat+ML agree but BOTH below confidence floor → false", () => {
-  assert.equal(checkFastAgreementEntry(true, true, 55, 58), false);
+  assert.equal(checkFastAgreementEntry(true, true, 48, 49), false);
 });
 
 test("fastAgreement: stat+ML disagree → false regardless of confidence", () => {
@@ -1060,9 +1060,16 @@ test("fastAgreement: null confidences are treated as 0, not confident", () => {
   assert.equal(checkFastAgreementEntry(true, true, null, null), false);
 });
 
-test("fastAgreement: exactly at the 60 threshold → true (inclusive)", () => {
-  assert.equal(checkFastAgreementEntry(false, false, null, 60), true);
-  assert.equal(checkFastAgreementEntry(false, false, 60, null), true);
+test("fastAgreement: exactly at the 52 threshold → true (inclusive)", () => {
+  assert.equal(checkFastAgreementEntry(false, false, null, 52), true);
+  assert.equal(checkFastAgreementEntry(false, false, 52, null), true);
+});
+
+test("fastAgreement: btc-scenario mlConf=55 + stat agrees → true (was blocked at old 60 threshold)", () => {
+  // BTC 23:30 window: mlConf=55, statAbove=false, mlAbove=false, yesPrice=51.5¢ (return 2.06x)
+  // At old threshold 60: would have been blocked → price collapsed to 15.5¢ by min 4 → no bet ever
+  // At new threshold 52: fires → entry at 51.5¢ → all quality gates pass
+  assert.equal(checkFastAgreementEntry(false, false, null, 55), true);
 });
 
 test("fastAgreement: custom minConf is respected", () => {
