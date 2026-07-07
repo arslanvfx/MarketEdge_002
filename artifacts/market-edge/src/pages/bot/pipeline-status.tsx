@@ -7,6 +7,8 @@ interface PipelineStatusPanelProps {
   results: PipelineResult[];
   inFlight: InFlightEntry[];
   liveSignals?: Record<string, CoinSignals>;
+  /** Live stat predictions from /crypto/predictions — same source as the predictor page. */
+  predictionMap?: Record<string, { predictedPrice: number; confidence: number }>;
 }
 
 function SignalDot({ above, confidence }: { above: boolean | null; confidence: number | null }) {
@@ -68,7 +70,7 @@ function PhaseLabel({ phase }: { phase: PipelinePhase }) {
   }
 }
 
-export function PipelineStatusPanel({ results, inFlight, liveSignals }: PipelineStatusPanelProps) {
+export function PipelineStatusPanel({ results, inFlight, liveSignals, predictionMap }: PipelineStatusPanelProps) {
   const [open, setOpen] = useState(true);
 
   const inFlightSyms = inFlight.map(e => e.sym);
@@ -157,11 +159,20 @@ export function PipelineStatusPanel({ results, inFlight, liveSignals }: Pipeline
                   {results.map(r => {
                     const entry = inFlight.find(e => e.sym === r.sym);
                     const isRechecking = !!entry?.isRecheck;
-                    // Prefer live unified signals (same source as predictor page) over
-                    // stale pipeline result snapshots — eliminates mid-window display drift.
                     const live = liveSignals?.[r.sym];
-                    const statAbove = live?.statAbove ?? r.statAbove;
-                    const statConfidence = live?.statConfidence ?? r.statConfidence;
+
+                    // Stat: use live /crypto/predictions (same source as predictor page) so
+                    // the value here always matches what the predictor page shows.
+                    // predictedPrice is continuously refreshed every ~30s; compare against the
+                    // Kalshi target already captured in the pipeline result.
+                    const pred = predictionMap?.[r.sym];
+                    const statAbove = pred != null && r.kalshiTarget > 0
+                      ? pred.predictedPrice >= r.kalshiTarget
+                      : (live?.statAbove ?? r.statAbove);
+                    const statConfidence = pred?.confidence ?? live?.statConfidence ?? r.statConfidence;
+
+                    // Claude + ML: liveSignals reads from the same in-memory caches the
+                    // predictor page uses, so no divergence there.
                     const claudeAbove = live?.claudeAbove ?? r.claudeAbove;
                     const claudeConfidence = live?.claudeConfidence ?? r.claudeConfidence;
                     const mlAbove = live?.mlAbove ?? r.mlAbove;

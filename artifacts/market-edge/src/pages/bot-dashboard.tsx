@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 
 import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, PipelineResult } from "./bot/types";
+import type { CoinPrediction } from "./predictor/types";
 import { API_BASE, fmt$, fmtPct, fmtCrypto, wkToEst, utcToEst, ET_LABEL } from "./bot/utils";
 import { ConditionsPanel, ClearPausesButton } from "./bot/conditions-panel";
 import { BotHeader } from "./bot/bot-header";
@@ -207,6 +208,23 @@ export default function BotDashboard() {
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
     refetchInterval: 5_000,
   });
+
+  // Live stat predictions — same endpoint & interval as the predictor page so the
+  // Pipeline Status stat column always matches what the predictor page shows.
+  const { data: livePredictionsData } = useQuery<{ generatedAt: string; coins: CoinPrediction[] }>({
+    queryKey: ["bot-live-predictions"],
+    queryFn: () => fetch(`${API_BASE}/crypto/predictions`).then(r => r.json()),
+    refetchInterval: 5_000,
+    staleTime: 4_000,
+  });
+  const predictionMap = useMemo(() => {
+    const map: Record<string, { predictedPrice: number; confidence: number }> = {};
+    for (const coin of livePredictionsData?.coins ?? []) {
+      const pred = coin.predictions[0];
+      if (pred) map[coin.symbol] = { predictedPrice: pred.predictedPrice, confidence: pred.confidence };
+    }
+    return map;
+  }, [livePredictionsData]);
 
   // Live Kalshi prices for the manual order modal — polls every 5s while modal is open
   const { data: manualOrderKalshiData } = useQuery<{
@@ -500,6 +518,7 @@ export default function BotDashboard() {
           results={pipelineStatusData?.results ?? []}
           inFlight={pipelineStatusData?.inFlight ?? []}
           liveSignals={pipelineStatusData?.liveSignals}
+          predictionMap={predictionMap}
         />
         <ActivePositions
           openPosList={openPosList}
