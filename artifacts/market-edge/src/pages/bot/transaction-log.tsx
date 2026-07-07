@@ -1,4 +1,4 @@
-import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
+import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save, Thermometer, Waves, Crosshair, Timer, Users } from "lucide-react";
 import React from "react";
 import type { HistoryRecord } from "./types";
 import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtDuration, wkToEst } from "./utils";
@@ -159,16 +159,26 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       ) : isSkip ? (
                         (() => {
                           const reason = sigs?.reason as string | null ?? null;
-                          const SKIP_LABELS: Record<string, string> = {
-                            "market-consensus-gate": "Consensus gate",
-                            "live-signal-stale-hard-stop": "Stale signal",
-                            "candle-momentum-reversal": "Momentum reversal",
+                          type SkipMeta = { label: string; icon: React.ReactNode; detail?: string };
+                          const SKIP_META: Record<string, SkipMeta> = {
+                            "market-consensus-gate":      { label: "Consensus gate",      icon: <Users className="w-3 h-3" />,       detail: "YES price below 25¢ floor" },
+                            "live-signal-stale-hard-stop":{ label: "Stale signal",        icon: <Timer className="w-3 h-3" />,       detail: "Live signal too old to trust" },
+                            "candle-cache-not-warm":      { label: "Candles not ready",   icon: <Thermometer className="w-3 h-3" />, detail: "Candle cache still warming up" },
+                            "candle-momentum-reversal":   { label: "Momentum reversal",   icon: <Waves className="w-3 h-3" />,       detail: "Last candles show counter-trend move" },
+                            "strike-proximity":           { label: "Near strike",         icon: <Crosshair className="w-3 h-3" />,   detail: "Price too close to strike" },
+                            "strike-oscillation":         { label: "Strike oscillation",  icon: <Waves className="w-3 h-3" />,       detail: "Price crossing strike repeatedly" },
+                            "warmup-buffer":              { label: "Warmup buffer",       icon: <Timer className="w-3 h-3" />,       detail: "Bot still in window warmup period" },
                           };
-                          const label = reason ? (SKIP_LABELS[reason] ?? reason.replace(/-/g, " ")) : "Gated";
+                          const meta = reason ? SKIP_META[reason] : null;
+                          const label = meta?.label ?? (reason ? reason.replace(/-/g, " ") : "Gated");
+                          const icon  = meta?.icon ?? <Shield className="w-3 h-3" />;
+                          const tooltip = meta?.detail
+                            ? `${reason} — ${meta.detail}`
+                            : (reason ?? "Entry gate fired");
                           return (
                             <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-300"
-                              title={reason ?? "Entry gate fired"}>
-                              <Shield className="w-3 h-3" /> SKIP — {label}
+                              title={tooltip}>
+                              {icon} SKIP — {label}
                             </span>
                           );
                         })()
