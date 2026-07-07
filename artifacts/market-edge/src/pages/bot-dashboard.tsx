@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot } from "./bot/types";
+import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, PipelineResult } from "./bot/types";
 import { API_BASE, fmt$, fmtPct, fmtCrypto, wkToEst, utcToEst, ET_LABEL } from "./bot/utils";
 import { ConditionsPanel, ClearPausesButton } from "./bot/conditions-panel";
 import { BotHeader } from "./bot/bot-header";
@@ -25,6 +25,7 @@ import { PerformanceInsights } from "./bot/performance-insights";
 import { TimingAnalytics, type TimeAnalyticsRow } from "./bot/timing-analytics";
 import { AutoTuneHistory } from "./bot/autotune-history";
 import { ManualOrderModal } from "./bot/manual-order-modal";
+import { PipelineStatusPanel } from "./bot/pipeline-status";
 export default function BotDashboard() {
   const { getToken } = useAuth();
   const qc = useQueryClient();
@@ -199,6 +200,12 @@ export default function BotDashboard() {
     queryKey: ["bot-coin-guard-state", activeMode],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/coin-guard-state?mode=${activeMode}`).then(r => r.json()),
     refetchInterval: 10_000,
+  });
+
+  const { data: pipelineStatusData } = useQuery<{ results: PipelineResult[]; inFlightSyms: string[] }>({
+    queryKey: ["bot-pipeline-status"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
+    refetchInterval: 5_000,
   });
 
   // Live Kalshi prices for the manual order modal — polls every 5s while modal is open
@@ -488,6 +495,10 @@ export default function BotDashboard() {
           conditions={conditionsData}
           evaluation={evalData?.evaluation ?? []}
           status={status}
+        />
+        <PipelineStatusPanel
+          results={pipelineStatusData?.results ?? []}
+          inFlightSyms={pipelineStatusData?.inFlightSyms ?? []}
         />
         <ActivePositions
           openPosList={openPosList}

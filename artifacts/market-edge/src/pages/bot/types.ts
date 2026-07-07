@@ -229,6 +229,21 @@ export interface AutoTuneLogEntry {
   triggerReason: string;
 }
 
+export interface PipelineResult {
+  sym: string;
+  windowKey: string;
+  completedAt: number;
+  kalshiTarget: number;
+  statAbove: boolean | null;
+  statConfidence: number | null;
+  claudeAbove: boolean | null;
+  claudeConfidence: number | null;
+  mlAbove: boolean | null;
+  mlConfidence: number | null;
+  claudeCallMs: number;
+  isRecheck: boolean;
+}
+
 export interface CoinGuardEntry {
   symbol: string;
   dailyLoss: number;

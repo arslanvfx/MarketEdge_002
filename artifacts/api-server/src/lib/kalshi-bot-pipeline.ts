@@ -70,6 +70,42 @@ export function getPipelineResult(sym: string, windowKey: string): PipelineResul
   return pipelineResults.get(`${sym.toUpperCase()}:${windowKey}`) ?? null;
 }
 
+/** Return all current pipeline results as an array (one per coin, current window only). */
+export function getAllPipelineResults(): PipelineResult[] {
+  return Array.from(pipelineResults.values());
+}
+
+/** Return whether the pipeline is in-flight for a given (sym, windowKey) pair. */
+export function isPipelineInFlight(sym: string, windowKey: string): boolean {
+  const key = `${sym.toUpperCase()}:${windowKey}`;
+  return pipelineInFlight.has(key) || pipelineInFlight.has(`${key}:recheck`);
+}
+
+/**
+ * Return all currently in-flight entries by reading the pipelineInFlight Set
+ * directly.  Keys are `SYM:YYYY-MM-DDTHH:MM` (initial) or
+ * `SYM:YYYY-MM-DDTHH:MM:recheck`.  We parse sym and windowKey from each key.
+ * This correctly captures coins that are mid-pipeline with no result row yet
+ * (prior-window results are pruned at window-open before the new run completes).
+ */
+export function getInFlightEntries(): Array<{ sym: string; windowKey: string; isRecheck: boolean }> {
+  const entries: Array<{ sym: string; windowKey: string; isRecheck: boolean }> = [];
+  for (const key of pipelineInFlight) {
+    // Format: SYM:YYYY-MM-DDTHH:MM  or  SYM:YYYY-MM-DDTHH:MM:recheck
+    // windowKey itself contains a colon (T separator), so split on the first ":" only for sym,
+    // then reconstruct windowKey from the middle segments.
+    const parts = key.split(":");
+    if (parts.length < 3) continue; // SYM:YYYY-MM-DDTHH:MM → minimum 3 parts after split
+    const sym = parts[0];
+    const isRecheck = parts[parts.length - 1] === "recheck";
+    // windowKey is everything between sym and optional ":recheck"
+    const wkParts = isRecheck ? parts.slice(1, -1) : parts.slice(1);
+    const windowKey = wkParts.join(":");
+    if (sym && windowKey) entries.push({ sym, windowKey, isRecheck });
+  }
+  return entries;
+}
+
 /**
  * Trigger the window pipeline for a coin.  Fire-and-forget, idempotent:
  * if a result already exists for (sym, windowKey) the call is a no-op.

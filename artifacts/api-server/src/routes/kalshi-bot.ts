@@ -29,6 +29,7 @@ import {
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
+import { getAllPipelineResults, getInFlightEntries } from "../lib/kalshi-bot-pipeline";
 import { db, botConfigTable, kalshiBotBetsTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -80,6 +81,43 @@ function requireAuth(req: any, res: any, next: any) {
   }
   next();
 }
+
+// GET /crypto/bot/pipeline-status (and alias /bot/pipeline-status) —
+// Current per-coin pipeline results for the current window (public — read only)
+function pipelineStatusHandler(_req: any, res: any) {
+  try {
+    const allResults = getAllPipelineResults();
+    const inFlightEntries = getInFlightEntries();
+
+    // Determine current window from BOTH completed results and in-flight entries
+    // so we correctly identify the window even when all results were pruned and
+    // only in-flight entries remain (transition edge case).
+    const allWindowKeys = [
+      ...allResults.map(r => r.windowKey),
+      ...inFlightEntries.map(e => e.windowKey),
+    ];
+    const currentWindowKey = allWindowKeys.length > 0
+      ? allWindowKeys.reduce((best, wk) => (wk > best ? wk : best), allWindowKeys[0])
+      : null;
+
+    // Scope both results and in-flight to the current window only
+    const results = currentWindowKey
+      ? allResults.filter(r => r.windowKey === currentWindowKey)
+      : allResults;
+    const inFlightSyms = currentWindowKey
+      ? inFlightEntries.filter(e => e.windowKey === currentWindowKey).map(e => e.sym)
+      : inFlightEntries.map(e => e.sym);
+
+    res.json({ results, inFlightSyms, windowKey: currentWindowKey });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+}
+
+router.get("/crypto/bot/pipeline-status", pipelineStatusHandler);
+// Alias matching the task spec path
+router.get("/bot/pipeline-status", pipelineStatusHandler);
 
 // GET /crypto/bot/coin-guard-state?mode=paper|live — per-coin streak / daily-loss / slippage state (public — read only)
 router.get("/crypto/bot/coin-guard-state", (req, res) => {
