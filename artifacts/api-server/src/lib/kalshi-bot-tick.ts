@@ -249,17 +249,28 @@ async function _runBotTick(
       }, "[kalshi-bot] exit-guard result");
 
       if (guard.recommendation === "EXIT") {
-        // Cashout floor: never exit mid-window if the sell value is below the
-        // minimum. At near-$0 payout there is no advantage over holding to expiry
-        // and the position may still recover. Hold this tick and re-evaluate next.
+        // Cashout floor: never exit mid-window if the sell value is below 40% of
+        // the original entry cost.  Below this threshold the position is so far
+        // underwater that cashing out locks in a large loss with little benefit —
+        // it's better to let the market play out (hold to expiry or wait for a
+        // real recovery that clears the 40% bar).
+        const entryContractCost = pos.direction === "yes" ? pos.entryYesPrice : (1 - pos.entryYesPrice);
         const currentSellValue = effectiveYesPrice !== null
           ? (pos.direction === "yes" ? effectiveYesPrice : 1 - effectiveYesPrice) * pos.contractCount
           : null;
-        const minCashout = MIN_EXIT_CASHOUT_PER_CONTRACT * pos.contractCount;
-        if (currentSellValue !== null && currentSellValue < minCashout) {
+        const currentSellPerContract = effectiveYesPrice !== null
+          ? (pos.direction === "yes" ? effectiveYesPrice : 1 - effectiveYesPrice)
+          : null;
+        const recoveryRatio = currentSellPerContract !== null
+          ? currentSellPerContract / Math.max(entryContractCost, 0.01)
+          : null;
+        const belowRecoveryFloor = recoveryRatio !== null && recoveryRatio < 0.40;
+        if (belowRecoveryFloor) {
           logger.info(
-            { sym, direction: pos.direction, sellValue: currentSellValue.toFixed(3), minCashout: minCashout.toFixed(2), guardReason: guard.reason },
-            "[kalshi-bot] HOLD — cashout value below floor; waiting for recovery before exit",
+            { sym, direction: pos.direction,
+              sellPct: recoveryRatio != null ? `${(recoveryRatio * 100).toFixed(0)}%` : "?",
+              entryCost: entryContractCost.toFixed(2), guardReason: guard.reason },
+            "[kalshi-bot] HOLD — cashout < 40% of entry cost; letting position play out",
           );
         } else {
           const isLateRecovery = guard.phase === 2;
@@ -286,16 +297,23 @@ async function _runBotTick(
             (pos.direction === "no"  && cryptoPrice >= pos.kalshiTarget)
           );
           if (isPositionLosing) {
-            // Same cashout floor as the exit guard — if sell value is near-$0
-            // there is nothing to recover by closing; let it expire instead.
-            const tseSellValue = effectiveYesPrice !== null
-              ? (pos.direction === "yes" ? effectiveYesPrice : 1 - effectiveYesPrice) * pos.contractCount
+            // 40% recovery floor: if cashing out now would return less than 40% of
+            // what was paid, it's not worth executing the sell.  Let the position
+            // expire naturally — the market may still move in our favour in the
+            // last 2 minutes, and the cost of closing a deeply-underwater position
+            // exceeds the benefit versus simply riding to expiry.
+            const tseEntryCost = pos.direction === "yes" ? pos.entryYesPrice : (1 - pos.entryYesPrice);
+            const tseSellPerContract = effectiveYesPrice !== null
+              ? (pos.direction === "yes" ? effectiveYesPrice : 1 - effectiveYesPrice)
               : null;
-            const tseMinCashout = MIN_EXIT_CASHOUT_PER_CONTRACT * pos.contractCount;
-            if (tseSellValue !== null && tseSellValue < tseMinCashout) {
+            const tseRecoveryRatio = tseSellPerContract !== null
+              ? tseSellPerContract / Math.max(tseEntryCost, 0.01)
+              : null;
+            if (tseRecoveryRatio !== null && tseRecoveryRatio < 0.40) {
               logger.info(
-                { sym, minutesRemaining, tseSellValue: tseSellValue.toFixed(3), tseMinCashout: tseMinCashout.toFixed(2) },
-                "[kalshi-bot] time-stop HOLD — sell value below floor; letting position expire",
+                { sym, minutesRemaining,
+                  sellPct: `${(tseRecoveryRatio * 100).toFixed(0)}%`, entryCost: tseEntryCost.toFixed(2) },
+                "[kalshi-bot] time-stop HOLD — cashout < 40% of entry cost; letting position expire",
               );
             } else {
               logger.info(

@@ -228,15 +228,40 @@ export function runExitGuard(
     };
 
     if (recoveryDetected) {
+      // Before acting on the uptick, re-check the latest model directions.
+      // If models have reverted to the original bet direction (e.g. stat now
+      // says ABOVE again for a YES bet), the position may still win — hold
+      // rather than cashing out into what could be a full recovery.
+      const modelsStillWrong = modelsAgreeWrong;  // computed above from latest stat/Claude/WM
+      if (!modelsStillWrong) {
+        return {
+          recommendation: "HOLD",
+          reason: `Phase 2: uptick detected (${recoveryMagnitudePp.toFixed(1)}pp, ${(recoveryRatio * 100).toFixed(0)}% of entry) but models reverted to original direction — holding for potential win`,
+          phase: 2,
+          guardStates,
+        };
+      }
       const dir = direction === "yes" ? "rose" : "fell";
       return {
         recommendation: "EXIT",
-        reason: `Phase 2: Yes price ${dir} ${recoveryMagnitudePp.toFixed(1)}pp from extreme, recovered ${(recoveryRatio * 100).toFixed(0)}% of entry cost — best exit`,
+        reason: `Phase 2: Yes price ${dir} ${recoveryMagnitudePp.toFixed(1)}pp from extreme, recovered ${(recoveryRatio * 100).toFixed(0)}% of entry cost, models confirm — best exit`,
         phase: 2,
         guardStates,
       };
     }
     if (phase2Timeout) {
+      // If sell value is below 40% of entry cost, it's not worth cashing out
+      // at a deep loss — let the position expire naturally instead.  The market
+      // may still move back; paying the spread to close a position worth <40%
+      // of what we paid adds little benefit over expiry.
+      if (sellValue !== null && recoveryRatio < 0.40) {
+        return {
+          recommendation: "HOLD",
+          reason: `Phase 2: timeout but sell value only ${(recoveryRatio * 100).toFixed(0)}% of entry — holding to expiry`,
+          phase: 2,
+          guardStates,
+        };
+      }
       return {
         recommendation: "EXIT",
         reason: "Phase 2: 2-min timeout — exiting at market to avoid expiry-at-zero",
