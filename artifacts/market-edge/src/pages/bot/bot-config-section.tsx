@@ -434,6 +434,39 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </span>
                 </div>
 
+                {/* Market Consensus Gate */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Market Consensus Gate (¢)</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {([0, 10, 15, 20, 25, 30, 35] as const).map(c => (
+                      <button key={c} type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, consensusMinCents: c }))}
+                        className={`rounded-md px-3 py-1.5 text-sm font-medium border transition-colors ${(merged.consensusMinCents ?? 25) === c
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background text-foreground border-border hover:bg-muted"}`}>
+                        {c === 0 ? "Off" : `${c}¢`}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {(merged.consensusMinCents ?? 25) === 0
+                      ? "Disabled — no market-price veto on bets"
+                      : `Skip YES bets when Kalshi YES < ${merged.consensusMinCents ?? 25}¢, skip NO bets when YES > ${100 - (merged.consensusMinCents ?? 25)}¢`}
+                  </span>
+                </div>
+
+                {/* Momentum Lookback Candles */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Momentum Lookback ({merged.momentumLookbackCandles ?? 8} min)</span>
+                  <input type="range" min={4} max={12} step={1}
+                    className="mt-1"
+                    value={merged.momentumLookbackCandles ?? 8}
+                    onChange={e => setConfigDraft(d => ({ ...d, momentumLookbackCandles: parseInt(e.target.value) }))} />
+                  <span className="text-xs text-muted-foreground">
+                    Candle window for the reversal guard — wider catches drops that started {merged.momentumLookbackCandles ?? 8}+ min ago
+                  </span>
+                </label>
+
                 {/* Exit Sensitivity */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Exit Sensitivity</span>

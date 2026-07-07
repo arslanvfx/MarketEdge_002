@@ -712,6 +712,18 @@ export interface BotConfig {
   // Safety rails that are NEVER bypassed: circuit breaker, daily loss limit,
   // max bets per window, and the ML-Claude alignment gate.
   freeRunMode?: boolean;               // (default false)
+
+  // Market consensus gate: skip when the Kalshi market prices the bet outcome
+  // below this implied probability (in whole cents). A YES ask < consensusMinCents¢
+  // means ≥(100−X)% of the market expects NO — don't bet YES against that consensus.
+  // Symmetric: YES ask > (100 − consensusMinCents)¢ blocks NO bets.
+  // Default 25 = "never bet against 3:1 market odds." Set to 0 to disable.
+  consensusMinCents: number;           // ¢ (default 25)
+
+  // Candle momentum lookback window in 1-min candles for the reversal guard.
+  // Extended from legacy 4 to catch medium-duration drops (5–8 min) that leave
+  // recent candles oscillating at the low without a clear 4-candle slope.
+  momentumLookbackCandles: number;     // candles (default 8)
 }
 
 // ---------------------------------------------------------------------------
@@ -842,6 +854,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   dynamicSizingMaxConfidence: 90,
   profitLockPct: 0,
   freeRunMode: false,
+  consensusMinCents: 25,
+  momentumLookbackCandles: 8,
 };
 
 /**

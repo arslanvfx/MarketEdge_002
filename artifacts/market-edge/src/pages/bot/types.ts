@@ -48,6 +48,8 @@ export interface BotConfig {
   dynamicSizingMaxConfidence: number;
   profitLockPct: number;
   freeRunMode?: boolean;
+  consensusMinCents: number;
+  momentumLookbackCandles: number;
 }
 
 export interface LogicModeStats {

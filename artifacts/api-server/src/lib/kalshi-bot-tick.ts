@@ -413,10 +413,17 @@ async function _runBotTick(
       return;
     }
     if (signalGate.usedFallback) {
-      logger.warn(
+      // Live Claude direction unavailable after max-defer. Never bet on stale
+      // opening-snap reasoning — that's a blind bet. Skip this tick and keep
+      // refreshing in the background; the next tick with a fresh live signal proceeds.
+      if (!liveDirectionInFlight.has(sym)) {
+        fetchLiveDirection(sym, true).catch(() => {});
+      }
+      logger.info(
         { sym, secondsPastBuffer },
-        "[kalshi-bot] live signal stale beyond max-defer limit — falling back to opening snap",
+        "[kalshi-bot] SKIP — live signal stale (hard stop): not betting on stale opening snap",
       );
+      return;
     }
   }
 
@@ -546,26 +553,25 @@ async function _runBotTick(
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
 
   // ── Candle momentum guard ─────────────────────────────────────────────────
-  // Skip entry when the last 4 one-minute candles are clearly running against
-  // the bet direction. Catches intra-window reversals that the snap-time model
-  // missed because it was trained on data from the prior window.
-  // Threshold: 0.15 % net move over the last 4 closes. Calibrated so that
-  // normal noise (~0.05 %) doesn't trigger it, but a steady directional push
-  // (like the 10:00 UTC multi-coin upswing) does.
+  // Skip entry when the last N one-minute candles are clearly running against
+  // the bet direction. Catches intra-window reversals the snap-time model missed.
+  // Threshold: 0.15% net move over the last N closes. Calibrated so normal
+  // noise (~0.05%) doesn't trigger, but a steady push does.
+  // N = config.momentumLookbackCandles (default 8 — extended from legacy 4 to
+  // catch medium-duration drops that leave recent candles oscillating at the low).
   {
+    const lookbackCandles = S.config.momentumLookbackCandles ?? 8;
     const pred = getCachedPrediction(sym);
     const candles = pred?.candles ?? [];
 
     // ── Missing-data block ────────────────────────────────────────────────
-    // If the prediction cache isn't warm (no entry, or fewer than 4 candles),
-    // we can't evaluate momentum — block rather than silently pass.
-    // At T+2 with a healthy tracker the cache should always be populated;
-    // < 4 candles almost certainly means a fresh server restart where the
-    // snap loop hasn't completed its first cycle for this coin yet.
-    if (pred == null || candles.length < 4) {
+    // If the prediction cache isn't warm enough for the full lookback, block
+    // rather than silently pass. At T+2 with a healthy tracker this cache is
+    // always populated; fewer candles than the lookback means a fresh restart.
+    if (pred == null || candles.length < lookbackCandles) {
       logger.info(
-        { sym, direction, candleCount: candles.length, predCached: pred != null },
-        "[kalshi-bot] SKIP — prediction cache not warm enough for momentum check (< 4 candles)",
+        { sym, direction, candleCount: candles.length, lookbackCandles, predCached: pred != null },
+        "[kalshi-bot] SKIP — prediction cache not warm enough for momentum check",
       );
       if (lastDecisionWindowKey.get(sym) !== windowKey) {
         lastDecisionWindowKey.set(sym, windowKey);
@@ -579,9 +585,9 @@ async function _runBotTick(
       return;
     }
 
-    const recent = candles.slice(-4);
+    const recent = candles.slice(-lookbackCandles);
     const firstClose = recent[0].c;
-    const lastClose  = recent[3].c;
+    const lastClose  = recent[recent.length - 1].c;
     if (firstClose > 0) {
       const netChangePct = ((lastClose - firstClose) / firstClose) * 100;
       const MOMENTUM_REVERSAL_PCT = 0.15;
@@ -759,6 +765,49 @@ async function _runBotTick(
         },
         "[kalshi-bot] SKIP — live fill cost exceeds return floor; actual return < minReturnMultiple",
       );
+      return;
+    }
+  }
+
+  // ── Market consensus gate ─────────────────────────────────────────────────
+  // Skip when the Kalshi market itself prices the outcome strongly against the
+  // bet direction — the market embeds real-time crowd wisdom we should respect.
+  //
+  //   YES bet blocked when YES ask < consensusMinCents¢
+  //     (market implies <X% probability of YES — overwhelming consensus for NO)
+  //   NO  bet blocked when YES ask > (100 − consensusMinCents)¢
+  //     (market implies >X% probability of YES — overwhelming consensus against NO)
+  //
+  // Uses the live ask/bid; falls back to decision yesPrice when cache is absent.
+  // consensusMinCents=25 (default) → don't bet against 3:1 market odds.
+  // Set to 0 to disable.
+  if (!S.config.freeRunMode && (S.config.consensusMinCents ?? 25) > 0) {
+    const consensusFloor = (S.config.consensusMinCents ?? 25) / 100;
+    const refYesAsk = liveYesAsk ?? yesPrice ?? null;
+    const consensusBlocked = refYesAsk != null && (
+      (direction === "yes" && refYesAsk < consensusFloor) ||
+      (direction === "no"  && refYesAsk > (1 - consensusFloor))
+    );
+    if (consensusBlocked) {
+      const pricePct  = Math.round((refYesAsk!) * 100);
+      const floorPct  = Math.round(consensusFloor * 100);
+      const ceilPct   = 100 - floorPct;
+      const msg = direction === "yes"
+        ? `Market consensus gate: YES=${pricePct}¢ < floor ${floorPct}¢ — market says NO`
+        : `Market consensus gate: YES=${pricePct}¢ > ceiling ${ceilPct}¢ — market says YES`;
+      logger.info(
+        { sym, direction, pricePct, floorPct, ceilPct },
+        `[kalshi-bot] SKIP — ${msg}`,
+      );
+      if (lastDecisionWindowKey.get(sym) !== windowKey) {
+        lastDecisionWindowKey.set(sym, windowKey);
+        await persistBetRecord({
+          symbol: sym, windowKey, ticker: kalshiTicker, direction,
+          action: "skip",
+          signals: { ...decision.signals, reason: "market-consensus-gate", pricePct, floorPct },
+          entryPrice: yesPrice, kalshiTarget,
+        });
+      }
       return;
     }
   }
