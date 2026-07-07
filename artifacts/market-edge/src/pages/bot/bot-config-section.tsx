@@ -321,21 +321,18 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     onChange={e => setConfigDraft(d => ({ ...d, minConfidence: parseInt(e.target.value) }))} />
                 </label>
 
-                {/* ML Veto Threshold — only shown in ML Gate mode */}
+                {/* ML Veto — only shown in ML Gate mode */}
                 {(merged.decisionMode ?? "classic") === "ml_gate" && (
-                  <label className="flex flex-col gap-1.5">
+                  <div className="flex flex-col gap-1.5">
                     <span className="text-xs text-muted-foreground flex items-center gap-1">
                       <Brain className="w-3 h-3 text-sky-400" />
-                      ML Veto Threshold ({merged.mlVetoMinConfidence ?? 57}%)
+                      ML Veto
                     </span>
-                    <input type="range" min={50} max={70} step={1}
-                      className="mt-1"
-                      value={merged.mlVetoMinConfidence ?? 57}
-                      onChange={e => setConfigDraft(d => ({ ...d, mlVetoMinConfidence: parseInt(e.target.value) }))} />
-                    <span className="text-[10px] text-muted-foreground/60">
-                      ML veto only fires when ML is ≥{merged.mlVetoMinConfidence ?? 57}% confident — below this the bet proceeds
+                    <span className="text-[11px] text-muted-foreground/80 leading-relaxed">
+                      ML blocks a bet only when its confidence is higher than both Stat&apos;s and Claude&apos;s.
+                      A low-confidence ML that merely disagrees will not override a Stat+Claude agreement.
                     </span>
-                  </label>
+                  </div>
                 )}
 
                 {/* Decision Mode — full-width row */}
@@ -510,6 +507,20 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     <option value={0}>Disabled (no floor)</option>
                     {[1, 2, 3, 4, 5, 6, 7].map(m => (
                       <option key={m} value={m}>Don&apos;t enter with &lt;{m} min left</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Window Entry Buffer */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Window Entry Buffer ({merged.windowEntryBufferSeconds ?? 120}s)
+                  </span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.windowEntryBufferSeconds ?? 120}
+                    onChange={e => setConfigDraft(d => ({ ...d, windowEntryBufferSeconds: parseInt(e.target.value) }))}>
+                    {[60, 90, 120, 150, 180, 210, 240].map(s => (
+                      <option key={s} value={s}>{s}s ({Math.floor(s / 60)}m{s % 60 ? ` ${s % 60}s` : ""} after window open)</option>
                     ))}
                   </select>
                 </label>

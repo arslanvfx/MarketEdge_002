@@ -50,6 +50,7 @@ export interface BotConfig {
   freeRunMode?: boolean;
   consensusMinCents: number;
   momentumLookbackCandles: number;
+  windowEntryBufferSeconds?: number;
 }
 
 export interface LogicModeStats {

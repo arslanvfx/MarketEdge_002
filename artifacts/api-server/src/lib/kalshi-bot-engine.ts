@@ -467,25 +467,28 @@ function _makeBotDecisionInner(
     if (coreResult.action !== "SKIP" && mlAbove !== null) {
       const proposedDir = coreResult.action === "BET_YES";
       if (mlAbove !== proposedDir) {
-        // Soft veto: only block when ML is confident enough in the opposition.
-        // When mlConfidence < mlVetoMinConfidence the ML signal is too uncertain
-        // to override a Stat+Claude agreement — let the bet through.
-        const vetoThreshold = config.mlVetoMinConfidence ?? 57;
+        // Confidence-relative veto: ML blocks the bet only when its confidence is
+        // strictly greater than BOTH Stat's and Claude's confidence. This ensures
+        // ML only overrides when it is the most informed model — a near-coin-flip ML
+        // (e.g. 52%) that happens to disagree will not veto a Stat+Claude agreement
+        // where both models are more confident. The mlVetoMinConfidence config field
+        // is retained for historical logging but is no longer used for the veto gate.
+        const statConf = statCall?.confidence ?? 0;
+        const claudeConf = claudeCall?.confidence ?? 0;
         const mlConf = mlConfidence ?? 0;
-        if (mlConf >= vetoThreshold) {
+        if (mlConf > statConf && mlConf > claudeConf) {
           return {
             action: "SKIP",
             confidence: 0,
-            reasoning: `ml_gate: ML veto (ML=${mlAbove ? "above" : "below"} at ${mlConf}% ≥ ${vetoThreshold}% threshold opposes ${coreResult.action} from Stat+Claude) — skipping`,
+            reasoning: `ml_gate: ML veto — ML (${mlConf}%) beats Stat (${statConf}%) and Claude (${claudeConf}%) in confidence while opposing ${coreResult.action} — skipping`,
             signals: buildSnapshot(coreResult.ev, coreResult.signalsAgreeing, coreResult.signalsTotal),
           };
         }
-        // ML disagrees but below confidence threshold — proceed, note it in reasoning
-        // (overriding will be logged via the return below)
+        // ML disagrees but is not the most confident model — proceed, note it in reasoning
       }
     }
 
-    // ML agrees or is unavailable (or disagrees but below veto threshold) — return the core result directly
+    // ML agrees or is unavailable (or disagrees but not the most confident) — return the core result
     const coreSnap = buildSnapshot(
       coreResult.ev,
       coreResult.signalsAgreeing,
@@ -497,13 +500,17 @@ function _makeBotDecisionInner(
     let mlReasonSuffix = "";
     if (coreResult.action !== "SKIP") {
       const proposedDir = coreResult.action === "BET_YES";
-      const mlDisagreesButBelowThreshold =
-        mlAbove !== null && mlAbove !== proposedDir;
+      const statConf = statCall?.confidence ?? 0;
+      const claudeConf = claudeCall?.confidence ?? 0;
+      const mlConf = mlConfidence ?? 0;
+      const mlDisagreesButNotMostConfident =
+        mlAbove !== null && mlAbove !== proposedDir &&
+        !(mlConf > statConf && mlConf > claudeConf);
       mlReasonSuffix =
         mlAbove === null
           ? " (ML not ready — no veto applied)"
-          : mlDisagreesButBelowThreshold
-            ? ` (ML disagrees at ${mlConfidence ?? 0}% < ${config.mlVetoMinConfidence ?? 57}% threshold — veto skipped)`
+          : mlDisagreesButNotMostConfident
+            ? ` (ML disagrees at ${mlConf}% but not most confident vs Stat ${statConf}%/Claude ${claudeConf}% — veto skipped)`
             : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
     }
     // Append short notes whenever signals were sourced from live re-checks

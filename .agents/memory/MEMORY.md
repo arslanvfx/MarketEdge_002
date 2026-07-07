@@ -54,6 +54,8 @@
 - [Bot mode variable naming](bot-mode-variable-name.md) — runBotLoopTick/_runBotTick use module-level botMode; ${mode} throws ReferenceError in those functions
 - [FOK 409 throw/swallow split](fok-retry-split.md) — placeOrder must re-throw fill_or_kill 409 (exits detect kills via throw); only placeOrderWithRetry swallows+retries (Phase1 same-price, Phase2 +1c escalation)
 - [Late-entry hard floor](late-entry-floor.md) — minRemainingMinutes guard is stale (tick-start snapshot); hard 3-min floor re-checked with fresh Date.now() immediately before placeOrderWithRetry — two-layer design
+- [Bot timing guards clock source](bot-timing-clock-source.md) — entry buffer + late-floor MUST use clockElapsedS=(Date.now()-windowKey)/1000, NOT winCtx.secondsElapsed (prefetch-relative); liveDirectionCache must clear at window transition
+- [ML veto confidence-relative](ml-veto-confidence-relative.md) — ml_gate veto fires only when mlConf>statConf AND mlConf>claudeConf; old fixed-threshold (mlVetoMinConfidence) removed from veto path; field kept in BotConfig for DB compat
 - [Kalshi order price format](kalshi-order-price-format.md) — price must be 2-decimal cent-resolution string (e.g. "0.69"); 4-decimal gives invalid_price; size using expectedFillPrice not raw yesPrice
 - [Kalshi live P&L formula](kalshi-live-pnl.md) — real contract math: YES win=(1−ep)×n, YES loss=−ep×n, NO win=ep×n, NO loss=−(1−ep)×n; betAmount=actual fill cost; fixLiveExpiredPnlHistorical() corrects DB on startup; pnl column is numeric (not text)
 - [Price-band gates removed](price-band-gates.md) — price_band_yes/no, near_strike_ev_filter, yesBelowStrike all REMOVED; they required yesPrice!=null so were bypassed while API was broken; fired together after price fix killed all bets

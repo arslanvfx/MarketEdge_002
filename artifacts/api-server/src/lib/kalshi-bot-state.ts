@@ -192,7 +192,7 @@ export const MIN_HARD_MODEL_SIGNALS = 2;
 export const DB_DEGRADED_THRESHOLD = 10;
 export const DB_DEGRADED_MIN_WINDOW_MS = 60_000;
 export const REGIME_STRIKES_MAX = 6;
-export const WINDOW_ENTRY_BUFFER_S = 60;
+export const WINDOW_ENTRY_BUFFER_S = 120; // fallback used when S.config.windowEntryBufferSeconds is not set
 export const STABILITY_WAIT_MAX_S = 240;
 // Mutable — parole system can remove coins when YES shadow accuracy reaches ≥60%.
 // Re-initialised from the hardcoded list on every server restart.

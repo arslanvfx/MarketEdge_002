@@ -28,7 +28,7 @@ import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
-  CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
+  CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, liveDirectionCache, type TrendStability,
 } from "./crypto";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
@@ -384,6 +384,12 @@ export async function runBotLoopTick(): Promise<void> {
     S.lastStabilityWindowKey = newWindowKey;
     S.stabilityFiredForCoins.clear();
     windowStabilityCache.clear();
+    // Clear the live Claude direction cache so prior-window Claude responses cannot
+    // satisfy the Claude-pending guard or act as a signal for the new window.  The
+    // cache has a 2-min TTL but window boundaries are exactly 15 min — a prior-window
+    // entry can survive into the new window and be treated as a current signal.
+    liveDirectionCache.clear();
+    logger.info({ windowKey: newWindowKey }, "[kalshi-bot] window transition: liveDirectionCache cleared");
     // Fire the window-open pre-fetch burst immediately — runs in background.
     void runWindowOpenPrefetch(newWindowKey).catch(() => {});
   }
@@ -755,6 +761,13 @@ export async function runBotLoopTick(): Promise<void> {
     const winCtx = getKalshiWindowContext(sym);
     const secondsElapsed = winCtx?.secondsElapsed ?? 0;
     const minutesElapsed = winCtx?.minutesElapsed ?? 0;
+    // Clock-derived elapsed time for timing guards.  winCtx.secondsElapsed is
+    // measured from when the Kalshi prefetch completed — which can be 20-40 s
+    // after the official window boundary — causing the entry buffer and the
+    // late-floor check to undercount elapsed time and fire prematurely.
+    // clockElapsedS anchors to the official window boundary (windowKey ISO string)
+    // and is always used for the entry buffer and late-floor guards.
+    const clockElapsedS = Math.max(0, (Date.now() - new Date(windowKey).getTime()) / 1000);
     const now = new Date().toISOString();
 
     // Derive regime from recent Kalshi strikes for this symbol (always computed).
@@ -783,13 +796,14 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "empty-book cooldown — IOC returned 0 fills earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    if (!S.config.freeRunMode && secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
-      const remaining = Math.ceil(WINDOW_ENTRY_BUFFER_S - secondsElapsed);
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `window buffer (${remaining}s remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+    const entryBufferS = S.config.windowEntryBufferSeconds ?? WINDOW_ENTRY_BUFFER_S;
+    if (!S.config.freeRunMode && clockElapsedS < entryBufferS) {
+      const remaining = Math.ceil(entryBufferS - clockElapsedS);
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `window buffer (${remaining}s remaining — ${Math.floor(clockElapsedS)}s of ${entryBufferS}s elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `past entry ceiling (>${S.config.maxEntryMinutes}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+    if (S.config.maxEntryMinutes > 0 && clockElapsedS > S.config.maxEntryMinutes * 60) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `past entry ceiling (>${S.config.maxEntryMinutes}min elapsed, clock=${Math.floor(clockElapsedS)}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     // Global total-bet cap: if maxBetsPerWindow total bets have already been placed
@@ -801,8 +815,8 @@ export async function runBotLoopTick(): Promise<void> {
     }
 
     const minRem = S.config.minRemainingMinutes ?? 0;
-    if (minRem > 0 && 15 * 60 - secondsElapsed < minRem * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+    if (minRem > 0 && 15 * 60 - clockElapsedS < minRem * 60) {
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining, clock=${Math.floor(clockElapsedS)}s elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
 

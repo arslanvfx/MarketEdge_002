@@ -589,6 +589,7 @@ export interface BotConfig {
   phase2ThresholdPp: number; // pp below entry to activate phase 2 (default 30)
   maxEntryMinutes: number;   // ceiling: don't enter after this many minutes into the window; 0 = disabled (no ceiling)
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
+  windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
@@ -812,6 +813,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Floor: skip entry when fewer than 2 minutes remain in the 15-min window.
   // 0 = disabled.
   minRemainingMinutes: 2,
+  // Window-open entry buffer: hold off all bets for this many seconds after a new
+  // window starts so the stat model can snap against the new Kalshi target and
+  // Claude's opening call can resolve.  Config-driven so it can be changed live.
+  // 0/undefined in DB → uses this default of 120 s (2 tracker snap cycles).
+  windowEntryBufferSeconds: 120,
   // Allow up to 8 bets per window (matches 8-coin training set: BTC/ETH/XRP/HYPE/BNB/SOL/DOGE/LINK).
   maxBetsPerWindow: 8,
   enabled: true,
