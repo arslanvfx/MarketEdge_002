@@ -95,45 +95,46 @@ test("PATH A: ML base confidence = mlConfidence when Stat agrees (no Claude)", (
   // When ML leads and Stat agrees, ML's own confidence is the base; the Stat
   // agreement then adds +ML_SIGNAL_BOOST on top.  Testing the raw mlConfidence
   // baseline requires the gate to pass — provide Stat so ML isn't solo.
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 67, statAbove: true }));
-  assert.equal(r.confidence, 67 + ML_SIGNAL_BOOST); // Stat agrees → +boost
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, statAbove: true }));
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + ML_SIGNAL_BOOST); // Stat agrees → +boost
 });
 
 test("PATH A: Claude agrees with ML → +ML_SIGNAL_BOOST", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, claudeAbove: true }));
-  assert.equal(r.confidence, 62 + ML_SIGNAL_BOOST);
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, claudeAbove: true }));
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + ML_SIGNAL_BOOST);
 });
 
 test("PATH A: Claude disagrees with ML → alignment gate → SKIP", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, claudeAbove: false }));
+  // ML at primary threshold (≥56% so meaningful dissent) → gate fires when claude≠ml
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, claudeAbove: false }));
   assert.equal(r.action, "SKIP");
 });
 
 test("PATH A: Stat agrees with ML → +ML_SIGNAL_BOOST", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, statAbove: true }));
-  assert.equal(r.confidence, 62 + ML_SIGNAL_BOOST);
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, statAbove: true }));
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + ML_SIGNAL_BOOST);
 });
 
 test("PATH A: Stat disagrees with ML → −DISSENT_PENALTY (Claude confirms ML so veto doesn't fire)", () => {
   // Stat opposes ML but Claude agrees → mlHasConfirmation=true → no veto → ML leads.
   // Stat dissent still subtracts DISSENT_PENALTY from confidence.
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, statAbove: false, claudeAbove: true }));
-  assert.equal(r.confidence, 62 + ML_SIGNAL_BOOST - DISSENT_PENALTY); // Claude agrees (+6), Stat disagrees (−6)
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, statAbove: false, claudeAbove: true }));
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + ML_SIGNAL_BOOST - DISSENT_PENALTY); // Claude agrees (+6), Stat disagrees (−6)
 });
 
 test("PATH A: WM agrees with ML → +ML_SIGNAL_BOOST (Stat also present as validator)", () => {
   // Stat must be present so ML isn't solo. WM then adds its own boost on top.
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, statAbove: true, wmDriftAbove: true, wmRec: "bet", wmReady: true }));
-  assert.equal(r.confidence, 62 + ML_SIGNAL_BOOST + ML_SIGNAL_BOOST); // Stat+WM each add boost
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, statAbove: true, wmDriftAbove: true, wmRec: "bet", wmReady: true }));
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + ML_SIGNAL_BOOST + ML_SIGNAL_BOOST); // Stat+WM each add boost
 });
 
 test("PATH A: all three validators agree with ML → +3×ML_SIGNAL_BOOST", () => {
   const r = computeCorePairDecision(inp({
-    mlAbove: true, mlConfidence: 62,
+    mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE,
     claudeAbove: true, statAbove: true,
     wmDriftAbove: true, wmRec: "bet", wmReady: true,
   }));
-  assert.equal(r.confidence, 62 + 3 * ML_SIGNAL_BOOST);
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + 3 * ML_SIGNAL_BOOST);
 });
 
 test("PATH A veto: Stat+Claude both oppose ML → alignment gate fires first → SKIP", () => {
@@ -267,14 +268,19 @@ test("PATH B: ML below threshold + Claude available + ML agrees → no dissent p
   assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
 });
 
-// mlConfidence null → ML not ready → Claude leads; mlAbove still set → alignment gate fires on mismatch.
-test("PATH B: ML confidence null but mlAbove present and disagrees → alignment gate → SKIP", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: null, claudeAbove: false, statAbove: false }));
-  assert.equal(r.action, "SKIP");
+test("PATH B: ML confidence null but mlAbove present and disagrees → gate does NOT fire (no conf) → no dissent penalty → BET_NO at full-pair confidence", () => {
+  // When mlConfidence is null the alignment gate treats it as noise and does NOT block.
+  // The dissent penalty is also skipped (ML is noise for all purposes when conf is absent).
+  // PATH B proceeds: claude=false primary → BET_NO at BASE_CONFIDENCE_FULL_PAIR.
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: null, claudeAbove: false, statAbove: false, minConfidence: 50 }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
 });
 
-test("PATH B: ML confidence null but mlAbove present and disagrees (low threshold) → alignment gate still fires → SKIP", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: null, claudeAbove: false, statAbove: false, minConfidence: 50 }));
+test("PATH B: ML at meaningful confidence (≥56%) and disagrees with Claude → alignment gate fires → SKIP", () => {
+  // Even below ML_PRIMARY_MIN_CONFIDENCE, if ML confidence >= ML_ALIGNMENT_GATE_MIN_CONFIDENCE (56),
+  // the alignment gate fires when claude and ml disagree — their conflict makes the bet unreliable.
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 60, claudeAbove: false, statAbove: false, minConfidence: 50 }));
   assert.equal(r.action, "SKIP");
 });
 
@@ -283,6 +289,42 @@ test("PATH B: ML absent (mlAbove null) → no dissent penalty", () => {
   const r = computeCorePairDecision(inp({ mlAbove: null, mlConfidence: null, claudeAbove: true, statAbove: true }));
   assert.equal(r.action, "BET_YES");
   assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
+});
+
+// ---------------------------------------------------------------------------
+// New rule: weak ML dissent (50–55%) treated as noise — stat+claude win
+// ---------------------------------------------------------------------------
+
+test("Weak ML dissent (52%): stat+claude both agree, ML barely-above-random → gate does not fire → no penalty → BET_YES at full-pair confidence", () => {
+  // ML at 52% is essentially a coin-flip. Below ML_ALIGNMENT_GATE_MIN_CONFIDENCE (56%)
+  // ML is treated as noise: no alignment gate AND no dissent penalty.
+  // Stat+claude both say YES → PATH B full pair (65) → BET_YES at 65.
+  const r = computeCorePairDecision(inp({
+    mlAbove: false, mlConfidence: 52,  // ML says NO at only 52% — noise
+    claudeAbove: true, statAbove: true, // stat+claude both strongly say YES
+    minConfidence: 62,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
+});
+
+test("Weak ML dissent (55%): at boundary — gate still does not fire (55 < 56) → stat+claude win", () => {
+  const r = computeCorePairDecision(inp({
+    mlAbove: false, mlConfidence: 55,
+    claudeAbove: true, statAbove: true,
+    minConfidence: 50,
+  }));
+  assert.equal(r.action, "BET_YES");
+});
+
+test("ML dissent at gate boundary (56%): gate fires → SKIP even when stat+claude agree", () => {
+  // At exactly ML_ALIGNMENT_GATE_MIN_CONFIDENCE (56%), the dissent is considered meaningful.
+  const r = computeCorePairDecision(inp({
+    mlAbove: false, mlConfidence: 56,
+    claudeAbove: true, statAbove: true,
+    minConfidence: 50,
+  }));
+  assert.equal(r.action, "SKIP");
 });
 
 // ---------------------------------------------------------------------------
@@ -300,8 +342,9 @@ test("DISSENT: PATH A — ML+Stat agree but Claude actively opposes → alignmen
 });
 
 test("DISSENT: PATH A — ML+Claude agree but Stat actively opposes → net zero delta", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 66, claudeAbove: true, statAbove: false }));
-  assert.equal(r.confidence, 66);
+  // Claude agrees (+ML_SIGNAL_BOOST), Stat disagrees (−DISSENT_PENALTY) → net 0 → confidence stays at base
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, claudeAbove: true, statAbove: false }));
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE);
 });
 
 test("DISSENT: PATH A — Claude opposes ML (Stat null) → alignment gate → SKIP", () => {
@@ -332,8 +375,8 @@ test("DISSENT: PATH B — ML opposes Claude → alignment gate blocks regardless
 
 // Sanity: when all three agree, no penalty, only boosts
 test("DISSENT: all three agree → boosts only, no penalty", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, claudeAbove: true, statAbove: true }));
-  assert.equal(r.confidence, 62 + 2 * ML_SIGNAL_BOOST);
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE, claudeAbove: true, statAbove: true }));
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + 2 * ML_SIGNAL_BOOST);
 });
 
 test("PATH C: Stat=YES, no ML, no Claude → BET_YES", () => {
@@ -461,14 +504,14 @@ test("Low-conviction: base 65 - 20 = 45 < minConfidence(60) → Phase 3 skips", 
   assert.ok(r.confidence - 20 < DEFAULT_MIN_CONFIDENCE, "penalized confidence falls below gate");
 });
 
-test("High-conviction: ML+Claude+Stat+WM all agree → 62+18=80 → 80-20=60 ≥ 60 → Phase 3 allows", () => {
+test("High-conviction: ML+Claude+Stat+WM all agree → 70+18=88 → 88-20=68 ≥ 60 → Phase 3 allows", () => {
   const r = computeCorePairDecision(inp({
-    mlAbove: true, mlConfidence: 62,
+    mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE,
     claudeAbove: true, statAbove: true,
     wmDriftAbove: true, wmRec: "bet", wmReady: true,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 62 + 3 * ML_SIGNAL_BOOST);
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE + 3 * ML_SIGNAL_BOOST);
   assert.ok(r.confidence - 20 >= DEFAULT_MIN_CONFIDENCE, "penalized confidence still clears gate");
 });
 
@@ -1226,13 +1269,13 @@ test("stat flip downstream: flip above→below + ML=above (PATH A, stat dissents
   // Expected: ML+Claude boost partially cancelled by stat dissent (net zero on those two).
   const r = computeCorePairDecision(inp({
     mlAbove: true,
-    mlConfidence: 66,
+    mlConfidence: ML_PRIMARY_MIN_CONFIDENCE,
     claudeAbove: true,   // Claude agrees with ML
     statAbove: false,    // stat has flipped to below (dissents)
   }));
   assert.equal(r.action, "BET_YES");
-  // Claude agrees: +ML_SIGNAL_BOOST; Stat disagrees: −DISSENT_PENALTY; net = 66 + boost − penalty = 66
-  assert.equal(r.confidence, 66, "ML_SIGNAL_BOOST and DISSENT_PENALTY cancel → net 66");
+  // Claude agrees: +ML_SIGNAL_BOOST; Stat disagrees: −DISSENT_PENALTY; net = 0 → base stays
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE, "ML_SIGNAL_BOOST and DISSENT_PENALTY cancel → net confidence = base");
 });
 
 // ---------------------------------------------------------------------------

@@ -30,7 +30,12 @@ export const BASE_CONFIDENCE_HALF_PAIR = 60;
 // Each validating signal adds this when it agrees in Path B/C (WM).
 export const CONFIDENCE_BOOST_PER_SIGNAL = 8;
 // Minimum ML confidence required for ML to lead (Path A).
-export const ML_PRIMARY_MIN_CONFIDENCE = 62;
+export const ML_PRIMARY_MIN_CONFIDENCE = 70;
+// Minimum ML confidence at which ML's direction is considered meaningful enough
+// to trigger the Claude-ML alignment gate.  Below this threshold ML is treated
+// as noise — a weak ML dissent (50–55%) should not block a strong stat+claude
+// consensus; PATH B handles it with a small confidence penalty instead.
+export const ML_ALIGNMENT_GATE_MIN_CONFIDENCE = 56;
 // Each agreeing validator (Claude, Stat, WM) adds this when ML leads (Path A).
 export const ML_SIGNAL_BOOST = 6;
 // Penalty applied when a model is available and actively calls the OPPOSITE direction.
@@ -58,23 +63,23 @@ export interface BetProfileConfig {
 export const BET_PROFILES: Record<BetProfile, BetProfileConfig> = {
   normal: {
     label: "Normal",
-    // Classic confidence ranges:
-    //   PATH A (ML leads, ≥62%): 62–80% base + 6pp per supporting signal (Stat/Claude/WM)
-    //   PATH B (Stat+Claude): 65% base; no cap → high-conviction entries pass through cleanly
+    // Confidence ranges:
+    //   PATH A (ML leads, ≥70%): 70–88% base + 6pp per supporting signal (Stat/Claude/WM)
+    //   PATH B (Stat+Claude): 68% base (full pair), 60% base (half pair); no cap
+    //   ML < 56%: treated as noise — weak dissent handled by −6pp penalty in PATH B
+    //   ML 56–69%: meaningful dissent, triggers alignment gate → SKIP if disagreeing with Claude
     //   No regime penalty — each 15-min window is independent; YES and NO are equally valid
-    description: "Balanced — ML leads at 62%+; confidence uncapped (PATH A up to 80%+); no regime bias. Direction decided purely by signal agreement.",
-    mlMinConfidence: 62,
+    description: "Balanced — ML leads at 70%+; stat+claude win when ML is weak (≤55%); no regime bias. Direction decided purely by signal agreement.",
+    mlMinConfidence: 70,
     effectiveConfidenceCap: 100,
     regimePenalty: 0,
   },
   aggressive: {
     label: "Aggressive",
-    // Classic confidence ranges:
-    //   PATH A (ML leads, ≥58%): 58–80% effective (capped) — ML at 58% + Stat+Claude = 70%, all 3 = 76%
-    //   PATH B (Stat+Claude): 65% base, capped at 80 — prevents borderline ML signals from inflating to 87-90%
-    //   No regime penalty — direction decided by signals, not historical macro trend
-    description: "More bets — ML leads at 58%+; no regime penalty; confidence capped at 80% (PATH A with full support peaks at ~76–80%).",
-    mlMinConfidence: 58,
+    // Same ML threshold as normal (70%) — the same directional rules apply.
+    // Aggressive mode differs via effectiveConfidenceCap (caps inflated entries at 80%).
+    description: "More bets — ML leads at 70%+; confidence capped at 80% to prevent over-conviction in choppy markets. Same directional rules as Normal.",
+    mlMinConfidence: 70,
     effectiveConfidenceCap: 80,
     regimePenalty: 0,
   },
@@ -262,14 +267,17 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   const ev = computeEV(inp.yesPrice, inp.signalAccuracyPct);
 
   // Claude-ML alignment gate — applied before any path decision.
-  // When both Claude and ML have live opinions but call opposite directions,
-  // historical data shows the bet is poor regardless of what Stat says.
-  // Claude is a strong directional signal; we require it to agree with ML
-  // before entering any position.  Stat may still disagree (it only shifts
-  // confidence via boost/penalty) but cannot override this alignment check.
-  if (inp.claudeAbove !== null && inp.mlAbove !== null && inp.claudeAbove !== inp.mlAbove) {
+  // When Claude and ML call opposite directions AND ML is confident enough to
+  // be a meaningful counter-signal (>= ML_ALIGNMENT_GATE_MIN_CONFIDENCE = 56%),
+  // the bet is unreliable regardless of Stat.
+  // Below 56%, ML is essentially a coin-flip and its dissent is treated as noise;
+  // PATH B then handles it with a small confidence penalty instead of blocking.
+  // Rule: when stat+claude both agree strongly but ML is only 50–55% wrong → bet
+  // in stat+claude direction (their combined signal outweighs weak ML dissent).
+  const mlMeaningfulDissent = inp.mlConfidence != null && inp.mlConfidence >= ML_ALIGNMENT_GATE_MIN_CONFIDENCE;
+  if (mlMeaningfulDissent && inp.claudeAbove !== null && inp.mlAbove !== null && inp.claudeAbove !== inp.mlAbove) {
     return skip(
-      `Claude-ML misalignment: Claude=${inp.claudeAbove ? "YES" : "NO"} ML=${inp.mlAbove ? "YES" : "NO"} — skipping until they agree`,
+      `Claude-ML misalignment: Claude=${inp.claudeAbove ? "YES" : "NO"} ML=${inp.mlAbove ? "YES" : "NO"} (${inp.mlConfidence}%) — skipping until they agree`,
       ev,
     );
   }
@@ -389,8 +397,15 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     if (inp.wmDriftAbove === claudeDir) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
 
     // ML available and actively calls the opposite direction → dissent penalty.
-    // Absent or below-threshold ML (mlAbove===null) → no change.
-    if (inp.mlAbove !== null && inp.mlAbove !== claudeDir) confidence -= DISSENT_PENALTY;
+    // Only applies when ML's confidence is meaningful (>= ML_ALIGNMENT_GATE_MIN_CONFIDENCE).
+    // Below that threshold ML is treated as noise for all purposes — no gate, no penalty.
+    // (Note: if mlConfidence >= gate threshold AND claude≠ml, the alignment gate above would
+    //  have already returned SKIP, so in practice this penalty only fires in edge cases.)
+    const mlDissentMeaningful =
+      inp.mlAbove !== null &&
+      inp.mlConfidence != null &&
+      inp.mlConfidence >= ML_ALIGNMENT_GATE_MIN_CONFIDENCE;
+    if (mlDissentMeaningful && inp.mlAbove !== claudeDir) confidence -= DISSENT_PENALTY;
 
     if (confidence < inp.minConfidence) {
       const { signalsAgreeing, signalsTotal } = countSignals(claudeDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
@@ -875,7 +890,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   freeRunMode: false,
   consensusMinCents: 25,
   momentumLookbackCandles: 8,
-  mlPrimaryMinConfidenceOverrides: { ETH: 58, XRP: 58, SOL: 58 },
+  mlPrimaryMinConfidenceOverrides: {},
 };
 
 /**

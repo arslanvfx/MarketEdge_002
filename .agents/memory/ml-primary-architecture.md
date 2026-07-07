@@ -37,15 +37,32 @@ Async awaits between check and use create a TOCTOU race on ephemeral caches (TTL
 
 In `kalshi-bot-engine-core.ts`:
 
-- **PATH A (ML primary)** — `mlLeadReady = mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE (58)`.
+- **PATH A (ML primary)** — `mlLeadReady = mlConfidence >= ML_PRIMARY_MIN_CONFIDENCE (70)`.
   ML decides direction. Each agreeing validator (Claude, Stat, WM) adds `+ML_SIGNAL_BOOST (6%)`.
-  ML wins even when Claude+Stat both disagree.
   
-- **PATH B (Claude primary)** — ML not ready. Claude leads. If Stat available and disagrees → SKIP
-  (no tiebreaker). WM adds `+CONFIDENCE_BOOST_PER_SIGNAL (8%)`.
+- **PATH B (Claude primary)** — ML not ready. Claude leads. WM adds `+CONFIDENCE_BOOST_PER_SIGNAL (8%)`.
 
-- **PATH C (Stat primary)** — no ML, no Claude. Stat leads at statConfidence or `BASE_CONFIDENCE_HALF_PAIR (60%)`.
-  WM adds `+CONFIDENCE_BOOST_PER_SIGNAL`.
+- **PATH C (Stat primary)** — no ML, no Claude.
+
+### Alignment gate (claude-ML mismatch)
+
+Fires only when `mlConfidence >= ML_ALIGNMENT_GATE_MIN_CONFIDENCE (56)`.
+
+- **ML 50–55% (< 56):** treated as noise. Gate doesn't fire AND no dissent penalty in PATH B.
+  stat+claude proceed at full-pair confidence (65). This is the "stat+claude overwhelm weak ML" rule.
+- **ML 56–69%:** meaningful dissent → gate fires → SKIP when claude ≠ ML.
+- **ML ≥ 70%:** PATH A eligible. Gate still fires if claude disagrees (prevents ML overriding stat+claude 2-vs-1).
+
+### Veto rule (ML confirmation)
+
+When mlLeadReady=true but neither stat nor claude confirms ML's direction → `mlLeadReady=false`.
+Falls to PATH B/C rather than letting ML solo-bet.
+
+### Per-coin overrides
+
+`mlPrimaryMinConfidenceOverrides` must be `{}`. Never add per-coin exceptions below 70.
+**Why:** different thresholds per coin create inconsistent gate behavior and were the source
+of ETH/XRP/SOL betting at 58% which is too low to be reliable.
 
 **Why:** ML has been training since day 1 and is the most data-rich signal. Previously it was
 only a booster on top of Stat+Claude, so whenever Claude said the opposite direction, ML was
