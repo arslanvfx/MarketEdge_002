@@ -821,11 +821,57 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
+    // Signal accuracy — used in makeBotDecision for the EV gate and also in the
+    // WM caution bypass peek below.  Moved above the WM readiness gate so the
+    // peek call gets the real accuracy value (not null) for an accurate EV check.
+    const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
+
+    // ── WM Caution Bypass — readiness wait override ───────────────────────────
+    // When the window monitor hasn't yet accumulated enough intra-window candles
+    // (wmReady=false) but the recommendation is "caution" rather than "stay_away",
+    // peek at the model signals.  If all models agree unanimously at ≥
+    // WM_CAUTION_BYPASS_MIN_CONF, the directional signal is clear enough to
+    // proceed without waiting for the full 2-5 min readiness window.
+    //
+    // "stay_away" is NEVER bypassed — it reflects a genuine regime problem, not
+    // just a data-accumulation delay.
+    //
+    // The bypass only fires when `requireMonitorReady=true` (the gate is active)
+    // and the WM is not yet ready.  When WM is already ready, the normal path
+    // below runs unchanged.
+    const WM_CAUTION_BYPASS_MIN_CONF = 65;
+    const _wmPreSig = getWindowBetSignal(sym);
+    let _wmBypassActive = false;
+    if (
+      !(_wmPreSig?.ready ?? false) &&
+      (_wmPreSig?.recommendation ?? null) !== "stay_away" &&
+      (S.config.requireMonitorReady ?? true)
+    ) {
+      const _peekDec = makeBotDecision(
+        sym, S.config, kalshiData.ticker, kalshiData.yesPrice ?? null,
+        minutesElapsed, signalAcc, kalshiData.value,
+      );
+      if (
+        _peekDec.action !== "SKIP" &&
+        _peekDec.signals.signalsAgreeing >= 3 &&
+        _peekDec.confidence >= WM_CAUTION_BYPASS_MIN_CONF
+      ) {
+        _wmBypassActive = true;
+        logger.info(
+          { sym, wmRec: _wmPreSig?.recommendation, conf: _peekDec.confidence,
+            signalsAgreeing: _peekDec.signals.signalsAgreeing,
+            minutesElapsed: minutesElapsed.toFixed(1), windowKey },
+          "[kalshi-bot] WM caution bypass — unanimous signals override readiness wait",
+        );
+      }
+    }
+
     // Window Monitor readiness gate: defer (not permanently block) until the monitor
     // has ≥2 min of intra-window candle data.  Unlike filteredByNewGuards entries,
     // this coin is NOT blocked from Phase-4 for the whole window — the next 60-second
     // tick will re-evaluate it and find the monitor ready.
-    if (checkWindowMonitorReadyGuard(getWindowBetSignal(sym)?.ready ?? false, S.config.requireMonitorReady ?? true)) {
+    // Skipped when _wmBypassActive (unanimous high-confidence signals above).
+    if (!_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0,
         reason: `window monitor not ready (${minutesElapsed.toFixed(1)}m elapsed — needs ≥2m)`,
         windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -890,17 +936,50 @@ export async function runBotLoopTick(): Promise<void> {
     }
 
     // Cached bot-timing accuracy is used for composite score ranking only.
-    // Signal accuracy (from prediction_records) is passed separately to makeBotDecision
-    // for the EV gate so it reflects signal quality rather than bot win rate.
+    // Signal accuracy (signalAcc) was moved above the WM bypass block so the
+    // bypass peek can use the real EV-gate accuracy value.
     const marks = [1, 3, 6, 9, 12];
     const elapsedMin = Math.floor(minutesElapsed);
     const closest = marks.reduce((p, m) => Math.abs(m - elapsedMin) < Math.abs(p - elapsedMin) ? m : p, marks[0]);
     const timingAcc = S.timingCache.get(`${sym}:${closest * 60}`) ?? S.timingCache.get(`ALL:${closest * 60}`) ?? null;
 
-    const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
-    // `let` so the auto-tune shadow path can temporarily substitute the alt-floor
-    // decision for gate evaluation (see below).
+    // `let` so the auto-tune shadow path and WM relief can temporarily substitute
+    // an alt-floor decision for gate evaluation (see below).
     let decision = makeBotDecision(sym, S.config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
+
+    // ── WM Caution Confidence Relief — threshold ease when WM is "caution" ───
+    // When the window monitor is ready but says "caution" (choppy regime, not a
+    // hard directional problem) and all models agree unanimously, relax the
+    // confidence floor by WM_CAUTION_CONF_RELIEF pp.  This handles the edge case
+    // where unanimous PATH-A confidence lands just below the global minConfidence.
+    //
+    // Conditions: SKIP due to confidence (confidence > 0), ≥3 signals agreeing,
+    // WM recommendation is "caution", and confidence is within the relief band.
+    // "stay_away" is never relieved (blocked above this point already).
+    const WM_CAUTION_CONF_RELIEF = 4;
+    if (
+      decision.action === "SKIP" &&
+      decision.confidence > 0 &&
+      decision.confidence >= S.config.minConfidence - WM_CAUTION_CONF_RELIEF &&
+      (getWindowBetSignal(sym)?.recommendation ?? null) === "caution" &&
+      decision.signals.signalsAgreeing >= 3
+    ) {
+      const _reliefConfig = { ...S.config, minConfidence: S.config.minConfidence - WM_CAUTION_CONF_RELIEF };
+      const _reliefDec = makeBotDecision(
+        sym, _reliefConfig, kalshiData.ticker, kalshiData.yesPrice ?? null,
+        minutesElapsed, signalAcc, kalshiData.value,
+      );
+      if (_reliefDec.action !== "SKIP") {
+        logger.info(
+          { sym, wmRec: "caution", originalConf: decision.confidence,
+            reliefFloor: _reliefConfig.minConfidence, action: _reliefDec.action,
+            signalsAgreeing: decision.signals.signalsAgreeing, windowKey },
+          "[kalshi-bot] WM caution confidence relief — unanimous signals cleared lower threshold",
+        );
+        decision = _reliefDec;
+      }
+    }
+
     // Save the original decision immediately — used at the final push to restore
     // the real action/confidence when `decision` is overridden for gate evaluation.
     const originalDecision = decision;
