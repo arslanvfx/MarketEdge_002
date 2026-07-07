@@ -465,21 +465,22 @@ export async function runBotLoopTick(): Promise<void> {
         if (!currentPos || currentPos.windowKey !== pos.windowKey) return;
 
         const betAbove = currentPos.direction === "yes";
-        // Re-check consensus is intentionally stat + Claude only.  ML is not
-        // re-run during re-checks (its feature vector doesn't change mid-window);
-        // including a stale ML signal in exit consensus can override a genuine
-        // Claude flip, which defeats the purpose of the re-check.
+        // Consensus check: stat + Claude majority must flip AND ML must also
+        // confirm the new direction before we consider exiting.  All three
+        // models agreeing is the required signal that direction has genuinely
+        // shifted — not just short-term noise in one or two indicators.
+        const mlAgainstBet = result.mlAbove !== null && result.mlAbove !== betAbove;
         const signals = [result.statAbove, result.claudeAbove];
         const signalsForBet = signals.filter(s => s === betAbove).length;
         const signalsAgainstBet = signals.filter(s => s !== null && s !== betAbove).length;
 
         logger.info(
-          { sym, betAbove, signalsForBet, signalsAgainstBet,
+          { sym, betAbove, signalsForBet, signalsAgainstBet, mlAgainstBet,
             statAbove: result.statAbove, claudeAbove: result.claudeAbove, mlAbove: result.mlAbove },
           "[pipeline-recheck] consensus check for open position",
         );
 
-        if (signalsAgainstBet === 0 || signalsAgainstBet <= signalsForBet) return;
+        if (signalsAgainstBet === 0 || signalsAgainstBet <= signalsForBet || !mlAgainstBet) return;
 
         // Respect the minimum hold period — even if signals have flipped, we
         // don't exit before the position has been held for minHoldMinutes.
@@ -501,17 +502,17 @@ export async function runBotLoopTick(): Promise<void> {
         const entryCost = betAbove ? currentPos.entryYesPrice : (1 - currentPos.entryYesPrice);
         const exitRatio = exitValue / Math.max(entryCost, 0.01);
 
-        if (exitRatio < 0.25) {
+        if (exitRatio < 0.50) {
           logger.info(
             { sym, exitRatio: exitRatio.toFixed(3), signalsAgainstBet },
-            "[pipeline-recheck] consensus flipped but exit value < 25% of entry cost — holding",
+            "[pipeline-recheck] all models flipped but exit value < 50% of entry cost — waiting for recovery uptick",
           );
           return;
         }
 
         logger.warn(
-          { sym, betAbove, exitRatio: exitRatio.toFixed(3), signalsForBet, signalsAgainstBet },
-          "[pipeline-recheck] consensus flipped with meaningful exit value — closing position",
+          { sym, betAbove, exitRatio: exitRatio.toFixed(3), signalsForBet, signalsAgainstBet, mlAgainstBet },
+          "[pipeline-recheck] all models confirm flip + ≥50% value recoverable — closing position",
         );
 
         // Synchronously delete before the async close to prevent double-close.

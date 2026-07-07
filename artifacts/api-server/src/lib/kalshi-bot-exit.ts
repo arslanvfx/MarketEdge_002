@@ -191,19 +191,25 @@ export function runExitGuard(
     const phase2ElapsedMs = Date.now() - (state.phase2.activatedAt ?? Date.now());
     const phase2Timeout = phase2ElapsedMs >= 2 * 60_000;
 
-    // Recovery signal: position is no longer bleeding as badly
-    // YES: yes price rose ≥5pp from its recent low      → EXIT (salvage what's left)
-    // NO:  yes price fell ≥5pp from its recent high     → EXIT
+    // Recovery signal: price has bounced from its extreme AND sell value has recovered
+    // to ≥ 50% of the original entry cost.  This prevents exiting on the first tick
+    // of any minor uptick — we wait through the downturn for a genuine recovery that
+    // restores at least half the investment before cashing out.
+    // YES: yes price rose ≥5pp from recent low AND sell value ≥ 50% of entry cost
+    // NO:  yes price fell ≥5pp from recent high AND sell value ≥ 50% of entry cost
     let recoveryDetected = false;
     let recoveryMagnitudePp = 0;
+    const entryCost = direction === "yes" ? entryPrice : (1 - entryPrice);
+    const sellValue = yp !== null ? (direction === "yes" ? yp : (1 - yp)) : null;
+    const recoveryRatio = sellValue !== null ? sellValue / Math.max(entryCost, 0.01) : 0;
     if (direction === "yes") {
       const recentLow = state.phase2.recentLow ?? yp ?? entryPrice;
       recoveryMagnitudePp = yp !== null ? (yp - recentLow) * 100 : 0;
-      recoveryDetected = yp !== null && recoveryMagnitudePp >= 5;
+      recoveryDetected = yp !== null && recoveryMagnitudePp >= 5 && recoveryRatio >= 0.50;
     } else {
       const recentHigh = state.phase2.recentHigh ?? yp ?? entryPrice;
       recoveryMagnitudePp = yp !== null ? (recentHigh - yp) * 100 : 0;
-      recoveryDetected = yp !== null && recoveryMagnitudePp >= 5;
+      recoveryDetected = yp !== null && recoveryMagnitudePp >= 5 && recoveryRatio >= 0.50;
     }
 
     const recentExtreme = direction === "yes"
@@ -225,7 +231,7 @@ export function runExitGuard(
       const dir = direction === "yes" ? "rose" : "fell";
       return {
         recommendation: "EXIT",
-        reason: `Phase 2: Yes price ${dir} ${recoveryMagnitudePp.toFixed(1)}pp from extreme — best available exit`,
+        reason: `Phase 2: Yes price ${dir} ${recoveryMagnitudePp.toFixed(1)}pp from extreme, recovered ${(recoveryRatio * 100).toFixed(0)}% of entry cost — best exit`,
         phase: 2,
         guardStates,
       };
@@ -326,17 +332,16 @@ export function runExitGuard(
     phase2YesPrice: yp, phase2RecentLow: null,
   };
 
-  // Fast-flip path: if BOTH stat and Claude unanimously say the position is
-  // wrong AND we've held for at least 90 seconds, exit immediately — no
-  // tick-count or magnitude requirement.  This is the "sell and rebuy"
-  // mechanism: cut the loss early while there's still contract value left,
-  // then let the entry loop re-enter in the correct direction next tick.
+  // Fast-flip path: stat AND Claude unanimously signal reversal AND ML agrees.
+  // All three models must confirm the direction has shifted before cutting the
+  // loss early — this prevents premature exits caused by short-term noise in
+  // stat or Claude when the ML model still supports the original position.
   const bothCoreFlipped = statSaysAdverse && claudeSaysAdverse;
   const holdMinimumForFlip = holdDurationMs >= 90_000;
-  if (bothCoreFlipped && holdMinimumForFlip && !timingOverride) {
+  if (bothCoreFlipped && mlFlipped && holdMinimumForFlip && !timingOverride) {
     return {
       recommendation: "EXIT",
-      reason: `Fast flip: stat + Claude both signal reversal after ${Math.round(holdDurationMs / 1000)}s — cutting to allow re-entry`,
+      reason: `Fast flip: stat + Claude + ML all signal reversal after ${Math.round(holdDurationMs / 1000)}s — cutting to allow re-entry`,
       phase: 1,
       guardStates,
     };

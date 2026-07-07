@@ -19,6 +19,7 @@ import {
 import { getKalshiCachedData, getKalshiWindowContext } from "./crypto-kalshi";
 import { extractMLFeatures } from "./ml-features";
 import { getMLPrediction } from "./ml-store";
+import { liveDirectionCache } from "./crypto-claude";
 
 export interface CoinSignals {
   statAbove: boolean | null;
@@ -52,11 +53,22 @@ export function getLatestCoinSignals(symbol: string): CoinSignals {
   const statAbove = statCall?.aboveKalshi ?? null;
   const statConfidence = statCall?.confidence ?? null;
 
-  // ── Claude — tracker window call (predictor page's source) ──────────────
-  // Only present when auto-pilot fired the opening Claude call for this coin.
+  // ── Claude — tracker opening call + live direction override ─────────────
+  // The opening call (historyStore) is written once at window-open and stays
+  // frozen.  If a mid-window live re-check (fetchLiveDirection) has run, its
+  // result is stored in liveDirectionCache which is cleared at every window
+  // transition — so any entry here is always from the current window and
+  // reflects Claude's most up-to-date read.  Prefer it over the opening snap
+  // to match exactly what the Crypto Predictor page shows.
   const trackerCall = getTrackerWindowCall(sym);
-  const claudeAbove = trackerCall?.aboveKalshi ?? null;
-  const claudeConfidence = trackerCall?.confidence ?? null;
+  let claudeAbove = trackerCall?.aboveKalshi ?? null;
+  let claudeConfidence = trackerCall?.confidence ?? null;
+  const liveEntry = liveDirectionCache.get(sym);
+  if (liveEntry && liveEntry.result.aboveKalshi !== null) {
+    claudeAbove = liveEntry.result.aboveKalshi;
+    // liveDirectionCache entries may not carry a confidence value; keep the
+    // opening-call confidence as the best available approximation.
+  }
   const claudeEnabled = isCoinClaudeEnabled(sym);
 
   // ── Window Monitor ───────────────────────────────────────────────────────
