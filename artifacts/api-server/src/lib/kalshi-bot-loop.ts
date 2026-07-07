@@ -866,13 +866,13 @@ export async function runBotLoopTick(): Promise<void> {
     // After STABILITY_WAIT_MAX_S seconds we proceed anyway and log a warning —
     // this prevents the gate from blocking all entries if Claude is slow or down.
     if (isAiFeatureEnabled("crypto_stability") && !windowStabilityCache.has(sym)) {
-      if (secondsElapsed < STABILITY_WAIT_MAX_S) {
+      if (clockElapsedS < STABILITY_WAIT_MAX_S) {
         evalResults.push({
           symbol: sym,
           action: "SKIP",
           confidence: 0,
           score: 0,
-          reason: `pending trend analysis (${Math.round(secondsElapsed)}s elapsed — waiting up to ${STABILITY_WAIT_MAX_S}s)`,
+          reason: `pending trend analysis (${Math.round(clockElapsedS)}s elapsed — waiting up to ${STABILITY_WAIT_MAX_S}s)`,
           windowKey,
           selected: false,
           evaluatedAt: now,
@@ -883,7 +883,7 @@ export async function runBotLoopTick(): Promise<void> {
       }
       // Past the wait ceiling — proceed without stability data but surface the miss.
       logger.warn(
-        { sym, secondsElapsed: Math.round(secondsElapsed), windowKey },
+        { sym, clockElapsedS: Math.round(clockElapsedS), windowKey },
         "[kalshi-bot] stability analysis timeout — proceeding without trend data",
       );
     }

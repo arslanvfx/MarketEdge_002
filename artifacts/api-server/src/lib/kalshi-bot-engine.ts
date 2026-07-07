@@ -187,9 +187,24 @@ function _makeBotDecisionInner(
   // result in predCache.  If that entry is newer than the opening stat snap
   // and less than 10 minutes old, derive a fresher statAbove from the live
   // price vs Kalshi strike.
+  //
+  // Freshness gate: when the stat model has NOT yet written a record for the
+  // current window's target time (isCurrentWindowSnap === false), the direction
+  // returned by computeStatWindowCall is an extrapolation from prior-window data.
+  // Treat it as null to prevent a cross-window stat from satisfying the hard-model
+  // gate.  The predCache mid-snap (T+7) can still supply a direction when it's
+  // fresh enough (< 10 min old) — applyStatPredCacheOverride handles that path.
+  const statNotYetSnapped = statCall != null && statCall.isCurrentWindowSnap === false;
+  if (statNotYetSnapped) {
+    logger.debug(
+      { sym, statAboveRaw: statCall?.aboveKalshi ?? null },
+      "[kalshi-bot] stat not yet snapped for current window — treating as null",
+    );
+  }
+  const openingStatAbove: boolean | null = statNotYetSnapped ? null : (statCall?.aboveKalshi ?? null);
   const statSnapAtMs = statCall?.snappedAt ? new Date(statCall.snappedAt).getTime() : 0;
   const statPredResult = applyStatPredCacheOverride(
-    statCall?.aboveKalshi ?? null,
+    openingStatAbove,
     statSnapAtMs,
     predCache.get(sym),
     kalshiTarget ?? null,
@@ -197,7 +212,7 @@ function _makeBotDecisionInner(
   let statAbove = statPredResult.statAbove;
   if (statPredResult.flipped) {
     logger.info(
-      { sym, openingStatAbove: statCall?.aboveKalshi ?? null, midSnapStatAbove: statAbove, snapAgeS: Math.round((Date.now() - statSnapAtMs) / 1000) },
+      { sym, openingStatAbove, midSnapStatAbove: statAbove, snapAgeS: Math.round((Date.now() - statSnapAtMs) / 1000) },
       "[kalshi-bot] stat mid-snap FLIP: direction reversed vs opening call",
     );
   }

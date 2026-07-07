@@ -93,6 +93,10 @@ export interface TrackerWindowCall {
   confidence: number;
   snappedAt: string;
   strikeProximityPct: number | null;
+  // true when an actual DB record for the current window's target time was found;
+  // false when the direction is extrapolated from prior-window regression data.
+  // Only set on stat calls from getStatWindowCall; Claude calls omit this field.
+  isCurrentWindowSnap?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +282,7 @@ export function getStatWindowCall(symbol: string): TrackerWindowCall | null {
     kalshiTargetForProx != null && rec?.priceAtSnapshot != null && rec.priceAtSnapshot > 0
       ? Math.abs(rec.priceAtSnapshot - kalshiTargetForProx) / rec.priceAtSnapshot * 100
       : null;
-  return { ...result, aboveKalshi, strikeProximityPct };
+  return { ...result, aboveKalshi, strikeProximityPct, isCurrentWindowSnap: rec != null };
 }
 
 // ---------------------------------------------------------------------------

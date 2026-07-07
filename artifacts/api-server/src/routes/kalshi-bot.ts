@@ -209,6 +209,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     phase2ThresholdPp,
     maxEntryMinutes,
     minRemainingMinutes,
+    windowEntryBufferSeconds,
     maxBetsPerWindow,
     enabled,
     quietHoursStart,
@@ -254,6 +255,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     phase2ThresholdPp?: number;
     maxEntryMinutes?: number;
     minRemainingMinutes?: number;
+    windowEntryBufferSeconds?: number;
     maxBetsPerWindow?: number;
     enabled?: boolean;
     quietHoursStart?: number;
@@ -329,6 +331,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof minRemainingMinutes === "number" && minRemainingMinutes >= 0 && minRemainingMinutes <= 7) {
     partial.minRemainingMinutes = minRemainingMinutes;
+  }
+  if (typeof windowEntryBufferSeconds === "number" && windowEntryBufferSeconds >= 0 && windowEntryBufferSeconds <= 300) {
+    partial.windowEntryBufferSeconds = windowEntryBufferSeconds;
   }
   if (typeof maxBetsPerWindow === "number" && maxBetsPerWindow >= 1 && maxBetsPerWindow <= 10) {
     partial.maxBetsPerWindow = maxBetsPerWindow;
