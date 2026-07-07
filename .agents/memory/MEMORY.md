@@ -63,3 +63,4 @@
 - [ml_gate hard checkpoint](ml-gate-checkpoint.md) — ml_gate mode MUST block bets when mlAbove===null; gate lives in Phase 3 loop (kalshi-bot-loop.ts) after hardModelCount check; no parole override
 - [EV gate direction asymmetry](ev-gate-direction.md) — EV gate must run AFTER direction; use BET_YES formula for YES, BET_NO formula for NO; pre-direction gate with YES formula incorrectly blocks cheap NO contracts
 - [Bot signal pipeline architecture](bot-signal-pipeline.md) — stale-signal gate replaced by window-keyed pipeline; no more TTL gaps; Claude prompt includes explicit window close time; see kalshi-bot-pipeline.ts
+- [ml_gate Path A sentinel removal](ml-gate-path-a.md) — mlMinConfidence:999 blocked ML from ever leading; replaced with per-coin overrides via BotConfig.mlPrimaryMinConfidenceOverrides; ETH/XRP/SOL default 58

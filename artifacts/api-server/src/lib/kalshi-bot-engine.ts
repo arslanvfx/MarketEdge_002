@@ -439,20 +439,22 @@ function _makeBotDecisionInner(
   }
 
   // ── Decision Mode: ml_gate ────────────────────────────────────────────────
-  // Rule: compute the Stat+Claude core-pair decision with ML as a tiebreaker
-  // but NOT as Path A primary.  mlMinConfidence is set impossibly high (999)
-  // so ML cannot promote itself to PATH A; it only participates in:
-  //   • PATH B disagreement arbitration (Claude+ML vs Stat, 2-of-3)
-  //   • confidence modifiers (dissent penalty / boost) in PATH B/C
-  //   • post-core veto (if ML opposes the agreed direction with high confidence)
-  // If ML is unavailable (mlAbove===null) and Claude/Stat disagree, the core
-  // returns SKIP "no ML to arbitrate" as before.
+  // ML and Claude are equal partners:
+  //   • PATH A: ML leads when its confidence ≥ per-coin threshold (Claude validates)
+  //   • PATH B: Claude leads when ML is below threshold (ML tiebreaks Stat disagreements)
+  //   • Post-core veto: ML can still block a Claude+Stat bet if it disagrees with
+  //     high confidence (≥ mlVetoMinConfidence)
+  // Per-coin overrides (mlPrimaryMinConfidenceOverrides) allow coins like ETH/XRP/SOL
+  // whose ML accuracy is 59–60 % to use a lower gate (58) so they qualify for Path A
+  // when Claude confirms, rather than being locked out by the global 62 % default.
   if (decisionMode === "ml_gate") {
+    const mlMinConf =
+      config.mlPrimaryMinConfidenceOverrides?.[sym] ?? ML_PRIMARY_MIN_CONFIDENCE;
     const coreResult = computeCorePairDecision({
       statAbove, claudeAbove,
-      mlAbove,              // pass real mlAbove so PATH B can use it as tiebreaker
+      mlAbove,
       mlConfidence,
-      mlMinConfidence: 999, // prevent ML from taking PATH A primary role
+      mlMinConfidence: mlMinConf,
       wmDriftAbove, wmRec, wmReady,
       yesPrice, signalAccuracyPct, minutesElapsed,
       statConfidence: statCall?.confidence ?? null,

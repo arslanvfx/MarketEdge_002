@@ -724,6 +724,14 @@ export interface BotConfig {
   // Extended from legacy 4 to catch medium-duration drops (5–8 min) that leave
   // recent candles oscillating at the low without a clear 4-candle slope.
   momentumLookbackCandles: number;     // candles (default 8)
+
+  // Per-coin ML confidence overrides for Path A (ML primary).
+  // Key = symbol uppercase (e.g. "ETH"). Value = minimum ML confidence % to
+  // qualify ML as the lead signal for that coin, overriding the global
+  // ML_PRIMARY_MIN_CONFIDENCE constant.  Missing keys use the global default.
+  // Default: lower thresholds for ETH/XRP/SOL whose ML accuracy sits at
+  // 59–60 %, just below the global 62 % gate.
+  mlPrimaryMinConfidenceOverrides?: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -856,6 +864,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   freeRunMode: false,
   consensusMinCents: 25,
   momentumLookbackCandles: 8,
+  mlPrimaryMinConfidenceOverrides: { ETH: 58, XRP: 58, SOL: 58 },
 };
 
 /**
