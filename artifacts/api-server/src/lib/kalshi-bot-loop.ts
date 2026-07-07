@@ -475,6 +475,18 @@ export async function runBotLoopTick(): Promise<void> {
 
         if (signalsAgainstBet === 0 || signalsAgainstBet <= signalsForBet) return;
 
+        // Respect the minimum hold period — even if signals have flipped, we
+        // don't exit before the position has been held for minHoldMinutes.
+        // The next recheck (2.5 min later) will re-evaluate if it's still flipped.
+        const minHoldMs = (S.config.minHoldMinutes ?? 3) * 60_000;
+        if (Date.now() - currentPos.openedAt < minHoldMs) {
+          logger.info(
+            { sym, heldSec: Math.round((Date.now() - currentPos.openedAt) / 1000), signalsAgainstBet },
+            "[pipeline-recheck] consensus flipped but within minimum hold period — holding",
+          );
+          return;
+        }
+
         const kd = getKalshiCachedData(sym);
         const currentYesPrice = kd?.yesPrice ?? null;
         if (currentYesPrice == null) return;
@@ -506,6 +518,26 @@ export async function runBotLoopTick(): Promise<void> {
           logger.error({ err, sym }, "[pipeline-recheck] close failed — position restored");
         }
       }).catch(() => {});
+    }
+  }
+
+  // ── Periodic display-refresh pipeline re-check (all coins) ─────────────
+  // Re-run stat + Claude every PIPELINE_RECHECK_INTERVAL_MS for every active
+  // Kalshi coin — not just those with open positions — so the pipeline-status
+  // UI always shows up-to-date signals throughout the 15-min window.
+  // ML is not re-run (its feature vector is fixed at window open); Claude and
+  // stat are re-checked and the updated result is stored so the window-eval
+  // endpoint reflects the current model consensus.
+  {
+    const recheckWK = currentWindowKey();
+    for (const coin of CRYPTO_COINS.filter(c => KALSHI_SERIES[c.symbol])) {
+      const sym = coin.symbol;
+      if (openPositions.has(sym)) continue; // already rechecked above
+      const displayKey = `display:${sym}`;
+      const lastDisplayRecheck = pipelineRecheckAt.get(displayKey) ?? 0;
+      if (Date.now() - lastDisplayRecheck < PIPELINE_RECHECK_INTERVAL_MS) continue;
+      pipelineRecheckAt.set(displayKey, Date.now());
+      void runPipelineRecheck(sym, recheckWK).catch(() => {});
     }
   }
 

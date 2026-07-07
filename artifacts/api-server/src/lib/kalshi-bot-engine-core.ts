@@ -704,6 +704,7 @@ export interface BotConfig {
   enableDynamicSizing: boolean;        // (default false)
   dynamicSizingMaxConfidence: number;  // confidence at which max bet is reached (default 85)
   profitLockPct: number;               // 0 = disabled; 1–99 = cash out when current value reaches this % of max payout
+  minHoldMinutes: number;              // min minutes to hold before ANY exit is evaluated (default 3); 0 = disabled
 
   // ── Free-run mode ────────────────────────────────────────────────────────
   // When true, all restriction layers are bypassed so the bot places any bet
@@ -861,6 +862,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableDynamicSizing: false,
   dynamicSizingMaxConfidence: 90,
   profitLockPct: 0,
+  minHoldMinutes: 3,
   freeRunMode: false,
   consensusMinCents: 25,
   momentumLookbackCandles: 8,

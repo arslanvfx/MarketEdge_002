@@ -151,6 +151,23 @@ async function _runBotTick(
         direction: pos.direction,
       }, "[kalshi-bot] exit-tick price check");
 
+      // ── Minimum hold guard ────────────────────────────────────────────────
+      // Block ALL exits (profit-lock, exit-guard, time-stop) for the first
+      // minHoldMinutes after entry.  The market needs time to establish a
+      // direction; reacting to the opening noise spike almost always means
+      // exiting a winner too early.  After the hold period expires the normal
+      // exit logic resumes, including model-signal re-checks.
+      const minHoldMs = (S.config.minHoldMinutes ?? 3) * 60_000;
+      const heldMs = Date.now() - pos.openedAt;
+      if (minHoldMs > 0 && heldMs < minHoldMs) {
+        const remainingSec = Math.ceil((minHoldMs - heldMs) / 1000);
+        logger.debug(
+          { sym, heldSec: Math.round(heldMs / 1000), remainingSec },
+          "[kalshi-bot] minimum hold period active — skipping exit evaluation",
+        );
+        return;
+      }
+
       // ── Profit-lock early cash-out ────────────────────────────────────────
       // When the position has captured ≥ profitLockPct% of its maximum possible
       // payout, cash out immediately rather than risk a late reversal.
