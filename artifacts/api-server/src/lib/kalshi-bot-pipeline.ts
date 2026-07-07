@@ -170,12 +170,30 @@ async function _runPipeline(
     return null;
   }
 
-  // ── Step 2: Stat signal (from tracker's historyStore snap) ───────────────
-  // getStatWindowCall reads the snap written by the tracker at ~T+30-60s.
-  // May be null early in the window; that's OK — the engine handles null stat.
-  const statCall = getStatWindowCall(sym);
-  const statAbove = statCall?.aboveKalshi ?? null;
-  const statConfidence = statCall?.confidence ?? null;
+  // ── Step 2: Stat signal — computed directly from live market data ─────────
+  // Stat is pure math (price vs strike, candle indicators) — no AI involved,
+  // resolves in milliseconds.  We fetch live data here and call analyzeCoin
+  // directly rather than waiting for the tracker's historyStore snap (~T+30-60s),
+  // which would always be null when the pipeline runs at window-open.
+  const pred = getCachedPrediction(sym);
+  const [candles, stats, tickerPrice] = await Promise.all([
+    getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
+    getStats(coin.product).catch(() => null),
+    getTicker(coin.product).catch(() => 0),
+  ]);
+  const livePrice = tickerPrice > 0 ? tickerPrice : (pred?.price ?? 0);
+
+  let statAbove: boolean | null = null;
+  let statConfidence: number | null = null;
+  if (livePrice > 0) {
+    statAbove = livePrice >= kalshiTarget;
+    if (candles.length >= 10 && stats != null) {
+      const analysis = analyzeCoin(
+        coin, candles, stats, new Date(), livePrice,
+      );
+      statConfidence = analysis?.confidence ?? null;
+    }
+  }
 
   // ── Step 3: Claude — rich prompt with explicit window close timestamp ─────
   let claudeAbove: boolean | null = null;
@@ -186,7 +204,7 @@ async function _runPipeline(
     try {
       const claudeResult = await _callPipelineClaude(
         sym, coin, kalshiTarget, windowKey,
-        getCachedPrediction(sym),
+        pred, candles, stats, livePrice,
         statAbove, statConfidence,
       );
       claudeAbove = claudeResult.aboveKalshi;
@@ -223,7 +241,6 @@ async function _runPipeline(
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
   if (!isRecheck) {
-    const pred = getCachedPrediction(sym);
     if (pred && kalshiTarget != null) {
       try {
         const winCtx = getKalshiWindowContext(sym);
@@ -276,9 +293,14 @@ async function _callPipelineClaude(
   kalshiTarget: number,
   windowKey: string,
   pred: CoinPrediction | null,
+  candles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>,
+  stats: Awaited<ReturnType<typeof getStats>> | null,
+  livePrice: number,
   statAbove: boolean | null,
   statConfidence: number | null,
 ): Promise<{ aboveKalshi: boolean | null; confidence: number; callMs: number }> {
+  if (livePrice === 0) throw new Error("no live price available");
+
   // Exact window close time — windowKey is "YYYY-MM-DDTHH:MM" UTC
   const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
   const windowCloseMs = windowStartMs + 15 * 60_000;
@@ -290,22 +312,12 @@ async function _callPipelineClaude(
   }) + " ET";
   const minutesRemaining = Math.max(0, (windowCloseMs - Date.now()) / 60_000);
 
-  // Fetch fresh market data in parallel
-  const [candles, stats, tickerPrice] = await Promise.all([
-    getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
-    getStats(coin.product).catch(() => null),
-    getTicker(coin.product).catch(() => 0),
-  ]);
-
-  const livePrice = tickerPrice > 0 ? tickerPrice : (pred?.price ?? 0);
-  if (livePrice === 0) throw new Error("no live price available");
-
   // Decimal places: 2 for BTC/ETH (≥100), 4 for mid-range, 6 for small coins
   const dp = livePrice >= 100 ? 2 : livePrice >= 1 ? 4 : 6;
 
-  // Fresh indicators from latest candles
+  // Use indicators from candles already fetched in Step 2 (no re-fetch needed)
   const freshAnalysis = candles.length >= 10 && stats != null
-    ? analyzeCoin(coin, candles, stats, new Date(), tickerPrice > 0 ? tickerPrice : undefined)
+    ? analyzeCoin(coin, candles, stats, new Date(), livePrice)
     : null;
   const ind = freshAnalysis?.indicators ?? pred?.indicators ?? null;
 
