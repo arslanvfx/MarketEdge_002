@@ -485,7 +485,7 @@ export async function runBotLoopTick(): Promise<void> {
         // Respect the minimum hold period — even if signals have flipped, we
         // don't exit before the position has been held for minHoldMinutes.
         // The next recheck (2.5 min later) will re-evaluate if it's still flipped.
-        const minHoldMs = (S.config.minHoldMinutes ?? 3) * 60_000;
+        const minHoldMs = (S.config.minHoldMinutes ?? 4) * 60_000;
         if (Date.now() - currentPos.openedAt < minHoldMs) {
           logger.info(
             { sym, heldSec: Math.round((Date.now() - currentPos.openedAt) / 1000), signalsAgainstBet },

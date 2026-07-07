@@ -51,6 +51,8 @@ export interface BotConfig {
   consensusMinCents: number;
   momentumLookbackCandles: number;
   windowEntryBufferSeconds?: number;
+  minHoldMinutes?: number;
+  enableMidExit?: boolean;
 }
 
 export interface LogicModeStats {

@@ -464,6 +464,35 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </span>
                 </label>
 
+                {/* Mid-Exit System */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Mid-Window Exit System</span>
+                  <button type="button"
+                    onClick={() => setConfigDraft(d => ({ ...d, enableMidExit: !(merged.enableMidExit ?? false) }))}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium border transition-colors w-fit ${(merged.enableMidExit ?? false)
+                      ? "bg-amber-500/20 text-amber-400 border-amber-500/40 hover:bg-amber-500/30"
+                      : "bg-background text-muted-foreground border-border hover:bg-muted"}`}>
+                    {(merged.enableMidExit ?? false) ? "Enabled — bot may exit positions early" : "Disabled — hold all positions to window close"}
+                  </button>
+                  <span className="text-xs text-muted-foreground">
+                    {(merged.enableMidExit ?? false)
+                      ? "Bot will cashout early when signal divergence, price flip, or Phase 2 conditions are met."
+                      : "Bot holds every position until the 15-min window closes. Safest option — no early exit risk."}
+                  </span>
+                </div>
+
+                {/* Min Hold Minutes */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Min Hold Before Any Exit ({merged.minHoldMinutes ?? 4} min)</span>
+                  <input type="range" min={1} max={8} step={1}
+                    className="mt-1"
+                    value={merged.minHoldMinutes ?? 4}
+                    onChange={e => setConfigDraft(d => ({ ...d, minHoldMinutes: parseInt(e.target.value) }))} />
+                  <span className="text-xs text-muted-foreground">
+                    No exit of any kind will fire until a position has been held for this many minutes. Applies even when mid-exit is enabled.
+                  </span>
+                </label>
+
                 {/* Exit Sensitivity */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Exit Sensitivity</span>

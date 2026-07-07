@@ -73,6 +73,7 @@ export function runExitGuard(
   sensitivity: "conservative" | "balanced" | "aggressive",
   phase2ThresholdPp: number,
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null },
+  minHoldMinutes: number = 4,
 ): ExitGuardResult {
   const { adverseTicks, magnitudePp } = SENSITIVITY[sensitivity];
 
@@ -277,6 +278,30 @@ export function runExitGuard(
     };
   }
 
+  // ── Belt-and-suspenders minimum hold gate ────────────────────────────────
+  // Block ALL Phase 1 exits (divergence cutout, fast-flip, full Phase 1) until
+  // the position has been held for at least minHoldMinutes.  This duplicates the
+  // guard in kalshi-bot-tick.ts but protects against edge cases where pos.openedAt
+  // is set at order-send time (before fill confirmation), which can be 3-5s before
+  // the actual fill, causing the outer guard to expire ~5s too early.
+  const holdDurationMs = Date.now() - state.phase1.entryTime;
+  const minHoldMs = minHoldMinutes * 60_000;
+  if (minHoldMinutes > 0 && holdDurationMs < minHoldMs) {
+    const blockerGuardStates: GuardStates = {
+      holdDurationOk: false, flipConfirmed: false, magnitudeOk: false,
+      consensusOk: false, timingOverride: false, erOk: false,
+      mlFlipped: false,
+      phase2Active: false, phase2UptickDetected: false, phase2Timeout: false,
+      phase2YesPrice: currentYesPrice, phase2RecentLow: null,
+    };
+    return {
+      recommendation: "HOLD",
+      reason: `Phase 1: minimum hold ${minHoldMinutes}min not met (held ${Math.round(holdDurationMs / 1000)}s)`,
+      phase: 1,
+      guardStates: blockerGuardStates,
+    };
+  }
+
   // ── SIGNAL DIVERGENCE EARLY-EXIT CUTOUT ─────────────────────────────────
   // Fires before Phase 1 guards when ≥2 of 3 signals that were FOR the bet
   // at entry have since flipped AGAINST it, while still early (<8 min) and
@@ -313,8 +338,7 @@ export function runExitGuard(
 
   // ── PHASE 1 GUARDS ────────────────────────────────────────────────────────
 
-  const holdDurationMs = Date.now() - state.phase1.entryTime;
-  const holdDurationOk = holdDurationMs >= 2 * 60_000;
+  const holdDurationOk = holdDurationMs >= minHoldMs;
   const flipConfirmed = state.phase1.adverseTickCount >= adverseTicks;
   const magnitudeOk = priceMovePp >= magnitudePp;
 
@@ -362,7 +386,7 @@ export function runExitGuard(
   // loss early — this prevents premature exits caused by short-term noise in
   // stat or Claude when the ML model still supports the original position.
   const bothCoreFlipped = statSaysAdverse && claudeSaysAdverse;
-  const holdMinimumForFlip = holdDurationMs >= 90_000;
+  const holdMinimumForFlip = holdDurationMs >= minHoldMs;
   if (bothCoreFlipped && mlFlipped && holdMinimumForFlip && !timingOverride) {
     return {
       recommendation: "EXIT",

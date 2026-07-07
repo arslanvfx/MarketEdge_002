@@ -157,7 +157,7 @@ async function _runBotTick(
       // direction; reacting to the opening noise spike almost always means
       // exiting a winner too early.  After the hold period expires the normal
       // exit logic resumes, including model-signal re-checks.
-      const minHoldMs = (S.config.minHoldMinutes ?? 3) * 60_000;
+      const minHoldMs = (S.config.minHoldMinutes ?? 4) * 60_000;
       const heldMs = Date.now() - pos.openedAt;
       if (minHoldMs > 0 && heldMs < minHoldMs) {
         const remainingSec = Math.ceil((minHoldMs - heldMs) / 1000);
@@ -167,6 +167,11 @@ async function _runBotTick(
         );
         return;
       }
+
+      // ── Mid-exit master switch ────────────────────────────────────────────
+      // When enableMidExit is false, skip all cashout/exit evaluation.
+      // The position will be closed normally when the window expires.
+      if (S.config.enableMidExit === false) return;
 
       // ── Profit-lock early cash-out ────────────────────────────────────────
       // When the position has captured ≥ profitLockPct% of its maximum possible
@@ -218,6 +223,7 @@ async function _runBotTick(
         S.config.midExitSensitivity,
         S.config.phase2ThresholdPp,
         pos.entrySignals,
+        S.config.minHoldMinutes ?? 4,
       );
 
       lastGuardStatesMap.set(sym, guard.guardStates);
@@ -264,13 +270,13 @@ async function _runBotTick(
         const recoveryRatio = currentSellPerContract !== null
           ? currentSellPerContract / Math.max(entryContractCost, 0.01)
           : null;
-        const belowRecoveryFloor = recoveryRatio !== null && recoveryRatio < 0.40;
+        const belowRecoveryFloor = recoveryRatio !== null && recoveryRatio < 0.50;
         if (belowRecoveryFloor) {
           logger.info(
             { sym, direction: pos.direction,
               sellPct: recoveryRatio != null ? `${(recoveryRatio * 100).toFixed(0)}%` : "?",
               entryCost: entryContractCost.toFixed(2), guardReason: guard.reason },
-            "[kalshi-bot] HOLD — cashout < 40% of entry cost; letting position play out",
+            "[kalshi-bot] HOLD — cashout < 50% of entry cost; letting position play out",
           );
         } else {
           const isLateRecovery = guard.phase === 2;
@@ -309,11 +315,11 @@ async function _runBotTick(
             const tseRecoveryRatio = tseSellPerContract !== null
               ? tseSellPerContract / Math.max(tseEntryCost, 0.01)
               : null;
-            if (tseRecoveryRatio !== null && tseRecoveryRatio < 0.40) {
+            if (tseRecoveryRatio !== null && tseRecoveryRatio < 0.50) {
               logger.info(
                 { sym, minutesRemaining,
                   sellPct: `${(tseRecoveryRatio * 100).toFixed(0)}%`, entryCost: tseEntryCost.toFixed(2) },
-                "[kalshi-bot] time-stop HOLD — cashout < 40% of entry cost; letting position expire",
+                "[kalshi-bot] time-stop HOLD — cashout < 50% of entry cost; letting position expire",
               );
             } else {
               logger.info(
