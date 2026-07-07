@@ -502,6 +502,12 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
       : BASE_CONFIDENCE_HALF_PAIR;
     let confidence = base;
     if (inp.wmDriftAbove === statDir) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
+    // ML is below the lead threshold (< ML_PRIMARY_MIN_CONFIDENCE) but if it
+    // agrees with Stat it still adds confirming signal value — same as WM does.
+    // When ML disagrees with Stat no penalty is applied (Stat leads, ML is
+    // advisory only in this path).
+    const mlAgreesStat = inp.mlAbove !== null && inp.mlAbove === statDir;
+    if (mlAgreesStat) confidence += ML_SIGNAL_BOOST;
 
     if (confidence < inp.minConfidence) {
       const { signalsAgreeing, signalsTotal } = countSignals(statDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
@@ -514,11 +520,12 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
 
     const { signalsAgreeing, signalsTotal } = countSignals(statDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
     const wmBoostDesc = inp.wmDriftAbove === statDir ? ` WM:+${CONFIDENCE_BOOST_PER_SIGNAL}` : "";
+    const mlBoostDesc = mlAgreesStat ? ` ML:+${ML_SIGNAL_BOOST}` : "";
     const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
 
     return {
       action, confidence, ev, signalsAgreeing, signalsTotal,
-      reasoning: `Stat primary: Stat:✓(${Math.round(base)}%)${wmBoostDesc} → ${action} (${confidence}%)${evDesc}`,
+      reasoning: `Stat primary: Stat:✓(${Math.round(base)}%)${wmBoostDesc}${mlBoostDesc} → ${action} (${confidence}%)${evDesc}`,
     };
   }
 

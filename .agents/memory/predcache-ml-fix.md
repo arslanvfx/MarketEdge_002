@@ -1,17 +1,27 @@
 ---
 name: predCache must be warm for ML
-description: Why ML was always null in bot decisions and how the tracker snap loop fixes it permanently
+description: Why ML was null in bot decisions post-restart and how session-scoped snap tracking fixes the cold-start delay
 ---
 
 ## The Rule
-The prediction tracker snap loop (`startPredictionTracker` in `crypto.ts`) must call `predCache.set(sym, { at: Date.now(), value: analysis })` immediately after each `analyzeCoin()` call.
+The prediction tracker snap loop must populate `predCache` immediately after each `analyzeCoin()` call, AND use a **session-scoped Set** (`snappedThisSession`) rather than DB records to determine whether a snap has already run for the current window.
 
-**Why:** `getCachedPrediction(sym)` (used by the bot's ML inference in `kalshi-bot-engine.ts`) reads from `predCache`. That cache was **only** populated by `fetchCryptoPredictions()`, which is the API endpoint called by the frontend dashboard. If no browser tab is open (production overnight, server restart, inactive session), `predCache` is empty and `getCachedPrediction` returns `null` — silently skipping all ML inference on every bet.
+**Why:** Two layers to the problem:
+1. `getCachedPrediction(sym)` (used by ML inference in `kalshi-bot-engine.ts`) reads from `predCache`. That cache was only populated by the frontend endpoint `fetchCryptoPredictions()`. After a restart with no browser tab open, `predCache` is empty → `mlAbove: null` on all bot decisions.
+2. Even after adding `predCache.set()` to the snap loop, the DB-based `alreadySnapped = records.some(r => r.targetTime === targetISO)` found pre-restart DB records for the current window → skipped the snap → predCache stayed cold until the next window's 90s `snapFallback` fired (~8-10 minutes of ML=null).
 
-**How to apply:** Any time ML is showing `mlAbove: null` / `mlConfidence: null` in bet records despite models being ready (windows ≥ 30), the first thing to check is whether `predCache` is being populated independently of frontend polling. The tracker snap loop is the right place because it runs every ~15 minutes for all CRYPTO_COINS regardless of user activity.
+**How to apply:**
+- Use `snappedThisSession.has(snapKey)` (module-level `Set<string>`, cleared on server restart) instead of DB record check for `alreadySnapped`.
+- Add `snappedThisSession.add(snapKey)` immediately after `predCache.set()` in the window-open snap block.
+- On restart: `snappedThisSession` is empty → `alreadySnapped = false` → snap runs on first tick (~30s) → predCache warm by minute 3 instead of minute 10+.
+- DB records from prior session don't interfere; `onConflictDoNothing` handles any duplicate writes.
 
 ## Architecture
-- `predCache`: `Map<string, CacheEntry<CoinPrediction>>` in `crypto.ts`
-- `getCachedPrediction(sym)`: returns `predCache.get(sym)?.value ?? null` (no TTL check — stale values are fine for ML)
-- `fetchCryptoPredictions()`: populates predCache via frontend API calls — unreliable for bot use
-- Fix location: `crypto.ts` in the `startPredictionTracker` snap block, right after the `analyzeCoin()` call (~line 3063)
+- `predCache`: `Map<string, CacheEntry<CoinPrediction>>` in `crypto-tracker.ts`
+- `getCachedPrediction(sym)`: returns `predCache.get(sym)?.value ?? null` (no TTL — stale is fine for ML)
+- `snappedThisSession`: `Set<string>` keyed by `${sym}:${targetISO}`, lives at module level
+- Fix location: `crypto-tracker.ts` — `alreadySnapped` check (around line 570) + `predCache.set()` line (around line 675)
+
+## Verified
+After the fix: `mlAbove: true, mlConfidence: 54` available for HYPE at minute 3 of the 18:30 window
+(server restarted at minute 2). Before: all coins showed `mlAbove: null` until minute 10+.

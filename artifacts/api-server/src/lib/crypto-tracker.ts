@@ -112,6 +112,12 @@ const wmRecordedKeys = new Set<string>();
 // Tracks which intra-window timing snapshots have been written this session.
 const timingSnapshotWritten = new Set<string>();
 
+// Tracks which window-open snaps have completed this session (keyed by sym:targetISO).
+// Using a session-scoped Set (cleared on restart) instead of DB records so that a
+// server restart always runs one snap immediately for the current window, ensuring
+// predCache (and therefore ML features) are available from the first bot tick.
+const snappedThisSession = new Set<string>();
+
 // ---------------------------------------------------------------------------
 // AI Mode Settings
 // ---------------------------------------------------------------------------
@@ -554,8 +560,11 @@ export function startPredictionTracker(
         // 2. Snapshot a new prediction for the next boundary if not already done.
         const targetISO = nextBoundary.toISOString();
         const timeToNext = nextBoundary.getTime() - nowMs;
-        const alreadySnapped = records.some((r) => r.targetTime === targetISO);
         const snapKey = `${sym}:${targetISO}`;
+        // Use session-scoped tracking instead of DB records so that a restart
+        // always re-runs the snap for the current window, warming predCache
+        // (and therefore ML) within one tick (~30 s) of startup.
+        const alreadySnapped = snappedThisSession.has(snapKey);
 
         const TARGET_CONFIRM_BUFFER_MS = 5_000;
         const WINDOW_SNAP_MIN_MS      = 45_000;
@@ -661,6 +670,7 @@ export function startPredictionTracker(
               const livePrice = tickerPrice > 0 ? tickerPrice : undefined;
               const analysis = analyzeCoin(coin, candles, stats, new Date(nowMs), livePrice, orderBook);
               predCache.set(sym, { at: Date.now(), value: analysis });
+              snappedThisSession.add(snapKey); // mark as done so this session doesn't re-snap
 
               const basePred =
                 analysis.predictions.find((p) => p.target === targetISO) ??
