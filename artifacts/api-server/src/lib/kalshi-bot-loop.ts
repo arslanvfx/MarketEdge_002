@@ -1042,7 +1042,9 @@ export async function runBotLoopTick(): Promise<void> {
       const _streakEntry = activeCoinStreakState().get(sym);
       const _isStreakPaused = _streakEntry?.pauseUntilWindowKey != null
         && windowKey <= _streakEntry.pauseUntilWindowKey;
-      if (_isStreakPaused) {
+      // freeRunMode bypasses streak pauses so "Reset all" + "Free Run" give
+      // immediate unrestricted access to all coins.
+      if (_isStreakPaused && !S.config.freeRunMode) {
         if (decision.action !== "SKIP") {
           const _shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
           void recordShadowBet(
@@ -1065,7 +1067,8 @@ export async function runBotLoopTick(): Promise<void> {
     // Fires after `decision` is computed so we can record a directional shadow
     // bet. checkAllParoles() clears pausedCoins early when shadow accuracy
     // reaches ≥60% over ≥3 evaluated bets (blockedBy="auto_tune_pause").
-    if (pausedCoins.has(sym)) {
+    // freeRunMode bypasses this gate so the user can un-pause all coins instantly.
+    if (!S.config.freeRunMode && pausedCoins.has(sym)) {
       const remaining = pausedCoins.get(sym) ?? 0;
       if (decision.action !== "SKIP") {
         const _pauseDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";

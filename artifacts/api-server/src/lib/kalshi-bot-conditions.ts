@@ -125,23 +125,28 @@ export function clearAllPauses(): { clearedCoins: string[]; cbWasActive: boolean
   const cbWasActive = S.cbState.circuitBreakerWindowsRemaining > 0;
   S.cbState = { ...S.cbState, circuitBreakerWindowsRemaining: 0 };
 
-  // Also clear streak-based pauses (pauseUntilWindowKey) from the active mode's
-  // coinStreakState. These are displayed in the "Blocked coins" banner.
-  const activeStreakMap = activeCoinStreakState();
+  // Clear streak-based pauses (pauseUntilWindowKey) from BOTH mode streak maps
+  // so that a reset is total — paper and live are independent stores and the
+  // bot may have been running in a different mode when pauses were recorded.
   const streakCleared: string[] = [];
-  for (const [sym, entry] of activeStreakMap.entries()) {
-    if (entry.pauseUntilWindowKey !== null) {
-      activeStreakMap.set(sym, { ...entry, pauseUntilWindowKey: null, consecutiveLosses: 0 });
-      streakCleared.push(sym);
+  for (const [streakMap, store] of [
+    [paperCoinStreakState, paperStreakStore],
+    [liveCoinStreakState,  liveStreakStore],
+  ] as const) {
+    for (const [sym, entry] of streakMap.entries()) {
+      if (entry.pauseUntilWindowKey !== null) {
+        streakMap.set(sym, { ...entry, pauseUntilWindowKey: null, consecutiveLosses: 0 });
+        streakCleared.push(sym);
+      }
     }
+    // Persist each map so the cleared state survives a republish / restart.
+    persistCoinStreakState(streakMap, store).catch(() => {});
   }
 
   logger.info(
     { clearedCoins, streakCleared, cbWasActive },
-    "[kalshi-bot] all pauses cleared manually",
+    "[kalshi-bot] all pauses cleared manually (both paper + live modes)",
   );
-  // Persist the updated streak state so the clear survives a restart.
-  persistCoinStreakState(activeStreakMap, streakStoreForMode(S.botMode)).catch(() => {});
   return { clearedCoins: [...clearedCoins, ...streakCleared], cbWasActive };
 }
 
@@ -290,17 +295,23 @@ export function resetWindowConditions(): { cleared: string[]; cbWasActive: boole
   // clearAllPauses() only zeros losses for coins that have an active pause.
   // A coin sitting at 2 consecutive losses (below the pause threshold) still
   // carries that state — reset it here so no coin enters the next window
-  // with a strike count.
-  const activeStreakMap = activeCoinStreakState();
+  // with a strike count.  Clear BOTH mode maps so paper+live are both clean.
   const streakReset: string[] = [];
-  for (const [sym, entry] of activeStreakMap.entries()) {
-    if (entry.consecutiveLosses > 0) {
-      activeStreakMap.set(sym, { ...entry, consecutiveLosses: 0, pauseUntilWindowKey: null });
-      streakReset.push(sym);
+  for (const [streakMap, store] of [
+    [paperCoinStreakState, paperStreakStore],
+    [liveCoinStreakState,  liveStreakStore],
+  ] as const) {
+    let dirty = false;
+    for (const [sym, entry] of streakMap.entries()) {
+      if (entry.consecutiveLosses > 0) {
+        streakMap.set(sym, { ...entry, consecutiveLosses: 0, pauseUntilWindowKey: null });
+        streakReset.push(sym);
+        dirty = true;
+      }
     }
-  }
-  if (streakReset.length > 0) {
-    persistCoinStreakState(activeStreakMap, streakStoreForMode(S.botMode)).catch(() => {});
+    if (dirty) {
+      persistCoinStreakState(streakMap, store).catch(() => {});
+    }
   }
 
   const allCleared = [...new Set([...pauseResult.clearedCoins, ...streakReset])];
