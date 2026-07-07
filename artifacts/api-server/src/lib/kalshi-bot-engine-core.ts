@@ -281,15 +281,16 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     inp.mlConfidence != null &&
     inp.mlConfidence >= mlMinConf;
 
-  // Veto PATH A when the core pair (Stat + Claude) are BOTH available and BOTH
-  // oppose ML's direction.  When two independent signals unanimously disagree
-  // with ML, the core pair is more reliable for direction — let PATH B/C decide.
-  if (
-    mlLeadReady &&
-    inp.mlAbove !== null &&
-    inp.statAbove !== null && inp.claudeAbove !== null &&
-    inp.statAbove !== inp.mlAbove && inp.claudeAbove !== inp.mlAbove
-  ) {
+  // Veto PATH A: ML must have at least one confirming signal to lead.
+  // By this point the alignment gate above has already SKIPped any case where
+  // claudeAbove is non-null and disagrees with ML — so if claudeAbove is
+  // non-null here it is guaranteed to agree with ML.  The only gap the old
+  // veto missed: claudeAbove=null + statAbove opposing ML.  The new rule
+  // (require at least one agreeing validator) closes that gap cleanly.
+  const mlHasConfirmation =
+    (inp.statAbove !== null && inp.statAbove === inp.mlAbove) ||
+    (inp.claudeAbove !== null && inp.claudeAbove === inp.mlAbove);
+  if (mlLeadReady && inp.mlAbove !== null && !mlHasConfirmation) {
     mlLeadReady = false;
   }
 
@@ -1235,7 +1236,7 @@ export function checkSignalDivergenceCutout(
 export function applyStatPredCacheOverride(
   openingAbove: boolean | null,
   openingSnapAtMs: number,
-  predCacheEntry: { at: number; value: { price: number; kalshiTarget?: number | null } } | undefined,
+  predCacheEntry: { at: number; value: { price: number; kalshiTarget?: number | null; predictions?: Array<{ predictedPrice: number }> } } | undefined,
   kalshiTarget: number | null,
   nowMs: number = Date.now(),
 ): { statAbove: boolean | null; isLive: boolean; flipped: boolean } {
@@ -1244,12 +1245,7 @@ export function applyStatPredCacheOverride(
     return { statAbove: openingAbove, isLive: false, flipped: false };
   }
   // Guard: if the opening stat snap has fired and produced a real forward prediction,
-  // trust it.  The predCache stores the LIVE price (not a predictive model output), so
-  // "livePrice >= kalshiTarget" is a current-position check, not a forecast.  Replacing
-  // the stat model's forward prediction with a live-price comparison creates a YES/NO
-  // bias whenever the market is trending: live price above target → always ABOVE even
-  // when the model predicts the price will fall by close.  Only use the predCache path
-  // as a fallback during the ~1-min window before the opening snap has been written.
+  // trust it unconditionally — do not override it with any live-price comparison.
   if (openingAbove !== null) {
     return { statAbove: openingAbove, isLive: false, flipped: false };
   }
@@ -1258,9 +1254,20 @@ export function applyStatPredCacheOverride(
   if (predCacheEntry.at <= openingSnapAtMs || predAge >= PRED_CACHE_MAX_AGE_MS || kal == null) {
     return { statAbove: openingAbove, isLive: false, flipped: false };
   }
-  const midSnapStatAbove = predCacheEntry.value.price >= kal;
+  // Use the model's forward predicted price, NOT the live spot price.
+  // The live price is a current-position check ("are we above/below right now?"),
+  // whereas the predictor page and the stat snap both use the model's forecast
+  // ("will price be above/below at window close?").  Using live price here
+  // diverges from the predictor's stat signal and caused YES bets when the
+  // model was predicting a fall below the target.
+  const predPrice = predCacheEntry.value.predictions?.[0]?.predictedPrice;
+  if (predPrice == null) {
+    // No forward prediction available — returning null is safer than substituting
+    // a live-price positional check as a stat signal.
+    return { statAbove: null, isLive: false, flipped: false };
+  }
   return {
-    statAbove: midSnapStatAbove,
+    statAbove: predPrice >= kal,
     isLive: true,
     flipped: false,
   };

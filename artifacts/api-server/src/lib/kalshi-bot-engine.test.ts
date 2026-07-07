@@ -75,18 +75,20 @@ function inp(overrides: Partial<CorePairInputs> = {}): CorePairInputs {
 // ---------------------------------------------------------------------------
 
 test("PATH A: ML ready, both Stat+Claude null → SKIP (ML cannot bet solo)", () => {
-  // New invariant: ML requires at least one core signal (Stat or Claude) as a
-  // validator. A lone ML signal with no human-interpretable confirmation is not
-  // an ensemble decision — it is a single unvalidated opinion. SKIP.
+  // ML requires at least one confirming signal. With no validators the new veto
+  // fires (mlHasConfirmation=false → mlLeadReady=false) before the old ML solo
+  // guard is even reached — falls through to "No signals available".
   const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 68 }));
   assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /ML solo/);
+  assert.match(r.reasoning, /No signals available/);
 });
 
 test("PATH A: ML ready, both Stat+Claude null → SKIP regardless of direction", () => {
+  // New veto fires before the ML solo guard: no confirmation → mlLeadReady=false.
+  // Falls through PATH B (no claude) → PATH C (no stat) → "No signals available".
   const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 65 }));
   assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /ML solo/);
+  assert.match(r.reasoning, /No signals available/);
 });
 
 test("PATH A: ML base confidence = mlConfidence when Stat agrees (no Claude)", () => {
@@ -112,9 +114,11 @@ test("PATH A: Stat agrees with ML → +ML_SIGNAL_BOOST", () => {
   assert.equal(r.confidence, 62 + ML_SIGNAL_BOOST);
 });
 
-test("PATH A: Stat disagrees with ML → −DISSENT_PENALTY", () => {
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, statAbove: false }));
-  assert.equal(r.confidence, 62 - DISSENT_PENALTY);
+test("PATH A: Stat disagrees with ML → −DISSENT_PENALTY (Claude confirms ML so veto doesn't fire)", () => {
+  // Stat opposes ML but Claude agrees → mlHasConfirmation=true → no veto → ML leads.
+  // Stat dissent still subtracts DISSENT_PENALTY from confidence.
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: 62, statAbove: false, claudeAbove: true }));
+  assert.equal(r.confidence, 62 + ML_SIGNAL_BOOST - DISSENT_PENALTY); // Claude agrees (+6), Stat disagrees (−6)
 });
 
 test("PATH A: WM agrees with ML → +ML_SIGNAL_BOOST (Stat also present as validator)", () => {
@@ -155,6 +159,40 @@ test("PATH A veto: Stat+Claude both YES, ML=NO → alignment gate fires first �
   // ML=NO(65%); Claude=YES → alignment gate fires before veto check → SKIP.
   // This is the exact loss pattern: Claude+Stat say YES, ML says NO → now blocked.
   const r = computeCorePairDecision(inp({ mlAbove: false, mlConfidence: 65, claudeAbove: true, statAbove: true, minConfidence: 50 }));
+  assert.equal(r.action, "SKIP");
+});
+
+test("PATH A veto: ML=ABOVE, stat=BELOW, claude=null → no confirming signal → veto → PATH C → BET_NO", () => {
+  // The DOGE bug: ML says ABOVE (even at sufficient confidence) but stat says BELOW
+  // and Claude hasn't responded yet.  ML must not be allowed to solo-bet YES when
+  // its only validator actively disagrees.  Falls through to PATH C → BET_NO.
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 70, // well above threshold
+    statAbove: false,                // stat says BELOW
+    claudeAbove: null,               // claude not yet available
+    minConfidence: 50,
+  }));
+  assert.equal(r.action, "BET_NO"); // PATH C uses stat=BELOW → BET_NO
+});
+
+test("PATH A: ML=ABOVE, stat=ABOVE, claude=null → stat confirms → ML leads", () => {
+  // When stat agrees with ML, the veto must NOT fire even with claude absent.
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 70,
+    statAbove: true,
+    claudeAbove: null,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.match(r.reasoning, /ML primary/);
+});
+
+test("PATH A veto: ML=ABOVE, stat=null, claude=null → no confirmation → veto (ML solo guard also fires)", () => {
+  // Belt-and-suspenders: no validators at all → veto and ML solo guard both block.
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 70,
+    statAbove: null,
+    claudeAbove: null,
+  }));
   assert.equal(r.action, "SKIP");
 });
 
@@ -1001,7 +1039,7 @@ test("applyStatPredCacheOverride: uses entry.value.kalshiTarget when argument is
   const r = applyStatPredCacheOverride(
     null,
     now - 60_000,
-    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59500 } },
+    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59500, predictions: [{ predictedPrice: 60000 }] } },
     null, // no fallback target — must use entry's
     now,
   );
@@ -1014,13 +1052,44 @@ test("applyStatPredCacheOverride: opening null → flipped=false even when direc
   const r = applyStatPredCacheOverride(
     null, // no opening signal
     now - 60_000,
-    { at: now - 30_000, value: { price: 58000, kalshiTarget: 59000 } },
+    { at: now - 30_000, value: { price: 59500, kalshiTarget: 59000, predictions: [{ predictedPrice: 58000 }] } },
     null,
     now,
   );
-  assert.equal(r.statAbove, false);
+  assert.equal(r.statAbove, false); // predictedPrice 58000 < target 59000
   assert.equal(r.isLive, true);
   assert.equal(r.flipped, false); // null opening → no flip to detect
+});
+
+test("applyStatPredCacheOverride: opening null, no predictions in entry → statAbove null (no live-price fallback)", () => {
+  // Before the snap fires, the predCache only has a live spot price.
+  // Using live price as a stat signal diverges from the predictor page (which uses
+  // the model's forward prediction).  Return null instead of a misleading live comparison.
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    null,
+    now - 60_000,
+    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59500 } }, // no predictions field
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, null); // no forward prediction → no stat signal
+  assert.equal(r.isLive, false);
+});
+
+test("applyStatPredCacheOverride: opening null, predictedPrice BELOW target → statAbove false", () => {
+  // Model predicts fall below target even when live price is currently above.
+  // The stat signal should match the model (BELOW), not the live position (ABOVE).
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    null,
+    now - 60_000,
+    { at: now - 30_000, value: { price: 60200, kalshiTarget: 60000, predictions: [{ predictedPrice: 59800 }] } },
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, false); // predictedPrice 59800 < target 60000
+  assert.equal(r.isLive, true);
 });
 
 // ---------------------------------------------------------------------------
