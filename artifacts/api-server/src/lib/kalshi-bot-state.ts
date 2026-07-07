@@ -193,7 +193,12 @@ export const DB_DEGRADED_THRESHOLD = 10;
 export const DB_DEGRADED_MIN_WINDOW_MS = 60_000;
 export const REGIME_STRIKES_MAX = 6;
 export const WINDOW_ENTRY_BUFFER_S = 60; // fallback used when S.config.windowEntryBufferSeconds is not set
-export const STABILITY_WAIT_MAX_S = 240;
+// Max seconds to wait for the window-open Claude trend-stability analysis before
+// proceeding without it.  Was 240 — combined with the Claude-pending guard this
+// locked the bot out of minutes 0-4 of every window, exactly when trending-window
+// prices are still bettable.  Stability normally resolves in 30-90s; after 90s we
+// proceed with a neutral (×1.0) multiplier rather than miss the entry window.
+export const STABILITY_WAIT_MAX_S = 90;
 // Mutable — parole system can remove coins when YES shadow accuracy reaches ≥60%.
 // Re-initialised from the hardcoded list on every server restart.
 export const COIN_YES_BLOCKED: Set<string> = new Set();

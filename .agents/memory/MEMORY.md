@@ -70,3 +70,4 @@
 - [Bot signal pipeline architecture](bot-signal-pipeline.md) — stale-signal gate replaced by window-keyed pipeline; no more TTL gaps; Claude prompt includes explicit window close time; see kalshi-bot-pipeline.ts
 - [ml_gate Path A sentinel removal](ml-gate-path-a.md) — mlMinConfidence:999 blocked ML from ever leading; replaced with per-coin overrides via BotConfig.mlPrimaryMinConfidenceOverrides; ETH/XRP/SOL default 58
 - [Window entry buffer timing](window-entry-buffer-timing.md) — buffer 60s not 120s; WM bypass 2 signals not 3; strong-trend markets move to extreme prices in <2min; DB config overrides code default, patch both
+- [Fast-agreement early entry](fast-agreement-early-entry.md) — stat+ML agreement (one ≥60 conf) must bypass the Claude-pending guard; waiting for Claude in min 0-3 caused zero NO bets ever

@@ -272,6 +272,33 @@ export function checkMinReturnGate(
 }
 
 /**
+ * Fast-agreement early entry — pure predicate.
+ *
+ * Stat and ML are both local + instant signals available within the first
+ * minute of a window, while Claude's extended-thinking call takes 30-120s
+ * after prefetch. Waiting for Claude means entering at minute 2-4, by which
+ * point trending-window prices have collapsed to extremes (1-10¢ / 90-99¢)
+ * and every entry fails the min-return gate — the root cause of near-zero
+ * bet volume and zero NO bets historically.
+ *
+ * Returns true when Stat and ML are BOTH available, AGREE on direction, and
+ * at least one is confident (>= minConf, default 60). When true, the
+ * Claude-pending guard must not block the entry; the engine's PATH A handles
+ * the Claude-null decision (ML leads, Stat validates).
+ */
+export function checkFastAgreementEntry(
+  statAbove: boolean | null,
+  mlAbove: boolean | null,
+  statConfidence: number | null,
+  mlConfidence: number | null,
+  minConf = 60,
+): boolean {
+  const agree = statAbove !== null && mlAbove !== null && statAbove === mlAbove;
+  const confident = (mlConfidence ?? 0) >= minConf || (statConfidence ?? 0) >= minConf;
+  return agree && confident;
+}
+
+/**
  * Pure decision function — all inputs are values, no I/O.
  *
  * See module header for the three priority paths (A / B / C).

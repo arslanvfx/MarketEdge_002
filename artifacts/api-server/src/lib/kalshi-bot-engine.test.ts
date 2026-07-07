@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import {
   computeCorePairDecision,
   checkMinReturnGate,
+  checkFastAgreementEntry,
   DEFAULT_BOT_CONFIG,
   BASE_CONFIDENCE_FULL_PAIR,
   BASE_CONFIDENCE_HALF_PAIR,
@@ -1021,6 +1022,52 @@ test("checkMinReturnGate: null yes-price is NOT blocked even when gate is active
 
 test("checkMinReturnGate: null yes-price is allowed when gate is off", () => {
   assert.equal(checkMinReturnGate("BET_YES", null, 1).blocked, false);
+});
+
+// ---------------------------------------------------------------------------
+// checkFastAgreementEntry — early-entry predicate that bypasses the Claude-
+// pending guard when Stat and ML agree with sufficient confidence. This is
+// what allows the bot to enter during minutes 1-3 of a window (the only time
+// trending-window prices are still bettable) without waiting for Claude's
+// 30-120s extended-thinking call.
+// ---------------------------------------------------------------------------
+
+test("fastAgreement: stat+ML agree bearish, ML confident → true (NO bets can fire early)", () => {
+  assert.equal(checkFastAgreementEntry(false, false, null, 65), true);
+});
+
+test("fastAgreement: stat+ML agree bullish, stat confident → true", () => {
+  assert.equal(checkFastAgreementEntry(true, true, 62, 55), true);
+});
+
+test("fastAgreement: stat+ML agree but BOTH below confidence floor → false", () => {
+  assert.equal(checkFastAgreementEntry(true, true, 55, 58), false);
+});
+
+test("fastAgreement: stat+ML disagree → false regardless of confidence", () => {
+  assert.equal(checkFastAgreementEntry(true, false, 90, 90), false);
+});
+
+test("fastAgreement: stat null → false (needs BOTH signals present)", () => {
+  assert.equal(checkFastAgreementEntry(null, true, null, 90), false);
+});
+
+test("fastAgreement: ML null → false (needs BOTH signals present)", () => {
+  assert.equal(checkFastAgreementEntry(false, null, 90, null), false);
+});
+
+test("fastAgreement: null confidences are treated as 0, not confident", () => {
+  assert.equal(checkFastAgreementEntry(true, true, null, null), false);
+});
+
+test("fastAgreement: exactly at the 60 threshold → true (inclusive)", () => {
+  assert.equal(checkFastAgreementEntry(false, false, null, 60), true);
+  assert.equal(checkFastAgreementEntry(false, false, 60, null), true);
+});
+
+test("fastAgreement: custom minConf is respected", () => {
+  assert.equal(checkFastAgreementEntry(true, true, null, 62, 65), false);
+  assert.equal(checkFastAgreementEntry(true, true, null, 66, 65), true);
 });
 
 // ---------------------------------------------------------------------------
