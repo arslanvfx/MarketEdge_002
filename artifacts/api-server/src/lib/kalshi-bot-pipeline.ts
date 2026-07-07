@@ -26,7 +26,8 @@ import {
   analyzeCoin,
   getKalshiCachedData, fetchKalshiTarget, getKalshiWindowContext,
   getCachedPrediction,
-  getStatWindowCall, getTrackerWindowCall,
+  getStatWindowCall, getTrackerWindowCall, getWindowBetSignal,
+  isCoinClaudeEnabled,
   liveDirectionCache,
   type CoinDef,
   type CoinPrediction,
@@ -328,9 +329,20 @@ async function _runPipeline(
           { sym, windowKey, claudeAbove, claudeConfidence, isRecheck },
           "[pipeline] Claude verdict from tracker window call (predictor-page source)",
         );
+      } else if (!isCoinClaudeEnabled(sym)) {
+        // Auto-pilot is OFF for this coin — the predictor page is not running Claude
+        // on it, so the bot must not run a separate Claude call either.
+        // claudeAbove stays null, matching the predictor page's signal state.
+        // The bot respects the predictor's judgment that this coin doesn't warrant
+        // AI analysis right now, rather than spending tokens on a divergent call.
+        logger.info({ sym, windowKey, isRecheck },
+          "[pipeline] auto-pilot off for this coin — skipping Claude fallback (predictor not running it)");
       } else {
-        // Tracker call not ready yet (race at window open) — run fresh pipeline call.
-        logger.info({ sym, windowKey, isRecheck }, "[pipeline] tracker Claude not ready — running fresh pipeline call");
+        // Auto-pilot IS on but tracker call hasn't completed yet (genuine race at
+        // window open — Claude call fires at T+0 and may take 15–60 s).
+        // Fall back to a fresh pipeline call so we never ship null when Claude is
+        // expected but just hasn't responded yet.
+        logger.info({ sym, windowKey, isRecheck }, "[pipeline] tracker Claude not ready — running fresh pipeline call (auto-pilot on, race at window open)");
         const claudeResult = await _callPipelineClaude(
           sym, coin, kalshiTarget, windowKey,
           pred, candles, stats, livePrice,
@@ -362,24 +374,30 @@ async function _runPipeline(
     }
   }
 
-  // ── Step 4: ML prediction — initial pipeline only ────────────────────────
-  // Re-checks are limited to stat + Claude. ML is trained once per window at
-  // snap time and does not benefit from re-calling mid-window.
-  // For re-checks, carry forward the ML values from the initial result so they
-  // are not erased when the re-check overwrites pipelineResults.
+  // ── Step 4: ML prediction ────────────────────────────────────────────────
+  // Runs on both initial pipeline and mid-window rechecks.  Using the latest
+  // pred snapshot (updated every ~30 s by the tracker) keeps the bot dashboard
+  // in sync with the predictor page's continuously-refreshed ML signal.
   const existingResult = pipelineResults.get(`${sym}:${windowKey}`);
-  let mlAbove: boolean | null = isRecheck ? (existingResult?.mlAbove ?? null) : null;
-  let mlConfidence: number | null = isRecheck ? (existingResult?.mlConfidence ?? null) : null;
-  if (!isRecheck) {
-    pipelinePhaseMap.set(`${sym}:${windowKey}`, "ml-analyzing");
+  let mlAbove: boolean | null = null;
+  let mlConfidence: number | null = null;
+  // ML runs on both initial pipeline and rechecks.
+  // During rechecks, getCachedPrediction returns the tracker's latest 30-s snap —
+  // the same data the predictor page uses — so re-running inference here keeps the
+  // bot dashboard in sync with the predictor's continuously-updated ML signal.
+  // The wmRec is also passed to features (matching the bot engine's own inference call)
+  // instead of the previous `null` which caused a divergence in features 14-16.
+  {
+    if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "ml-analyzing");
     if (pred && kalshiTarget != null) {
       try {
         const winCtx = getKalshiWindowContext(sym);
         const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
         const elapsedFraction = Math.min((Date.now() - windowStartMs) / (15 * 60_000), 1);
+        const wmSigForML = getWindowBetSignal(sym);
         const features = extractMLFeatures(
           pred, kalshiTarget, elapsedFraction, winCtx?.priceAtOpen,
-          statAbove, claudeAbove, null,
+          statAbove, claudeAbove, wmSigForML?.recommendation ?? null,
         );
         const mlResult = getMLPrediction(sym, features);
         if (mlResult.ready && mlResult.prediction) {
@@ -388,7 +406,17 @@ async function _runPipeline(
         }
       } catch (err) {
         logger.warn({ sym, windowKey, err }, "[pipeline] ML inference failed");
+        // On failure during a recheck, carry forward the last known result so the
+        // bot dashboard doesn't regress to null for a coin that had a good ML signal.
+        if (isRecheck && existingResult) {
+          mlAbove = existingResult.mlAbove;
+          mlConfidence = existingResult.mlConfidence;
+        }
       }
+    } else if (isRecheck && existingResult) {
+      // pred not yet available (unlikely mid-window) — carry forward last known result
+      mlAbove = existingResult.mlAbove;
+      mlConfidence = existingResult.mlConfidence;
     }
   }
 

@@ -817,6 +817,25 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
+    // Window Monitor STAY_AWAY hard gate: mirrors the predictor page's STAY AWAY badge
+    // as an actual trading rule.  When the monitor IS ready and its recommendation is
+    // "stay_away", skip this coin for the entire window (added to filteredByNewGuards
+    // so Phase 4 cannot independently place an order).
+    // Unlike the readiness gate above (which defers to the next tick), STAY_AWAY is
+    // a permanent block — the monitor signal is stable for the window and won't improve.
+    {
+      const _wmStayAway = getWindowBetSignal(sym);
+      if (_wmStayAway?.ready && _wmStayAway.recommendation === "stay_away") {
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym, action: "SKIP", confidence: 0, score: 0,
+          reason: "window_monitor_stay_away — predictor STAY AWAY badge active; skipping entry",
+          windowKey, selected: false, evaluatedAt: now, trendStability: null, regime,
+        });
+        continue;
+      }
+    }
+
     // Trend-stability readiness gate: defer new bets until the window-open Claude
     // trend-stability analysis has resolved for this coin.  Without this gate the
     // bot bets blind on the trend-quality dimension — e.g. a NO bet placed when

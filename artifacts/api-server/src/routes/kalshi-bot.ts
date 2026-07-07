@@ -30,6 +30,7 @@ import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
 import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pipeline";
+import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { db, botConfigTable, kalshiBotBetsTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -505,9 +506,26 @@ router.get("/crypto/bot/trend", async (req, res) => {
 });
 
 // GET /crypto/bot/window-eval (public — last market evaluation results)
+// Response: { evaluation, signals }
+//   evaluation — bot decision per coin (action/confidence/reason) from last Phase-3 run
+//   signals    — current unified predictor signals per coin (stat/claude/ml/wm),
+//                derived from getLatestCoinSignals so they always match the Crypto
+//                Predictor page — no pipelineResults divergence.
 router.get("/crypto/bot/window-eval", (_req, res) => {
   try {
-    res.json({ evaluation: getWindowEvaluation() });
+    const evaluation = getWindowEvaluation();
+    // Build unified signal map for each coin that appeared in the last evaluation.
+    // getLatestCoinSignals reads from the same sources as the predictor page, so
+    // the bot dashboard and predictor page always display identical values.
+    const signals: Record<string, ReturnType<typeof getLatestCoinSignals>> = {};
+    for (const row of evaluation) {
+      try {
+        signals[row.symbol] = getLatestCoinSignals(row.symbol);
+      } catch {
+        // non-fatal — skip signal enrichment for this coin
+      }
+    }
+    res.json({ evaluation, signals });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

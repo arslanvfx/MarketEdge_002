@@ -126,6 +126,13 @@ export type {
   TrendStabilityResult,
 } from "./crypto-claude";
 
+// ── crypto-signals ────────────────────────────────────────────────────────────
+// Unified accessor for all predictor signals — reads from the same sources
+// the Crypto Predictor page uses (stat/claude/wm/ml) so bot and predictor
+// always display identical values for the same coin and window.
+export { getLatestCoinSignals } from "./crypto-signals";
+export type { CoinSignals } from "./crypto-signals";
+
 // ── crypto-tracker ────────────────────────────────────────────────────────────
 export {
   runAutoPilot,
