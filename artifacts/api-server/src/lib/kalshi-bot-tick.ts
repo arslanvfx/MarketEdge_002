@@ -423,6 +423,15 @@ async function _runBotTick(
         { sym, secondsPastBuffer },
         "[kalshi-bot] SKIP — live signal stale (hard stop): not betting on stale opening snap",
       );
+      if (lastDecisionWindowKey.get(sym) !== `stale-signal:${windowKey}`) {
+        lastDecisionWindowKey.set(sym, `stale-signal:${windowKey}`);
+        await persistBetRecord({
+          symbol: sym, windowKey, ticker: kalshiTicker ?? "", direction: null,
+          action: "skip",
+          signals: { reason: "live-signal-stale-hard-stop", secondsPastBuffer },
+          entryPrice: yesPrice, kalshiTarget,
+        });
+      }
       return;
     }
   }

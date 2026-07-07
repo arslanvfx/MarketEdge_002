@@ -79,16 +79,19 @@ export async function getBotTrend(limit = 50, filterMode?: BotMode): Promise<Tre
   }
 }
 
-// Returns bet-action records for the bot dashboard — excludes skip/warmup audit
-// rows which are internal-only and would otherwise crowd out real bet records
-// within the pagination limit.
+// Returns bet-action records for the bot dashboard. Excludes routine warmup-buffer
+// skip rows (one per coin per window — too noisy) but includes gate-skip records
+// so entry-veto reasons (consensus, stale-signal, candle-reversal) appear in history.
 export async function getBotAllHistory(limit = 100, offset = 0, filterMode?: BotMode): Promise<unknown[]> {
   try {
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
     return await db
       .select()
       .from(kalshiBotBetsTable)
-      .where(sql`${kalshiBotBetsTable.action} NOT IN ('skip', 'warmup') AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`)
+      .where(sql`
+        ${kalshiBotBetsTable.action} NOT IN ('warmup')
+        AND NOT (${kalshiBotBetsTable.action} = 'skip' AND ${kalshiBotBetsTable.signals}->>'reason' IN ('warmup-buffer', 'candle-cache-not-warm'))
+        AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit)
       .offset(offset);

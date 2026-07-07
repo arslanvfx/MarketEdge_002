@@ -191,6 +191,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableDynamicSizing,
     dynamicSizingMaxConfidence,
     profitLockPct,
+    consensusMinCents,
+    momentumLookbackCandles,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -234,6 +236,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableDynamicSizing?: boolean;
     dynamicSizingMaxConfidence?: number;
     profitLockPct?: number;
+    consensusMinCents?: number;
+    momentumLookbackCandles?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -350,6 +354,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof profitLockPct === "number" && profitLockPct >= 0 && profitLockPct <= 99) {
     partial.profitLockPct = profitLockPct;
+  }
+  // Entry safety gate thresholds
+  if (typeof consensusMinCents === "number" && consensusMinCents >= 0 && consensusMinCents <= 50) {
+    partial.consensusMinCents = consensusMinCents;
+  }
+  if (typeof momentumLookbackCandles === "number" && momentumLookbackCandles >= 4 && momentumLookbackCandles <= 12) {
+    partial.momentumLookbackCandles = momentumLookbackCandles;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
