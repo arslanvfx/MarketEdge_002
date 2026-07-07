@@ -85,6 +85,7 @@ export interface OpenPosition {
   guardStates: GuardStates | null;
   guardReason: string | null;
   source?: "bot" | "manual";
+  entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
 }
 
 export interface GuardStates {

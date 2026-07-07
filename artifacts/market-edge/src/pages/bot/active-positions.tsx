@@ -93,6 +93,33 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                   ))}
                 </div>
 
+                {pos.entrySignals && (
+                  <div className="flex flex-wrap items-center gap-2 mb-3">
+                    <span className="text-xs text-muted-foreground self-center">Entry signals:</span>
+                    {(["stat", "ml", "claude"] as const).map((key) => {
+                      const val = pos.entrySignals![key === "stat" ? "statAbove" : key === "ml" ? "mlAbove" : "claudeAbove"];
+                      const label = key === "stat" ? "Stat" : key === "ml" ? "ML" : "Claude";
+                      if (val === null || val === undefined) {
+                        return (
+                          <span key={key} className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted/30 text-muted-foreground">
+                            <Minus className="w-3 h-3" />
+                            {label}
+                          </span>
+                        );
+                      }
+                      const isYesBet = pos.direction === "yes";
+                      const agrees = isYesBet ? val === true : val === false;
+                      return (
+                        <span key={key} className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full ${agrees ? "bg-emerald-500/15 text-emerald-400" : "bg-amber-500/15 text-amber-400"}`}>
+                          {val ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                          {label} {val ? "UP" : "DN"}
+                        </span>
+                      );
+                    })}
+                    <span className="text-xs text-muted-foreground italic self-center">at entry</span>
+                  </div>
+                )}
+
                 {pos.guardStates && (
                   <div className="flex flex-wrap gap-2">
                     <span className="text-xs text-muted-foreground self-center">Exit guards:</span>
