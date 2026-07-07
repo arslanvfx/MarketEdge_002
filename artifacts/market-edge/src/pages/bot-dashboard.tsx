@@ -41,7 +41,7 @@ export default function BotDashboard() {
   // Defaults to the active bot mode but can be toggled independently so the
   // user can browse paper history while live or vice versa.
   const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
-  const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual">("all");
+  const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual" | "skips">("all");
 
   // ── Close manual position state ──────────────────────────────────────────
   const [closingManualSym, setClosingManualSym] = useState<string | null>(null);
@@ -334,17 +334,20 @@ export default function BotDashboard() {
   const hasDraft = Object.keys(configDraft).length > 0;
   const history = historyData?.history ?? [];
   const bets = history.filter(r => {
-    // Include real bet lifecycle actions AND gate-skip records (action="skip").
-    // Shadow/warmup rows are already excluded by the backend query.
-    const allowed = r.action === "bet" || r.action === "exit" || r.action === "late_recovery_exit" || r.action === "expired" || r.action === "skip";
+    const isSkipAction = r.action === "skip";
+
+    // "skips" tab: only gate-skip records
+    if (histSourceFilter === "skips") return isSkipAction;
+
+    // All other tabs: only real bet lifecycle actions — skips go in their own tab
+    const allowed = r.action === "bet" || r.action === "exit" || r.action === "late_recovery_exit" || r.action === "expired";
     if (!allowed) return false;
-    // Skip records are always bot-initiated — exclude from "manual" source filter.
+
     if (histSourceFilter === "manual") {
-      if (r.action === "skip") return false;
       return r.source === "manual" || (r.signals as Record<string, unknown> | null)?.manual === true;
     }
     if (histSourceFilter === "bot") return r.source !== "manual" && (r.signals as Record<string, unknown> | null)?.manual !== true;
-    return true;
+    return true; // "all"
   });
 
   const HIST_PAGE_SIZE = 20;

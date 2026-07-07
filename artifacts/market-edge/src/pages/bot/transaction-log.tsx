@@ -13,8 +13,8 @@ interface TransactionLogProps {
   totalBets: number;
   historyMode: "paper" | "live";
   setHistoryMode: React.Dispatch<React.SetStateAction<"paper" | "live">>;
-  histSourceFilter: "all" | "bot" | "manual";
-  setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual">>;
+  histSourceFilter: "all" | "bot" | "manual" | "skips";
+  setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual" | "skips">>;
   activeMode: "paper" | "live";
 }
 
@@ -40,13 +40,19 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 </button>
               ))}
             </div>
-            {/* Source filter — All / Bot / Manual */}
+            {/* Source filter — All / Bot / Manual / Skips */}
             <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
-              {(["all", "bot", "manual"] as const).map(s => (
+              {(["all", "bot", "manual", "skips"] as const).map(s => (
                 <button
                   key={s}
                   onClick={() => { setHistSourceFilter(s); setHistPage(0); }}
-                  className={`px-2.5 py-1 transition-colors capitalize ${histSourceFilter === s ? (s === "manual" ? "bg-purple-500/20 text-purple-300" : "bg-muted text-foreground") : "text-muted-foreground hover:text-foreground"}`}
+                  className={`px-2.5 py-1 transition-colors capitalize ${
+                    histSourceFilter === s
+                      ? s === "manual"  ? "bg-purple-500/20 text-purple-300"
+                      : s === "skips"   ? "bg-orange-500/20 text-orange-300"
+                      : "bg-muted text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                  }`}
                 >
                   {s}
                 </button>
@@ -79,7 +85,11 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
           {totalBets === 0 ? (
             <div className="px-5 py-12 text-center">
               <Bot className="w-8 h-8 text-muted-foreground/40 mx-auto mb-3" />
-              <p className="text-sm text-muted-foreground">No bets placed yet. The bot is watching the markets.</p>
+              <p className="text-sm text-muted-foreground">
+                {histSourceFilter === "skips"
+                  ? "No gate skips recorded yet."
+                  : "No bets placed yet. The bot is watching the markets."}
+              </p>
             </div>
           ) : (
             <div className="p-4 space-y-3">
