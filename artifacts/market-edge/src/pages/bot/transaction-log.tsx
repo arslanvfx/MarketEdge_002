@@ -93,8 +93,9 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
                 const xp = r.exitPrice != null ? parseFloat(r.exitPrice) : null;
                 const isShadow = r.action === "shadow";
+                const isSkip = r.action === "skip";
                 const isOpen = r.action === "bet";
-                const isPendingEval = !isOpen && !isShadow && r.outcome == null;
+                const isPendingEval = !isOpen && !isShadow && !isSkip && r.outcome == null;
                 const isWin = r.outcome === "win";
                 const isLoss = r.outcome === "loss";
                 const sigs = r.signals as Record<string, unknown> | null;
@@ -110,15 +111,17 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
 
                 const cardBg = isShadow
                   ? "border-violet-500/20 bg-violet-950/5"
-                  : isOpen
-                    ? "border-sky-500/30 bg-sky-950/10"
-                    : isWin
-                      ? "border-emerald-500/30 bg-emerald-950/10"
-                      : isLoss
-                        ? "border-red-500/30 bg-red-950/10"
-                        : isPendingEval
-                          ? "border-amber-500/20 bg-amber-950/5"
-                          : "border-border bg-card/60";
+                  : isSkip
+                    ? "border-orange-500/20 bg-orange-950/5"
+                    : isOpen
+                      ? "border-sky-500/30 bg-sky-950/10"
+                      : isWin
+                        ? "border-emerald-500/30 bg-emerald-950/10"
+                        : isLoss
+                          ? "border-red-500/30 bg-red-950/10"
+                          : isPendingEval
+                            ? "border-amber-500/20 bg-amber-950/5"
+                            : "border-border bg-card/60";
 
                 return (
                   <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
@@ -153,6 +156,22 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                             </span>
                           )}
                         </>
+                      ) : isSkip ? (
+                        (() => {
+                          const reason = sigs?.reason as string | null ?? null;
+                          const SKIP_LABELS: Record<string, string> = {
+                            "market-consensus-gate": "Consensus gate",
+                            "live-signal-stale-hard-stop": "Stale signal",
+                            "candle-momentum-reversal": "Momentum reversal",
+                          };
+                          const label = reason ? (SKIP_LABELS[reason] ?? reason.replace(/-/g, " ")) : "Gated";
+                          return (
+                            <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-300"
+                              title={reason ?? "Entry gate fired"}>
+                              <Shield className="w-3 h-3" /> SKIP — {label}
+                            </span>
+                          );
+                        })()
                       ) : isOpen ? (
                         <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 animate-pulse">
                           <Activity className="w-3 h-3" /> ACTIVE

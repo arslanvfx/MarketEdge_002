@@ -334,8 +334,15 @@ export default function BotDashboard() {
   const hasDraft = Object.keys(configDraft).length > 0;
   const history = historyData?.history ?? [];
   const bets = history.filter(r => {
-    if (r.action !== "bet" && r.action !== "exit" && r.action !== "late_recovery_exit" && r.action !== "expired") return false;
-    if (histSourceFilter === "manual") return r.source === "manual" || (r.signals as Record<string, unknown> | null)?.manual === true;
+    // Include real bet lifecycle actions AND gate-skip records (action="skip").
+    // Shadow/warmup rows are already excluded by the backend query.
+    const allowed = r.action === "bet" || r.action === "exit" || r.action === "late_recovery_exit" || r.action === "expired" || r.action === "skip";
+    if (!allowed) return false;
+    // Skip records are always bot-initiated — exclude from "manual" source filter.
+    if (histSourceFilter === "manual") {
+      if (r.action === "skip") return false;
+      return r.source === "manual" || (r.signals as Record<string, unknown> | null)?.manual === true;
+    }
     if (histSourceFilter === "bot") return r.source !== "manual" && (r.signals as Record<string, unknown> | null)?.manual !== true;
     return true;
   });
