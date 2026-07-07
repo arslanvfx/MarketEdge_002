@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { Brain, CheckCircle2, Clock, Loader2, ChevronDown, ChevronUp, ArrowUp, ArrowDown, Search, Cpu, Zap } from "lucide-react";
-import type { PipelineResult, InFlightEntry, PipelinePhase } from "./types";
+import type { PipelineResult, InFlightEntry, PipelinePhase, CoinSignals } from "./types";
 import { wkToEst } from "./utils";
 
 interface PipelineStatusPanelProps {
   results: PipelineResult[];
   inFlight: InFlightEntry[];
+  liveSignals?: Record<string, CoinSignals>;
 }
 
 function SignalDot({ above, confidence }: { above: boolean | null; confidence: number | null }) {
@@ -67,7 +68,7 @@ function PhaseLabel({ phase }: { phase: PipelinePhase }) {
   }
 }
 
-export function PipelineStatusPanel({ results, inFlight }: PipelineStatusPanelProps) {
+export function PipelineStatusPanel({ results, inFlight, liveSignals }: PipelineStatusPanelProps) {
   const [open, setOpen] = useState(true);
 
   const inFlightSyms = inFlight.map(e => e.sym);
@@ -156,6 +157,15 @@ export function PipelineStatusPanel({ results, inFlight }: PipelineStatusPanelPr
                   {results.map(r => {
                     const entry = inFlight.find(e => e.sym === r.sym);
                     const isRechecking = !!entry?.isRecheck;
+                    // Prefer live unified signals (same source as predictor page) over
+                    // stale pipeline result snapshots — eliminates mid-window display drift.
+                    const live = liveSignals?.[r.sym];
+                    const statAbove = live?.statAbove ?? r.statAbove;
+                    const statConfidence = live?.statConfidence ?? r.statConfidence;
+                    const claudeAbove = live?.claudeAbove ?? r.claudeAbove;
+                    const claudeConfidence = live?.claudeConfidence ?? r.claudeConfidence;
+                    const mlAbove = live?.mlAbove ?? r.mlAbove;
+                    const mlConfidence = live?.mlConfidence ?? r.mlConfidence;
                     return (
                       <tr key={r.sym} className="border-b border-border/50 last:border-0">
                         <td className="py-2 pr-3 font-bold text-foreground">{r.sym}</td>
@@ -177,13 +187,13 @@ export function PipelineStatusPanel({ results, inFlight }: PipelineStatusPanelPr
                             : r.kalshiTarget.toFixed(6)}
                         </td>
                         <td className="py-2 pr-3">
-                          <SignalDot above={r.statAbove} confidence={r.statConfidence} />
+                          <SignalDot above={statAbove} confidence={statConfidence} />
                         </td>
                         <td className="py-2 pr-3">
-                          <SignalDot above={r.claudeAbove} confidence={r.claudeConfidence} />
+                          <SignalDot above={claudeAbove} confidence={claudeConfidence} />
                         </td>
                         <td className="py-2 pr-3">
-                          <SignalDot above={r.mlAbove} confidence={r.mlConfidence} />
+                          <SignalDot above={mlAbove} confidence={mlConfidence} />
                         </td>
                         <td className="py-2 pr-3">
                           <LatencyBadge ms={r.claudeCallMs} />

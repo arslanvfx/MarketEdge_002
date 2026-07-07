@@ -244,6 +244,18 @@ export interface PipelineResult {
   isRecheck: boolean;
 }
 
+export interface CoinSignals {
+  statAbove: boolean | null;
+  statConfidence: number | null;
+  claudeAbove: boolean | null;
+  claudeConfidence: number | null;
+  mlAbove: boolean | null;
+  mlConfidence: number | null;
+  wmRecommendation: "bet" | "caution" | "stay_away" | null;
+  wmReady: boolean;
+  claudeEnabled: boolean;
+}
+
 export type PipelinePhase =
   | "waiting-target"
   | "fetching-data"

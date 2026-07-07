@@ -817,22 +817,28 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
-    // Window Monitor STAY_AWAY hard gate: mirrors the predictor page's STAY AWAY badge
-    // as an actual trading rule.  When the monitor IS ready and its recommendation is
-    // "stay_away", skip this coin for the entire window (added to filteredByNewGuards
-    // so Phase 4 cannot independently place an order).
-    // Unlike the readiness gate above (which defers to the next tick), STAY_AWAY is
-    // a permanent block — the monitor signal is stable for the window and won't improve.
+    // Window Monitor STAY_AWAY gate: mirrors the predictor page's STAY AWAY badge.
+    // Behaviour mirrors the readiness gate: when requireMonitorReady=true (required
+    // mode) this is a hard block added to filteredByNewGuards; when false (advisory
+    // mode) it logs a warning but does not prevent entry.
+    // Unlike the readiness gate (which defers to the next tick), STAY_AWAY is a
+    // full-window block — the monitor signal is stable and won't improve mid-window.
     {
       const _wmStayAway = getWindowBetSignal(sym);
       if (_wmStayAway?.ready && _wmStayAway.recommendation === "stay_away") {
-        filteredByNewGuards.add(sym);
-        evalResults.push({
-          symbol: sym, action: "SKIP", confidence: 0, score: 0,
-          reason: "window_monitor_stay_away — predictor STAY AWAY badge active; skipping entry",
-          windowKey, selected: false, evaluatedAt: now, trendStability: null, regime,
-        });
-        continue;
+        const monitorRequired = S.config.requireMonitorReady ?? true;
+        if (monitorRequired) {
+          filteredByNewGuards.add(sym);
+          evalResults.push({
+            symbol: sym, action: "SKIP", confidence: 0, score: 0,
+            reason: "window_monitor_stay_away — predictor STAY AWAY badge active; skipping entry",
+            windowKey, selected: false, evaluatedAt: now, trendStability: null, regime,
+          });
+          continue;
+        } else {
+          logger.debug({ sym, windowKey },
+            "[kalshi-bot] window monitor STAY_AWAY advisory (requireMonitorReady=false) — proceeding");
+        }
       }
     }
 
