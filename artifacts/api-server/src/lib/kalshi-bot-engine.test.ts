@@ -176,6 +176,80 @@ test("PATH A veto: ML=ABOVE, stat=BELOW, claude=null → no confirming signal �
   assert.equal(r.action, "BET_NO"); // PATH C uses stat=BELOW → BET_NO
 });
 
+// ---------------------------------------------------------------------------
+// 2-vs-1 override rule: both stat+claude oppose ML, but both are weak (< 60%)
+// ---------------------------------------------------------------------------
+
+test("2-vs-1 weak: ML=72%, stat=BELOW 55%, claude=BELOW 55% → ML overrides both weak signals → BET_YES at mlConfidence", () => {
+  // Both signals oppose ML but are below STAT_CLAUDE_DOMINANCE_THRESHOLD (60%).
+  // ML at 72% (≥ primary threshold 70%) overrides: alignment gate allows through,
+  // veto is waived, no dissent penalty → confidence = mlConfidence = 72%.
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 72,
+    statAbove: false, statConfidence: 55,
+    claudeAbove: false, claudeConfidence: 55,
+    minConfidence: 62,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 72); // no boosts (both oppose), no penalties (both weak)
+  assert.match(r.reasoning, /ML primary/);
+});
+
+test("2-vs-1 weak: ML=70% (exactly at threshold), stat=BELOW 59%, claude=BELOW 59% → BET_YES", () => {
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: ML_PRIMARY_MIN_CONFIDENCE,
+    statAbove: false, statConfidence: 59,
+    claudeAbove: false, claudeConfidence: 59,
+    minConfidence: 62,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, ML_PRIMARY_MIN_CONFIDENCE);
+});
+
+test("2-vs-1 strong stat: ML=72%, stat=BELOW 62%, claude=BELOW 55% → stat is strong → SKIP", () => {
+  // Stat is at 62% (≥ 60% threshold) — consensus beats ML regardless.
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 72,
+    statAbove: false, statConfidence: 62,
+    claudeAbove: false, claudeConfidence: 55,
+    minConfidence: 50,
+  }));
+  assert.equal(r.action, "SKIP");
+});
+
+test("2-vs-1 strong claude: ML=72%, stat=BELOW 55%, claude=BELOW 62% → claude is strong → SKIP", () => {
+  // Claude at 62% (≥ 60%) — either signal being strong is enough to block ML.
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 72,
+    statAbove: false, statConfidence: 55,
+    claudeAbove: false, claudeConfidence: 62,
+    minConfidence: 50,
+  }));
+  assert.equal(r.action, "SKIP");
+});
+
+test("2-vs-1 null confidence: ML=72%, stat=BELOW (conf null), claude=BELOW (conf null) → null treated as strong → SKIP", () => {
+  // Unknown confidence is treated conservatively as strong (≥ threshold).
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 72,
+    statAbove: false, statConfidence: null,
+    claudeAbove: false, claudeConfidence: null,
+    minConfidence: 50,
+  }));
+  assert.equal(r.action, "SKIP");
+});
+
+test("2-vs-1 ML not strong enough: ML=68% (below primary), stat=BELOW 55%, claude=BELOW 55% → ML cannot override → SKIP", () => {
+  // Both signals are weak, but ML itself is below ML_PRIMARY_MIN_CONFIDENCE (70%) — cannot lead.
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 68,
+    statAbove: false, statConfidence: 55,
+    claudeAbove: false, claudeConfidence: 55,
+    minConfidence: 50,
+  }));
+  assert.equal(r.action, "SKIP");
+});
+
 test("PATH A: ML=ABOVE, stat=ABOVE, claude=null → stat confirms → ML leads", () => {
   // When stat agrees with ML, the veto must NOT fire even with claude absent.
   const r = computeCorePairDecision(inp({

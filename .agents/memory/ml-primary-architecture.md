@@ -48,15 +48,24 @@ In `kalshi-bot-engine-core.ts`:
 
 Fires only when `mlConfidence >= ML_ALIGNMENT_GATE_MIN_CONFIDENCE (56)`.
 
-- **ML 50–55% (< 56):** treated as noise. Gate doesn't fire AND no dissent penalty in PATH B.
-  stat+claude proceed at full-pair confidence (65). This is the "stat+claude overwhelm weak ML" rule.
-- **ML 56–69%:** meaningful dissent → gate fires → SKIP when claude ≠ ML.
-- **ML ≥ 70%:** PATH A eligible. Gate still fires if claude disagrees (prevents ML overriding stat+claude 2-vs-1).
+**Case A — only Claude disagrees (Stat agrees or absent) → always SKIP.**
+
+**Case B — both Stat AND Claude disagree with ML (2-vs-1):**
+- Either signal confidence ≥ `STAT_CLAUDE_DOMINANCE_THRESHOLD (60)` → **SKIP** (consensus beats ML)
+- Both signals < 60% AND ML ≥ 70% → **ML leads** (weak opposition ignored)
+  - No dissent penalty in PATH A (weak signals don't penalise ML confidence)
+  - Veto is also waived (bothWeaklyOppose exception)
+- Both signals < 60% but ML < 70% → **SKIP** (ML not strong enough to override)
+
+**Null signal confidence is treated as strong (= 60)** — conservative: unknown → assume strong → SKIP.
+
+**ML 50–55% (< 56):** noise for all purposes — no gate, no dissent penalty in PATH B.
 
 ### Veto rule (ML confirmation)
 
-When mlLeadReady=true but neither stat nor claude confirms ML's direction → `mlLeadReady=false`.
-Falls to PATH B/C rather than letting ML solo-bet.
+When mlLeadReady=true but no confirming signal exists → veto → `mlLeadReady=false`.
+Exception: if both stat AND claude actively oppose ML AND both are weak (< 60%) the veto
+is waived — the alignment gate already confirmed the weak-opposition condition.
 
 ### Per-coin overrides
 

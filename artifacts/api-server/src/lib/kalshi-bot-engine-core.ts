@@ -36,6 +36,12 @@ export const ML_PRIMARY_MIN_CONFIDENCE = 70;
 // as noise — a weak ML dissent (50–55%) should not block a strong stat+claude
 // consensus; PATH B handles it with a small confidence penalty instead.
 export const ML_ALIGNMENT_GATE_MIN_CONFIDENCE = 56;
+// When BOTH Stat and Claude oppose ML with confidence at or above this threshold,
+// their combined consensus overrides ML — SKIP regardless of ML confidence.
+// Below this threshold their opposition is too weak to block a confident ML (≥70%).
+// Example: stat=55%+claude=55% vs ML=72% → ML leads. stat=62%+claude=55% → SKIP.
+// Null confidence is treated conservatively as >= this threshold (assumed strong).
+export const STAT_CLAUDE_DOMINANCE_THRESHOLD = 60;
 // Each agreeing validator (Claude, Stat, WM) adds this when ML leads (Path A).
 export const ML_SIGNAL_BOOST = 6;
 // Penalty applied when a model is available and actively calls the OPPOSITE direction.
@@ -266,20 +272,50 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
 
   const ev = computeEV(inp.yesPrice, inp.signalAccuracyPct);
 
-  // Claude-ML alignment gate — applied before any path decision.
-  // When Claude and ML call opposite directions AND ML is confident enough to
-  // be a meaningful counter-signal (>= ML_ALIGNMENT_GATE_MIN_CONFIDENCE = 56%),
-  // the bet is unreliable regardless of Stat.
-  // Below 56%, ML is essentially a coin-flip and its dissent is treated as noise;
-  // PATH B then handles it with a small confidence penalty instead of blocking.
-  // Rule: when stat+claude both agree strongly but ML is only 50–55% wrong → bet
-  // in stat+claude direction (their combined signal outweighs weak ML dissent).
+  // ── Alignment gate — applied before any path decision ────────────────────
+  // Fires only when ML's dissent is meaningful (>= ML_ALIGNMENT_GATE_MIN_CONFIDENCE = 56%).
+  // Below 56% ML is treated as noise — PATH B handles it without blocking.
+  //
+  // Two distinct sub-cases when Claude disagrees with ML:
+  //
+  // (A) Only Claude disagrees (Stat agrees with ML or is absent) → always SKIP.
+  //     A single high-quality signal (Claude) opposing ML is enough to block.
+  //
+  // (B) Both Stat AND Claude disagree with ML (2-vs-1):
+  //     • Either signal is strong (≥ STAT_CLAUDE_DOMINANCE_THRESHOLD = 60%) → SKIP.
+  //       Their consensus outweighs even a 70%+ ML.
+  //     • Both signals are weak (< 60%) AND ML ≥ primary threshold (70%) → allow.
+  //       ML's high confidence overrides two weak, uncertain signals.
+  //       Veto below is also waived for this case; PATH A proceeds without penalty.
   const mlMeaningfulDissent = inp.mlConfidence != null && inp.mlConfidence >= ML_ALIGNMENT_GATE_MIN_CONFIDENCE;
   if (mlMeaningfulDissent && inp.claudeAbove !== null && inp.mlAbove !== null && inp.claudeAbove !== inp.mlAbove) {
-    return skip(
-      `Claude-ML misalignment: Claude=${inp.claudeAbove ? "YES" : "NO"} ML=${inp.mlAbove ? "YES" : "NO"} (${inp.mlConfidence}%) — skipping until they agree`,
-      ev,
-    );
+    const statAlsoOpposes = inp.statAbove !== null && inp.statAbove !== inp.mlAbove;
+
+    if (statAlsoOpposes) {
+      // 2-vs-1: both Stat and Claude oppose ML.
+      // Null confidence is treated conservatively as "strong" (>= threshold).
+      const statConf = inp.statConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD;
+      const claudeConf = inp.claudeConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD;
+      const bothWeak = statConf < STAT_CLAUDE_DOMINANCE_THRESHOLD && claudeConf < STAT_CLAUDE_DOMINANCE_THRESHOLD;
+      const mlPrimaryConf = inp.mlMinConfidence ?? ML_PRIMARY_MIN_CONFIDENCE;
+      const mlStrongEnough = (inp.mlConfidence as number) >= mlPrimaryConf;
+
+      if (bothWeak && mlStrongEnough) {
+        // ML overrides two weak signals — fall through to PATH A.
+        // (Veto below is waived; DISSENT_PENALTY is not applied.)
+      } else {
+        const reason = (!bothWeak)
+          ? `Stat+Claude both disagree with ML and are strong (stat=${Math.round(statConf)}% claude=${Math.round(claudeConf)}% ≥ ${STAT_CLAUDE_DOMINANCE_THRESHOLD}%) — consensus wins`
+          : `Stat+Claude both disagree with ML but ML (${inp.mlConfidence}%) is below primary threshold (${mlPrimaryConf}%) — cannot override`;
+        return skip(reason, ev);
+      }
+    } else {
+      // Case A: only Claude disagrees → always SKIP.
+      return skip(
+        `Claude-ML misalignment: Claude=${inp.claudeAbove ? "YES" : "NO"} ML=${inp.mlAbove ? "YES" : "NO"} (${inp.mlConfidence}%) — skipping until they agree`,
+        ev,
+      );
+    }
   }
 
   // Whether the ML model is ready to lead
@@ -290,32 +326,35 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     inp.mlConfidence >= mlMinConf;
 
   // Veto PATH A: ML must have at least one confirming signal to lead.
-  // By this point the alignment gate above has already SKIPped any case where
-  // claudeAbove is non-null and disagrees with ML — so if claudeAbove is
-  // non-null here it is guaranteed to agree with ML.  The only gap the old
-  // veto missed: claudeAbove=null + statAbove opposing ML.  The new rule
-  // (require at least one agreeing validator) closes that gap cleanly.
+  // Exception: both Stat and Claude actively oppose ML but are BOTH weak
+  // (< STAT_CLAUDE_DOMINANCE_THRESHOLD).  The alignment gate above already
+  // blocked the "strong opposition" case, so if we reach here with both
+  // opposing, their confidences are confirmed < 60% — ML's 70%+ overrides.
+  const mlDir = inp.mlAbove;
   const mlHasConfirmation =
-    (inp.statAbove !== null && inp.statAbove === inp.mlAbove) ||
-    (inp.claudeAbove !== null && inp.claudeAbove === inp.mlAbove);
-  if (mlLeadReady && inp.mlAbove !== null && !mlHasConfirmation) {
-    mlLeadReady = false;
+    (inp.statAbove !== null && inp.statAbove === mlDir) ||
+    (inp.claudeAbove !== null && inp.claudeAbove === mlDir);
+  if (mlLeadReady && mlDir !== null && !mlHasConfirmation) {
+    // Check whether the gate granted the "both weak" exception above.
+    // If it did, both statAbove and claudeAbove must be non-null and opposing.
+    const bothWeaklyOppose =
+      inp.statAbove !== null && inp.statAbove !== mlDir &&
+      inp.claudeAbove !== null && inp.claudeAbove !== mlDir;
+    if (!bothWeaklyOppose) {
+      mlLeadReady = false; // standard veto: no confirming signal
+    }
+    // If bothWeaklyOppose === true: gate already confirmed both are < 60% weak
+    // → allow ML to lead without a confirming signal.
   }
 
   // ── PATH A: ML primary ────────────────────────────────────────────────────
   if (mlLeadReady) {
-    const mlDir = inp.mlAbove as boolean;
-    const action: BotDecisionAction = mlDir ? "BET_YES" : "BET_NO";
+    const mlDir2 = inp.mlAbove as boolean;
+    const action: BotDecisionAction = mlDir2 ? "BET_YES" : "BET_NO";
 
-    // Hard gate: ML must have at least one core signal (Stat or Claude) to
-    // validate it. ML is an ensemble learner that encodes both signals as
-    // features — when both are null, those features are 0.5 (neutral) during
-    // inference, which may not match what the model learned during training.
-    // More importantly, betting on ML alone with zero human-interpretable
-    // signal is a single unvalidated opinion — not an ensemble decision.
-    // When Claude is null because it's still pending, the Claude-pending guard
-    // above already blocks; this guard fires for the rare case where Claude
-    // never responded in 3+ minutes and Stat is also unavailable.
+    // Hard gate: ML must have at least one core signal available.
+    // (The "both weak" exception keeps both statAbove and claudeAbove non-null,
+    // so this guard only fires when genuinely no validators exist.)
     if (inp.statAbove === null && inp.claudeAbove === null) {
       return skip(
         `ML solo: no core signals available (Stat=null, Claude=null) — require at least one validator before betting`,
@@ -325,20 +364,31 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
 
     let confidence = inp.mlConfidence as number;
 
-    // Agreeing validator: +ML_SIGNAL_BOOST.  Actively opposing validator (not null,
-    // calls the opposite direction): −DISSENT_PENALTY.  Absent (null): no change.
-    if      (inp.claudeAbove === mlDir)  confidence += ML_SIGNAL_BOOST;
-    else if (inp.claudeAbove !== null)   confidence -= DISSENT_PENALTY;
+    // Agreeing validator → +ML_SIGNAL_BOOST.
+    // Opposing validator → −DISSENT_PENALTY, BUT ONLY if their confidence is
+    // "strong" (≥ STAT_CLAUDE_DOMINANCE_THRESHOLD = 60%).  Weak opposition
+    // (<60%) cannot block the bet (alignment gate already enforced this) so
+    // applying a penalty would arbitrarily reduce ML's lead confidence for
+    // signals that weren't strong enough to influence the decision.
+    // Null confidence is treated conservatively as strong (= penalty applies).
+    const claudeOpposesStrongly =
+      inp.claudeAbove !== null && inp.claudeAbove !== mlDir2 &&
+      (inp.claudeConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD) >= STAT_CLAUDE_DOMINANCE_THRESHOLD;
+    const statOpposesStrongly =
+      inp.statAbove !== null && inp.statAbove !== mlDir2 &&
+      (inp.statConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD) >= STAT_CLAUDE_DOMINANCE_THRESHOLD;
 
-    if      (inp.statAbove   === mlDir)  confidence += ML_SIGNAL_BOOST;
-    else if (inp.statAbove   !== null)   confidence -= DISSENT_PENALTY;
+    if      (inp.claudeAbove === mlDir2)  confidence += ML_SIGNAL_BOOST;
+    else if (claudeOpposesStrongly)       confidence -= DISSENT_PENALTY;
 
-    if (inp.wmDriftAbove === mlDir) confidence += ML_SIGNAL_BOOST;
-    // WM dissent: no penalty — WM is a secondary signal; penalizing it would over-penalise
-    // windows where WM is simply cautious rather than genuinely wrong.
+    if      (inp.statAbove   === mlDir2)  confidence += ML_SIGNAL_BOOST;
+    else if (statOpposesStrongly)         confidence -= DISSENT_PENALTY;
+
+    if (inp.wmDriftAbove === mlDir2) confidence += ML_SIGNAL_BOOST;
+    // WM dissent: no penalty — WM is a secondary signal.
 
     if (confidence < inp.minConfidence) {
-      const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
+      const { signalsAgreeing, signalsTotal } = countSignals(mlDir2, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
       return {
         action: "SKIP", confidence,
         reasoning: `Confidence ${confidence}% below minimum ${inp.minConfidence}% (ML primary)`,
@@ -346,16 +396,24 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
       };
     }
 
-    const { signalsAgreeing, signalsTotal } = countSignals(mlDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
+    const { signalsAgreeing, signalsTotal } = countSignals(mlDir2, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
 
     const claudeDesc = inp.claudeAbove !== null
-      ? `Claude:${inp.claudeAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : `−${DISSENT_PENALTY}`}`
+      ? inp.claudeAbove === mlDir2
+        ? `Claude:+${ML_SIGNAL_BOOST}`
+        : claudeOpposesStrongly
+          ? `Claude:−${DISSENT_PENALTY}`
+          : `Claude:~(weak)`
       : "Claude:—";
     const statDesc = inp.statAbove !== null
-      ? `Stat:${inp.statAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : `−${DISSENT_PENALTY}`}`
+      ? inp.statAbove === mlDir2
+        ? `Stat:+${ML_SIGNAL_BOOST}`
+        : statOpposesStrongly
+          ? `Stat:−${DISSENT_PENALTY}`
+          : `Stat:~(weak)`
       : "Stat:—";
     const wmDesc = inp.wmDriftAbove !== null
-      ? `WM:${inp.wmDriftAbove === mlDir ? `+${ML_SIGNAL_BOOST}` : "—"}`
+      ? `WM:${inp.wmDriftAbove === mlDir2 ? `+${ML_SIGNAL_BOOST}` : "—"}`
       : "";
     const validators = [claudeDesc, statDesc, wmDesc].filter(Boolean).join(" ");
     const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
