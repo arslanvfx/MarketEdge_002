@@ -331,8 +331,11 @@ async function _runPipeline(
   // ── Step 4: ML prediction — initial pipeline only ────────────────────────
   // Re-checks are limited to stat + Claude. ML is trained once per window at
   // snap time and does not benefit from re-calling mid-window.
-  let mlAbove: boolean | null = null;
-  let mlConfidence: number | null = null;
+  // For re-checks, carry forward the ML values from the initial result so they
+  // are not erased when the re-check overwrites pipelineResults.
+  const existingResult = pipelineResults.get(`${sym}:${windowKey}`);
+  let mlAbove: boolean | null = isRecheck ? (existingResult?.mlAbove ?? null) : null;
+  let mlConfidence: number | null = isRecheck ? (existingResult?.mlConfidence ?? null) : null;
   if (!isRecheck) {
     pipelinePhaseMap.set(`${sym}:${windowKey}`, "ml-analyzing");
     if (pred && kalshiTarget != null) {
