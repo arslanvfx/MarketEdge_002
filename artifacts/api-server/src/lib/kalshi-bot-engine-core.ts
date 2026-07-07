@@ -48,6 +48,11 @@ export const ML_SIGNAL_BOOST = 6;
 // Symmetric with ML_SIGNAL_BOOST so that one agree+one oppose = net zero boost.
 // Applied in: PATH A (Claude/Stat oppose ML), PATH B (ML opposes Claude).
 export const DISSENT_PENALTY = 6;
+// Minimum margin by which ML must lead an opposing signal's confidence for the
+// "ML dominance" exception to fire — used in both the alignment gate (Case A)
+// and the PATH A confirmation gate.  Below this margin the opposing signal is
+// considered meaningful enough to block or veto ML.
+export const ML_DOMINANCE_MARGIN = 10;
 
 // ── Bet Profiles ─────────────────────────────────────────────────────────────
 // Two preset aggression levels the user can switch between in the dashboard.
@@ -310,11 +315,30 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
         return skip(reason, ev);
       }
     } else {
-      // Case A: only Claude disagrees → always SKIP.
-      return skip(
-        `Claude-ML misalignment: Claude=${inp.claudeAbove ? "YES" : "NO"} ML=${inp.mlAbove ? "YES" : "NO"} (${inp.mlConfidence}%) — skipping until they agree`,
-        ev,
-      );
+      // Case A: only Claude disagrees (stat agrees with ML or is absent).
+      // Default: SKIP — a single high-quality signal opposing ML is enough to block.
+      // Exception (ML dominance): when stat actively AGREES with ML direction
+      // (2-vs-1 in ML's favour with Claude as sole dissenter), Claude's confidence
+      // is weak (< STAT_CLAUDE_DOMINANCE_THRESHOLD), and ML leads Claude by
+      // ≥ ML_DOMINANCE_MARGIN — allow PATH A to proceed.  A weak trending-context
+      // Claude read cannot veto a stronger ML+Stat aligned short-window signal.
+      const statAgreesWithML = inp.statAbove !== null && inp.statAbove === inp.mlAbove;
+      const mlConf    = inp.mlConfidence ?? 0;
+      const claudeConf = inp.claudeConfidence ?? STAT_CLAUDE_DOMINANCE_THRESHOLD;
+      const mlPrimaryConf = inp.mlMinConfidence ?? ML_PRIMARY_MIN_CONFIDENCE;
+      const mlDominatesWeakClaude =
+        statAgreesWithML &&
+        claudeConf < STAT_CLAUDE_DOMINANCE_THRESHOLD &&
+        mlConf >= claudeConf + ML_DOMINANCE_MARGIN &&
+        mlConf >= mlPrimaryConf;
+      if (!mlDominatesWeakClaude) {
+        return skip(
+          `Claude-ML misalignment: Claude=${inp.claudeAbove ? "YES" : "NO"} ML=${inp.mlAbove ? "YES" : "NO"} (${inp.mlConfidence}%) — skipping until they agree`,
+          ev,
+        );
+      }
+      // Fall through to PATH A — stat+ML beat a weak Claude; DISSENT_PENALTY
+      // will reduce ML's confidence score for Claude's opposition in PATH A.
     }
   }
 
@@ -335,7 +359,6 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   // pp.  A single weak, complement-absent signal cannot block a clearly stronger
   // ML read.  Strong opposition (≥ STAT_CLAUDE_DOMINANCE_THRESHOLD) is never
   // overridden here — the alignment gate above already handles that case.
-  const ML_DOMINANCE_MARGIN = 10;
   const mlDir = inp.mlAbove;
   const mlHasConfirmation =
     (inp.statAbove !== null && inp.statAbove === mlDir) ||
