@@ -1243,6 +1243,16 @@ export function applyStatPredCacheOverride(
   if (!predCacheEntry) {
     return { statAbove: openingAbove, isLive: false, flipped: false };
   }
+  // Guard: if the opening stat snap has fired and produced a real forward prediction,
+  // trust it.  The predCache stores the LIVE price (not a predictive model output), so
+  // "livePrice >= kalshiTarget" is a current-position check, not a forecast.  Replacing
+  // the stat model's forward prediction with a live-price comparison creates a YES/NO
+  // bias whenever the market is trending: live price above target → always ABOVE even
+  // when the model predicts the price will fall by close.  Only use the predCache path
+  // as a fallback during the ~1-min window before the opening snap has been written.
+  if (openingAbove !== null) {
+    return { statAbove: openingAbove, isLive: false, flipped: false };
+  }
   const kal = predCacheEntry.value.kalshiTarget ?? kalshiTarget;
   const predAge = nowMs - predCacheEntry.at;
   if (predCacheEntry.at <= openingSnapAtMs || predAge >= PRED_CACHE_MAX_AGE_MS || kal == null) {
@@ -1252,6 +1262,6 @@ export function applyStatPredCacheOverride(
   return {
     statAbove: midSnapStatAbove,
     isLive: true,
-    flipped: openingAbove !== null && midSnapStatAbove !== openingAbove,
+    flipped: false,
   };
 }

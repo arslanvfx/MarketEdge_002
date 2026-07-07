@@ -957,46 +957,43 @@ test("applyStatPredCacheOverride: no kalshiTarget in entry or argument → not o
   assert.equal(r.isLive, false);
 });
 
-test("applyStatPredCacheOverride: price above target → statAbove=true, isLive=true, flipped=false (opening agreed)", () => {
+test("applyStatPredCacheOverride: opening snap exists (non-null) → always returns opening value, isLive=false", () => {
+  // The predCache stores the LIVE price, not a model forecast.  Once the stat
+  // opening snap has fired (openingAbove !== null), trust the model prediction
+  // and never override it with a raw livePrice >= target comparison.
   const now = Date.now();
-  const r = applyStatPredCacheOverride(
-    true, // opening also said above
+  const rAbove = applyStatPredCacheOverride(
+    true, // opening said ABOVE
     now - 60_000,
-    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59000 } }, // price > target
+    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59000 } },
     null,
     now,
   );
-  assert.equal(r.statAbove, true);
-  assert.equal(r.isLive, true);
-  assert.equal(r.flipped, false);
-});
+  assert.equal(rAbove.statAbove, true);   // opening preserved
+  assert.equal(rAbove.isLive, false);     // not from live-price override
+  assert.equal(rAbove.flipped, false);
 
-test("applyStatPredCacheOverride: price below target → statAbove=false, flipped=true when opening was true", () => {
-  const now = Date.now();
-  const r = applyStatPredCacheOverride(
-    true,  // opening said above
+  const rBelow = applyStatPredCacheOverride(
+    true, // opening said ABOVE — predCache says below, but opening wins
     now - 60_000,
     { at: now - 30_000, value: { price: 58000, kalshiTarget: 59000 } }, // price < target
     null,
     now,
   );
-  assert.equal(r.statAbove, false);
-  assert.equal(r.isLive, true);
-  assert.equal(r.flipped, true);
-});
+  assert.equal(rBelow.statAbove, true);   // opening preserved despite contrary live price
+  assert.equal(rBelow.isLive, false);
+  assert.equal(rBelow.flipped, false);
 
-test("applyStatPredCacheOverride: price exactly at target counts as above (>= is inclusive)", () => {
-  const now = Date.now();
-  const r = applyStatPredCacheOverride(
-    false,
+  const rBelow2 = applyStatPredCacheOverride(
+    false, // opening said BELOW — predCache says above, but opening wins
     now - 60_000,
     { at: now - 30_000, value: { price: 59000, kalshiTarget: 59000 } }, // price === target
     null,
     now,
   );
-  assert.equal(r.statAbove, true); // >= is inclusive
-  assert.equal(r.isLive, true);
-  assert.equal(r.flipped, true); // opening said false → mid-snap says true
+  assert.equal(rBelow2.statAbove, false);  // opening preserved
+  assert.equal(rBelow2.isLive, false);
+  assert.equal(rBelow2.flipped, false);
 });
 
 test("applyStatPredCacheOverride: uses entry.value.kalshiTarget when argument is null", () => {
@@ -1173,9 +1170,10 @@ test("stat flip downstream: flip above→below + ML=above (PATH A, stat dissents
 // Stat flip → Claude re-check scenarios
 // ---------------------------------------------------------------------------
 
-test("applyStatPredCacheOverride: mid-snap flip surfaces new direction (above→below) — should trigger Claude re-check", () => {
-  // This case is what the tracker detects to fire fetchLiveDirection.
-  // Opening said price was ABOVE the strike; mid-snap re-run now shows BELOW.
+test("applyStatPredCacheOverride: opening snap non-null → opening preserved even when mid-snap contradicts (Claude re-check uses tracker, not predCache)", () => {
+  // With the live-price override removed for non-null openings, the predCache can no
+  // longer silently flip the stat signal.  Claude re-checks are now driven by the
+  // tracker's own divergence logic (crypto-tracker.ts), not by this function.
   const now = Date.now();
   const r = applyStatPredCacheOverride(
     true,            // opening: price was above strike
@@ -1184,9 +1182,9 @@ test("applyStatPredCacheOverride: mid-snap flip surfaces new direction (above→
     null,
     now,
   );
-  assert.equal(r.statAbove, false);  // flipped direction is surfaced
-  assert.equal(r.isLive, true);
-  assert.equal(r.flipped, true);     // caller sees the flip and triggers Claude re-check
+  assert.equal(r.statAbove, true);   // opening prediction preserved — no flip via predCache
+  assert.equal(r.isLive, false);
+  assert.equal(r.flipped, false);     // no flip detected
 });
 
 // ---------------------------------------------------------------------------
