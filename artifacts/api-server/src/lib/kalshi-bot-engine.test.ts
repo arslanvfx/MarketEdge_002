@@ -1351,12 +1351,13 @@ test("divergence: signal that was AGAINST bet at entry cannot flip (only support
   assert.match(r.reason, /ml/);
 });
 
-test("divergence: currentYesPrice=null skips price floor check → only time + flip count matter", () => {
+test("divergence: currentYesPrice=null → not triggered (cannot verify price floor, must hold)", () => {
   const r = checkSignalDivergenceCutout(
     "yes", 3, null, ENTRY_PRICE,
     defaultEntry, false, false, false,
   );
-  assert.equal(r.triggered, true, "null price → floor skipped, 3 signals flipped → triggered");
+  assert.equal(r.triggered, false, "null price → price floor unverifiable → hold, do not exit");
+  assert.match(r.reason, /unavailable/);
 });
 
 test("stale Claude override from prior window is evicted when stat flips — applyClaudeLiveOverride ignores prior-window entry", () => {

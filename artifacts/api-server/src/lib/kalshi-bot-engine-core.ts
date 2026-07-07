@@ -1146,17 +1146,19 @@ export function checkSignalDivergenceCutout(
     return { triggered: false, reason: `divergence-cutout: min${minutesElapsed} ≥ ${DIVERGENCE_MAX_MINUTES} — beyond early window` };
   }
 
-  // Price floor: contract value must still be ≥ 50% of what we paid
-  if (currentYesPrice !== null) {
-    const contractValueAtEntry = direction === "yes" ? entryYesPrice : (1 - entryYesPrice);
-    const contractValueNow     = direction === "yes" ? currentYesPrice : (1 - currentYesPrice);
-    const priceFloor = contractValueAtEntry * DIVERGENCE_PRICE_FLOOR_MULT;
-    if (contractValueNow < priceFloor) {
-      return {
-        triggered: false,
-        reason: `divergence-cutout: contract ${(contractValueNow * 100).toFixed(0)}¢ < floor ${(priceFloor * 100).toFixed(0)}¢ — not enough value to exit`,
-      };
-    }
+  // Price floor: contract value must still be ≥ 50% of what we paid.
+  // If price is unavailable we cannot verify the condition — hold.
+  if (currentYesPrice === null) {
+    return { triggered: false, reason: `divergence-cutout: currentYesPrice unavailable — cannot verify price floor, holding` };
+  }
+  const contractValueAtEntry = direction === "yes" ? entryYesPrice : (1 - entryYesPrice);
+  const contractValueNow     = direction === "yes" ? currentYesPrice : (1 - currentYesPrice);
+  const priceFloor = contractValueAtEntry * DIVERGENCE_PRICE_FLOOR_MULT;
+  if (contractValueNow < priceFloor) {
+    return {
+      triggered: false,
+      reason: `divergence-cutout: contract ${(contractValueNow * 100).toFixed(0)}¢ < floor ${(priceFloor * 100).toFixed(0)}¢ — not enough value to exit`,
+    };
   }
 
   let flippedCount = 0;
@@ -1176,7 +1178,7 @@ export function checkSignalDivergenceCutout(
   if (flippedCount >= DIVERGENCE_MIN_SIGNALS_FLIPPED) {
     return {
       triggered: true,
-      reason: `Signal divergence: ${flipped.join("+")} flipped vs ${direction.toUpperCase()} at min ${minutesElapsed} — early cutout (${flippedCount}/${DIVERGENCE_MIN_SIGNALS_FLIPPED})`,
+      reason: `Signal divergence: ${flipped.join("+")} flipped vs ${direction.toUpperCase()} at min ${minutesElapsed} — contract now ${(contractValueNow * 100).toFixed(0)}¢ vs entry ${(contractValueAtEntry * 100).toFixed(0)}¢ — early cutout (${flippedCount}/${DIVERGENCE_MIN_SIGNALS_FLIPPED})`,
     };
   }
 
