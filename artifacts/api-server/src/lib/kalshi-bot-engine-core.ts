@@ -954,8 +954,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Window-open entry buffer: hold off all bets for this many seconds after a new
   // window starts so the stat model can snap against the new Kalshi target and
   // Claude's opening call can resolve.  Config-driven so it can be changed live.
-  // 0/undefined in DB → uses this default of 120 s (2 tracker snap cycles).
-  windowEntryBufferSeconds: 120,
+  // 0/undefined in DB → uses this default of 60 s (1 tracker snap cycle).
+  windowEntryBufferSeconds: 60,
   // Allow up to 8 bets per window (matches 8-coin training set: BTC/ETH/XRP/HYPE/BNB/SOL/DOGE/LINK).
   maxBetsPerWindow: 8,
   enabled: true,

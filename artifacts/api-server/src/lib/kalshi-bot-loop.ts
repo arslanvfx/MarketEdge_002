@@ -853,7 +853,7 @@ export async function runBotLoopTick(): Promise<void> {
       );
       if (
         _peekDec.action !== "SKIP" &&
-        _peekDec.signals.signalsAgreeing >= 3 &&
+        _peekDec.signals.signalsAgreeing >= 2 &&
         _peekDec.confidence >= WM_CAUTION_BYPASS_MIN_CONF
       ) {
         _wmBypassActive = true;
