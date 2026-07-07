@@ -590,6 +590,16 @@ export async function loadOpenPositionFromDB(): Promise<void> {
         source: row.id.startsWith("manual:") || (row.signals as Record<string, unknown> | null)?.["manual"] === true
           ? "manual"
           : "bot",
+        entrySignals: (() => {
+          const s = row.signals as Record<string, unknown> | null;
+          if (!s) return undefined;
+          const sa = s["statAbove"]; const ca = s["claudeAbove"]; const ma = s["mlAbove"];
+          return {
+            statAbove:   typeof sa === "boolean" ? sa : null,
+            claudeAbove: typeof ca === "boolean" ? ca : null,
+            mlAbove:     typeof ma === "boolean" ? ma : null,
+          };
+        })(),
       });
 
       logger.info(

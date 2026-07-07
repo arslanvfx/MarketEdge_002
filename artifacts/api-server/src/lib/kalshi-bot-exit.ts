@@ -8,6 +8,7 @@
 // to near-zero at expiry.
 
 import { getStatWindowCall, getTrackerWindowCall, getWindowBetSignal, getLastMLAbove } from "./crypto";
+import { checkSignalDivergenceCutout, DIVERGENCE_MAX_MINUTES, DIVERGENCE_PRICE_FLOOR_MULT } from "./kalshi-bot-engine-core";
 
 export type ExitRecommendation = "HOLD" | "EXIT";
 
@@ -71,6 +72,7 @@ export function runExitGuard(
   erValue: number | null,
   sensitivity: "conservative" | "balanced" | "aggressive",
   phase2ThresholdPp: number,
+  entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null },
 ): ExitGuardResult {
   const { adverseTicks, magnitudePp } = SENSITIVITY[sensitivity];
 
@@ -242,6 +244,40 @@ export function runExitGuard(
       phase: 2,
       guardStates,
     };
+  }
+
+  // ── SIGNAL DIVERGENCE EARLY-EXIT CUTOUT ─────────────────────────────────
+  // Fires before Phase 1 guards when ≥2 of 3 signals that were FOR the bet
+  // at entry have since flipped AGAINST it, while still early (<8 min) and
+  // while the contract still retains ≥50% of entry value.
+  if (entrySignals != null) {
+    const currentStatAbove   = statCall?.aboveKalshi ?? null;
+    const currentClaudeAbove = claudeCall?.aboveKalshi ?? null;
+    const divergence = checkSignalDivergenceCutout(
+      direction,
+      minutesElapsed,
+      yp,
+      entryPrice,
+      entrySignals,
+      currentStatAbove,
+      currentClaudeAbove,
+      mlAbove,
+    );
+    if (divergence.triggered) {
+      const divGuardStates: GuardStates = {
+        holdDurationOk: false, flipConfirmed: false, magnitudeOk: false,
+        consensusOk: false, timingOverride: false, erOk: false,
+        mlFlipped,
+        phase2Active: false, phase2UptickDetected: false, phase2Timeout: false,
+        phase2YesPrice: yp, phase2RecentLow: null,
+      };
+      return {
+        recommendation: "EXIT",
+        reason: divergence.reason,
+        phase: 1,
+        guardStates: divGuardStates,
+      };
+    }
   }
 
   // ── PHASE 1 GUARDS ────────────────────────────────────────────────────────

@@ -200,6 +200,7 @@ async function _runBotTick(
         erValue,
         S.config.midExitSensitivity,
         S.config.phase2ThresholdPp,
+        pos.entrySignals,
       );
 
       lastGuardStatesMap.set(sym, guard.guardStates);
@@ -1059,6 +1060,11 @@ async function _runBotTick(
     ? contractCount * actualFillYesPrice
     : contractCount * (1 - actualFillYesPrice);
 
+  const _entrySigs = decision.signals as {
+    statAbove?: boolean | null;
+    claudeAbove?: boolean | null;
+    mlAbove?: boolean | null;
+  };
   const newPosition: OpenPosition = {
     id,
     symbol: sym,
@@ -1075,6 +1081,11 @@ async function _runBotTick(
     entryDecision: decision,
     phase2Activated: false,
     entryMode,
+    entrySignals: {
+      statAbove: _entrySigs.statAbove ?? null,
+      claudeAbove: _entrySigs.claudeAbove ?? null,
+      mlAbove: _entrySigs.mlAbove ?? null,
+    },
   };
   openPositions.set(sym, newPosition);
 

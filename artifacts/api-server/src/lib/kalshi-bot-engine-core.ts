@@ -1110,6 +1110,82 @@ export function applyClaudeLiveOverride(
   };
 }
 
+// ── Signal divergence early-exit cutout ──────────────────────────────────────
+// Fires when ≥2 of 3 signals (stat, Claude, ML) that were supporting the bet
+// at entry have since flipped to oppose it.  Only triggers during the first
+// DIVERGENCE_MAX_MINUTES of the position while the contract still has ≥50% of
+// its entry value — i.e. there is still meaningful value to recover.
+
+export const DIVERGENCE_MAX_MINUTES = 8;
+export const DIVERGENCE_MIN_SIGNALS_FLIPPED = 2;
+export const DIVERGENCE_PRICE_FLOOR_MULT = 0.50;
+
+/**
+ * Check whether the signal divergence early-exit cutout should fire.
+ *
+ * A signal is "flipped" when it was actively supporting the bet direction at
+ * entry (true for YES, false for NO) and is now actively opposing it.
+ * Null signals (unavailable at entry or now) are ignored — they cannot flip.
+ *
+ * Conditions (all must hold):
+ *   1. minutesElapsed < DIVERGENCE_MAX_MINUTES (early window only, ≤8 min)
+ *   2. Contract still has ≥ DIVERGENCE_PRICE_FLOOR_MULT × entry value (≥50%)
+ *   3. ≥ DIVERGENCE_MIN_SIGNALS_FLIPPED of 3 signals have flipped
+ */
+export function checkSignalDivergenceCutout(
+  direction: "yes" | "no",
+  minutesElapsed: number,
+  currentYesPrice: number | null,
+  entryYesPrice: number,
+  entrySignals: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null },
+  currentStatAbove: boolean | null,
+  currentClaudeAbove: boolean | null,
+  currentMlAbove: boolean | null,
+): { triggered: boolean; reason: string } {
+  if (minutesElapsed >= DIVERGENCE_MAX_MINUTES) {
+    return { triggered: false, reason: `divergence-cutout: min${minutesElapsed} ≥ ${DIVERGENCE_MAX_MINUTES} — beyond early window` };
+  }
+
+  // Price floor: contract value must still be ≥ 50% of what we paid
+  if (currentYesPrice !== null) {
+    const contractValueAtEntry = direction === "yes" ? entryYesPrice : (1 - entryYesPrice);
+    const contractValueNow     = direction === "yes" ? currentYesPrice : (1 - currentYesPrice);
+    const priceFloor = contractValueAtEntry * DIVERGENCE_PRICE_FLOOR_MULT;
+    if (contractValueNow < priceFloor) {
+      return {
+        triggered: false,
+        reason: `divergence-cutout: contract ${(contractValueNow * 100).toFixed(0)}¢ < floor ${(priceFloor * 100).toFixed(0)}¢ — not enough value to exit`,
+      };
+    }
+  }
+
+  let flippedCount = 0;
+  const flipped: string[] = [];
+
+  function checkFlip(name: string, entryVal: boolean | null, currentVal: boolean | null): void {
+    if (entryVal === null || currentVal === null) return;
+    const wasForBet  = direction === "yes" ? entryVal === true  : entryVal === false;
+    const nowAgainst = direction === "yes" ? currentVal === false : currentVal === true;
+    if (wasForBet && nowAgainst) { flippedCount++; flipped.push(name); }
+  }
+
+  checkFlip("stat",   entrySignals.statAbove,   currentStatAbove);
+  checkFlip("claude", entrySignals.claudeAbove, currentClaudeAbove);
+  checkFlip("ml",     entrySignals.mlAbove,     currentMlAbove);
+
+  if (flippedCount >= DIVERGENCE_MIN_SIGNALS_FLIPPED) {
+    return {
+      triggered: true,
+      reason: `Signal divergence: ${flipped.join("+")} flipped vs ${direction.toUpperCase()} at min ${minutesElapsed} — early cutout (${flippedCount}/${DIVERGENCE_MIN_SIGNALS_FLIPPED})`,
+    };
+  }
+
+  return {
+    triggered: false,
+    reason: `divergence-cutout: ${flippedCount}/${DIVERGENCE_MIN_SIGNALS_FLIPPED} signals flipped — not enough to exit`,
+  };
+}
+
 /**
  * Applies the mid-snap predCache override to the opening stat signal.
  *

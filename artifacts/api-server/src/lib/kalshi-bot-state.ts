@@ -41,6 +41,7 @@ export interface OpenPosition {
   phase2Activated: boolean;
   entryMode: BotMode;
   source?: "bot" | "manual";
+  entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
 }
 
 export interface OpenPositionDisplay extends OpenPosition {

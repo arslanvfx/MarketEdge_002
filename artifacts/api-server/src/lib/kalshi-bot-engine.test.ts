@@ -1189,6 +1189,176 @@ test("applyStatPredCacheOverride: mid-snap flip surfaces new direction (above→
   assert.equal(r.flipped, true);     // caller sees the flip and triggers Claude re-check
 });
 
+// ---------------------------------------------------------------------------
+// checkSignalDivergenceCutout — pure divergence cutout logic
+// ---------------------------------------------------------------------------
+
+import {
+  checkSignalDivergenceCutout,
+  DIVERGENCE_MAX_MINUTES,
+  DIVERGENCE_MIN_SIGNALS_FLIPPED,
+  DIVERGENCE_PRICE_FLOOR_MULT,
+} from "./kalshi-bot-engine-core.ts";
+
+const defaultEntry = { statAbove: true, claudeAbove: true, mlAbove: true };
+const ENTRY_PRICE = 0.60;
+
+test("divergence: all three signals flip for YES bet → triggered", () => {
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.40, ENTRY_PRICE,
+    { statAbove: true, claudeAbove: true, mlAbove: true },
+    false, false, false,
+  );
+  assert.equal(r.triggered, true);
+  assert.match(r.reason, /Signal divergence/);
+  assert.match(r.reason, /stat/);
+  assert.match(r.reason, /claude/);
+  assert.match(r.reason, /ml/);
+});
+
+test("divergence: exactly 2 signals flip → triggered", () => {
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.40, ENTRY_PRICE,
+    { statAbove: true, claudeAbove: true, mlAbove: true },
+    false, false, true,
+  );
+  assert.equal(r.triggered, true);
+});
+
+test("divergence: only 1 signal flips → not triggered", () => {
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.40, ENTRY_PRICE,
+    { statAbove: true, claudeAbove: true, mlAbove: true },
+    false, true, true,
+  );
+  assert.equal(r.triggered, false);
+  assert.match(r.reason, /1\/2 signals flipped/);
+});
+
+test("divergence: minutesElapsed >= DIVERGENCE_MAX_MINUTES → not triggered", () => {
+  const r = checkSignalDivergenceCutout(
+    "yes", DIVERGENCE_MAX_MINUTES, 0.40, ENTRY_PRICE,
+    defaultEntry, false, false, false,
+  );
+  assert.equal(r.triggered, false);
+  assert.match(r.reason, /beyond early window/);
+});
+
+test("divergence: price below floor → not triggered even if signals flipped", () => {
+  const floorPrice = ENTRY_PRICE * DIVERGENCE_PRICE_FLOOR_MULT - 0.01; // just below floor
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, floorPrice, ENTRY_PRICE,
+    defaultEntry, false, false, false,
+  );
+  assert.equal(r.triggered, false);
+  assert.match(r.reason, /not enough value to exit/);
+});
+
+test("divergence: price at exactly floor → triggered (≥ floor means allowed to exit)", () => {
+  const floorPrice = ENTRY_PRICE * DIVERGENCE_PRICE_FLOOR_MULT;
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, floorPrice, ENTRY_PRICE,
+    defaultEntry, false, false, false,
+  );
+  assert.equal(r.triggered, true, "at exactly floor contract value (not strictly below), exit is allowed");
+});
+
+test("divergence: price just above floor → triggered when signals flipped", () => {
+  const aboveFloor = ENTRY_PRICE * DIVERGENCE_PRICE_FLOOR_MULT + 0.01;
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, aboveFloor, ENTRY_PRICE,
+    defaultEntry, false, false, false,
+  );
+  assert.equal(r.triggered, true);
+});
+
+test("divergence: null entry signal is ignored (cannot flip)", () => {
+  // statAbove=null at entry → stat cannot count as flipped
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.40, ENTRY_PRICE,
+    { statAbove: null, claudeAbove: true, mlAbove: true },
+    false, false, false,
+  );
+  // Only claude + ml flip (2) → triggered
+  assert.equal(r.triggered, true);
+});
+
+test("divergence: null current signal is ignored (unknown state)", () => {
+  // claudeAbove currently null → cannot assess, ignore
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.40, ENTRY_PRICE,
+    { statAbove: true, claudeAbove: true, mlAbove: true },
+    false, null, false,
+  );
+  // stat + ml flip (2) → triggered
+  assert.equal(r.triggered, true);
+});
+
+test("divergence: all entry signals null → nothing can flip → not triggered", () => {
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.40, ENTRY_PRICE,
+    { statAbove: null, claudeAbove: null, mlAbove: null },
+    false, false, false,
+  );
+  assert.equal(r.triggered, false);
+});
+
+test("divergence: NO bet — signals flip when entry was false and now true", () => {
+  const r = checkSignalDivergenceCutout(
+    "no", 3, 0.65, 0.35, // NO entry: yesPrice=0.35 → NO contract cost = 1-0.35 = 0.65
+    { statAbove: false, claudeAbove: false, mlAbove: false },
+    true, true, false,
+  );
+  // stat + claude flipped (were false, now true, against NO bet) → triggered
+  assert.equal(r.triggered, true);
+  assert.match(r.reason, /stat/);
+  assert.match(r.reason, /claude/);
+});
+
+test("divergence: NO bet price floor uses NO contract value (1 - yesPrice)", () => {
+  // NO entry: entryYesPrice = 0.30 → NO contract value = 0.70
+  // floor = 0.70 * 0.50 = 0.35 (in NO terms)
+  // If yesPrice is now 0.68 → NO value = 0.32 < 0.35 → below floor
+  const r = checkSignalDivergenceCutout(
+    "no", 3, 0.68, 0.30,
+    { statAbove: false, claudeAbove: false, mlAbove: false },
+    true, true, true,
+  );
+  assert.equal(r.triggered, false, "NO contract value below floor — should not trigger");
+});
+
+test("divergence: signal that was FOR bet and stays FOR bet → no flip counted", () => {
+  // Stat stays supporting the YES bet (was true, still true)
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.50, ENTRY_PRICE,
+    { statAbove: true, claudeAbove: true, mlAbove: true },
+    true, false, false,
+  );
+  // Only claude + ml flipped → 2/2 → triggered
+  assert.equal(r.triggered, true);
+});
+
+test("divergence: signal that was AGAINST bet at entry cannot flip (only supporting signals can flip)", () => {
+  // Entry: statAbove=false for YES bet (was opposing already) — cannot flip against
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, 0.50, ENTRY_PRICE,
+    { statAbove: false, claudeAbove: true, mlAbove: true },
+    false, false, false,
+  );
+  // stat was already against (entry false) → not counted; only claude+ml flipped → 2
+  assert.equal(r.triggered, true);
+  assert.match(r.reason, /claude/);
+  assert.match(r.reason, /ml/);
+});
+
+test("divergence: currentYesPrice=null skips price floor check → only time + flip count matter", () => {
+  const r = checkSignalDivergenceCutout(
+    "yes", 3, null, ENTRY_PRICE,
+    defaultEntry, false, false, false,
+  );
+  assert.equal(r.triggered, true, "null price → floor skipped, 3 signals flipped → triggered");
+});
+
 test("stale Claude override from prior window is evicted when stat flips — applyClaudeLiveOverride ignores prior-window entry", () => {
   // Scenario: stat flips at T+7. The liveDirectionCache entry was written at
   // window-open (T+1) and is OLDER than the mid-snap opening-snap timestamp
