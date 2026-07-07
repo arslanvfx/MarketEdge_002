@@ -454,16 +454,20 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     let confidence = base;
     if (inp.wmDriftAbove === claudeDir) confidence += CONFIDENCE_BOOST_PER_SIGNAL;
 
-    // ML available and actively calls the opposite direction → dissent penalty.
-    // Only applies when ML's confidence is meaningful (>= ML_ALIGNMENT_GATE_MIN_CONFIDENCE).
-    // Below that threshold ML is treated as noise for all purposes — no gate, no penalty.
-    // (Note: if mlConfidence >= gate threshold AND claude≠ml, the alignment gate above would
-    //  have already returned SKIP, so in practice this penalty only fires in edge cases.)
-    const mlDissentMeaningful =
+    // ML vote in PATH B: direction-symmetric treatment.
+    // Agreement → +ML_SIGNAL_BOOST; dissent → −DISSENT_PENALTY.
+    // Both apply only when ML confidence is meaningful (≥ ML_ALIGNMENT_GATE_MIN_CONFIDENCE = 56).
+    // Below that threshold ML is noise — no boost, no penalty.
+    // This makes unanimous YES and unanimous NO calls score identically (65+6=71),
+    // preventing any directional bias introduced by the confidence floor.
+    // (When ML disagrees at ≥56%, the alignment gate above would normally have already
+    //  returned SKIP — the dissent branch here is a safety net for edge cases.)
+    const mlMeaningful =
       inp.mlAbove !== null &&
       inp.mlConfidence != null &&
       inp.mlConfidence >= ML_ALIGNMENT_GATE_MIN_CONFIDENCE;
-    if (mlDissentMeaningful && inp.mlAbove !== claudeDir) confidence -= DISSENT_PENALTY;
+    if (mlMeaningful && inp.mlAbove === claudeDir) confidence += ML_SIGNAL_BOOST;
+    else if (mlMeaningful && inp.mlAbove !== claudeDir) confidence -= DISSENT_PENALTY;
 
     if (confidence < inp.minConfidence) {
       const { signalsAgreeing, signalsTotal } = countSignals(claudeDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
@@ -477,13 +481,15 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     const { signalsAgreeing, signalsTotal } = countSignals(claudeDir, inp.statAbove, inp.claudeAbove, inp.mlAbove, inp.wmDriftAbove);
 
     const statDesc = inp.statAbove !== null ? `Stat:✓` : "Stat:—";
-    const mlDissentDesc = (inp.mlAbove !== null && inp.mlAbove !== claudeDir) ? ` ML:−${DISSENT_PENALTY}` : "";
+    const mlSignalDesc = mlMeaningful
+      ? inp.mlAbove === claudeDir ? ` ML:+${ML_SIGNAL_BOOST}` : ` ML:−${DISSENT_PENALTY}`
+      : "";
     const wmBoostDesc = inp.wmDriftAbove === claudeDir ? ` WM:+${CONFIDENCE_BOOST_PER_SIGNAL}` : "";
     const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
 
     return {
       action, confidence, ev, signalsAgreeing, signalsTotal,
-      reasoning: `Claude primary: Claude:✓ ${statDesc}${mlDissentDesc}${wmBoostDesc} → ${action} (${confidence}%)${evDesc}`,
+      reasoning: `Claude primary: Claude:✓ ${statDesc}${mlSignalDesc}${wmBoostDesc} → ${action} (${confidence}%)${evDesc}`,
     };
   }
 

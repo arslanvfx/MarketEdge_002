@@ -334,12 +334,62 @@ test("PATH B: ML below threshold + Claude available + ML disagrees → alignment
   assert.equal(r.action, "SKIP");
 });
 
-// ML below threshold but AGREES with Claude → no penalty, normal full-pair confidence
-test("PATH B: ML below threshold + Claude available + ML agrees → no dissent penalty", () => {
-  const belowThreshold = ML_PRIMARY_MIN_CONFIDENCE - 1;
-  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: belowThreshold, claudeAbove: true, statAbove: true }));
+// ML below ML_PRIMARY_MIN_CONFIDENCE but ≥ ML_ALIGNMENT_GATE_MIN_CONFIDENCE → still meaningful →
+// agreement boost applies (+ML_SIGNAL_BOOST), no penalty.
+test("PATH B: ML below primary threshold but meaningful (≥56%) + Claude available + ML agrees → +ML_SIGNAL_BOOST", () => {
+  const belowPrimary = ML_PRIMARY_MIN_CONFIDENCE - 1; // 69 — below PATH A gate but still meaningful
+  const r = computeCorePairDecision(inp({ mlAbove: true, mlConfidence: belowPrimary, claudeAbove: true, statAbove: true }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR);
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR + ML_SIGNAL_BOOST); // 65+6=71
+});
+
+// ── PATH B ML agreement boost — direction-symmetric tests ────────────────────
+// The fix: ML agreement gives +ML_SIGNAL_BOOST in PATH B, just as in PATH A.
+// Unanimous YES and unanimous NO must score identically so the confidence floor
+// does not inadvertently filter one direction more than the other.
+
+test("PATH B symmetry: unanimous NO (claude=false, stat=false, ml=false at 60%) → confidence = 71", () => {
+  const r = computeCorePairDecision(inp({
+    claudeAbove: false, statAbove: false,
+    mlAbove: false, mlConfidence: 60,
+    minConfidence: 60,
+  }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR + ML_SIGNAL_BOOST); // 65+6=71
+  assert.match(r.reasoning, /ML:\+6/);
+});
+
+test("PATH B symmetry: unanimous YES (claude=true, stat=true, ml=true at 60%) → confidence = 71", () => {
+  const r = computeCorePairDecision(inp({
+    claudeAbove: true, statAbove: true,
+    mlAbove: true, mlConfidence: 60,
+    minConfidence: 60,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR + ML_SIGNAL_BOOST); // 65+6=71
+  assert.match(r.reasoning, /ML:\+6/);
+});
+
+test("PATH B symmetry: NO with ml noise (<56%) → no boost → confidence stays at BASE_CONFIDENCE_FULL_PAIR", () => {
+  const r = computeCorePairDecision(inp({
+    claudeAbove: false, statAbove: false,
+    mlAbove: false, mlConfidence: 52, // below ML_ALIGNMENT_GATE_MIN_CONFIDENCE (56)
+    minConfidence: 60,
+  }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR); // 65, no boost
+});
+
+test("PATH B symmetry: unanimous NO clears auto-tuned floor of 70 (65+6=71 > 70)", () => {
+  // This is the production scenario: auto-tune raised minConfidence to 70.
+  // Before fix, unanimous NO scored 65 → SKIP. After fix, 71 → BET_NO.
+  const r = computeCorePairDecision(inp({
+    claudeAbove: false, statAbove: false,
+    mlAbove: false, mlConfidence: 60,
+    minConfidence: 70,
+  }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, BASE_CONFIDENCE_FULL_PAIR + ML_SIGNAL_BOOST); // 71 > 70 → passes
 });
 
 test("PATH B: ML confidence null but mlAbove present and disagrees → gate does NOT fire (no conf) → no dissent penalty → BET_NO at full-pair confidence", () => {
