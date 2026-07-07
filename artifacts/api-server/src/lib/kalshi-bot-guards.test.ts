@@ -22,9 +22,12 @@ import {
   checkBalanceGuard,
   checkExposureGuard,
   checkWindowMonitorReadyGuard,
+  checkWindowMonitorStayAwayGuard,
+  applyStayAwayGateDecision,
   applyDailyLossUpdate,
   applyStreakUpdate,
   type CoinStreakState,
+  type StayAwayGateOutcome,
 } from "./kalshi-bot-guards.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -475,5 +478,173 @@ test("wmReady/wiring: kalshi-bot.ts imports and calls checkWindowMonitorReadyGua
   assert.ok(
     src.includes("S.config.requireMonitorReady"),
     "kalshi-bot.ts Phase-3 loop must pass config.requireMonitorReady to the gate",
+  );
+});
+
+// ===========================================================================
+// Guard 7b — Window Monitor STAY_AWAY gate
+//
+//   Fires when:  signal.ready === true AND signal.recommendation === "stay_away"
+//   Effect (requireMonitorReady=true):   "block" — coin added to filteredByNewGuards
+//                                        (full-window block, not just per-tick defer)
+//   Effect (requireMonitorReady=false):  "advisory" — log only, entry proceeds
+//   Otherwise:                           "pass"
+// ===========================================================================
+
+const STAY_AWAY_SIGNAL = {
+  ready: true,
+  recommendation: "stay_away" as const,
+  minutesElapsed: 5,
+  reason: "High oscillation",
+  preWindowER: null,
+  factors: { efficiencyRatio: 0.1, oscillationCount: 4, spikeFlag: false, netDriftPct: 0 },
+};
+
+const BET_SIGNAL = {
+  ...STAY_AWAY_SIGNAL,
+  recommendation: "bet" as const,
+};
+
+const CAUTION_SIGNAL = {
+  ...STAY_AWAY_SIGNAL,
+  recommendation: "caution" as const,
+};
+
+const NOT_READY_STAY_AWAY = {
+  ...STAY_AWAY_SIGNAL,
+  ready: false,
+};
+
+test("stayAway: stay_away signal + required=true → block (full-window hard gate)", () => {
+  assert.equal(checkWindowMonitorStayAwayGuard(STAY_AWAY_SIGNAL, true), "block");
+});
+
+test("stayAway: stay_away signal + required=false → advisory only (not a hard block)", () => {
+  assert.equal(checkWindowMonitorStayAwayGuard(STAY_AWAY_SIGNAL, false), "advisory");
+});
+
+test("stayAway: bet signal (positive) → pass regardless of required flag", () => {
+  assert.equal(checkWindowMonitorStayAwayGuard(BET_SIGNAL, true), "pass");
+  assert.equal(checkWindowMonitorStayAwayGuard(BET_SIGNAL, false), "pass");
+});
+
+test("stayAway: caution signal → pass (only stay_away triggers the gate)", () => {
+  assert.equal(checkWindowMonitorStayAwayGuard(CAUTION_SIGNAL, true), "pass");
+});
+
+test("stayAway: null signal (monitor not yet computed) → pass", () => {
+  assert.equal(checkWindowMonitorStayAwayGuard(null, true), "pass");
+  assert.equal(checkWindowMonitorStayAwayGuard(null, false), "pass");
+});
+
+test("stayAway: ready=false with stay_away recommendation → pass (not ready yet)", () => {
+  assert.equal(checkWindowMonitorStayAwayGuard(NOT_READY_STAY_AWAY, true), "pass");
+});
+
+// ---------------------------------------------------------------------------
+// Behavioral tests for applyStayAwayGateDecision:
+// These exercise the full application-layer function with real Set and signal
+// objects — the same structures the bot loop uses at runtime.  "Mocking"
+// getWindowBetSignal means passing a crafted signal value directly so tests
+// run without I/O or DB setup and deterministically assert side effects.
+// ---------------------------------------------------------------------------
+
+test("stayAway/apply: stay_away + required=true → outcome=block, sym added to filteredByNewGuards", () => {
+  const guards = new Set<string>();
+  const outcome = applyStayAwayGateDecision("BTC", STAY_AWAY_SIGNAL, true, guards);
+  assert.equal(outcome.action, "block",
+    "block outcome required when signal=stay_away and monitorRequired=true");
+  assert.ok(guards.has("BTC"),
+    "BTC must be in filteredByNewGuards so Phase 4 cannot place an order");
+});
+
+test("stayAway/apply: block outcome carries the canonical reason string", () => {
+  const guards = new Set<string>();
+  const outcome = applyStayAwayGateDecision("ETH", STAY_AWAY_SIGNAL, true, guards) as Extract<StayAwayGateOutcome, { action: "block" }>;
+  assert.ok(
+    outcome.reason.includes("window_monitor_stay_away"),
+    "reason must contain 'window_monitor_stay_away' — this is the canonical SKIP reason checked by the loop",
+  );
+});
+
+test("stayAway/apply: stay_away + required=false → outcome=advisory, filteredByNewGuards unchanged", () => {
+  const guards = new Set<string>();
+  const outcome = applyStayAwayGateDecision("BTC", STAY_AWAY_SIGNAL, false, guards);
+  assert.equal(outcome.action, "advisory",
+    "advisory mode must not hard-block when requireMonitorReady=false");
+  assert.ok(!guards.has("BTC"),
+    "advisory path must NOT add sym to filteredByNewGuards (Phase 4 may still bet)");
+});
+
+test("stayAway/apply: bet signal → outcome=pass, filteredByNewGuards unchanged", () => {
+  const guards = new Set<string>();
+  const outcome = applyStayAwayGateDecision("BTC", BET_SIGNAL, true, guards);
+  assert.equal(outcome.action, "pass");
+  assert.ok(!guards.has("BTC"), "bet signal must leave filteredByNewGuards untouched");
+});
+
+test("stayAway/apply: null signal (monitor not yet computed) → outcome=pass", () => {
+  const guards = new Set<string>();
+  const outcome = applyStayAwayGateDecision("BTC", null, true, guards);
+  assert.equal(outcome.action, "pass");
+  assert.ok(!guards.has("BTC"));
+});
+
+test("stayAway/apply: ready=false stay_away signal → outcome=pass (readiness gate defers first)", () => {
+  const guards = new Set<string>();
+  const outcome = applyStayAwayGateDecision("BTC", NOT_READY_STAY_AWAY, true, guards);
+  assert.equal(outcome.action, "pass");
+  assert.ok(!guards.has("BTC"));
+});
+
+test("stayAway/apply: only the stay_away coin is blocked when multiple symbols evaluated", () => {
+  const guards = new Set<string>();
+  const btcOutcome = applyStayAwayGateDecision("BTC", STAY_AWAY_SIGNAL, true, guards);
+  const ethOutcome = applyStayAwayGateDecision("ETH", BET_SIGNAL, true, guards);
+  const solOutcome = applyStayAwayGateDecision("SOL", CAUTION_SIGNAL, true, guards);
+
+  assert.equal(btcOutcome.action, "block");
+  assert.equal(ethOutcome.action, "pass");
+  assert.equal(solOutcome.action, "pass");
+
+  assert.ok(guards.has("BTC"), "only BTC must be in filteredByNewGuards");
+  assert.ok(!guards.has("ETH"), "ETH must NOT be in filteredByNewGuards");
+  assert.ok(!guards.has("SOL"), "SOL must NOT be in filteredByNewGuards");
+});
+
+test("stayAway/apply: Phase-4 skip-candidates filtered by filteredByNewGuards (regression guard)", () => {
+  // Simulate the Phase-4 filter the bot loop applies at line:
+  //   skips.filter(e => e.trendStability !== "reversing" && !filteredByNewGuards.has(e.symbol))
+  // A coin blocked by the STAY_AWAY gate must be absent from that result.
+  const guards = new Set<string>();
+  applyStayAwayGateDecision("BTC", STAY_AWAY_SIGNAL, true, guards);
+
+  const phase4Candidates = [
+    { symbol: "BTC", trendStability: null },
+    { symbol: "ETH", trendStability: null },
+  ].filter(e => e.trendStability !== "reversing" && !guards.has(e.symbol));
+
+  const symbols = phase4Candidates.map(e => e.symbol);
+  assert.ok(!symbols.includes("BTC"),
+    "BTC must be excluded from Phase-4 candidates after STAY_AWAY block");
+  assert.ok(symbols.includes("ETH"),
+    "ETH must remain in Phase-4 candidates (not stay_away)");
+});
+
+// ---------------------------------------------------------------------------
+// Wiring check: loop delegates to applyStayAwayGateDecision (not inline logic)
+// ---------------------------------------------------------------------------
+
+test("stayAway/wiring: kalshi-bot-loop.ts delegates to applyStayAwayGateDecision", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  assert.ok(
+    src.includes("applyStayAwayGateDecision("),
+    "Phase-3 loop must call applyStayAwayGateDecision — do not inline the guard logic",
+  );
+  assert.ok(
+    src.includes("getWindowBetSignal(sym)") &&
+    src.includes("S.config.requireMonitorReady ?? true") &&
+    src.includes("filteredByNewGuards"),
+    "applyStayAwayGateDecision must receive getWindowBetSignal(sym), config.requireMonitorReady, and filteredByNewGuards",
   );
 });

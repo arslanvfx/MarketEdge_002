@@ -93,6 +93,73 @@ export function checkWindowMonitorReadyGuard(
 }
 
 /**
+ * Guard 7b — Window Monitor STAY_AWAY gate.
+ *
+ * Returns:
+ *   "block"    — signal is ready AND recommendation === "stay_away" AND
+ *                requireMonitorReady is true.  Caller must add the coin to
+ *                filteredByNewGuards (full-window block) and push a SKIP result.
+ *   "advisory" — signal is stay_away but requireMonitorReady is false.
+ *                Caller should log a warning and continue.
+ *   "pass"     — no stay_away condition; proceed normally.
+ *
+ * Unlike the readiness gate (Guard 7), STAY_AWAY is a full-window block when
+ * monitorRequired is true — the monitor signal is stable and won't improve
+ * during the same 15-min window.
+ *
+ * Pass `signal = null` (monitor not yet computed) to get "pass" — the
+ * readiness gate (Guard 7) will already have deferred this tick.
+ */
+export function checkWindowMonitorStayAwayGuard(
+  signal: { ready: boolean; recommendation: string } | null,
+  requireMonitorReady: boolean,
+): "block" | "advisory" | "pass" {
+  if (!signal?.ready || signal.recommendation !== "stay_away") return "pass";
+  return requireMonitorReady ? "block" : "advisory";
+}
+
+/**
+ * Outcome returned by applyStayAwayGateDecision.
+ *
+ * "block"    — coin was added to filteredByNewGuards; caller must push a SKIP
+ *              result and `continue` (skip Phase 4 entirely for this coin).
+ * "advisory" — stay_away but gate is in advisory mode; no guard state mutated.
+ * "pass"     — no stay_away condition; proceed to the next Phase-3 check.
+ */
+export type StayAwayGateOutcome =
+  | { action: "block"; reason: string }
+  | { action: "advisory" }
+  | { action: "pass" };
+
+/**
+ * Guard 7b application layer: evaluates the STAY_AWAY signal and, when the
+ * outcome is "block", immediately adds `sym` to `filteredByNewGuards` so
+ * Phase 4 cannot independently place an order for this coin.
+ *
+ * Separating the side-effect (Set mutation) from pure logic
+ * (checkWindowMonitorStayAwayGuard) lets unit tests inject a mocked signal
+ * and assert both the returned outcome and the Set mutation without needing
+ * to run the full bot loop or any I/O dependencies.
+ */
+export function applyStayAwayGateDecision(
+  sym: string,
+  signal: { ready: boolean; recommendation: string } | null,
+  monitorRequired: boolean,
+  filteredByNewGuards: Set<string>,
+): StayAwayGateOutcome {
+  const verdict = checkWindowMonitorStayAwayGuard(signal, monitorRequired);
+  if (verdict === "block") {
+    filteredByNewGuards.add(sym);
+    return {
+      action: "block",
+      reason: "window_monitor_stay_away — predictor STAY AWAY badge active; skipping entry",
+    };
+  }
+  if (verdict === "advisory") return { action: "advisory" };
+  return { action: "pass" };
+}
+
+/**
  * Guard 8 (live-only): Total open-exposure cap.
  *
  * Returns true (blocked) when adding this bet would push the total open dollar

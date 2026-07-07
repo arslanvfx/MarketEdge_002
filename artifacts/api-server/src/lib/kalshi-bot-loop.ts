@@ -4,8 +4,8 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm
 import { logger } from "./logger";
 import {
   checkMaxBetSizeGuard, checkDailyLossGuard, checkStreakPauseGuard,
-  checkSlippageStrikeGuard, checkWindowMonitorReadyGuard, checkBalanceGuard,
-  checkExposureGuard, applyDailyLossUpdate, applyStreakUpdate,
+  checkSlippageStrikeGuard, checkWindowMonitorReadyGuard, applyStayAwayGateDecision,
+  checkBalanceGuard, checkExposureGuard, applyDailyLossUpdate, applyStreakUpdate,
   checkDuplicatePositionGuard, checkManualPositionExistsGuard, checkManualSourceGuard,
 } from "./kalshi-bot-guards";
 import {
@@ -818,27 +818,27 @@ export async function runBotLoopTick(): Promise<void> {
     }
 
     // Window Monitor STAY_AWAY gate: mirrors the predictor page's STAY AWAY badge.
-    // Behaviour mirrors the readiness gate: when requireMonitorReady=true (required
-    // mode) this is a hard block added to filteredByNewGuards; when false (advisory
-    // mode) it logs a warning but does not prevent entry.
-    // Unlike the readiness gate (which defers to the next tick), STAY_AWAY is a
-    // full-window block — the monitor signal is stable and won't improve mid-window.
+    // applyStayAwayGateDecision handles both the verdict and the filteredByNewGuards
+    // mutation atomically, so Phase 4 cannot independently bet this coin.
+    // When requireMonitorReady=true: hard block (full-window, not per-tick defer).
+    // When requireMonitorReady=false: advisory log only, entry proceeds.
     {
-      const _wmStayAway = getWindowBetSignal(sym);
-      if (_wmStayAway?.ready && _wmStayAway.recommendation === "stay_away") {
-        const monitorRequired = S.config.requireMonitorReady ?? true;
-        if (monitorRequired) {
-          filteredByNewGuards.add(sym);
-          evalResults.push({
-            symbol: sym, action: "SKIP", confidence: 0, score: 0,
-            reason: "window_monitor_stay_away — predictor STAY AWAY badge active; skipping entry",
-            windowKey, selected: false, evaluatedAt: now, trendStability: null, regime,
-          });
-          continue;
-        } else {
-          logger.debug({ sym, windowKey },
-            "[kalshi-bot] window monitor STAY_AWAY advisory (requireMonitorReady=false) — proceeding");
-        }
+      const _stayAway = applyStayAwayGateDecision(
+        sym,
+        getWindowBetSignal(sym),
+        S.config.requireMonitorReady ?? true,
+        filteredByNewGuards,
+      );
+      if (_stayAway.action === "block") {
+        evalResults.push({
+          symbol: sym, action: "SKIP", confidence: 0, score: 0,
+          reason: _stayAway.reason,
+          windowKey, selected: false, evaluatedAt: now, trendStability: null, regime,
+        });
+        continue;
+      } else if (_stayAway.action === "advisory") {
+        logger.debug({ sym, windowKey },
+          "[kalshi-bot] window monitor STAY_AWAY advisory (requireMonitorReady=false) — proceeding");
       }
     }
 
