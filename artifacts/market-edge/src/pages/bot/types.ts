@@ -244,6 +244,20 @@ export interface PipelineResult {
   isRecheck: boolean;
 }
 
+export type PipelinePhase =
+  | "waiting-target"
+  | "fetching-data"
+  | "claude-analyzing"
+  | "ml-analyzing"
+  | "ready";
+
+export interface InFlightEntry {
+  sym: string;
+  windowKey: string;
+  isRecheck: boolean;
+  phase: PipelinePhase;
+}
+
 export interface CoinGuardEntry {
   symbol: string;
   dailyLoss: number;

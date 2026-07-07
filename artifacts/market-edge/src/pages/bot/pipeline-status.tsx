@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Brain, CheckCircle2, Clock, Loader2, ChevronDown, ChevronUp, ArrowUp, ArrowDown, Minus } from "lucide-react";
-import type { PipelineResult } from "./types";
+import { Brain, CheckCircle2, Clock, Loader2, ChevronDown, ChevronUp, ArrowUp, ArrowDown, Search, Cpu, Zap } from "lucide-react";
+import type { PipelineResult, InFlightEntry, PipelinePhase } from "./types";
 import { wkToEst } from "./utils";
 
 interface PipelineStatusPanelProps {
   results: PipelineResult[];
-  inFlightSyms: string[];
+  inFlight: InFlightEntry[];
 }
 
 function SignalDot({ above, confidence }: { above: boolean | null; confidence: number | null }) {
@@ -27,11 +27,64 @@ function LatencyBadge({ ms }: { ms: number }) {
   return <span className={`font-mono text-xs ${color}`}>{ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`}</span>;
 }
 
-export function PipelineStatusPanel({ results, inFlightSyms }: PipelineStatusPanelProps) {
+function PhaseLabel({ phase }: { phase: PipelinePhase }) {
+  switch (phase) {
+    case "waiting-target":
+      return (
+        <span className="flex items-center gap-1 text-amber-400">
+          <Clock className="w-3 h-3 animate-pulse" />
+          Waiting for strike…
+        </span>
+      );
+    case "fetching-data":
+      return (
+        <span className="flex items-center gap-1 text-amber-400">
+          <Search className="w-3 h-3 animate-spin" />
+          Fetching data…
+        </span>
+      );
+    case "claude-analyzing":
+      return (
+        <span className="flex items-center gap-1 text-violet-400">
+          <Brain className="w-3 h-3 animate-pulse" />
+          Claude thinking…
+        </span>
+      );
+    case "ml-analyzing":
+      return (
+        <span className="flex items-center gap-1 text-blue-400">
+          <Cpu className="w-3 h-3 animate-spin" />
+          ML predicting…
+        </span>
+      );
+    case "ready":
+      return (
+        <span className="flex items-center gap-1 text-emerald-400">
+          <CheckCircle2 className="w-3 h-3" />
+          Ready
+        </span>
+      );
+  }
+}
+
+export function PipelineStatusPanel({ results, inFlight }: PipelineStatusPanelProps) {
   const [open, setOpen] = useState(true);
 
-  const allReady = inFlightSyms.length === 0 && results.length > 0;
-  const anyInFlight = inFlightSyms.length > 0;
+  const inFlightSyms = inFlight.map(e => e.sym);
+  const allReady = inFlight.length === 0 && results.length > 0;
+  const anyInFlight = inFlight.length > 0;
+
+  // Show which phase most coins are waiting on for the header label
+  const waitingForTarget = inFlight.filter(e => e.phase === "waiting-target");
+  const claudeThinking = inFlight.filter(e => e.phase === "claude-analyzing");
+
+  const headerLabel = waitingForTarget.length > 0
+    ? `Waiting for Kalshi strike… (${waitingForTarget.map(e => e.sym).join(", ")})`
+    : claudeThinking.length > 0
+    ? `Claude analyzing… (${claudeThinking.map(e => e.sym).join(", ")})`
+    : anyInFlight
+    ? `Analyzing… (${inFlightSyms.join(", ")})`
+    : null;
 
   const headerColor = anyInFlight
     ? "text-amber-400"
@@ -39,10 +92,12 @@ export function PipelineStatusPanel({ results, inFlightSyms }: PipelineStatusPan
     ? "text-emerald-400"
     : "text-muted-foreground";
 
-  const HeaderIcon = anyInFlight ? Loader2 : allReady ? CheckCircle2 : Brain;
-  const headerIconClass = anyInFlight ? "animate-spin" : "";
+  const HeaderIcon = anyInFlight
+    ? (waitingForTarget.length > 0 ? Clock : claudeThinking.length > 0 ? Brain : Loader2)
+    : allReady ? CheckCircle2 : Brain;
+  const headerIconClass = anyInFlight ? "animate-pulse" : "";
 
-  const windowKey = results[0]?.windowKey ?? null;
+  const windowKey = results[0]?.windowKey ?? inFlight[0]?.windowKey ?? null;
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -58,13 +113,14 @@ export function PipelineStatusPanel({ results, inFlightSyms }: PipelineStatusPan
               window {wkToEst(windowKey)} ET
             </span>
           )}
-          {anyInFlight && (
+          {headerLabel && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30 animate-pulse">
-              Awaiting Claude… ({inFlightSyms.join(", ")})
+              {headerLabel}
             </span>
           )}
           {allReady && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <Zap className="w-3 h-3 inline mr-1" />
               Pipeline ready ✓
             </span>
           )}
@@ -77,9 +133,9 @@ export function PipelineStatusPanel({ results, inFlightSyms }: PipelineStatusPan
 
       {open && (
         <div className="px-5 pb-4 pt-1">
-          {results.length === 0 && inFlightSyms.length === 0 ? (
+          {results.length === 0 && inFlight.length === 0 ? (
             <p className="text-xs text-muted-foreground py-2">
-              Pipeline runs at window open. Results will appear here once the first coin completes.
+              Pipeline runs at window open. Waits for Kalshi to publish the new strike before analyzing.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -98,16 +154,14 @@ export function PipelineStatusPanel({ results, inFlightSyms }: PipelineStatusPan
                 </thead>
                 <tbody>
                   {results.map(r => {
-                    const isInFlight = inFlightSyms.includes(r.sym);
+                    const entry = inFlight.find(e => e.sym === r.sym);
+                    const isRechecking = !!entry?.isRecheck;
                     return (
                       <tr key={r.sym} className="border-b border-border/50 last:border-0">
                         <td className="py-2 pr-3 font-bold text-foreground">{r.sym}</td>
                         <td className="py-2 pr-3">
-                          {isInFlight ? (
-                            <span className="flex items-center gap-1 text-amber-400">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              Re-checking
-                            </span>
+                          {isRechecking ? (
+                            <PhaseLabel phase={entry!.phase} />
                           ) : (
                             <span className="flex items-center gap-1 text-emerald-400">
                               <CheckCircle2 className="w-3 h-3" />
@@ -140,16 +194,13 @@ export function PipelineStatusPanel({ results, inFlightSyms }: PipelineStatusPan
                       </tr>
                     );
                   })}
-                  {inFlightSyms
-                    .filter(sym => !results.some(r => r.sym === sym))
-                    .map(sym => (
-                      <tr key={`inflight-${sym}`} className="border-b border-border/50 last:border-0 opacity-60">
-                        <td className="py-2 pr-3 font-bold text-foreground">{sym}</td>
+                  {inFlight
+                    .filter(e => !results.some(r => r.sym === e.sym))
+                    .map(entry => (
+                      <tr key={`inflight-${entry.sym}`} className="border-b border-border/50 last:border-0 opacity-70">
+                        <td className="py-2 pr-3 font-bold text-foreground">{entry.sym}</td>
                         <td className="py-2 pr-3" colSpan={7}>
-                          <span className="flex items-center gap-1 text-amber-400">
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            Awaiting Claude…
-                          </span>
+                          <PhaseLabel phase={entry.phase} />
                         </td>
                       </tr>
                     ))}

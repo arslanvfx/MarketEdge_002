@@ -202,7 +202,7 @@ export default function BotDashboard() {
     refetchInterval: 10_000,
   });
 
-  const { data: pipelineStatusData } = useQuery<{ results: PipelineResult[]; inFlightSyms: string[] }>({
+  const { data: pipelineStatusData } = useQuery<{ results: PipelineResult[]; inFlight: import("./bot/types").InFlightEntry[]; inFlightSyms: string[] }>({
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
     refetchInterval: 5_000,
@@ -498,7 +498,7 @@ export default function BotDashboard() {
         />
         <PipelineStatusPanel
           results={pipelineStatusData?.results ?? []}
-          inFlightSyms={pipelineStatusData?.inFlightSyms ?? []}
+          inFlight={pipelineStatusData?.inFlight ?? []}
         />
         <ActivePositions
           openPosList={openPosList}

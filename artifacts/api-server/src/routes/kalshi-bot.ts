@@ -29,7 +29,7 @@ import {
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
-import { getAllPipelineResults, getInFlightEntries } from "../lib/kalshi-bot-pipeline";
+import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pipeline";
 import { db, botConfigTable, kalshiBotBetsTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -87,14 +87,14 @@ function requireAuth(req: any, res: any, next: any) {
 function pipelineStatusHandler(_req: any, res: any) {
   try {
     const allResults = getAllPipelineResults();
-    const inFlightEntries = getInFlightEntries();
+    const inFlightDetails = getInFlightDetails();
 
     // Determine current window from BOTH completed results and in-flight entries
     // so we correctly identify the window even when all results were pruned and
     // only in-flight entries remain (transition edge case).
     const allWindowKeys = [
       ...allResults.map(r => r.windowKey),
-      ...inFlightEntries.map(e => e.windowKey),
+      ...inFlightDetails.map(e => e.windowKey),
     ];
     const currentWindowKey = allWindowKeys.length > 0
       ? allWindowKeys.reduce((best, wk) => (wk > best ? wk : best), allWindowKeys[0])
@@ -104,11 +104,14 @@ function pipelineStatusHandler(_req: any, res: any) {
     const results = currentWindowKey
       ? allResults.filter(r => r.windowKey === currentWindowKey)
       : allResults;
-    const inFlightSyms = currentWindowKey
-      ? inFlightEntries.filter(e => e.windowKey === currentWindowKey).map(e => e.sym)
-      : inFlightEntries.map(e => e.sym);
+    const inFlight = currentWindowKey
+      ? inFlightDetails.filter(e => e.windowKey === currentWindowKey)
+      : inFlightDetails;
 
-    res.json({ results, inFlightSyms, windowKey: currentWindowKey });
+    // Legacy field for any consumers that haven't updated yet
+    const inFlightSyms = inFlight.map(e => e.sym);
+
+    res.json({ results, inFlight, inFlightSyms, windowKey: currentWindowKey });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

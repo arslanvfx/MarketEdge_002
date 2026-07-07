@@ -2,7 +2,11 @@
 // kalshi-bot-pipeline.ts — per-coin sequential signal pipeline
 // ---------------------------------------------------------------------------
 // At window-open, this pipeline runs sequentially for each confirmed coin:
-//   Kalshi target → stat analysis → Claude (rich prompt + explicit close time) → ML
+//   Wait for fresh Kalshi target → stat analysis → Claude (extended thinking)
+//   → ML (using Claude's verdict as a feature)
+//
+// Step 1 BLOCKS until Kalshi publishes the new window's market (10-30s).
+// No analysis runs against a stale/previous-window target.
 //
 // Results are tagged to the current windowKey (not a wall-clock TTL).
 // The bot tick gate checks getPipelineResult(sym, windowKey):
@@ -20,9 +24,8 @@ import {
   CRYPTO_COINS,
   getCandles, getStats, getTicker,
   analyzeCoin,
-  getKalshiCachedData, getKalshiWindowContext,
+  getKalshiCachedData, fetchKalshiTarget, getKalshiWindowContext,
   getCachedPrediction,
-  getStatWindowCall,
   liveDirectionCache,
   type CoinDef,
   type CoinPrediction,
@@ -50,6 +53,13 @@ export interface PipelineResult {
   isRecheck: boolean;
 }
 
+export type PipelinePhase =
+  | "waiting-target"
+  | "fetching-data"
+  | "claude-analyzing"
+  | "ml-analyzing"
+  | "ready";
+
 // ---------------------------------------------------------------------------
 // Module-level state
 // ---------------------------------------------------------------------------
@@ -61,6 +71,9 @@ const pipelineResults = new Map<string, PipelineResult>();
 // Re-checks use a separate key (`${sym}:${windowKey}:recheck`) so they don't
 // block the initial pipeline and vice versa.
 const pipelineInFlight = new Set<string>();
+
+// Tracks the current execution phase for each in-flight coin (for status display).
+const pipelinePhaseMap = new Map<string, PipelinePhase>();
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -82,28 +95,37 @@ export function isPipelineInFlight(sym: string, windowKey: string): boolean {
 }
 
 /**
- * Return all currently in-flight entries by reading the pipelineInFlight Set
- * directly.  Keys are `SYM:YYYY-MM-DDTHH:MM` (initial) or
- * `SYM:YYYY-MM-DDTHH:MM:recheck`.  We parse sym and windowKey from each key.
- * This correctly captures coins that are mid-pipeline with no result row yet
- * (prior-window results are pruned at window-open before the new run completes).
+ * Return all currently in-flight entries with their current phase.
+ * Keys are `SYM:YYYY-MM-DDTHH:MM` (initial) or `SYM:YYYY-MM-DDTHH:MM:recheck`.
  */
-export function getInFlightEntries(): Array<{ sym: string; windowKey: string; isRecheck: boolean }> {
-  const entries: Array<{ sym: string; windowKey: string; isRecheck: boolean }> = [];
+export function getInFlightDetails(): Array<{
+  sym: string;
+  windowKey: string;
+  isRecheck: boolean;
+  phase: PipelinePhase;
+}> {
+  const entries: Array<{ sym: string; windowKey: string; isRecheck: boolean; phase: PipelinePhase }> = [];
   for (const key of pipelineInFlight) {
-    // Format: SYM:YYYY-MM-DDTHH:MM  or  SYM:YYYY-MM-DDTHH:MM:recheck
-    // windowKey itself contains a colon (T separator), so split on the first ":" only for sym,
-    // then reconstruct windowKey from the middle segments.
     const parts = key.split(":");
-    if (parts.length < 3) continue; // SYM:YYYY-MM-DDTHH:MM → minimum 3 parts after split
+    if (parts.length < 3) continue;
     const sym = parts[0];
     const isRecheck = parts[parts.length - 1] === "recheck";
-    // windowKey is everything between sym and optional ":recheck"
     const wkParts = isRecheck ? parts.slice(1, -1) : parts.slice(1);
     const windowKey = wkParts.join(":");
-    if (sym && windowKey) entries.push({ sym, windowKey, isRecheck });
+    if (sym && windowKey) {
+      const phase = pipelinePhaseMap.get(`${sym}:${windowKey}`) ?? "waiting-target";
+      entries.push({ sym, windowKey, isRecheck, phase });
+    }
   }
   return entries;
+}
+
+/**
+ * Legacy accessor — returns just the sym list for the current window.
+ * Kept for backward compat; prefer getInFlightDetails() for phase info.
+ */
+export function getInFlightEntries(): Array<{ sym: string; windowKey: string; isRecheck: boolean }> {
+  return getInFlightDetails();
 }
 
 /**
@@ -124,10 +146,19 @@ export function triggerWindowPipeline(sym: string, windowKey: string): void {
       pipelineResults.delete(existingKey);
     }
   }
+  // Prune stale phase entries for this coin
+  for (const phaseKey of pipelinePhaseMap.keys()) {
+    if (phaseKey.startsWith(`${symUp}:`) && phaseKey !== key) {
+      pipelinePhaseMap.delete(phaseKey);
+    }
+  }
 
   pipelineInFlight.add(key);
   _runPipeline(symUp, windowKey, false)
-    .finally(() => pipelineInFlight.delete(key));
+    .finally(() => {
+      pipelineInFlight.delete(key);
+      pipelinePhaseMap.delete(`${symUp}:${windowKey}`);
+    });
 }
 
 /**
@@ -151,6 +182,61 @@ export async function runPipelineRecheck(
 }
 
 // ---------------------------------------------------------------------------
+// Fresh-target polling
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll fetchKalshiTarget(sym, windowCloseDate) until Kalshi publishes the new
+ * window's market — one whose close_time is within 8 min of windowCloseMs.
+ *
+ * fetchKalshiTarget with a targetTime skips the in-memory cache and always
+ * makes a live API call, then validates close_time proximity. Returns null
+ * only if the window's market has not been published within maxWaitMs.
+ *
+ * On success the kalshiTargetCache is updated by fetchKalshiTarget internally,
+ * so getKalshiCachedData(sym) immediately reflects the fresh target.
+ */
+async function waitForFreshKalshiTarget(
+  sym: string,
+  windowKey: string,
+  windowCloseMs: number,
+  maxWaitMs: number,
+): Promise<number | null> {
+  const windowCloseDate = new Date(windowCloseMs);
+  const deadline = Date.now() + maxWaitMs;
+  let attempt = 0;
+
+  while (Date.now() < deadline) {
+    attempt++;
+    try {
+      const target = await fetchKalshiTarget(sym, windowCloseDate);
+      if (target != null) {
+        const kd = getKalshiCachedData(sym);
+        logger.info(
+          { sym, windowKey, target, ticker: kd?.ticker, attempt },
+          "[pipeline] fresh Kalshi target confirmed",
+        );
+        return target;
+      }
+    } catch {
+      // non-fatal, will retry
+    }
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+
+    logger.debug(
+      { sym, windowKey, attempt, remainingMs: Math.round(remaining) },
+      "[pipeline] Kalshi target not yet published — retrying in 5s",
+    );
+    await new Promise<void>(r => setTimeout(r, 5_000));
+  }
+
+  logger.warn({ sym, windowKey, attempts: attempt }, "[pipeline] timed out waiting for fresh Kalshi target");
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Internal pipeline runner
 // ---------------------------------------------------------------------------
 
@@ -162,19 +248,31 @@ async function _runPipeline(
   const coin = CRYPTO_COINS.find(c => c.symbol === sym);
   if (!coin) return null;
 
-  // ── Step 1: Kalshi target ────────────────────────────────────────────────
-  const kd = getKalshiCachedData(sym);
-  const kalshiTarget = kd?.value ?? null;
+  // ── Step 1: Ensure fresh Kalshi target for THIS window ───────────────────
+  // Re-checks are mid-window — the market is already confirmed and the target
+  // is stable. Only the initial run needs to wait for the new window's market.
+  // fetchKalshiTarget(sym, windowCloseDate) validates close_time proximity,
+  // bypasses the cache, and always makes a live API call.
+  const windowCloseMs = new Date(`${windowKey}:00.000Z`).getTime() + 15 * 60_000;
+
+  let kalshiTarget: number | null;
+  if (isRecheck) {
+    kalshiTarget = getKalshiCachedData(sym)?.value ?? null;
+  } else {
+    pipelinePhaseMap.set(`${sym}:${windowKey}`, "waiting-target");
+    kalshiTarget = await waitForFreshKalshiTarget(sym, windowKey, windowCloseMs, 90_000);
+  }
+
   if (kalshiTarget == null) {
-    logger.debug({ sym, windowKey }, "[pipeline] no Kalshi target — aborting");
+    logger.warn({ sym, windowKey, isRecheck }, "[pipeline] no Kalshi target — aborting");
     return null;
   }
 
-  // ── Step 2: Stat signal — computed directly from live market data ─────────
-  // Stat is pure math (price vs strike, candle indicators) — no AI involved,
-  // resolves in milliseconds.  We fetch live data here and call analyzeCoin
-  // directly rather than waiting for the tracker's historyStore snap (~T+30-60s),
-  // which would always be null when the pipeline runs at window-open.
+  // ── Step 2: Fetch live market data ───────────────────────────────────────
+  // Stat is pure math — resolves in milliseconds. We fetch live data directly
+  // so the pipeline doesn't wait for the tracker's historyStore snap (~T+30-60s).
+  if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "fetching-data");
+
   const pred = getCachedPrediction(sym);
   const [candles, stats, tickerPrice] = await Promise.all([
     getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
@@ -184,23 +282,22 @@ async function _runPipeline(
   const livePrice = tickerPrice > 0 ? tickerPrice : (pred?.price ?? 0);
 
   let statAbove: boolean | null = null;
-  let statConfidence: number | null = null;
+  const statConfidence: number | null = null; // stat is a binary price-vs-strike signal; no model confidence score
   if (livePrice > 0) {
     statAbove = livePrice >= kalshiTarget;
-    if (candles.length >= 10 && stats != null) {
-      const analysis = analyzeCoin(
-        coin, candles, stats, new Date(), livePrice,
-      );
-      statConfidence = analysis?.confidence ?? null;
-    }
   }
 
-  // ── Step 3: Claude — rich prompt with explicit window close timestamp ─────
+  // ── Step 3: Claude — extended thinking with full context ─────────────────
+  // Claude receives the confirmed new-window target, full indicator set, and
+  // stat signal. Extended thinking (budget 8000 tokens) gives Claude the
+  // reasoning depth needed for a proper directional judgment.
+  // This is gated on the crypto_live_dir AI feature flag.
   let claudeAbove: boolean | null = null;
   let claudeConfidence: number | null = null;
   let claudeCallMs = 0;
 
   if (isAiFeatureEnabled("crypto_live_dir")) {
+    if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "claude-analyzing");
     try {
       const claudeResult = await _callPipelineClaude(
         sym, coin, kalshiTarget, windowKey,
@@ -232,19 +329,15 @@ async function _runPipeline(
   }
 
   // ── Step 4: ML prediction — initial pipeline only ────────────────────────
-  // Re-checks are limited to stat + Claude (the two signals that can meaningfully
-  // shift mid-window based on fresh market data).  ML is trained once per window
-  // at snap time and does not benefit from re-calling at minute 5 or 7 — its
-  // feature vector is dominated by time-invariant window-open indicators.
-  // Including ML in re-check exit consensus would create a risk-sensitive path
-  // where the ML signal (unchanged from window-open) can override a Claude flip.
+  // Re-checks are limited to stat + Claude. ML is trained once per window at
+  // snap time and does not benefit from re-calling mid-window.
   let mlAbove: boolean | null = null;
   let mlConfidence: number | null = null;
   if (!isRecheck) {
+    pipelinePhaseMap.set(`${sym}:${windowKey}`, "ml-analyzing");
     if (pred && kalshiTarget != null) {
       try {
         const winCtx = getKalshiWindowContext(sym);
-        // windowKey is "YYYY-MM-DDTHH:MM" — parse as UTC window start
         const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
         const elapsedFraction = Math.min((Date.now() - windowStartMs) / (15 * 60_000), 1);
         const features = extractMLFeatures(
@@ -272,8 +365,6 @@ async function _runPipeline(
     claudeCallMs, isRecheck,
   };
 
-  // Both initial and re-check overwrite the main key so subsequent ticks always
-  // see the freshest signals for this window.
   pipelineResults.set(`${sym}:${windowKey}`, result);
 
   logger.info(
@@ -284,7 +375,7 @@ async function _runPipeline(
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline-specific Claude call
+// Pipeline-specific Claude call — extended thinking
 // ---------------------------------------------------------------------------
 
 async function _callPipelineClaude(
@@ -301,7 +392,6 @@ async function _callPipelineClaude(
 ): Promise<{ aboveKalshi: boolean | null; confidence: number; callMs: number }> {
   if (livePrice === 0) throw new Error("no live price available");
 
-  // Exact window close time — windowKey is "YYYY-MM-DDTHH:MM" UTC
   const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
   const windowCloseMs = windowStartMs + 15 * 60_000;
   const windowCloseDate = new Date(windowCloseMs);
@@ -312,10 +402,8 @@ async function _callPipelineClaude(
   }) + " ET";
   const minutesRemaining = Math.max(0, (windowCloseMs - Date.now()) / 60_000);
 
-  // Decimal places: 2 for BTC/ETH (≥100), 4 for mid-range, 6 for small coins
   const dp = livePrice >= 100 ? 2 : livePrice >= 1 ? 4 : 6;
 
-  // Use indicators from candles already fetched in Step 2 (no re-fetch needed)
   const freshAnalysis = candles.length >= 10 && stats != null
     ? analyzeCoin(coin, candles, stats, new Date(), livePrice)
     : null;
@@ -335,6 +423,9 @@ async function _callPipelineClaude(
   const volStr = recent20.length > 0
     ? `Vol range: ${Math.min(...recent20.map(c => c.v)).toFixed(0)}–${Math.max(...recent20.map(c => c.v)).toFixed(0)}`
     : "";
+  const topVol = recent20.length > 0
+    ? [...recent20].sort((a, b) => b.v - a.v)[0]
+    : null;
 
   const winCtx = getKalshiWindowContext(sym);
   let trajectoryNote = "";
@@ -347,13 +438,14 @@ async function _callPipelineClaude(
 
   const statNote = statAbove !== null
     ? `Stat model: ${statAbove ? "ABOVE" : "BELOW"} strike${statConfidence != null ? ` (${statConfidence.toFixed(0)}% conf)` : ""}`
-    : "Stat model: not yet snapped";
+    : "Stat model: not yet available";
 
   const lines = [
-    `${sym} — Kalshi 15-min window`,
-    `Strike: $${kalshiTarget.toFixed(dp)} | Window closes: ${windowCloseUTC} (${windowCloseET}) | ${minutesRemaining.toFixed(1)} min remaining`,
+    `${sym} — Kalshi 15-min binary market`,
+    `CONFIRMED strike (new window): $${kalshiTarget.toFixed(dp)}`,
+    `Window closes: ${windowCloseUTC} (${windowCloseET}) | ${minutesRemaining.toFixed(1)} min remaining`,
     trajectoryNote,
-    `Current price: $${livePrice.toFixed(dp)} — ${gapPct.toFixed(3)}% ${currentSide} strike`,
+    `Current live price: $${livePrice.toFixed(dp)} — ${gapPct.toFixed(3)}% ${currentSide} strike`,
     ind
       ? `RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bullish" : "bearish"} | BB%B ${ind.bbPctB.toFixed(0)}%` +
         ` | Trend: ${ind.trend} (strength ${Math.round(ind.trendStrength * 100)}%) | ER ${ind.efficiencyRatio.toFixed(2)} (${regime})`
@@ -365,6 +457,7 @@ async function _callPipelineClaude(
       : "",
     `Last 20 1-min closes: ${closesStr}`,
     volStr,
+    topVol ? `Highest-volume candle close: $${topVol.c.toFixed(dp)} (${topVol.v.toFixed(0)} units)` : "",
     statNote,
     ``,
     `Question: Will ${sym} close ABOVE or BELOW $${kalshiTarget.toFixed(dp)} at exactly ${windowCloseUTC}?`,
@@ -373,20 +466,25 @@ async function _callPipelineClaude(
 
   const t0 = Date.now();
 
-  // 60-second timeout so the pipeline never hangs indefinitely
+  // Extended thinking gives Claude full reasoning depth before committing to
+  // a direction. Budget 8000 tokens lets Claude properly weigh momentum,
+  // proximity, regime, and indicator context before outputting the JSON.
   const response = await Promise.race([
     anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 60,
-      system: "You are a short-term crypto price analyst. Analyze the data and return ONLY compact JSON: {\"above\":true,\"confidence\":70}. 'above' is true if price will be AT OR ABOVE the Kalshi strike at window close, false if below. No markdown, no prose, no explanation.",
+      max_tokens: 12000,
+      thinking: { type: "enabled", budget_tokens: 8000 },
+      system: "You are a short-term crypto price analyst making a binary ABOVE/BELOW prediction for a Kalshi 15-min market. Use your thinking to thoroughly analyze price momentum, technical indicators, distance from the strike, regime, and time remaining. After your analysis, output ONLY this JSON in your response: {\"above\":true,\"confidence\":70}. The 'above' field is true if the price will be AT OR ABOVE the strike at window close, false if below. Confidence must be 50-90. No markdown, no prose, no explanation outside the JSON.",
       messages: [{ role: "user", content: lines }],
     } as Parameters<typeof anthropic.messages.create>[0]),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Claude pipeline timeout (60s)")), 60_000),
+      setTimeout(() => reject(new Error("Claude pipeline timeout (120s)")), 120_000),
     ),
   ]);
 
   const callMs = Date.now() - t0;
+  // Extended thinking responses include both "thinking" and "text" content blocks.
+  // Parse only the text block for the JSON verdict.
   const raw = (response as { content: Array<{ type: string; text?: string }> }).content
     .filter(b => b.type === "text")
     .map(b => b.text ?? "")
@@ -397,13 +495,12 @@ async function _callPipelineClaude(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    // Attempt to extract JSON from prose if Claude added surrounding text
     const match = raw.match(/\{[^}]+\}/);
     if (match) parsed = JSON.parse(match[0]);
-    else throw new Error(`Claude returned non-JSON: ${raw.slice(0, 100)}`);
+    else throw new Error(`Claude returned non-JSON: ${raw.slice(0, 200)}`);
   }
 
-  const confidence = Math.min(90, Math.max(20, parsed.confidence ?? 60));
+  const confidence = Math.min(90, Math.max(50, parsed.confidence ?? 60));
   const aboveKalshi = typeof parsed.above === "boolean" ? parsed.above : null;
   return { aboveKalshi, confidence, callMs };
 }
