@@ -648,3 +648,114 @@ test("stayAway/wiring: kalshi-bot-loop.ts delegates to applyStayAwayGateDecision
     "applyStayAwayGateDecision must receive getWindowBetSignal(sym), config.requireMonitorReady, and filteredByNewGuards",
   );
 });
+
+// ===========================================================================
+// Clock-derived timing guards — entry buffer, late-floor, window transition
+//
+// These wiring tests confirm that every timing gate in the Phase-3 loop uses
+// clockElapsedS (anchored to the official window-boundary timestamp) and NOT
+// winCtx.secondsElapsed (which is measured from when the Kalshi prefetch
+// completed — 20–40 s after the boundary — and would cause early-entry bugs).
+//
+// See: .agents/memory/bot-timing-clock-source.md
+// ===========================================================================
+
+test("timing/clockElapsedS: Phase-3 loop derives elapsed time from the window boundary key, not the prefetch", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // The authoritative clock formula must be present
+  assert.ok(
+    src.includes("(Date.now() - new Date(windowKey).getTime()) / 1000"),
+    "clockElapsedS must be computed as (Date.now() - new Date(windowKey).getTime()) / 1000 — " +
+    "using winCtx.secondsElapsed or Date.now() alone would anchor to the prefetch time, not the window boundary",
+  );
+  // Math.max(0, ...) guard against negative values on clock skew must be present
+  assert.ok(
+    src.includes("Math.max(0,") && src.includes("(Date.now() - new Date(windowKey).getTime())"),
+    "clockElapsedS must be clamped with Math.max(0, ...) to handle clock skew at window open",
+  );
+});
+
+test("timing/entryBuffer: Phase-3 loop gates entries using clockElapsedS, not secondsElapsed", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // Must use clockElapsedS for the buffer comparison — never raw winCtx.secondsElapsed
+  assert.ok(
+    src.includes("clockElapsedS < entryBufferS"),
+    "entry buffer must compare clockElapsedS against entryBufferS — using secondsElapsed would fire prematurely",
+  );
+  // The config override path must be present so freeRunMode bypasses it
+  assert.ok(
+    src.includes("S.config.freeRunMode") && src.includes("clockElapsedS < entryBufferS"),
+    "entry buffer check must be gated on !S.config.freeRunMode before comparing clockElapsedS",
+  );
+});
+
+test("timing/entryBuffer: reason string contains countdown and elapsed-vs-total format", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // The canonical reason format: "window buffer (Ns remaining — Xs of 120s elapsed)"
+  // This string must appear in the SKIP evalResult for pre-buffer ticks so the
+  // evaluation log shows a readable countdown.
+  assert.ok(
+    src.includes("window buffer (") &&
+    src.includes("s remaining \u2014") &&    // "—" em dash
+    src.includes("s of ") &&
+    src.includes("s elapsed)"),
+    "entry buffer SKIP reason must use format: 'window buffer (Ns remaining — Xs of <total>s elapsed)'",
+  );
+  // The remaining seconds must be Math.ceil (rounds up so 119.1s reads as 120, not 119)
+  assert.ok(
+    src.includes("Math.ceil(entryBufferS - clockElapsedS)"),
+    "remaining seconds must use Math.ceil so the countdown never shows 0 until the buffer actually expires",
+  );
+  // The elapsed seconds must be Math.floor (shows integer seconds, not fractional)
+  assert.ok(
+    src.includes("Math.floor(clockElapsedS)"),
+    "elapsed seconds in the reason string must use Math.floor for a clean integer display",
+  );
+});
+
+test("timing/maxEntryMinutes: entry ceiling also uses clockElapsedS", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  assert.ok(
+    src.includes("clockElapsedS > S.config.maxEntryMinutes * 60"),
+    "maxEntryMinutes ceiling check must compare clockElapsedS — not secondsElapsed — against the ceiling",
+  );
+  assert.ok(
+    src.includes("past entry ceiling (>") && src.includes("elapsed, clock="),
+    "maxEntryMinutes SKIP reason must include clock= to surface the clockElapsedS value in logs",
+  );
+});
+
+test("timing/minRemainingFloor: late-floor guard also uses clockElapsedS", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // The minRemainingMinutes guard must compute time-left from clockElapsedS (15*60 - clockElapsedS)
+  assert.ok(
+    src.includes("15 * 60 - clockElapsedS"),
+    "minRemainingMinutes floor must compute time-left as (15 * 60 - clockElapsedS) — " +
+    "using secondsElapsed would undercount elapsed time and let late bets slip through",
+  );
+  assert.ok(
+    src.includes("min remaining, clock=") && src.includes("s elapsed)"),
+    "min-remaining floor SKIP reason must include 'clock=' to surface clockElapsedS in logs",
+  );
+});
+
+test("timing/windowTransition: liveDirectionCache is cleared with a log message at each window boundary", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // The cache must be explicitly cleared so prior-window Claude verdicts can't
+  // contaminate the new window's signal path
+  assert.ok(
+    src.includes("liveDirectionCache.clear()"),
+    "liveDirectionCache must be cleared on window transition to prevent prior-window Claude verdicts from leaking",
+  );
+  // A structured log line must accompany the clear so production logs surface the event
+  assert.ok(
+    src.includes("[kalshi-bot] window transition: liveDirectionCache cleared"),
+    "window transition must emit '[kalshi-bot] window transition: liveDirectionCache cleared' so production log-scans can verify timing",
+  );
+  // The clear must happen inside the newWindowKey !== S.lastStabilityWindowKey guard
+  // (i.e., only once per window boundary, not every tick)
+  assert.ok(
+    src.includes("S.lastStabilityWindowKey") && src.includes("liveDirectionCache.clear()"),
+    "liveDirectionCache.clear() must be guarded by the window-key change check (S.lastStabilityWindowKey) — clearing every tick would break live-direction caching",
+  );
+});
