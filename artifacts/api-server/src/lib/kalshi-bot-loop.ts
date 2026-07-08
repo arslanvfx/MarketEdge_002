@@ -1104,9 +1104,33 @@ export async function runBotLoopTick(): Promise<void> {
     const closest = marks.reduce((p, m) => Math.abs(m - elapsedMin) < Math.abs(p - elapsedMin) ? m : p, marks[0]);
     const timingAcc = S.timingCache.get(`${sym}:${closest * 60}`) ?? S.timingCache.get(`ALL:${closest * 60}`) ?? null;
 
+    // ── Per-coin streak confidence penalty (applied at decision-call time) ─────
+    // Compute the raised minConfidence floor for this coin before calling
+    // makeBotDecision, so the decision engine directly returns SKIP when the
+    // signal confidence doesn't clear the streak-adjusted bar. This avoids a
+    // post-decision threshold check and ensures the engine reasoning string
+    // correctly reflects the raised floor. Exempt when freeRunMode.
+    let _streakPenaltyPp = 0;
+    if (!S.config.freeRunMode) {
+      const _seEntry = activeCoinStreakState().get(sym);
+      const _seConLosses = _seEntry?.consecutiveLosses ?? 0;
+      const _sePen1 = S.config.coinStreakPenalty1LossPp ?? 6;
+      const _sePen2 = S.config.coinStreakPenalty2PlusLossPp ?? 12;
+      _streakPenaltyPp = _seConLosses >= 2 ? _sePen2 : _seConLosses === 1 ? _sePen1 : 0;
+    }
+    const _decisionConfig = _streakPenaltyPp > 0
+      ? { ...S.config, minConfidence: S.config.minConfidence + _streakPenaltyPp }
+      : S.config;
+    if (_streakPenaltyPp > 0) {
+      logger.info(
+        { sym, penalty: _streakPenaltyPp, raisedFloor: _decisionConfig.minConfidence, windowKey },
+        `[kalshi-bot] streak penalty: minConf raised +${_streakPenaltyPp}pp to ${_decisionConfig.minConfidence}% before decision call`,
+      );
+    }
+
     // `let` so the auto-tune shadow path and WM relief can temporarily substitute
     // an alt-floor decision for gate evaluation (see below).
-    let decision = makeBotDecision(sym, S.config, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
+    let decision = makeBotDecision(sym, _decisionConfig, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
 
     // ── WM Caution Confidence Relief — threshold ease when WM is "caution" ───
     // When the window monitor is ready but says "caution" (choppy regime, not a
@@ -1224,33 +1248,9 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // ── Per-coin streak confidence penalty ────────────────────────────────────
-    // When a coin has consecutive losses but is NOT on full pause (above), raise
-    // the effective minConfidence floor by the penalty amount (applied at
-    // decision-call time, not as a deduction from effectiveConfidence, so that
-    // downstream gates retain the true signal quality). Exempt when freeRunMode.
-    if (decision.action !== "SKIP" && !S.config.freeRunMode) {
-      const _streakEnt = activeCoinStreakState().get(sym);
-      const _consLosses = _streakEnt?.consecutiveLosses ?? 0;
-      const _pen1 = S.config.coinStreakPenalty1LossPp ?? 6;
-      const _pen2 = S.config.coinStreakPenalty2PlusLossPp ?? 12;
-      const _streakPenaltyPp = _consLosses >= 2 ? _pen2 : _consLosses === 1 ? _pen1 : 0;
-      if (_streakPenaltyPp > 0) {
-        const _raisedFloor = S.config.minConfidence + _streakPenaltyPp;
-        logger.info(
-          { sym, consecutiveLosses: _consLosses, penalty: _streakPenaltyPp, confidence: decision.confidence, raisedFloor: _raisedFloor, windowKey },
-          `[kalshi-bot] streak penalty: ${_consLosses} loss${_consLosses === 1 ? "" : "es"} → minConf raised +${_streakPenaltyPp}pp to ${_raisedFloor}%`,
-        );
-        if (decision.confidence < _raisedFloor) {
-          evalResults.push({
-            symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
-            reason: `streak penalty — ${_consLosses} consecutive loss${_consLosses === 1 ? "" : "es"}: ${Math.round(decision.confidence)}% < raised floor ${_raisedFloor}% (base ${S.config.minConfidence}% + ${_streakPenaltyPp}pp)`,
-            windowKey, selected: false, evaluatedAt: now, trendStability: stability ?? null, regime,
-          });
-          continue;
-        }
-      }
-    }
+    // (Streak penalty was applied at makeBotDecision call-time above — no
+    // post-decision check needed here. If confidence was below the raised floor
+    // the engine already returned SKIP, which is caught by Phase-4 guards.)
 
     // ── Per-coin auto-tune pause (shadow probe) ───────────────────────────────
     // Fires after `decision` is computed so we can record a directional shadow
