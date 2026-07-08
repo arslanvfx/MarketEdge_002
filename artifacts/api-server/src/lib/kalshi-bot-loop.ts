@@ -1225,35 +1225,30 @@ export async function runBotLoopTick(): Promise<void> {
     }
 
     // ── Per-coin streak confidence penalty ────────────────────────────────────
-    // When a coin has consecutive losses but is NOT on full pause (above), apply
-    // a confidence penalty to raise the effective floor. Softens bets on "on notice"
-    // coins without fully blocking them. Exempt when freeRunMode.
+    // When a coin has consecutive losses but is NOT on full pause (above), raise
+    // the effective minConfidence floor by the penalty amount (applied at
+    // decision-call time, not as a deduction from effectiveConfidence, so that
+    // downstream gates retain the true signal quality). Exempt when freeRunMode.
     if (decision.action !== "SKIP" && !S.config.freeRunMode) {
       const _streakEnt = activeCoinStreakState().get(sym);
       const _consLosses = _streakEnt?.consecutiveLosses ?? 0;
       const _pen1 = S.config.coinStreakPenalty1LossPp ?? 6;
       const _pen2 = S.config.coinStreakPenalty2PlusLossPp ?? 12;
-      if (_consLosses >= 2 && _pen2 > 0) {
-        effectiveConfidence -= _pen2;
+      const _streakPenaltyPp = _consLosses >= 2 ? _pen2 : _consLosses === 1 ? _pen1 : 0;
+      if (_streakPenaltyPp > 0) {
+        const _raisedFloor = S.config.minConfidence + _streakPenaltyPp;
         logger.info(
-          { sym, consecutiveLosses: _consLosses, penalty: _pen2, effectiveConfidence, windowKey },
-          `[kalshi-bot] streak penalty: ${_consLosses} losses → −${_pen2}pp (effective ${effectiveConfidence}%)`,
+          { sym, consecutiveLosses: _consLosses, penalty: _streakPenaltyPp, confidence: decision.confidence, raisedFloor: _raisedFloor, windowKey },
+          `[kalshi-bot] streak penalty: ${_consLosses} loss${_consLosses === 1 ? "" : "es"} → minConf raised +${_streakPenaltyPp}pp to ${_raisedFloor}%`,
         );
-      } else if (_consLosses === 1 && _pen1 > 0) {
-        effectiveConfidence -= _pen1;
-        logger.info(
-          { sym, consecutiveLosses: _consLosses, penalty: _pen1, effectiveConfidence, windowKey },
-          `[kalshi-bot] streak penalty: 1 loss → −${_pen1}pp (effective ${effectiveConfidence}%)`,
-        );
-      }
-      // If streak penalty drops confidence below the base floor, skip now.
-      if (_consLosses > 0 && effectiveConfidence < S.config.minConfidence) {
-        evalResults.push({
-          symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
-          reason: `streak penalty — ${_consLosses} consecutive loss${_consLosses === 1 ? "" : "es"}: ${effectiveConfidence}% < ${S.config.minConfidence}% base floor`,
-          windowKey, selected: false, evaluatedAt: now, trendStability: stability ?? null, regime,
-        });
-        continue;
+        if (decision.confidence < _raisedFloor) {
+          evalResults.push({
+            symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
+            reason: `streak penalty — ${_consLosses} consecutive loss${_consLosses === 1 ? "" : "es"}: ${Math.round(decision.confidence)}% < raised floor ${_raisedFloor}% (base ${S.config.minConfidence}% + ${_streakPenaltyPp}pp)`,
+            windowKey, selected: false, evaluatedAt: now, trendStability: stability ?? null, regime,
+          });
+          continue;
+        }
       }
     }
 

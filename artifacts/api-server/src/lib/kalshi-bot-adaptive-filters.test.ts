@@ -76,29 +76,43 @@ test("streak penalty: DEFAULT_BOT_CONFIG unanimousMinModelConfidence defaults to
 
 // Simulate the streak-penalty confidence reduction applied in the loop:
 // effectiveConfidence = baseConf - penalty; skip when below minConfidence.
-test("streak penalty: 1 consecutive loss reduces effective confidence by 6pp", () => {
+// The streak penalty raises minConfidence (the threshold), NOT reduces decision.confidence.
+// A bet fires only when: decision.confidence >= minConfidence + streakPenalty
+
+test("streak penalty: 1 consecutive loss raises the required floor by 6pp — blocks a borderline bet", () => {
   const minConf = 60;
   const pen1 = DEFAULT_BOT_CONFIG.coinStreakPenalty1LossPp!; // 6
-  const baseConf = 65;
-  const effective = baseConf - pen1; // 59
-  assert.ok(effective < minConf, "effective confidence should fall below minConfidence after 1-loss penalty");
+  const raisedFloor = minConf + pen1; // 66
+  // A decision.confidence of 64% would pass the base floor (64 ≥ 60) but fail
+  // the raised floor (64 < 66), so the bet is skipped.
+  const decisionConf = 64;
+  assert.ok(decisionConf >= minConf, "base floor: decision would be allowed without streak");
+  assert.ok(decisionConf < raisedFloor, "raised floor: decision should be blocked by 1-loss streak penalty");
 });
 
-test("streak penalty: 2+ consecutive losses reduces effective confidence by 12pp", () => {
+test("streak penalty: 2+ consecutive losses raises the required floor by 12pp — blocks a borderline bet", () => {
   const minConf = 60;
   const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!; // 12
-  const baseConf = 70;
-  const effective = baseConf - pen2; // 58
-  assert.ok(effective < minConf, "effective confidence should fall below minConfidence after 2+-loss penalty");
+  const raisedFloor = minConf + pen2; // 72
+  const decisionConf = 70;
+  assert.ok(decisionConf >= minConf, "base floor: decision would be allowed without streak");
+  assert.ok(decisionConf < raisedFloor, "raised floor: decision should be blocked by 2+-loss streak penalty");
+});
+
+test("streak penalty: a confident-enough bet still passes even with streak penalty", () => {
+  const minConf = 60;
+  const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!; // 12
+  const raisedFloor = minConf + pen2; // 72
+  const decisionConf = 75;
+  assert.ok(decisionConf >= raisedFloor, "a 75% confidence bet should still clear the 2+-loss raised floor (72%)");
 });
 
 test("streak penalty: freeRunMode exempts coins from streak penalty", () => {
   // In freeRunMode the loop skips the penalty block entirely.
-  // Validate the config flag exists and is boolean.
   assert.strictEqual(typeof DEFAULT_BOT_CONFIG.freeRunMode, "boolean");
-  // The logic: if (freeRunMode) skip penalty → confidence unchanged.
-  const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!;
+  // The logic: if (freeRunMode) penalty = 0, floor stays at minConfidence.
   const freeRun = true;
+  const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!;
   const penalty = freeRun ? 0 : pen2;
   assert.strictEqual(penalty, 0, "freeRunMode should zero out streak penalty");
 });
