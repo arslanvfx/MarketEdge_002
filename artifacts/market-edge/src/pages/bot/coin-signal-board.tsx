@@ -142,10 +142,12 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey }: CoinS
                     <Dir above={s.statAbove} confidence={s.statConfidence} />
                   </td>
                   <td className="px-3 py-2.5">
-                    {s.claudeEnabled ? (
-                      <Dir above={s.claudeAbove} confidence={s.claudeConfidence} />
+                    {s.claudeAbove !== null ? (
+                      <span className={s.claudeEnabled ? "" : "opacity-60"} title={s.claudeEnabled ? undefined : "Claude running (passive — auto-pilot slot not active)"}>
+                        <Dir above={s.claudeAbove} confidence={s.claudeConfidence} />
+                      </span>
                     ) : (
-                      <span className="text-muted-foreground/40 text-[10px]">off</span>
+                      <span className="text-muted-foreground/40 text-xs font-mono">—</span>
                     )}
                   </td>
                   <td className="px-3 py-2.5">

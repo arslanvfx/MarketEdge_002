@@ -63,6 +63,19 @@ async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): 
     });
 }
 
+// ── Opening-call store ────────────────────────────────────────────────────────
+// Persists the first complete signal snapshot for each coin in a given window.
+// Key: `sym:windowKey`  Value: { direction, decision, claudeConf, composite }
+// Cleared automatically when a new window is detected.
+interface OpeningCallRecord {
+  direction: "YES" | "NO" | null;
+  decision: string;
+  claudeConf: number | null;
+  composite: number | null;
+}
+const openingCallStore = new Map<string, OpeningCallRecord>();
+let openingCallWindowKey: string | null = null;
+
 const router = Router();
 
 // Bot admin guard.
@@ -192,6 +205,25 @@ function pipelineStatusHandler(_req: any, res: any) {
         }
       }
 
+      // ── Opening-call tracking ──────────────────────────────────────────────
+      // Clear the store when the window rolls over so stale opening calls
+      // from the previous window never bleed into the new one.
+      if (openingCallWindowKey !== clockWindowKey) {
+        openingCallStore.clear();
+        openingCallWindowKey = clockWindowKey;
+      }
+      const ocKey = `${sym}:${clockWindowKey}`;
+      // Record the first time this coin is fully ready this window.
+      if (ready && !openingCallStore.has(ocKey)) {
+        openingCallStore.set(ocKey, {
+          direction,
+          decision,
+          claudeConf: s.claudeConfidence,
+          composite: math?.composite ?? null,
+        });
+      }
+      const openingCall = openingCallStore.get(ocKey) ?? null;
+
       return {
         sym,
         strike,
@@ -203,6 +235,7 @@ function pipelineStatusHandler(_req: any, res: any) {
         decision,
         vetoReason,
         math,
+        openingCall,
       };
     });
 

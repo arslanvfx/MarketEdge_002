@@ -276,6 +276,13 @@ export interface BotStepMath {
   statAgrees: boolean;
 }
 
+export interface BotStepOpeningCall {
+  direction: "YES" | "NO" | null;
+  decision: string;
+  claudeConf: number | null;
+  composite: number | null;
+}
+
 export interface BotStepEntry {
   sym: string;
   strike: number | null;
@@ -287,6 +294,7 @@ export interface BotStepEntry {
   decision: "WAITING" | "NO_MARKET" | "VETO" | "BET_YES" | "BET_NO" | "BELOW_MIN";
   vetoReason: string | null;
   math: BotStepMath | null;
+  openingCall: BotStepOpeningCall | null;
 }
 
 export type PipelinePhase =

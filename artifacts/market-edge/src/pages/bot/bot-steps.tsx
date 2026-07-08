@@ -3,7 +3,7 @@ import {
   ListChecks, CheckCircle2, Clock, ChevronDown, ChevronUp,
   ArrowUp, ArrowDown, Ban, Brain, Cpu, BarChart2, Target,
 } from "lucide-react";
-import type { BotStepEntry } from "./types";
+import type { BotStepEntry, BotStepOpeningCall } from "./types";
 import { wkToEstRange, ET_LABEL } from "./utils";
 
 interface BotStepsPanelProps {
@@ -237,15 +237,32 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
                       </div>
                     </td>
                     <td className="py-2.5 pr-3">
-                      {step.direction ? (
-                        <span className={`inline-flex items-center gap-1 font-bold ${step.direction === "YES" ? "text-emerald-400" : "text-red-400"}`}>
-                          {step.direction === "YES" ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
-                          {step.direction}
-                          <span className="font-normal text-muted-foreground/60 text-[10px]">(Claude)</span>
-                        </span>
-                      ) : (
-                        <DirBadge above={step.claude.above} confidence={null} />
-                      )}
+                      <div className="flex flex-col gap-0.5">
+                        {step.direction ? (
+                          <span className={`inline-flex items-center gap-1 font-bold ${step.direction === "YES" ? "text-emerald-400" : "text-red-400"}`}>
+                            {step.direction === "YES" ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+                            {step.direction}
+                            <span className="font-normal text-muted-foreground/60 text-[10px]">(Claude)</span>
+                          </span>
+                        ) : (
+                          <DirBadge above={step.claude.above} confidence={null} />
+                        )}
+                        {step.openingCall && step.openingCall.direction && (
+                          step.openingCall.direction !== step.direction ? (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] text-amber-400/80" title="Direction changed since window open">
+                              <span className="text-muted-foreground/50">was</span>
+                              {step.openingCall.direction === "YES"
+                                ? <><ArrowUp className="w-2.5 h-2.5" />YES</>
+                                : <><ArrowDown className="w-2.5 h-2.5" />NO</>}
+                              <span className="text-amber-400/60">↻</span>
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground/40" title="Same direction since window open">
+                              same since open
+                            </span>
+                          )
+                        )}
+                      </div>
                     </td>
                     <td className="py-2.5 pr-3">
                       <MathBreakdown step={step} minConfidence={minConfidence} />
