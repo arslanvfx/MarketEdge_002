@@ -3,35 +3,25 @@
 // Reads all available prediction signals for the current window and returns a
 // BET_YES / BET_NO / SKIP decision with full reasoning logged.
 //
-// Signal sources:
-//   Core pair (both must agree for entry):
-//     1. Stat model  (getStatWindowCall)     — short-term statistical regression
-//     2. Claude AI   (getTrackerWindowCall)  — LLM directional read
-//   Confidence boosters (+8% each when they agree with core direction):
-//     3. ML model    (getMLPrediction)       — online logistic regression (14-feature vector)
+// Signal sources — ALL model signals come from getLatestCoinSignals
+// (crypto-signals.ts), the predictor's shared signal module.  The Crypto
+// Predictor tool is the ONLY place stat/Claude/ML are computed; this engine
+// never assembles its own signals:
+//     1. Stat model  — predCache forward prediction vs Kalshi strike
+//     2. Claude AI   — tracker opening call + live re-check override
+//     3. ML model    — online logistic regression (predictor snapshot features)
 //     4. Window BetSignal (getWindowBetSignal) — pre-window regime + intra-window momentum
+//        (confidence booster only — not a model signal)
 //
 // Core-pair gate: at least one of Stat/Claude must be non-null, and all
 // non-null core signals must agree. ML and WM can never block an entry —
 // they only raise or leave unchanged the base confidence of 65%.
 
 import {
-  getTrackerWindowCall,
-  getStatWindowCall,
   getWindowBetSignal,
-  getCachedPrediction,
-  getKalshiCachedData,
-  getKalshiWindowContext,
-  liveDirectionCache,
-  predCache,
-  TRAINING_COINS,
-  type TrackerWindowCall,
   type WindowBetSignal,
 } from "./crypto";
-import { logger } from "./logger";
-
-import { extractMLFeatures } from "./ml-features";
-import { getMLPrediction } from "./ml-store";
+import { getLatestCoinSignals } from "./crypto-signals";
 
 import {
   computeCorePairDecision,
@@ -194,150 +184,51 @@ function _makeBotDecisionInner(
 ): BotDecision {
   const sym = symbol.toUpperCase();
 
-  const statCall: TrackerWindowCall | null = getStatWindowCall(sym);
-  const claudeCall: TrackerWindowCall | null = getTrackerWindowCall(sym);
+  // ── All three model signals — read from the predictor's shared signal
+  // module.  getLatestCoinSignals is the SINGLE source of truth for
+  // stat/Claude/ML directions + confidence: the Crypto Predictor tool is the
+  // only place those signals are computed, and the pipeline + tick gates read
+  // the exact same snapshot.  The engine must never assemble its own signals
+  // (no historyStore stat reads, no liveDirectionCache merging, no ML feature
+  // extraction here) — that guarantees the direction the gate checked is the
+  // direction the decision uses.
+  const live = getLatestCoinSignals(sym);
+  const statAbove = live.statAbove;
+  const liveStatConf = live.statConfidence;
+  const claudeAbove = live.claudeAbove;
+  const claudeConfidence = live.claudeConfidence;
+  const mlAbove = live.mlAbove;
+  const mlConfidence = live.mlConfidence;
+  const wmRec = live.wmRecommendation;
+  const wmReady = live.wmReady;
+
+  // Window-monitor factors (net drift direction) are a confidence-boost input
+  // only — not one of the three model signals — so the raw WM signal object
+  // is still read here for its factors field.
   const wmSignal: WindowBetSignal | null = getWindowBetSignal(sym);
-
-  // ── Stat signal — prefer mid-snap predCache when fresher than opening snap ─
-  //
-  // getStatWindowCall reads historyStore written once at window-open (~T+1 min).
-  // The tracker fires a mid-window analyzeCoin re-run at T+7 and stores the
-  // result in predCache.  If that entry is newer than the opening stat snap
-  // and less than 10 minutes old, derive a fresher statAbove from the live
-  // price vs Kalshi strike.
-  //
-  // Freshness gate: when the stat model has NOT yet written a record for the
-  // current window's target time (isCurrentWindowSnap === false), the direction
-  // returned by computeStatWindowCall is an extrapolation from prior-window data.
-  // Treat it as null to prevent a cross-window stat from satisfying the hard-model
-  // gate.  The predCache mid-snap (T+7) can still supply a direction when it's
-  // fresh enough (< 10 min old) — applyStatPredCacheOverride handles that path.
-  const statNotYetSnapped = statCall != null && statCall.isCurrentWindowSnap === false;
-  if (statNotYetSnapped) {
-    logger.debug(
-      { sym, statAboveRaw: statCall?.aboveKalshi ?? null },
-      "[kalshi-bot] stat not yet snapped for current window — treating as null",
-    );
-  }
-  const openingStatAbove: boolean | null = statNotYetSnapped ? null : (statCall?.aboveKalshi ?? null);
-  const statSnapAtMs = statCall?.snappedAt ? new Date(statCall.snappedAt).getTime() : 0;
-  // Pass remaining window time so the override picks the prediction horizon
-  // closest to window close — not a shorter-horizon prediction that diverges.
-  const minutesRemaining = Math.max(1, 15 - minutesElapsed);
-  const statPredResult = applyStatPredCacheOverride(
-    openingStatAbove,
-    statSnapAtMs,
-    predCache.get(sym),
-    kalshiTarget ?? null,
-    undefined,        // nowMs — use default Date.now()
-    minutesRemaining,
-  );
-  let statAbove = statPredResult.statAbove;
-  // Live stat confidence: use the predCache prediction's confidence when available
-  // (real-time, keyed to the right horizon); fall back to the opening snap confidence.
-  const liveStatConf: number | null = statPredResult.statConfidence ?? statCall?.confidence ?? null;
-  if (statPredResult.flipped) {
-    logger.info(
-      { sym, openingStatAbove, midSnapStatAbove: statAbove, liveStatConf, snapAgeS: Math.round((Date.now() - statSnapAtMs) / 1000) },
-      "[kalshi-bot] stat mid-snap FLIP: direction reversed vs opening call",
-    );
-  }
-
-  // ── Claude signal — prefer liveDirectionCache over the frozen opening snap ─
-  //
-  // getTrackerWindowCall reads historyStore written once at window-open
-  // (T~+1 min) and never updated again.  liveDirectionCache is populated by
-  // fetchLiveDirection (2-min TTL) and reflects Claude's current read.
-  //
-  // When the live direction contradicts the opening call the bot sees Claude
-  // disagreeing with Stat, which tightens the agreement gate appropriately.
-  const claudeSnapAtMs = claudeCall?.snappedAt ? new Date(claudeCall.snappedAt).getTime() : 0;
-  const claudeLiveResult = applyClaudeLiveOverride(
-    claudeCall?.aboveKalshi ?? null,
-    claudeSnapAtMs,
-    liveDirectionCache.get(sym),
-  );
-  let claudeAbove = claudeLiveResult.claudeAbove;
-  const claudeSourceIsLive = claudeLiveResult.isLive;
-  if (claudeLiveResult.flipped) {
-    logger.info(
-      { sym, openingClaudeAbove: claudeCall?.aboveKalshi ?? null, liveClaudeAbove: claudeAbove, openingAgeS: Math.round((Date.now() - claudeSnapAtMs) / 1000) },
-      "[kalshi-bot] Claude live direction FLIP: live verdict contradicts opening call",
-    );
-  }
-  const wmRec = wmSignal?.recommendation ?? null;
-  const wmReady = wmSignal?.ready ?? false;
-
-  // Guard: Claude must have responded before we enter any position.
-  //
-  // Claude's opening call fires at window-open prefetch time and typically
-  // completes in 15–60 s (extended thinking). The entry buffer (60 s) means
-  // the first bot tick can arrive before Claude's response. We wait up to
-  // 3 minutes (CLAUDE_PENDING_THRESHOLD_MIN) for Claude before allowing any
-  // bet. After 3 minutes, if Claude still hasn't responded, the bet is allowed
-  // to proceed on Stat + ML alone — but the engine's core-signal gate still
-  // requires at least one of Stat or ML to be available and confident.
-  //
-  // This guard applies to ALL coins — not just training coins — because every
-  // coin the bot trades has a Claude call fired at window open, and entering
-  // without Claude's view violates the "all signals ready before betting" rule.
-  const CLAUDE_PENDING_THRESHOLD_MIN = 3.0; // 180 s — allow Claude time to respond
-
-  // ML logistic-regression prediction.
-  // getCachedPrediction gives the live CoinPrediction (price + indicators + candles).
-  // extractMLFeatures converts it into the 14-element feature vector; getMLPrediction
-  // runs inference on the in-memory trained weights.  Returns null when the model
-  // hasn't accumulated ≥30 labeled windows yet (minWindows gate).
-  //
-  // ML fix: the CoinPrediction.kalshiTarget field may be null even when the Kalshi
-  // route cache has the strike; fall back to getKalshiCachedData so ML always gets
-  // the current window's numeric strike when available.
-  //
-  // NOTE: ML inference runs BEFORE the Claude-pending guard so the fast-agreement
-  // early-entry path below can see the ML verdict during the first minutes of the
-  // window — the only time trending-window prices are still bettable.
-  let mlAbove: boolean | null = null;
-  let mlConfidence: number | null = null;
-  const pred = getCachedPrediction(sym);
-  // Use the caller-supplied kalshiTarget first (already confirmed non-null by
-  // the bot loop's Phase-3 gate). Falling back to getKalshiCachedData handles
-  // calls from tests or callers that don't pass the value explicitly, but
-  // avoids a stale-cache race where the prediction tracker overwrites the
-  // kalshiTargetCache with value:null between the Phase-3 check and this call.
-  const mlKalshiTarget = kalshiTarget ?? pred?.kalshiTarget ?? getKalshiCachedData(sym)?.value ?? null;
-  if (pred && mlKalshiTarget != null) {
-    const winCtx = getKalshiWindowContext(sym);
-    const elapsedFraction = Math.min(minutesElapsed / 15, 1);
-    // Pass live stat/claude/wm signals so ML sees all three model directions
-    // at inference time — matching the training distribution where these are
-    // also captured at snapshot time after stat+claude have been computed.
-    const features = extractMLFeatures(pred, mlKalshiTarget, elapsedFraction, winCtx?.priceAtOpen, statAbove, claudeAbove, wmRec);
-    const mlResult = getMLPrediction(sym, features);
-    if (mlResult.ready && mlResult.prediction) {
-      mlAbove = mlResult.prediction.above;
-      mlConfidence = mlResult.prediction.confidence ?? null;
-    }
-  }
 
   // Pipeline gate: ALL three models must have a direction before any bet fires.
   // Claude's extended-thinking call takes 30-120s after the window opens.
   // We always wait — no fast-agreement bypass — the new pipeline requires
   // Stat + Claude + ML to all complete before any entry decision is made.
-  if (claudeAbove === null) {
+  if (statAbove === null || claudeAbove === null || mlAbove === null) {
+    const missing = (
+      [statAbove === null && "Stat", claudeAbove === null && "Claude", mlAbove === null && "ML"] as Array<string | false>
+    ).filter(Boolean).join("+");
     const pendingSnapshot: SignalSnapshot = {
-      statAbove, claudeAbove: null, mlAbove,
+      statAbove, claudeAbove, mlAbove,
       windowMonitor: wmRec, windowMonitorReady: wmReady,
       yesPrice, ev: null, signalAccuracyPct, minutesElapsed,
       signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
       statConfidence: liveStatConf,
-      claudeConfidence: null, mlConfidence,
+      claudeConfidence, mlConfidence,
       warmupActive: true,
       roiPct: null,
     };
     return {
       action: "SKIP",
       confidence: 0,
-      reasoning: `Pipeline: waiting for Claude (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, ML, Claude) must complete before betting`,
+      reasoning: `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`,
       signals: pendingSnapshot,
     };
   }
@@ -353,7 +244,7 @@ function _makeBotDecisionInner(
     yesPrice, ev, signalAccuracyPct, minutesElapsed,
     signalsAgreeing, signalsTotal, agreementTarget,
     statConfidence: liveStatConf,
-    claudeConfidence: claudeCall?.confidence ?? null,
+    claudeConfidence,
     mlConfidence,
     warmupActive: false,
     roiPct: null,
@@ -369,7 +260,7 @@ function _makeBotDecisionInner(
   if (decisionMode === "consensus") {
     const votes: Array<{ above: boolean; conf: number }> = [];
     if (statAbove !== null)  votes.push({ above: statAbove,  conf: liveStatConf ?? 55 });
-    if (claudeAbove !== null) votes.push({ above: claudeAbove, conf: claudeCall?.confidence ?? 55 });
+    if (claudeAbove !== null) votes.push({ above: claudeAbove, conf: claudeConfidence ?? 55 });
     if (mlAbove !== null && mlConfidence != null) votes.push({ above: mlAbove, conf: mlConfidence });
 
     if (votes.length < 2) {
@@ -453,9 +344,9 @@ function _makeBotDecisionInner(
 
     const agreeDir = statAbove; // all three are identical
     const action: BotDecisionAction = agreeDir ? "BET_YES" : "BET_NO";
-    const statConf   = liveStatConf           ?? BASE_CONFIDENCE_HALF_PAIR;
-    const claudeConf = claudeCall?.confidence ?? BASE_CONFIDENCE_HALF_PAIR;
-    const mlConf     = mlConfidence           ?? BASE_CONFIDENCE_HALF_PAIR;
+    const statConf   = liveStatConf     ?? BASE_CONFIDENCE_HALF_PAIR;
+    const claudeConf = claudeConfidence ?? BASE_CONFIDENCE_HALF_PAIR;
+    const mlConf     = mlConfidence     ?? BASE_CONFIDENCE_HALF_PAIR;
     const confidence = Math.round((statConf + claudeConf + mlConf) / 3);
 
     if (confidence < config.minConfidence) {
@@ -505,7 +396,7 @@ function _makeBotDecisionInner(
       wmDriftAbove, wmRec, wmReady,
       yesPrice, signalAccuracyPct, minutesElapsed,
       statConfidence: liveStatConf,
-      claudeConfidence: claudeCall?.confidence ?? null,
+      claudeConfidence,
       kalshiTicker,
       minConfidence: config.minConfidence,
       minReturnMultiple: config.minReturnMultiple,
@@ -521,7 +412,7 @@ function _makeBotDecisionInner(
         // where both models are more confident. The mlVetoMinConfidence config field
         // is retained for historical logging but is no longer used for the veto gate.
         const statConf = liveStatConf ?? 0;
-        const claudeConf = claudeCall?.confidence ?? 0;
+        const claudeConf = claudeConfidence ?? 0;
         const mlConf = mlConfidence ?? 0;
         if (mlConf > statConf && mlConf > claudeConf) {
           return {
@@ -548,7 +439,7 @@ function _makeBotDecisionInner(
     if (coreResult.action !== "SKIP") {
       const proposedDir = coreResult.action === "BET_YES";
       const statConf = liveStatConf ?? 0;
-      const claudeConf = claudeCall?.confidence ?? 0;
+      const claudeConf = claudeConfidence ?? 0;
       const mlConf = mlConfidence ?? 0;
       const mlDisagreesButNotMostConfident =
         mlAbove !== null && mlAbove !== proposedDir &&
@@ -560,15 +451,10 @@ function _makeBotDecisionInner(
             ? ` (ML disagrees at ${mlConf}% but not most confident vs Stat ${statConf}%/Claude ${claudeConf}% — veto skipped)`
             : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
     }
-    // Append short notes whenever signals were sourced from live re-checks
-    // rather than the frozen opening snaps.
-    const liveSourceNotes =
-      (claudeSourceIsLive ? " [Claude:live-refresh]" : "") +
-      (statPredResult.isLive ? " [Stat:mid-snap]" : "");
     return {
       action: coreResult.action,
       confidence: coreResult.confidence,
-      reasoning: coreResult.reasoning + mlReasonSuffix + liveSourceNotes,
+      reasoning: coreResult.reasoning + mlReasonSuffix,
       signals: coreSnap,
     };
   }
@@ -578,7 +464,7 @@ function _makeBotDecisionInner(
     statAbove, claudeAbove, mlAbove, wmDriftAbove,
     wmRec, wmReady, yesPrice, signalAccuracyPct, minutesElapsed,
     statConfidence: liveStatConf,
-    claudeConfidence: claudeCall?.confidence ?? null,
+    claudeConfidence,
     mlConfidence,
     mlMinConfidence: profile.mlMinConfidence,
     kalshiTicker,
@@ -593,13 +479,10 @@ function _makeBotDecisionInner(
     result.action !== "SKIP" ? result.action : null,
   );
 
-  const liveSourceNotes =
-    (claudeSourceIsLive ? " [Claude:live-refresh]" : "") +
-    (statPredResult.isLive ? " [Stat:mid-snap]" : "");
   return {
     action: result.action,
     confidence: result.confidence,
-    reasoning: result.reasoning + liveSourceNotes,
+    reasoning: result.reasoning,
     signals: snapshot,
   };
 }

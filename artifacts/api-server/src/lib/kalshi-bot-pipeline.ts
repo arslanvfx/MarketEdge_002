@@ -1,36 +1,30 @@
 // ---------------------------------------------------------------------------
-// kalshi-bot-pipeline.ts — per-coin sequential signal pipeline
+// kalshi-bot-pipeline.ts — per-coin signal READER pipeline
 // ---------------------------------------------------------------------------
-// At window-open, this pipeline runs sequentially for each confirmed coin:
-//   Wait for fresh Kalshi target → stat analysis → Claude (extended thinking)
-//   → ML (using Claude's verdict as a feature)
+// At window-open, this pipeline runs for each confirmed coin:
+//   Wait for fresh Kalshi target → read stat/Claude/ML from the predictor
+//   layer (getLatestCoinSignals — the same caches the Crypto Predictor page
+//   displays).
+//
+// HARD RULE: the bot NEVER computes signals itself.  No analyzeCoin calls,
+// no Claude calls, no independent ML feature extraction happen here — the
+// Crypto Predictor tool is the single source of truth for all three models.
+// If any signal is still null, the pipeline stores the partial result and
+// the re-check loop polls again until the predictor has produced all three.
 //
 // Step 1 BLOCKS until Kalshi publishes the new window's market (10-30s).
-// No analysis runs against a stale/previous-window target.
+// No signals are read against a stale/previous-window target.
 //
 // Results are tagged to the current windowKey (not a wall-clock TTL).
 // The bot tick gate checks getPipelineResult(sym, windowKey):
 //   null   → pipeline still running, defer this tick
-//   result → all signals ready, proceed to makeBotDecision
-//
-// The pipeline writes Claude's verdict to liveDirectionCache so
-// _makeBotDecisionInner picks it up via applyClaudeLiveOverride with no
-// engine changes needed.
+//   result → signals stored; entry fires only when stat+Claude+ML all non-null
 
 import { logger } from "./logger";
-import { anthropic } from "@workspace/integrations-anthropic-ai";
-import { isAiFeatureEnabled } from "./ai-spend";
 import {
   CRYPTO_COINS,
-  getCandles, getStats, getTicker,
-  analyzeCoin,
-  getKalshiCachedData, fetchKalshiTarget, getKalshiWindowContext,
-  getCachedPrediction,
-  liveDirectionCache,
+  getKalshiCachedData, fetchKalshiTarget,
   getLatestCoinSignals,
-  type CoinDef,
-  type CoinPrediction,
-  type LiveDirectionResult,
 } from "./crypto";
 
 // ---------------------------------------------------------------------------
@@ -178,10 +172,11 @@ export function triggerWindowPipeline(sym: string, windowKey: string): void {
 }
 
 /**
- * Re-run stat + Claude for an open position's window.  Used every 2-3 min
- * to detect consensus flips.  Returns the updated result or null on failure.
- * Updates liveDirectionCache and pipelineResults so subsequent ticks see the
- * fresh signal even if no explicit re-check fires.
+ * Re-read the predictor's signals for a coin's window.  Used (a) every 2-3
+ * min for open positions to detect consensus flips, and (b) by the bot tick
+ * to keep polling until all three signals are non-null.  Returns the updated
+ * result or null on failure.  Updates pipelineResults so subsequent ticks
+ * see the fresh signals.
  */
 export async function runPipelineRecheck(
   sym: string,
@@ -286,124 +281,34 @@ async function _runPipeline(
 
   // ── Steps 2–4: Read all signals from the unified predictor layer ─────────
   // getLatestCoinSignals reads from the SAME sources as the Crypto Predictor page:
-  //   stat   → getStatWindowCall     (null when historyStore snap not ready yet)
+  //   stat   → getCachedPrediction (predCache) vs Kalshi strike
   //   claude → getTrackerWindowCall  (null when autopilot off OR tracker not done yet)
   //   ml     → fresh inference with tracker's latest pred snapshot (~30 s cadence)
   //   wm     → getWindowBetSignal
   //
-  // Replacing independent stat/claude/ML computation with a single unified read
-  // eliminates every signal divergence: the pipeline can never show a different
+  // The bot NEVER computes signals itself — it only reads what the predictor
+  // tool already produced, so the pipeline can never show a different
   // direction than the predictor page for the same coin and window.
   if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "fetching-data");
   const signals = getLatestCoinSignals(sym);
-  let statAbove: boolean | null = signals.statAbove;
-  let statConfidence: number | null = signals.statConfidence;
-  let claudeAbove: boolean | null = signals.claudeAbove;
-  let claudeConfidence: number | null = signals.claudeConfidence;
+  const statAbove: boolean | null = signals.statAbove;
+  const statConfidence: number | null = signals.statConfidence;
+  const claudeAbove: boolean | null = signals.claudeAbove;
+  const claudeConfidence: number | null = signals.claudeConfidence;
   const mlAbove: boolean | null = signals.mlAbove;
   const mlConfidence: number | null = signals.mlConfidence;
-  let claudeCallMs = 0;
+  const claudeCallMs = 0;
 
   logger.debug(
     { sym, windowKey, statAbove, statConfidence, claudeAbove, mlAbove, wmRecommendation: signals.wmRecommendation, isRecheck },
     "[pipeline] unified signals read from predictor layer",
   );
 
-  // ── Shared data fetch ─────────────────────────────────────────────────────
-  // Two fallbacks below (stat direct + Claude) both need candles/stats/price.
-  // Fetch once here when at least one of them will fire, so we never fetch twice.
-  const needsStatDirect   = statAbove === null && kalshiTarget != null;
-  const needsClaudeDirect = isAiFeatureEnabled("crypto_live_dir") && claudeAbove === null && signals.claudeEnabled;
-  let _sharedCandles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }> = [];
-  let _sharedStats: Awaited<ReturnType<typeof getStats>> = null;
-  let _sharedLivePrice = 0;
-  if (needsStatDirect || needsClaudeDirect) {
-    try {
-      const pred = getCachedPrediction(sym);
-      const [fbCandles, fbStats, fbTicker] = await Promise.all([
-        getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
-        getStats(coin.product).catch(() => null),
-        getTicker(coin.product).catch(() => 0),
-      ]);
-      _sharedCandles    = fbCandles;
-      _sharedStats      = fbStats;
-      _sharedLivePrice  = fbTicker > 0 ? fbTicker : (pred?.price ?? 0);
-    } catch {
-      // non-fatal; individual fallbacks will skip if data is missing
-    }
-  }
-
-  // ── Stat direct fallback ──────────────────────────────────────────────────
-  // statAbove is null when the tracker's historyStore snap hasn't run yet for
-  // the current window.  This is normal at window open: the tracker writes
-  // historyStore every 30 s and the new Kalshi target may not have been
-  // confirmed when the last snap fired.
-  //
-  // analyzeCoin is pure synchronous math (candles + stats → predicted price).
-  // We already hold the confirmed kalshiTarget from Step 1, so we can compute
-  // stat instantly without waiting for the next tracker cycle.
-  if (needsStatDirect && _sharedLivePrice > 0 && _sharedCandles.length >= 5) {
-    try {
-      const statResult = analyzeCoin(coin, _sharedCandles, _sharedStats, new Date(), _sharedLivePrice);
-      if (statResult.predictedPrice != null && statResult.predictedPrice > 0) {
-        statAbove      = statResult.predictedPrice >= kalshiTarget;
-        statConfidence = statResult.confidence ?? null;
-        logger.info(
-          { sym, windowKey, statAbove, statConfidence, kalshiTarget, livePrice: _sharedLivePrice, predictedPrice: statResult.predictedPrice, isRecheck },
-          "[pipeline] stat direct: computed via analyzeCoin (tracker snap not ready yet)",
-        );
-      }
-    } catch (err) {
-      logger.warn({ sym, windowKey, err }, "[pipeline] stat direct fallback failed — leaving statAbove null");
-    }
-  }
-
-  // ── Claude race-fallback ──────────────────────────────────────────────────
-  // claudeAbove is null in two cases:
-  //   (a) Auto-pilot OFF  — predictor not running Claude → leave null (matches page).
-  //   (b) Race at T+0     — auto-pilot on but tracker's opening call hasn't resolved
-  //                         yet (takes 15–60 s); fall back to a fresh pipeline call
-  //                         so we don't miss the opening window bet entirely.
-  //
-  // signals.claudeEnabled distinguishes them: true = auto-pilot on (case b); false = off (case a).
-  if (needsClaudeDirect) {
-    if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "claude-analyzing");
-    try {
-      if (_sharedLivePrice === 0) throw new Error("no live price available for Claude fallback");
-      const pred = getCachedPrediction(sym);
-      logger.info({ sym, windowKey, isRecheck },
-        "[pipeline] tracker Claude not ready — running fresh pipeline call (auto-pilot on, race at window open)");
-      const claudeResult = await _callPipelineClaude(
-        sym, coin, kalshiTarget, windowKey,
-        pred, _sharedCandles, _sharedStats, _sharedLivePrice,
-        statAbove, statConfidence,
-      );
-      claudeAbove = claudeResult.aboveKalshi;
-      claudeConfidence = claudeResult.confidence;
-      claudeCallMs = claudeResult.callMs;
-      logger.info(
-        { sym, windowKey, claudeAbove, claudeConfidence, callMs: claudeCallMs, isRecheck },
-        "[pipeline] Claude verdict from fresh pipeline call (fallback)",
-      );
-    } catch (err) {
-      logger.warn({ sym, windowKey, err }, "[pipeline] Claude fallback failed — proceeding without Claude signal");
-    }
-  }
-
-  // Write to liveDirectionCache so _makeBotDecisionInner picks up the Claude
-  // verdict via applyClaudeLiveOverride without any engine changes.
-  if (isAiFeatureEnabled("crypto_live_dir") && claudeAbove !== null) {
-    const liveResult: LiveDirectionResult = {
-      aboveKalshi: claudeAbove,
-      direction: claudeAbove ? "up" : "down",
-      confidence: claudeConfidence ?? 50,
-      at: new Date().toISOString(),
-      cached: false,
-    };
-    liveDirectionCache.set(sym, { result: liveResult, at: Date.now() });
-  }
-
   // ── Step 5: Store and return ─────────────────────────────────────────────
+  // NO fallbacks: the bot never computes its own stat and never makes its own
+  // Claude call.  The predictor tool is the ONLY place those are computed —
+  // if a signal is still null the completion trigger below simply waits and
+  // the re-check loop polls again until the predictor has produced it.
   const result: PipelineResult = {
     sym, windowKey, completedAt: Date.now(),
     kalshiTarget,
@@ -423,172 +328,44 @@ async function _runPipeline(
     `[pipeline] ${isRecheck ? "re-check" : "initial"} complete`,
   );
 
-  // Fire the completion callback exactly once per window, the first time
-  // statAbove becomes non-null.  This triggers a targeted one-shot entry
-  // evaluation in the bot loop without waiting for the next 15s polling tick.
+  // Fire the completion callback exactly once per window, the first time ALL
+  // THREE model signals (stat, Claude, ML) are non-null.  This triggers a
+  // targeted one-shot entry evaluation in the bot loop without waiting for
+  // the next 15s polling tick.
   //
-  // Two cases that trigger the callback:
-  //   (a) Initial run (isRecheck=false) with statAbove !== null — the fast
-  //       path when the tracker already has data from the previous window.
-  //   (b) Re-check with statAbove transitioning null → non-null — the common
-  //       path at the start of each window.  The prediction tracker needs
-  //       ~1–2 minutes after window-open to run its first snapshot; the
-  //       initial pipeline always completes before that and stores
-  //       statAbove=null.  The first re-check that has real stat data is the
-  //       correct "all signals ready" moment, even though isRecheck=true.
+  // HARD RULE: the bot must never enter a bet with a missing signal.  If any
+  // of statAbove / claudeAbove / mlAbove is still null, we log and wait — the
+  // re-check loop keeps polling and this trigger re-evaluates on every pass
+  // until the predictor has produced all three.
   //
-  // Guard: prevStatWasNull ensures the callback fires AT MOST ONCE per window.
-  // If the initial run already fired it (case a), prevResult.statAbove is
-  // non-null, so re-checks do not fire it again (prevStatWasNull=false).
-  //
-  // claudeAbove===null is NOT a blocking condition — it is a legitimate final
-  // state when AI is disabled, quiet hours are active, or Claude errored.
-  // The bot handles null claude gracefully via Gate 1 / non-training bypass.
-  if (_pipelineCompleteCallback && statAbove !== null) {
-    const prevStatWasNull = prevResult == null || prevResult.statAbove === null;
-    if (!isRecheck || prevStatWasNull) {
+  // Guard: prevAnyWasNull ensures the callback fires AT MOST ONCE per window.
+  // If a previous pass already had all three signals (and therefore fired),
+  // later re-checks do not fire it again.
+  const allSignalsReady = statAbove !== null && claudeAbove !== null && mlAbove !== null;
+  if (_pipelineCompleteCallback && allSignalsReady) {
+    const prevAnyWasNull =
+      prevResult == null ||
+      prevResult.statAbove === null ||
+      prevResult.claudeAbove === null ||
+      prevResult.mlAbove === null;
+    if (!isRecheck || prevAnyWasNull) {
       try {
         logger.info(
-          { sym, windowKey, isRecheck, prevStatWasNull },
-          "[pipeline] completion trigger: stat non-null — firing entry callback",
+          { sym, windowKey, isRecheck, prevAnyWasNull },
+          "[pipeline] completion trigger: all three signals ready — firing entry callback",
         );
         _pipelineCompleteCallback(sym, windowKey, result);
       } catch {
         // non-fatal — the next scheduler tick will pick up the pipeline result
       }
     }
+  } else if (_pipelineCompleteCallback && !allSignalsReady) {
+    logger.info(
+      { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck },
+      "[pipeline] waiting for all signals — entry callback NOT fired (re-check loop will retry)",
+    );
   }
 
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline-specific Claude call — extended thinking
-// ---------------------------------------------------------------------------
-
-async function _callPipelineClaude(
-  sym: string,
-  coin: CoinDef,
-  kalshiTarget: number,
-  windowKey: string,
-  pred: CoinPrediction | null,
-  candles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>,
-  stats: Awaited<ReturnType<typeof getStats>> | null,
-  livePrice: number,
-  statAbove: boolean | null,
-  statConfidence: number | null,
-): Promise<{ aboveKalshi: boolean | null; confidence: number; callMs: number }> {
-  if (livePrice === 0) throw new Error("no live price available");
-
-  const windowStartMs = new Date(`${windowKey}:00.000Z`).getTime();
-  const windowCloseMs = windowStartMs + 15 * 60_000;
-  const windowCloseDate = new Date(windowCloseMs);
-  const windowCloseUTC = windowCloseDate.toISOString().replace("T", " ").slice(0, 16) + " UTC";
-  const windowCloseET = windowCloseDate.toLocaleString("en-US", {
-    timeZone: "America/New_York",
-    hour: "2-digit", minute: "2-digit", hour12: true,
-  }) + " ET";
-  const minutesRemaining = Math.max(0, (windowCloseMs - Date.now()) / 60_000);
-
-  const dp = livePrice >= 100 ? 2 : livePrice >= 1 ? 4 : 6;
-
-  const freshAnalysis = candles.length >= 10 && stats != null
-    ? analyzeCoin(coin, candles, stats, new Date(), livePrice)
-    : null;
-  const ind = freshAnalysis?.indicators ?? pred?.indicators ?? null;
-
-  const regime = ind
-    ? ind.efficiencyRatio >= 0.4 ? "trending"
-    : ind.efficiencyRatio >= 0.15 ? "drifting" : "choppy"
-    : "unknown";
-
-  const currentSide = livePrice >= kalshiTarget ? "ABOVE" : "BELOW";
-  const gapPct = Math.abs(livePrice - kalshiTarget) / kalshiTarget * 100;
-  const recent20 = candles.slice(-20);
-  const closesStr = recent20.length > 0
-    ? recent20.map(c => `$${c.c.toFixed(dp)}`).join(" → ")
-    : "(no candle data)";
-  const volStr = recent20.length > 0
-    ? `Vol range: ${Math.min(...recent20.map(c => c.v)).toFixed(0)}–${Math.max(...recent20.map(c => c.v)).toFixed(0)}`
-    : "";
-  const topVol = recent20.length > 0
-    ? [...recent20].sort((a, b) => b.v - a.v)[0]
-    : null;
-
-  const winCtx = getKalshiWindowContext(sym);
-  let trajectoryNote = "";
-  if (winCtx?.priceAtOpen != null) {
-    const openGapPct = Math.abs(winCtx.priceAtOpen - kalshiTarget) / kalshiTarget * 100;
-    const openSide = winCtx.priceAtOpen >= kalshiTarget ? "ABOVE" : "BELOW";
-    const elapsed = (winCtx.minutesElapsed ?? 0).toFixed(1);
-    trajectoryNote = `Window opened ${elapsed}min ago at $${winCtx.priceAtOpen.toFixed(dp)} (${openGapPct.toFixed(3)}% ${openSide} strike).`;
-  }
-
-  const statNote = statAbove !== null
-    ? `Stat model: ${statAbove ? "ABOVE" : "BELOW"} strike${statConfidence != null ? ` (${statConfidence.toFixed(0)}% conf)` : ""}`
-    : "Stat model: not yet available";
-
-  const lines = [
-    `${sym} — Kalshi 15-min binary market`,
-    `CONFIRMED strike (new window): $${kalshiTarget.toFixed(dp)}`,
-    `Window closes: ${windowCloseUTC} (${windowCloseET}) | ${minutesRemaining.toFixed(1)} min remaining`,
-    trajectoryNote,
-    `Current live price: $${livePrice.toFixed(dp)} — ${gapPct.toFixed(3)}% ${currentSide} strike`,
-    ind
-      ? `RSI ${ind.rsi.toFixed(0)} | MACD ${ind.macd >= 0 ? "bullish" : "bearish"} | BB%B ${ind.bbPctB.toFixed(0)}%` +
-        ` | Trend: ${ind.trend} (strength ${Math.round(ind.trendStrength * 100)}%) | ER ${ind.efficiencyRatio.toFixed(2)} (${regime})`
-      : "",
-    ind
-      ? `Net drift last 15 candles: ${ind.netDriftPct >= 0 ? "+" : ""}${ind.netDriftPct.toFixed(3)}%` +
-        ` | Oscillations: ${ind.oscillationCount}` +
-        ` | Volatility: ${ind.volatilityPct.toFixed(3)}%`
-      : "",
-    `Last 20 1-min closes: ${closesStr}`,
-    volStr,
-    topVol ? `Highest-volume candle close: $${topVol.c.toFixed(dp)} (${topVol.v.toFixed(0)} units)` : "",
-    statNote,
-    ``,
-    `Question: Will ${sym} close ABOVE or BELOW $${kalshiTarget.toFixed(dp)} at exactly ${windowCloseUTC}?`,
-    `Respond with ONLY this JSON: {"above":true,"confidence":70}`,
-  ].filter(Boolean).join("\n");
-
-  const t0 = Date.now();
-
-  // Extended thinking gives Claude full reasoning depth before committing to
-  // a direction. Budget 8000 tokens lets Claude properly weigh momentum,
-  // proximity, regime, and indicator context before outputting the JSON.
-  const response = await Promise.race([
-    anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 12000,
-      thinking: { type: "enabled", budget_tokens: 8000 },
-      system: "You are a short-term crypto price analyst making a binary ABOVE/BELOW prediction for a Kalshi 15-min market. Use your thinking to thoroughly analyze price momentum, technical indicators, distance from the strike, regime, and time remaining. After your analysis, output ONLY this JSON in your response: {\"above\":true,\"confidence\":70}. The 'above' field is true if the price will be AT OR ABOVE the strike at window close, false if below. Confidence must be 50-90. No markdown, no prose, no explanation outside the JSON.",
-      messages: [{ role: "user", content: lines }],
-    } as Parameters<typeof anthropic.messages.create>[0]),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Claude pipeline timeout (120s)")), 120_000),
-    ),
-  ]);
-
-  const callMs = Date.now() - t0;
-  // Extended thinking responses include both "thinking" and "text" content blocks.
-  // Parse only the text block for the JSON verdict.
-  const raw = (response as { content: Array<{ type: string; text?: string }> }).content
-    .filter(b => b.type === "text")
-    .map(b => b.text ?? "")
-    .join("")
-    .trim();
-
-  let parsed: { above?: boolean; confidence?: number } = {};
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    const match = raw.match(/\{[^}]+\}/);
-    if (match) parsed = JSON.parse(match[0]);
-    else throw new Error(`Claude returned non-JSON: ${raw.slice(0, 200)}`);
-  }
-
-  const confidence = Math.min(90, Math.max(50, parsed.confidence ?? 60));
-  const aboveKalshi = typeof parsed.above === "boolean" ? parsed.above : null;
-  return { aboveKalshi, confidence, callMs };
-}

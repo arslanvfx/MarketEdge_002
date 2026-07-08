@@ -28,6 +28,7 @@ import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
+  getLatestCoinSignals,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
 import { getPipelineResult, triggerWindowPipeline } from "./kalshi-bot-pipeline";
@@ -388,21 +389,40 @@ async function _runBotTick(
   }
 
   // ── Pipeline readiness gate ────────────────────────────────────────────────
-  // All signals (Kalshi target → stat → Claude → ML) must be ready before
-  // any bet is placed.  The pipeline fires at window-open (from prefetch or
-  // from the new-ticker detection above) and runs sequentially, writing its
-  // Claude verdict to liveDirectionCache so the engine picks it up via
-  // applyClaudeLiveOverride with no engine changes.
-  //
-  // If the pipeline hasn't completed for this window yet, defer this tick.
-  // There is no time-based fallback — we would rather miss the window entry
-  // than bet with incomplete or stale signal data.
+  // The pipeline confirms the fresh Kalshi target for this window.  If it
+  // hasn't completed yet, defer this tick — no bet may be evaluated against
+  // a stale/previous-window target.
   {
     const pipelineResult = getPipelineResult(sym, windowKey);
     if (pipelineResult === null) {
       logger.debug(
         { sym, windowKey, secondsElapsed },
         "[kalshi-bot] pipeline not yet ready for this window — deferring tick",
+      );
+      return;
+    }
+  }
+
+  // ── All-signals gate (HARD RULE) ───────────────────────────────────────────
+  // The bot must NEVER enter a bet unless ALL THREE model signals — stat,
+  // Claude, and ML — are non-null.  Signals are read LIVE from the predictor
+  // layer (the same caches the Crypto Predictor page displays), not from the
+  // stored pipeline snapshot, so the very next tick after the predictor
+  // produces the missing signal can proceed without waiting for a re-check.
+  //
+  // There is no time-based fallback — we would rather miss the window entry
+  // than bet with incomplete signal data.  (Open-position management is
+  // unaffected: this gate only blocks NEW entries, and _runBotTick for open
+  // positions is handled in Phase 2 before this point.)
+  {
+    const live = getLatestCoinSignals(sym);
+    if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
+      logger.info(
+        {
+          sym, windowKey, secondsElapsed,
+          statAbove: live.statAbove, claudeAbove: live.claudeAbove, mlAbove: live.mlAbove,
+        },
+        "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
       );
       return;
     }

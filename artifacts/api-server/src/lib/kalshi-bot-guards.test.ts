@@ -703,29 +703,125 @@ test("timing/pipelineGate: pipelineEntryFiredThisWindow is cleared on window tra
   );
 });
 
-test("timing/pipelineGate: pipeline callback fires on initial run with non-null stat", () => {
+test("timing/pipelineGate: pipeline callback requires ALL THREE signals (stat+Claude+ML) non-null", () => {
   const src = readSrc("kalshi-bot-pipeline.ts");
+  // HARD RULE: the bot must never enter a bet with a missing signal.  The
+  // completion callback is the entry trigger, so it must be gated on all
+  // three model signals being non-null — not just stat.
   assert.ok(
-    src.includes("statAbove !== null") &&
+    src.includes("statAbove !== null && claudeAbove !== null && mlAbove !== null") &&
     src.includes("_pipelineCompleteCallback"),
-    "pipeline completion callback must be gated on statAbove !== null so null-stat initial completions don't permanently suppress Phase-3 retry",
+    "pipeline completion callback must be gated on statAbove, claudeAbove AND mlAbove all being non-null",
+  );
+  // When signals are incomplete the pipeline must log a wait — not fire.
+  assert.ok(
+    src.includes("waiting for all signals"),
+    "pipeline must log 'waiting for all signals' when any of the three signals is still null",
   );
 });
 
-test("timing/pipelineGate: pipeline callback fires on re-check when stat transitions null→non-null for the first time", () => {
+test("timing/pipelineGate: pipeline callback fires on re-check when signals transition to all-non-null for the first time", () => {
   const src = readSrc("kalshi-bot-pipeline.ts");
-  // The tracker takes ~1-2 min after window-open to have stat data. The initial
-  // pipeline always completes before that (statAbove=null). The first re-check
-  // with real stat is the true "all signals ready" moment — the callback must
-  // fire then too, not be permanently excluded because isRecheck=true.
+  // The tracker takes time after window-open to produce all signals. The
+  // initial pipeline can complete with partial (null) signals. The first
+  // re-check where all three are non-null is the true "all signals ready"
+  // moment — the callback must fire then too, not be permanently excluded
+  // because isRecheck=true.
   assert.ok(
-    src.includes("prevStatWasNull") &&
-    src.includes("prevResult == null || prevResult.statAbove === null"),
-    "callback must fire on re-check when previous stored result had statAbove=null (null→non-null transition)",
+    src.includes("prevAnyWasNull") &&
+    src.includes("prevResult.statAbove === null") &&
+    src.includes("prevResult.claudeAbove === null") &&
+    src.includes("prevResult.mlAbove === null"),
+    "callback must fire on re-check when any previously stored signal was null (transition to all-ready)",
   );
   assert.ok(
-    src.includes("!isRecheck || prevStatWasNull"),
-    "callback guard must allow re-check to fire when prevStatWasNull is true",
+    src.includes("!isRecheck || prevAnyWasNull"),
+    "callback guard must allow re-check to fire when prevAnyWasNull is true",
+  );
+});
+
+test("allSignals/tickGate: _runBotTick blocks new entries until stat, Claude AND ML are all non-null (live read)", () => {
+  const src = readSrc("kalshi-bot-tick.ts");
+  // The scheduler tick path can reach makeBotDecision even when the pipeline
+  // stored a partial result — the live all-signals gate must block it.
+  assert.ok(
+    src.includes("getLatestCoinSignals(sym)"),
+    "_runBotTick must read live signals via getLatestCoinSignals — not the stored pipeline snapshot",
+  );
+  assert.ok(
+    src.includes("live.statAbove === null || live.claudeAbove === null || live.mlAbove === null"),
+    "_runBotTick must defer when any of the three live signals is null",
+  );
+  assert.ok(
+    src.includes("waiting for all signals (stat+Claude+ML)"),
+    "the all-signals defer must be logged for traceability",
+  );
+});
+
+test("noFallbacks/pipeline: bot pipeline never computes its own signals (no analyzeCoin / no Claude calls)", () => {
+  const src = readSrc("kalshi-bot-pipeline.ts");
+  // The predictor tool is the ONLY place stat/Claude/ML are computed.
+  assert.ok(
+    !src.includes("analyzeCoin("),
+    "kalshi-bot-pipeline must NOT call analyzeCoin — stat comes from the predictor's predCache only",
+  );
+  assert.ok(
+    !src.includes("anthropic.messages.create"),
+    "kalshi-bot-pipeline must NOT make its own Claude calls — Claude verdicts come from the predictor's tracker only",
+  );
+  assert.ok(
+    !src.includes("_callPipelineClaude"),
+    "the _callPipelineClaude fallback must stay deleted",
+  );
+});
+
+test("noFallbacks/engine: decision engine consumes getLatestCoinSignals only — no internal signal assembly", () => {
+  const src = readSrc("kalshi-bot-engine.ts");
+  // The engine must read the predictor's shared signal snapshot — the same
+  // one the pipeline and tick gates check — so gate and decision can never
+  // diverge.
+  assert.ok(
+    src.includes("getLatestCoinSignals(sym)"),
+    "engine must call getLatestCoinSignals — the single source of truth for stat/Claude/ML",
+  );
+  // No direct signal-source reads or model computation in the engine.
+  for (const banned of [
+    "getStatWindowCall(",
+    "getTrackerWindowCall(",
+    "liveDirectionCache.get(",
+    "predCache.get(",
+    "extractMLFeatures(",
+    "getMLPrediction(",
+    "getCachedPrediction(",
+  ]) {
+    assert.ok(
+      !src.includes(banned),
+      `engine must NOT call ${banned}...) — signal assembly belongs to crypto-signals.ts only`,
+    );
+  }
+  // Engine-level all-three gate must exist as final defense before decisions.
+  assert.ok(
+    src.includes("statAbove === null || claudeAbove === null || mlAbove === null"),
+    "engine must SKIP when any of the three signals is null",
+  );
+});
+
+test("noFallbacks/signals: crypto-signals derives stat from predCache, not historyStore", () => {
+  const src = readSrc("crypto-signals.ts");
+  assert.ok(
+    !src.includes("getStatWindowCall("),
+    "getLatestCoinSignals must NOT call getStatWindowCall (historyStore lags 30-90s at window open)",
+  );
+  assert.ok(
+    src.includes("predCache.get(sym)") &&
+    src.includes("predictedPrice >= kalshiTarget"),
+    "stat must be derived from predCache forward predictions vs the Kalshi strike",
+  );
+  // Freshness guard: a stale predictor snapshot must null out stat+ML so the
+  // all-signals gate blocks entries instead of betting on stale model output.
+  assert.ok(
+    src.includes("PRED_MAX_AGE_MS"),
+    "crypto-signals must enforce a max-age freshness guard on the predCache snapshot",
   );
 });
 
