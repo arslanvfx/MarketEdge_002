@@ -56,6 +56,9 @@ import {
 } from "./kalshi-bot-state";
 import { EVAL_DEFER_MS, fetchWindowClosePrice } from "./kalshi-bot-shadow";
 import { tagBotEntryTimingOutcomes, recoverBotEntryTimingSnapshots } from "./kalshi-bot-entry-timing";
+import { applyDirectionalOutcome } from "./kalshi-bot-directional-outcomes";
+
+export { applyDirectionalOutcome } from "./kalshi-bot-directional-outcomes";
 
 export async function evalClosedBets(): Promise<void> {
   const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
@@ -318,13 +321,7 @@ export async function evalClosedBets(): Promise<void> {
 
         // Track directional outcomes for the directional regime dampener.
         if (row.direction) {
-          const dd = recentDirectionalOutcomes.get(wk) ?? { yesWins: 0, yesLosses: 0, noWins: 0, noLosses: 0 };
-          if (row.direction === "yes") {
-            if (correctedPnl > 0) dd.yesWins++; else if (correctedPnl < 0) dd.yesLosses++;
-          } else if (row.direction === "no") {
-            if (correctedPnl > 0) dd.noWins++; else if (correctedPnl < 0) dd.noLosses++;
-          }
-          recentDirectionalOutcomes.set(wk, dd);
+          applyDirectionalOutcome(recentDirectionalOutcomes, row.direction, correctedPnl, wk);
         }
       }
 

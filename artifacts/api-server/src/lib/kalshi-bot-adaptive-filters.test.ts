@@ -16,6 +16,11 @@ import {
   CLAUDE_WEIGHT,
   type CorePairInputs,
 } from "./kalshi-bot-engine-core.ts";
+import {
+  applyDirectionalOutcome,
+  computeDirectionalPenaltyPp,
+  type DirectionalOutcomeEntry,
+} from "./kalshi-bot-directional-outcomes.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,21 +48,6 @@ function mlGateInputs(overrides: Partial<CorePairInputs> = {}): CorePairInputs {
   };
 }
 
-// Pure helper that mirrors the directional dampener math in kalshi-bot-loop.ts.
-// Used to validate the logic in isolation without importing any DB-backed module.
-function computeDirectionalPenaltyPp(
-  wins: number,
-  losses: number,
-  minBets: number,
-  threshold: number,
-  penaltyPp: number,
-  freeRunMode = false,
-): number {
-  const total = wins + losses;
-  if (freeRunMode) return 0;
-  if (total < minBets) return 0;
-  return wins / total < threshold ? penaltyPp : 0;
-}
 
 // ---------------------------------------------------------------------------
 // 1. Coin streak penalty — config defaults
@@ -249,6 +239,105 @@ test("directional dampener: freeRunMode disables penalty regardless of win rate"
     0,
     "freeRunMode=true must suppress directional penalty even with 0% win rate",
   );
+});
+
+// ---------------------------------------------------------------------------
+// 4. Directional dampener — accumulation through the real module
+// These tests call applyDirectionalOutcome imported from kalshi-bot-directional-outcomes.ts
+// — the same function used by evalClosedBets in production.
+// ---------------------------------------------------------------------------
+
+test("applyDirectionalOutcome: YES win increments yesWins for the given window key", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "yes", 0.50, "2026-07-08T14:00");
+  const entry = map.get("2026-07-08T14:00");
+  assert.strictEqual(entry?.yesWins, 1, "win should increment yesWins");
+  assert.strictEqual(entry?.yesLosses, 0);
+  assert.strictEqual(entry?.noWins, 0);
+  assert.strictEqual(entry?.noLosses, 0);
+});
+
+test("applyDirectionalOutcome: YES loss increments yesLosses", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "yes", -0.50, "2026-07-08T14:00");
+  const entry = map.get("2026-07-08T14:00");
+  assert.strictEqual(entry?.yesWins, 0);
+  assert.strictEqual(entry?.yesLosses, 1, "loss should increment yesLosses");
+});
+
+test("applyDirectionalOutcome: NO loss increments noLosses", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "no", -0.50, "2026-07-08T14:00");
+  const entry = map.get("2026-07-08T14:00");
+  assert.strictEqual(entry?.noLosses, 1, "NO loss should increment noLosses");
+  assert.strictEqual(entry?.yesLosses, 0, "YES losses must not change");
+});
+
+test("applyDirectionalOutcome: pnl=0 is ignored (tie/push, no counter incremented)", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "yes", 0, "2026-07-08T14:00");
+  const entry = map.get("2026-07-08T14:00");
+  assert.strictEqual(entry?.yesWins, 0);
+  assert.strictEqual(entry?.yesLosses, 0);
+});
+
+test("applyDirectionalOutcome: accumulates across multiple bets in the same window", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  const wk = "2026-07-08T14:00";
+  applyDirectionalOutcome(map, "yes", -0.5, wk); // YES loss
+  applyDirectionalOutcome(map, "yes", -0.5, wk); // YES loss
+  applyDirectionalOutcome(map, "no", 0.5, wk);   // NO win
+  const entry = map.get(wk)!;
+  assert.strictEqual(entry.yesWins, 0);
+  assert.strictEqual(entry.yesLosses, 2);
+  assert.strictEqual(entry.noWins, 1);
+  assert.strictEqual(entry.noLosses, 0);
+});
+
+test("applyDirectionalOutcome: different window keys are tracked independently", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "yes", -0.5, "2026-07-08T13:45"); // loss in w1
+  applyDirectionalOutcome(map, "yes", 0.5,  "2026-07-08T14:00"); // win in w2
+  assert.strictEqual(map.get("2026-07-08T13:45")?.yesLosses, 1);
+  assert.strictEqual(map.get("2026-07-08T14:00")?.yesWins, 1);
+  assert.strictEqual(map.get("2026-07-08T14:00")?.yesLosses, 0);
+});
+
+test("applyDirectionalOutcome + computeDirectionalPenaltyPp: full dampener cycle — 2 losses triggers penalty", () => {
+  // Simulate 2 YES losses across 2 windows, then compute whether penalty fires.
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "yes", -0.5, "2026-07-08T13:30");
+  applyDirectionalOutcome(map, "yes", -0.5, "2026-07-08T13:45");
+
+  // Aggregate across lookback (2 windows):
+  let yesWins = 0, yesLosses = 0;
+  for (const entry of map.values()) { yesWins += entry.yesWins; yesLosses += entry.yesLosses; }
+
+  const penalty = computeDirectionalPenaltyPp(yesWins, yesLosses, 2, 0.35, 10);
+  assert.strictEqual(penalty, 10, "2 YES losses over lookback should trigger 10pp dampener penalty");
+});
+
+test("applyDirectionalOutcome + computeDirectionalPenaltyPp: thin-data guard — 1 loss does not trigger penalty", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "yes", -0.5, "2026-07-08T13:30");
+
+  let yesWins = 0, yesLosses = 0;
+  for (const entry of map.values()) { yesWins += entry.yesWins; yesLosses += entry.yesLosses; }
+
+  const penalty = computeDirectionalPenaltyPp(yesWins, yesLosses, 2, 0.35, 10);
+  assert.strictEqual(penalty, 0, "Only 1 bet in direction should not trigger penalty (thin-data guard)");
+});
+
+test("applyDirectionalOutcome + computeDirectionalPenaltyPp: mixed results above threshold — no penalty", () => {
+  const map = new Map<string, DirectionalOutcomeEntry>();
+  applyDirectionalOutcome(map, "yes", 0.5,  "2026-07-08T13:30"); // win
+  applyDirectionalOutcome(map, "yes", -0.5, "2026-07-08T13:45"); // loss
+
+  let yesWins = 0, yesLosses = 0;
+  for (const entry of map.values()) { yesWins += entry.yesWins; yesLosses += entry.yesLosses; }
+
+  const penalty = computeDirectionalPenaltyPp(yesWins, yesLosses, 2, 0.35, 10);
+  assert.strictEqual(penalty, 0, "50% win rate above 35% threshold should NOT trigger penalty");
 });
 
 test("directional dampener: DEFAULT_BOT_CONFIG has correct directional filter defaults", () => {

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   ListChecks, CheckCircle2, Clock, ChevronDown, ChevronUp,
-  ArrowUp, ArrowDown, Ban, Brain, Cpu, BarChart2, Target,
+  ArrowUp, ArrowDown, Ban, Brain, Cpu, BarChart2, Target, TrendingDown,
 } from "lucide-react";
 import type { BotStepEntry, BotStepOpeningCall } from "./types";
 import { wkToEstRange, ET_LABEL } from "./utils";
@@ -137,27 +137,43 @@ function MathBreakdown({ step, minConfidence }: { step: BotStepEntry; minConfide
     );
   }
   const passes = step.decision === "BET_YES" || step.decision === "BET_NO";
+  // Show directional dampener badge when the active direction has a penalty.
+  const dp = m.directionalPenalty;
+  const dirPenaltyPp =
+    step.direction === "YES" ? (dp?.yes ?? 0) :
+    step.direction === "NO"  ? (dp?.no  ?? 0) : 0;
   return (
-    <span className="font-mono text-[11px] tabular-nums whitespace-nowrap">
-      <span className="text-blue-400" title={`ML ${m.mlConf.toFixed(0)}% × 0.60`}>
-        {m.mlContrib}
-        <span className="text-[9px] align-top text-blue-300/70">ML</span>
+    <span className="font-mono text-[11px] tabular-nums whitespace-nowrap flex flex-wrap items-center gap-x-1 gap-y-0.5">
+      <span>
+        <span className="text-blue-400" title={`ML ${m.mlConf.toFixed(0)}% × 0.60`}>
+          {m.mlContrib}
+          <span className="text-[9px] align-top text-blue-300/70">ML</span>
+        </span>
+        <span className="text-emerald-400" title={`Claude ${m.claudeConf.toFixed(0)}% × 0.40 (confirms ML direction)`}>
+          {" "}+{m.claudeContrib}
+          <span className="text-[9px] align-top text-emerald-300/70">Cl</span>
+        </span>
+        <span className={m.statAgrees ? "text-cyan-400" : "text-amber-400"} title={m.statAgrees ? "Stat confirms ML direction" : "Stat dissents from ML direction"}>
+          {" "}{m.statMod >= 0 ? `+${m.statMod}` : `−${Math.abs(m.statMod)}`}
+          <span className="text-[9px] align-top">St</span>
+        </span>
+        <span className="text-muted-foreground"> = </span>
+        <span className={`font-bold ${passes ? "text-emerald-400" : "text-muted-foreground"}`}>
+          {m.composite.toFixed(0)}%
+        </span>
+        {minConfidence != null && (
+          <span className={passes ? "text-emerald-400/70" : "text-red-400/70"}>
+            {" "}{passes ? "≥" : "<"} {minConfidence}%
+          </span>
+        )}
       </span>
-      <span className="text-emerald-400" title={`Claude ${m.claudeConf.toFixed(0)}% × 0.40 (confirms ML direction)`}>
-        {" "}+{m.claudeContrib}
-        <span className="text-[9px] align-top text-emerald-300/70">Cl</span>
-      </span>
-      <span className={m.statAgrees ? "text-cyan-400" : "text-amber-400"} title={m.statAgrees ? "Stat confirms ML direction" : "Stat dissents from ML direction"}>
-        {" "}{m.statMod >= 0 ? `+${m.statMod}` : `−${Math.abs(m.statMod)}`}
-        <span className="text-[9px] align-top">St</span>
-      </span>
-      <span className="text-muted-foreground"> = </span>
-      <span className={`font-bold ${passes ? "text-emerald-400" : "text-muted-foreground"}`}>
-        {m.composite.toFixed(0)}%
-      </span>
-      {minConfidence != null && (
-        <span className={passes ? "text-emerald-400/70" : "text-red-400/70"}>
-          {" "}{passes ? "≥" : "<"} {minConfidence}%
+      {dirPenaltyPp > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 text-[10px] px-1 py-0.5 rounded border bg-orange-500/10 text-orange-400 border-orange-500/25 font-sans"
+          title={`Directional regime dampener: ${step.direction} win rate below threshold — −${dirPenaltyPp}pp applied to effective confidence`}
+        >
+          <TrendingDown className="w-2.5 h-2.5" />
+          {step.direction} dampened −{dirPenaltyPp}pp
         </span>
       )}
     </span>
