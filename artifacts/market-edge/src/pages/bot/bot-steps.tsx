@@ -56,6 +56,18 @@ function DirBadge({ above, confidence }: { above: boolean | null; confidence: nu
   );
 }
 
+function OriginalDecisionLabel({ decision, minConfidence }: { decision: string; minConfidence: number | null }) {
+  switch (decision) {
+    case "BET_YES":  return <span className="text-emerald-400/70"><ArrowUp className="inline w-2.5 h-2.5" /> YES</span>;
+    case "BET_NO":   return <span className="text-red-400/70"><ArrowDown className="inline w-2.5 h-2.5" /> NO</span>;
+    case "VETO":     return <span className="text-orange-400/70">ML Veto</span>;
+    case "BELOW_MIN":return <span className="text-muted-foreground/50">Below {minConfidence != null ? `${minConfidence}%` : "min"}</span>;
+    case "NO_MARKET":return <span className="text-muted-foreground/50">No market</span>;
+    case "WAITING":  return <span className="text-amber-400/50">Waiting</span>;
+    default:         return <span className="text-muted-foreground/50">{decision}</span>;
+  }
+}
+
 function DecisionBadge({ step, minConfidence }: { step: BotStepEntry; minConfidence: number | null }) {
   switch (step.decision) {
     case "BET_YES":
@@ -268,7 +280,21 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
                       <MathBreakdown step={step} minConfidence={minConfidence} />
                     </td>
                     <td className="py-2.5">
-                      <DecisionBadge step={step} minConfidence={minConfidence} />
+                      <div className="flex flex-col gap-0.5">
+                        <DecisionBadge step={step} minConfidence={minConfidence} />
+                        {step.openingCall?.decision && step.openingCall.decision !== step.decision && (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-amber-400/80" title="Decision changed since window open">
+                            <span className="text-muted-foreground/50">was</span>
+                            <OriginalDecisionLabel decision={step.openingCall.decision} minConfidence={minConfidence} />
+                            <span className="text-amber-400/60">↻</span>
+                          </span>
+                        )}
+                        {step.openingCall?.decision && step.openingCall.decision === step.decision && step.ready && (
+                          <span className="text-[10px] text-muted-foreground/40" title="Same decision since window open">
+                            same since open
+                          </span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
