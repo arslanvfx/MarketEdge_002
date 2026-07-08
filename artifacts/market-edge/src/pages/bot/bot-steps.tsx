@@ -119,6 +119,11 @@ function MathBreakdown({ step, minConfidence }: { step: BotStepEntry; minConfide
       </span>
     );
   }
+  if (step.decision === "VETO") {
+    return (
+      <span className="text-[11px] text-orange-400/90">{step.vetoReason ?? "Claude disagrees on direction"}</span>
+    );
+  }
   const m = step.math;
   if (!m) {
     const missing: string[] = [];
@@ -134,10 +139,13 @@ function MathBreakdown({ step, minConfidence }: { step: BotStepEntry; minConfide
   const passes = step.decision === "BET_YES" || step.decision === "BET_NO";
   return (
     <span className="font-mono text-[11px] tabular-nums whitespace-nowrap">
-      <span className="text-blue-400" title="ML confidence (base)">{m.base.toFixed(0)}</span>
-      <span className={m.mlAgrees ? "text-emerald-400" : "text-red-400/80"} title={m.mlAgrees ? "Claude confirms ML direction" : "Claude dissents from ML direction"}>
-        {" "}{m.mlAgrees ? `+${m.mlBoost}` : `−${m.mlBoost}`}
-        <span className="text-[9px] align-top">Cl</span>
+      <span className="text-blue-400" title={`ML ${m.mlConf.toFixed(0)}% × 0.60`}>
+        {m.mlContrib}
+        <span className="text-[9px] align-top text-blue-300/70">ML</span>
+      </span>
+      <span className="text-emerald-400" title={`Claude ${m.claudeConf.toFixed(0)}% × 0.40 (confirms ML direction)`}>
+        {" "}+{m.claudeContrib}
+        <span className="text-[9px] align-top text-emerald-300/70">Cl</span>
       </span>
       <span className={m.statAgrees ? "text-cyan-400" : "text-amber-400"} title={m.statAgrees ? "Stat confirms ML direction" : "Stat dissents from ML direction"}>
         {" "}{m.statMod >= 0 ? `+${m.statMod}` : `−${Math.abs(m.statMod)}`}
@@ -199,8 +207,7 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
       {open && (
         <div className="px-5 pb-4 pt-1">
           <p className="text-[11px] text-muted-foreground mb-2">
-            ML sets direction · Claude confirms (+6%) or penalizes (−6%) · Stat modifier (±4%) · composite =
-            ML + Claude modifier + Stat modifier · EV &amp; price gates still checked at entry.
+            ML sets direction · Claude must agree (direction veto if not) · composite = ML×0.6 + Claude×0.4 + Stat(±4) · EV &amp; price gates still checked at entry.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">

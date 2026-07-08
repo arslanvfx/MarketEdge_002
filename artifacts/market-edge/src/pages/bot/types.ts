@@ -268,11 +268,12 @@ export interface BotStepSignal {
 }
 
 export interface BotStepMath {
-  base: number;
-  mlBoost: number;
-  statMod: number;
+  mlConf: number;        // raw ML confidence
+  mlContrib: number;     // round(mlConf × ML_WEIGHT)
+  claudeConf: number;    // raw Claude confidence
+  claudeContrib: number; // round(claudeConf × CLAUDE_WEIGHT)
+  statMod: number;       // ±STAT_BOOST (signed)
   composite: number;
-  mlAgrees: boolean;
   statAgrees: boolean;
 }
 

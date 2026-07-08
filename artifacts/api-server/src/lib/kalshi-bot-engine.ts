@@ -26,6 +26,8 @@ import { getLatestCoinSignals } from "./crypto-signals";
 import {
   computeCorePairDecision,
   computeMLGateDecision,
+  ML_WEIGHT,
+  CLAUDE_WEIGHT,
   ML_BOOST,
   STAT_BOOST,
   STAT_PENALTY,
@@ -73,6 +75,8 @@ import {
 export {
   computeCorePairDecision,
   computeMLGateDecision,
+  ML_WEIGHT,
+  CLAUDE_WEIGHT,
   ML_BOOST,
   STAT_BOOST,
   STAT_PENALTY,

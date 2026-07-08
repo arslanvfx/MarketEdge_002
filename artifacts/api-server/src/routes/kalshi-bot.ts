@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, isLiveModePermitted, ML_BOOST, STAT_BOOST, STAT_PENALTY, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, type BetProfile } from "../lib/kalshi-bot-engine";
 import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
@@ -181,36 +181,45 @@ function pipelineStatusHandler(_req: any, res: any) {
       let direction: "YES" | "NO" | null = null;
       let vetoReason: string | null = null;
       let math: {
-        base: number;
-        mlBoost: number;
+        mlContrib: number;
+        claudeContrib: number;
+        mlConf: number;
+        claudeConf: number;
         statMod: number;
         composite: number;
-        mlAgrees: boolean;
         statAgrees: boolean;
       } | null = null;
 
       if (strike == null) {
         decision = "NO_MARKET";
       } else if (ready) {
-        // ML-leads formula — mirrors computeMLGateDecision exactly:
+        // Weighted-blend formula — mirrors computeMLGateDecision exactly:
         //   direction  = ML direction
-        //   composite  = mlConf + (Claude agrees ? +CLAUDE_BOOST : −CLAUDE_PENALTY) + (Stat agrees ? +STAT_BOOST : −STAT_PENALTY)
-        // ML_BOOST === CLAUDE_BOOST === 6; STAT_BOOST === STAT_PENALTY === 4
+        //   If Claude disagrees → VETO (direction veto, no bet)
+        //   composite  = round(mlConf × ML_WEIGHT + claudeConf × CLAUDE_WEIGHT) + statMod
         const claudeDir = s.claudeAbove as boolean;
         const mlDir = s.mlAbove as boolean;
         const statDir = s.statAbove as boolean;
         const mlConf = s.mlConfidence ?? 0;
+        const claudeConf = s.claudeConfidence ?? 0;
         direction = mlDir ? "YES" : "NO";
 
         const claudeAgrees = claudeDir === mlDir;
         const statAgrees = statDir === mlDir;
-        const claudeMod = claudeAgrees ? ML_BOOST : -ML_BOOST;
-        const statMod = statAgrees ? STAT_BOOST : -STAT_PENALTY;
-        const composite = mlConf + claudeMod + statMod;
-        math = { base: mlConf, mlBoost: ML_BOOST, statMod, composite, mlAgrees: claudeAgrees, statAgrees };
-        decision = composite >= minConfidence
-          ? (mlDir ? "BET_YES" : "BET_NO")
-          : "BELOW_MIN";
+
+        if (!claudeAgrees) {
+          decision = "VETO";
+          vetoReason = `Claude disagrees on direction — direction veto (ML: ${mlDir ? "YES" : "NO"}, Claude: ${claudeDir ? "YES" : "NO"})`;
+        } else {
+          const mlContrib = Math.round(mlConf * ML_WEIGHT);
+          const claudeContrib = Math.round(claudeConf * CLAUDE_WEIGHT);
+          const statMod = statAgrees ? STAT_BOOST : -STAT_PENALTY;
+          const composite = mlContrib + claudeContrib + statMod;
+          math = { mlConf, mlContrib, claudeConf, claudeContrib, statMod, composite, statAgrees };
+          decision = composite >= minConfidence
+            ? (mlDir ? "BET_YES" : "BET_NO")
+            : "BELOW_MIN";
+        }
       }
 
       // ── Opening-call tracking ──────────────────────────────────────────────

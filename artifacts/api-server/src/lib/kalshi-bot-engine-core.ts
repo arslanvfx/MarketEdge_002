@@ -89,14 +89,17 @@ export const ML_OVERRIDE_MIN_CONF = 75;
 export const STAT_AGREE_BOOST = 4;  // +4pp when Stat agrees with ML+Claude direction
 export const ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY = 4; // −4pp when Stat dissents from ML+Claude
 
-// ── ML Gate simplified three-tier formula constants ──────────────────────────
-// Priority hierarchy: ML = primary direction setter, Claude = confidence
-// modifier, Stat = confidence modifier.  See computeMLGateDecision.
-export const CLAUDE_BOOST   = 6; // Claude agrees with ML's direction   → +6pp
-export const CLAUDE_PENALTY = 6; // Claude disagrees with ML's direction → −6pp
-export const STAT_BOOST     = 4; // Stat agrees with ML's direction      → +4pp
-export const STAT_PENALTY   = 4; // Stat disagrees with ML's direction   → −4pp
-// Kept for backwards-compat imports (backtest-core, tests).
+// ── ML Gate weighted-blend formula constants ──────────────────────────────────
+// Priority hierarchy: ML = primary direction setter AND co-decider (60% weight),
+// Claude = required co-decider (40% weight, direction veto if disagrees),
+// Stat = ±4pp modifier.  See computeMLGateDecision.
+export const ML_WEIGHT     = 0.60; // ML's share of the weighted blend
+export const CLAUDE_WEIGHT = 0.40; // Claude's share — required to agree on direction
+export const STAT_BOOST    = 4;    // Stat agrees with ML's direction    → +4pp
+export const STAT_PENALTY  = 4;    // Stat disagrees with ML's direction → −4pp
+// Legacy aliases kept for backwards-compat imports (backtest-core, tests, classic path).
+export const CLAUDE_BOOST   = 6;
+export const CLAUDE_PENALTY = 6;
 export const ML_BOOST = CLAUDE_BOOST;
 
 // ── Bet Profiles ─────────────────────────────────────────────────────────────
@@ -270,21 +273,19 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
 }
 
 /**
- * ML Gate — simplified three-tier decision formula.
+ * ML Gate — weighted-blend co-decision formula.
  *
- * Priority hierarchy:
- *   ML     = primary direction setter (62.4% accuracy — leads)
- *   Claude = confidence modifier (+CLAUDE_BOOST agree / −CLAUDE_PENALTY dissent)
- *   Stat   = confidence modifier only (+STAT_BOOST / −STAT_PENALTY)
+ * Both ML and Claude are decision makers; neither can win alone:
+ *   ML     = primary direction setter (60% weight, 62.4% accuracy)
+ *   Claude = required co-decider      (40% weight, direction veto if disagrees)
+ *   Stat   = ±4pp modifier only
  *
- * The bot's tick loop guarantees all three signals are populated (sourced from
- * the same predictor-layer store as the Crypto Predictor page) before this is
- * called, so the formula runs instantly with no waiting or fallback logic:
- *
- *   1. direction  = ML's direction  (62.4% accuracy vs Claude 56.2%)
- *   2. confidence = mlConf + (Claude agrees ? +CLAUDE_BOOST : −CLAUDE_PENALTY)
- *                          + (Stat agrees   ? +STAT_BOOST   : −STAT_PENALTY)
- *   3. gate       : confidence ≥ minConfidence → BET, else SKIP
+ * Formula (all three signals required before running):
+ *   1. direction  = ML direction
+ *   2. If Claude disagrees → SKIP immediately (direction veto — no bet)
+ *   3. composite  = round(mlConf × ML_WEIGHT + claudeConf × CLAUDE_WEIGHT)
+ *                         + (Stat agrees ? +STAT_BOOST : −STAT_PENALTY)
+ *   4. gate       : composite ≥ minConfidence → BET, else SKIP
  *
  * Post-decision gates (shared with all modes): direction-aware EV floor and
  * the minimum-return (payout multiple) gate.
@@ -358,26 +359,39 @@ function computeMLGateDecisionUngated(inp: CorePairInputs): CorePairResult {
   const mlConf     = inp.mlConfidence     ?? 0;
 
   // ── Step 1: Direction — ML leads ─────────────────────────────────────────
-  // ML is 62.4% accurate vs Claude's 56.2%. ML sets direction; Claude and
-  // Stat are confidence modifiers only — no hard veto in either direction.
   const direction = mlDir;
 
-  // ── Step 2: Confidence formula ───────────────────────────────────────────
+  // ── Step 2: Direction veto — Claude must agree ───────────────────────────
+  // Claude is a required co-decider: if it disagrees on direction the bet is
+  // blocked immediately, regardless of ML confidence level.
   const claudeAgrees = claudeDir === mlDir;
   const statAgrees   = statDir   === mlDir;
-  const confidence =
-    mlConf +
-    (claudeAgrees ? CLAUDE_BOOST : -CLAUDE_PENALTY) +
-    (statAgrees   ? STAT_BOOST   : -STAT_PENALTY);
+
+  if (!claudeAgrees) {
+    const { signalsTotal, signalsAgreeing } = countSignals(
+      direction, statDir, claudeDir, mlDir, inp.wmDriftAbove,
+    );
+    return {
+      action: "SKIP", confidence: 0, ev,
+      reasoning: `Claude disagrees on direction — direction veto (ML: ${mlDir ? "YES" : "NO"} ${Math.round(mlConf)}%, Claude: ${claudeDir ? "YES" : "NO"} ${Math.round(claudeConf)}%)`,
+      signalsAgreeing, signalsTotal,
+    };
+  }
+
+  // ── Step 3: Weighted confidence blend ────────────────────────────────────
+  // composite = round(mlConf × ML_WEIGHT + claudeConf × CLAUDE_WEIGHT) + statMod
+  // Neither signal reaches the threshold alone — both must be decent.
+  const statMod   = statAgrees ? STAT_BOOST : -STAT_PENALTY;
+  const mlContrib = Math.round(mlConf     * ML_WEIGHT);
+  const clContrib = Math.round(claudeConf * CLAUDE_WEIGHT);
+  const confidence = mlContrib + clContrib + statMod;
 
   const pathReason =
-    `ML Gate: ML leads ${mlDir ? "YES" : "NO"} (${Math.round(mlConf)}%)` +
-    (claudeAgrees
-      ? ` + Claude confirms (${Math.round(claudeConf)}%, +${CLAUDE_BOOST})`
-      : ` − Claude dissents (${Math.round(claudeConf)}%, −${CLAUDE_PENALTY})`) +
+    `ML Gate: ML ${mlDir ? "YES" : "NO"} ${Math.round(mlConf)}%×${ML_WEIGHT}=${mlContrib}` +
+    ` + Claude ${Math.round(claudeConf)}%×${CLAUDE_WEIGHT}=${clContrib}` +
     (statAgrees
-      ? ` + Stat confirms (${Math.round(statConf)}%, +${STAT_BOOST})`
-      : ` − Stat dissents (${Math.round(statConf)}%, −${STAT_PENALTY})`);
+      ? ` + Stat (+${STAT_BOOST})`
+      : ` − Stat (−${STAT_PENALTY})`);
 
   const { signalsTotal, signalsAgreeing } = countSignals(
     direction, statDir, claudeDir, mlDir, inp.wmDriftAbove,
