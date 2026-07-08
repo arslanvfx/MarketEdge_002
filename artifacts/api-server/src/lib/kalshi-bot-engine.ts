@@ -299,24 +299,11 @@ function _makeBotDecisionInner(
     }
   }
 
-  // Fast-agreement early entry: Stat and ML are both available within the first
-  // minute of the window (both are local + instant), while Claude's extended-
-  // thinking call takes 30-120s after prefetch. Waiting for Claude means entering
-  // at minute 2-4, by which point trending-window prices have collapsed to
-  // extremes (1-10¢ / 90-99¢) and every entry fails the min-return gate.
-  // When Stat and ML AGREE on direction and at least one is confident (≥60),
-  // Claude's pending verdict is not allowed to block the entry window.
-  const statMlAgree =
-    statAbove !== null && mlAbove !== null && statAbove === mlAbove;
-  const fastAgreementEntry = checkFastAgreementEntry(
-    statAbove, mlAbove, statCall?.confidence ?? null, mlConfidence,
-  );
-
-  if (
-    claudeAbove === null &&
-    minutesElapsed < CLAUDE_PENDING_THRESHOLD_MIN &&
-    !fastAgreementEntry
-  ) {
+  // Pipeline gate: ALL three models must have a direction before any bet fires.
+  // Claude's extended-thinking call takes 30-120s after the window opens.
+  // We always wait — no fast-agreement bypass — the new pipeline requires
+  // Stat + Claude + ML to all complete before any entry decision is made.
+  if (claudeAbove === null) {
     const pendingSnapshot: SignalSnapshot = {
       statAbove, claudeAbove: null, mlAbove,
       windowMonitor: wmRec, windowMonitorReady: wmReady,
@@ -330,16 +317,9 @@ function _makeBotDecisionInner(
     return {
       action: "SKIP",
       confidence: 0,
-      reasoning: `Claude opening call pending — waiting up to 3 min before evaluating entry (${minutesElapsed.toFixed(1)} min elapsed; stat/ML ${statMlAgree ? "agree but low confidence" : "not aligned yet"})`,
+      reasoning: `Pipeline: waiting for Claude (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, ML, Claude) must complete before betting`,
       signals: pendingSnapshot,
     };
-  }
-
-  if (claudeAbove === null && fastAgreementEntry && minutesElapsed < CLAUDE_PENDING_THRESHOLD_MIN) {
-    logger.info(
-      { sym, statAbove, mlAbove, mlConfidence, statConfidence: statCall?.confidence ?? null, minutesElapsed },
-      "[kalshi-bot] fast-agreement early entry — Stat+ML agree, proceeding without Claude",
-    );
   }
 
   const wmFactors = wmSignal?.factors;

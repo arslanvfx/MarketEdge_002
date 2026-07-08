@@ -29,8 +29,7 @@
 - [Proximity & time-of-day calibration](proximity-tod-calibration.md) — thresholds derived from 62+ evaluated records/coin; do NOT revert to old 0.2%/0.1% values
 - [Claude per-coin down-scale](claude-down-scale.md) — computeClaudeDownScale reads historyStore; BNB down>up so scale=1.0; use clamp(downAcc/upAcc, 0.5, 1.0) not a fixed 0.70
 - [Bot trend stability analysis](bot-trend-stability.md) — window-open parallel Claude calls; cached per (sym, windowKey); clean=×1.2, choppy=×1.0, reversing=force SKIP in Phase 3
-- [ML-primary architecture](ml-primary-architecture.md) — ML null bug fix (kalshiTarget fallback); new priority ML→Claude→Stat; regime filter penalises against-regime bets
-- [ML-primary bot entry architecture](ml-primary-entry.md) — three-path decision: A=stat+claude agree (unchanged), B=ML tiebreaker on conflict, C=ML solo when no core signals; ML_PRIMARY_MIN_CONFIDENCE=58, ML_SIGNAL_BOOST=6
+- [Sequential pipeline decision architecture](sequential-pipeline-arch.md) — Gate 1=all 3 required, Gate 2=per-signal mins (stat/claude≥55%, ML≥65%), Gate 3=unanimous/ML-override≥70%/disagree→SKIP; stat≠claude always hard-blocks
 - [Multi-position bot architecture](multi-position-bot.md) — openPositions Map replaces single openPosition; each coin fully independent; Phase 2 iterates all open slots; Phase 4 no break; BotStateSnapshot.openPositions is an array
 - [Self-learning analytics architecture](self-learning-analytics.md) — effectiveConfidence stored per bet; confidence-band/agreement-level breakdowns in PerformanceReport; Rule 3 data-driven jump to optimalConfidenceThreshold
 - [Bot config persistence](bot-config-persistence.md) — Drizzle onConflictDoUpdate silently fails for bot_config; use raw sql template instead; stale draft also masked real backend config in UI
