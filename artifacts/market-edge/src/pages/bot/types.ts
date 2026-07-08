@@ -281,6 +281,7 @@ export interface BotStepMath {
   statMod: number;       // ±STAT_BOOST (signed)
   composite: number;
   statAgrees: boolean;
+  directionalPenalty?: { yes: number; no: number }; // active directional regime dampener pp
 }
 
 export interface BotStepOpeningCall {

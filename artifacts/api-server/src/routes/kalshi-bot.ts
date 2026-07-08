@@ -167,6 +167,27 @@ function pipelineStatusHandler(_req: any, res: any) {
     const botState = getBotState();
     const minConfidence = botState.config.minConfidence;
     const decisionMode = botState.config.decisionMode;
+
+    // ── Pre-compute directional penalties before botSteps map ─────────────────
+    // These are system-wide (not per-coin) and included in each botStep's math
+    // so the UI can show which direction is penalised this window.
+    const _bsDirLookback = botState.config.directionalRegressionLookback ?? 3;
+    const _bsDirThreshold = botState.config.directionalRegressionThreshold ?? 0.35;
+    const _bsDirPenaltyPp = botState.config.directionalRegressionPenaltyPp ?? 10;
+    let _bsYesWins = 0, _bsYesLosses = 0, _bsNoWins = 0, _bsNoLosses = 0;
+    for (let _bsi = 1; _bsi <= _bsDirLookback; _bsi++) {
+      const _bsMs = Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - _bsi * 15 * 60_000;
+      const _bsWk = new Date(_bsMs).toISOString().slice(0, 16);
+      const _bsD = recentDirectionalOutcomes.get(_bsWk);
+      if (!_bsD) continue;
+      _bsYesWins += _bsD.yesWins; _bsYesLosses += _bsD.yesLosses;
+      _bsNoWins  += _bsD.noWins;  _bsNoLosses  += _bsD.noLosses;
+    }
+    const _bsYesTotal = _bsYesWins + _bsYesLosses;
+    const _bsNoTotal  = _bsNoWins  + _bsNoLosses;
+    const directionalPenaltyYesPp = (!botState.config.freeRunMode && _bsYesTotal >= 2 && _bsYesWins / _bsYesTotal < _bsDirThreshold) ? _bsDirPenaltyPp : 0;
+    const directionalPenaltyNoPp  = (!botState.config.freeRunMode && _bsNoTotal  >= 2 && _bsNoWins  / _bsNoTotal  < _bsDirThreshold) ? _bsDirPenaltyPp : 0;
+
     const botSteps = allTrackedSyms.map(sym => {
       const s = liveSignals[sym];
       const strike = kalshiTargets[sym] ?? null;
@@ -189,6 +210,7 @@ function pipelineStatusHandler(_req: any, res: any) {
         statMod: number;
         composite: number;
         statAgrees: boolean;
+        directionalPenalty: { yes: number; no: number };
       } | null = null;
 
       if (strike == null) {
@@ -216,7 +238,7 @@ function pipelineStatusHandler(_req: any, res: any) {
           const claudeContrib = Math.round(claudeConf * CLAUDE_WEIGHT);
           const statMod = statAgrees ? STAT_BOOST : -STAT_PENALTY;
           const composite = mlContrib + claudeContrib + statMod;
-          math = { mlConf, mlContrib, claudeConf, claudeContrib, statMod, composite, statAgrees };
+          math = { mlConf, mlContrib, claudeConf, claudeContrib, statMod, composite, statAgrees, directionalPenalty: { yes: directionalPenaltyYesPp, no: directionalPenaltyNoPp } };
           decision = composite >= minConfidence
             ? (mlDir ? "BET_YES" : "BET_NO")
             : "BELOW_MIN";
@@ -279,32 +301,15 @@ function pipelineStatusHandler(_req: any, res: any) {
     });
 
     // ── Adaptive filter state — exposed for pipeline-status UI ───────────────
-    const _afConfig = botState.config;
-    const _afDirLookback = _afConfig.directionalRegressionLookback ?? 3;
-    const _afDirThreshold = _afConfig.directionalRegressionThreshold ?? 0.35;
-    const _afDirPenaltyPp = _afConfig.directionalRegressionPenaltyPp ?? 10;
-    let _afYesWins = 0, _afYesLosses = 0, _afNoWins = 0, _afNoLosses = 0;
-    for (let _i = 1; _i <= _afDirLookback; _i++) {
-      const _ms = Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - _i * 15 * 60_000;
-      const _wk = new Date(_ms).toISOString().slice(0, 16);
-      const _d = recentDirectionalOutcomes.get(_wk);
-      if (!_d) continue;
-      _afYesWins += _d.yesWins; _afYesLosses += _d.yesLosses;
-      _afNoWins  += _d.noWins;  _afNoLosses  += _d.noLosses;
-    }
-    const _afYesTotal = _afYesWins + _afYesLosses;
-    const _afNoTotal  = _afNoWins  + _afNoLosses;
-    const directionalPenaltyYesPp = (!_afConfig.freeRunMode && _afYesTotal >= 2 && _afYesWins / _afYesTotal < _afDirThreshold) ? _afDirPenaltyPp : 0;
-    const directionalPenaltyNoPp  = (!_afConfig.freeRunMode && _afNoTotal  >= 2 && _afNoWins  / _afNoTotal  < _afDirThreshold) ? _afDirPenaltyPp : 0;
-
-    // Per-coin streak penalty (for UI display)
+    // directionalPenaltyYesPp / directionalPenaltyNoPp already computed above
+    // (before botSteps map). Per-coin streak penalty for UI display:
     const coinStreakState = activeCoinStreakState();
     const coinStreakPenalties = Object.fromEntries(
       allTrackedSyms.map(sym => {
         const entry = coinStreakState.get(sym);
         const losses = entry?.consecutiveLosses ?? 0;
-        const pen1 = _afConfig.coinStreakPenalty1LossPp ?? 6;
-        const pen2 = _afConfig.coinStreakPenalty2PlusLossPp ?? 12;
+        const pen1 = botState.config.coinStreakPenalty1LossPp ?? 6;
+        const pen2 = botState.config.coinStreakPenalty2PlusLossPp ?? 12;
         const pp = losses >= 2 ? pen2 : losses === 1 ? pen1 : 0;
         return [sym, pp];
       })

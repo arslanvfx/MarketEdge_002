@@ -404,6 +404,7 @@ function _makeBotDecisionInner(
       kalshiTicker,
       minConfidence: config.minConfidence,
       minReturnMultiple: config.minReturnMultiple,
+      unanimousMinModelConfidence: config.unanimousMinModelConfidence,
     });
 
     const coreSnap = buildSnapshot(

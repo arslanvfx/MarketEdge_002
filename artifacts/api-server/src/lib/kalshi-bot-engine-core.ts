@@ -382,17 +382,39 @@ function computeMLGateDecisionUngated(inp: CorePairInputs): CorePairResult {
   // ── Step 3: Weighted confidence blend ────────────────────────────────────
   // composite = round(mlConf × ML_WEIGHT + claudeConf × CLAUDE_WEIGHT) + statMod
   // Neither signal reaches the threshold alone — both must be decent.
-  const statMod   = statAgrees ? STAT_BOOST : -STAT_PENALTY;
+  let statMod = statAgrees ? STAT_BOOST : -STAT_PENALTY;
+
+  // ── Unanimous model floor (ml_gate) ──────────────────────────────────────
+  // When all three models agree on direction but any individual model's
+  // confidence is below unanimousMinModelConfidence, the unanimous arrangement
+  // is downgraded: the Stat boost is withdrawn and replaced with the Stat
+  // penalty — reducing the composite as if Stat had disagreed.
+  // This prevents three weakly-confident-but-agreeing models from clearing
+  // minConfidence via accumulated agreement alone.
+  const unanimousModelFloor = inp.unanimousMinModelConfidence ?? 0;
+  const allThreeAgreeMLGate = claudeAgrees && statAgrees;
+  let unanimousDowngradedNote = "";
+  if (allThreeAgreeMLGate && unanimousModelFloor > 0) {
+    const weakestModel = Math.min(statConf, claudeConf, mlConf);
+    if (weakestModel < unanimousModelFloor) {
+      statMod = -STAT_PENALTY;
+      unanimousDowngradedNote =
+        ` [unanimous downgraded — weakest model ${Math.round(weakestModel)}% < ${unanimousModelFloor}% floor]`;
+    }
+  }
+
   const mlContrib = Math.round(mlConf     * ML_WEIGHT);
   const clContrib = Math.round(claudeConf * CLAUDE_WEIGHT);
   const confidence = mlContrib + clContrib + statMod;
 
+  const statLabel = unanimousDowngradedNote
+    ? ` − Stat (downgraded; −${STAT_PENALTY})`
+    : statAgrees ? ` + Stat (+${STAT_BOOST})` : ` − Stat (−${STAT_PENALTY})`;
   const pathReason =
     `ML Gate: ML ${mlDir ? "YES" : "NO"} ${Math.round(mlConf)}%×${ML_WEIGHT}=${mlContrib}` +
     ` + Claude ${Math.round(claudeConf)}%×${CLAUDE_WEIGHT}=${clContrib}` +
-    (statAgrees
-      ? ` + Stat (+${STAT_BOOST})`
-      : ` − Stat (−${STAT_PENALTY})`);
+    statLabel +
+    unanimousDowngradedNote;
 
   const { signalsTotal, signalsAgreeing } = countSignals(
     direction, statDir, claudeDir, mlDir, inp.wmDriftAbove,
