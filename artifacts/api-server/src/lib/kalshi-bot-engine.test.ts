@@ -6,8 +6,12 @@
 //
 // Pipeline (sequential gates — all must pass before a bet fires):
 //   GATE 1 — All three models required: Stat + Claude + ML must each have a direction.
-//   GATE 2 — Per-signal minimums: Stat≥55%, Claude≥55%, ML≥65%.
-//   GATE 3 — Direction agreement: unanimous bet, ML override (≥70%), or SKIP.
+//   GATE 2 — Per-signal minimums: Stat≥58%, Claude≥62%, ML≥70%.
+//   GATE 3 — Direction agreement:
+//     (A) Unanimous → bet (ML+6, Stat+4)
+//     (B) ML+Claude agree, Stat dissents → bet (ML+6, Stat−4)
+//     (C) Stat+Claude agree, ML opposes at ≥75% → ML override
+//     (D) ML+Stat agree, Claude disagrees → SKIP
 //   GATE 4 — Composite confidence ≥ minConfidence (default 70%).
 //   Post-pipeline — EV gate, minReturnMultiple gate.
 //
@@ -29,11 +33,12 @@ import {
   CONFIDENCE_BOOST_PER_SIGNAL,
   ML_PRIMARY_MIN_CONFIDENCE,
   ML_SIGNAL_BOOST,
+  STAT_AGREE_BOOST,
+  ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY,
   ML_REQUIRED_MIN_CONF,
   ML_OVERRIDE_MIN_CONF,
   STAT_REQUIRED_MIN_CONF,
   CLAUDE_REQUIRED_MIN_CONF,
-  DISSENT_PENALTY,
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
@@ -117,54 +122,54 @@ test("pipeline gate 1: all three null → SKIP — first gate fires on Stat", ()
 // PIPELINE: Gate 2 — per-signal confidence minimums
 // ---------------------------------------------------------------------------
 
-test("pipeline gate 2: stat confidence 54% → SKIP (below 55% minimum)", () => {
+test("pipeline gate 2: stat confidence 57% → SKIP (below 58% minimum)", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 54,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 57,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
   }));
   assert.equal(r.action, "SKIP");
   assert.match(r.reasoning, /Stat confidence.*below minimum/);
 });
 
-test("pipeline gate 2: stat exactly 55% → passes minimum", () => {
+test("pipeline gate 2: stat exactly 58% → passes minimum", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
   }));
   assert.notEqual(r.action, "SKIP");
 });
 
-test("pipeline gate 2: claude confidence 54% → SKIP (below 55% minimum)", () => {
+test("pipeline gate 2: claude confidence 61% → SKIP (below 62% minimum)", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 54,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 61,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
   }));
   assert.equal(r.action, "SKIP");
   assert.match(r.reasoning, /Claude confidence.*below minimum/);
 });
 
-test("pipeline gate 2: ML confidence 64% → SKIP (below 65% minimum)", () => {
+test("pipeline gate 2: ML confidence 69% → SKIP (below 70% minimum)", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 64,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 69,
     minConfidence: 50,
   }));
   assert.equal(r.action, "SKIP");
   assert.match(r.reasoning, /ML confidence.*below minimum/);
 });
 
-test("pipeline gate 2: ML exactly 65% → passes minimum", () => {
+test("pipeline gate 2: ML exactly 70% → passes minimum", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
   }));
   assert.notEqual(r.action, "SKIP");
@@ -179,11 +184,13 @@ test("pipeline gate 2: null confidence treated as 0 → below any minimum → SK
   assert.equal(r.action, "SKIP");
 });
 
-test("pipeline gate 2: constants reflect spec values (stat=55, claude=55, ml=65, override=70)", () => {
-  assert.equal(STAT_REQUIRED_MIN_CONF,   55);
-  assert.equal(CLAUDE_REQUIRED_MIN_CONF, 55);
-  assert.equal(ML_REQUIRED_MIN_CONF,     65);
-  assert.equal(ML_OVERRIDE_MIN_CONF,     70);
+test("pipeline gate 2: constants reflect spec values (stat=58, claude=62, ml=70, override=75, stat_boost=4, dissent_penalty=4)", () => {
+  assert.equal(STAT_REQUIRED_MIN_CONF,                  58);
+  assert.equal(CLAUDE_REQUIRED_MIN_CONF,                62);
+  assert.equal(ML_REQUIRED_MIN_CONF,                    70);
+  assert.equal(ML_OVERRIDE_MIN_CONF,                    75);
+  assert.equal(STAT_AGREE_BOOST,                         4);
+  assert.equal(ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY,     4);
 });
 
 // ---------------------------------------------------------------------------
@@ -192,9 +199,9 @@ test("pipeline gate 2: constants reflect spec values (stat=55, claude=55, ml=65,
 
 test("unanimous YES: all three agree above minimums → BET_YES", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_YES");
@@ -202,46 +209,48 @@ test("unanimous YES: all three agree above minimums → BET_YES", () => {
 
 test("unanimous NO: all three agree above minimums → BET_NO", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: false, mlConfidence: 65,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 70,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_NO");
 });
 
-test("unanimous: confidence = mlConf + 2×ML_SIGNAL_BOOST (stat+claude both confirm)", () => {
+test("unanimous: confidence = mlConf + ML_SIGNAL_BOOST + STAT_AGREE_BOOST (Claude co-signs +6, Stat confirms +4)", () => {
+  // Path A: 70 + 6 + 4 = 80
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 60,
   }));
-  assert.equal(r.confidence, 65 + ML_SIGNAL_BOOST + ML_SIGNAL_BOOST); // 65+6+6=77
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 70+6+4=80
 });
 
 test("unanimous: WM agreeing adds CONFIDENCE_BOOST_PER_SIGNAL on top", () => {
+  // Path A + WM: 70+6+4+8=88
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     wmDriftAbove: true, wmRec: "bet", wmReady: true,
     minConfidence: 60,
   }));
-  assert.equal(r.confidence, 65 + ML_SIGNAL_BOOST + ML_SIGNAL_BOOST + CONFIDENCE_BOOST_PER_SIGNAL); // 77+8=85
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST + CONFIDENCE_BOOST_PER_SIGNAL); // 88
 });
 
 test("unanimous: WM opposing does NOT reduce confidence (WM never vetoes)", () => {
   const noWm = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 60,
   }));
   const wmOppose = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     wmDriftAbove: false, wmRec: "skip", wmReady: true,
     minConfidence: 60,
   }));
@@ -249,191 +258,254 @@ test("unanimous: WM opposing does NOT reduce confidence (WM never vetoes)", () =
 });
 
 test("unanimous: composite below final minConfidence gate → SKIP with confidence value preserved", () => {
-  // 65+6+6=77, minConfidence=80 → SKIP
+  // Path A: 70+6+4=80, minConfidence=85 → SKIP
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
-    minConfidence: 80,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
+    minConfidence: 85,
   }));
   assert.equal(r.action, "SKIP");
-  assert.equal(r.confidence, 77);
+  assert.equal(r.confidence, 80);
 });
 
 test("unanimous: reasoning contains 'Unanimous'", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: false, mlConfidence: 65,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 70,
     minConfidence: 60,
   }));
   assert.match(r.reasoning, /Unanimous/);
 });
 
-test("unanimous YES clears production minConfidence=70 at minimum inputs (65+6+6=77 ≥ 70)", () => {
+test("unanimous YES clears production minConfidence=70 at minimum inputs (70+6+4=80 ≥ 70)", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 70,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 77);
+  assert.equal(r.confidence, 80);
 });
 
 test("unanimous NO clears production minConfidence=70 at minimum inputs", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: false, mlConfidence: 65,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 70,
     minConfidence: 70,
   }));
   assert.equal(r.action, "BET_NO");
-  assert.equal(r.confidence, 77);
+  assert.equal(r.confidence, 80);
 });
 
 // ---------------------------------------------------------------------------
-// PIPELINE: Gate 3B — ML override (stat+claude agree, ML opposes)
+// PIPELINE: Gate 3C — ML override (stat+claude agree, ML opposes at ≥75%)
 // ---------------------------------------------------------------------------
 
-test("ML override: ML 65% opposing stat+claude → SKIP (below 70% override threshold)", () => {
+test("ML override: ML 70% opposing stat+claude → SKIP (below 75% override threshold)", () => {
+  // stat+claude both say YES, ML says NO at 70% — below the 75% override bar
   const r = computeCorePairDecision(inp({
     statAbove: true, statConfidence: 60,
-    claudeAbove: true, claudeConfidence: 60,
-    mlAbove: false, mlConfidence: 65,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 70,
     minConfidence: 60,
   }));
   assert.equal(r.action, "SKIP");
   assert.match(r.reasoning, /needs.*to override|below.*override/i);
 });
 
-test("ML override: ML 69% opposing stat+claude → SKIP (1% below threshold)", () => {
+test("ML override: ML 74% opposing stat+claude → SKIP (1% below 75% threshold)", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 69,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 74,
     minConfidence: 60,
   }));
   assert.equal(r.action, "SKIP");
 });
 
-test("ML override: ML exactly 70% opposing stat+claude YES → follow ML → BET_NO at 70", () => {
+test("ML override: ML exactly 75% opposing stat+claude YES → follow ML → BET_NO at 75", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: false, mlConfidence: 70,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 75,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_NO"); // ML says NO (below strike), stat+claude said YES
-  assert.equal(r.confidence, 70);   // ML confidence alone — no boosts from opposing validators
+  assert.equal(r.confidence, 75);   // ML confidence alone — no boosts from opposing validators
 });
 
-test("ML override: ML exactly 70% opposing stat+claude NO → follow ML → BET_YES at 70", () => {
+test("ML override: ML exactly 75% opposing stat+claude NO → follow ML → BET_YES at 75", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 70,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 75,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 70);
+  assert.equal(r.confidence, 75);
 });
 
 test("ML override: confidence = ML confidence alone (opposing validators add no boost)", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
-    mlAbove: false, mlConfidence: 72,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 75,
     minConfidence: 60,
   }));
-  assert.equal(r.confidence, 72);
-  assert.notEqual(r.confidence, 72 + ML_SIGNAL_BOOST); // stat does NOT boost ML here
+  assert.equal(r.confidence, 75);
+  assert.notEqual(r.confidence, 75 + ML_SIGNAL_BOOST); // stat does NOT boost ML here
 });
 
 test("ML override: WM agreeing with ML adds CONFIDENCE_BOOST_PER_SIGNAL", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 70,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 75,
     wmDriftAbove: true, wmRec: "bet", wmReady: true,
     minConfidence: 60,
   }));
-  assert.equal(r.confidence, 70 + CONFIDENCE_BOOST_PER_SIGNAL); // 78
+  assert.equal(r.confidence, 75 + CONFIDENCE_BOOST_PER_SIGNAL); // 83
 });
 
 test("ML override: reasoning contains 'ML override'", () => {
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: true, mlConfidence: 70,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 75,
     minConfidence: 60,
   }));
   assert.match(r.reasoning, /ML override/);
 });
 
-test("ML override: ML 72% opposing stat+claude both at 55% → override fires", () => {
+test("ML override: ML 80% opposing stat+claude → override fires", () => {
   const r = computeCorePairDecision(inp({
-    mlAbove: true, mlConfidence: 72,
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
+    mlAbove: true, mlConfidence: 80,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
     minConfidence: 62,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 72);
+  assert.equal(r.confidence, 80);
   assert.match(r.reasoning, /ML override/);
 });
 
-test("ML override: ML 72% opposing stat+claude both at 62% → override fires regardless of their level", () => {
+test("ML override: ML 75% opposing high-confidence stat+claude → override fires regardless of their level", () => {
   const r = computeCorePairDecision(inp({
-    mlAbove: true, mlConfidence: 72,
-    statAbove: false, statConfidence: 62,
-    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 75,
+    statAbove: false, statConfidence: 70,
+    claudeAbove: false, claudeConfidence: 70,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 72);
+  assert.equal(r.confidence, 75);
 });
 
 // ---------------------------------------------------------------------------
-// PIPELINE: Gate 3C — disagreement (stat ≠ claude → always SKIP)
+// PIPELINE: Gate 3B — ML+Claude agree, Stat dissents → BET with penalty
 // ---------------------------------------------------------------------------
 
-test("disagreement: stat=YES, claude=NO → SKIP regardless of ML", () => {
+test("Path B: ML=YES + Claude=YES, Stat=NO → BET_YES with Stat-dissent penalty", () => {
+  // ML+Claude agree on YES; Stat disagrees. Net confidence = mlConf + 6 − 4 = 70+6−4=72
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 70,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: false, statConfidence: 58,
+    minConfidence: 60,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY); // 72
+});
+
+test("Path B: ML=NO + Claude=NO, Stat=YES → BET_NO with Stat-dissent penalty", () => {
+  const r = computeCorePairDecision(inp({
+    mlAbove: false, mlConfidence: 70,
+    claudeAbove: false, claudeConfidence: 62,
+    statAbove: true, statConfidence: 58,
+    minConfidence: 60,
+  }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY); // 72
+});
+
+test("Path B: confidence = mlConf + ML_SIGNAL_BOOST − ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY", () => {
+  // 72 + 6 − 4 = 74
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 72,
+    claudeAbove: true, claudeConfidence: 65,
+    statAbove: false, statConfidence: 60,
+    minConfidence: 60,
+  }));
+  assert.equal(r.confidence, 72 + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY); // 74
+});
+
+test("Path B: WM agreeing with direction adds CONFIDENCE_BOOST_PER_SIGNAL on top of penalty", () => {
+  // 70+6−4+8=80
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 70,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: false, statConfidence: 58,
+    wmDriftAbove: true, wmRec: "bet", wmReady: true,
+    minConfidence: 60,
+  }));
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY + CONFIDENCE_BOOST_PER_SIGNAL); // 80
+});
+
+test("Path B: reasoning mentions Stat dissent", () => {
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 70,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: false, statConfidence: 58,
+    minConfidence: 60,
+  }));
+  assert.match(r.reasoning, /Stat dissent|dissent/i);
+});
+
+test("Path B: penalized confidence below minConfidence → SKIP", () => {
+  // 70+6−4=72, minConfidence=75 → SKIP
+  const r = computeCorePairDecision(inp({
+    mlAbove: true, mlConfidence: 70,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: false, statConfidence: 58,
+    minConfidence: 75,
+  }));
+  assert.equal(r.action, "SKIP");
+});
+
+// ---------------------------------------------------------------------------
+// PIPELINE: Gate 3D — ML+Stat agree, Claude disagrees → always SKIP
+// ---------------------------------------------------------------------------
+
+test("Path D: ML=YES + Stat=YES, Claude=NO → SKIP (Claude opposition overrides)", () => {
   const r = computeCorePairDecision(inp({
     statAbove: true, statConfidence: 60,
-    claudeAbove: false, claudeConfidence: 60,
-    mlAbove: true, mlConfidence: 65,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
   }));
   assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /disagree/);
+  assert.match(r.reasoning, /disagree|Claude.*disagree|opposition/i);
 });
 
-test("disagreement: stat=NO, claude=YES → SKIP", () => {
+test("Path D: ML=NO + Stat=NO, Claude=YES → SKIP", () => {
   const r = computeCorePairDecision(inp({
     statAbove: false, statConfidence: 60,
-    claudeAbove: true, claudeConfidence: 60,
-    mlAbove: false, mlConfidence: 65,
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 70,
     minConfidence: 50,
   }));
   assert.equal(r.action, "SKIP");
 });
 
-test("disagreement: stat=YES, claude=NO, ML=NO (with stat) → SKIP (stat≠claude is the deciding factor)", () => {
+test("Path D: ML=YES + Stat=YES, Claude=NO even with very high ML confidence → still SKIP", () => {
+  // ML at 90% cannot override Claude's opposition in Path D — hard block.
   const r = computeCorePairDecision(inp({
     statAbove: true, statConfidence: 60,
-    claudeAbove: false, claudeConfidence: 60,
-    mlAbove: false, mlConfidence: 65,
-    minConfidence: 50,
-  }));
-  assert.equal(r.action, "SKIP");
-});
-
-test("disagreement: stat=YES, claude=NO, high-confidence ML=YES → still SKIP (stat≠claude blocks first)", () => {
-  const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 60,
-    claudeAbove: false, claudeConfidence: 60,
-    mlAbove: true, mlConfidence: 80,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 90,
     minConfidence: 50,
   }));
   assert.equal(r.action, "SKIP");
@@ -492,14 +564,14 @@ test("No Kalshi ticker → SKIP", () => {
 // ---------------------------------------------------------------------------
 
 const evYes = (extra: Partial<CorePairInputs> = {}) => inp({
-  statAbove: true, statConfidence: 55,
-  claudeAbove: true, claudeConfidence: 55,
+  statAbove: true, statConfidence: 58,
+  claudeAbove: true, claudeConfidence: 62,
   mlAbove: true, mlConfidence: 70,
   ...extra,
 });
 const evNo = (extra: Partial<CorePairInputs> = {}) => inp({
-  statAbove: false, statConfidence: 55,
-  claudeAbove: false, claudeConfidence: 55,
+  statAbove: false, statConfidence: 58,
+  claudeAbove: false, claudeConfidence: 62,
   mlAbove: false, mlConfidence: 70,
   ...extra,
 });
@@ -556,31 +628,32 @@ test("EV gate: 50¢ market is identical for YES and NO at same accuracy", () => 
 // Reversing-caution arithmetic (Phase 3 penalty applied externally)
 // ---------------------------------------------------------------------------
 
-test("Low-conviction: pipeline minimum 65+6+6=77, 77-20=57 < minConfidence(60) → Phase 3 skips", () => {
-  // All three at minimum thresholds: stat=55, claude=55, ml=65 → unanimous → 65+6+6=77.
-  // Phase 3 applies a −20 penalty externally → 57 < DEFAULT_MIN_CONFIDENCE(60) → SKIP.
+test("Low-conviction: pipeline minimum 70+6+4=80, 80−21=59 < minConfidence(61) → Phase 3 skips", () => {
+  // All three at minimum thresholds: stat=58, claude=62, ml=70 → unanimous → 70+6+4=80 (Path A).
+  // Phase 3 applies an external penalty; here we verify the confidence value for the caller
+  // to use.  With a 21pp penalty: 80−21=59 < 61 (a slightly raised gate) → Phase 3 would SKIP.
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,
-    claudeAbove: true, claudeConfidence: 55,
+    statAbove: true, statConfidence: 58,
+    claudeAbove: true, claudeConfidence: 62,
     mlAbove: true, mlConfidence: ML_REQUIRED_MIN_CONF,
-    minConfidence: 60,
+    minConfidence: 60, // normal gate — bet passes here; penalty applied outside
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, ML_REQUIRED_MIN_CONF + 2 * ML_SIGNAL_BOOST); // 77
-  assert.ok(r.confidence - 20 < DEFAULT_MIN_CONFIDENCE, "penalized confidence falls below gate");
+  assert.equal(r.confidence, ML_REQUIRED_MIN_CONF + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 80
+  assert.ok(r.confidence - 21 < 61, "penalized confidence (59) falls below a raised gate (61)");
 });
 
-test("High-conviction: ML+Claude+Stat+WM all agree → 65+6+6+8=85 → 85-20=65 ≥ 60 → Phase 3 allows", () => {
-  // Same minimum inputs plus WM: 65+6+6+8=85. Phase 3 −20 → 65 ≥ DEFAULT_MIN_CONFIDENCE(60) → passes.
+test("High-conviction: ML+Claude+Stat+WM all agree → 70+6+4+8=88 → 88−20=68 ≥ 60 → Phase 3 allows", () => {
+  // Same minimum inputs plus WM: 70+6+4+8=88 (Path A + WM). Phase 3 −20 → 68 ≥ 60 → passes.
   const r = computeCorePairDecision(inp({
     mlAbove: true, mlConfidence: ML_REQUIRED_MIN_CONF,
-    claudeAbove: true, claudeConfidence: 55,
-    statAbove: true, statConfidence: 55,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: true, statConfidence: 58,
     wmDriftAbove: true, wmRec: "bet", wmReady: true,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, ML_REQUIRED_MIN_CONF + 2 * ML_SIGNAL_BOOST + CONFIDENCE_BOOST_PER_SIGNAL); // 85
-  assert.ok(r.confidence - 20 >= DEFAULT_MIN_CONFIDENCE, "penalized confidence still clears gate");
+  assert.equal(r.confidence, ML_REQUIRED_MIN_CONF + ML_SIGNAL_BOOST + STAT_AGREE_BOOST + CONFIDENCE_BOOST_PER_SIGNAL); // 88
+  assert.ok(r.confidence - 20 >= DEFAULT_MIN_CONFIDENCE, "penalized confidence (68) still clears gate (60)");
 });
 
 // ---------------------------------------------------------------------------
@@ -894,15 +967,16 @@ test("restoreStreakState: entry with no pause and no losses is restored (not fil
 
 // Helpers for min-return-gate tests: provide all three signals so pipeline
 // Gates 1-3 pass before the min-return gate is reached.
+// Use minimum passing values: stat=58, claude=62, ml=70.
 const mrNo  = (extra: Partial<CorePairInputs> = {}) => inp({
-  statAbove: false, statConfidence: 55,
-  claudeAbove: false, claudeConfidence: 55,
+  statAbove: false, statConfidence: 58,
+  claudeAbove: false, claudeConfidence: 62,
   mlAbove: false, mlConfidence: 70,
   ...extra,
 });
 const mrYes = (extra: Partial<CorePairInputs> = {}) => inp({
-  statAbove: true, statConfidence: 55,
-  claudeAbove: true, claudeConfidence: 55,
+  statAbove: true, statConfidence: 58,
+  claudeAbove: true, claudeConfidence: 62,
   mlAbove: true, mlConfidence: 70,
   ...extra,
 });
@@ -1353,11 +1427,11 @@ test("shouldDeferForLiveSignal: stale cache, one second before max-defer → sti
 
 test("stat flip downstream: flip above→below + Claude=below + ML=below → BET_NO (all three agree on new direction)", () => {
   // Opening: stat=above.  Mid-snap flips stat to below.  Claude and ML also say below.
-  // All three models agree on below after the flip → unanimous BET_NO.
+  // All three models agree on below after the flip → unanimous BET_NO (Path A).
   const r = computeCorePairDecision(inp({
-    statAbove: false, statConfidence: 55,
-    claudeAbove: false, claudeConfidence: 55,
-    mlAbove: false, mlConfidence: 65,
+    statAbove: false, statConfidence: 58,
+    claudeAbove: false, claudeConfidence: 62,
+    mlAbove: false, mlConfidence: 70,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_NO", "agreed-below after flip must bet NO, not SKIP");
@@ -1365,55 +1439,54 @@ test("stat flip downstream: flip above→below + Claude=below + ML=below → BET
 
 test("stat flip downstream: flip + Claude=above, ML=null → SKIP (Gate 1: pipeline waits for ML)", () => {
   // Stat has flipped to below but Claude still says above.  ML not yet available.
-  // Pipeline Gate 1 fires: ML direction missing → SKIP (no ML to arbitrate is now
-  // enforced structurally as a Gate 1 condition, not a PATH B special case).
+  // Pipeline Gate 1 fires: ML direction missing → SKIP regardless of other signals.
   const r = computeCorePairDecision(inp({
-    claudeAbove: true, claudeConfidence: 55,
-    statAbove: false, statConfidence: 55,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: false, statConfidence: 58,
     mlAbove: null,
   }));
   assert.equal(r.action, "SKIP");
   assert.match(r.reasoning, /Pipeline.*ML/i);
 });
 
-test("stat flip downstream: flip + Claude=above + ML=above → SKIP (stat≠claude: Gate 3C hard block)", () => {
-  // Stat has flipped to below, but Claude and ML both say above.
-  // In the new pipeline, stat≠claude is a hard SKIP at Gate 3C regardless of ML.
-  // The old PATH B ML-tiebreaker no longer exists: disagreement always stops here.
+test("stat flip downstream: flip + Claude=YES + ML=YES → BET_YES (Path B: ML+Claude agree, Stat dissents)", () => {
+  // Stat has flipped to below (NO), but Claude and ML both say above (YES).
+  // New pipeline Path B: ML+Claude agree → BET_YES with Stat-dissent penalty.
+  // Confidence = mlConf + ML_SIGNAL_BOOST − ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY = 70+6−4=72
   const r = computeCorePairDecision(inp({
-    claudeAbove: true, claudeConfidence: 55,
-    statAbove: false, statConfidence: 55,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: false, statConfidence: 58,
     mlAbove: true, mlConfidence: 70,
     minConfidence: 60,
   }));
-  assert.equal(r.action, "SKIP", "stat≠claude is a hard block in Gate 3C");
-  assert.match(r.reasoning, /disagree/);
+  assert.equal(r.action, "BET_YES", "ML+Claude agree YES; stat dissents → Path B bet, not SKIP");
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY); // 72
 });
 
 test("stat flip downstream: no flip (stat stays above) + Claude=above + ML=above → BET_YES unchanged", () => {
-  // Sanity check: when stat does NOT flip, all three agree above → unanimous BET_YES.
+  // Sanity check: when stat does NOT flip, all three agree above → unanimous BET_YES (Path A).
   const r = computeCorePairDecision(inp({
-    claudeAbove: true, claudeConfidence: 55,
-    statAbove: true, statConfidence: 55,
-    mlAbove: true, mlConfidence: 65,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: true, statConfidence: 58,
+    mlAbove: true, mlConfidence: 70,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 65 + ML_SIGNAL_BOOST + ML_SIGNAL_BOOST); // 77
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 80
 });
 
-test("stat flip downstream: flip above→below + ML=above + Claude=above → SKIP (stat≠claude; no dissent-penalty path in pipeline)", () => {
-  // The old PATH A allowed ML to lead with a stat-dissent penalty.
-  // In the new pipeline, stat≠claude fires Gate 3C (hard SKIP) before the
-  // ML-override check (Gate 3B) is reached — stat and claude must agree first.
+test("stat flip downstream: flip above→below + ML=YES + Claude=YES → BET_YES (Path B with minimum inputs)", () => {
+  // When stat flips to NO but ML+Claude agree YES — Path B fires (not a SKIP).
+  // This is the central behavior change from the prior pipeline:
+  // the old pipeline SKIPped here (stat≠claude); the new pipeline BETs with a penalty.
   const r = computeCorePairDecision(inp({
     mlAbove: true, mlConfidence: 70,
-    claudeAbove: true, claudeConfidence: 55,
-    statAbove: false, statConfidence: 55,
+    claudeAbove: true, claudeConfidence: 62,
+    statAbove: false, statConfidence: 58,
     minConfidence: 60,
   }));
-  assert.equal(r.action, "SKIP", "stat≠claude always blocks in Gate 3C");
-  assert.match(r.reasoning, /disagree/);
+  assert.equal(r.action, "BET_YES", "ML+Claude agree YES (Path B) — bets despite stat flip");
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY); // 72
 });
 
 // ---------------------------------------------------------------------------

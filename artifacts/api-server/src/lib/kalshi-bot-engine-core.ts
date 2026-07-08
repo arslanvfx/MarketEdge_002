@@ -10,16 +10,24 @@
 //     No fast-agreement bypass — Claude must complete its extended-thinking call.
 //
 //   GATE 2 — Per-signal confidence minimums:
-//     Stat   ≥ STAT_REQUIRED_MIN_CONF   (55%)
-//     Claude ≥ CLAUDE_REQUIRED_MIN_CONF (55%)
-//     ML     ≥ ML_REQUIRED_MIN_CONF     (65%)
+//     Stat   ≥ STAT_REQUIRED_MIN_CONF   (58%)
+//     Claude ≥ CLAUDE_REQUIRED_MIN_CONF (62%)
+//     ML     ≥ ML_REQUIRED_MIN_CONF     (70%)
 //
-//   GATE 3 — Direction agreement:
-//     (A) Unanimous (all three agree) → bet.
-//           Confidence = mlConf + ML_SIGNAL_BOOST×2 [+ CONFIDENCE_BOOST_PER_SIGNAL if WM agrees]
-//     (B) Stat+Claude agree, ML opposes at ≥ ML_OVERRIDE_MIN_CONF (70%) → follow ML.
+//   GATE 3 — Direction agreement (four exclusive paths):
+//     (A) All three unanimous → bet.
+//           Confidence = mlConf + ML_SIGNAL_BOOST (Claude boost) + STAT_AGREE_BOOST
+//                      [+ CONFIDENCE_BOOST_PER_SIGNAL if WM agrees]
+//     (B) ML + Claude agree, Stat dissents → bet with Stat penalty.
+//           Confidence = mlConf + ML_SIGNAL_BOOST − ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY
+//                      [+ CONFIDENCE_BOOST_PER_SIGNAL if WM agrees]
+//           Rationale: our two strongest models agree; Stat's dissent is noted
+//           as a confidence penalty, not a hard block.
+//     (C) Stat + Claude agree, ML opposes at ≥ ML_OVERRIDE_MIN_CONF (75%) → follow ML.
 //           Confidence = mlConf [+ CONFIDENCE_BOOST_PER_SIGNAL if WM agrees]
-//     (C) Any other disagreement (Stat ≠ Claude) → SKIP.
+//           Below 75% ML cannot override Stat+Claude consensus → SKIP.
+//     (D) ML + Stat agree, Claude disagrees → SKIP.
+//           Claude's opposition carries too much weight to override.
 //
 //   GATE 4 — Composite confidence ≥ minConfidence (default 70%).
 //
@@ -61,13 +69,17 @@ export const ML_DOMINANCE_MARGIN = 10;
 // ── Pipeline per-signal confidence minimums ──────────────────────────────────
 // All three models must have a direction AND meet their own minimum before
 // the group decision is made.  null confidence is treated as 0 (conservative).
-export const STAT_REQUIRED_MIN_CONF   = 55; // Stat ≥ 55%
-export const CLAUDE_REQUIRED_MIN_CONF = 55; // Claude ≥ 55%
-export const ML_REQUIRED_MIN_CONF     = 65; // ML ≥ 65% (stronger threshold — ML is the leading model)
+export const STAT_REQUIRED_MIN_CONF   = 58; // Stat ≥ 58%
+export const CLAUDE_REQUIRED_MIN_CONF = 62; // Claude ≥ 62% (strong co-signer)
+export const ML_REQUIRED_MIN_CONF     = 70; // ML ≥ 70% (lead model, high bar)
 // ML must reach this threshold to override a Stat+Claude consensus in the
-// opposite direction.  Below this level the two-model consensus prevails and
-// the window is skipped (not reversed — that requires ≥ ML_OVERRIDE_MIN_CONF).
-export const ML_OVERRIDE_MIN_CONF = 70;
+// opposite direction (Gate 3C).  Below this level the two-model consensus
+// prevails and the window is skipped.
+export const ML_OVERRIDE_MIN_CONF = 75;
+// Gate 3 confidence adjustments — applied after direction is resolved.
+// Claude is our primary co-signer; Stat is the technical confirmer.
+export const STAT_AGREE_BOOST = 4;  // +4pp when Stat agrees with ML+Claude direction
+export const ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY = 4; // −4pp when Stat dissents from ML+Claude
 
 // ── Bet Profiles ─────────────────────────────────────────────────────────────
 // Two preset aggression levels the user can switch between in the dashboard.
@@ -373,10 +385,12 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   }
 
   // ── Gate 3: Direction agreement ──────────────────────────────────────────
-  // Three outcomes:
-  //   (A) All three agree → unanimous bet (ML leads, stat+claude each add a boost)
-  //   (B) Stat+Claude agree, ML opposes at ≥ ML_OVERRIDE_MIN_CONF → ML override
-  //   (C) Any other disagreement (Stat ≠ Claude) → SKIP, no consensus possible
+  // Four exclusive paths (with 3 boolean signals only one model can be the
+  // odd one out — the 4th "all disagree" case is impossible):
+  //   (A) All three unanimous → best-quality bet
+  //   (B) ML + Claude agree, Stat dissents → bet with Stat penalty
+  //   (C) Stat + Claude agree, ML opposes → ML override at ≥ ML_OVERRIDE_MIN_CONF; else SKIP
+  //   (D) ML + Stat agree, Claude disagrees → SKIP (Claude's opposition overrides)
   const statDir   = inp.statAbove as boolean;
   const claudeDir = inp.claudeAbove as boolean;
   const mlDir     = inp.mlAbove as boolean;
@@ -384,17 +398,29 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   let direction: boolean;
   let confidence: number;
   let pathReason: string;
+  let coreAgreeing: number;
 
   if (statDir === claudeDir && claudeDir === mlDir) {
     // ── (A) Unanimous — all three agree ──────────────────────────────────────
     direction = statDir;
-    confidence = mlConf + ML_SIGNAL_BOOST + ML_SIGNAL_BOOST; // ML leads; stat+claude both confirm
+    confidence = mlConf + ML_SIGNAL_BOOST + STAT_AGREE_BOOST; // Claude co-signs (+6), Stat confirms (+4)
     pathReason = `Unanimous: Stat:✓(${Math.round(statConf)}%) Claude:✓(${Math.round(claudeConf)}%) ML:✓(${Math.round(mlConf)}%)`;
+    coreAgreeing = 3;
 
-  } else if (statDir === claudeDir && mlDir !== statDir) {
-    // ── (B) Stat+Claude agree, ML opposes ────────────────────────────────────
-    // ML can override at ≥ ML_OVERRIDE_MIN_CONF (70%).  Below that threshold
-    // the two-model consensus prevails and the window is skipped (not reversed).
+  } else if (mlDir === claudeDir) {
+    // ── (B) ML + Claude agree, Stat dissents ─────────────────────────────────
+    // Our two strongest models agree; Stat's dissent is noted as a confidence
+    // penalty but does not block the bet.  This is the key improvement over the
+    // prior pipeline where stat≠claude was always a hard SKIP.
+    direction = mlDir;
+    confidence = mlConf + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY; // Claude co-signs (+6), Stat penalty (−4)
+    pathReason = `ML+Claude agree (${Math.round(mlConf)}%/${Math.round(claudeConf)}%), Stat dissents (${Math.round(statConf)}% ${statDir ? "YES" : "NO"}) — Stat penalty applied`;
+    coreAgreeing = 2;
+
+  } else if (statDir === claudeDir) {
+    // ── (C) Stat + Claude agree, ML opposes ──────────────────────────────────
+    // ML can override at ≥ ML_OVERRIDE_MIN_CONF (75%).  Below that threshold
+    // the Stat+Claude consensus prevails and the window is skipped.
     if (mlConf < ML_OVERRIDE_MIN_CONF) {
       return skip(
         `ML (${Math.round(mlConf)}%) opposes Stat+Claude consensus but needs ≥${ML_OVERRIDE_MIN_CONF}% to override — skipping`,
@@ -404,11 +430,14 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     direction = mlDir;
     confidence = mlConf; // ML overrides: confidence is ML's alone; no boosts from opposing validators
     pathReason = `ML override (${Math.round(mlConf)}%≥${ML_OVERRIDE_MIN_CONF}%): ML overrides Stat+Claude consensus pointing ${statDir ? "YES" : "NO"}`;
+    coreAgreeing = 1;
 
   } else {
-    // ── (C) Stat ≠ Claude — no consensus ────────────────────────────────────
+    // ── (D) ML + Stat agree, Claude disagrees ────────────────────────────────
+    // Claude is our strongest reasoning model — its opposition overrides even a
+    // ML+Stat agreement.  No override path; hard SKIP.
     return skip(
-      `Models disagree: Stat=${statDir ? "YES" : "NO"}(${Math.round(statConf)}%) Claude=${claudeDir ? "YES" : "NO"}(${Math.round(claudeConf)}%) ML=${mlDir ? "YES" : "NO"}(${Math.round(mlConf)}%) — no consensus`,
+      `Claude (${Math.round(claudeConf)}% ${claudeDir ? "YES" : "NO"}) disagrees with ML+Stat (${mlDir ? "YES" : "NO"}) — Claude opposition overrides, no bet`,
       ev,
     );
   }
@@ -421,8 +450,7 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   const action: BotDecisionAction = direction ? "BET_YES" : "BET_NO";
   const wmPresent   = inp.wmDriftAbove !== null;
   const wmAgrees    = inp.wmDriftAbove === direction;
-  const allUnanimous = statDir === direction && claudeDir === direction && mlDir === direction;
-  const signalsAgreeing = (allUnanimous ? 3 : 1) + (wmAgrees ? 1 : 0);
+  const signalsAgreeing = coreAgreeing + (wmAgrees ? 1 : 0);
   const signalsTotal    = 3 + (wmPresent ? 1 : 0);
 
   if (confidence < inp.minConfidence) {
