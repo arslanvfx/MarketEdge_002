@@ -31,7 +31,7 @@ import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
 import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pipeline";
 import { getLatestCoinSignals } from "../lib/crypto-signals";
-import { CRYPTO_COINS } from "../lib/crypto";
+import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
@@ -214,11 +214,22 @@ function pipelineStatusHandler(_req: any, res: any) {
       }
       const ocKey = `${sym}:${clockWindowKey}`;
       // Record the first time this coin is fully ready this window.
+      // Crucially: use getTrackerWindowCall() for Claude's direction rather than
+      // s.claudeAbove from getLatestCoinSignals.  getLatestCoinSignals prefers
+      // liveDirectionCache (mid-window live re-checks) over the opening snap —
+      // at the very start of a window that cache may still hold the PREVIOUS
+      // window's live re-check result, causing a stale YES/NO to be recorded as
+      // the opening call.  getTrackerWindowCall is written once at window-open
+      // and is the same authoritative source the Crypto Predictor page uses.
       if (ready && !openingCallStore.has(ocKey)) {
+        const trackerCall = getTrackerWindowCall(sym);
+        const openingClaudeAbove = trackerCall?.aboveKalshi ?? s.claudeAbove;
+        const openingDirection: "YES" | "NO" | null =
+          openingClaudeAbove === null ? null : openingClaudeAbove ? "YES" : "NO";
         openingCallStore.set(ocKey, {
-          direction,
+          direction: openingDirection,
           decision,
-          claudeConf: s.claudeConfidence,
+          claudeConf: trackerCall?.confidence ?? s.claudeConfidence,
           composite: math?.composite ?? null,
         });
       }
