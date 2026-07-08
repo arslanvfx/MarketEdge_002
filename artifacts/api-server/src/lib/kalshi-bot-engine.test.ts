@@ -1235,41 +1235,41 @@ test("applyStatPredCacheOverride: no kalshiTarget in entry or argument → not o
   assert.equal(r.isLive, false);
 });
 
-test("applyStatPredCacheOverride: opening snap exists (non-null) → always returns opening value, isLive=false", () => {
-  // The predCache stores the LIVE price, not a model forecast.  Once the stat
-  // opening snap has fired (openingAbove !== null), trust the model prediction
-  // and never override it with a raw livePrice >= target comparison.
+test("applyStatPredCacheOverride: opening snap non-null, NO predictions in cache entry → opening preserved (no model forecast to override with)", () => {
+  // Without a predictions array the function cannot derive a forward model forecast.
+  // The opening snap IS a forward forecast, so it is kept as-is.
+  // (Spot-price comparisons are explicitly rejected as stat signals.)
   const now = Date.now();
   const rAbove = applyStatPredCacheOverride(
     true, // opening said ABOVE
     now - 60_000,
-    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59000 } },
+    { at: now - 30_000, value: { price: 60000, kalshiTarget: 59000 } }, // no predictions field
     null,
     now,
   );
-  assert.equal(rAbove.statAbove, true);   // opening preserved
-  assert.equal(rAbove.isLive, false);     // not from live-price override
+  assert.equal(rAbove.statAbove, true);   // opening preserved — no forward prediction to override
+  assert.equal(rAbove.isLive, false);
   assert.equal(rAbove.flipped, false);
 
   const rBelow = applyStatPredCacheOverride(
-    true, // opening said ABOVE — predCache says below, but opening wins
+    true, // opening said ABOVE — cache price < target but no predictions → opening wins
     now - 60_000,
-    { at: now - 30_000, value: { price: 58000, kalshiTarget: 59000 } }, // price < target
+    { at: now - 30_000, value: { price: 58000, kalshiTarget: 59000 } },
     null,
     now,
   );
-  assert.equal(rBelow.statAbove, true);   // opening preserved despite contrary live price
+  assert.equal(rBelow.statAbove, true);   // opening preserved — no forward prediction
   assert.equal(rBelow.isLive, false);
   assert.equal(rBelow.flipped, false);
 
   const rBelow2 = applyStatPredCacheOverride(
-    false, // opening said BELOW — predCache says above, but opening wins
+    false, // opening said BELOW — no predictions → opening wins
     now - 60_000,
-    { at: now - 30_000, value: { price: 59000, kalshiTarget: 59000 } }, // price === target
+    { at: now - 30_000, value: { price: 59000, kalshiTarget: 59000 } },
     null,
     now,
   );
-  assert.equal(rBelow2.statAbove, false);  // opening preserved
+  assert.equal(rBelow2.statAbove, false);
   assert.equal(rBelow2.isLive, false);
   assert.equal(rBelow2.flipped, false);
 });
@@ -1493,21 +1493,147 @@ test("stat flip downstream: flip above→below + ML=YES + Claude=YES → BET_YES
 // Stat flip → Claude re-check scenarios
 // ---------------------------------------------------------------------------
 
-test("applyStatPredCacheOverride: opening snap non-null → opening preserved even when mid-snap contradicts (Claude re-check uses tracker, not predCache)", () => {
-  // With the live-price override removed for non-null openings, the predCache can no
-  // longer silently flip the stat signal.  Claude re-checks are now driven by the
-  // tracker's own divergence logic (crypto-tracker.ts), not by this function.
+test("applyStatPredCacheOverride: opening snap non-null, mid-snap has NO predictions → opening preserved (same rule as above — no model forecast to override with)", () => {
+  // Cache entry has no predictions array (e.g. only price + kalshiTarget).
+  // Even though cache is fresh and openingAbove is non-null, we cannot derive
+  // a forward model forecast from spot price alone — opening snap is kept.
   const now = Date.now();
   const r = applyStatPredCacheOverride(
-    true,            // opening: price was above strike
-    now - 7 * 60_000, // opening snap 7 min ago
-    { at: now - 30_000, value: { price: 97_000, kalshiTarget: 98_000 } }, // mid-snap: price < strike
+    true,              // opening: above strike
+    now - 7 * 60_000,  // opening snap 7 min ago
+    { at: now - 30_000, value: { price: 97_000, kalshiTarget: 98_000 } }, // no predictions
     null,
     now,
   );
-  assert.equal(r.statAbove, true);   // opening prediction preserved — no flip via predCache
+  assert.equal(r.statAbove, true);   // opening preserved — no forward prediction to use
   assert.equal(r.isLive, false);
-  assert.equal(r.flipped, false);     // no flip detected
+  assert.equal(r.flipped, false);
+});
+
+// ---------------------------------------------------------------------------
+// applyStatPredCacheOverride — real-time override (opening snap WITH predictions)
+// ---------------------------------------------------------------------------
+
+test("applyStatPredCacheOverride: opening non-null + fresh cache WITH predictions → predCache overrides direction (real-time stat)", () => {
+  // Core new behavior: when the model's mid-window prediction (in predCache) points
+  // the opposite way from the opening snap, the bot uses the live prediction.
+  // This prevents entering a bet when the model has since changed its mind.
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true,            // opening snap: above target
+    now - 7 * 60_000,
+    {
+      at: now - 30_000,
+      value: {
+        price: 97_000,
+        kalshiTarget: 98_000,
+        predictions: [{ predictedPrice: 97_500, minutesAhead: 8, confidence: 55 }], // below target
+      },
+    },
+    null,
+    now,
+    8, // 8 minutes remaining
+  );
+  assert.equal(r.statAbove, false);      // predCache overrides — model says below target
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, true);         // direction changed from opening
+  assert.equal(r.statConfidence, 55);   // confidence from live prediction
+});
+
+test("applyStatPredCacheOverride: opening non-null + predictions agree with opening → no flip, isLive=true, statConfidence returned", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    true,            // opening snap: above target
+    now - 5 * 60_000,
+    {
+      at: now - 30_000,
+      value: {
+        price: 99_000,
+        kalshiTarget: 98_000,
+        predictions: [{ predictedPrice: 98_500, minutesAhead: 10, confidence: 62 }], // above target
+      },
+    },
+    null,
+    now,
+    10,
+  );
+  assert.equal(r.statAbove, true);       // still above — opening confirmed
+  assert.equal(r.isLive, true);
+  assert.equal(r.flipped, false);        // no direction change
+  assert.equal(r.statConfidence, 62);   // live confidence used
+});
+
+test("applyStatPredCacheOverride: minutesRemaining selects closest prediction horizon", () => {
+  // predictions at 5, 10, 15 minutes ahead; minutesRemaining=8 → closest is 10
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    null,
+    now - 60_000,
+    {
+      at: now - 30_000,
+      value: {
+        price: 100_000,
+        kalshiTarget: 99_000,
+        predictions: [
+          { predictedPrice: 98_000, minutesAhead: 5,  confidence: 50 }, // below target
+          { predictedPrice: 99_500, minutesAhead: 10, confidence: 61 }, // above target ← closest to 8
+          { predictedPrice: 97_000, minutesAhead: 15, confidence: 58 }, // below target
+        ],
+      },
+    },
+    null,
+    now,
+    8, // 8 minutes remaining → closest is 10-min prediction
+  );
+  assert.equal(r.statAbove, true);       // 99_500 >= 99_000 → above
+  assert.equal(r.statConfidence, 61);   // from the 10-min prediction
+  assert.equal(r.isLive, true);
+});
+
+test("applyStatPredCacheOverride: no minutesRemaining → uses last (farthest-horizon) prediction", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    null,
+    now - 60_000,
+    {
+      at: now - 30_000,
+      value: {
+        price: 100_000,
+        kalshiTarget: 99_000,
+        predictions: [
+          { predictedPrice: 99_500, minutesAhead: 5,  confidence: 60 }, // above target
+          { predictedPrice: 98_000, minutesAhead: 15, confidence: 54 }, // below target ← last
+        ],
+      },
+    },
+    null,
+    now,
+    // no minutesRemaining → uses last prediction
+  );
+  assert.equal(r.statAbove, false);     // 98_000 < 99_000 → below (last prediction used)
+  assert.equal(r.statConfidence, 54);
+  assert.equal(r.isLive, true);
+});
+
+test("applyStatPredCacheOverride: statConfidence=null when prediction has no confidence field", () => {
+  const now = Date.now();
+  const r = applyStatPredCacheOverride(
+    null,
+    now - 60_000,
+    {
+      at: now - 30_000,
+      value: {
+        price: 100_000,
+        kalshiTarget: 99_000,
+        predictions: [{ predictedPrice: 100_500 }], // no confidence or minutesAhead
+      },
+    },
+    null,
+    now,
+  );
+  assert.equal(r.statAbove, true);
+  assert.equal(r.statConfidence, null); // no confidence in prediction object
+  assert.equal(r.isLive, true);
 });
 
 // ---------------------------------------------------------------------------

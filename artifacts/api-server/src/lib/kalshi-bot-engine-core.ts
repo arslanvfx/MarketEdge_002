@@ -1250,49 +1250,71 @@ export function checkSignalDivergenceCutout(
  * Applies the mid-snap predCache override to the opening stat signal.
  *
  * The stat snap in historyStore is written once at window-open (~T+1 min).
- * The tracker fires a mid-window analyzeCoin re-run at T+7 and writes the
- * result to predCache.  If that cache entry is newer than the opening snap
- * and recent enough (< 10 min), derive a fresher statAbove by comparing the
- * live price in the cache entry against the Kalshi target.
+ * The tracker fires an analyzeCoin re-run every ~30 s and stores the result in
+ * predCache.  When that entry is newer than the opening snap and fresh (< 10 min),
+ * derive a real-time stat signal by using the model's forward prediction closest
+ * to the remaining window time — not the stale opening-snap forecast.
+ *
+ * This means the bot sees mid-window stat signal changes immediately: if the
+ * model now predicts a fall below the Kalshi target, statAbove flips to false
+ * and statConfidence reflects the live prediction's confidence.
+ *
+ * The opening snap is preserved only when predCache is unavailable, stale, or
+ * lacks forward predictions — ensuring we never substitute a live spot-price
+ * comparison for a model forecast.
  *
  * `nowMs` is injectable for deterministic testing (defaults to Date.now()).
+ * `minutesRemaining` selects the best prediction horizon; omit to use the last
+ * (farthest) available prediction.
  */
 export function applyStatPredCacheOverride(
   openingAbove: boolean | null,
   openingSnapAtMs: number,
-  predCacheEntry: { at: number; value: { price: number; kalshiTarget?: number | null; predictions?: Array<{ predictedPrice: number }> } } | undefined,
+  predCacheEntry: { at: number; value: { price: number; kalshiTarget?: number | null; predictions?: Array<{ predictedPrice: number; minutesAhead?: number; confidence?: number }> } } | undefined,
   kalshiTarget: number | null,
   nowMs: number = Date.now(),
-): { statAbove: boolean | null; isLive: boolean; flipped: boolean } {
+  minutesRemaining?: number,
+): { statAbove: boolean | null; statConfidence: number | null; isLive: boolean; flipped: boolean } {
   const PRED_CACHE_MAX_AGE_MS = 10 * 60_000;
   if (!predCacheEntry) {
-    return { statAbove: openingAbove, isLive: false, flipped: false };
-  }
-  // Guard: if the opening stat snap has fired and produced a real forward prediction,
-  // trust it unconditionally — do not override it with any live-price comparison.
-  if (openingAbove !== null) {
-    return { statAbove: openingAbove, isLive: false, flipped: false };
+    return { statAbove: openingAbove, statConfidence: null, isLive: false, flipped: false };
   }
   const kal = predCacheEntry.value.kalshiTarget ?? kalshiTarget;
   const predAge = nowMs - predCacheEntry.at;
-  if (predCacheEntry.at <= openingSnapAtMs || predAge >= PRED_CACHE_MAX_AGE_MS || kal == null) {
-    return { statAbove: openingAbove, isLive: false, flipped: false };
+  // Only override when the cache entry is:
+  //   1. Newer than the opening snap (not pre-window stale data)
+  //   2. Less than 10 minutes old (freshness gate)
+  //   3. Paired with a valid Kalshi target
+  const predCacheFresh = predCacheEntry.at > openingSnapAtMs && predAge < PRED_CACHE_MAX_AGE_MS && kal != null;
+  if (!predCacheFresh) {
+    return { statAbove: openingAbove, statConfidence: null, isLive: false, flipped: false };
   }
-  // Use the model's forward predicted price, NOT the live spot price.
-  // The live price is a current-position check ("are we above/below right now?"),
-  // whereas the predictor page and the stat snap both use the model's forecast
-  // ("will price be above/below at window close?").  Using live price here
-  // diverges from the predictor's stat signal and caused YES bets when the
-  // model was predicting a fall below the target.
-  const predPrice = predCacheEntry.value.predictions?.[0]?.predictedPrice;
+  const predictions = predCacheEntry.value.predictions;
+  if (!predictions || predictions.length === 0) {
+    // No forward predictions — preserve the opening snap direction rather than
+    // using a live spot-price comparison as a model signal.
+    return { statAbove: openingAbove, statConfidence: null, isLive: false, flipped: false };
+  }
+  // Find the prediction whose time horizon best matches the remaining window time.
+  // When minutesRemaining is not supplied, use the last (farthest-horizon) prediction.
+  let bestPred = predictions[predictions.length - 1];
+  if (minutesRemaining != null && minutesRemaining > 0) {
+    bestPred = predictions.reduce((best, p) => {
+      const d = Math.abs((p.minutesAhead ?? 0) - minutesRemaining);
+      const dBest = Math.abs((best.minutesAhead ?? 0) - minutesRemaining);
+      return d < dBest ? p : best;
+    }, predictions[0]);
+  }
+  const predPrice = bestPred.predictedPrice;
   if (predPrice == null) {
-    // No forward prediction available — returning null is safer than substituting
-    // a live-price positional check as a stat signal.
-    return { statAbove: null, isLive: false, flipped: false };
+    return { statAbove: openingAbove, statConfidence: null, isLive: false, flipped: false };
   }
+  const liveAbove = predPrice >= kal;
+  const flipped = openingAbove !== null && liveAbove !== openingAbove;
   return {
-    statAbove: predPrice >= kal,
+    statAbove: liveAbove,
+    statConfidence: bestPred.confidence ?? null,
     isLive: true,
-    flipped: false,
+    flipped,
   };
 }

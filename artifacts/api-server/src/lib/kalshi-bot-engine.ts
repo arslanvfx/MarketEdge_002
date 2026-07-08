@@ -221,16 +221,24 @@ function _makeBotDecisionInner(
   }
   const openingStatAbove: boolean | null = statNotYetSnapped ? null : (statCall?.aboveKalshi ?? null);
   const statSnapAtMs = statCall?.snappedAt ? new Date(statCall.snappedAt).getTime() : 0;
+  // Pass remaining window time so the override picks the prediction horizon
+  // closest to window close — not a shorter-horizon prediction that diverges.
+  const minutesRemaining = Math.max(1, 15 - minutesElapsed);
   const statPredResult = applyStatPredCacheOverride(
     openingStatAbove,
     statSnapAtMs,
     predCache.get(sym),
     kalshiTarget ?? null,
+    undefined,        // nowMs — use default Date.now()
+    minutesRemaining,
   );
   let statAbove = statPredResult.statAbove;
+  // Live stat confidence: use the predCache prediction's confidence when available
+  // (real-time, keyed to the right horizon); fall back to the opening snap confidence.
+  const liveStatConf: number | null = statPredResult.statConfidence ?? statCall?.confidence ?? null;
   if (statPredResult.flipped) {
     logger.info(
-      { sym, openingStatAbove, midSnapStatAbove: statAbove, snapAgeS: Math.round((Date.now() - statSnapAtMs) / 1000) },
+      { sym, openingStatAbove, midSnapStatAbove: statAbove, liveStatConf, snapAgeS: Math.round((Date.now() - statSnapAtMs) / 1000) },
       "[kalshi-bot] stat mid-snap FLIP: direction reversed vs opening call",
     );
   }
@@ -321,7 +329,7 @@ function _makeBotDecisionInner(
       windowMonitor: wmRec, windowMonitorReady: wmReady,
       yesPrice, ev: null, signalAccuracyPct, minutesElapsed,
       signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
-      statConfidence: statCall?.confidence ?? null,
+      statConfidence: liveStatConf,
       claudeConfidence: null, mlConfidence,
       warmupActive: true,
       roiPct: null,
@@ -344,7 +352,7 @@ function _makeBotDecisionInner(
     windowMonitor: wmRec, windowMonitorReady: wmReady,
     yesPrice, ev, signalAccuracyPct, minutesElapsed,
     signalsAgreeing, signalsTotal, agreementTarget,
-    statConfidence: statCall?.confidence ?? null,
+    statConfidence: liveStatConf,
     claudeConfidence: claudeCall?.confidence ?? null,
     mlConfidence,
     warmupActive: false,
@@ -360,7 +368,7 @@ function _makeBotDecisionInner(
   // trained) so the mode is never strictly worse than classic during warm-up.
   if (decisionMode === "consensus") {
     const votes: Array<{ above: boolean; conf: number }> = [];
-    if (statAbove !== null)  votes.push({ above: statAbove,  conf: statCall?.confidence ?? 55 });
+    if (statAbove !== null)  votes.push({ above: statAbove,  conf: liveStatConf ?? 55 });
     if (claudeAbove !== null) votes.push({ above: claudeAbove, conf: claudeCall?.confidence ?? 55 });
     if (mlAbove !== null && mlConfidence != null) votes.push({ above: mlAbove, conf: mlConfidence });
 
@@ -445,7 +453,7 @@ function _makeBotDecisionInner(
 
     const agreeDir = statAbove; // all three are identical
     const action: BotDecisionAction = agreeDir ? "BET_YES" : "BET_NO";
-    const statConf   = statCall?.confidence   ?? BASE_CONFIDENCE_HALF_PAIR;
+    const statConf   = liveStatConf           ?? BASE_CONFIDENCE_HALF_PAIR;
     const claudeConf = claudeCall?.confidence ?? BASE_CONFIDENCE_HALF_PAIR;
     const mlConf     = mlConfidence           ?? BASE_CONFIDENCE_HALF_PAIR;
     const confidence = Math.round((statConf + claudeConf + mlConf) / 3);
@@ -496,7 +504,7 @@ function _makeBotDecisionInner(
       mlMinConfidence: mlMinConf,
       wmDriftAbove, wmRec, wmReady,
       yesPrice, signalAccuracyPct, minutesElapsed,
-      statConfidence: statCall?.confidence ?? null,
+      statConfidence: liveStatConf,
       claudeConfidence: claudeCall?.confidence ?? null,
       kalshiTicker,
       minConfidence: config.minConfidence,
@@ -512,7 +520,7 @@ function _makeBotDecisionInner(
         // (e.g. 52%) that happens to disagree will not veto a Stat+Claude agreement
         // where both models are more confident. The mlVetoMinConfidence config field
         // is retained for historical logging but is no longer used for the veto gate.
-        const statConf = statCall?.confidence ?? 0;
+        const statConf = liveStatConf ?? 0;
         const claudeConf = claudeCall?.confidence ?? 0;
         const mlConf = mlConfidence ?? 0;
         if (mlConf > statConf && mlConf > claudeConf) {
@@ -539,7 +547,7 @@ function _makeBotDecisionInner(
     let mlReasonSuffix = "";
     if (coreResult.action !== "SKIP") {
       const proposedDir = coreResult.action === "BET_YES";
-      const statConf = statCall?.confidence ?? 0;
+      const statConf = liveStatConf ?? 0;
       const claudeConf = claudeCall?.confidence ?? 0;
       const mlConf = mlConfidence ?? 0;
       const mlDisagreesButNotMostConfident =
@@ -569,7 +577,7 @@ function _makeBotDecisionInner(
   const result = computeCorePairDecision({
     statAbove, claudeAbove, mlAbove, wmDriftAbove,
     wmRec, wmReady, yesPrice, signalAccuracyPct, minutesElapsed,
-    statConfidence: statCall?.confidence ?? null,
+    statConfidence: liveStatConf,
     claudeConfidence: claudeCall?.confidence ?? null,
     mlConfidence,
     mlMinConfidence: profile.mlMinConfidence,
