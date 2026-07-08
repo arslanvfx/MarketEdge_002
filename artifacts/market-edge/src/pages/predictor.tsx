@@ -71,7 +71,7 @@ export default function Predictor() {
   const aiSettings: AiSettings = aiSettingsQuery.data ?? {
     mode: "stat",
     claudeCoins: [],
-    trainingCoins: ["BTC", "ETH", "XRP", "HYPE", "BNB", "DOGE", "LINK"],
+    trainingCoins: ["BTC", "ETH", "XRP", "HYPE", "BNB", "DOGE"],
     autoPilot: { enabled: false, maxActive: 0, decisions: [] },
   };
   const claudeEnabledSet = useMemo(() => new Set(aiSettings.claudeCoins), [aiSettings.claudeCoins]);

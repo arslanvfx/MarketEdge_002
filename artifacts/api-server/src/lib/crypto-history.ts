@@ -42,7 +42,7 @@ export const MAX_HISTORY = 90;
 export const RETENTION_DAYS = 60;
 
 // These coins ALWAYS run Claude in the background tracker.
-export const TRAINING_COINS = new Set(["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "LINK"]);
+export const TRAINING_COINS = new Set(["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE"]);
 
 // Fallback accuracy threshold used when no Kalshi target is available.
 export const ACCURACY_THRESHOLD_PCT = 1.0;
@@ -175,7 +175,7 @@ export function rowToRecord(row: Record<string, unknown>): PredictionRecord {
 
 export async function initHistoryFromDB(): Promise<void> {
   try {
-    const symbols = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "LINK"];
+    const symbols = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE"];
     const rows = await db
       .select()
       .from(predictionRecordsTable)

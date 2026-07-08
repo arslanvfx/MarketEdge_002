@@ -20,7 +20,6 @@ export const GECKO_ID: Record<string, string> = {
   ETH: "ethereum",
   SOL: "solana",
   XRP: "ripple",
-  LINK: "chainlink",
   DOGE: "dogecoin",
   HYPE: "hyperliquid",
   BNB:  "binancecoin",
@@ -39,7 +38,6 @@ export const CRYPTO_COINS: CoinDef[] = [
   { symbol: "XRP",  product: "XRP-USD",  name: "XRP" },
   { symbol: "HYPE", product: "HYPE-USD", name: "Hyperliquid" },
   { symbol: "BNB",  product: "BNB-USD",  name: "BNB" },
-  { symbol: "LINK", product: "LINK-USD", name: "Chainlink" },
   { symbol: "DOGE", product: "DOGE-USD", name: "Dogecoin" },
 ];
 

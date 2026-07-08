@@ -1028,8 +1028,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Claude's opening call can resolve.  Config-driven so it can be changed live.
   // 0/undefined in DB → uses this default of 60 s (1 tracker snap cycle).
   windowEntryBufferSeconds: 60,
-  // Allow up to 8 bets per window (matches 8-coin training set: BTC/ETH/XRP/HYPE/BNB/SOL/DOGE/LINK).
-  maxBetsPerWindow: 8,
+  // Allow up to 7 bets per window (matches 7-coin training set: BTC/ETH/XRP/HYPE/BNB/SOL/DOGE).
+  maxBetsPerWindow: 7,
   enabled: true,
   // start === end → disabled; 7 = 07:00 UTC stored value (set equal to disable)
   quietHoursStart: 7,

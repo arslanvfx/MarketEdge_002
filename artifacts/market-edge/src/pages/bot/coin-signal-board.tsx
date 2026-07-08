@@ -69,7 +69,7 @@ function fmtStrike(v: number | null | undefined): string {
   return `$${v.toFixed(6)}`;
 }
 
-const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "LINK"];
+const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
 
 export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey }: CoinSignalBoardProps) {
   // Pin strikes: once we see a non-null value for a coin, never clear it.

@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 import type { TradingWindowsData, TradingWindowBucket } from "./types";
 import { fetchJson } from "./utils";
 
-const TRAINING_COIN_FILTERS = ["ALL", "BTC", "ETH", "XRP", "HYPE", "BNB", "DOGE", "LINK"] as const;
+const TRAINING_COIN_FILTERS = ["ALL", "BTC", "ETH", "XRP", "HYPE", "BNB", "DOGE"] as const;
 
 type BarViewMode = "er" | "accuracy";
 
