@@ -112,11 +112,6 @@ function DecisionBadge({ step, minConfidence }: { step: BotStepEntry; minConfide
 }
 
 function MathBreakdown({ step, minConfidence }: { step: BotStepEntry; minConfidence: number | null }) {
-  if (step.decision === "VETO") {
-    return (
-      <span className="text-[11px] text-orange-400/90">{step.vetoReason}</span>
-    );
-  }
   if (step.decision === "NO_MARKET") {
     return (
       <span className="text-[11px] text-muted-foreground/60">
@@ -139,12 +134,12 @@ function MathBreakdown({ step, minConfidence }: { step: BotStepEntry; minConfide
   const passes = step.decision === "BET_YES" || step.decision === "BET_NO";
   return (
     <span className="font-mono text-[11px] tabular-nums whitespace-nowrap">
-      <span className="text-violet-400" title="Claude confidence (base)">{m.base.toFixed(0)}</span>
-      <span className={m.mlAgrees ? "text-blue-400" : "text-muted-foreground/50"} title={m.mlAgrees ? "ML agrees" : "ML dissents (no boost)"}>
-        {" "}{m.mlAgrees ? `+${m.mlBoost}` : "+0"}
-        <span className="text-[9px] align-top">ML</span>
+      <span className="text-blue-400" title="ML confidence (base)">{m.base.toFixed(0)}</span>
+      <span className={m.mlAgrees ? "text-emerald-400" : "text-red-400/80"} title={m.mlAgrees ? "Claude confirms ML direction" : "Claude dissents from ML direction"}>
+        {" "}{m.mlAgrees ? `+${m.mlBoost}` : `−${m.mlBoost}`}
+        <span className="text-[9px] align-top">Cl</span>
       </span>
-      <span className={m.statAgrees ? "text-cyan-400" : "text-amber-400"} title={m.statAgrees ? "Stat agrees" : "Stat dissents"}>
+      <span className={m.statAgrees ? "text-cyan-400" : "text-amber-400"} title={m.statAgrees ? "Stat confirms ML direction" : "Stat dissents from ML direction"}>
         {" "}{m.statMod >= 0 ? `+${m.statMod}` : `−${Math.abs(m.statMod)}`}
         <span className="text-[9px] align-top">St</span>
       </span>
@@ -297,7 +292,7 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
                             <span className="text-amber-400/60">↻</span>
                           </span>
                         )}
-                        {step.openingCall?.decision && step.openingCall.decision === step.decision && step.ready && (
+                        {step.openingCall?.decision && step.openingCall.decision === step.decision && step.ready && step.decision !== "BELOW_MIN" && (
                           <span className="text-[10px] text-muted-foreground/40" title="Same decision since window open">
                             same since open
                           </span>

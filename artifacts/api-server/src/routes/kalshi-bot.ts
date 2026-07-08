@@ -192,27 +192,25 @@ function pipelineStatusHandler(_req: any, res: any) {
       if (strike == null) {
         decision = "NO_MARKET";
       } else if (ready) {
+        // ML-leads formula — mirrors computeMLGateDecision exactly:
+        //   direction  = ML direction
+        //   composite  = mlConf + (Claude agrees ? +CLAUDE_BOOST : −CLAUDE_PENALTY) + (Stat agrees ? +STAT_BOOST : −STAT_PENALTY)
+        // ML_BOOST === CLAUDE_BOOST === 6; STAT_BOOST === STAT_PENALTY === 4
         const claudeDir = s.claudeAbove as boolean;
         const mlDir = s.mlAbove as boolean;
         const statDir = s.statAbove as boolean;
-        const claudeConf = s.claudeConfidence ?? 0;
         const mlConf = s.mlConfidence ?? 0;
-        direction = claudeDir ? "YES" : "NO";
+        direction = mlDir ? "YES" : "NO";
 
-        if (mlDir !== claudeDir && mlConf > claudeConf) {
-          decision = "VETO";
-          vetoReason = `ML (${Math.round(mlConf)}% ${mlDir ? "YES" : "NO"}) opposes Claude (${Math.round(claudeConf)}% ${claudeDir ? "YES" : "NO"}) with higher confidence`;
-        } else {
-          const mlAgrees = mlDir === claudeDir;
-          const statAgrees = statDir === claudeDir;
-          const mlBoost = mlAgrees ? ML_BOOST : 0;
-          const statMod = statAgrees ? STAT_BOOST : -STAT_PENALTY;
-          const composite = claudeConf + mlBoost + statMod;
-          math = { base: claudeConf, mlBoost, statMod, composite, mlAgrees, statAgrees };
-          decision = composite >= minConfidence
-            ? (claudeDir ? "BET_YES" : "BET_NO")
-            : "BELOW_MIN";
-        }
+        const claudeAgrees = claudeDir === mlDir;
+        const statAgrees = statDir === mlDir;
+        const claudeMod = claudeAgrees ? ML_BOOST : -ML_BOOST;
+        const statMod = statAgrees ? STAT_BOOST : -STAT_PENALTY;
+        const composite = mlConf + claudeMod + statMod;
+        math = { base: mlConf, mlBoost: ML_BOOST, statMod, composite, mlAgrees: claudeAgrees, statAgrees };
+        decision = composite >= minConfidence
+          ? (mlDir ? "BET_YES" : "BET_NO")
+          : "BELOW_MIN";
       }
 
       // ── Opening-call tracking ──────────────────────────────────────────────
@@ -226,13 +224,12 @@ function pipelineStatusHandler(_req: any, res: any) {
       const ocKey = `${sym}:${clockWindowKey}`;
       const trackerCall = getTrackerWindowCall(sym);
 
-      // Phase 1: record on first-ready using whatever Claude source is available.
-      // If the tracker's Claude snap hasn't finished yet, s.claudeAbove may be
-      // stale (previous window's liveDirectionCache).  Phase 2 fixes this.
+      // Phase 1: record on first-ready. Direction now follows ML (the direction
+      // setter in the ML-leads formula) so the "was" indicator in the Direction
+      // column matches what the bot actually used.
       if (ready && !openingCallStore.has(ocKey)) {
-        const openingClaudeAbove = trackerCall?.aboveKalshi ?? s.claudeAbove;
         const openingDirection: "YES" | "NO" | null =
-          openingClaudeAbove === null ? null : openingClaudeAbove ? "YES" : "NO";
+          s.mlAbove === null ? null : s.mlAbove ? "YES" : "NO";
         openingCallStore.set(ocKey, {
           direction: openingDirection,
           decision,
@@ -242,18 +239,13 @@ function pipelineStatusHandler(_req: any, res: any) {
         if (trackerCall) openingCallTrackerFinalized.add(ocKey);
       }
 
-      // Phase 2: once the tracker's Claude snap arrives, update direction so it
-      // matches the predictor page's "AT OPEN" row (same getTrackerWindowCall
-      // source).  Decision is kept from Phase 1 — it reflects what the bot
-      // computed at first-ready, which is the true original decision.
+      // Phase 2: direction is already ML-based from Phase 1; no update needed
+      // for direction. Update claudeConf once the tracker snap arrives so the
+      // opening call's confidence display stays accurate.
       if (openingCallStore.has(ocKey) && trackerCall && !openingCallTrackerFinalized.has(ocKey)) {
         const existing = openingCallStore.get(ocKey)!;
-        const updatedDirection: "YES" | "NO" | null =
-          trackerCall.aboveKalshi === null ? existing.direction
-          : trackerCall.aboveKalshi ? "YES" : "NO";
         openingCallStore.set(ocKey, {
           ...existing,
-          direction: updatedDirection,
           claudeConf: trackerCall.confidence ?? existing.claudeConf,
         });
         openingCallTrackerFinalized.add(ocKey);
