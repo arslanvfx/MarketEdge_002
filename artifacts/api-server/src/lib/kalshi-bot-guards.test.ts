@@ -808,19 +808,24 @@ test("noFallbacks/engine: decision engine consumes getLatestCoinSignals only —
 
 test("noFallbacks/signals: crypto-signals derives stat from predCache, not historyStore", () => {
   const src = readSrc("crypto-signals.ts");
+  // The pure comparison logic lives in the pure sub-module; read both files.
+  const pureSrc = readSrc("crypto-signals-pure.ts");
   assert.ok(
     !src.includes("getStatWindowCall("),
     "getLatestCoinSignals must NOT call getStatWindowCall (historyStore lags 30-90s at window open)",
   );
   assert.ok(
-    src.includes("predCache.get(sym)") &&
-    src.includes("predictedPrice >= kalshiTarget"),
-    "stat must be derived from predCache forward predictions vs the Kalshi strike",
+    src.includes("predCache.get(sym)"),
+    "crypto-signals.ts must read predCache.get(sym) (freshness-checked via resolvePredEntry)",
+  );
+  assert.ok(
+    pureSrc.includes("predictedPrice >= kalshiTarget"),
+    "stat comparison (predictedPrice >= kalshiTarget) must live in crypto-signals-pure.ts",
   );
   // Freshness guard: a stale predictor snapshot must null out stat+ML so the
   // all-signals gate blocks entries instead of betting on stale model output.
   assert.ok(
-    src.includes("PRED_MAX_AGE_MS"),
+    src.includes("PRED_MAX_AGE_MS") || pureSrc.includes("PRED_MAX_AGE_MS"),
     "crypto-signals must enforce a max-age freshness guard on the predCache snapshot",
   );
 });

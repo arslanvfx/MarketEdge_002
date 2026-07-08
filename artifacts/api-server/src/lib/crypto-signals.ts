@@ -20,6 +20,14 @@ import { extractMLFeatures } from "./ml-features";
 import { getMLPrediction } from "./ml-store";
 import { liveDirectionCache } from "./crypto-claude";
 
+// Pure helpers — re-exported so callers only need one import.
+export {
+  PRED_MAX_AGE_MS,
+  resolvePredEntry,
+  resolveStatSignal,
+} from "./crypto-signals-pure";
+import { resolvePredEntry, resolveStatSignal } from "./crypto-signals-pure";
+
 export interface CoinSignals {
   statAbove: boolean | null;
   statConfidence: number | null;
@@ -53,17 +61,12 @@ export function getLatestCoinSignals(symbol: string): CoinSignals {
   // always at least as fresh as historyStore (which only updates every ~30 s
   // and lags at window open).
   //
-  // Freshness guard: if the predCache entry is older than 10 minutes the
+  // Freshness guard: if the predCache entry is older than PRED_MAX_AGE_MS the
   // predictor's snap loop has stalled — treat the snapshot as missing so
   // stat and ML both go null and the bot's all-signals gate blocks entries
   // rather than betting on stale model output.  (Same 10-min ceiling the
   // engine's old applyStatPredCacheOverride enforced.)
-  const PRED_MAX_AGE_MS = 10 * 60_000;
-  const predEntry = predCache.get(sym);
-  const pred =
-    predEntry != null && Date.now() - predEntry.at < PRED_MAX_AGE_MS
-      ? predEntry.value
-      : null;
+  const pred = resolvePredEntry(predCache.get(sym), Date.now());
   const kalshiTarget = getKalshiCachedData(sym)?.value ?? null;
   const winCtx = getKalshiWindowContext(sym);
 
@@ -74,25 +77,21 @@ export function getLatestCoinSignals(symbol: string): CoinSignals {
   // applyStatPredCacheOverride.  This replaces the old getStatWindowCall
   // (historyStore) read, which could lag 30-90 s behind the predictor page
   // at window open.
-  let statAbove: boolean | null = null;
-  let statConfidence: number | null = null;
-  if (pred && kalshiTarget != null && pred.predictions.length > 0) {
-    const minutesRemaining = winCtx
-      ? Math.max(0, 15 - winCtx.minutesElapsed)
+  //
+  // NOTE: resolveStatSignal always compares against the CURRENT kalshiTarget,
+  // not whatever strike was in effect when the pred snapshot was computed.
+  // A predCache entry that is fresh by timestamp but was computed during a
+  // prior window will still be compared against the live strike.  The
+  // PRED_MAX_AGE_MS guard (10 min) ensures that a prior-window snapshot can
+  // only survive into the next window for at most 10 minutes — after that it
+  // goes null and the bot cannot enter on it at all.
+  const minutesRemaining = winCtx ? Math.max(0, 15 - winCtx.minutesElapsed) : null;
+  const statResult =
+    pred && kalshiTarget != null
+      ? resolveStatSignal(pred.predictions, kalshiTarget, minutesRemaining)
       : null;
-    let bestPred = pred.predictions[pred.predictions.length - 1];
-    if (minutesRemaining != null && minutesRemaining > 0) {
-      bestPred = pred.predictions.reduce((best, p) => {
-        const d = Math.abs((p.minutesAhead ?? 0) - minutesRemaining);
-        const dBest = Math.abs((best.minutesAhead ?? 0) - minutesRemaining);
-        return d < dBest ? p : best;
-      }, pred.predictions[0]);
-    }
-    if (bestPred.predictedPrice > 0) {
-      statAbove = bestPred.predictedPrice >= kalshiTarget;
-      statConfidence = bestPred.confidence ?? null;
-    }
-  }
+  const statAbove: boolean | null = statResult?.statAbove ?? null;
+  const statConfidence: number | null = statResult?.statConfidence ?? null;
 
   // ── Claude — tracker opening call + live direction override ─────────────
   // The opening call (historyStore) is written once at window-open and stays
