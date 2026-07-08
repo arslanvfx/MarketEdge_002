@@ -468,8 +468,9 @@ router.get("/crypto/bot/history", async (req, res) => {
   const rawMode = req.query.mode;
   const filterMode: BotMode =
     rawMode === "paper" || rawMode === "live" ? rawMode : getBotState().mode;
+  const resetAt = filterMode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
   try {
-    const history = await getBotHistory(limit, filterMode);
+    const history = await getBotHistory(limit, filterMode, resetAt);
     res.json({ history });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -482,8 +483,9 @@ router.get("/crypto/bot/all-history", async (req, res) => {
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
   const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
+  const resetAt = mode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
   try {
-    const history = await getBotAllHistory(limit, offset, mode);
+    const history = await getBotAllHistory(limit, offset, mode, resetAt);
     res.json({ history });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -497,8 +499,9 @@ router.get("/crypto/bot/stats", async (req, res) => {
     ? req.query.symbol.trim()
     : undefined;
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
+  const resetAt = mode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
   try {
-    const stats = await getBotStats(symbol, mode);
+    const stats = await getBotStats(symbol, mode, resetAt);
     res.json(stats);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -510,8 +513,9 @@ router.get("/crypto/bot/stats", async (req, res) => {
 router.get("/crypto/bot/trend", async (req, res) => {
   const limit = Math.min(100, Math.max(2, parseInt(String(req.query.limit ?? "50"), 10) || 50));
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
+  const resetAt = mode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
   try {
-    const points = await getBotTrend(limit, mode);
+    const points = await getBotTrend(limit, mode, resetAt);
     res.json(points);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -872,6 +876,20 @@ router.get("/crypto/bot/time-analytics", async (_req, res) => {
 
     const totalBets = data.reduce((s: number, r: { total: number }) => s + r.total, 0);
     res.json({ rows: data, totalBets, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/reset-live-stats — set liveStatsResetAt to NOW() so all
+// visual stats (win/loss %, profit, history, performance report) start fresh
+// from this moment.  Zero rows are deleted; the underlying data is fully
+// preserved for ML training and auto-tune learning.
+router.post("/crypto/bot/reset-live-stats", requireAuth, async (_req, res) => {
+  try {
+    const { config } = await updateBotConfig({ liveStatsResetAt: new Date().toISOString() });
+    res.json({ ok: true, liveStatsResetAt: config.liveStatsResetAt });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

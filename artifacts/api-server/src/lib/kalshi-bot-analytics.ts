@@ -14,15 +14,18 @@ type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
 // History
 // ---------------------------------------------------------------------------
 
-export async function getBotHistory(limit = 20, filterMode?: BotMode): Promise<unknown[]> {
+export async function getBotHistory(limit = 20, filterMode?: BotMode, resetAt?: string | null): Promise<unknown[]> {
   try {
     // Only return terminal outcomes for the recent table — bet entries and
     // intermediate marks (e.g. exit_failed) are excluded for fidelity.
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
+    const resetClause = (resetAt && filterMode === "live")
+      ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
+      : sql``;
     return await db
       .select()
       .from(kalshiBotBetsTable)
-      .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')${modeClause}`)
+      .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')${modeClause}${resetClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit);
   } catch {
@@ -42,9 +45,12 @@ export interface TrendPoint {
   rollingWinRate: number;  // 10-bet rolling window, 0–1
 }
 
-export async function getBotTrend(limit = 50, filterMode?: BotMode): Promise<TrendPoint[]> {
+export async function getBotTrend(limit = 50, filterMode?: BotMode, resetAt?: string | null): Promise<TrendPoint[]> {
   try {
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
+    const resetClause = (resetAt && filterMode === "live")
+      ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
+      : sql``;
     const rows = await db
       .select({
         symbol: kalshiBotBetsTable.symbol,
@@ -54,7 +60,7 @@ export async function getBotTrend(limit = 50, filterMode?: BotMode): Promise<Tre
       })
       .from(kalshiBotBetsTable)
       .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
-        AND ${kalshiBotBetsTable.outcome} IS NOT NULL${modeClause}`)
+        AND ${kalshiBotBetsTable.outcome} IS NOT NULL${modeClause}${resetClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit);
 
@@ -82,16 +88,19 @@ export async function getBotTrend(limit = 50, filterMode?: BotMode): Promise<Tre
 // Returns bet-action records for the bot dashboard. Excludes routine warmup-buffer
 // skip rows (one per coin per window — too noisy) but includes gate-skip records
 // so entry-veto reasons (consensus, stale-signal, candle-reversal) appear in history.
-export async function getBotAllHistory(limit = 100, offset = 0, filterMode?: BotMode): Promise<unknown[]> {
+export async function getBotAllHistory(limit = 100, offset = 0, filterMode?: BotMode, resetAt?: string | null): Promise<unknown[]> {
   try {
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
+    const resetClause = (resetAt && filterMode === "live")
+      ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
+      : sql``;
     return await db
       .select()
       .from(kalshiBotBetsTable)
       .where(sql`
         ${kalshiBotBetsTable.action} NOT IN ('warmup')
         AND NOT (${kalshiBotBetsTable.action} = 'skip' AND ${kalshiBotBetsTable.signals}->>'reason' IN ('warmup-buffer', 'candle-cache-not-warm'))
-        AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`)
+        AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}${resetClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit)
       .offset(offset);
@@ -108,7 +117,7 @@ export interface CoinBotStats {
   pnl: number;
 }
 
-export async function getBotStats(filterSymbol?: string, filterMode?: BotMode): Promise<{
+export async function getBotStats(filterSymbol?: string, filterMode?: BotMode, resetAt?: string | null): Promise<{
   totalBets: number;
   wins: number;
   losses: number;
@@ -128,6 +137,9 @@ export async function getBotStats(filterSymbol?: string, filterMode?: BotMode): 
       : baseWhere;
     if (filterMode) {
       whereClause = sql`${whereClause} AND ${kalshiBotBetsTable.mode} = ${filterMode}`;
+    }
+    if (resetAt && filterMode === "live") {
+      whereClause = sql`${whereClause} AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`;
     }
 
     const rows = await db

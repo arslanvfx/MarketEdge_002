@@ -340,6 +340,10 @@ export async function runAutoTuneJob(): Promise<void> {
     // Fetch settled bets (oldest first so last-30 slice is correct).
     // Manual bets are excluded so user-placed trades don't skew the auto-tune
     // Rules 1–4 (confidence threshold adjustment, coin pausing, etc.).
+    const liveResetAt = S.botMode === "live" ? (S.config.liveStatsResetAt ?? null) : null;
+    const resetClause = liveResetAt
+      ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${liveResetAt}`
+      : sql``;
     const rows = await db
       .select({
         symbol: kalshiBotBetsTable.symbol,
@@ -356,7 +360,7 @@ export async function runAutoTuneJob(): Promise<void> {
         sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
           AND ${kalshiBotBetsTable.outcome} IS NOT NULL
           AND ${kalshiBotBetsTable.mode} = ${S.botMode}
-          AND (${kalshiBotBetsTable.source} IS NULL OR ${kalshiBotBetsTable.source} != 'manual')`,
+          AND (${kalshiBotBetsTable.source} IS NULL OR ${kalshiBotBetsTable.source} != 'manual')${resetClause}`,
       )
       .orderBy(desc(kalshiBotBetsTable.createdAt)) // most-recent first → reverse below
       .limit(S.config.autoTuneWindowSize ?? 100);
