@@ -422,6 +422,8 @@ function _makeBotDecisionInner(
   }
 
   // ── Classic path (also used by ml_primary) ────────────────────────────────
+  // unanimousMinModelConfidence is ml_gate-only; do not pass it here so the
+  // classic unanimous bypass behaviour remains unchanged.
   const result = computeCorePairDecision({
     statAbove, claudeAbove, mlAbove, wmDriftAbove,
     wmRec, wmReady, yesPrice, signalAccuracyPct, minutesElapsed,
@@ -432,7 +434,6 @@ function _makeBotDecisionInner(
     kalshiTicker,
     minConfidence: config.minConfidence,
     minReturnMultiple: config.minReturnMultiple,
-    unanimousMinModelConfidence: config.unanimousMinModelConfidence,
   });
 
   const snapshot = buildSnapshot(

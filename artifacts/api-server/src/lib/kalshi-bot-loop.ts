@@ -1145,11 +1145,13 @@ export async function runBotLoopTick(): Promise<void> {
     if (
       decision.action === "SKIP" &&
       decision.confidence > 0 &&
-      decision.confidence >= S.config.minConfidence - WM_CAUTION_CONF_RELIEF &&
+      decision.confidence >= _decisionConfig.minConfidence - WM_CAUTION_CONF_RELIEF &&
       (getWindowBetSignal(sym)?.recommendation ?? null) === "caution" &&
       decision.signals.signalsAgreeing >= 3
     ) {
-      const _reliefConfig = { ...S.config, minConfidence: S.config.minConfidence - WM_CAUTION_CONF_RELIEF };
+      // Use the streak-adjusted floor (_decisionConfig) so a streak-penalised coin
+      // cannot be promoted back to BET by applying relief against the base floor.
+      const _reliefConfig = { ..._decisionConfig, minConfidence: _decisionConfig.minConfidence - WM_CAUTION_CONF_RELIEF };
       const _reliefDec = makeBotDecision(
         sym, _reliefConfig, kalshiData.ticker, kalshiData.yesPrice ?? null,
         minutesElapsed, signalAcc, kalshiData.value,
@@ -1190,10 +1192,12 @@ export async function runBotLoopTick(): Promise<void> {
     let _autoTuneShadowDecision: { action: string; signals: unknown } | null = null;
     if (
       S.config.autoTuneConfidenceRevertTo != null &&
-      S.config.minConfidence > S.config.autoTuneConfidenceRevertTo &&
+      _decisionConfig.minConfidence > S.config.autoTuneConfidenceRevertTo &&
       decision.action === "SKIP"
     ) {
-      const origFloorConfig = { ...S.config, minConfidence: S.config.autoTuneConfidenceRevertTo };
+      // Preserve the streak penalty in the shadow floor so that the auto-tune
+      // shadow does not promote a streak-blocked coin to BET.
+      const origFloorConfig = { ..._decisionConfig, minConfidence: S.config.autoTuneConfidenceRevertTo + _streakPenaltyPp };
       const altDec = makeBotDecision(
         sym,
         origFloorConfig,
