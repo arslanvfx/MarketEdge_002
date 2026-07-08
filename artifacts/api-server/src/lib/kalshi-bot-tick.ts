@@ -170,9 +170,10 @@ async function _runBotTick(
       }
 
       // ── Mid-exit master switch ────────────────────────────────────────────
-      // When enableMidExit is false, skip all cashout/exit evaluation.
+      // When enableMidExit is falsy, skip all cashout/exit evaluation.
       // The position will be closed normally when the window expires.
-      if (S.config.enableMidExit === false) return;
+      // Use truthy check (not === false) so null/undefined from older DB rows also disables.
+      if (!S.config.enableMidExit) return;
 
       // ── Profit-lock early cash-out ────────────────────────────────────────
       // When the position has captured ≥ profitLockPct% of its maximum possible
@@ -294,8 +295,8 @@ async function _runBotTick(
       // Guaranteed time-stop: if < 2 minutes remain in the 15-min window AND the
       // position is losing (crypto price on the wrong side of the Kalshi strike),
       // exit immediately rather than riding to expiry at maximum loss.
-      // This caps maximum hold to ~13 minutes regardless of exit-guard state.
-      if (openPositions.has(sym)) {
+      // Gated by enableTimeStop — when false (default), this block is fully skipped.
+      if (S.config.enableTimeStop && openPositions.has(sym)) {
         const minutesRemaining = 15 - minutesElapsed;
         if (minutesRemaining < 2) {
           const cryptoPrice = getCachedPrediction(sym)?.price ?? null;

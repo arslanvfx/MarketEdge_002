@@ -580,7 +580,8 @@ export async function runBotLoopTick(): Promise<void> {
         // ── enableMidExit guard ───────────────────────────────────────────────
         // If mid-exit is disabled in config, the recheck still runs for
         // display-refresh purposes but must not close positions.
-        if (S.config.enableMidExit === false) {
+        // Use truthy check so null/undefined from older DB rows also disables.
+        if (!S.config.enableMidExit) {
           logger.info(
             { sym, signalsAgainstBet, exitRatio: exitRatio.toFixed(3) },
             "[pipeline-recheck] all models flipped but enableMidExit=false — holding per config",

@@ -481,6 +481,23 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </span>
                 </div>
 
+                {/* Time-Stop */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Late-Window Time-Stop</span>
+                  <button type="button"
+                    onClick={() => setConfigDraft(d => ({ ...d, enableTimeStop: !(merged.enableTimeStop ?? false) }))}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium border transition-colors w-fit ${(merged.enableTimeStop ?? false)
+                      ? "bg-amber-500/20 text-amber-400 border-amber-500/40 hover:bg-amber-500/30"
+                      : "bg-background text-muted-foreground border-border hover:bg-muted"}`}>
+                    {(merged.enableTimeStop ?? false) ? "Enabled — exit losing positions with <2 min left" : "Disabled — never force-close based on time"}
+                  </button>
+                  <span className="text-xs text-muted-foreground">
+                    {(merged.enableTimeStop ?? false)
+                      ? "Bot will sell a losing position in the final 2 minutes if the crypto price is on the wrong side of the strike."
+                      : "Bot lets every position resolve naturally at window close, even if losing in the final minutes."}
+                  </span>
+                </div>
+
                 {/* Min Hold Minutes */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Min Hold Before Any Exit ({merged.minHoldMinutes ?? 4} min)</span>

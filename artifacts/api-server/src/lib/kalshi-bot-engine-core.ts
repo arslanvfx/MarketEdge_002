@@ -915,6 +915,7 @@ export interface BotConfig {
   profitLockPct: number;               // 0 = disabled; 1–99 = cash out when current value reaches this % of max payout
   minHoldMinutes: number;              // min minutes to hold before ANY exit is evaluated (default 4); 0 = disabled
   enableMidExit: boolean;              // master switch for mid-window cashout/exit system (default false = disabled)
+  enableTimeStop?: boolean;            // when true, also exit losing positions with <2 min left regardless of mid-exit sensitivity (default false)
 
   // ── Free-run mode ────────────────────────────────────────────────────────
   // When true, all restriction layers are bypassed so the bot places any bet
@@ -1080,6 +1081,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   profitLockPct: 0,
   minHoldMinutes: 4,
   enableMidExit: false,
+  enableTimeStop: false,
   freeRunMode: false,
   consensusMinCents: 25,
   momentumLookbackCandles: 8,

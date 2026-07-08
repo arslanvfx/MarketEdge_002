@@ -54,6 +54,7 @@ export interface BotConfig {
   windowEntryBufferSeconds?: number;
   minHoldMinutes?: number;
   enableMidExit?: boolean;
+  enableTimeStop?: boolean;
 }
 
 export interface LogicModeStats {
