@@ -147,14 +147,18 @@ export interface BotDecision {
 
 // Minimum net return required to place a bet.  Set to 1.4 % as a loose ~1.5 %
 // floor — values like 1.45 % and 1.48 % are acceptable; hard-losing plays
-// (< 1.4 %) are skipped.  A YES bet needs yesPrice ≤ 98.62 ¢; a NO bet needs
-// yesPrice ≥ 1.38 ¢.  Gate is bypassed when yesPrice is unknown.
+// (< 1.4 %) are skipped.  A YES bet needs yesPrice ≤ 0.9862; a NO bet needs
+// yesPrice ≥ 0.0138.  Gate is bypassed when yesPrice is unknown.
+// NOTE: yesPrice is in 0-1 dollar format (e.g. 0.52 for 52¢), not cents.
 const MIN_ROI_PCT = 1.4;
 
 function calcROI(action: BotDecisionAction, yesPrice: number): number {
+  // yesPrice is in 0-1 dollar format — e.g. 0.52 means the YES contract costs 52¢.
+  // YES payout = (1 - yesPrice) / yesPrice × 100%
+  // NO  payout = yesPrice / (1 - yesPrice) × 100%
   return action === "BET_YES"
-    ? (100 - yesPrice) / yesPrice * 100
-    : yesPrice / (100 - yesPrice) * 100;
+    ? ((1 - yesPrice) / yesPrice) * 100
+    : (yesPrice / (1 - yesPrice)) * 100;
 }
 
 // ---------------------------------------------------------------------------
@@ -630,8 +634,8 @@ export function makeBotDecision(
   }
 
   // Compute ROI for the chosen side when yesPrice is available.
-  // yesPrice is in cents (0–100); net return = payout / stake.
-  if (inner.action !== "SKIP" && yesPrice !== null && yesPrice > 0 && yesPrice < 100) {
+  // yesPrice is in 0-1 dollar format (e.g. 0.52 for 52¢); net return = payout / stake.
+  if (inner.action !== "SKIP" && yesPrice !== null && yesPrice > 0 && yesPrice < 1) {
     const roi = calcROI(inner.action, yesPrice);
     // Always record roiPct so it shows in bet signals even on SKIPs below.
     inner.signals = { ...inner.signals, roiPct: parseFloat(roi.toFixed(2)) };

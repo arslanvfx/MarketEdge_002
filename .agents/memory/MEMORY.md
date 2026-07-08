@@ -71,3 +71,4 @@
 - [ml_gate Path A sentinel removal](ml-gate-path-a.md) — mlMinConfidence:999 blocked ML from ever leading; replaced with per-coin overrides via BotConfig.mlPrimaryMinConfidenceOverrides; ETH/XRP/SOL default 58
 - [Window entry buffer timing](window-entry-buffer-timing.md) — buffer 60s not 120s; WM bypass 2 signals not 3; strong-trend markets move to extreme prices in <2min; DB config overrides code default, patch both
 - [Fast-agreement early entry](fast-agreement-early-entry.md) — stat+ML agreement (one ≥60 conf) must bypass the Claude-pending guard; waiting for Claude in min 0-3 caused zero NO bets ever
+- [calcROI NO-bet block](calcROI-no-bet-block.md) — calcROI used cents format (100-p)/p but yesPrice is 0-1 dollars; blocked every NO bet via MIN_ROI_PCT gate; fix: use (1-p)/p and guard yesPrice<1
