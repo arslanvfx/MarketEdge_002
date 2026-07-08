@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -314,6 +314,17 @@ export async function evalClosedBets(): Promise<void> {
           if (correctedPnl > 0) uo.wins++;
           else if (correctedPnl < 0) uo.losses++;
           recentUnanimousOutcomes.set(wk, uo);
+        }
+
+        // Track directional outcomes for the directional regime dampener.
+        if (row.direction) {
+          const dd = recentDirectionalOutcomes.get(wk) ?? { yesWins: 0, yesLosses: 0, noWins: 0, noLosses: 0 };
+          if (row.direction === "yes") {
+            if (correctedPnl > 0) dd.yesWins++; else if (correctedPnl < 0) dd.yesLosses++;
+          } else if (row.direction === "no") {
+            if (correctedPnl > 0) dd.noWins++; else if (correctedPnl < 0) dd.noLosses++;
+          }
+          recentDirectionalOutcomes.set(wk, dd);
         }
       }
 

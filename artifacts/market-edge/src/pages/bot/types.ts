@@ -55,6 +55,12 @@ export interface BotConfig {
   minHoldMinutes?: number;
   enableMidExit?: boolean;
   enableTimeStop?: boolean;
+  coinStreakPenalty1LossPp?: number;
+  coinStreakPenalty2PlusLossPp?: number;
+  unanimousMinModelConfidence?: number;
+  directionalRegressionLookback?: number;
+  directionalRegressionThreshold?: number;
+  directionalRegressionPenaltyPp?: number;
 }
 
 export interface LogicModeStats {

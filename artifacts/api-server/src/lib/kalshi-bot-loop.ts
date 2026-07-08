@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -813,6 +813,46 @@ export async function runBotLoopTick(): Promise<void> {
   if (S.config.freeRunMode) unanimousFailurePenalty = 0;
   S.currentUnanimousFailurePenalty = unanimousFailurePenalty;
 
+  // ── Directional regime dampener ───────────────────────────────────────────
+  // Tracks YES and NO win rates over recent completed windows (same time-based
+  // lookback as the doubt penalty — self-clears as empty windows accumulate).
+  // If a direction's win rate is below threshold over the lookback period with
+  // ≥2 bets in that direction, a penalty is added to all bets in that direction.
+  const _dirLookback = S.config.directionalRegressionLookback ?? 3;
+  const _dirThreshold = S.config.directionalRegressionThreshold ?? 0.35;
+  const _dirPenaltyPp = S.config.directionalRegressionPenaltyPp ?? 10;
+  let _yesWinsTotal = 0, _yesLossesTotal = 0, _noWinsTotal = 0, _noLossesTotal = 0;
+  for (let _di = 1; _di <= _dirLookback; _di++) {
+    const _dms = Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - _di * 15 * 60_000;
+    const _dwk = new Date(_dms).toISOString().slice(0, 16);
+    const _dd = recentDirectionalOutcomes.get(_dwk);
+    if (!_dd) continue;
+    _yesWinsTotal += _dd.yesWins;
+    _yesLossesTotal += _dd.yesLosses;
+    _noWinsTotal += _dd.noWins;
+    _noLossesTotal += _dd.noLosses;
+  }
+  const _yesTotal = _yesWinsTotal + _yesLossesTotal;
+  const _noTotal = _noWinsTotal + _noLossesTotal;
+  let directionalPenaltyYesPp = 0;
+  let directionalPenaltyNoPp = 0;
+  if (!S.config.freeRunMode) {
+    if (_yesTotal >= 2 && _yesWinsTotal / _yesTotal < _dirThreshold) {
+      directionalPenaltyYesPp = _dirPenaltyPp;
+      logger.info(
+        { yesWins: _yesWinsTotal, yesLosses: _yesLossesTotal, winRate: (_yesWinsTotal / _yesTotal).toFixed(2), threshold: _dirThreshold, penaltyPp: _dirPenaltyPp, lookback: _dirLookback },
+        `[kalshi-bot] directional dampener: YES win rate ${(_yesWinsTotal / _yesTotal * 100).toFixed(0)}% < ${_dirThreshold * 100}% — +${_dirPenaltyPp}pp on YES bets`,
+      );
+    }
+    if (_noTotal >= 2 && _noWinsTotal / _noTotal < _dirThreshold) {
+      directionalPenaltyNoPp = _dirPenaltyPp;
+      logger.info(
+        { noWins: _noWinsTotal, noLosses: _noLossesTotal, winRate: (_noWinsTotal / _noTotal).toFixed(2), threshold: _dirThreshold, penaltyPp: _dirPenaltyPp, lookback: _dirLookback },
+        `[kalshi-bot] directional dampener: NO win rate ${(_noWinsTotal / _noTotal * 100).toFixed(0)}% < ${_dirThreshold * 100}% — +${_dirPenaltyPp}pp on NO bets`,
+      );
+    }
+  }
+
   // Universal shadow parole — computed once per tick, covers ALL restriction types.
   // checkAllParoles queries shadow bet accuracy grouped by (symbol, blockedBy) and
   // returns bypass sets that each gate in the per-coin loop checks before blocking.
@@ -1179,6 +1219,39 @@ export async function runBotLoopTick(): Promise<void> {
           symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
           reason: `streak pause — blocked until window ${_streakEntry!.pauseUntilWindowKey} (${_streakEntry!.consecutiveLosses} consecutive losses)`,
           windowKey, selected: false, evaluatedAt: now, trendStability: stability, regime,
+        });
+        continue;
+      }
+    }
+
+    // ── Per-coin streak confidence penalty ────────────────────────────────────
+    // When a coin has consecutive losses but is NOT on full pause (above), apply
+    // a confidence penalty to raise the effective floor. Softens bets on "on notice"
+    // coins without fully blocking them. Exempt when freeRunMode.
+    if (decision.action !== "SKIP" && !S.config.freeRunMode) {
+      const _streakEnt = activeCoinStreakState().get(sym);
+      const _consLosses = _streakEnt?.consecutiveLosses ?? 0;
+      const _pen1 = S.config.coinStreakPenalty1LossPp ?? 6;
+      const _pen2 = S.config.coinStreakPenalty2PlusLossPp ?? 12;
+      if (_consLosses >= 2 && _pen2 > 0) {
+        effectiveConfidence -= _pen2;
+        logger.info(
+          { sym, consecutiveLosses: _consLosses, penalty: _pen2, effectiveConfidence, windowKey },
+          `[kalshi-bot] streak penalty: ${_consLosses} losses → −${_pen2}pp (effective ${effectiveConfidence}%)`,
+        );
+      } else if (_consLosses === 1 && _pen1 > 0) {
+        effectiveConfidence -= _pen1;
+        logger.info(
+          { sym, consecutiveLosses: _consLosses, penalty: _pen1, effectiveConfidence, windowKey },
+          `[kalshi-bot] streak penalty: 1 loss → −${_pen1}pp (effective ${effectiveConfidence}%)`,
+        );
+      }
+      // If streak penalty drops confidence below the base floor, skip now.
+      if (_consLosses > 0 && effectiveConfidence < S.config.minConfidence) {
+        evalResults.push({
+          symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
+          reason: `streak penalty — ${_consLosses} consecutive loss${_consLosses === 1 ? "" : "es"}: ${effectiveConfidence}% < ${S.config.minConfidence}% base floor`,
+          windowKey, selected: false, evaluatedAt: now, trendStability: stability ?? null, regime,
         });
         continue;
       }
@@ -1558,10 +1631,14 @@ export async function runBotLoopTick(): Promise<void> {
     // NOTE: this gate runs AFTER border guard — so any shadow probe recorded here has
     // already cleared every non-confidence gate in the loop (regime, contrarian, NO
     // gate, border guard).  Coins blocked by those earlier gates never reach this point.
-    // Combined confidence floor = base minConfidence + doubt penalty + unanimous failure penalty.
+    // Combined confidence floor = base minConfidence + doubt penalty + unanimous failure penalty
+    // + directional regime dampener (direction-specific).
     // Each penalty eases independently: doubt via time (empty windows) + shadow parole,
-    // unanimous failure via time (empty unanimous windows) + shadow parole.
-    const totalPenalty = effectiveDoubtPenalty + effectiveUnanimousFailurePenalty;
+    // unanimous failure via time (empty unanimous windows) + shadow parole,
+    // directional via time (new window data) automatically.
+    const _betDir = decision.action === "BET_YES" ? "yes" : decision.action === "BET_NO" ? "no" : null;
+    const _dirPenalty = _betDir === "yes" ? directionalPenaltyYesPp : _betDir === "no" ? directionalPenaltyNoPp : 0;
+    const totalPenalty = effectiveDoubtPenalty + effectiveUnanimousFailurePenalty + _dirPenalty;
     if (totalPenalty > 0 && effectiveConfidence < S.config.minConfidence + totalPenalty) {
       filteredByNewGuards.add(sym);
 
@@ -1571,6 +1648,8 @@ export async function runBotLoopTick(): Promise<void> {
         penaltyParts.push(`doubt+${effectiveDoubtPenalty}pp`);
       if (effectiveUnanimousFailurePenalty > 0)
         penaltyParts.push(`unanimous-fail+${effectiveUnanimousFailurePenalty}pp`);
+      if (_dirPenalty > 0)
+        penaltyParts.push(`dir-regime+${_dirPenalty}pp(${_betDir?.toUpperCase()})`);
       const penaltyStr = penaltyParts.join(" ");
       evalResults.push({
         symbol: sym,
@@ -1603,6 +1682,13 @@ export async function runBotLoopTick(): Promise<void> {
             kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
             "unanimous_failure_guard",
           ).catch(err => logger.warn({ err, sym }, "[shadow-bet] unanimous_failure_guard record failed (non-fatal)"));
+        }
+        if (_dirPenalty > 0) {
+          void recordShadowBet(
+            sym, shadowDir, effectiveConfidence, decision.signals,
+            kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
+            "directional_regime_dampener",
+          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] directional_regime_dampener record failed (non-fatal)"));
         }
       }
 

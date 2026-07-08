@@ -33,6 +33,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
+import { recentDirectionalOutcomes, activeCoinStreakState } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -277,6 +278,38 @@ function pipelineStatusHandler(_req: any, res: any) {
       };
     });
 
+    // ── Adaptive filter state — exposed for pipeline-status UI ───────────────
+    const _afConfig = botState.config;
+    const _afDirLookback = _afConfig.directionalRegressionLookback ?? 3;
+    const _afDirThreshold = _afConfig.directionalRegressionThreshold ?? 0.35;
+    const _afDirPenaltyPp = _afConfig.directionalRegressionPenaltyPp ?? 10;
+    let _afYesWins = 0, _afYesLosses = 0, _afNoWins = 0, _afNoLosses = 0;
+    for (let _i = 1; _i <= _afDirLookback; _i++) {
+      const _ms = Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - _i * 15 * 60_000;
+      const _wk = new Date(_ms).toISOString().slice(0, 16);
+      const _d = recentDirectionalOutcomes.get(_wk);
+      if (!_d) continue;
+      _afYesWins += _d.yesWins; _afYesLosses += _d.yesLosses;
+      _afNoWins  += _d.noWins;  _afNoLosses  += _d.noLosses;
+    }
+    const _afYesTotal = _afYesWins + _afYesLosses;
+    const _afNoTotal  = _afNoWins  + _afNoLosses;
+    const directionalPenaltyYesPp = (!_afConfig.freeRunMode && _afYesTotal >= 2 && _afYesWins / _afYesTotal < _afDirThreshold) ? _afDirPenaltyPp : 0;
+    const directionalPenaltyNoPp  = (!_afConfig.freeRunMode && _afNoTotal  >= 2 && _afNoWins  / _afNoTotal  < _afDirThreshold) ? _afDirPenaltyPp : 0;
+
+    // Per-coin streak penalty (for UI display)
+    const coinStreakState = activeCoinStreakState();
+    const coinStreakPenalties = Object.fromEntries(
+      allTrackedSyms.map(sym => {
+        const entry = coinStreakState.get(sym);
+        const losses = entry?.consecutiveLosses ?? 0;
+        const pen1 = _afConfig.coinStreakPenalty1LossPp ?? 6;
+        const pen2 = _afConfig.coinStreakPenalty2PlusLossPp ?? 12;
+        const pp = losses >= 2 ? pen2 : losses === 1 ? pen1 : 0;
+        return [sym, pp];
+      })
+    );
+
     res.json({
       results,
       inFlight,
@@ -289,6 +322,18 @@ function pipelineStatusHandler(_req: any, res: any) {
       minConfidence,
       decisionMode,
       boosts: { mlWeight: ML_WEIGHT, claudeWeight: CLAUDE_WEIGHT, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
+      adaptiveFilters: {
+        directionalPenaltyYesPp,
+        directionalPenaltyNoPp,
+        yesWinRate: _afYesTotal >= 2 ? _afYesWins / _afYesTotal : null,
+        noWinRate: _afNoTotal >= 2 ? _afNoWins / _afNoTotal : null,
+        yesBets: _afYesTotal,
+        noBets: _afNoTotal,
+        threshold: _afDirThreshold,
+        lookbackWindows: _afDirLookback,
+        freeRunMode: _afConfig.freeRunMode ?? false,
+        coinStreakPenalties,
+      },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -413,6 +458,12 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     profitLockPct,
     consensusMinCents,
     momentumLookbackCandles,
+    coinStreakPenalty1LossPp,
+    coinStreakPenalty2PlusLossPp,
+    unanimousMinModelConfidence,
+    directionalRegressionLookback,
+    directionalRegressionThreshold,
+    directionalRegressionPenaltyPp,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -459,6 +510,12 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     profitLockPct?: number;
     consensusMinCents?: number;
     momentumLookbackCandles?: number;
+    coinStreakPenalty1LossPp?: number;
+    coinStreakPenalty2PlusLossPp?: number;
+    unanimousMinModelConfidence?: number;
+    directionalRegressionLookback?: number;
+    directionalRegressionThreshold?: number;
+    directionalRegressionPenaltyPp?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -585,6 +642,25 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof momentumLookbackCandles === "number" && momentumLookbackCandles >= 4 && momentumLookbackCandles <= 12) {
     partial.momentumLookbackCandles = momentumLookbackCandles;
+  }
+  // Loss-learning adaptive filter config
+  if (typeof coinStreakPenalty1LossPp === "number" && coinStreakPenalty1LossPp >= 0 && coinStreakPenalty1LossPp <= 30) {
+    partial.coinStreakPenalty1LossPp = coinStreakPenalty1LossPp;
+  }
+  if (typeof coinStreakPenalty2PlusLossPp === "number" && coinStreakPenalty2PlusLossPp >= 0 && coinStreakPenalty2PlusLossPp <= 30) {
+    partial.coinStreakPenalty2PlusLossPp = coinStreakPenalty2PlusLossPp;
+  }
+  if (typeof unanimousMinModelConfidence === "number" && unanimousMinModelConfidence >= 0 && unanimousMinModelConfidence <= 70) {
+    partial.unanimousMinModelConfidence = unanimousMinModelConfidence;
+  }
+  if (typeof directionalRegressionLookback === "number" && directionalRegressionLookback >= 1 && directionalRegressionLookback <= 10) {
+    partial.directionalRegressionLookback = directionalRegressionLookback;
+  }
+  if (typeof directionalRegressionThreshold === "number" && directionalRegressionThreshold >= 0 && directionalRegressionThreshold <= 1) {
+    partial.directionalRegressionThreshold = directionalRegressionThreshold;
+  }
+  if (typeof directionalRegressionPenaltyPp === "number" && directionalRegressionPenaltyPp >= 0 && directionalRegressionPenaltyPp <= 30) {
+    partial.directionalRegressionPenaltyPp = directionalRegressionPenaltyPp;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

@@ -176,6 +176,7 @@ export const liveCoinStreakState = new Map<string, CoinStreakEntry>();
 export const coinSlippageStrikes = new Map<string, { strikes: number; windowKey: string }>();
 export const recentWindowOutcomes = new Map<string, { wins: number; losses: number }>();
 export const recentUnanimousOutcomes = new Map<string, { wins: number; losses: number }>();
+export const recentDirectionalOutcomes = new Map<string, { yesWins: number; yesLosses: number; noWins: number; noLosses: number }>();
 export const windowCBBuffer = new Map<string, { wins: number; losses: number }>();
 export const cachedPerformanceReportByMode = new Map<BotMode, PerformanceReport>();
 export const recentKalshiTargets = new Map<string, number[]>();

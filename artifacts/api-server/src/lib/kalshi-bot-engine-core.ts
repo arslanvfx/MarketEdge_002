@@ -161,6 +161,7 @@ export interface CorePairInputs {
   kalshiTicker: string | null;
   minConfidence: number;
   minReturnMultiple?: number | null; // skip bets whose payout multiple (1/cost) is below this; ≤1 = off
+  unanimousMinModelConfidence?: number; // per-model floor for Path A bypass; 0/undefined = off
 }
 
 export interface CorePairResult {
@@ -536,8 +537,16 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   const mlConf     = inp.mlConfidence     ?? 0;
 
   // Gate 1 already guarantees none of these is null, so direction comparison is safe.
-  const unanimousSignal =
-    inp.statAbove === inp.claudeAbove && inp.claudeAbove === inp.mlAbove;
+  const allThreeAgree = inp.statAbove === inp.claudeAbove && inp.claudeAbove === inp.mlAbove;
+
+  // unanimousMinModelConfidence: when set, each model must individually meet this
+  // confidence floor for the Path A unanimous bypass (Gate 2 skip) to apply.
+  // If any model is below the floor the bet is routed through non-unanimous Gate 2
+  // — preventing three weakly-agreeing models from bypassing individual floors.
+  const unanimousModelFloor = inp.unanimousMinModelConfidence ?? 0;
+  const unanimousSignal = allThreeAgree &&
+    (unanimousModelFloor <= 0 ||
+     (statConf >= unanimousModelFloor && claudeConf >= unanimousModelFloor && mlConf >= unanimousModelFloor));
 
   if (!unanimousSignal) {
     if (statConf < STAT_REQUIRED_MIN_CONF) {
@@ -950,6 +959,22 @@ export interface BotConfig {
   // Default: lower thresholds for ETH/XRP/SOL whose ML accuracy sits at
   // 59–60 %, just below the global 62 % gate.
   mlPrimaryMinConfidenceOverrides?: Record<string, number>;
+  // Per-coin streak confidence penalty: applied when a coin has consecutive losses
+  // but is NOT yet on full pause (coinStreakPauseWindows). Raises the effective
+  // confidence floor for that coin only without fully blocking it.
+  coinStreakPenalty1LossPp?: number;    // pp added when coin has exactly 1 consecutive loss (default 6)
+  coinStreakPenalty2PlusLossPp?: number; // pp added when coin has ≥2 consecutive losses (default 12)
+  // Unanimous model floor: minimum per-model confidence for Path A (all-three-agree)
+  // bypass to apply. If any model is below this floor, Gate 2 per-signal floors run
+  // instead. Set to 0 to disable.
+  unanimousMinModelConfidence?: number; // (default 57)
+  // Directional regime dampener: tracks YES / NO win rates over recent completed
+  // windows. If a direction's win rate falls below directionalRegressionThreshold
+  // over directionalRegressionLookback windows (with ≥2 bets in that direction),
+  // add directionalRegressionPenaltyPp to the confidence floor for that direction.
+  directionalRegressionLookback?: number;    // windows to inspect (default 3)
+  directionalRegressionThreshold?: number;   // win rate floor; below this fires the penalty (default 0.35)
+  directionalRegressionPenaltyPp?: number;   // pp penalty (default 10)
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,6 +1119,13 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // SOL/DOGE/XRP ML accuracy sits at ~59-60%, just under the global 65% gate.
   // Lower per-coin floors so they qualify for PATH A at their realistic confidence range.
   mlPrimaryMinConfidenceOverrides: { SOL: 60, DOGE: 62, XRP: 60 },
+  // Loss-learning adaptive filters (Task #338)
+  coinStreakPenalty1LossPp: 6,
+  coinStreakPenalty2PlusLossPp: 12,
+  unanimousMinModelConfidence: 57,
+  directionalRegressionLookback: 3,
+  directionalRegressionThreshold: 0.35,
+  directionalRegressionPenaltyPp: 10,
 };
 
 /**
