@@ -161,15 +161,12 @@ export function PipelineStatusPanel({ results, inFlight, liveSignals, prediction
                     const isRechecking = !!entry?.isRecheck;
                     const live = liveSignals?.[r.sym];
 
-                    // Stat: use live /crypto/predictions (same source as predictor page) so
-                    // the value here always matches what the predictor page shows.
-                    // predictedPrice is continuously refreshed every ~30s; compare against the
-                    // Kalshi target already captured in the pipeline result.
-                    const pred = predictionMap?.[r.sym];
-                    const statAbove = pred != null && r.kalshiTarget > 0
-                      ? pred.predictedPrice >= r.kalshiTarget
-                      : (live?.statAbove ?? r.statAbove);
-                    const statConfidence = pred?.confidence ?? live?.statConfidence ?? r.statConfidence;
+                    // Stat: use liveSignals (getLatestCoinSignals → getStatWindowCall → historyStore)
+                    // so the value here is exactly what Gate 2 uses in the bot's decision pipeline.
+                    // pred.predictions[0] is a short-horizon confidence and diverges from the
+                    // 15-min window-close confidence the bot gates on — do NOT use it here.
+                    const statAbove = live?.statAbove ?? r.statAbove;
+                    const statConfidence = live?.statConfidence ?? r.statConfidence;
 
                     // Claude + ML: liveSignals reads from the same in-memory caches the
                     // predictor page uses, so no divergence there.
