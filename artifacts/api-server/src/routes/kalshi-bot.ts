@@ -33,7 +33,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
-import { recentDirectionalOutcomes, activeCoinStreakState } from "../lib/kalshi-bot-state";
+import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -185,8 +185,20 @@ function pipelineStatusHandler(_req: any, res: any) {
     }
     const _bsYesTotal = _bsYesWins + _bsYesLosses;
     const _bsNoTotal  = _bsNoWins  + _bsNoLosses;
-    const directionalPenaltyYesPp = (!botState.config.freeRunMode && _bsYesTotal >= 2 && _bsYesWins / _bsYesTotal < _bsDirThreshold) ? _bsDirPenaltyPp : 0;
-    const directionalPenaltyNoPp  = (!botState.config.freeRunMode && _bsNoTotal  >= 2 && _bsNoWins  / _bsNoTotal  < _bsDirThreshold) ? _bsDirPenaltyPp : 0;
+    // Mirrors the loop's cooldown check: penalty fires if win rate is below threshold
+    // OR if the dampener cooldown is still active (fired within the last N windows).
+    const _bsCooldownActive = (dir: string): boolean => {
+      const _lastFired = directionalDampenerCooldown.get(dir);
+      if (!_lastFired) return false;
+      const _windowsAgo = (Date.parse(clockWindowKey) - Date.parse(_lastFired)) / (15 * 60_000);
+      return _windowsAgo <= _bsDirLookback;
+    };
+    const directionalPenaltyYesPp = !botState.config.freeRunMode && (
+      (_bsYesTotal >= 2 && _bsYesWins / _bsYesTotal < _bsDirThreshold) || _bsCooldownActive("yes")
+    ) ? _bsDirPenaltyPp : 0;
+    const directionalPenaltyNoPp  = !botState.config.freeRunMode && (
+      (_bsNoTotal  >= 2 && _bsNoWins  / _bsNoTotal  < _bsDirThreshold) || _bsCooldownActive("no")
+    ) ? _bsDirPenaltyPp : 0;
 
     const botSteps = allTrackedSyms.map(sym => {
       const s = liveSignals[sym];
