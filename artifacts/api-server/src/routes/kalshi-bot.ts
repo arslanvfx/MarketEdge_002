@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, isLiveModePermitted, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, ML_BOOST, STAT_BOOST, STAT_PENALTY, type BetProfile } from "../lib/kalshi-bot-engine";
 import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
@@ -127,7 +127,98 @@ function pipelineStatusHandler(_req: any, res: any) {
       allTrackedSyms.map(sym => [sym, getKalshiCachedData(sym)?.value ?? null])
     );
 
-    res.json({ results, inFlight, inFlightSyms, windowKey: currentWindowKey, liveSignals, kalshiTargets });
+    // Authoritative current 15-min window boundary (UTC) — always present even
+    // when no pipeline results exist yet, so the UI can label which window the
+    // data belongs to.
+    const nowMs = Date.now();
+    const clockWindowKey = new Date(Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000))
+      .toISOString()
+      .slice(0, 16);
+
+    // ── Bot Steps — live ML Gate decision math per coin ─────────────────────
+    // Mirrors computeMLGateDecision exactly (Gate 1 all-three, Claude leads,
+    // strict ML veto, composite formula, minConfidence gate) using the same
+    // liveSignals the bot's tick loop reads. EV + min-return gates depend on
+    // the live yes price and are applied at entry time — flagged as such.
+    const botState = getBotState();
+    const minConfidence = botState.config.minConfidence;
+    const decisionMode = botState.config.decisionMode;
+    const botSteps = allTrackedSyms.map(sym => {
+      const s = liveSignals[sym];
+      const strike = kalshiTargets[sym] ?? null;
+      const hasStat = s.statAbove !== null;
+      const hasClaude = s.claudeAbove !== null;
+      const hasMl = s.mlAbove !== null;
+      // Readiness mirrors computeMLGateDecision's Gate 1: the three signals only.
+      // A missing Kalshi market is a separate terminal SKIP in the engine
+      // (!kalshiTicker), represented here as NO_MARKET rather than WAITING.
+      const ready = hasStat && hasClaude && hasMl;
+
+      let decision: "WAITING" | "NO_MARKET" | "VETO" | "BET_YES" | "BET_NO" | "BELOW_MIN" = "WAITING";
+      let direction: "YES" | "NO" | null = null;
+      let vetoReason: string | null = null;
+      let math: {
+        base: number;
+        mlBoost: number;
+        statMod: number;
+        composite: number;
+        mlAgrees: boolean;
+        statAgrees: boolean;
+      } | null = null;
+
+      if (strike == null) {
+        decision = "NO_MARKET";
+      } else if (ready) {
+        const claudeDir = s.claudeAbove as boolean;
+        const mlDir = s.mlAbove as boolean;
+        const statDir = s.statAbove as boolean;
+        const claudeConf = s.claudeConfidence ?? 0;
+        const mlConf = s.mlConfidence ?? 0;
+        direction = claudeDir ? "YES" : "NO";
+
+        if (mlDir !== claudeDir && mlConf > claudeConf) {
+          decision = "VETO";
+          vetoReason = `ML (${Math.round(mlConf)}% ${mlDir ? "YES" : "NO"}) opposes Claude (${Math.round(claudeConf)}% ${claudeDir ? "YES" : "NO"}) with higher confidence`;
+        } else {
+          const mlAgrees = mlDir === claudeDir;
+          const statAgrees = statDir === claudeDir;
+          const mlBoost = mlAgrees ? ML_BOOST : 0;
+          const statMod = statAgrees ? STAT_BOOST : -STAT_PENALTY;
+          const composite = claudeConf + mlBoost + statMod;
+          math = { base: claudeConf, mlBoost, statMod, composite, mlAgrees, statAgrees };
+          decision = composite >= minConfidence
+            ? (claudeDir ? "BET_YES" : "BET_NO")
+            : "BELOW_MIN";
+        }
+      }
+
+      return {
+        sym,
+        strike,
+        stat: { above: s.statAbove, confidence: s.statConfidence },
+        claude: { above: s.claudeAbove, confidence: s.claudeConfidence, enabled: s.claudeEnabled },
+        ml: { above: s.mlAbove, confidence: s.mlConfidence },
+        ready,
+        direction,
+        decision,
+        vetoReason,
+        math,
+      };
+    });
+
+    res.json({
+      results,
+      inFlight,
+      inFlightSyms,
+      windowKey: currentWindowKey,
+      currentWindowKey: clockWindowKey,
+      liveSignals,
+      kalshiTargets,
+      botSteps,
+      minConfidence,
+      decisionMode,
+      boosts: { mlBoost: ML_BOOST, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

@@ -261,6 +261,33 @@ export interface CoinSignals {
   claudeEnabled: boolean;
 }
 
+export interface BotStepSignal {
+  above: boolean | null;
+  confidence: number | null;
+}
+
+export interface BotStepMath {
+  base: number;
+  mlBoost: number;
+  statMod: number;
+  composite: number;
+  mlAgrees: boolean;
+  statAgrees: boolean;
+}
+
+export interface BotStepEntry {
+  sym: string;
+  strike: number | null;
+  stat: BotStepSignal;
+  claude: BotStepSignal & { enabled: boolean };
+  ml: BotStepSignal;
+  ready: boolean;
+  direction: "YES" | "NO" | null;
+  decision: "WAITING" | "NO_MARKET" | "VETO" | "BET_YES" | "BET_NO" | "BELOW_MIN";
+  vetoReason: string | null;
+  math: BotStepMath | null;
+}
+
 export type PipelinePhase =
   | "waiting-target"
   | "fetching-data"

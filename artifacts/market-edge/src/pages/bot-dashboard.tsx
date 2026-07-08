@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
@@ -10,8 +10,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, PipelineResult } from "./bot/types";
-import type { CoinPrediction } from "./predictor/types";
+import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, BotStepEntry } from "./bot/types";
 import { API_BASE, fmt$, fmtPct, fmtCrypto, wkToEst, utcToEst, ET_LABEL } from "./bot/utils";
 import { ConditionsPanel, ClearPausesButton } from "./bot/conditions-panel";
 import { BotHeader } from "./bot/bot-header";
@@ -26,7 +25,7 @@ import { PerformanceInsights } from "./bot/performance-insights";
 import { TimingAnalytics, type TimeAnalyticsRow } from "./bot/timing-analytics";
 import { AutoTuneHistory } from "./bot/autotune-history";
 import { ManualOrderModal } from "./bot/manual-order-modal";
-import { PipelineStatusPanel } from "./bot/pipeline-status";
+import { BotStepsPanel } from "./bot/bot-steps";
 import { CoinSignalBoard } from "./bot/coin-signal-board";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
@@ -272,34 +271,18 @@ export default function BotDashboard() {
   });
 
   const { data: pipelineStatusData } = useQuery<{
-    results: PipelineResult[];
-    inFlight: import("./bot/types").InFlightEntry[];
-    inFlightSyms: string[];
     liveSignals?: Record<string, import("./bot/types").CoinSignals>;
     kalshiTargets?: Record<string, number | null>;
+    currentWindowKey?: string | null;
+    botSteps?: BotStepEntry[];
+    minConfidence?: number;
+    decisionMode?: string;
   }>({
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
     refetchInterval: 5_000,
     placeholderData: keepPreviousData,
   });
-
-  // Live stat predictions — same endpoint & interval as the predictor page so the
-  // Pipeline Status stat column always matches what the predictor page shows.
-  const { data: livePredictionsData } = useQuery<{ generatedAt: string; coins: CoinPrediction[] }>({
-    queryKey: ["bot-live-predictions"],
-    queryFn: () => fetch(`${API_BASE}/crypto/predictions`).then(r => r.json()),
-    refetchInterval: 5_000,
-    staleTime: 4_000,
-  });
-  const predictionMap = useMemo(() => {
-    const map: Record<string, { predictedPrice: number; confidence: number }> = {};
-    for (const coin of livePredictionsData?.coins ?? []) {
-      const pred = coin.predictions[0];
-      if (pred) map[coin.symbol] = { predictedPrice: pred.predictedPrice, confidence: pred.confidence };
-    }
-    return map;
-  }, [livePredictionsData]);
 
   // Live Kalshi prices for the manual order modal — polls every 5s while modal is open
   const { data: manualOrderKalshiData } = useQuery<{
@@ -612,13 +595,14 @@ export default function BotDashboard() {
           <CoinSignalBoard
             liveSignals={pipelineStatusData.liveSignals}
             kalshiTargets={pipelineStatusData.kalshiTargets ?? {}}
+            windowKey={pipelineStatusData.currentWindowKey ?? null}
           />
         )}
-        <PipelineStatusPanel
-          results={pipelineStatusData?.results ?? []}
-          inFlight={pipelineStatusData?.inFlight ?? []}
-          liveSignals={pipelineStatusData?.liveSignals}
-          predictionMap={predictionMap}
+        <BotStepsPanel
+          steps={pipelineStatusData?.botSteps ?? []}
+          minConfidence={pipelineStatusData?.minConfidence ?? null}
+          decisionMode={pipelineStatusData?.decisionMode ?? null}
+          windowKey={pipelineStatusData?.currentWindowKey ?? null}
         />
         <ActivePositions
           openPosList={openPosList}

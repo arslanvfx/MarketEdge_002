@@ -6,8 +6,8 @@ description: Complete specification of ml_gate mode — engine constants, bot co
 # ML Gate Reference Configuration
 
 > **Intent:** When the user says "switch to ML Gate mode", restore ALL of these exact values.
-> Last captured: 2026-07-03 from live DB + source code.
-> **Status:** Active in production as of 2026-07-06. minConfidence kept at 65 (auto-tuned) rather than reverting to 60.
+> Last captured: 2026-07-08 from live DB + source code (post three-tier-formula rewrite).
+> **Status:** Active. minConfidence is 60 in the current dev config; auto-tune may move it — always read the live value, the composite gate uses whatever is in config.
 
 ---
 
@@ -34,7 +34,7 @@ ml_gate uses `computeMLGateDecision` in engine-core.ts (NOT computeCorePairDecis
 2. **Direction = Claude's direction.** Claude is the primary direction setter; ML never leads.
 3. **ML veto**: SKIP only when `mlAbove !== claudeAbove && mlConf > claudeConf` (strictly greater). Low-conviction ML dissent never blocks. `mlVetoMinConfidence` is NO LONGER used anywhere (field kept in BotConfig for DB compat only).
 4. **Confidence** = `claudeConf + (ML agrees ? +ML_BOOST(8) : 0) + (Stat agrees ? +STAT_BOOST(4) : −STAT_PENALTY(4))`.
-5. **Gate 4**: composite ≥ `minConfidence` (65 in production) → BET, else SKIP.
+5. **Gate 4**: composite ≥ `minConfidence` (from live config; 60 as of 2026-07-08) → BET, else SKIP.
 6. **Post-gates** (same as classic): direction-aware EV floor (YES −0.05 / NO −0.15) and minReturnMultiple gate.
 
 **No Gate 2 per-signal floors in ml_gate** — the composite gate is the only quality filter. Constants ML_BOOST/STAT_BOOST/STAT_PENALTY live in engine-core.ts and are re-exported through the kalshi-bot-engine.ts barrel.
@@ -55,7 +55,7 @@ These are the live DB values captured at the time of this snapshot. When switchi
 | `dailyLossLimit` | **$20** | Stop new entries if daily P&L reaches this loss |
 | `maxBetsPerWindow` | **6** | Max bets per 15-min window |
 | `regimePenalty` | **15pp** | Deducted when betting against recent settlement regime |
-| `mlVetoMinConfidence` | **57%** | ML must be at least this confident to exercise its veto in ml_gate mode |
+| `mlVetoMinConfidence` | **57%** | UNUSED since 2026-07-08 three-tier formula (veto is now confidence-relative: mlConf > claudeConf). Field kept in BotConfig for DB compat only — value is inert |
 | `maxSameDirectionBets` | **6** | Direction cap per window (YES or NO) |
 | `enableDirectionCap` | **true** | Direction cap is active |
 | `enableMomentumFilter` | **true** | Momentum filter active |
@@ -82,6 +82,8 @@ These are the live DB values captured at the time of this snapshot. When switchi
 
 ## Why ml_gate vs classic
 
-**Why:** The user explicitly requested that ml_gate be the reference mode. ml_gate is considered more conservative than classic because ML cannot lead direction (only veto), meaning Stat+Claude must form an agreement first. This reduces the number of bets in ambiguous markets where ML is the only signal.
+**Why:** The user explicitly requested that ml_gate be the reference mode. ml_gate is considered more conservative than classic because ML cannot lead direction (only veto), meaning Claude sets direction and the composite gate filters quality. This reduces the number of bets in ambiguous markets where ML is the only signal.
 
-**How to apply:** When the user says "switch to ML Gate" or "switch to ML Logic", set `decisionMode = "ml_gate"` and verify all other fields match this table. Do NOT adjust mlVetoMinConfidence without being told — 57% is the calibrated soft-veto threshold.
+**How to apply:** When the user says "switch to ML Gate" or "switch to ML Logic", set `decisionMode = "ml_gate"` and verify all other fields match this table. The veto has no configurable threshold anymore — it is purely confidence-relative (mlConf > claudeConf on disagreement).
+
+**Bot Steps UI note:** the dashboard's Bot Steps panel (pipeline-status endpoint) mirrors this exact formula for display; if the formula changes, update the route's botSteps math too.

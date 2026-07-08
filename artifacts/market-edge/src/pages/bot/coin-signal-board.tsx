@@ -1,10 +1,12 @@
 import { useRef } from "react";
 import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity } from "lucide-react";
 import type { CoinSignals } from "./types";
+import { wkToEstRange, ET_LABEL } from "./utils";
 
 interface CoinSignalBoardProps {
   liveSignals: Record<string, CoinSignals>;
   kalshiTargets: Record<string, number | null>;
+  windowKey?: string | null;
 }
 
 function Dir({
@@ -69,7 +71,7 @@ function fmtStrike(v: number | null | undefined): string {
 
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "LINK"];
 
-export function CoinSignalBoard({ liveSignals, kalshiTargets }: CoinSignalBoardProps) {
+export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey }: CoinSignalBoardProps) {
   // Pin strikes: once we see a non-null value for a coin, never clear it.
   // Kalshi strike is fixed per window so there's no reason to blank it on refetch.
   const pinnedStrikes = useRef<Record<string, number>>({});
@@ -85,6 +87,11 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets }: CoinSignalBoardP
       <div className="flex items-center gap-2.5 px-5 py-3 border-b border-border">
         <Activity className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Live Signals</h2>
+        {windowKey && (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
+            Window {wkToEstRange(windowKey)} {ET_LABEL}
+          </span>
+        )}
         <span className="text-xs text-muted-foreground ml-1">
           mirrored from predictor · updates every 5 s
         </span>

@@ -42,6 +42,18 @@ export const wkToEst = (wk: string | null | undefined): string => {
   return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: EST });
 };
 
+/** Convert a windowKey like "2026-07-08T13:15" (UTC) to an ET range like "9:15 – 9:30 AM". */
+export const wkToEstRange = (wk: string | null | undefined): string => {
+  if (!wk) return "—";
+  const start = new Date(wk + ":00Z");
+  const end = new Date(start.getTime() + 15 * 60_000);
+  const fmtNoAmPm = (d: Date) =>
+    d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: EST }).replace(/\s?[AP]M$/i, "");
+  const fmtFull = (d: Date) =>
+    d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: EST });
+  return `${fmtNoAmPm(start)} – ${fmtFull(end)}`;
+};
+
 /** Convert "HH-HH" UTC hour band to EST, e.g. "00-02" → "7PM-9PM EST". */
 export const bandToEst = (band: string): string => {
   const [s, e] = band.split("-").map(Number);
