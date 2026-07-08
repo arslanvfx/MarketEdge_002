@@ -288,7 +288,7 @@ function pipelineStatusHandler(_req: any, res: any) {
       botSteps,
       minConfidence,
       decisionMode,
-      boosts: { mlBoost: ML_BOOST, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
+      boosts: { mlWeight: ML_WEIGHT, claudeWeight: CLAUDE_WEIGHT, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
