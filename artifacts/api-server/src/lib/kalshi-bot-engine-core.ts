@@ -291,7 +291,7 @@ export function checkFastAgreementEntry(
   mlAbove: boolean | null,
   statConfidence: number | null,
   mlConfidence: number | null,
-  minConf = 52,
+  minConf = 60,
 ): boolean {
   const agree = statAbove !== null && mlAbove !== null && statAbove === mlAbove;
   const confident = (mlConfidence ?? 0) >= minConf || (statConfidence ?? 0) >= minConf;
@@ -969,7 +969,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   betSize: 1.00,
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry
-  minConfidence: 67,
+  minConfidence: 70,
   decisionMode: "classic",
   midExitSensitivity: "balanced",
   phase2ThresholdPp: 30,
