@@ -6,10 +6,10 @@
 //
 // Pipeline (sequential gates — all must pass before a bet fires):
 //   GATE 1 — All three models required: Stat + Claude + ML must each have a direction.
-//   GATE 2 — Per-signal minimums: Stat≥58%, Claude≥62%, ML≥70%.
+//   GATE 2 — Per-signal minimums: Stat≥58%, Claude≥62%, ML≥60%.
 //   GATE 3 — Direction agreement:
-//     (A) Unanimous → bet (ML+6, Stat+4)
-//     (B) ML+Claude agree, Stat dissents → bet (ML+6, Stat−4)
+//     (A) Unanimous → bet (ML+6, Stat+4); ML needs only Gate 2 floor (60%) in consensus
+//     (B) ML+Claude agree, Stat dissents → bet (ML+6, Stat−4); ML must be ≥70% to lead
 //     (C) Stat+Claude agree, ML opposes at ≥75% → ML override
 //     (D) ML+Stat agree, Claude disagrees → SKIP
 //   GATE 4 — Composite confidence ≥ minConfidence (default 70%).
@@ -36,6 +36,7 @@ import {
   STAT_AGREE_BOOST,
   ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY,
   ML_REQUIRED_MIN_CONF,
+  ML_LEAD_MIN_CONF,
   ML_OVERRIDE_MIN_CONF,
   STAT_REQUIRED_MIN_CONF,
   CLAUDE_REQUIRED_MIN_CONF,
@@ -154,15 +155,26 @@ test("pipeline gate 2: claude confidence 61% → SKIP (below 62% minimum)", () =
   assert.match(r.reasoning, /Claude confidence.*below minimum/);
 });
 
-test("pipeline gate 2: ML confidence 69% → SKIP (below 70% minimum)", () => {
+test("pipeline gate 2: ML confidence 69% unanimous → BET_YES (60% floor; Path B handles dissent separately)", () => {
   const r = computeCorePairDecision(inp({
     statAbove: true, statConfidence: 58,
     claudeAbove: true, claudeConfidence: 62,
     mlAbove: true, mlConfidence: 69,
     minConfidence: 50,
   }));
+  assert.equal(r.action, "BET_YES"); // unanimous: ML needs only 60% not 70%
+  assert.equal(r.confidence, 69 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 69+6+4=79
+});
+
+test("pipeline gate 3B: ML+Claude agree, ML 69% < ML_LEAD_MIN_CONF (70%) → SKIP when Stat dissents", () => {
+  const r = computeCorePairDecision(inp({
+    statAbove: false, statConfidence: 58, // Stat disagrees
+    claudeAbove: true, claudeConfidence: 62,
+    mlAbove: true, mlConfidence: 69,
+    minConfidence: 50,
+  }));
   assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /ML confidence.*below minimum/);
+  assert.match(r.reasoning, /ML.*needs.*70.*lead.*Stat.*dissent/);
 });
 
 test("pipeline gate 2: ML exactly 70% → passes minimum", () => {
@@ -184,10 +196,11 @@ test("pipeline gate 2: null confidence treated as 0 → below any minimum → SK
   assert.equal(r.action, "SKIP");
 });
 
-test("pipeline gate 2: constants reflect spec values (stat=58, claude=62, ml=70, override=75, stat_boost=4, dissent_penalty=4)", () => {
+test("pipeline gate 2: constants reflect spec values (stat=58, claude=62, ml=60, lead=70, override=75, stat_boost=4, dissent_penalty=4)", () => {
   assert.equal(STAT_REQUIRED_MIN_CONF,                  58);
   assert.equal(CLAUDE_REQUIRED_MIN_CONF,                62);
-  assert.equal(ML_REQUIRED_MIN_CONF,                    70);
+  assert.equal(ML_REQUIRED_MIN_CONF,                    60); // Gate 2 floor — just enough to have a direction
+  assert.equal(ML_LEAD_MIN_CONF,                        70); // Path B — ML leading against Stat dissent
   assert.equal(ML_OVERRIDE_MIN_CONF,                    75);
   assert.equal(STAT_AGREE_BOOST,                         4);
   assert.equal(ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY,     4);
@@ -628,31 +641,31 @@ test("EV gate: 50¢ market is identical for YES and NO at same accuracy", () => 
 // Reversing-caution arithmetic (Phase 3 penalty applied externally)
 // ---------------------------------------------------------------------------
 
-test("Low-conviction: pipeline minimum 70+6+4=80, 80−21=59 < minConfidence(61) → Phase 3 skips", () => {
-  // All three at minimum thresholds: stat=58, claude=62, ml=70 → unanimous → 70+6+4=80 (Path A).
-  // Phase 3 applies an external penalty; here we verify the confidence value for the caller
-  // to use.  With a 21pp penalty: 80−21=59 < 61 (a slightly raised gate) → Phase 3 would SKIP.
+test("Low-conviction: unanimous at ML=70 → 70+6+4=80, 80−21=59 < minConfidence(61) → Phase 3 skips", () => {
+  // ML at ML_LEAD_MIN_CONF (70) — the practical minimum for non-trivial entries.
+  // Unanimous → 70+6+4=80 (Path A). Phase 3 applies an external penalty; here we verify
+  // the confidence value for the caller.  With a 21pp penalty: 80−21=59 < 61 → Phase 3 SKIP.
   const r = computeCorePairDecision(inp({
     statAbove: true, statConfidence: 58,
     claudeAbove: true, claudeConfidence: 62,
-    mlAbove: true, mlConfidence: ML_REQUIRED_MIN_CONF,
+    mlAbove: true, mlConfidence: 70, // ML_LEAD_MIN_CONF
     minConfidence: 60, // normal gate — bet passes here; penalty applied outside
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, ML_REQUIRED_MIN_CONF + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 80
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 80
   assert.ok(r.confidence - 21 < 61, "penalized confidence (59) falls below a raised gate (61)");
 });
 
 test("High-conviction: ML+Claude+Stat+WM all agree → 70+6+4+8=88 → 88−20=68 ≥ 60 → Phase 3 allows", () => {
-  // Same minimum inputs plus WM: 70+6+4+8=88 (Path A + WM). Phase 3 −20 → 68 ≥ 60 → passes.
+  // ML at 70 plus WM: 70+6+4+8=88 (Path A + WM). Phase 3 −20 → 68 ≥ 60 → passes.
   const r = computeCorePairDecision(inp({
-    mlAbove: true, mlConfidence: ML_REQUIRED_MIN_CONF,
+    mlAbove: true, mlConfidence: 70, // ML_LEAD_MIN_CONF
     claudeAbove: true, claudeConfidence: 62,
     statAbove: true, statConfidence: 58,
     wmDriftAbove: true, wmRec: "bet", wmReady: true,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, ML_REQUIRED_MIN_CONF + ML_SIGNAL_BOOST + STAT_AGREE_BOOST + CONFIDENCE_BOOST_PER_SIGNAL); // 88
+  assert.equal(r.confidence, 70 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST + CONFIDENCE_BOOST_PER_SIGNAL); // 88
   assert.ok(r.confidence - 20 >= DEFAULT_MIN_CONFIDENCE, "penalized confidence (68) still clears gate (60)");
 });
 

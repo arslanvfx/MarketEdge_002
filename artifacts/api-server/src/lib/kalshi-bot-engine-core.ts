@@ -12,13 +12,15 @@
 //   GATE 2 — Per-signal confidence minimums:
 //     Stat   ≥ STAT_REQUIRED_MIN_CONF   (58%)
 //     Claude ≥ CLAUDE_REQUIRED_MIN_CONF (62%)
-//     ML     ≥ ML_REQUIRED_MIN_CONF     (70%)
+//     ML     ≥ ML_REQUIRED_MIN_CONF     (60%)  — minimum to provide a meaningful direction
 //
 //   GATE 3 — Direction agreement (four exclusive paths):
-//     (A) All three unanimous → bet.
+//     (A) All three unanimous → bet.  ML needs only the Gate 2 floor (60%) since it is
+//           part of a consensus, not the lone leader.
 //           Confidence = mlConf + ML_SIGNAL_BOOST (Claude boost) + STAT_AGREE_BOOST
 //                      [+ CONFIDENCE_BOOST_PER_SIGNAL if WM agrees]
-//     (B) ML + Claude agree, Stat dissents → bet with Stat penalty.
+//     (B) ML + Claude agree, Stat dissents → bet with Stat penalty, but ML must reach
+//           ML_LEAD_MIN_CONF (70%) to lead against a dissenter.
 //           Confidence = mlConf + ML_SIGNAL_BOOST − ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY
 //                      [+ CONFIDENCE_BOOST_PER_SIGNAL if WM agrees]
 //           Rationale: our two strongest models agree; Stat's dissent is noted
@@ -71,7 +73,11 @@ export const ML_DOMINANCE_MARGIN = 10;
 // the group decision is made.  null confidence is treated as 0 (conservative).
 export const STAT_REQUIRED_MIN_CONF   = 58; // Stat ≥ 58%
 export const CLAUDE_REQUIRED_MIN_CONF = 62; // Claude ≥ 62% (strong co-signer)
-export const ML_REQUIRED_MIN_CONF     = 70; // ML ≥ 70% (lead model, high bar)
+export const ML_REQUIRED_MIN_CONF     = 60; // ML ≥ 60% — minimum to provide a meaningful direction
+// When ML is leading against a Stat dissenter (Path B), it must clear this
+// higher bar.  In the unanimous case (Path A) the Gate 2 floor (60%) suffices
+// because ML is not the lone leader — it is part of a consensus.
+export const ML_LEAD_MIN_CONF         = 70; // ML ≥ 70% to lead vs Stat dissent (Path B)
 // ML must reach this threshold to override a Stat+Claude consensus in the
 // opposite direction (Gate 3C).  Below this level the two-model consensus
 // prevails and the window is skipped.
@@ -412,6 +418,14 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     // Our two strongest models agree; Stat's dissent is noted as a confidence
     // penalty but does not block the bet.  This is the key improvement over the
     // prior pipeline where stat≠claude was always a hard SKIP.
+    // ML must clear ML_LEAD_MIN_CONF (70%) here — it is leading against a
+    // dissenter, so the 60% Gate 2 floor is not enough.
+    if (mlConf < ML_LEAD_MIN_CONF) {
+      return skip(
+        `ML+Claude agree (${Math.round(mlConf)}%/${Math.round(claudeConf)}%) but ML needs ≥${ML_LEAD_MIN_CONF}% to lead against Stat dissent — skipping`,
+        ev,
+      );
+    }
     direction = mlDir;
     confidence = mlConf + ML_SIGNAL_BOOST - ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY; // Claude co-signs (+6), Stat penalty (−4)
     pathReason = `ML+Claude agree (${Math.round(mlConf)}%/${Math.round(claudeConf)}%), Stat dissents (${Math.round(statConf)}% ${statDir ? "YES" : "NO"}) — Stat penalty applied`;
