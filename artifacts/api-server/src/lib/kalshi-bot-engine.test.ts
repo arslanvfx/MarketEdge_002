@@ -198,16 +198,19 @@ test("pipeline gate 2: null confidence unanimous → Gate 2 bypassed → composi
   assert.equal(r.action, "SKIP");
 });
 
-test("pipeline gate 2: unanimous low-confidence (stat=55, claude=58, ml=56) → SKIP (floors enforced for unanimous)", () => {
-  // All three agree YES but ML(56%) < ML_REQUIRED_MIN_CONF(60%) and Stat(55%) < STAT_REQUIRED_MIN_CONF(58%).
-  // Floors are now enforced even for unanimous — weak opening signals must be blocked.
+test("pipeline gate 2: unanimous low-confidence (stat=55, claude=58, ml=56) → BET_YES (Gate 2 BYPASSED for unanimous)", () => {
+  // All three agree YES. Gate 2 floors do NOT apply to the unanimous path — three-model
+  // unanimous agreement is itself strong evidence. The stat model's calibrated output
+  // (50–57%) is routinely below any floor even on reliable entries.
+  // Composite confidence = mlConf(56) + ML_SIGNAL_BOOST(6) + STAT_AGREE_BOOST(4) = 66 ≥ minConfidence(60) → BET_YES.
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,   // below 58% floor → blocks
-    claudeAbove: true, claudeConfidence: 58, // below 62% floor (Claude floor waived for unanimous)
-    mlAbove: true, mlConfidence: 56,         // below 60% floor → blocks
+    statAbove: true, statConfidence: 55,
+    claudeAbove: true, claudeConfidence: 58,
+    mlAbove: true, mlConfidence: 56,
     minConfidence: 60,
   }));
-  assert.equal(r.action, "SKIP");
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 56 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 56+6+4=66
 });
 
 test("pipeline gate 2: unanimous with sufficient ML + stat but low claude → BET_YES (claude floor waived unanimous)", () => {

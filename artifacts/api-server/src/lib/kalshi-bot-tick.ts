@@ -482,8 +482,25 @@ async function _runBotTick(
   }
 
   if (decision.action === "SKIP") {
-    // Log at most one SKIP per (symbol, window) to avoid flooding audit logs
-    // with repeated SKIP records from successive 30-second ticks
+    // Always log the skip reason at info level so production logs show exactly
+    // why each bet was not placed.  DB persistence is deduplicated (once per
+    // window) but the log fires on every tick so the most recent reasoning is
+    // always visible even when the DB write fails due to connection issues.
+    logger.info(
+      {
+        sym, windowKey, secondsElapsed,
+        confidence: decision.confidence,
+        reasoning: decision.reasoning,
+        statAbove: decision.signals.statAbove,
+        claudeAbove: decision.signals.claudeAbove,
+        mlAbove: decision.signals.mlAbove,
+        statConf: decision.signals.statConfidence,
+        claudeConf: decision.signals.claudeConfidence,
+        mlConf: decision.signals.mlConfidence,
+      },
+      "[kalshi-bot] SKIP decision",
+    );
+    // Persist at most once per (symbol, window) to avoid flooding the DB
     if (lastDecisionWindowKey.get(sym) !== windowKey) {
       lastDecisionWindowKey.set(sym, windowKey);
       await persistBetRecord({

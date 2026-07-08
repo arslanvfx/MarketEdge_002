@@ -30,6 +30,7 @@
 - [Claude per-coin down-scale](claude-down-scale.md) — computeClaudeDownScale reads historyStore; BNB down>up so scale=1.0; use clamp(downAcc/upAcc, 0.5, 1.0) not a fixed 0.70
 - [Bot trend stability analysis](bot-trend-stability.md) — window-open parallel Claude calls; cached per (sym, windowKey); clean=×1.2, choppy=×1.0, reversing=force SKIP in Phase 3
 - [Sequential pipeline decision architecture](sequential-pipeline-arch.md) — Gate 2 BYPASSED for unanimous (Path A); floors stat≥58/claude≥62/ml≥60 apply only for non-unanimous (B/C/D); Gate 4 composite is quality gate for unanimous
+- [Gate 2 unanimous bypass regression](gate2-unanimous-regression.md) — stat_conf is consistently 50–57% (calibrated ceiling); STAT_REQUIRED_MIN_CONF=58 applied to unanimous path kills ALL bets; must stay bypassed for Path A
 - [Multi-position bot architecture](multi-position-bot.md) — openPositions Map replaces single openPosition; each coin fully independent; Phase 2 iterates all open slots; Phase 4 no break; BotStateSnapshot.openPositions is an array
 - [Self-learning analytics architecture](self-learning-analytics.md) — effectiveConfidence stored per bet; confidence-band/agreement-level breakdowns in PerformanceReport; Rule 3 data-driven jump to optimalConfidenceThreshold
 - [Bot config persistence](bot-config-persistence.md) — Drizzle onConflictDoUpdate silently fails for bot_config; use raw sql template instead; stale draft also masked real backend config in UI

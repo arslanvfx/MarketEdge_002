@@ -368,15 +368,16 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
 
   // ── Gate 2: Per-signal confidence minimums ───────────────────────────────
   // ML and Claude are the PRIMARY direction signals; Stat is a secondary
-  // confidence modifier.  Even when all three unanimously agree (Path A),
-  // we enforce minimum floors so that coin-flip-level opening signals
-  // (ML=53%, Stat=52%) cannot trigger bets — the opening stat in particular
-  // is unreliable for the first 7 minutes of a window.
+  // confidence modifier.
   //
-  // Unanimous (Path A): ML ≥ ML_REQUIRED_MIN_CONF, Stat ≥ STAT_REQUIRED_MIN_CONF.
-  //   Claude is the strongest reasoning model; its agreement is sufficient
-  //   to waive Claude's own floor when unanimous.
-  // Non-unanimous (B/C/D): all three must independently clear their floors.
+  // Unanimous (Path A): Gate 2 is BYPASSED.  Three-model unanimous agreement
+  //   is itself strong evidence, and the stat model's calibrated confidence
+  //   output (50–57%) is routinely below any meaningful floor even on reliable
+  //   entries.  The composite minConfidence check (Gate 4, line ~505) acts as
+  //   the final backstop: composite = mlConf + ML_SIGNAL_BOOST + STAT_AGREE_BOOST.
+  //
+  // Non-unanimous (B/C/D): all three must independently clear their floors so
+  //   that a lone high-confidence model cannot drag through a weak pair.
   // null confidence is treated conservatively as 0.
   const statConf   = inp.statConfidence   ?? 0;
   const claudeConf = inp.claudeConfidence ?? 0;
@@ -386,23 +387,7 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   const unanimousSignal =
     inp.statAbove === inp.claudeAbove && inp.claudeAbove === inp.mlAbove;
 
-  if (unanimousSignal) {
-    // Path A: ML must meet its minimum floor — it is the primary quantitative signal.
-    if (mlConf < ML_REQUIRED_MIN_CONF) {
-      return skip(
-        `Unanimous but ML confidence ${Math.round(mlConf)}% below minimum ${ML_REQUIRED_MIN_CONF}% — opening signal too weak to bet`,
-        ev,
-      );
-    }
-    // Stat must also clear its floor — weak opening stat (T+2min) routinely flips
-    // at mid-snap (T+7min) and causes wrong-direction entries.
-    if (statConf < STAT_REQUIRED_MIN_CONF) {
-      return skip(
-        `Unanimous but Stat confidence ${Math.round(statConf)}% below minimum ${STAT_REQUIRED_MIN_CONF}% — opening stat too unreliable to bet`,
-        ev,
-      );
-    }
-  } else {
+  if (!unanimousSignal) {
     if (statConf < STAT_REQUIRED_MIN_CONF) {
       return skip(
         `Stat confidence ${Math.round(statConf)}% below minimum ${STAT_REQUIRED_MIN_CONF}% — signal not strong enough for non-unanimous decision`,
