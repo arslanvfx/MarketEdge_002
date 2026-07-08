@@ -67,6 +67,14 @@ async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): 
 // Persists the first complete signal snapshot for each coin in a given window.
 // Key: `sym:windowKey`  Value: { direction, decision, claudeConf, composite }
 // Cleared automatically when a new window is detected.
+//
+// Two-phase design:
+//   Phase 1 — recorded on first-ready (may use stale s.claudeAbove fallback if
+//              getTrackerWindowCall() hasn't returned yet)
+//   Phase 2 — direction + claudeConf updated once the tracker's Claude snap
+//              arrives, so the opening call matches the predictor page's AT OPEN
+//              row (same getTrackerWindowCall source). Decision is kept from
+//              Phase 1 to preserve what the bot actually computed at first-ready.
 interface OpeningCallRecord {
   direction: "YES" | "NO" | null;
   decision: string;
@@ -74,6 +82,8 @@ interface OpeningCallRecord {
   composite: number | null;
 }
 const openingCallStore = new Map<string, OpeningCallRecord>();
+// Tracks which opening calls have been updated with the authoritative tracker snap.
+const openingCallTrackerFinalized = new Set<string>();
 let openingCallWindowKey: string | null = null;
 
 const router = Router();
@@ -210,19 +220,16 @@ function pipelineStatusHandler(_req: any, res: any) {
       // from the previous window never bleed into the new one.
       if (openingCallWindowKey !== clockWindowKey) {
         openingCallStore.clear();
+        openingCallTrackerFinalized.clear();
         openingCallWindowKey = clockWindowKey;
       }
       const ocKey = `${sym}:${clockWindowKey}`;
-      // Record the first time this coin is fully ready this window.
-      // Crucially: use getTrackerWindowCall() for Claude's direction rather than
-      // s.claudeAbove from getLatestCoinSignals.  getLatestCoinSignals prefers
-      // liveDirectionCache (mid-window live re-checks) over the opening snap —
-      // at the very start of a window that cache may still hold the PREVIOUS
-      // window's live re-check result, causing a stale YES/NO to be recorded as
-      // the opening call.  getTrackerWindowCall is written once at window-open
-      // and is the same authoritative source the Crypto Predictor page uses.
+      const trackerCall = getTrackerWindowCall(sym);
+
+      // Phase 1: record on first-ready using whatever Claude source is available.
+      // If the tracker's Claude snap hasn't finished yet, s.claudeAbove may be
+      // stale (previous window's liveDirectionCache).  Phase 2 fixes this.
       if (ready && !openingCallStore.has(ocKey)) {
-        const trackerCall = getTrackerWindowCall(sym);
         const openingClaudeAbove = trackerCall?.aboveKalshi ?? s.claudeAbove;
         const openingDirection: "YES" | "NO" | null =
           openingClaudeAbove === null ? null : openingClaudeAbove ? "YES" : "NO";
@@ -232,7 +239,26 @@ function pipelineStatusHandler(_req: any, res: any) {
           claudeConf: trackerCall?.confidence ?? s.claudeConfidence,
           composite: math?.composite ?? null,
         });
+        if (trackerCall) openingCallTrackerFinalized.add(ocKey);
       }
+
+      // Phase 2: once the tracker's Claude snap arrives, update direction so it
+      // matches the predictor page's "AT OPEN" row (same getTrackerWindowCall
+      // source).  Decision is kept from Phase 1 — it reflects what the bot
+      // computed at first-ready, which is the true original decision.
+      if (openingCallStore.has(ocKey) && trackerCall && !openingCallTrackerFinalized.has(ocKey)) {
+        const existing = openingCallStore.get(ocKey)!;
+        const updatedDirection: "YES" | "NO" | null =
+          trackerCall.aboveKalshi === null ? existing.direction
+          : trackerCall.aboveKalshi ? "YES" : "NO";
+        openingCallStore.set(ocKey, {
+          ...existing,
+          direction: updatedDirection,
+          claudeConf: trackerCall.confidence ?? existing.claudeConf,
+        });
+        openingCallTrackerFinalized.add(ocKey);
+      }
+
       const openingCall = openingCallStore.get(ocKey) ?? null;
 
       return {
