@@ -703,6 +703,18 @@ test("timing/pipelineGate: pipelineEntryFiredThisWindow is cleared on window tra
   );
 });
 
+test("timing/pipelineGate: pipeline callback is guarded on statAbove non-null so null-signal completions don't suppress Phase-3 retry", () => {
+  const src = readSrc("kalshi-bot-pipeline.ts");
+  // The callback must require statAbove !== null before firing.
+  // This prevents startup-time completions (before the tracker has run) from
+  // permanently marking a coin as "evaluated" while all signals are still null.
+  assert.ok(
+    src.includes("statAbove !== null") &&
+    src.includes("_pipelineCompleteCallback"),
+    "pipeline completion callback must be gated on statAbove !== null so Phase-3 retains retry rights until real stat signal data exists",
+  );
+});
+
 test("timing/maxEntryMinutes: entry ceiling also uses clockElapsedS", () => {
   const src = readSrc("kalshi-bot-loop.ts");
   assert.ok(

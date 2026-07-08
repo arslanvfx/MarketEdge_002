@@ -382,7 +382,23 @@ async function _runPipeline(
   // Fire the completion callback immediately (initial runs only).
   // The bot loop registers this callback to trigger a single targeted entry
   // evaluation the moment all three models have directions — no polling delay.
-  if (!isRecheck && _pipelineCompleteCallback) {
+  //
+  // Guard: only fire when the stat signal is non-null.  statAbove===null means
+  // the prediction tracker has not yet produced a direction for this window
+  // (common at server startup before the first tracker snap runs), so the
+  // pipeline result does not yet have meaningful entry signal data.  When the
+  // callback is NOT fired, pipelineEntryFiredThisWindow is NOT set, and the
+  // 15s Phase-3 scheduler loop will keep retrying until:
+  //   (a) a pipeline re-check stores a result with real signals, OR
+  //   (b) the per-tick triggerWindowPipeline guard fires a fresh initial run
+  //       once the ticker is detected in a later tick (deferred Kalshi markets).
+  // In both paths, the callback will eventually fire once stat is non-null,
+  // triggering the immediate one-shot entry evaluation.
+  //
+  // claudeAbove===null is NOT a blocking condition — it is a legitimate final
+  // state when AI is disabled, quiet hours are active, or Claude errored.  The
+  // bot handles null claude gracefully (Gate 1 / non-training coin bypass).
+  if (!isRecheck && _pipelineCompleteCallback && statAbove !== null) {
     try {
       _pipelineCompleteCallback(sym, windowKey, result);
     } catch {
