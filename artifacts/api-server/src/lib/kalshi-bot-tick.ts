@@ -50,7 +50,7 @@ import {
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
   REGIME_AGAINST_PENALTY_FALLBACK, CONTRARIAN_LIVE_REGIME_PENALTY,
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
-  DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX, WINDOW_ENTRY_BUFFER_S,
+  DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
   tickInFlight,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
@@ -385,35 +385,6 @@ async function _runBotTick(
   if (prefetchedTicker.get(sym) !== kalshiTicker) {
     prefetchedTicker.set(sym, kalshiTicker);
     triggerWindowPipeline(sym, windowKey); // fire-and-forget, idempotent
-  }
-
-    // Hard 2-minute window buffer: no entry until the window is at least
-  // WINDOW_ENTRY_BUFFER_S seconds old. This guarantees:
-  //   1. The new Kalshi strike has had time to publish (Kalshi can be slow).
-  //   2. The current window's Kalshi target is appended to recentKalshiTargets
-  //      so the momentum override has a full cross-window picture — not just
-  //      the previous window's strikes (which may show a flat/mixed signal).
-  //   3. Claude's eager prefetch (fired on new-ticker detection above) has
-  //      completed so the live-direction cache holds the CURRENT window's
-  //      verdict — not the previous window's stale result.
-  //   4. The stat snap has had time to run and update predCache with the
-  //      new window's predictions (ML included).
-  // Effective betting window: 2:00 → 12:00 (10 min), enough for all strategies.
-  if (!S.config.freeRunMode && secondsElapsed < WINDOW_ENTRY_BUFFER_S) {
-    if (lastDecisionWindowKey.get(sym) !== `warmup:${windowKey}`) {
-      lastDecisionWindowKey.set(sym, `warmup:${windowKey}`);
-      await persistBetRecord({
-        symbol: sym,
-        windowKey,
-        ticker: kalshiTicker,
-        direction: null,
-        action: "skip",
-        signals: { warmupActive: true, secondsElapsed, minutesElapsed, reason: "warmup-buffer", msSinceConfirm: Math.round(secondsElapsed * 1000) },
-        entryPrice: null,
-        kalshiTarget,
-      });
-    }
-    return;
   }
 
   // ── Pipeline readiness gate ────────────────────────────────────────────────

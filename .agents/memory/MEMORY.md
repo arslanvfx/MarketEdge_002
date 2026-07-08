@@ -68,6 +68,6 @@
 - [EV gate direction asymmetry](ev-gate-direction.md) — EV gate thresholds: YES=−0.05, NO=−0.15; NO needs wider floor because accuracy metric is calibrated on YES bets only; min-return gate (1.45×) still hard-blocks yesPrice<31%
 - [Bot signal pipeline architecture](bot-signal-pipeline.md) — stale-signal gate replaced by window-keyed pipeline; no more TTL gaps; Claude prompt includes explicit window close time; see kalshi-bot-pipeline.ts
 - [ml_gate Path A sentinel removal](ml-gate-path-a.md) — mlMinConfidence:999 blocked ML from ever leading; replaced with per-coin overrides via BotConfig.mlPrimaryMinConfidenceOverrides; ETH/XRP/SOL default 58
-- [Window entry buffer timing](window-entry-buffer-timing.md) — buffer 60s not 120s; WM bypass 2 signals not 3; strong-trend markets move to extreme prices in <2min; DB config overrides code default, patch both
+- [Pipeline-completion entry trigger](pipeline-completion-trigger.md) — time buffer REMOVED; pipeline fires _firePipelineEntryForCoin immediately on initial complete; pipelineEntryFiredThisWindow Set prevents Phase-3 double-eval; cleared on window transition
 - [Fast-agreement early entry](fast-agreement-early-entry.md) — stat+ML agreement (one ≥60 conf) must bypass the Claude-pending guard; waiting for Claude in min 0-3 caused zero NO bets ever
 - [calcROI NO-bet block](calcROI-no-bet-block.md) — calcROI used cents format (100-p)/p but yesPrice is 0-1 dollars; blocked every NO bet via MIN_ROI_PCT gate; fix: use (1-p)/p and guard yesPrice<1

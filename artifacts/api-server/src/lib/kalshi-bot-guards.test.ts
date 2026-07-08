@@ -675,41 +675,31 @@ test("timing/clockElapsedS: Phase-3 loop derives elapsed time from the window bo
   );
 });
 
-test("timing/entryBuffer: Phase-3 loop gates entries using clockElapsedS, not secondsElapsed", () => {
+test("timing/pipelineGate: Phase-3 loop skips coins whose pipeline-completion entry has already fired this window", () => {
   const src = readSrc("kalshi-bot-loop.ts");
-  // Must use clockElapsedS for the buffer comparison — never raw winCtx.secondsElapsed
+  // The pipelineEntryFiredThisWindow Set must be declared at module level
   assert.ok(
-    src.includes("clockElapsedS < entryBufferS"),
-    "entry buffer must compare clockElapsedS against entryBufferS — using secondsElapsed would fire prematurely",
+    src.includes("pipelineEntryFiredThisWindow"),
+    "pipelineEntryFiredThisWindow Set must exist in kalshi-bot-loop.ts to track which coins have had their pipeline-triggered entry evaluated",
   );
-  // The config override path must be present so freeRunMode bypasses it
+  // Phase-3 must check the Set and exclude coins from Phase-4 via filteredByNewGuards
   assert.ok(
-    src.includes("S.config.freeRunMode") && src.includes("clockElapsedS < entryBufferS"),
-    "entry buffer check must be gated on !S.config.freeRunMode before comparing clockElapsedS",
+    src.includes("pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`)") &&
+    src.includes("filteredByNewGuards.add(sym)"),
+    "Phase-3 must add pipeline-triggered coins to filteredByNewGuards to prevent Phase-4 double-evaluation",
+  );
+  // The skip reason must be identifiable in logs
+  assert.ok(
+    src.includes("pipeline-triggered entry already evaluated this window"),
+    "Phase-3 SKIP reason must include 'pipeline-triggered entry already evaluated this window' for log traceability",
   );
 });
 
-test("timing/entryBuffer: reason string contains countdown and elapsed-vs-total format", () => {
+test("timing/pipelineGate: pipelineEntryFiredThisWindow is cleared on window transition", () => {
   const src = readSrc("kalshi-bot-loop.ts");
-  // The canonical reason format: "window buffer (Ns remaining — Xs of 120s elapsed)"
-  // This string must appear in the SKIP evalResult for pre-buffer ticks so the
-  // evaluation log shows a readable countdown.
   assert.ok(
-    src.includes("window buffer (") &&
-    src.includes("s remaining \u2014") &&    // "—" em dash
-    src.includes("s of ") &&
-    src.includes("s elapsed)"),
-    "entry buffer SKIP reason must use format: 'window buffer (Ns remaining — Xs of <total>s elapsed)'",
-  );
-  // The remaining seconds must be Math.ceil (rounds up so 119.1s reads as 120, not 119)
-  assert.ok(
-    src.includes("Math.ceil(entryBufferS - clockElapsedS)"),
-    "remaining seconds must use Math.ceil so the countdown never shows 0 until the buffer actually expires",
-  );
-  // The elapsed seconds must be Math.floor (shows integer seconds, not fractional)
-  assert.ok(
-    src.includes("Math.floor(clockElapsedS)"),
-    "elapsed seconds in the reason string must use Math.floor for a clean integer display",
+    src.includes("pipelineEntryFiredThisWindow.clear()"),
+    "pipelineEntryFiredThisWindow must be cleared on window transition so each new window gets a fresh evaluation",
   );
 });
 

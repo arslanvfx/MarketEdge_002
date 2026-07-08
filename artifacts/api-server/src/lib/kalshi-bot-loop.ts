@@ -48,7 +48,7 @@ import {
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
-  DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX, WINDOW_ENTRY_BUFFER_S,
+  DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
@@ -57,7 +57,10 @@ import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition } from "./kalshi-bot-close";
 import { runBotTickForCoin } from "./kalshi-bot-tick";
-import { triggerWindowPipeline, runPipelineRecheck } from "./kalshi-bot-pipeline";
+import {
+  triggerWindowPipeline, runPipelineRecheck, registerPipelineCompleteCallback,
+  type PipelineResult,
+} from "./kalshi-bot-pipeline";
 import {
   _persistModeToConfig, updateBotConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadWindowBetCountsFromDB, loadRegimeCache,
@@ -135,21 +138,6 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
     );
   }
 
-  // ── Immediate post-Step-1 bot tick ─────────────────────────────────────
-  // Fire the bot decision loop as soon as Kalshi data is confirmed for at
-  // least one coin.  This eliminates the 0–30 s dead zone that previously
-  // existed between prefetch completion and the next scheduled tick.
-  // Stability results from Step 2 arrive asynchronously; the bot handles
-  // "pending" stability gracefully (×1.0 multiplier) and the scheduler's
-  // next tick will re-evaluate once those values are resolved.
-  // tickInFlight prevents the overlapping scheduler tick from doing redundant work.
-  if (confirmed.length > 0) {
-    logger.info({ windowKey, confirmed }, "[prefetch] firing immediate post-prefetch bot tick");
-    runBotLoopTick().catch(err =>
-      logger.warn({ err, windowKey }, "[prefetch] immediate tick failed (non-fatal)"),
-    );
-  }
-
   // ── Step 2: stability analysis, gated on Step 1 per coin ────────────────
   // Only coins that PASSED step 1 are dispatched here.  The shared
   // S.stabilityFiredForCoins guard prevents double-dispatch with the bot loop.
@@ -198,6 +186,80 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
 // Tracks the last time a pipeline re-check was run for each open position.
 // Keyed by sym — cleared on window change by the position-expiry logic.
 const pipelineRecheckAt = new Map<string, number>();
+
+// Tracks which `sym:windowKey` pairs have already had their pipeline-completion
+// entry evaluation triggered.  The pipeline callback fires exactly once per coin
+// per window when all three models (Stat, Claude, ML) have returned directions.
+// The Phase-3 scheduler loop skips coins in this Set so the 15s polling tick
+// cannot double-attempt an entry that was already evaluated by the trigger.
+// Cleared on every window transition so each new window starts fresh.
+const pipelineEntryFiredThisWindow = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// Pipeline-completion entry trigger
+// ---------------------------------------------------------------------------
+// Registered once at module-load time.  When the initial pipeline finishes for
+// a coin, the pipeline fires this callback synchronously; we add the coin to
+// pipelineEntryFiredThisWindow (guards against double-fire) and schedule the
+// entry evaluation asynchronously so we don't block the pipeline's finally{}.
+registerPipelineCompleteCallback((_sym: string, _windowKey: string, _result: PipelineResult) => {
+  const key = `${_sym}:${_windowKey}`;
+  if (pipelineEntryFiredThisWindow.has(key)) return; // idempotent guard
+  pipelineEntryFiredThisWindow.add(key);
+  _firePipelineEntryForCoin(_sym, _windowKey).catch(err =>
+    logger.warn({ err, sym: _sym, windowKey: _windowKey }, "[pipeline] completion-triggered entry failed (non-fatal)"),
+  );
+});
+
+/**
+ * Evaluate a single coin for entry immediately after its pipeline completes.
+ * This replaces the time-based entry buffer as the "signals ready" gate:
+ * instead of waiting a fixed number of seconds, we fire once the moment all
+ * three models (Stat, Claude, ML) have directions for the current window.
+ *
+ * All existing quality gates (Gate 1, Gate 2, late-floor, EV, return gate) are
+ * enforced inside runBotTickForCoin / _runBotTick — nothing is bypassed here.
+ */
+async function _firePipelineEntryForCoin(sym: string, windowKey: string): Promise<void> {
+  if (!S.config.enabled || S.paused) {
+    logger.debug({ sym, windowKey }, "[pipeline] completion trigger: bot disabled/paused — skipping entry");
+    return;
+  }
+  if (S.dbDegradedSince !== null) {
+    logger.debug({ sym, windowKey }, "[pipeline] completion trigger: DB degraded — skipping entry");
+    return;
+  }
+  // Confirm the window is still current — late pipeline completions (>12min in) are
+  // caught by the late-floor guard inside _runBotTick so this is just a fast-exit
+  // for completions that arrive after the window has already rolled over.
+  if (currentWindowKey() !== windowKey) {
+    logger.debug({ sym, windowKey }, "[pipeline] completion trigger: window already expired — skipping entry");
+    return;
+  }
+  // Skip if a position is already open for this coin — Phase 2 in the scheduler
+  // tick will manage the exit; we do not open a second position.
+  if (openPositions.has(sym)) {
+    logger.debug({ sym, windowKey }, "[pipeline] completion trigger: position already open — skipping new entry");
+    return;
+  }
+
+  const kalshiData = getKalshiCachedData(sym);
+  const prediction  = getCachedPrediction(sym);
+
+  logger.info({ sym, windowKey }, "[pipeline] completion trigger: all models ready — evaluating entry");
+
+  try {
+    await runBotTickForCoin(
+      sym,
+      kalshiData?.ticker   ?? null,
+      kalshiData?.value    ?? null,
+      kalshiData?.yesPrice ?? null,
+      prediction?.candles  ?? [],
+    );
+  } catch (err) {
+    logger.warn({ err, sym, windowKey }, "[pipeline] completion-triggered tick error (non-fatal)");
+  }
+}
 
 let tickInFlight = false;
 
@@ -390,6 +452,9 @@ export async function runBotLoopTick(): Promise<void> {
     // entry can survive into the new window and be treated as a current signal.
     liveDirectionCache.clear();
     logger.info({ windowKey: newWindowKey }, "[kalshi-bot] window transition: liveDirectionCache cleared");
+    // Clear pipeline entry flags so the new window's completions each trigger
+    // a fresh entry evaluation — prior-window keys are now stale.
+    pipelineEntryFiredThisWindow.clear();
     // Fire the window-open pre-fetch burst immediately — runs in background.
     void runWindowOpenPrefetch(newWindowKey).catch(() => {});
   }
@@ -845,10 +910,17 @@ export async function runBotLoopTick(): Promise<void> {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "empty-book cooldown — IOC returned 0 fills earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
-    const entryBufferS = S.config.windowEntryBufferSeconds ?? WINDOW_ENTRY_BUFFER_S;
-    if (!S.config.freeRunMode && clockElapsedS < entryBufferS) {
-      const remaining = Math.ceil(entryBufferS - clockElapsedS);
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `window buffer (${remaining}s remaining — ${Math.floor(clockElapsedS)}s of ${entryBufferS}s elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+    // Pipeline-completion gate: skip re-evaluation for coins where the
+    // pipeline-triggered entry has already fired this window.
+    // The completion callback (_firePipelineEntryForCoin) fires immediately when
+    // all three models are ready and calls runBotTickForCoin directly.  This
+    // prevents the 15s scheduler from double-attempting entry on the same window.
+    // Coins with no pipeline result (deferred Kalshi market) remain eligible for
+    // retry via the normal scheduler path so deferred coins are not permanently
+    // excluded — they simply re-enter the Phase-3 loop until their market publishes.
+    if (pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`) && !openPositions.has(sym)) {
+      filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "pipeline-triggered entry already evaluated this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
     if (S.config.maxEntryMinutes > 0 && clockElapsedS > S.config.maxEntryMinutes * 60) {

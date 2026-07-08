@@ -74,6 +74,23 @@ const pipelineInFlight = new Set<string>();
 // Tracks the current execution phase for each in-flight coin (for status display).
 const pipelinePhaseMap = new Map<string, PipelinePhase>();
 
+// Invoked once when the initial pipeline completes for a coin (isRecheck=false).
+// Registered by kalshi-bot-loop.ts to trigger an immediate entry evaluation.
+// Fire-and-forget; errors inside the callback are the caller's responsibility.
+let _pipelineCompleteCallback: ((sym: string, windowKey: string, result: PipelineResult) => void) | null = null;
+
+/**
+ * Register a callback that fires once per coin per window when all three
+ * models (Stat, Claude, ML) have returned directions.  Only one callback
+ * is supported — calling this again replaces the previous registration.
+ * Must be registered before the first window pipeline runs.
+ */
+export function registerPipelineCompleteCallback(
+  fn: (sym: string, windowKey: string, result: PipelineResult) => void,
+): void {
+  _pipelineCompleteCallback = fn;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -361,6 +378,18 @@ async function _runPipeline(
     { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck },
     `[pipeline] ${isRecheck ? "re-check" : "initial"} complete`,
   );
+
+  // Fire the completion callback immediately (initial runs only).
+  // The bot loop registers this callback to trigger a single targeted entry
+  // evaluation the moment all three models have directions — no polling delay.
+  if (!isRecheck && _pipelineCompleteCallback) {
+    try {
+      _pipelineCompleteCallback(sym, windowKey, result);
+    } catch {
+      // non-fatal — the next scheduler tick will pick up the pipeline result
+    }
+  }
+
   return result;
 }
 
