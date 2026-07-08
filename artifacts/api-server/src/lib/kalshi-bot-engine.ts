@@ -167,12 +167,6 @@ function calcROI(action: BotDecisionAction, yesPrice: number): number {
 // Public decision engine — gathers live signals then calls the pure core
 // ---------------------------------------------------------------------------
 
-// Pure override helpers live in kalshi-bot-engine-core.ts (zero-dependency
-// module) so they can be unit-tested without mocking the I/O stores.
-// Import for local use inside _makeBotDecisionInner; also re-export for callers.
-import { applyClaudeLiveOverride, applyStatPredCacheOverride, shouldDeferForLiveSignal } from "./kalshi-bot-engine-core";
-export { applyClaudeLiveOverride, applyStatPredCacheOverride, shouldDeferForLiveSignal };
-
 function _makeBotDecisionInner(
   symbol: string,
   config: BotConfig,
