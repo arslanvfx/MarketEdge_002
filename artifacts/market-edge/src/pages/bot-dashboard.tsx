@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useAuth } from "@clerk/react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign,
   BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle,
@@ -281,6 +281,7 @@ export default function BotDashboard() {
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
     refetchInterval: 5_000,
+    placeholderData: keepPreviousData,
   });
 
   // Live stat predictions — same endpoint & interval as the predictor page so the

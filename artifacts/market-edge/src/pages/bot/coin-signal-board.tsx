@@ -1,4 +1,5 @@
-import { ArrowUp, ArrowDown, Minus, Brain, Cpu, BarChart2, Activity } from "lucide-react";
+import { useRef } from "react";
+import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity } from "lucide-react";
 import type { CoinSignals } from "./types";
 
 interface CoinSignalBoardProps {
@@ -9,24 +10,21 @@ interface CoinSignalBoardProps {
 function Dir({
   above,
   confidence,
-  dim,
 }: {
   above: boolean | null;
   confidence: number | null;
-  dim?: boolean;
 }) {
   if (above === null) {
-    return <span className="text-muted-foreground/50 text-xs font-mono">—</span>;
+    return <span className="text-muted-foreground/40 text-xs font-mono">—</span>;
   }
-  const up = above;
   return (
     <span
       className={`inline-flex items-center gap-0.5 font-semibold text-xs tabular-nums ${
-        dim ? "opacity-40" : up ? "text-emerald-400" : "text-red-400"
+        above ? "text-emerald-400" : "text-red-400"
       }`}
     >
-      {up ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-      {confidence != null ? `${confidence.toFixed(0)}%` : up ? "YES" : "NO"}
+      {above ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+      {confidence != null ? `${confidence.toFixed(0)}%` : above ? "YES" : "NO"}
     </span>
   );
 }
@@ -55,23 +53,16 @@ function AgreementBadge({ signals }: { signals: CoinSignals }) {
       </span>
     );
   }
-  if (votes.length === 3) {
-    return (
-      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-        {upVotes}↑ {downVotes}↓ Split
-      </span>
-    );
-  }
   return (
-    <span className="text-[10px] text-muted-foreground font-mono">
-      {upVotes}↑ {downVotes}↓
+    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+      {upVotes}↑ {downVotes}↓ Split
     </span>
   );
 }
 
-function fmtStrike(v: number | null): string {
+function fmtStrike(v: number | null | undefined): string {
   if (v == null) return "—";
-  if (v >= 1000) return `$${v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  if (v >= 1000) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   if (v >= 1) return `$${v.toFixed(4)}`;
   return `$${v.toFixed(6)}`;
 }
@@ -79,6 +70,13 @@ function fmtStrike(v: number | null): string {
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "LINK"];
 
 export function CoinSignalBoard({ liveSignals, kalshiTargets }: CoinSignalBoardProps) {
+  // Pin strikes: once we see a non-null value for a coin, never clear it.
+  // Kalshi strike is fixed per window so there's no reason to blank it on refetch.
+  const pinnedStrikes = useRef<Record<string, number>>({});
+  for (const [sym, val] of Object.entries(kalshiTargets)) {
+    if (val != null) pinnedStrikes.current[sym] = val;
+  }
+
   const syms = COIN_ORDER.filter((s) => s in liveSignals);
   if (syms.length === 0) return null;
 
@@ -87,8 +85,8 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets }: CoinSignalBoardP
       <div className="flex items-center gap-2.5 px-5 py-3 border-b border-border">
         <Activity className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Live Signals</h2>
-        <span className="text-xs text-muted-foreground">
-          — predictor output per coin, updated every 5 s
+        <span className="text-xs text-muted-foreground ml-1">
+          mirrored from predictor · updates every 5 s
         </span>
       </div>
 
@@ -122,20 +120,16 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets }: CoinSignalBoardP
           <tbody>
             {syms.map((sym) => {
               const s = liveSignals[sym];
-              const target = kalshiTargets[sym] ?? null;
-              const hasAny =
-                s.statAbove !== null || s.claudeAbove !== null || s.mlAbove !== null;
+              const strike = pinnedStrikes.current[sym] ?? null;
 
               return (
                 <tr
                   key={sym}
-                  className={`border-b border-border/40 last:border-0 transition-colors ${
-                    hasAny ? "hover:bg-muted/20" : "opacity-50"
-                  }`}
+                  className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors"
                 >
                   <td className="px-5 py-2.5 font-bold text-foreground">{sym}</td>
-                  <td className="px-3 py-2.5 font-mono text-foreground/70">
-                    {fmtStrike(target)}
+                  <td className="px-3 py-2.5 font-mono text-foreground/60 text-[11px]">
+                    {fmtStrike(strike)}
                   </td>
                   <td className="px-3 py-2.5">
                     <Dir above={s.statAbove} confidence={s.statConfidence} />
