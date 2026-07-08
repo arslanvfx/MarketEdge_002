@@ -1316,6 +1316,23 @@ async function recoverUnevaluatedTimingSnapshots(): Promise<void> {
 }
 
 export async function getTimingAnalysis(symbol?: string, days?: number): Promise<TimingAnalysisRow[]> {
+  // avg_theoretical_return: direction-adjusted profit/cost ratio.
+  // When price_above=true  (YES bet): return = (1 - yes_price) / yes_price
+  // When price_above=false (NO  bet): return = yes_price / (1 - yes_price)
+  // Averaging raw yes_price across both directions gives ~0.50 regardless of window minute
+  // because YES snapshots have high yes_price and NO snapshots have low yes_price.
+  // Using direction-adjusted return correctly reflects that a late-window bet costs ~90¢
+  // for either direction and pays only ~1.1×.
+  const dirAdjReturn = sql`
+    AVG(CASE
+      WHEN price_above = true  AND kalshi_yes_price::float > 0.01 AND kalshi_yes_price::float < 0.99
+        THEN (1.0 - kalshi_yes_price::float) / kalshi_yes_price::float
+      WHEN price_above = false AND kalshi_yes_price::float > 0.01 AND kalshi_yes_price::float < 0.99
+        THEN kalshi_yes_price::float / (1.0 - kalshi_yes_price::float)
+      ELSE NULL
+    END) AS avg_theoretical_return
+  `;
+
   const rawRows = await db.execute(
     symbol
       ? days != null
@@ -1323,7 +1340,8 @@ export async function getTimingAnalysis(symbol?: string, days?: number): Promise
             SELECT symbol, minute_mark,
               COUNT(*)::int                                            AS sample_count,
               COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
-              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price,
+              ${dirAdjReturn}
             FROM window_timing_snapshots
             WHERE actual_above IS NOT NULL
               AND symbol = ${symbol}
@@ -1335,7 +1353,8 @@ export async function getTimingAnalysis(symbol?: string, days?: number): Promise
             SELECT symbol, minute_mark,
               COUNT(*)::int                                            AS sample_count,
               COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
-              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price,
+              ${dirAdjReturn}
             FROM window_timing_snapshots
             WHERE actual_above IS NOT NULL
               AND symbol = ${symbol}
@@ -1347,7 +1366,8 @@ export async function getTimingAnalysis(symbol?: string, days?: number): Promise
             SELECT NULL AS symbol, minute_mark,
               COUNT(*)::int                                            AS sample_count,
               COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
-              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price,
+              ${dirAdjReturn}
             FROM window_timing_snapshots
             WHERE actual_above IS NOT NULL
               AND evaluated_at >= NOW() - (${days} || ' days')::interval
@@ -1358,7 +1378,8 @@ export async function getTimingAnalysis(symbol?: string, days?: number): Promise
             SELECT NULL AS symbol, minute_mark,
               COUNT(*)::int                                            AS sample_count,
               COUNT(*) FILTER (WHERE correct = true)::int             AS correct_count,
-              AVG(kalshi_yes_price::float)                            AS avg_yes_price
+              AVG(kalshi_yes_price::float)                            AS avg_yes_price,
+              ${dirAdjReturn}
             FROM window_timing_snapshots
             WHERE actual_above IS NOT NULL
             GROUP BY minute_mark
@@ -1371,12 +1392,15 @@ export async function getTimingAnalysis(symbol?: string, days?: number): Promise
     const correctCount = Number(row.correct_count);
     const accuracy     = sampleCount > 0 ? correctCount / sampleCount : null;
     const avgYesPrice  = row.avg_yes_price != null ? Number(row.avg_yes_price) : null;
-    const avgReturn    =
-      avgYesPrice !== null && avgYesPrice > 0 ? (1 - avgYesPrice) / avgYesPrice : null;
-    const ev =
-      accuracy !== null && avgYesPrice !== null && avgYesPrice > 0
-        ? accuracy * (1 / avgYesPrice) - (1 - accuracy)
-        : null;
+    // Direction-adjusted return multiple: profit/cost for the model's called direction.
+    // e.g. 0.111 means you profit 11.1¢ per dollar staked (1.11× payout) at min 12.
+    const avgRet       = row.avg_theoretical_return != null ? Number(row.avg_theoretical_return) : null;
+    // EV = accuracy × (1 + avgRet) − 1   (per dollar staked, including cost recovery on win)
+    // This is the correct binary bet EV formula. Using avgRet (direction-adjusted) ensures
+    // late-window entries show the true low payout rather than an artificial ~50¢ average.
+    const ev = accuracy !== null && avgRet !== null
+      ? accuracy * (1 + avgRet) - 1
+      : null;
     const markNum = Number(row.minute_mark);
     return {
       symbol:     row.symbol != null ? String(row.symbol) : null,
@@ -1385,7 +1409,7 @@ export async function getTimingAnalysis(symbol?: string, days?: number): Promise
       sampleCount,
       accuracy,
       avgYesPrice,
-      avgReturn,
+      avgReturn:  avgRet,
       ev,
     };
   });

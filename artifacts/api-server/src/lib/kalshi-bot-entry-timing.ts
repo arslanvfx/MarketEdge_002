@@ -236,8 +236,12 @@ export async function getBotEntryTimingAnalysis(
     const avgRet       = row.avg_theoretical_return != null ? Number(row.avg_theoretical_return) : null;
     const pct15x       = row.pct_above_1_5x  != null ? Number(row.pct_above_1_5x)          : null;
 
-    const ev = accuracy != null && avgYesPrice != null && avgYesPrice > 0
-      ? accuracy * (1 / avgYesPrice) - (1 - accuracy)
+    // EV = accuracy × (1 + avgRet) − 1  (correct binary bet EV per dollar staked).
+    // avgRet is already direction-adjusted (YES: (1-p)/p, NO: p/(1-p)), so it correctly
+    // reflects the ~0.11× profit available at min 12 rather than an artificial 2× from
+    // averaging raw yes_price across both YES and NO direction snapshots.
+    const ev = accuracy != null && avgRet != null
+      ? accuracy * (1 + avgRet) - 1
       : null;
 
     return {
