@@ -366,14 +366,17 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     return skip("Pipeline: waiting for ML — all three models (Stat, Claude, ML) required before betting", ev);
   }
 
-  // ── Gate 2: Per-signal confidence minimums (non-unanimous only) ──────────
-  // When all three models unanimously agree on direction (Path A), Gate 2 is
-  // bypassed — no single model is "leading", so individual floors add no
-  // protection and only block legitimate low-confidence consensus signals.
-  // Gate 4 composite confidence is the quality gate for Path A.
+  // ── Gate 2: Per-signal confidence minimums ───────────────────────────────
+  // ML and Claude are the PRIMARY direction signals; Stat is a secondary
+  // confidence modifier.  Even when all three unanimously agree (Path A),
+  // we enforce minimum floors so that coin-flip-level opening signals
+  // (ML=53%, Stat=52%) cannot trigger bets — the opening stat in particular
+  // is unreliable for the first 7 minutes of a window.
   //
-  // For non-unanimous paths (B/C/D), each model must still independently
-  // meet its own minimum before it can lead or dissent.
+  // Unanimous (Path A): ML ≥ ML_REQUIRED_MIN_CONF, Stat ≥ STAT_REQUIRED_MIN_CONF.
+  //   Claude is the strongest reasoning model; its agreement is sufficient
+  //   to waive Claude's own floor when unanimous.
+  // Non-unanimous (B/C/D): all three must independently clear their floors.
   // null confidence is treated conservatively as 0.
   const statConf   = inp.statConfidence   ?? 0;
   const claudeConf = inp.claudeConfidence ?? 0;
@@ -383,7 +386,23 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
   const unanimousSignal =
     inp.statAbove === inp.claudeAbove && inp.claudeAbove === inp.mlAbove;
 
-  if (!unanimousSignal) {
+  if (unanimousSignal) {
+    // Path A: ML must meet its minimum floor — it is the primary quantitative signal.
+    if (mlConf < ML_REQUIRED_MIN_CONF) {
+      return skip(
+        `Unanimous but ML confidence ${Math.round(mlConf)}% below minimum ${ML_REQUIRED_MIN_CONF}% — opening signal too weak to bet`,
+        ev,
+      );
+    }
+    // Stat must also clear its floor — weak opening stat (T+2min) routinely flips
+    // at mid-snap (T+7min) and causes wrong-direction entries.
+    if (statConf < STAT_REQUIRED_MIN_CONF) {
+      return skip(
+        `Unanimous but Stat confidence ${Math.round(statConf)}% below minimum ${STAT_REQUIRED_MIN_CONF}% — opening stat too unreliable to bet`,
+        ev,
+      );
+    }
+  } else {
     if (statConf < STAT_REQUIRED_MIN_CONF) {
       return skip(
         `Stat confidence ${Math.round(statConf)}% below minimum ${STAT_REQUIRED_MIN_CONF}% — signal not strong enough for non-unanimous decision`,
@@ -422,7 +441,9 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
 
   if (statDir === claudeDir && claudeDir === mlDir) {
     // ── (A) Unanimous — all three agree ──────────────────────────────────────
-    direction = statDir;
+    // Direction is ML's — ML and Claude are the primary directional signals;
+    // stat is a secondary confidence modifier.  All three happen to agree here.
+    direction = mlDir;
     confidence = mlConf + ML_SIGNAL_BOOST + STAT_AGREE_BOOST; // Claude co-signs (+6), Stat confirms (+4)
     pathReason = `Unanimous: Stat:✓(${Math.round(statConf)}%) Claude:✓(${Math.round(claudeConf)}%) ML:✓(${Math.round(mlConf)}%)`;
     coreAgreeing = 3;

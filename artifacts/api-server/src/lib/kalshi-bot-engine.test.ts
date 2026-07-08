@@ -204,17 +204,28 @@ test("pipeline gate 2: null confidence unanimous → Gate 2 bypassed → composi
   assert.equal(r.action, "SKIP");
 });
 
-test("pipeline gate 2: unanimous low-confidence (stat=55, claude=58, ml=56) → Gate 2 bypassed → BET_YES", () => {
-  // All three agree YES at below-floor confidences; unanimous → Gate 2 bypassed
-  // composite = 56 + 6 + 4 = 66% ≥ minConfidence=60 → BET_YES
+test("pipeline gate 2: unanimous low-confidence (stat=55, claude=58, ml=56) → SKIP (floors enforced for unanimous)", () => {
+  // All three agree YES but ML(56%) < ML_REQUIRED_MIN_CONF(60%) and Stat(55%) < STAT_REQUIRED_MIN_CONF(58%).
+  // Floors are now enforced even for unanimous — weak opening signals must be blocked.
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 55,   // below 58% floor
-    claudeAbove: true, claudeConfidence: 58, // below 62% floor
-    mlAbove: true, mlConfidence: 56,         // below 60% floor
+    statAbove: true, statConfidence: 55,   // below 58% floor → blocks
+    claudeAbove: true, claudeConfidence: 58, // below 62% floor (Claude floor waived for unanimous)
+    mlAbove: true, mlConfidence: 56,         // below 60% floor → blocks
+    minConfidence: 60,
+  }));
+  assert.equal(r.action, "SKIP");
+});
+
+test("pipeline gate 2: unanimous with sufficient ML + stat but low claude → BET_YES (claude floor waived unanimous)", () => {
+  // All three agree YES. ML(61%) ≥ 60%, Stat(59%) ≥ 58%. Claude floor waived for unanimous.
+  const r = computeCorePairDecision(inp({
+    statAbove: true, statConfidence: 59,
+    claudeAbove: true, claudeConfidence: 58, // below 62% floor — waived for unanimous
+    mlAbove: true, mlConfidence: 61,
     minConfidence: 60,
   }));
   assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 56 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 56+6+4=66
+  assert.equal(r.confidence, 61 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 61+6+4=71
 });
 
 test("pipeline gate 2: constants reflect spec values (stat=58, claude=62, ml=60, lead=70, override=75, stat_boost=4, dissent_penalty=4)", () => {

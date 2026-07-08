@@ -446,12 +446,14 @@ export async function runBotLoopTick(): Promise<void> {
   // ── Pipeline re-check for open positions ──────────────────────────────────
   // Every PIPELINE_RECHECK_INTERVAL_MS (~2.5 min) re-run the signal pipeline
   // (Claude + stat + ML) for each open position.  If the resulting consensus
-  // contradicts the direction we bet AND the current exit value is ≥ 25% of
-  // the original entry cost, close the position immediately.
+  // contradicts the direction we bet AND the current exit value is ≥ 50% of
+  // the original entry cost, a SECOND independent pipeline run is immediately
+  // triggered to confirm the flip is real before closing.  Both checks must
+  // agree for the position to be closed — this prevents exiting on transient
+  // noise (e.g. the stat mid-snap flip that often corrects within minutes).
   //
-  // This supplements (not replaces) the existing Phase-2 exit guards:
-  //   • Phase 2 handles profit-lock, phase2-threshold, and time-based exits.
-  //   • Re-check handles signal-flip exits (Claude/stat/ML changed their mind).
+  // Gated by enableMidExit: when that flag is false the recheck still runs for
+  // display-refresh purposes but will never trigger a close.
   const PIPELINE_RECHECK_INTERVAL_MS = 150_000; // 2.5 min
   if (openPositions.size > 0) {
     for (const [sym, pos] of Array.from(openPositions.entries())) {
@@ -510,9 +512,55 @@ export async function runBotLoopTick(): Promise<void> {
           return;
         }
 
+        // ── enableMidExit guard ───────────────────────────────────────────────
+        // If mid-exit is disabled in config, the recheck still runs for
+        // display-refresh purposes but must not close positions.
+        if (S.config.enableMidExit === false) {
+          logger.info(
+            { sym, signalsAgainstBet, exitRatio: exitRatio.toFixed(3) },
+            "[pipeline-recheck] all models flipped but enableMidExit=false — holding per config",
+          );
+          return;
+        }
+
+        // ── Double-check: run a second independent pipeline read before closing ─
+        // A single flipped read can be a transient artifact (stat mid-snap noise,
+        // a momentary Claude re-call, etc.).  Re-running all three models right
+        // now gives us a second independent read; both must agree on the flip
+        // before we execute the close order.
+        logger.info(
+          { sym, betAbove, exitRatio: exitRatio.toFixed(3) },
+          "[pipeline-recheck] first check confirms flip — running double-check before close",
+        );
+        const confirmResult = await runPipelineRecheck(sym, pos.windowKey);
+        if (!confirmResult) {
+          logger.info({ sym }, "[pipeline-recheck] double-check returned no result — holding");
+          return;
+        }
+
+        const confirmMlAgainst    = confirmResult.mlAbove !== null && confirmResult.mlAbove !== betAbove;
+        const confirmSignals      = [confirmResult.statAbove, confirmResult.claudeAbove];
+        const confirmForBet       = confirmSignals.filter(s => s === betAbove).length;
+        const confirmAgainstBet   = confirmSignals.filter(s => s !== null && s !== betAbove).length;
+        const doubleCheckFailed   = confirmAgainstBet === 0 || confirmAgainstBet <= confirmForBet || !confirmMlAgainst;
+
+        logger.info(
+          { sym, betAbove, confirmForBet, confirmAgainstBet, confirmMlAgainst,
+            statAbove: confirmResult.statAbove, claudeAbove: confirmResult.claudeAbove, mlAbove: confirmResult.mlAbove },
+          "[pipeline-recheck] double-check result",
+        );
+
+        if (doubleCheckFailed) {
+          logger.info(
+            { sym, confirmForBet, confirmAgainstBet, confirmMlAgainst },
+            "[pipeline-recheck] double-check shows recovery or disagreement — holding position, not closing",
+          );
+          return;
+        }
+
         logger.warn(
-          { sym, betAbove, exitRatio: exitRatio.toFixed(3), signalsForBet, signalsAgainstBet, mlAgainstBet },
-          "[pipeline-recheck] all models confirm flip + ≥50% value recoverable — closing position",
+          { sym, betAbove, exitRatio: exitRatio.toFixed(3), signalsForBet, signalsAgainstBet, confirmAgainstBet },
+          "[pipeline-recheck] both checks confirm flip — closing position",
         );
 
         // Synchronously delete before the async close to prevent double-close.
