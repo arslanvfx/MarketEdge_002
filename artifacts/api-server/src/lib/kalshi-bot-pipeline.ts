@@ -296,8 +296,8 @@ async function _runPipeline(
   // direction than the predictor page for the same coin and window.
   if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "fetching-data");
   const signals = getLatestCoinSignals(sym);
-  const statAbove: boolean | null = signals.statAbove;
-  const statConfidence: number | null = signals.statConfidence;
+  let statAbove: boolean | null = signals.statAbove;
+  let statConfidence: number | null = signals.statConfidence;
   let claudeAbove: boolean | null = signals.claudeAbove;
   let claudeConfidence: number | null = signals.claudeConfidence;
   const mlAbove: boolean | null = signals.mlAbove;
@@ -309,6 +309,55 @@ async function _runPipeline(
     "[pipeline] unified signals read from predictor layer",
   );
 
+  // ── Shared data fetch ─────────────────────────────────────────────────────
+  // Two fallbacks below (stat direct + Claude) both need candles/stats/price.
+  // Fetch once here when at least one of them will fire, so we never fetch twice.
+  const needsStatDirect   = statAbove === null && kalshiTarget != null;
+  const needsClaudeDirect = isAiFeatureEnabled("crypto_live_dir") && claudeAbove === null && signals.claudeEnabled;
+  let _sharedCandles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }> = [];
+  let _sharedStats: Awaited<ReturnType<typeof getStats>> = null;
+  let _sharedLivePrice = 0;
+  if (needsStatDirect || needsClaudeDirect) {
+    try {
+      const pred = getCachedPrediction(sym);
+      const [fbCandles, fbStats, fbTicker] = await Promise.all([
+        getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
+        getStats(coin.product).catch(() => null),
+        getTicker(coin.product).catch(() => 0),
+      ]);
+      _sharedCandles    = fbCandles;
+      _sharedStats      = fbStats;
+      _sharedLivePrice  = fbTicker > 0 ? fbTicker : (pred?.price ?? 0);
+    } catch {
+      // non-fatal; individual fallbacks will skip if data is missing
+    }
+  }
+
+  // ── Stat direct fallback ──────────────────────────────────────────────────
+  // statAbove is null when the tracker's historyStore snap hasn't run yet for
+  // the current window.  This is normal at window open: the tracker writes
+  // historyStore every 30 s and the new Kalshi target may not have been
+  // confirmed when the last snap fired.
+  //
+  // analyzeCoin is pure synchronous math (candles + stats → predicted price).
+  // We already hold the confirmed kalshiTarget from Step 1, so we can compute
+  // stat instantly without waiting for the next tracker cycle.
+  if (needsStatDirect && _sharedLivePrice > 0 && _sharedCandles.length >= 5) {
+    try {
+      const statResult = analyzeCoin(coin, _sharedCandles, _sharedStats, new Date(), _sharedLivePrice);
+      if (statResult.predictedPrice != null && statResult.predictedPrice > 0) {
+        statAbove      = statResult.predictedPrice >= kalshiTarget;
+        statConfidence = statResult.confidence ?? null;
+        logger.info(
+          { sym, windowKey, statAbove, statConfidence, kalshiTarget, livePrice: _sharedLivePrice, predictedPrice: statResult.predictedPrice, isRecheck },
+          "[pipeline] stat direct: computed via analyzeCoin (tracker snap not ready yet)",
+        );
+      }
+    } catch (err) {
+      logger.warn({ sym, windowKey, err }, "[pipeline] stat direct fallback failed — leaving statAbove null");
+    }
+  }
+
   // ── Claude race-fallback ──────────────────────────────────────────────────
   // claudeAbove is null in two cases:
   //   (a) Auto-pilot OFF  — predictor not running Claude → leave null (matches page).
@@ -317,24 +366,16 @@ async function _runPipeline(
   //                         so we don't miss the opening window bet entirely.
   //
   // signals.claudeEnabled distinguishes them: true = auto-pilot on (case b); false = off (case a).
-  if (isAiFeatureEnabled("crypto_live_dir") && claudeAbove === null && signals.claudeEnabled) {
+  if (needsClaudeDirect) {
     if (!isRecheck) pipelinePhaseMap.set(`${sym}:${windowKey}`, "claude-analyzing");
     try {
-      // Lazy-fetch market data — only needed for the Claude prompt context.
+      if (_sharedLivePrice === 0) throw new Error("no live price available for Claude fallback");
       const pred = getCachedPrediction(sym);
-      const [candles, stats, tickerPrice] = await Promise.all([
-        getCandles(coin.product).catch(() => [] as Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>),
-        getStats(coin.product).catch(() => null),
-        getTicker(coin.product).catch(() => 0),
-      ]);
-      const livePrice = tickerPrice > 0 ? tickerPrice : (pred?.price ?? 0);
-      if (livePrice === 0) throw new Error("no live price available for Claude fallback");
-
       logger.info({ sym, windowKey, isRecheck },
         "[pipeline] tracker Claude not ready — running fresh pipeline call (auto-pilot on, race at window open)");
       const claudeResult = await _callPipelineClaude(
         sym, coin, kalshiTarget, windowKey,
-        pred, candles, stats, livePrice,
+        pred, _sharedCandles, _sharedStats, _sharedLivePrice,
         statAbove, statConfidence,
       );
       claudeAbove = claudeResult.aboveKalshi;
