@@ -226,35 +226,9 @@ function countSignals(
 export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
   const result = computeCorePairDecisionUngated(inp);
 
-  // Direction-aware EV gate — applied after direction is decided so YES and NO
-  // bets each use the correct payoff formula for their actual cost structure.
-  // Pre-direction EV used the YES formula for all bets, which incorrectly
-  // blocked cheap NO contracts (high yes_price = low NO cost = high payoff).
-  //
-  // Thresholds are asymmetric:
-  //   YES: −0.05  — tight, since historical accuracy is calibrated on YES bets.
-  //   NO : −0.15  — relaxed, because the accuracy metric is derived almost entirely
-  //                 from YES-bet history.  Applying the same threshold to NO bets
-  //                 treats YES-calibrated accuracy as a perfect proxy for NO win
-  //                 rate, which over-rejects valid NO entries in bearish windows
-  //                 where the Kalshi market has partially but not fully priced in
-  //                 the move (yesPrice 30–40%).  The min-return gate (1.45×) still
-  //                 hard-blocks truly overpriced NO bets (yesPrice < 31%).
-  if (result.action === "BET_YES" || result.action === "BET_NO") {
-    const dirEV = computeEVForDirection(result.action, inp.yesPrice, inp.signalAccuracyPct);
-    const evFloor = result.action === "BET_NO" ? -0.15 : -0.05;
-    if (dirEV !== null && dirEV < evFloor) {
-      return {
-        action: "SKIP",
-        confidence: result.confidence,
-        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}% (floor ${evFloor})`,
-        signalsAgreeing: result.signalsAgreeing,
-        signalsTotal: result.signalsTotal,
-        ev: dirEV,
-      };
-    }
-  }
-
+  // Min-return gate first — structural price check independent of model confidence.
+  // Rejects contracts where the payout multiple is below the configured floor
+  // (e.g. paying 92¢ to win 8¢ → 1.09× is never acceptable regardless of signals).
   const gate = checkMinReturnGate(result.action, inp.yesPrice, inp.minReturnMultiple);
   if (gate.blocked) {
     return {
@@ -265,6 +239,28 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
       signalsTotal: result.signalsTotal,
       ev: result.ev,
     };
+  }
+
+  // Direction-aware EV gate — uses the composite confidence (result.confidence)
+  // as the accuracy estimate, not the global historical ensemble accuracy.
+  // The composite already integrates Claude + ML + Stat signals for the current
+  // window, so it IS the model's best current accuracy estimate.  Feeding stale
+  // global history here would double-penalise coins that happen to have a poor
+  // overall record but a strong current-window signal.
+  if (result.action === "BET_YES" || result.action === "BET_NO") {
+    const evAcc = result.confidence; // composite, 0–100
+    const dirEV = computeEVForDirection(result.action, inp.yesPrice, evAcc);
+    const evFloor = result.action === "BET_NO" ? -0.15 : -0.05;
+    if (dirEV !== null && dirEV < evFloor) {
+      return {
+        action: "SKIP",
+        confidence: result.confidence,
+        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} composite=${evAcc.toFixed(0)}% (floor ${evFloor})`,
+        signalsAgreeing: result.signalsAgreeing,
+        signalsTotal: result.signalsTotal,
+        ev: dirEV,
+      };
+    }
   }
 
   return result;
@@ -294,22 +290,7 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
 export function computeMLGateDecision(inp: CorePairInputs): CorePairResult {
   const result = computeMLGateDecisionUngated(inp);
 
-  // Direction-aware EV gate — same thresholds as computeCorePairDecision.
-  if (result.action === "BET_YES" || result.action === "BET_NO") {
-    const dirEV = computeEVForDirection(result.action, inp.yesPrice, inp.signalAccuracyPct);
-    const evFloor = result.action === "BET_NO" ? -0.15 : -0.05;
-    if (dirEV !== null && dirEV < evFloor) {
-      return {
-        action: "SKIP",
-        confidence: result.confidence,
-        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}% (floor ${evFloor})`,
-        signalsAgreeing: result.signalsAgreeing,
-        signalsTotal: result.signalsTotal,
-        ev: dirEV,
-      };
-    }
-  }
-
+  // Min-return gate first — structural price check independent of model confidence.
   const gate = checkMinReturnGate(result.action, inp.yesPrice, inp.minReturnMultiple);
   if (gate.blocked) {
     return {
@@ -320,6 +301,23 @@ export function computeMLGateDecision(inp: CorePairInputs): CorePairResult {
       signalsTotal: result.signalsTotal,
       ev: result.ev,
     };
+  }
+
+  // EV gate — uses composite confidence, not stale global historical accuracy.
+  if (result.action === "BET_YES" || result.action === "BET_NO") {
+    const evAcc = result.confidence; // composite, 0–100
+    const dirEV = computeEVForDirection(result.action, inp.yesPrice, evAcc);
+    const evFloor = result.action === "BET_NO" ? -0.15 : -0.05;
+    if (dirEV !== null && dirEV < evFloor) {
+      return {
+        action: "SKIP",
+        confidence: result.confidence,
+        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} composite=${evAcc.toFixed(0)}% (floor ${evFloor})`,
+        signalsAgreeing: result.signalsAgreeing,
+        signalsTotal: result.signalsTotal,
+        ev: dirEV,
+      };
+    }
   }
 
   return result;

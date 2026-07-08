@@ -622,18 +622,17 @@ const evNo = (extra: Partial<CorePairInputs> = {}) => inp({
   ...extra,
 });
 
-test("Negative EV fires when signalAccuracyPct is low (40% at 50¢ YES)", () => {
-  // BET_YES: EV = 0.40*(0.50/0.50) − 0.60 = −0.20 < −0.05
+test("EV gate: 50¢ YES passes when composite is high (signalAccuracyPct no longer drives EV)", () => {
+  // EV now uses composite confidence (80%) not signalAccuracyPct (40%).
+  // At 50¢ with composite=80%: EV = 0.80*1 − 0.20 = +0.60 → passes gate.
   const r = computeCorePairDecision(evYes({ yesPrice: 0.50, signalAccuracyPct: 40 }));
-  assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /Negative EV/);
+  assert.equal(r.action, "BET_YES");
 });
 
-test("Negative EV fires at 45% accuracy at 50¢ YES (borderline)", () => {
-  // BET_YES: EV = 0.45*1 − 0.55 = −0.10 < −0.05
+test("EV gate: 50¢ YES passes even at borderline composite (stale acc no longer used)", () => {
+  // Composite (80%) is the accuracy estimate; 50¢ YES has positive EV at any composite ≥ 50%.
   const r = computeCorePairDecision(evYes({ yesPrice: 0.50, signalAccuracyPct: 45 }));
-  assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /Negative EV/);
+  assert.equal(r.action, "BET_YES");
 });
 
 test("EV gate passes when signalAccuracyPct is 60% at 50¢ YES", () => {
@@ -648,11 +647,11 @@ test("EV gate skipped when signalAccuracyPct is null (no history yet)", () => {
   assert.equal(r.action, "BET_YES");
 });
 
-test("EV gate symmetry: expensive NO (low yes_price) blocked just like bad YES", () => {
-  // BET_NO at yes=0.08 (NO costs 0.92): EV = 0.40*(0.08/0.92) − 0.60 = −0.565 < −0.05
-  const r = computeCorePairDecision(evNo({ yesPrice: 0.08, signalAccuracyPct: 40 }));
+test("Min-return gate blocks expensive NO (low yes_price) before EV even runs", () => {
+  // BET_NO at yes=0.08 → NO cost = 0.92 → return = 1.09× < 1.45 floor → min-return blocks first.
+  const r = computeCorePairDecision(evNo({ yesPrice: 0.08, signalAccuracyPct: 40, minReturnMultiple: 1.45 }));
   assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /Negative EV/);
+  assert.match(r.reasoning, /below minimum/);
 });
 
 test("EV gate symmetry: cheap NO (high yes_price) passes despite low acc", () => {
@@ -661,13 +660,13 @@ test("EV gate symmetry: cheap NO (high yes_price) passes despite low acc", () =>
   assert.equal(r.action, "BET_NO");
 });
 
-test("EV gate: 50¢ market is identical for YES and NO at same accuracy", () => {
-  // Both directions at 50¢ with 40% acc: EV = 0.40*1 − 0.60 = −0.20 → both block
+test("EV gate: 50¢ market — both YES and NO pass when composite is high", () => {
+  // EV now uses composite (80%), not signalAccuracyPct (40%).
+  // At 50¢ with composite=80%: EV = 0.80*1 − 0.20 = +0.60 → both sides pass.
   const rYes = computeCorePairDecision(evYes({ yesPrice: 0.50, signalAccuracyPct: 40 }));
   const rNo  = computeCorePairDecision(evNo ({ yesPrice: 0.50, signalAccuracyPct: 40 }));
-  assert.equal(rYes.action, "SKIP");
-  assert.equal(rNo.action,  "SKIP");
-  assert.ok(rYes.ev != null && rNo.ev != null && Math.abs(rYes.ev - rNo.ev) < 0.001, "EV symmetric at 50¢");
+  assert.equal(rYes.action, "BET_YES");
+  assert.equal(rNo.action,  "BET_NO");
 });
 
 // ---------------------------------------------------------------------------
