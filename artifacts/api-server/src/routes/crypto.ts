@@ -80,7 +80,11 @@ router.get("/crypto/ai-predict", async (req, res) => {
   }
   // Serve the tracker's opening snap for free when available.
   // Pass ?force=1 to bypass and always call Claude fresh (e.g. manual Enhance).
+  // Pass ?snaponly=1 to return 204 (not ready) instead of falling through to a
+  // fresh Claude call — used by the predictor page's silent polling query so it
+  // never triggers a second Claude call while waiting for the tracker snap.
   const force = req.query.force === "1";
+  const snaponly = req.query.snaponly === "1";
   if (!force) {
     const snap = getTrackerWindowCall(symbol);
     if (snap) {
@@ -101,6 +105,10 @@ router.get("/crypto/ai-predict", async (req, res) => {
         generatedAt: snap.snappedAt,
         source: "snap",
       });
+      return;
+    }
+    if (snaponly) {
+      res.status(204).end();
       return;
     }
   }

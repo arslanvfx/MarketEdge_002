@@ -175,8 +175,6 @@ export default function Predictor() {
   // When the Kalshi event ticker changes (new window), immediately re-fetch
   // the tracker snapshot so the Window Monitor resets to "MONITORING…" without
   // waiting up to 15 s for the next scheduled poll to arrive.
-  // Also auto-trigger Claude Enhanced Analysis for the displayed coin so the
-  // enhanced panel populates without manual clicking.
   const prevKalshiTickerRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!kalshiEventTicker) return;
@@ -186,19 +184,62 @@ export default function Predictor() {
       void trackerSnapshotQuery.refetch();
       if (isNewWindow) {
         // Clear stale enhance result from the previous window.
+        // The aiSnapQuery polling will auto-populate it once the tracker snap
+        // completes (~35-90s after window open) — no manual Enhance needed.
         setAiData((prev) => {
           const n = { ...prev };
           delete n[selected];
           return n;
         });
-        // Auto-run Claude Enhanced Analysis for the currently displayed coin.
-        setAutoTriggerReason("New window — Kalshi strike updated");
-        void handleEnhance();
       }
     }
-  // handleEnhance and trackerSnapshotQuery are stable for the window lifecycle.
+  // trackerSnapshotQuery is stable for the window lifecycle.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kalshiEventTicker]);
+
+  // Silent snap poll — checks every 12s if the tracker's Claude snap for this
+  // window is ready (?snaponly=1 never calls Claude fresh).  Auto-populates the
+  // enhanced panel from the ONE tracker Claude call, avoiding a duplicate.
+  const aiSnapQuery = useQuery({
+    queryKey: ["ai-snap", selected, kalshiEventTicker],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/crypto/ai-predict?symbol=${selected}&snaponly=1`);
+      if (res.status === 204) return null;
+      if (!res.ok) return null;
+      return res.json() as Promise<{
+        predictions: AIPredictionItem[];
+        generatedAt: string;
+        source: string;
+        ensembleWeights?: EnsembleWeights;
+        abstainMinConf?: number;
+      }>;
+    },
+    refetchInterval: 12_000,
+    enabled: trainingCoinsSet.has(selected) && kalshiEventTicker != null,
+  });
+
+  // When the tracker snap arrives, auto-populate aiData so the enhanced panel
+  // shows without any manual Enhance click.  If the user already clicked
+  // Enhance this window (eventTickerAtRun matches), keep their result.
+  useEffect(() => {
+    const snap = aiSnapQuery.data;
+    if (!snap || !kalshiEventTicker) return;
+    setAiData((prev) => {
+      if (prev[selected]?.eventTickerAtRun === kalshiEventTicker) return prev;
+      return {
+        ...prev,
+        [selected]: {
+          preds: snap.predictions,
+          at: new Date(snap.generatedAt),
+          priceAtRun: 0,
+          eventTickerAtRun: kalshiEventTicker,
+          ensembleWeights: snap.ensembleWeights,
+          abstainMinConf: snap.abstainMinConf,
+        },
+      };
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiSnapQuery.data, selected, kalshiEventTicker]);
 
   // Restore a manual re-analysis result that survived a hard refresh.
   // sessionStorage is preserved across hard refreshes (Ctrl+Shift+R) but

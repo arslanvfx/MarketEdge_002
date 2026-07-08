@@ -39,6 +39,8 @@ function CheckItem({
       {label}
       {ok ? (
         <CheckCircle2 className="w-3 h-3" />
+      ) : detail ? (
+        <span className="text-[9px] italic opacity-70 animate-pulse">{detail}</span>
       ) : (
         <Clock className="w-3 h-3 animate-pulse" />
       )}
@@ -238,7 +240,9 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
                           label="Claude"
                           icon={Brain}
                           ok={step.claude.above !== null}
-                          detail={step.claude.above !== null ? `${step.claude.above ? "↑" : "↓"} ${step.claude.confidence?.toFixed(0) ?? "?"}%` : null}
+                          detail={step.claude.above !== null
+                            ? `${step.claude.above ? "↑" : "↓"} ${step.claude.confidence?.toFixed(0) ?? "?"}%`
+                            : step.stat.above !== null ? "calculating…" : null}
                         />
                         <CheckItem
                           label="ML"
@@ -256,10 +260,12 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
                             {step.direction}
                             <span className="font-normal text-muted-foreground/60 text-[10px]">(Claude)</span>
                           </span>
+                        ) : step.claude.above === null && step.stat.above !== null ? (
+                          <span className="text-[11px] text-muted-foreground/50 italic animate-pulse">Claude: calculating…</span>
                         ) : (
                           <DirBadge above={step.claude.above} confidence={null} />
                         )}
-                        {step.openingCall && step.openingCall.direction && (
+                        {step.openingCall?.direction ? (
                           step.openingCall.direction !== step.direction ? (
                             <span className="inline-flex items-center gap-0.5 text-[10px] text-amber-400/80" title="Direction changed since window open">
                               <span className="text-muted-foreground/50">was</span>
@@ -273,7 +279,9 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
                               same since open
                             </span>
                           )
-                        )}
+                        ) : step.stat.above !== null ? (
+                          <span className="text-[10px] text-muted-foreground/35 italic animate-pulse">open: calculating…</span>
+                        ) : null}
                       </div>
                     </td>
                     <td className="py-2.5 pr-3">
