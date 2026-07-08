@@ -89,6 +89,13 @@ export const ML_OVERRIDE_MIN_CONF = 75;
 export const STAT_AGREE_BOOST = 4;  // +4pp when Stat agrees with ML+Claude direction
 export const ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY = 4; // −4pp when Stat dissents from ML+Claude
 
+// ── ML Gate simplified three-tier formula constants ──────────────────────────
+// Priority hierarchy: ML = veto authority, Claude = primary direction setter,
+// Stat = confidence modifier only.  See computeMLGateDecision.
+export const ML_BOOST     = 8; // ML agrees with Claude's direction → +8pp
+export const STAT_BOOST   = 4; // Stat agrees with Claude's direction → +4pp
+export const STAT_PENALTY = 4; // Stat disagrees with Claude's direction → −4pp
+
 // ── Bet Profiles ─────────────────────────────────────────────────────────────
 // Two preset aggression levels the user can switch between in the dashboard.
 // "Normal"     — current proven defaults; higher bar for ML-led entries.
@@ -261,6 +268,145 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
   }
 
   return result;
+}
+
+/**
+ * ML Gate — simplified three-tier decision formula.
+ *
+ * Priority hierarchy:
+ *   ML     = veto authority (highest) — can block, never leads
+ *   Claude = primary direction setter
+ *   Stat   = confidence modifier only (+STAT_BOOST / −STAT_PENALTY)
+ *
+ * The bot's tick loop guarantees all three signals are populated (sourced from
+ * the same predictor-layer store as the Crypto Predictor page) before this is
+ * called, so the formula runs instantly with no waiting or fallback logic:
+ *
+ *   1. direction  = Claude's direction
+ *   2. ML veto    : ML disagrees AND mlConf > claudeConf → SKIP
+ *   3. confidence = claudeConf + (ML agrees ? +ML_BOOST : 0)
+ *                              + (Stat agrees ? +STAT_BOOST : −STAT_PENALTY)
+ *   4. gate       : confidence ≥ minConfidence → BET, else SKIP
+ *
+ * Post-decision gates (shared with all modes): direction-aware EV floor and
+ * the minimum-return (payout multiple) gate.
+ */
+export function computeMLGateDecision(inp: CorePairInputs): CorePairResult {
+  const result = computeMLGateDecisionUngated(inp);
+
+  // Direction-aware EV gate — same thresholds as computeCorePairDecision.
+  if (result.action === "BET_YES" || result.action === "BET_NO") {
+    const dirEV = computeEVForDirection(result.action, inp.yesPrice, inp.signalAccuracyPct);
+    const evFloor = result.action === "BET_NO" ? -0.15 : -0.05;
+    if (dirEV !== null && dirEV < evFloor) {
+      return {
+        action: "SKIP",
+        confidence: result.confidence,
+        reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} acc=${inp.signalAccuracyPct?.toFixed(0)}% (floor ${evFloor})`,
+        signalsAgreeing: result.signalsAgreeing,
+        signalsTotal: result.signalsTotal,
+        ev: dirEV,
+      };
+    }
+  }
+
+  const gate = checkMinReturnGate(result.action, inp.yesPrice, inp.minReturnMultiple);
+  if (gate.blocked) {
+    return {
+      action: "SKIP",
+      confidence: result.confidence,
+      reasoning: `${gate.reason} — was ${result.action} (${result.reasoning})`,
+      signalsAgreeing: result.signalsAgreeing,
+      signalsTotal: result.signalsTotal,
+      ev: result.ev,
+    };
+  }
+
+  return result;
+}
+
+function computeMLGateDecisionUngated(inp: CorePairInputs): CorePairResult {
+  const skip = (reason: string, ev: number | null = null): CorePairResult => ({
+    action: "SKIP", confidence: 0, reasoning: reason,
+    signalsAgreeing: 0, signalsTotal: 0, ev,
+  });
+
+  if (!inp.kalshiTicker) {
+    return skip("No active Kalshi market for this symbol");
+  }
+
+  const ev = computeEV(inp.yesPrice, inp.signalAccuracyPct);
+
+  // ── Gate 1: ALL THREE signals required ───────────────────────────────────
+  // Full population of the live signals per coin is the unlock: the tick loop
+  // waits until stat, Claude, and ML have all reported before the math runs.
+  if (inp.statAbove === null) {
+    return skip("Live Signals: waiting for Stat — all three (Stat, Claude, ML) must be populated before betting", ev);
+  }
+  if (inp.claudeAbove === null) {
+    return skip("Live Signals: waiting for Claude — all three (Stat, Claude, ML) must be populated before betting", ev);
+  }
+  if (inp.mlAbove === null) {
+    return skip("Live Signals: waiting for ML — all three (Stat, Claude, ML) must be populated before betting", ev);
+  }
+
+  const statDir   = inp.statAbove;
+  const claudeDir = inp.claudeAbove;
+  const mlDir     = inp.mlAbove;
+  const statConf   = inp.statConfidence   ?? 0;
+  const claudeConf = inp.claudeConfidence ?? 0;
+  const mlConf     = inp.mlConfidence     ?? 0;
+
+  // ── Step 1: Direction — Claude leads ─────────────────────────────────────
+  const direction = claudeDir;
+
+  // ── Step 2: ML veto ──────────────────────────────────────────────────────
+  // ML blocks the bet only when it disagrees AND is more confident than
+  // Claude.  A low-conviction ML dissent never overrides a confident Claude.
+  if (mlDir !== claudeDir && mlConf > claudeConf) {
+    return skip(
+      `ML veto: ML (${Math.round(mlConf)}% ${mlDir ? "YES" : "NO"}) opposes Claude (${Math.round(claudeConf)}% ${claudeDir ? "YES" : "NO"}) with higher confidence — skipping`,
+      ev,
+    );
+  }
+
+  // ── Step 3: Confidence formula ───────────────────────────────────────────
+  const mlAgrees   = mlDir === claudeDir;
+  const statAgrees = statDir === claudeDir;
+  const confidence =
+    claudeConf +
+    (mlAgrees ? ML_BOOST : 0) +
+    (statAgrees ? STAT_BOOST : -STAT_PENALTY);
+
+  const pathReason =
+    `ML Gate: Claude leads ${claudeDir ? "YES" : "NO"} (${Math.round(claudeConf)}%)` +
+    (mlAgrees
+      ? ` + ML confirms (${Math.round(mlConf)}%, +${ML_BOOST})`
+      : ` — ML dissents (${Math.round(mlConf)}%) but not more confident, no veto`) +
+    (statAgrees
+      ? ` + Stat confirms (${Math.round(statConf)}%, +${STAT_BOOST})`
+      : ` − Stat dissents (${Math.round(statConf)}%, −${STAT_PENALTY})`);
+
+  const { signalsTotal, signalsAgreeing } = countSignals(
+    direction, statDir, claudeDir, mlDir, inp.wmDriftAbove,
+  );
+
+  // ── Step 4: Composite gate ───────────────────────────────────────────────
+  if (confidence < inp.minConfidence) {
+    return {
+      action: "SKIP", confidence,
+      reasoning: `Composite confidence ${confidence}% below minimum ${inp.minConfidence}% — ${pathReason}`,
+      signalsAgreeing, signalsTotal, ev,
+    };
+  }
+
+  const action: BotDecisionAction = direction ? "BET_YES" : "BET_NO";
+  const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
+  return {
+    action, confidence, ev,
+    signalsAgreeing, signalsTotal,
+    reasoning: `${pathReason}${evDesc} → ${action} (${confidence}%)`,
+  };
 }
 
 /**

@@ -51,7 +51,9 @@ Minimum passing unanimous+WM: 77+8=85.
 
 **Why:** Old PATH A/B/C allowed ML to lead alone, stat+claude to bet without ML, and ML to tiebreak stat-claude conflicts. All three modes created bet patterns that underperformed. The sequential pipeline forces all three models to agree on a direction before any money moves.
 
-**How to apply:** Any new decision mode (classic, ml_gate, consensus, unanimous) that uses `computeCorePairDecision` inherits all four gates automatically. Only `computeCorePairDecision` in engine-core.ts implements this logic.
+**How to apply:** Any decision mode that uses `computeCorePairDecision` inherits all four gates automatically. Only `computeCorePairDecision` in engine-core.ts implements this logic.
+
+**NOTE (2026-07-08):** ml_gate mode NO LONGER uses `computeCorePairDecision`. It now calls the separate `computeMLGateDecision` (simplified three-tier formula: Claude leads direction, ML vetoes only if it disagrees AND mlConf > claudeConf, Stat is ±4 modifier, ML agreement +8; no Gate 2 per-signal floors). See ml-gate-reference-config.md. Classic mode still uses computeCorePairDecision with all gates above.
 
 ## Test patterns
 

@@ -7,9 +7,13 @@
 // placed THIS specific bet in the same direction?"
 //
 // classic   — yes, always (all existing bets passed the classic cascade)
-// ml_gate   — runs core pair (PATH B/C) without ML; ML can only veto, not lead
+// ml_gate   — simplified three-tier formula: Claude leads direction, ML vetoes
+//             only when it disagrees AND is strictly more confident than Claude,
+//             all three signals required (see computeMLGateDecision)
 // consensus — majority of [stat, claude, ml] must agree; tie = SKIP = rejected
 // unanimous — all 3 of [stat, claude, ml] must be available and unanimously agree
+
+import { ML_BOOST, STAT_BOOST, STAT_PENALTY } from "./kalshi-bot-engine-core.ts";
 
 /**
  * Returns true if the given decision mode would have approved the bet,
@@ -20,6 +24,11 @@
  * @param statAbove     Stat signal stored at bet time  (null = not available)
  * @param claudeAbove   Claude signal stored at bet time
  * @param mlAbove       ML signal stored at bet time
+ * @param statConf      Stat confidence stored at bet time (null on older rows)
+ * @param claudeConf    Claude confidence stored at bet time (null on older rows)
+ * @param mlConf        ML confidence stored at bet time (null on older rows)
+ * @param minConfidence Composite floor to simulate for ml_gate; null = skip the
+ *                      composite gate (historical per-bet config is unknown)
  */
 export function backtestModeApproval(
   mode: string,
@@ -27,39 +36,46 @@ export function backtestModeApproval(
   statAbove: boolean | null,
   claudeAbove: boolean | null,
   mlAbove: boolean | null,
+  statConf: number | null = null,
+  claudeConf: number | null = null,
+  mlConf: number | null = null,
+  minConfidence: number | null = null,
 ): boolean {
   // ── classic ───────────────────────────────────────────────────────────────
   // All existing settled bets passed the classic cascade by definition.
   if (mode === "classic") return true;
 
   // ── ml_gate ───────────────────────────────────────────────────────────────
-  // Mirrors kalshi-bot-engine.ts ~lines 316-358:
-  //   1. Run core pair (PATH B/C) WITHOUT ML (ml_gate never lets ML lead).
-  //   2. If core pair would SKIP → ml_gate skips.
-  //   3. If core pair bets opposite direction → ml_gate bets opposite (not counted).
-  //   4. If core pair bets same direction → apply ML veto.
+  // Mirrors computeMLGateDecision (kalshi-bot-engine-core.ts) — the simplified
+  // three-tier formula:
+  //   1. Gate 1: all three signals must be available (bot waits otherwise).
+  //   2. Direction = Claude's direction; must match the actual bet direction.
+  //   3. ML veto: ML disagrees AND mlConf > claudeConf (strict) → SKIP.
+  //      Missing confidences are treated as 0, same as the live formula.
+  //   4. Composite gate: claudeConf + (ML agrees ? +8 : 0) + (Stat agrees ? +4 : −4)
+  //      must clear minConfidence — only simulated when a floor is provided AND
+  //      Claude's confidence was recorded (older rows lack confidences; rejecting
+  //      them all on a 0-base composite would misattribute history).
   if (mode === "ml_gate") {
-    let coreBetDir: boolean | null = null;
-
-    if (claudeAbove !== null) {
-      // PATH B: Claude primary.  If Stat is available and disagrees → SKIP
-      // (no ML to act as tiebreaker in ml_gate mode).
-      if (statAbove !== null && statAbove !== claudeAbove) {
-        coreBetDir = null;
-      } else {
-        coreBetDir = claudeAbove;
-      }
-    } else if (statAbove !== null) {
-      // PATH C: Stat primary (Claude unavailable).
-      coreBetDir = statAbove;
+    if (statAbove === null || claudeAbove === null || mlAbove === null) {
+      return false; // Gate 1: any missing signal → the bot would still be waiting
     }
-    // else: no core signals → core pair SKIPs (coreBetDir stays null)
 
-    if (coreBetDir === null) return false;           // core pair SKIPs
-    if (coreBetDir !== aboveExpected) return false;  // core pair bets opposite
+    if (claudeAbove !== aboveExpected) return false; // Claude leads — opposite direction
 
-    // ML veto: reject if ML is available and disagrees with the direction.
-    return mlAbove === null || mlAbove === aboveExpected;
+    const cConf = claudeConf ?? 0;
+    const mConf = mlConf ?? 0;
+    if (mlAbove !== claudeAbove && mConf > cConf) return false; // ML veto
+
+    if (minConfidence !== null && claudeConf !== null) {
+      const composite =
+        cConf +
+        (mlAbove === claudeAbove ? ML_BOOST : 0) +
+        (statAbove === claudeAbove ? STAT_BOOST : -STAT_PENALTY);
+      if (composite < minConfidence) return false;
+    }
+
+    return true;
   }
 
   // ── consensus ─────────────────────────────────────────────────────────────

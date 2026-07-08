@@ -25,6 +25,10 @@ import { getLatestCoinSignals } from "./crypto-signals";
 
 import {
   computeCorePairDecision,
+  computeMLGateDecision,
+  ML_BOOST,
+  STAT_BOOST,
+  STAT_PENALTY,
   checkMinReturnGate,
   checkFastAgreementEntry,
   BASE_CONFIDENCE_FULL_PAIR,
@@ -68,6 +72,10 @@ import {
 // Re-export constants and types so callers only import from this file.
 export {
   computeCorePairDecision,
+  computeMLGateDecision,
+  ML_BOOST,
+  STAT_BOOST,
+  STAT_PENALTY,
   checkMinReturnGate,
   checkFastAgreementEntry,
   BASE_CONFIDENCE_FULL_PAIR,
@@ -371,22 +379,20 @@ function _makeBotDecisionInner(
   }
 
   // ── Decision Mode: ml_gate ────────────────────────────────────────────────
-  // ML and Claude are equal partners:
-  //   • PATH A: ML leads when its confidence ≥ per-coin threshold (Claude validates)
-  //   • PATH B: Claude leads when ML is below threshold (ML tiebreaks Stat disagreements)
-  //   • Post-core veto: ML can still block a Claude+Stat bet if it disagrees with
-  //     high confidence (≥ mlVetoMinConfidence)
-  // Per-coin overrides (mlPrimaryMinConfidenceOverrides) allow coins like ETH/XRP/SOL
-  // whose ML accuracy is 59–60 % to use a lower gate (58) so they qualify for Path A
-  // when Claude confirms, rather than being locked out by the global 62 % default.
+  // Simplified three-tier formula (computeMLGateDecision):
+  //   ML     = veto authority — blocks only when it disagrees AND is more
+  //            confident than Claude; never leads
+  //   Claude = primary direction setter
+  //   Stat   = confidence modifier only (+STAT_BOOST agree / −STAT_PENALTY dissent)
+  // All three signals must be populated (Gate 1 inside the formula + the tick
+  // loop's Live Signals gate) — then the math runs instantly:
+  //   confidence = claudeConf + (ML agrees ? +ML_BOOST : 0) ± Stat modifier
+  //   BET when confidence ≥ minConfidence, after EV + min-return gates.
   if (decisionMode === "ml_gate") {
-    const mlMinConf =
-      config.mlPrimaryMinConfidenceOverrides?.[sym] ?? ML_PRIMARY_MIN_CONFIDENCE;
-    const coreResult = computeCorePairDecision({
+    const coreResult = computeMLGateDecision({
       statAbove, claudeAbove,
       mlAbove,
       mlConfidence,
-      mlMinConfidence: mlMinConf,
       wmDriftAbove, wmRec, wmReady,
       yesPrice, signalAccuracyPct, minutesElapsed,
       statConfidence: liveStatConf,
@@ -396,59 +402,16 @@ function _makeBotDecisionInner(
       minReturnMultiple: config.minReturnMultiple,
     });
 
-    if (coreResult.action !== "SKIP" && mlAbove !== null) {
-      const proposedDir = coreResult.action === "BET_YES";
-      if (mlAbove !== proposedDir) {
-        // Confidence-relative veto: ML blocks the bet only when its confidence is
-        // strictly greater than BOTH Stat's and Claude's confidence. This ensures
-        // ML only overrides when it is the most informed model — a near-coin-flip ML
-        // (e.g. 52%) that happens to disagree will not veto a Stat+Claude agreement
-        // where both models are more confident. The mlVetoMinConfidence config field
-        // is retained for historical logging but is no longer used for the veto gate.
-        const statConf = liveStatConf ?? 0;
-        const claudeConf = claudeConfidence ?? 0;
-        const mlConf = mlConfidence ?? 0;
-        if (mlConf > statConf && mlConf > claudeConf) {
-          return {
-            action: "SKIP",
-            confidence: 0,
-            reasoning: `ml_gate: ML veto — ML (${mlConf}%) beats Stat (${statConf}%) and Claude (${claudeConf}%) in confidence while opposing ${coreResult.action} — skipping`,
-            signals: buildSnapshot(coreResult.ev, coreResult.signalsAgreeing, coreResult.signalsTotal),
-          };
-        }
-        // ML disagrees but is not the most confident model — proceed, note it in reasoning
-      }
-    }
-
-    // ML agrees or is unavailable (or disagrees but not the most confident) — return the core result
     const coreSnap = buildSnapshot(
       coreResult.ev,
       coreResult.signalsAgreeing,
       coreResult.signalsTotal,
       coreResult.action !== "SKIP" ? coreResult.action : null,
     );
-    // Only annotate with ML context when the core produced an actionable direction.
-    // A SKIP result (e.g. "No signals available") has no direction for ML to confirm.
-    let mlReasonSuffix = "";
-    if (coreResult.action !== "SKIP") {
-      const proposedDir = coreResult.action === "BET_YES";
-      const statConf = liveStatConf ?? 0;
-      const claudeConf = claudeConfidence ?? 0;
-      const mlConf = mlConfidence ?? 0;
-      const mlDisagreesButNotMostConfident =
-        mlAbove !== null && mlAbove !== proposedDir &&
-        !(mlConf > statConf && mlConf > claudeConf);
-      mlReasonSuffix =
-        mlAbove === null
-          ? " (ML not ready — no veto applied)"
-          : mlDisagreesButNotMostConfident
-            ? ` (ML disagrees at ${mlConf}% but not most confident vs Stat ${statConf}%/Claude ${claudeConf}% — veto skipped)`
-            : ` (ML confirms: ${mlAbove ? "above" : "below"})`;
-    }
     return {
       action: coreResult.action,
       confidence: coreResult.confidence,
-      reasoning: coreResult.reasoning + mlReasonSuffix,
+      reasoning: coreResult.reasoning,
       signals: coreSnap,
     };
   }

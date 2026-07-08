@@ -18,65 +18,69 @@ describe("backtestModeApproval: classic", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ml_gate — core pair (PATH B/C) must approve direction, then ML can veto
+// ml_gate — simplified three-tier formula (mirrors computeMLGateDecision):
+//   all three signals required; Claude leads direction; ML vetoes only when it
+//   disagrees AND mlConf > claudeConf (strict); missing confidences → 0.
 // ---------------------------------------------------------------------------
 describe("backtestModeApproval: ml_gate", () => {
-  // PATH B: claude primary
-  it("PATH B: claude only, agrees → approved (no ML veto)", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, null, true, null), true);
+  // Gate 1: all three signals required
+  it("missing ML → rejected (bot would still be waiting)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, null), false);
   });
-  it("PATH B: claude+stat both agree → approved", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, true, true, null), true);
+  it("missing Claude → rejected", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, null, true), false);
   });
-  it("PATH B: claude+stat disagree → SKIP (stat is tiebreaker, core pair fails)", () => {
-    // claude=YES, stat=NO → no tiebreaker without ML → core pair SKIPs
-    assert.equal(backtestModeApproval("ml_gate", true, false, true, null), false);
+  it("missing Stat → rejected", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, null, true, true), false);
   });
-  it("PATH B: claude=YES (agrees), stat=NO (disagrees) → SKIP", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, false, true, true), false);
-  });
-
-  // PATH C: stat primary (no claude)
-  it("PATH C: stat only agrees → approved", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, true, null, null), true);
-  });
-  it("PATH C: stat only disagrees with bet direction → rejected", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, false, null, null), false);
+  it("no signals at all → rejected", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, null, null, null), false);
   });
 
-  // No core signals → SKIP
-  it("no core signals → SKIP", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, null, null, true), false);
-  });
-
-  // ML veto
-  it("core agrees, ML available and agrees → approved", () => {
+  // Direction: Claude leads
+  it("all three agree with bet direction → approved", () => {
     assert.equal(backtestModeApproval("ml_gate", true, true, true, true), true);
   });
-  it("core agrees, ML available and disagrees → VETO (rejected)", () => {
-    // claude=YES (agrees), stat=null, ML=NO (disagrees) → veto
-    assert.equal(backtestModeApproval("ml_gate", true, null, true, false), false);
+  it("Claude opposes bet direction → rejected (Claude sets direction)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, false, true), false);
   });
-  it("core agrees, ML not available → no veto (approved)", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, null, true, null), true);
+  it("Stat dissents but Claude+ML agree → approved (Stat is modifier only)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, false, true, true), true);
   });
 
-  // Classic PATH A bets (ML-primary): core pair may point opposite or be absent
-  it("PATH A scenario: only ML available, no core signals → SKIP under ml_gate", () => {
-    // classic PATH A could place YES via ML alone; ml_gate would SKIP
-    assert.equal(backtestModeApproval("ml_gate", true, null, null, true), false);
+  // ML veto: strict mlConf > claudeConf
+  it("ML disagrees with HIGHER conf → veto (rejected)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 80), false);
   });
-  it("PATH A scenario: ML=YES, stat=NO, claude=null → core=stat(NO) opposes bet(YES) → rejected", () => {
-    // classic would bet YES via PATH A; ml_gate PATH C gives NO → rejected
-    assert.equal(backtestModeApproval("ml_gate", true, false, null, true), false);
+  it("ML disagrees with LOWER conf → no veto (approved)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 60), true);
+  });
+  it("ML disagrees with EQUAL conf → no veto (strict >)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 70), true);
+  });
+  it("ML disagrees, no confidences recorded (both 0) → no veto (0 > 0 is false)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, false), true);
+  });
+
+  // Composite gate — only simulated when minConfidence provided AND claudeConf known
+  it("composite below provided minConfidence → rejected", () => {
+    // claude 58 + ML agree 8 + stat dissent -4 = 62 < 65
+    assert.equal(backtestModeApproval("ml_gate", true, false, true, true, 55, 58, 60, 65), false);
+  });
+  it("composite at provided minConfidence → approved (inclusive)", () => {
+    // claude 53 + 8 + 4 = 65 >= 65
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, true, 55, 53, 60, 65), true);
+  });
+  it("minConfidence provided but claudeConf missing (old row) → composite gate skipped", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, true, null, null, null, 65), true);
   });
 
   // BET_NO direction
-  it("NO bet: claude=NO (agrees), stat=null, ML=null → approved", () => {
-    assert.equal(backtestModeApproval("ml_gate", false, null, false, null), true);
+  it("NO bet: all three NO → approved", () => {
+    assert.equal(backtestModeApproval("ml_gate", false, false, false, false), true);
   });
-  it("NO bet: claude=NO (agrees), ML=YES (disagrees) → VETO", () => {
-    assert.equal(backtestModeApproval("ml_gate", false, null, false, true), false);
+  it("NO bet: Claude NO, ML YES with higher conf → veto (rejected)", () => {
+    assert.equal(backtestModeApproval("ml_gate", false, false, false, true, 55, 60, 75), false);
   });
 });
 

@@ -360,6 +360,9 @@ export async function getBacktestModes(): Promise<BacktestModeStats[]> {
       const statAbove   = typeof sigs?.statAbove   === "boolean" ? sigs.statAbove   : null;
       const claudeAbove = typeof sigs?.claudeAbove === "boolean" ? sigs.claudeAbove : null;
       const mlAbove     = typeof sigs?.mlAbove     === "boolean" ? sigs.mlAbove     : null;
+      const statConf    = typeof sigs?.statConfidence   === "number" ? sigs.statConfidence   : null;
+      const claudeConf  = typeof sigs?.claudeConfidence === "number" ? sigs.claudeConfidence : null;
+      const mlConf      = typeof sigs?.mlConfidence     === "number" ? sigs.mlConfidence     : null;
 
       const p      = parseFloat(r.pnl ?? "0");
       const isWin  = r.outcome ? r.outcome === "win"  : p > 0;
@@ -369,7 +372,7 @@ export async function getBacktestModes(): Promise<BacktestModeStats[]> {
       const aboveExpected = dir === "yes";
 
       for (const mode of ALL_MODES) {
-        const approved = backtestModeApproval(mode, aboveExpected, statAbove, claudeAbove, mlAbove);
+        const approved = backtestModeApproval(mode, aboveExpected, statAbove, claudeAbove, mlAbove, statConf, claudeConf, mlConf);
 
         if (approved) {
           const e = modeAcc.get(mode)!;

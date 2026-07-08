@@ -26,18 +26,20 @@ These live in code and cannot be changed from the dashboard. They are the same f
 
 ---
 
-## How ml_gate Mode Works (kalshi-bot-engine.ts)
+## How ml_gate Mode Works (as of 2026-07-08 — simplified three-tier formula)
 
-ml_gate is fundamentally different from classic:
+ml_gate uses `computeMLGateDecision` in engine-core.ts (NOT computeCorePairDecision — classic keeps that). Linear formula, no path matrix:
 
-1. **Direction is decided by Stat + Claude alone** — ML is excluded from PATH A. ML cannot promote itself to lead direction.
-2. **ML acts only as a gatekeeper (veto)** after the core pair picks a direction:
-   - If ML **agrees** or is **unavailable** → bet proceeds, ML annotated in reasoning
-   - If ML **disagrees** and `mlConfidence >= mlVetoMinConfidence (57%)` → **hard SKIP** ("ML veto")
-   - If ML **disagrees** but `mlConfidence < 57%` → **bet proceeds** (ML too uncertain to block — "veto skipped")
-3. Falls through to the same PATH B / PATH C logic as classic when the core pair can't decide.
+1. **Gate 1 — all three signals required**: Stat, Claude, and ML must all be non-null (tick loop already waits via getLatestCoinSignals; the formula re-checks).
+2. **Direction = Claude's direction.** Claude is the primary direction setter; ML never leads.
+3. **ML veto**: SKIP only when `mlAbove !== claudeAbove && mlConf > claudeConf` (strictly greater). Low-conviction ML dissent never blocks. `mlVetoMinConfidence` is NO LONGER used anywhere (field kept in BotConfig for DB compat only).
+4. **Confidence** = `claudeConf + (ML agrees ? +ML_BOOST(8) : 0) + (Stat agrees ? +STAT_BOOST(4) : −STAT_PENALTY(4))`.
+5. **Gate 4**: composite ≥ `minConfidence` (65 in production) → BET, else SKIP.
+6. **Post-gates** (same as classic): direction-aware EV floor (YES −0.05 / NO −0.15) and minReturnMultiple gate.
 
-**Key behavioural difference from classic:** In classic, ML can lead when confident (PATH A). In ml_gate, ML never leads — it only blocks.
+**No Gate 2 per-signal floors in ml_gate** — the composite gate is the only quality filter. Constants ML_BOOST/STAT_BOOST/STAT_PENALTY live in engine-core.ts and are re-exported through the kalshi-bot-engine.ts barrel.
+
+**Key behavioural difference from classic:** In classic, ML can lead when confident (PATH A). In ml_gate, ML never leads — it only vetoes, and only when more confident than Claude.
 
 ---
 

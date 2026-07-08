@@ -26,6 +26,10 @@ import assert from "node:assert/strict";
 
 import {
   computeCorePairDecision,
+  computeMLGateDecision,
+  ML_BOOST,
+  STAT_BOOST,
+  STAT_PENALTY,
   checkMinReturnGate,
   checkFastAgreementEntry,
   DEFAULT_BOT_CONFIG,
@@ -1392,3 +1396,167 @@ test("divergence: currentYesPrice=null → not triggered (cannot verify price fl
   assert.match(r.reason, /unavailable/);
 });
 
+
+// ---------------------------------------------------------------------------
+// ML GATE: simplified three-tier formula (computeMLGateDecision)
+//   ML = veto authority, Claude = direction setter, Stat = confidence modifier
+//   confidence = claudeConf + (ML agrees ? +ML_BOOST : 0)
+//                           + (Stat agrees ? +STAT_BOOST : -STAT_PENALTY)
+// ---------------------------------------------------------------------------
+
+function mlGateInp(overrides: Partial<CorePairInputs> = {}): CorePairInputs {
+  return inp({
+    statAbove: true, claudeAbove: true, mlAbove: true,
+    statConfidence: 55, claudeConfidence: 70, mlConfidence: 60,
+    minConfidence: 65,
+    ...overrides,
+  });
+}
+
+// Gate 1 — all three required
+test("mlGate: missing Stat → SKIP waiting", () => {
+  const r = computeMLGateDecision(mlGateInp({ statAbove: null }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /waiting for Stat/);
+});
+
+test("mlGate: missing Claude → SKIP waiting", () => {
+  const r = computeMLGateDecision(mlGateInp({ claudeAbove: null }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /waiting for Claude/);
+});
+
+test("mlGate: missing ML → SKIP waiting", () => {
+  const r = computeMLGateDecision(mlGateInp({ mlAbove: null }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /waiting for ML/);
+});
+
+test("mlGate: no kalshiTicker → SKIP", () => {
+  const r = computeMLGateDecision(mlGateInp({ kalshiTicker: null }));
+  assert.equal(r.action, "SKIP");
+});
+
+// Outcome table row 1: YES/YES/YES → BET YES, claudeConf + ML_BOOST + STAT_BOOST
+test("mlGate row1: all YES → BET_YES at claudeConf+8+4", () => {
+  const r = computeMLGateDecision(mlGateInp());
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 70 + ML_BOOST + STAT_BOOST);
+});
+
+// Row 2: stat YES, claude YES, ml NO — veto only if mlConf > claudeConf
+test("mlGate row2a: ML dissents with HIGHER conf → veto SKIP", () => {
+  const r = computeMLGateDecision(mlGateInp({ mlAbove: false, mlConfidence: 75 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /ML veto/);
+});
+
+test("mlGate row2b: ML dissents with LOWER conf → no veto, BET_YES at claudeConf+0+4", () => {
+  const r = computeMLGateDecision(mlGateInp({ mlAbove: false, mlConfidence: 60 }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 70 + 0 + STAT_BOOST);
+});
+
+test("mlGate veto boundary: mlConf EQUAL to claudeConf → no veto (strict >)", () => {
+  const r = computeMLGateDecision(mlGateInp({ mlAbove: false, mlConfidence: 70 }));
+  assert.equal(r.action, "BET_YES");
+  assert.match(r.reasoning, /no veto/);
+});
+
+// Row 3: stat NO, claude YES, ml YES → BET YES at claudeConf+8-4
+test("mlGate row3: Stat dissents, ML confirms → BET_YES at claudeConf+8-4", () => {
+  const r = computeMLGateDecision(mlGateInp({ statAbove: false }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 70 + ML_BOOST - STAT_PENALTY);
+});
+
+// Row 4: stat NO, claude YES, ml NO
+test("mlGate row4a: Stat+ML dissent, ML more confident → veto SKIP", () => {
+  const r = computeMLGateDecision(mlGateInp({ statAbove: false, mlAbove: false, mlConfidence: 80 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /ML veto/);
+});
+
+test("mlGate row4b: Stat+ML dissent, ML less confident → BET_YES at claudeConf+0-4 (gated by minConfidence)", () => {
+  // 70 + 0 - 4 = 66 >= 65 → bet
+  const r = computeMLGateDecision(mlGateInp({ statAbove: false, mlAbove: false, mlConfidence: 50 }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 70 - STAT_PENALTY);
+});
+
+// Row 5: stat YES, claude NO, ml NO → BET NO at claudeConf+8-4
+test("mlGate row5: Claude+ML say NO, Stat dissents → BET_NO at claudeConf+8-4", () => {
+  const r = computeMLGateDecision(mlGateInp({ claudeAbove: false, mlAbove: false }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, 70 + ML_BOOST - STAT_PENALTY);
+});
+
+// Row 6: stat YES, claude NO, ml YES
+test("mlGate row6a: Claude NO, ML YES with higher conf → veto SKIP", () => {
+  const r = computeMLGateDecision(mlGateInp({ claudeAbove: false, mlConfidence: 85 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /ML veto/);
+});
+
+test("mlGate row6b: Claude NO, ML YES with lower conf → BET_NO at claudeConf+0-4", () => {
+  const r = computeMLGateDecision(mlGateInp({ claudeAbove: false, mlConfidence: 55 }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, 70 + 0 - STAT_PENALTY);
+});
+
+// Row 7: all NO → BET NO at claudeConf+8+4
+test("mlGate row7: all NO → BET_NO at claudeConf+8+4", () => {
+  const r = computeMLGateDecision(mlGateInp({ statAbove: false, claudeAbove: false, mlAbove: false }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, 70 + ML_BOOST + STAT_BOOST);
+});
+
+// Row 8: stat NO, claude NO, ml YES
+test("mlGate row8a: Stat+Claude NO, ML YES more confident → veto SKIP", () => {
+  const r = computeMLGateDecision(mlGateInp({ statAbove: false, claudeAbove: false, mlConfidence: 90 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /ML veto/);
+});
+
+test("mlGate row8b: Stat+Claude NO, ML YES less confident → BET_NO at claudeConf+0+4", () => {
+  const r = computeMLGateDecision(mlGateInp({ statAbove: false, claudeAbove: false, mlConfidence: 40 }));
+  assert.equal(r.action, "BET_NO");
+  assert.equal(r.confidence, 70 + 0 + STAT_BOOST);
+});
+
+// Gate 4 — composite must clear minConfidence
+test("mlGate: composite below minConfidence → SKIP with composite reason", () => {
+  // claudeConf 58 + 8 + 4 = 70 < 75
+  const r = computeMLGateDecision(mlGateInp({ claudeConfidence: 58, minConfidence: 75 }));
+  assert.equal(r.action, "SKIP");
+  assert.equal(r.confidence, 58 + ML_BOOST + STAT_BOOST);
+  assert.match(r.reasoning, /below minimum/);
+});
+
+test("mlGate: composite exactly at minConfidence → BET (>= inclusive)", () => {
+  // 53 + 8 + 4 = 65 = minConfidence
+  const r = computeMLGateDecision(mlGateInp({ claudeConfidence: 53, minConfidence: 65 }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 65);
+});
+
+// No per-signal floors (Gate 2 removed): low stat/ml confidences do not block
+test("mlGate: NO per-signal floors — low stat/ml conf still bets if composite clears", () => {
+  const r = computeMLGateDecision(mlGateInp({ statConfidence: 10, mlConfidence: 10, claudeConfidence: 70 }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 70 + ML_BOOST + STAT_BOOST);
+});
+
+// Post-decision gates still apply
+test("mlGate: EV gate blocks negative-EV YES bet", () => {
+  // yesPrice 0.90, acc 50% → EV = 0.5*(0.1/0.9) - 0.5 ≈ -0.444 < -0.05 floor
+  const r = computeMLGateDecision(mlGateInp({ yesPrice: 0.90, signalAccuracyPct: 50 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /Negative EV/);
+});
+
+test("mlGate: min-return gate blocks deep ITM YES bet", () => {
+  const r = computeMLGateDecision(mlGateInp({ yesPrice: 0.92, minReturnMultiple: 1.45 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /below minimum/);
+});
