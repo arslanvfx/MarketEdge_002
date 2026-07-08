@@ -55,6 +55,7 @@ import {
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 import { EVAL_DEFER_MS, fetchWindowClosePrice } from "./kalshi-bot-shadow";
+import { tagBotEntryTimingOutcomes, recoverBotEntryTimingSnapshots } from "./kalshi-bot-entry-timing";
 
 export async function evalClosedBets(): Promise<void> {
   const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
@@ -237,6 +238,9 @@ export async function evalClosedBets(): Promise<void> {
           const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
           outcome = won ? "win" : "loss";
 
+          // Tag all bot entry timing snapshots for this window with the final outcome.
+          tagBotEntryTimingOutcomes(row.symbol, row.windowKey!, priceAboveStrike).catch(() => {});
+
           // Real contract P&L for live bets; paper simulation for paper bets.
           const ep = entryPrice;
           const n  = count;
@@ -259,6 +263,11 @@ export async function evalClosedBets(): Promise<void> {
         const pnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
         if (pnl == null) continue; // pnl not yet written; skip
         outcome = pnl > 0 ? "win" : pnl < 0 ? "loss" : "push";
+        // Tag timing snapshots for mid-exits: direction + outcome → finalAbove
+        if (outcome !== "push" && row.direction != null && row.windowKey) {
+          const finalAbove = row.direction === "yes" ? outcome === "win" : outcome === "loss";
+          tagBotEntryTimingOutcomes(row.symbol, row.windowKey, finalAbove).catch(() => {});
+        }
       }
 
       // Merge closePrice into the signals JSONB so the dashboard can display it
@@ -347,6 +356,10 @@ export async function evalClosedBets(): Promise<void> {
     if (evaluated > 0) {
       logger.info({ evaluated }, "[kalshi-bot] evalClosedBets — outcomes stamped");
     }
+
+    // Back-fill any snapshots whose window closed without a bet row (coins we
+    // tracked but didn't bet on) using prediction_records as the source of truth.
+    recoverBotEntryTimingSnapshots().catch(() => {});
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] evalClosedBets error (non-fatal)");
   }

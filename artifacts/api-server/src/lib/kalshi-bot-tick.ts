@@ -59,6 +59,11 @@ import {
 } from "./kalshi-bot-state";
 import { closePosition, persistBetRecord, BetRecordArgs } from "./kalshi-bot-close";
 import { getTimingAccuracy } from "./kalshi-bot-db";
+import { writeBotEntryTimingSnapshot } from "./kalshi-bot-entry-timing";
+
+// Deduplication Set for bot entry timing snapshots (cleared implicitly as
+// window keys rotate — each key encodes coin+windowKey+minuteMark+mode).
+const entryTimingWritten = new Set<string>();
 
 // Minimum cashout value (per contract) required to allow any mid-window exit.
 // At $0 sell value there is no benefit over holding to expiry — the position
@@ -426,6 +431,32 @@ async function _runBotTick(
     signalAcc,
     kalshiTarget,  // pass through so ML doesn't re-fetch a potentially stale cache
   );
+
+  // ── Bot entry timing snapshot (fire-and-forget, once per minute per coin) ──
+  // Captures the composite model direction + confidence at this minute mark so
+  // we can later compute per-minute accuracy vs. return-ratio curves.
+  {
+    const windowKeyMs  = new Date(windowKey).getTime();
+    const clockElapsedS = (Date.now() - windowKeyMs) / 1000;
+    const minuteMark   = Math.min(14, Math.max(0, Math.floor(clockElapsedS / 60)));
+    const timingKey    = `${sym}:${windowKey}:${minuteMark}:${S.botMode}`;
+    if (!entryTimingWritten.has(timingKey)) {
+      entryTimingWritten.add(timingKey);
+      writeBotEntryTimingSnapshot({
+        id:                   timingKey,
+        coin:                 sym,
+        windowKey,
+        minuteMark,
+        mode:                 S.botMode,
+        statAbove:            decision.signals.statAbove,
+        claudeAbove:          decision.signals.claudeAbove,
+        mlAbove:              decision.signals.mlAbove,
+        compositeDirection:   decision.signals.mlAbove,
+        compositeConfidence:  decision.confidence,
+        yesPrice,
+      }).catch(() => { entryTimingWritten.delete(timingKey); });
+    }
+  }
 
   // ── Defense-in-depth coin direction filters ───────────────────────────────
   // These mirror the Phase-3 selection guards.  Phase-3 only adds a coin to

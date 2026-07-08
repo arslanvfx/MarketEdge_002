@@ -23,6 +23,7 @@ import { LogicModePerf } from "./bot/logic-mode-perf";
 import { TransactionLog } from "./bot/transaction-log";
 import { PerformanceInsights } from "./bot/performance-insights";
 import { TimingAnalytics, type TimeAnalyticsRow } from "./bot/timing-analytics";
+import { BotEntryTimingPanel, type BotEntryTimingRow } from "./bot/bot-entry-timing-panel";
 import { AutoTuneHistory } from "./bot/autotune-history";
 import { ManualOrderModal } from "./bot/manual-order-modal";
 import { BotStepsPanel } from "./bot/bot-steps";
@@ -233,6 +234,13 @@ export default function BotDashboard() {
   const { data: timeAnalyticsData } = useQuery<{ rows: TimeAnalyticsRow[]; totalBets: number; lastUpdated: string }>({
     queryKey: ["bot-time-analytics"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/time-analytics`).then(r => r.json()),
+    refetchInterval: 15 * 60_000,
+    staleTime: 5 * 60_000,
+  });
+
+  const { data: botEntryTimingData, isLoading: botEntryTimingLoading } = useQuery<BotEntryTimingRow[]>({
+    queryKey: ["bot-entry-timing"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/entry-timing`).then(r => r.json()),
     refetchInterval: 15 * 60_000,
     staleTime: 5 * 60_000,
   });
@@ -699,6 +707,10 @@ export default function BotDashboard() {
             lastUpdated={timeAnalyticsData.lastUpdated}
           />
         )}
+        <BotEntryTimingPanel
+          rows={botEntryTimingData ?? []}
+          isLoading={botEntryTimingLoading}
+        />
         <AutoTuneHistory
           tuneEntries={tuneEntries}
           tuneCount={tuneCount}

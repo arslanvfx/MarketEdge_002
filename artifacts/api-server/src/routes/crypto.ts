@@ -42,6 +42,7 @@ import {
   type BacktestReport,
 } from "../lib/backtest";
 import { tally } from "../lib/history-tally";
+import { getBotEntryTimingAnalysis } from "../lib/kalshi-bot-entry-timing";
 
 const router = Router();
 
@@ -712,6 +713,23 @@ router.get("/crypto/window-monitor-accuracy/:symbol", async (req, res) => {
     res.json(stats);
   } catch {
     res.status(500).json({ error: "Failed to fetch window monitor accuracy" });
+  }
+});
+
+// Bot entry timing analytics — composite ML Gate direction accuracy per minute (0–14).
+// ?coin=BTC restricts to one coin; ?days=30 limits to last N days; ?mode=paper|live.
+router.get("/crypto/bot/entry-timing", async (req, res) => {
+  const coin = typeof req.query.coin === "string" && req.query.coin.length > 0
+    ? req.query.coin.toUpperCase() : null;
+  const daysRaw = typeof req.query.days === "string" ? Number(req.query.days) : NaN;
+  const days = isNaN(daysRaw) || daysRaw <= 0 ? null : daysRaw;
+  const mode = typeof req.query.mode === "string" && req.query.mode.length > 0
+    ? req.query.mode : null;
+  try {
+    const rows = await getBotEntryTimingAnalysis(coin, days, mode);
+    res.json(rows);
+  } catch {
+    res.status(500).json({ error: "Failed to fetch bot entry timing analysis" });
   }
 });
 

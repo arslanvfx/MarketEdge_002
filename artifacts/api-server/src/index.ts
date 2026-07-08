@@ -100,6 +100,36 @@ async function runStartupMigrations(): Promise<void> {
       CREATE INDEX IF NOT EXISTS wts_symbol_window
         ON window_timing_snapshots (symbol, window_key)
     `);
+    // Bot entry timing snapshots — composite ML Gate direction at each minute (0–14)
+    // for all active coins, tagged with the final window outcome so we can compute
+    // per-minute accuracy and return-ratio curves.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bot_entry_timing_snapshots (
+        id                   TEXT PRIMARY KEY,
+        coin                 TEXT NOT NULL,
+        window_key           TEXT NOT NULL,
+        minute_mark          INTEGER NOT NULL,
+        mode                 TEXT NOT NULL,
+        stat_above           BOOLEAN,
+        claude_above         BOOLEAN,
+        ml_above             BOOLEAN,
+        composite_direction  BOOLEAN,
+        composite_confidence REAL,
+        yes_price            REAL,
+        final_result         BOOLEAN,
+        composite_correct    BOOLEAN,
+        evaluated_at         TIMESTAMPTZ,
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS bets_coin_window
+        ON bot_entry_timing_snapshots (coin, window_key)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS bets_evaluated_at
+        ON bot_entry_timing_snapshots (evaluated_at)
+    `);
     // Kalshi auto-betting bot bets log table.
     await client.query(`
       CREATE TABLE IF NOT EXISTS kalshi_bot_bets (
