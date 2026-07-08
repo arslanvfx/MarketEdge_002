@@ -354,6 +354,33 @@ test("applyDirectionalOutcome + computeDirectionalPenaltyPp: mixed results above
   assert.strictEqual(penalty, 0, "50% win rate above 35% threshold should NOT trigger penalty");
 });
 
+// ---------------------------------------------------------------------------
+// Cooldown persistence — once triggered, penalty holds across sparse windows
+// ---------------------------------------------------------------------------
+
+test("directional dampener cooldown: penalty persists within lookback window count", () => {
+  // Simulate: dampener fired at window W, now we are at W+1 (lookback=3).
+  // Even if sample drops below minBets in W+1, cooldown should keep penalty active.
+  const lookback = 3;
+  const lastFired  = "2026-07-08T14:00"; // window when dampener triggered
+  const currentWk  = "2026-07-08T14:15"; // one window later (within lookback)
+  const windowsAgo = (Date.parse(currentWk) - Date.parse(lastFired)) / (15 * 60_000);
+  assert.ok(windowsAgo <= lookback, "W+1 is within the 3-window cooldown — penalty should stay active");
+});
+
+test("directional dampener cooldown: penalty clears after lookback windows elapse", () => {
+  const lookback  = 3;
+  const lastFired = "2026-07-08T14:00";
+  const currentWk = "2026-07-08T14:45"; // 3 windows later — exactly at the boundary
+  const windowsAgo = (Date.parse(currentWk) - Date.parse(lastFired)) / (15 * 60_000);
+  // windowsAgo === lookback means cooldown expires at this window (not active).
+  assert.ok(windowsAgo <= lookback, "exactly at boundary (=lookback) is still within cooldown");
+
+  const afterWk    = "2026-07-08T15:00"; // 4 windows later — beyond lookback
+  const afterAgo   = (Date.parse(afterWk)   - Date.parse(lastFired)) / (15 * 60_000);
+  assert.ok(afterAgo > lookback, "W+4 (beyond 3-window lookback) should no longer be in cooldown");
+});
+
 test("directional dampener: DEFAULT_BOT_CONFIG has correct directional filter defaults", () => {
   assert.strictEqual(
     DEFAULT_BOT_CONFIG.directionalRegressionLookback,

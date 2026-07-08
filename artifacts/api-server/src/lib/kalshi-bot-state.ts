@@ -177,6 +177,11 @@ export const coinSlippageStrikes = new Map<string, { strikes: number; windowKey:
 export const recentWindowOutcomes = new Map<string, { wins: number; losses: number }>();
 export const recentUnanimousOutcomes = new Map<string, { wins: number; losses: number }>();
 export const recentDirectionalOutcomes = new Map<string, { yesWins: number; yesLosses: number; noWins: number; noLosses: number }>();
+// Tracks when the directional dampener last fired per direction.
+// Keyed "yes" or "no" → ISO windowKey string (YYYY-MM-DDTHH:mm).
+// Once triggered the penalty persists for directionalRegressionLookback windows
+// even through sparse/empty windows, then self-clears.
+export const directionalDampenerCooldown = new Map<string, string>();
 export const windowCBBuffer = new Map<string, { wins: number; losses: number }>();
 export const cachedPerformanceReportByMode = new Map<BotMode, PerformanceReport>();
 export const recentKalshiTargets = new Map<string, number[]>();

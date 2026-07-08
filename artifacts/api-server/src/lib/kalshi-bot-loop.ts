@@ -42,7 +42,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
-  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, windowCBBuffer,
+  liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
@@ -814,13 +814,14 @@ export async function runBotLoopTick(): Promise<void> {
   S.currentUnanimousFailurePenalty = unanimousFailurePenalty;
 
   // ── Directional regime dampener ───────────────────────────────────────────
-  // Tracks YES and NO win rates over recent completed windows (same time-based
-  // lookback as the doubt penalty — self-clears as empty windows accumulate).
-  // If a direction's win rate is below threshold over the lookback period with
-  // ≥2 bets in that direction, a penalty is added to all bets in that direction.
+  // Tracks YES and NO win rates over recent completed windows. Once the penalty
+  // fires it persists for directionalRegressionLookback windows via a cooldown
+  // Map (directionalDampenerCooldown) — this prevents the penalty from clearing
+  // early when sparse/empty windows temporarily drop the sample below minBets.
   const _dirLookback = S.config.directionalRegressionLookback ?? 3;
   const _dirThreshold = S.config.directionalRegressionThreshold ?? 0.35;
   const _dirPenaltyPp = S.config.directionalRegressionPenaltyPp ?? 10;
+  const _currentWk = new Date(Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000)).toISOString().slice(0, 16);
   let _yesWinsTotal = 0, _yesLossesTotal = 0, _noWinsTotal = 0, _noLossesTotal = 0;
   for (let _di = 1; _di <= _dirLookback; _di++) {
     const _dms = Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) - _di * 15 * 60_000;
@@ -834,21 +835,46 @@ export async function runBotLoopTick(): Promise<void> {
   }
   const _yesTotal = _yesWinsTotal + _yesLossesTotal;
   const _noTotal = _noWinsTotal + _noLossesTotal;
+
+  // Cooldown helper: returns true if the dampener fired within the last N windows.
+  const _dirCooldownActive = (dir: string): boolean => {
+    const _lastFired = directionalDampenerCooldown.get(dir);
+    if (!_lastFired) return false;
+    const _windowsAgo = (Date.parse(_currentWk) - Date.parse(_lastFired)) / (15 * 60_000);
+    return _windowsAgo <= _dirLookback;
+  };
+
   let directionalPenaltyYesPp = 0;
   let directionalPenaltyNoPp = 0;
   if (!S.config.freeRunMode) {
+    // YES: fires on fresh data OR persists via cooldown.
     if (_yesTotal >= 2 && _yesWinsTotal / _yesTotal < _dirThreshold) {
       directionalPenaltyYesPp = _dirPenaltyPp;
+      directionalDampenerCooldown.set("yes", _currentWk);
       logger.info(
-        { yesWins: _yesWinsTotal, yesLosses: _yesLossesTotal, winRate: (_yesWinsTotal / _yesTotal).toFixed(2), threshold: _dirThreshold, penaltyPp: _dirPenaltyPp, lookback: _dirLookback },
-        `[kalshi-bot] directional dampener: YES win rate ${(_yesWinsTotal / _yesTotal * 100).toFixed(0)}% < ${_dirThreshold * 100}% — +${_dirPenaltyPp}pp on YES bets`,
+        { yesWins: _yesWinsTotal, yesLosses: _yesLossesTotal, winRate: (_yesWinsTotal / _yesTotal).toFixed(2), threshold: _dirThreshold, penaltyPp: _dirPenaltyPp, lookback: _dirLookback, cooldownWindow: _currentWk },
+        `[kalshi-bot] directional dampener: YES win rate ${(_yesWinsTotal / _yesTotal * 100).toFixed(0)}% < ${_dirThreshold * 100}% — +${_dirPenaltyPp}pp on YES bets (cooldown started)`,
+      );
+    } else if (_dirCooldownActive("yes")) {
+      directionalPenaltyYesPp = _dirPenaltyPp;
+      logger.info(
+        { penaltyPp: _dirPenaltyPp, lastFired: directionalDampenerCooldown.get("yes"), currentWk: _currentWk },
+        `[kalshi-bot] directional dampener: YES cooldown active — +${_dirPenaltyPp}pp persists through sparse window`,
       );
     }
+    // NO: fires on fresh data OR persists via cooldown.
     if (_noTotal >= 2 && _noWinsTotal / _noTotal < _dirThreshold) {
       directionalPenaltyNoPp = _dirPenaltyPp;
+      directionalDampenerCooldown.set("no", _currentWk);
       logger.info(
-        { noWins: _noWinsTotal, noLosses: _noLossesTotal, winRate: (_noWinsTotal / _noTotal).toFixed(2), threshold: _dirThreshold, penaltyPp: _dirPenaltyPp, lookback: _dirLookback },
-        `[kalshi-bot] directional dampener: NO win rate ${(_noWinsTotal / _noTotal * 100).toFixed(0)}% < ${_dirThreshold * 100}% — +${_dirPenaltyPp}pp on NO bets`,
+        { noWins: _noWinsTotal, noLosses: _noLossesTotal, winRate: (_noWinsTotal / _noTotal).toFixed(2), threshold: _dirThreshold, penaltyPp: _dirPenaltyPp, lookback: _dirLookback, cooldownWindow: _currentWk },
+        `[kalshi-bot] directional dampener: NO win rate ${(_noWinsTotal / _noTotal * 100).toFixed(0)}% < ${_dirThreshold * 100}% — +${_dirPenaltyPp}pp on NO bets (cooldown started)`,
+      );
+    } else if (_dirCooldownActive("no")) {
+      directionalPenaltyNoPp = _dirPenaltyPp;
+      logger.info(
+        { penaltyPp: _dirPenaltyPp, lastFired: directionalDampenerCooldown.get("no"), currentWk: _currentWk },
+        `[kalshi-bot] directional dampener: NO cooldown active — +${_dirPenaltyPp}pp persists through sparse window`,
       );
     }
   }
