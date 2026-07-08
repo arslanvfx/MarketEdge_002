@@ -567,7 +567,6 @@ export function startPredictionTracker(
         const alreadySnapped = snappedThisSession.has(snapKey);
 
         const TARGET_CONFIRM_BUFFER_MS = 5_000;
-        const WINDOW_SNAP_MIN_MS      = 45_000;
         const SNAP_GIVE_UP_MS         = 90_000;
         const SNAP_MAX_MS             = 12 * 60_000;
         const windowStartMs = nextBoundary.getTime() - 15 * 60_000;
@@ -636,7 +635,7 @@ export function startPredictionTracker(
         const confirmedSnap = confirmedTargetStore.get(sym);
         const msSinceConfirmed = confirmedSnap ? nowMs - confirmedSnap.confirmedAt : null;
         const kalshiSnapReady = KALSHI_SERIES[sym]
-          ? msSinceConfirmed !== null && msSinceConfirmed >= TARGET_CONFIRM_BUFFER_MS && timeIntoWindow >= WINDOW_SNAP_MIN_MS
+          ? msSinceConfirmed !== null && msSinceConfirmed >= TARGET_CONFIRM_BUFFER_MS
           : timeIntoWindow >= 15_000;
         const snapFallback = KALSHI_SERIES[sym] && timeIntoWindow >= SNAP_GIVE_UP_MS;
 

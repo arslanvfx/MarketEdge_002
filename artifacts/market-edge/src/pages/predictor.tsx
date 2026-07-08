@@ -175,14 +175,28 @@ export default function Predictor() {
   // When the Kalshi event ticker changes (new window), immediately re-fetch
   // the tracker snapshot so the Window Monitor resets to "MONITORING…" without
   // waiting up to 15 s for the next scheduled poll to arrive.
+  // Also auto-trigger Claude Enhanced Analysis for the displayed coin so the
+  // enhanced panel populates without manual clicking.
   const prevKalshiTickerRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!kalshiEventTicker) return;
     if (kalshiEventTicker !== prevKalshiTickerRef.current) {
+      const isNewWindow = prevKalshiTickerRef.current !== undefined;
       prevKalshiTickerRef.current = kalshiEventTicker;
       void trackerSnapshotQuery.refetch();
+      if (isNewWindow) {
+        // Clear stale enhance result from the previous window.
+        setAiData((prev) => {
+          const n = { ...prev };
+          delete n[selected];
+          return n;
+        });
+        // Auto-run Claude Enhanced Analysis for the currently displayed coin.
+        setAutoTriggerReason("New window — Kalshi strike updated");
+        void handleEnhance();
+      }
     }
-  // trackerSnapshotQuery is stable — only re-run when ticker changes.
+  // handleEnhance and trackerSnapshotQuery are stable for the window lifecycle.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kalshiEventTicker]);
 
@@ -428,13 +442,6 @@ export default function Predictor() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.predictions[0]?.target, selected, kalshiTarget]);
-
-  // Auto-triggers removed: the trackerSnapshotQuery already refetches at window
-  // open and displays the snap via the trackerSnapshot display path (free, no
-  // Claude call).  Both the window-change trigger and the stat-flip trigger
-  // were causing redundant Claude API calls the background tracker had already
-  // made.  Manual "Enhance" button (force=1) is the only path that calls Claude.
-
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
