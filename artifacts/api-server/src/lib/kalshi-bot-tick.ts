@@ -31,7 +31,7 @@ import {
   getLatestCoinSignals,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
-import { getPipelineResult, triggerWindowPipeline } from "./kalshi-bot-pipeline";
+import { triggerWindowPipeline } from "./kalshi-bot-pipeline";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
@@ -386,21 +386,6 @@ async function _runBotTick(
   if (prefetchedTicker.get(sym) !== kalshiTicker) {
     prefetchedTicker.set(sym, kalshiTicker);
     triggerWindowPipeline(sym, windowKey); // fire-and-forget, idempotent
-  }
-
-  // ── Pipeline readiness gate ────────────────────────────────────────────────
-  // The pipeline confirms the fresh Kalshi target for this window.  If it
-  // hasn't completed yet, defer this tick — no bet may be evaluated against
-  // a stale/previous-window target.
-  {
-    const pipelineResult = getPipelineResult(sym, windowKey);
-    if (pipelineResult === null) {
-      logger.debug(
-        { sym, windowKey, secondsElapsed },
-        "[kalshi-bot] pipeline not yet ready for this window — deferring tick",
-      );
-      return;
-    }
   }
 
   // ── All-signals gate (HARD RULE) ───────────────────────────────────────────

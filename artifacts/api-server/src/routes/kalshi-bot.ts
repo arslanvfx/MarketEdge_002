@@ -31,6 +31,8 @@ import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
 import { getAllMLStatus } from "../lib/ml-store";
 import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pipeline";
 import { getLatestCoinSignals } from "../lib/crypto-signals";
+import { CRYPTO_COINS } from "../lib/crypto";
+import { getKalshiCachedData } from "../lib/crypto-kalshi";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -114,14 +116,18 @@ function pipelineStatusHandler(_req: any, res: any) {
 
     // Live unified signals — sourced from the same predictor-layer functions as
     // the Crypto Predictor page so stat/claude/ml always match what the page shows.
-    // Keyed by symbol for all coins in the current window (completed + in-flight).
-    const allSyms = Array.from(new Set([
-      ...results.map(r => r.sym),
-      ...inFlight.map(e => e.sym),
-    ]));
-    const liveSignals = Object.fromEntries(allSyms.map(sym => [sym, getLatestCoinSignals(sym)]));
+    // Always covers ALL tracked coins so the signal board is populated regardless
+    // of pipeline completion status.
+    const allTrackedSyms = CRYPTO_COINS.map(c => c.symbol);
+    const liveSignals = Object.fromEntries(
+      allTrackedSyms.map(sym => [sym, getLatestCoinSignals(sym)])
+    );
+    // Kalshi strike per coin — from the same cache the predictor page uses.
+    const kalshiTargets = Object.fromEntries(
+      allTrackedSyms.map(sym => [sym, getKalshiCachedData(sym)?.value ?? null])
+    );
 
-    res.json({ results, inFlight, inFlightSyms, windowKey: currentWindowKey, liveSignals });
+    res.json({ results, inFlight, inFlightSyms, windowKey: currentWindowKey, liveSignals, kalshiTargets });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

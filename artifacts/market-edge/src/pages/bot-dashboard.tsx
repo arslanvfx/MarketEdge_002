@@ -27,6 +27,7 @@ import { TimingAnalytics, type TimeAnalyticsRow } from "./bot/timing-analytics";
 import { AutoTuneHistory } from "./bot/autotune-history";
 import { ManualOrderModal } from "./bot/manual-order-modal";
 import { PipelineStatusPanel } from "./bot/pipeline-status";
+import { CoinSignalBoard } from "./bot/coin-signal-board";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -270,7 +271,13 @@ export default function BotDashboard() {
     refetchInterval: 10_000,
   });
 
-  const { data: pipelineStatusData } = useQuery<{ results: PipelineResult[]; inFlight: import("./bot/types").InFlightEntry[]; inFlightSyms: string[]; liveSignals?: Record<string, import("./bot/types").CoinSignals> }>({
+  const { data: pipelineStatusData } = useQuery<{
+    results: PipelineResult[];
+    inFlight: import("./bot/types").InFlightEntry[];
+    inFlightSyms: string[];
+    liveSignals?: Record<string, import("./bot/types").CoinSignals>;
+    kalshiTargets?: Record<string, number | null>;
+  }>({
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
     refetchInterval: 5_000,
@@ -600,6 +607,12 @@ export default function BotDashboard() {
           evaluation={evalData?.evaluation ?? []}
           status={status}
         />
+        {pipelineStatusData?.liveSignals && (
+          <CoinSignalBoard
+            liveSignals={pipelineStatusData.liveSignals}
+            kalshiTargets={pipelineStatusData.kalshiTargets ?? {}}
+          />
+        )}
         <PipelineStatusPanel
           results={pipelineStatusData?.results ?? []}
           inFlight={pipelineStatusData?.inFlight ?? []}
