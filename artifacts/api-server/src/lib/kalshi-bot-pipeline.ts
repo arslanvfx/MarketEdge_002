@@ -372,6 +372,9 @@ async function _runPipeline(
     claudeCallMs, isRecheck,
   };
 
+  // Capture the previous result BEFORE overwriting — used below to detect the
+  // null→non-null stat transition on re-checks.
+  const prevResult = pipelineResults.get(`${sym}:${windowKey}`);
   pipelineResults.set(`${sym}:${windowKey}`, result);
 
   logger.info(
@@ -379,30 +382,39 @@ async function _runPipeline(
     `[pipeline] ${isRecheck ? "re-check" : "initial"} complete`,
   );
 
-  // Fire the completion callback immediately (initial runs only).
-  // The bot loop registers this callback to trigger a single targeted entry
-  // evaluation the moment all three models have directions — no polling delay.
+  // Fire the completion callback exactly once per window, the first time
+  // statAbove becomes non-null.  This triggers a targeted one-shot entry
+  // evaluation in the bot loop without waiting for the next 15s polling tick.
   //
-  // Guard: only fire when the stat signal is non-null.  statAbove===null means
-  // the prediction tracker has not yet produced a direction for this window
-  // (common at server startup before the first tracker snap runs), so the
-  // pipeline result does not yet have meaningful entry signal data.  When the
-  // callback is NOT fired, pipelineEntryFiredThisWindow is NOT set, and the
-  // 15s Phase-3 scheduler loop will keep retrying until:
-  //   (a) a pipeline re-check stores a result with real signals, OR
-  //   (b) the per-tick triggerWindowPipeline guard fires a fresh initial run
-  //       once the ticker is detected in a later tick (deferred Kalshi markets).
-  // In both paths, the callback will eventually fire once stat is non-null,
-  // triggering the immediate one-shot entry evaluation.
+  // Two cases that trigger the callback:
+  //   (a) Initial run (isRecheck=false) with statAbove !== null — the fast
+  //       path when the tracker already has data from the previous window.
+  //   (b) Re-check with statAbove transitioning null → non-null — the common
+  //       path at the start of each window.  The prediction tracker needs
+  //       ~1–2 minutes after window-open to run its first snapshot; the
+  //       initial pipeline always completes before that and stores
+  //       statAbove=null.  The first re-check that has real stat data is the
+  //       correct "all signals ready" moment, even though isRecheck=true.
+  //
+  // Guard: prevStatWasNull ensures the callback fires AT MOST ONCE per window.
+  // If the initial run already fired it (case a), prevResult.statAbove is
+  // non-null, so re-checks do not fire it again (prevStatWasNull=false).
   //
   // claudeAbove===null is NOT a blocking condition — it is a legitimate final
-  // state when AI is disabled, quiet hours are active, or Claude errored.  The
-  // bot handles null claude gracefully (Gate 1 / non-training coin bypass).
-  if (!isRecheck && _pipelineCompleteCallback && statAbove !== null) {
-    try {
-      _pipelineCompleteCallback(sym, windowKey, result);
-    } catch {
-      // non-fatal — the next scheduler tick will pick up the pipeline result
+  // state when AI is disabled, quiet hours are active, or Claude errored.
+  // The bot handles null claude gracefully via Gate 1 / non-training bypass.
+  if (_pipelineCompleteCallback && statAbove !== null) {
+    const prevStatWasNull = prevResult == null || prevResult.statAbove === null;
+    if (!isRecheck || prevStatWasNull) {
+      try {
+        logger.info(
+          { sym, windowKey, isRecheck, prevStatWasNull },
+          "[pipeline] completion trigger: stat non-null — firing entry callback",
+        );
+        _pipelineCompleteCallback(sym, windowKey, result);
+      } catch {
+        // non-fatal — the next scheduler tick will pick up the pipeline result
+      }
     }
   }
 

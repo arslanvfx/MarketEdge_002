@@ -703,15 +703,29 @@ test("timing/pipelineGate: pipelineEntryFiredThisWindow is cleared on window tra
   );
 });
 
-test("timing/pipelineGate: pipeline callback is guarded on statAbove non-null so null-signal completions don't suppress Phase-3 retry", () => {
+test("timing/pipelineGate: pipeline callback fires on initial run with non-null stat", () => {
   const src = readSrc("kalshi-bot-pipeline.ts");
-  // The callback must require statAbove !== null before firing.
-  // This prevents startup-time completions (before the tracker has run) from
-  // permanently marking a coin as "evaluated" while all signals are still null.
   assert.ok(
     src.includes("statAbove !== null") &&
     src.includes("_pipelineCompleteCallback"),
-    "pipeline completion callback must be gated on statAbove !== null so Phase-3 retains retry rights until real stat signal data exists",
+    "pipeline completion callback must be gated on statAbove !== null so null-stat initial completions don't permanently suppress Phase-3 retry",
+  );
+});
+
+test("timing/pipelineGate: pipeline callback fires on re-check when stat transitions null→non-null for the first time", () => {
+  const src = readSrc("kalshi-bot-pipeline.ts");
+  // The tracker takes ~1-2 min after window-open to have stat data. The initial
+  // pipeline always completes before that (statAbove=null). The first re-check
+  // with real stat is the true "all signals ready" moment — the callback must
+  // fire then too, not be permanently excluded because isRecheck=true.
+  assert.ok(
+    src.includes("prevStatWasNull") &&
+    src.includes("prevResult == null || prevResult.statAbove === null"),
+    "callback must fire on re-check when previous stored result had statAbove=null (null→non-null transition)",
+  );
+  assert.ok(
+    src.includes("!isRecheck || prevStatWasNull"),
+    "callback guard must allow re-check to fire when prevStatWasNull is true",
   );
 });
 
