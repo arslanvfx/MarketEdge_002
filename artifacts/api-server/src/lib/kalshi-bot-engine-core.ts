@@ -90,11 +90,14 @@ export const STAT_AGREE_BOOST = 4;  // +4pp when Stat agrees with ML+Claude dire
 export const ML_CLAUDE_AGREE_STAT_DISSENT_PENALTY = 4; // −4pp when Stat dissents from ML+Claude
 
 // ── ML Gate simplified three-tier formula constants ──────────────────────────
-// Priority hierarchy: ML = veto authority, Claude = primary direction setter,
-// Stat = confidence modifier only.  See computeMLGateDecision.
-export const ML_BOOST     = 8; // ML agrees with Claude's direction → +8pp
-export const STAT_BOOST   = 4; // Stat agrees with Claude's direction → +4pp
-export const STAT_PENALTY = 4; // Stat disagrees with Claude's direction → −4pp
+// Priority hierarchy: ML = primary direction setter, Claude = confidence
+// modifier, Stat = confidence modifier.  See computeMLGateDecision.
+export const CLAUDE_BOOST   = 6; // Claude agrees with ML's direction   → +6pp
+export const CLAUDE_PENALTY = 6; // Claude disagrees with ML's direction → −6pp
+export const STAT_BOOST     = 4; // Stat agrees with ML's direction      → +4pp
+export const STAT_PENALTY   = 4; // Stat disagrees with ML's direction   → −4pp
+// Kept for backwards-compat imports (backtest-core, tests).
+export const ML_BOOST = CLAUDE_BOOST;
 
 // ── Bet Profiles ─────────────────────────────────────────────────────────────
 // Two preset aggression levels the user can switch between in the dashboard.
@@ -270,19 +273,18 @@ export function computeCorePairDecision(inp: CorePairInputs): CorePairResult {
  * ML Gate — simplified three-tier decision formula.
  *
  * Priority hierarchy:
- *   ML     = veto authority (highest) — can block, never leads
- *   Claude = primary direction setter
+ *   ML     = primary direction setter (62.4% accuracy — leads)
+ *   Claude = confidence modifier (+CLAUDE_BOOST agree / −CLAUDE_PENALTY dissent)
  *   Stat   = confidence modifier only (+STAT_BOOST / −STAT_PENALTY)
  *
  * The bot's tick loop guarantees all three signals are populated (sourced from
  * the same predictor-layer store as the Crypto Predictor page) before this is
  * called, so the formula runs instantly with no waiting or fallback logic:
  *
- *   1. direction  = Claude's direction
- *   2. ML veto    : ML disagrees AND mlConf > claudeConf → SKIP
- *   3. confidence = claudeConf + (ML agrees ? +ML_BOOST : 0)
- *                              + (Stat agrees ? +STAT_BOOST : −STAT_PENALTY)
- *   4. gate       : confidence ≥ minConfidence → BET, else SKIP
+ *   1. direction  = ML's direction  (62.4% accuracy vs Claude 56.2%)
+ *   2. confidence = mlConf + (Claude agrees ? +CLAUDE_BOOST : −CLAUDE_PENALTY)
+ *                          + (Stat agrees   ? +STAT_BOOST   : −STAT_PENALTY)
+ *   3. gate       : confidence ≥ minConfidence → BET, else SKIP
  *
  * Post-decision gates (shared with all modes): direction-aware EV floor and
  * the minimum-return (payout multiple) gate.
@@ -355,32 +357,24 @@ function computeMLGateDecisionUngated(inp: CorePairInputs): CorePairResult {
   const claudeConf = inp.claudeConfidence ?? 0;
   const mlConf     = inp.mlConfidence     ?? 0;
 
-  // ── Step 1: Direction — Claude leads ─────────────────────────────────────
-  const direction = claudeDir;
+  // ── Step 1: Direction — ML leads ─────────────────────────────────────────
+  // ML is 62.4% accurate vs Claude's 56.2%. ML sets direction; Claude and
+  // Stat are confidence modifiers only — no hard veto in either direction.
+  const direction = mlDir;
 
-  // ── Step 2: ML veto ──────────────────────────────────────────────────────
-  // ML blocks the bet only when it disagrees AND is more confident than
-  // Claude.  A low-conviction ML dissent never overrides a confident Claude.
-  if (mlDir !== claudeDir && mlConf > claudeConf) {
-    return skip(
-      `ML veto: ML (${Math.round(mlConf)}% ${mlDir ? "YES" : "NO"}) opposes Claude (${Math.round(claudeConf)}% ${claudeDir ? "YES" : "NO"}) with higher confidence — skipping`,
-      ev,
-    );
-  }
-
-  // ── Step 3: Confidence formula ───────────────────────────────────────────
-  const mlAgrees   = mlDir === claudeDir;
-  const statAgrees = statDir === claudeDir;
+  // ── Step 2: Confidence formula ───────────────────────────────────────────
+  const claudeAgrees = claudeDir === mlDir;
+  const statAgrees   = statDir   === mlDir;
   const confidence =
-    claudeConf +
-    (mlAgrees ? ML_BOOST : 0) +
-    (statAgrees ? STAT_BOOST : -STAT_PENALTY);
+    mlConf +
+    (claudeAgrees ? CLAUDE_BOOST : -CLAUDE_PENALTY) +
+    (statAgrees   ? STAT_BOOST   : -STAT_PENALTY);
 
   const pathReason =
-    `ML Gate: Claude leads ${claudeDir ? "YES" : "NO"} (${Math.round(claudeConf)}%)` +
-    (mlAgrees
-      ? ` + ML confirms (${Math.round(mlConf)}%, +${ML_BOOST})`
-      : ` — ML dissents (${Math.round(mlConf)}%) but not more confident, no veto`) +
+    `ML Gate: ML leads ${mlDir ? "YES" : "NO"} (${Math.round(mlConf)}%)` +
+    (claudeAgrees
+      ? ` + Claude confirms (${Math.round(claudeConf)}%, +${CLAUDE_BOOST})`
+      : ` − Claude dissents (${Math.round(claudeConf)}%, −${CLAUDE_PENALTY})`) +
     (statAgrees
       ? ` + Stat confirms (${Math.round(statConf)}%, +${STAT_BOOST})`
       : ` − Stat dissents (${Math.round(statConf)}%, −${STAT_PENALTY})`);

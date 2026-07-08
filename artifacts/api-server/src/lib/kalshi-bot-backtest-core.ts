@@ -7,13 +7,13 @@
 // placed THIS specific bet in the same direction?"
 //
 // classic   — yes, always (all existing bets passed the classic cascade)
-// ml_gate   — simplified three-tier formula: Claude leads direction, ML vetoes
-//             only when it disagrees AND is strictly more confident than Claude,
+// ml_gate   — simplified three-tier formula: ML leads direction, Claude and
+//             Stat are confidence modifiers (no hard veto),
 //             all three signals required (see computeMLGateDecision)
 // consensus — majority of [stat, claude, ml] must agree; tie = SKIP = rejected
 // unanimous — all 3 of [stat, claude, ml] must be available and unanimously agree
 
-import { ML_BOOST, STAT_BOOST, STAT_PENALTY } from "./kalshi-bot-engine-core.ts";
+import { CLAUDE_BOOST, CLAUDE_PENALTY, STAT_BOOST, STAT_PENALTY } from "./kalshi-bot-engine-core.ts";
 
 /**
  * Returns true if the given decision mode would have approved the bet,
@@ -49,29 +49,25 @@ export function backtestModeApproval(
   // Mirrors computeMLGateDecision (kalshi-bot-engine-core.ts) — the simplified
   // three-tier formula:
   //   1. Gate 1: all three signals must be available (bot waits otherwise).
-  //   2. Direction = Claude's direction; must match the actual bet direction.
-  //   3. ML veto: ML disagrees AND mlConf > claudeConf (strict) → SKIP.
-  //      Missing confidences are treated as 0, same as the live formula.
-  //   4. Composite gate: claudeConf + (ML agrees ? +8 : 0) + (Stat agrees ? +4 : −4)
-  //      must clear minConfidence — only simulated when a floor is provided AND
-  //      Claude's confidence was recorded (older rows lack confidences; rejecting
-  //      them all on a 0-base composite would misattribute history).
+  //   2. Direction = ML's direction; must match the actual bet direction.
+  //   3. Composite gate: mlConf + (Claude agrees ? +CLAUDE_BOOST : −CLAUDE_PENALTY)
+  //                               + (Stat agrees   ? +STAT_BOOST  : −STAT_PENALTY)
+  //      Only simulated when minConfidence provided AND mlConf known (older rows
+  //      lack confidences; skipping avoids misattributing history).
   if (mode === "ml_gate") {
     if (statAbove === null || claudeAbove === null || mlAbove === null) {
       return false; // Gate 1: any missing signal → the bot would still be waiting
     }
 
-    if (claudeAbove !== aboveExpected) return false; // Claude leads — opposite direction
+    if (mlAbove !== aboveExpected) return false; // ML leads — opposite direction
 
-    const cConf = claudeConf ?? 0;
-    const mConf = mlConf ?? 0;
-    if (mlAbove !== claudeAbove && mConf > cConf) return false; // ML veto
-
-    if (minConfidence !== null && claudeConf !== null) {
+    // Composite gate — only simulated when minConfidence provided AND mlConf known.
+    // Older rows lack confidence values; skipping the gate avoids misattributing history.
+    if (minConfidence !== null && mlConf !== null) {
       const composite =
-        cConf +
-        (mlAbove === claudeAbove ? ML_BOOST : 0) +
-        (statAbove === claudeAbove ? STAT_BOOST : -STAT_PENALTY);
+        mlConf +
+        (claudeAbove === mlAbove ? CLAUDE_BOOST : -CLAUDE_PENALTY) +
+        (statAbove   === mlAbove ? STAT_BOOST   : -STAT_PENALTY);
       if (composite < minConfidence) return false;
     }
 

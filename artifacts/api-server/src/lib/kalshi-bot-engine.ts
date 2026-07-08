@@ -380,13 +380,13 @@ function _makeBotDecisionInner(
 
   // ── Decision Mode: ml_gate ────────────────────────────────────────────────
   // Simplified three-tier formula (computeMLGateDecision):
-  //   ML     = veto authority — blocks only when it disagrees AND is more
-  //            confident than Claude; never leads
-  //   Claude = primary direction setter
+  //   ML     = primary direction setter (62.4% accuracy — leads)
+  //   Claude = confidence modifier (+CLAUDE_BOOST agree / −CLAUDE_PENALTY dissent)
   //   Stat   = confidence modifier only (+STAT_BOOST agree / −STAT_PENALTY dissent)
   // All three signals must be populated (Gate 1 inside the formula + the tick
   // loop's Live Signals gate) — then the math runs instantly:
-  //   confidence = claudeConf + (ML agrees ? +ML_BOOST : 0) ± Stat modifier
+  //   confidence = mlConf + (Claude agrees ? +CLAUDE_BOOST : −CLAUDE_PENALTY)
+  //                       + (Stat agrees   ? +STAT_BOOST   : −STAT_PENALTY)
   //   BET when confidence ≥ minConfidence, after EV + min-return gates.
   if (decisionMode === "ml_gate") {
     const coreResult = computeMLGateDecision({

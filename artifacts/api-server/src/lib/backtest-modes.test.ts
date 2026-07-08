@@ -19,8 +19,8 @@ describe("backtestModeApproval: classic", () => {
 
 // ---------------------------------------------------------------------------
 // ml_gate — simplified three-tier formula (mirrors computeMLGateDecision):
-//   all three signals required; Claude leads direction; ML vetoes only when it
-//   disagrees AND mlConf > claudeConf (strict); missing confidences → 0.
+//   all three signals required; ML leads direction; Claude and Stat are
+//   confidence modifiers only (no hard veto).
 // ---------------------------------------------------------------------------
 describe("backtestModeApproval: ml_gate", () => {
   // Gate 1: all three signals required
@@ -37,41 +37,41 @@ describe("backtestModeApproval: ml_gate", () => {
     assert.equal(backtestModeApproval("ml_gate", true, null, null, null), false);
   });
 
-  // Direction: Claude leads
+  // Direction: ML leads
   it("all three agree with bet direction → approved", () => {
     assert.equal(backtestModeApproval("ml_gate", true, true, true, true), true);
   });
-  it("Claude opposes bet direction → rejected (Claude sets direction)", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, true, false, true), false);
+  it("ML agrees with bet direction, Claude dissents → approved (Claude is modifier only)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, false, true), true);
   });
-  it("Stat dissents but Claude+ML agree → approved (Stat is modifier only)", () => {
+  it("ML agrees with bet direction, Stat dissents → approved (Stat is modifier only)", () => {
     assert.equal(backtestModeApproval("ml_gate", true, false, true, true), true);
   });
 
-  // ML veto: strict mlConf > claudeConf
-  it("ML disagrees with HIGHER conf → veto (rejected)", () => {
+  // Direction: ML opposes bet → always rejected regardless of confidences
+  it("ML opposes bet direction (higher conf) → rejected (ML sets direction)", () => {
     assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 80), false);
   });
-  it("ML disagrees with LOWER conf → no veto (approved)", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 60), true);
+  it("ML opposes bet direction (lower conf) → rejected (ML sets direction)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 60), false);
   });
-  it("ML disagrees with EQUAL conf → no veto (strict >)", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 70), true);
+  it("ML opposes bet direction (equal conf) → rejected (ML sets direction)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, false, 55, 70, 70), false);
   });
-  it("ML disagrees, no confidences recorded (both 0) → no veto (0 > 0 is false)", () => {
-    assert.equal(backtestModeApproval("ml_gate", true, true, true, false), true);
+  it("ML opposes bet direction, no confidences recorded → rejected (ML sets direction)", () => {
+    assert.equal(backtestModeApproval("ml_gate", true, true, true, false), false);
   });
 
-  // Composite gate — only simulated when minConfidence provided AND claudeConf known
+  // Composite gate — only simulated when minConfidence provided AND mlConf known
   it("composite below provided minConfidence → rejected", () => {
-    // claude 58 + ML agree 8 + stat dissent -4 = 62 < 65
+    // ml 60 + claude agrees +6 + stat dissents -4 = 62 < 65
     assert.equal(backtestModeApproval("ml_gate", true, false, true, true, 55, 58, 60, 65), false);
   });
   it("composite at provided minConfidence → approved (inclusive)", () => {
-    // claude 53 + 8 + 4 = 65 >= 65
+    // ml 60 + claude agrees +6 + stat agrees +4 = 70 >= 65
     assert.equal(backtestModeApproval("ml_gate", true, true, true, true, 55, 53, 60, 65), true);
   });
-  it("minConfidence provided but claudeConf missing (old row) → composite gate skipped", () => {
+  it("minConfidence provided but mlConf missing (old row) → composite gate skipped", () => {
     assert.equal(backtestModeApproval("ml_gate", true, true, true, true, null, null, null, 65), true);
   });
 
@@ -79,7 +79,7 @@ describe("backtestModeApproval: ml_gate", () => {
   it("NO bet: all three NO → approved", () => {
     assert.equal(backtestModeApproval("ml_gate", false, false, false, false), true);
   });
-  it("NO bet: Claude NO, ML YES with higher conf → veto (rejected)", () => {
+  it("NO bet: ML says YES → rejected (direction mismatch)", () => {
     assert.equal(backtestModeApproval("ml_gate", false, false, false, true, 55, 60, 75), false);
   });
 });

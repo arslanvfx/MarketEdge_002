@@ -204,8 +204,8 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
       {open && (
         <div className="px-5 pb-4 pt-1">
           <p className="text-[11px] text-muted-foreground mb-2">
-            Claude sets direction · ML vetoes only if it disagrees with higher confidence · composite =
-            Claude + ML boost + Stat modifier · EV &amp; price gates still checked at entry.
+            ML sets direction · Claude confirms (+6%) or penalizes (−6%) · Stat modifier (±4%) · composite =
+            ML + Claude modifier + Stat modifier · EV &amp; price gates still checked at entry.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -258,7 +258,7 @@ export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }:
                           <span className={`inline-flex items-center gap-1 font-bold ${step.direction === "YES" ? "text-emerald-400" : "text-red-400"}`}>
                             {step.direction === "YES" ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
                             {step.direction}
-                            <span className="font-normal text-muted-foreground/60 text-[10px]">(Claude)</span>
+                            <span className="font-normal text-muted-foreground/60 text-[10px]">(ML)</span>
                           </span>
                         ) : step.claude.above === null && step.stat.above !== null ? (
                           <span className="text-[11px] text-muted-foreground/50 italic animate-pulse">Claude: calculating…</span>

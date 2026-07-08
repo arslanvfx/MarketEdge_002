@@ -1,3 +1,4 @@
+- [ml_gate ML-primary formula](ml-gate-ml-primary.md) — ml_gate flipped so ML leads direction; CLAUDE_BOOST=6/CLAUDE_PENALTY=6 replace ML_BOOST=8; no hard veto; ML_BOOST kept as alias=6 for compat
 - [predCache override YES bias](pred-cache-override-bias.md) — applyStatPredCacheOverride used livePrice>=target (not model forecast); all-YES bias in bullish markets; fix: guard on openingAbove!==null returns snap immediately
 - [Pipeline signal cascade bug](pipeline-signal-cascade.md) — statAbove was livePrice>=kalshiTarget (raw snapshot, not the model); wrong stat poisoned Claude context + ML features 14/15; fix: use getStatWindowCall()+getTrackerWindowCall() same as predictor page
 - [Window open elapsed timing](window-open-elapsed-timing.md) — kalshiWindowStore.openedAt must be the 15-min UTC boundary (getCurrentWindowOpenMs()), not Date.now(); late confirmation causes minutesElapsed=0 → spurious minNoEntryMinutes skip + silent downstream blocks
