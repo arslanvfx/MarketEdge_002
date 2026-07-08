@@ -474,6 +474,31 @@ async function _runBotTick(
     return;
   }
 
+  // ── Claude direction quality gate (defense-in-depth) ─────────────────────
+  // Phase-3 enforces: for a YES bet Claude must not call NO, for a NO bet
+  // Claude must not call YES.  Phase-3 is bypassed when the pipeline-completion
+  // trigger (_firePipelineEntryForCoin) calls _runBotTick directly, so this
+  // guard must also live here.  Without it, a YES bet can fire even when Claude
+  // is calling BELOW — exactly the bug observed when ML briefly outputted YES
+  // at window-open before settling to NO, while Claude's opening call was BELOW.
+  {
+    const dirSigs = decision.signals as { claudeAbove?: boolean | null };
+    if (decision.action === "BET_YES" && dirSigs.claudeAbove === false) {
+      logger.info(
+        { sym, windowKey, claudeAbove: dirSigs.claudeAbove, confidence: decision.confidence },
+        "[kalshi-bot] _runBotTick: BET_YES blocked — Claude says NO (direction quality gate)",
+      );
+      return;
+    }
+    if (decision.action === "BET_NO" && dirSigs.claudeAbove === true) {
+      logger.info(
+        { sym, windowKey, claudeAbove: dirSigs.claudeAbove, confidence: decision.confidence },
+        "[kalshi-bot] _runBotTick: BET_NO blocked — Claude says YES (direction quality gate)",
+      );
+      return;
+    }
+  }
+
   // ── RE-ENTRY GUARD ───────────────────────────────────────────────────────
   // If we exited a position mid-window (fast-flip or phase-2), we may re-enter
   // — but only in the OPPOSITE direction, and only with a higher confidence bar
