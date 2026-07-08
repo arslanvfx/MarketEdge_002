@@ -265,6 +265,40 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-[10px] text-muted-foreground/60">How many windows to skip after the streak limit fires</span>
                 </label>
 
+                {/* Streak Confidence Penalty — 1 loss */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Streak Penalty · 1 Loss ({merged.coinStreakPenalty1LossPp ?? 6}pp — 0 = off)
+                  </span>
+                  <input type="range" min={0} max={30} step={1}
+                    className="mt-1 accent-amber-400"
+                    value={merged.coinStreakPenalty1LossPp ?? 6}
+                    onChange={e => setConfigDraft(d => ({ ...d, coinStreakPenalty1LossPp: parseInt(e.target.value) }))} />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0 (off)</span><span>30pp</span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    Raises the required confidence floor by this amount when a coin has exactly 1 consecutive loss. 0 disables.
+                  </span>
+                </label>
+
+                {/* Streak Confidence Penalty — 2+ losses */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Streak Penalty · 2+ Losses ({merged.coinStreakPenalty2PlusLossPp ?? 12}pp — 0 = off)
+                  </span>
+                  <input type="range" min={0} max={30} step={1}
+                    className="mt-1 accent-amber-400"
+                    value={merged.coinStreakPenalty2PlusLossPp ?? 12}
+                    onChange={e => setConfigDraft(d => ({ ...d, coinStreakPenalty2PlusLossPp: parseInt(e.target.value) }))} />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0 (off)</span><span>30pp</span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    Raises the required confidence floor by this amount when a coin has 2 or more consecutive losses. 0 disables.
+                  </span>
+                </label>
+
                 {/* Max Slippage Cents */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Max Slippage (¢)</span>
@@ -687,6 +721,52 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </select>
                 </label>
 
+                {/* Directional Regime Dampener */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Directional Dampener Penalty ({merged.directionalRegressionPenaltyPp ?? 10}pp — 0 = off)
+                  </span>
+                  <input type="range" min={0} max={20} step={1}
+                    className="mt-1 accent-orange-400"
+                    value={merged.directionalRegressionPenaltyPp ?? 10}
+                    onChange={e => setConfigDraft(d => ({ ...d, directionalRegressionPenaltyPp: parseInt(e.target.value) }))} />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0 (off)</span><span>20pp</span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    Raises the confidence floor for a direction (YES or NO) that has lost too many times recently. 0 disables.
+                  </span>
+                </label>
+
+                {/* Directional Dampener — win-rate threshold */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Dampener Win-Rate Threshold ({Math.round((merged.directionalRegressionThreshold ?? 0.35) * 100)}% — fire when below)
+                  </span>
+                  <input type="range" min={0.1} max={0.6} step={0.05}
+                    className="mt-1 accent-orange-400"
+                    value={merged.directionalRegressionThreshold ?? 0.35}
+                    onChange={e => setConfigDraft(d => ({ ...d, directionalRegressionThreshold: parseFloat(e.target.value) }))} />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>10% (aggressive)</span><span>60% (cautious)</span>
+                  </div>
+                </label>
+
+                {/* Directional Dampener — lookback windows */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Dampener Lookback (windows)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.directionalRegressionLookback ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, directionalRegressionLookback: parseInt(e.target.value) }))}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+                      <option key={n} value={n}>Last {n} window{n > 1 ? "s" : ""}</option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    How many recent completed windows to examine when checking directional win rate. Penalty persists this long once triggered.
+                  </span>
+                </label>
+
                 {/* Border Proximity Guard */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Border Proximity Guard</span>
@@ -791,6 +871,23 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </div>
                   <span className="text-[10px] text-muted-foreground/70 leading-tight">
                     Confidence deducted when betting against the recent settlement direction. Lower = more bets.
+                  </span>
+                </label>
+
+                {/* Unanimous Model Floor */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Unanimous Model Floor ({merged.unanimousMinModelConfidence ?? 57}% — 0 = off)
+                  </span>
+                  <input type="range" min={0} max={70} step={1}
+                    className="mt-1 accent-violet-400"
+                    value={merged.unanimousMinModelConfidence ?? 57}
+                    onChange={e => setConfigDraft(d => ({ ...d, unanimousMinModelConfidence: parseInt(e.target.value) }))} />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0 (off)</span><span>70%</span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    When all models unanimously agree, each individual model must still clear this confidence floor or the unanimous bonus is downgraded to a penalty. 0 disables.
                   </span>
                 </label>
 
