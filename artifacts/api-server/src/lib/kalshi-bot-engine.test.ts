@@ -6,9 +6,10 @@
 //
 // Pipeline (sequential gates — all must pass before a bet fires):
 //   GATE 1 — All three models required: Stat + Claude + ML must each have a direction.
-//   GATE 2 — Per-signal minimums: Stat≥58%, Claude≥62%, ML≥60%.
+//   GATE 2 — Per-signal minimums (non-unanimous only): Stat≥58%, Claude≥62%, ML≥60%.
+//             Bypassed when all three models unanimously agree (Path A) — Gate 4 decides.
 //   GATE 3 — Direction agreement:
-//     (A) Unanimous → bet (ML+6, Stat+4); ML needs only Gate 2 floor (60%) in consensus
+//     (A) Unanimous → bet (ML+6, Stat+4); Gate 2 bypassed; Gate 4 composite decides
 //     (B) ML+Claude agree, Stat dissents → bet (ML+6, Stat−4); ML must be ≥70% to lead
 //     (C) Stat+Claude agree, ML opposes at ≥75% → ML override
 //     (D) ML+Stat agree, Claude disagrees → SKIP
@@ -120,12 +121,15 @@ test("pipeline gate 1: all three null → SKIP — first gate fires on Stat", ()
 });
 
 // ---------------------------------------------------------------------------
-// PIPELINE: Gate 2 — per-signal confidence minimums
+// PIPELINE: Gate 2 — per-signal confidence minimums (non-unanimous only)
+// Gate 2 is bypassed when all three models unanimously agree (Path A).
+// It only fires when models disagree (Paths B/C/D).
 // ---------------------------------------------------------------------------
 
-test("pipeline gate 2: stat confidence 57% → SKIP (below 58% minimum)", () => {
+test("pipeline gate 2: stat confidence 57% → SKIP for non-unanimous decision (below 58% minimum)", () => {
+  // ML+Claude agree YES, Stat dissents NO (Path B) — non-unanimous → Gate 2 applies
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 57,
+    statAbove: false, statConfidence: 57, // below 58% floor; dissenting
     claudeAbove: true, claudeConfidence: 62,
     mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
@@ -134,20 +138,23 @@ test("pipeline gate 2: stat confidence 57% → SKIP (below 58% minimum)", () => 
   assert.match(r.reasoning, /Stat confidence.*below minimum/);
 });
 
-test("pipeline gate 2: stat exactly 58% → passes minimum", () => {
+test("pipeline gate 2: stat exactly 58% → passes minimum in non-unanimous decision", () => {
+  // ML+Claude agree YES, Stat dissents NO (Path B) — non-unanimous → Gate 2 applies; stat passes floor
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 58,
+    statAbove: false, statConfidence: 58, // exactly at floor; dissenting
     claudeAbove: true, claudeConfidence: 62,
     mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
   }));
+  // Passes Gate 2; Path B fires (ML leads against Stat dissent)
   assert.notEqual(r.action, "SKIP");
 });
 
-test("pipeline gate 2: claude confidence 61% → SKIP (below 62% minimum)", () => {
+test("pipeline gate 2: claude confidence 61% → SKIP for non-unanimous decision (below 62% minimum)", () => {
+  // ML+Claude agree YES, Stat dissents NO (Path B) — non-unanimous → Gate 2 applies
   const r = computeCorePairDecision(inp({
-    statAbove: true, statConfidence: 58,
-    claudeAbove: true, claudeConfidence: 61,
+    statAbove: false, statConfidence: 58, // dissenting but above floor
+    claudeAbove: true, claudeConfidence: 61, // below 62% floor
     mlAbove: true, mlConfidence: 70,
     minConfidence: 50,
   }));
@@ -187,13 +194,27 @@ test("pipeline gate 2: ML exactly 70% → passes minimum", () => {
   assert.notEqual(r.action, "SKIP");
 });
 
-test("pipeline gate 2: null confidence treated as 0 → below any minimum → SKIP", () => {
+test("pipeline gate 2: null confidence unanimous → Gate 2 bypassed → composite 0+6+4=10% < minConfidence → SKIP at Gate 4", () => {
+  // Unanimous (all true) bypasses Gate 2; null conf → 0 → composite=10% < default minConfidence → Gate 4 blocks
   const r = computeCorePairDecision(inp({
     statAbove: true, statConfidence: null,
     claudeAbove: true, claudeConfidence: null,
     mlAbove: true, mlConfidence: null,
   }));
   assert.equal(r.action, "SKIP");
+});
+
+test("pipeline gate 2: unanimous low-confidence (stat=55, claude=58, ml=56) → Gate 2 bypassed → BET_YES", () => {
+  // All three agree YES at below-floor confidences; unanimous → Gate 2 bypassed
+  // composite = 56 + 6 + 4 = 66% ≥ minConfidence=60 → BET_YES
+  const r = computeCorePairDecision(inp({
+    statAbove: true, statConfidence: 55,   // below 58% floor
+    claudeAbove: true, claudeConfidence: 58, // below 62% floor
+    mlAbove: true, mlConfidence: 56,         // below 60% floor
+    minConfidence: 60,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 56 + ML_SIGNAL_BOOST + STAT_AGREE_BOOST); // 56+6+4=66
 });
 
 test("pipeline gate 2: constants reflect spec values (stat=58, claude=62, ml=60, lead=70, override=75, stat_boost=4, dissent_penalty=4)", () => {

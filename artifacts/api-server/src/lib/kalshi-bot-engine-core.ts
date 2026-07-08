@@ -9,14 +9,16 @@
 //     Stat, Claude, AND ML must each have a direction before any bet fires.
 //     No fast-agreement bypass — Claude must complete its extended-thinking call.
 //
-//   GATE 2 — Per-signal confidence minimums:
-//     Stat   ≥ STAT_REQUIRED_MIN_CONF   (58%)
-//     Claude ≥ CLAUDE_REQUIRED_MIN_CONF (62%)
-//     ML     ≥ ML_REQUIRED_MIN_CONF     (60%)  — minimum to provide a meaningful direction
+//   GATE 2 — Per-signal confidence minimums (non-unanimous only):
+//     Applied only when models disagree (Paths B/C/D).  When all three models agree
+//     (Path A), Gate 2 is bypassed — no model is "leading" so individual floors are
+//     redundant.  Gate 4 composite confidence is the quality gate for unanimous bets.
+//     Stat   ≥ STAT_REQUIRED_MIN_CONF   (58%)  — when leading/dissenting
+//     Claude ≥ CLAUDE_REQUIRED_MIN_CONF (62%)  — when leading/dissenting
+//     ML     ≥ ML_REQUIRED_MIN_CONF     (60%)  — when leading/dissenting
 //
 //   GATE 3 — Direction agreement (four exclusive paths):
-//     (A) All three unanimous → bet.  ML needs only the Gate 2 floor (60%) since it is
-//           part of a consensus, not the lone leader.
+//     (A) All three unanimous → bet.  Gate 2 bypassed; composite confidence alone decides.
 //           Confidence = mlConf + ML_SIGNAL_BOOST (Claude boost) + STAT_AGREE_BOOST
 //                      [+ CONFIDENCE_BOOST_PER_SIGNAL if WM agrees]
 //     (B) ML + Claude agree, Stat dissents → bet with Stat penalty, but ML must reach
@@ -364,30 +366,42 @@ function computeCorePairDecisionUngated(inp: CorePairInputs): CorePairResult {
     return skip("Pipeline: waiting for ML — all three models (Stat, Claude, ML) required before betting", ev);
   }
 
-  // ── Gate 2: Per-signal confidence minimums ────────────────────────────────
-  // Each model must independently meet its own minimum before the group
-  // decision is considered.  null confidence is treated conservatively as 0.
+  // ── Gate 2: Per-signal confidence minimums (non-unanimous only) ──────────
+  // When all three models unanimously agree on direction (Path A), Gate 2 is
+  // bypassed — no single model is "leading", so individual floors add no
+  // protection and only block legitimate low-confidence consensus signals.
+  // Gate 4 composite confidence is the quality gate for Path A.
+  //
+  // For non-unanimous paths (B/C/D), each model must still independently
+  // meet its own minimum before it can lead or dissent.
+  // null confidence is treated conservatively as 0.
   const statConf   = inp.statConfidence   ?? 0;
   const claudeConf = inp.claudeConfidence ?? 0;
   const mlConf     = inp.mlConfidence     ?? 0;
 
-  if (statConf < STAT_REQUIRED_MIN_CONF) {
-    return skip(
-      `Stat confidence ${Math.round(statConf)}% below minimum ${STAT_REQUIRED_MIN_CONF}% — signal not strong enough to bet`,
-      ev,
-    );
-  }
-  if (claudeConf < CLAUDE_REQUIRED_MIN_CONF) {
-    return skip(
-      `Claude confidence ${Math.round(claudeConf)}% below minimum ${CLAUDE_REQUIRED_MIN_CONF}% — signal not strong enough to bet`,
-      ev,
-    );
-  }
-  if (mlConf < ML_REQUIRED_MIN_CONF) {
-    return skip(
-      `ML confidence ${Math.round(mlConf)}% below minimum ${ML_REQUIRED_MIN_CONF}% — signal not strong enough to bet`,
-      ev,
-    );
+  // Gate 1 already guarantees none of these is null, so direction comparison is safe.
+  const unanimousSignal =
+    inp.statAbove === inp.claudeAbove && inp.claudeAbove === inp.mlAbove;
+
+  if (!unanimousSignal) {
+    if (statConf < STAT_REQUIRED_MIN_CONF) {
+      return skip(
+        `Stat confidence ${Math.round(statConf)}% below minimum ${STAT_REQUIRED_MIN_CONF}% — signal not strong enough for non-unanimous decision`,
+        ev,
+      );
+    }
+    if (claudeConf < CLAUDE_REQUIRED_MIN_CONF) {
+      return skip(
+        `Claude confidence ${Math.round(claudeConf)}% below minimum ${CLAUDE_REQUIRED_MIN_CONF}% — signal not strong enough for non-unanimous decision`,
+        ev,
+      );
+    }
+    if (mlConf < ML_REQUIRED_MIN_CONF) {
+      return skip(
+        `ML confidence ${Math.round(mlConf)}% below minimum ${ML_REQUIRED_MIN_CONF}% — signal not strong enough for non-unanimous decision`,
+        ev,
+      );
+    }
   }
 
   // ── Gate 3: Direction agreement ──────────────────────────────────────────

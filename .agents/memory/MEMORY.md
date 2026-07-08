@@ -29,13 +29,13 @@
 - [Proximity & time-of-day calibration](proximity-tod-calibration.md) — thresholds derived from 62+ evaluated records/coin; do NOT revert to old 0.2%/0.1% values
 - [Claude per-coin down-scale](claude-down-scale.md) — computeClaudeDownScale reads historyStore; BNB down>up so scale=1.0; use clamp(downAcc/upAcc, 0.5, 1.0) not a fixed 0.70
 - [Bot trend stability analysis](bot-trend-stability.md) — window-open parallel Claude calls; cached per (sym, windowKey); clean=×1.2, choppy=×1.0, reversing=force SKIP in Phase 3
-- [Sequential pipeline decision architecture](sequential-pipeline-arch.md) — Gate 1=all 3 required, Gate 2=per-signal mins (stat/claude≥55%, ML≥65%), Gate 3=unanimous/ML-override≥70%/disagree→SKIP; stat≠claude always hard-blocks
+- [Sequential pipeline decision architecture](sequential-pipeline-arch.md) — Gate 2 BYPASSED for unanimous (Path A); floors stat≥58/claude≥62/ml≥60 apply only for non-unanimous (B/C/D); Gate 4 composite is quality gate for unanimous
 - [Multi-position bot architecture](multi-position-bot.md) — openPositions Map replaces single openPosition; each coin fully independent; Phase 2 iterates all open slots; Phase 4 no break; BotStateSnapshot.openPositions is an array
 - [Self-learning analytics architecture](self-learning-analytics.md) — effectiveConfidence stored per bet; confidence-band/agreement-level breakdowns in PerformanceReport; Rule 3 data-driven jump to optimalConfidenceThreshold
 - [Bot config persistence](bot-config-persistence.md) — Drizzle onConflictDoUpdate silently fails for bot_config; use raw sql template instead; stale draft also masked real backend config in UI
 - [Stock trading dashboard frontend](stock-frontend-arch.md) — market-edge /stocks/* vertical; /bot/pnl is mode-filtered but /bot/history isn't; analytics derived client-side; no manual-close endpoint
 - [Stock trading vertical](stock-vertical-arch.md) — Alpaca stock vertical is fully isolated from crypto (stock_* tables, 21-feat ML); never mark DB flat before broker close confirmed
-- [Window-doubt & chop filters](window-doubt-chop.md) — recentWindowOutcomes Map tracks per-window wins/losses; doubt penalty +4/+8pp when 1/2 recent windows <40% win rate; threshold total>=1 (not 3); chop cap limits to 2 bets when 4+ coins ≤58%
+- [Window-doubt & chop filters](window-doubt-chop.md) — recentWindowOutcomes Map tracks per-window wins/losses; doubt penalty +2/+4pp when 1/2 recent windows <40% win rate; unanimous failure 1-weak=2pp/2-weak=4pp; threshold total>=1 (not 3)
 - [FOK fill cooldown](fok-fill-cooldown.md) — windowFailedFills Set; after all retries fail, coin is skipped for rest of window via Phase 3 guard; cleared on window transition; key format sym:windowKey:mode
 - [Live-ask fill price](live-ask-fill.md) — bot bids at yesAsk+3c (orderLimitPrice, capped at return floor); expectedFillCost still uses raw ask for sizing; exchange price-improves to actual ask
 - [ML features v4](ml-features-v4.md) — N_FEATURES 17→19; feature 17=volumeDirectionBias (net bullish/bearish volume last 8 candles); feature 18=candleReversalSignal (-1/0/+1 for shooting star, engulfing, hammer patterns)

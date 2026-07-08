@@ -653,8 +653,8 @@ export async function runBotLoopTick(): Promise<void> {
     const total = wo.wins + wo.losses;
     if (total >= 1 && wo.wins / total < DOUBT_WIN_RATE_THRESHOLD) weakWindowCount++;
   }
-  if (weakWindowCount >= 2) windowDoubtPenalty = 8;
-  else if (weakWindowCount === 1) windowDoubtPenalty = 4;
+  if (weakWindowCount >= 2) windowDoubtPenalty = 4;
+  else if (weakWindowCount === 1) windowDoubtPenalty = 2;
   if (windowDoubtPenalty > 0) {
     logger.info(
       { windowDoubtPenalty, weakWindowCount, checkedWindows: completedWindowKeys, neutralWindows },
@@ -679,7 +679,7 @@ export async function runBotLoopTick(): Promise<void> {
   // windows: after one empty window the weak-count drops 2→1 (3pp→0) and after
   // two it's fully gone.  Shadow parole can also reduce it early.
   const UNANIMOUS_FAILURE_THRESHOLD = 0.4;
-  const UNANIMOUS_FAILURE_PENALTY_PP = 6;
+  const UNANIMOUS_FAILURE_PENALTY_PP = 4;
   let unanimousFailurePenalty = 0;
   let unanimousWeakWindowCount = 0;
   for (const wk of completedWindowKeys) {
