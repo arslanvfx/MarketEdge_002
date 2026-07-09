@@ -592,19 +592,22 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       if (price <= 0) continue;
 
       // Minimum market cap filter.
-      // Market cap data is not provided by Alpaca's standard equity API.
-      // This filter is a graceful no-op until a fundamental data feed
-      // (e.g., a static universe map with market caps or a Polygon.io integration)
-      // is wired in. When mcapBillion is null (data absent), the check is skipped.
+      // The S&P 500 stocks in STOCK_UNIVERSE are all large-caps (>$15B market cap)
+      // and always pass this filter. For user-added watchlist tickers, market cap
+      // data is unavailable from Alpaca's standard API, so when the filter is
+      // enabled we fail-closed — blocking unknown-cap tickers rather than letting
+      // potential micro-caps through.
       if (cfg.minMarketCapBillion > 0) {
-        const mcapBillion: number | null = null; // TODO: integrate fundamental data source
-        if (mcapBillion !== null && mcapBillion < cfg.minMarketCapBillion) {
+        const inUniverse = lookupUniverse(ticker) !== null;
+        if (!inUniverse) {
           recordDecision({
             ticker, action: "SKIP", horizon: mode, confidence: null,
-            reason: `market cap ${mcapBillion.toFixed(0)}B below $${cfg.minMarketCapBillion}B threshold`,
+            reason: `market cap unverifiable for non-universe ticker (filter: >$${cfg.minMarketCapBillion}B)`,
           });
           continue;
         }
+        // Universe stocks are S&P 500 large-caps (>$15B) and always satisfy any
+        // supported threshold (1B / 5B / 10B). No additional check needed.
       }
 
       // Level 1 entry timing gate (fail-closed): tight spread + buy-side
@@ -632,17 +635,21 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         continue;
       }
 
-      // Dynamic sizing: scale position size proportionally to confidence
-      let scaledSizePct = cfg.positionSizePct;
-      if (cfg.dynamicSizing && effectiveConfidence > cfg.minConfidence) {
+      // Dynamic sizing: linearly interpolate from base position size at minConfidence
+      // to the max dollar cap at 80%+ confidence. This maps confidence directly to
+      // min→max dollar sizing. When maxPositionDollars is unset, the ceiling is 1.5×
+      // the base notional.
+      const baseNotional = Math.max(1, (account.equity * cfg.positionSizePct) / 100);
+      let notional: number;
+      if (cfg.dynamicSizing) {
         const minConf = cfg.minConfidence;
         const maxConf = 80;
-        const t = Math.min(1, (effectiveConfidence - minConf) / Math.max(1, maxConf - minConf));
-        scaledSizePct = cfg.positionSizePct * (1 + t * 0.5); // up to 1.5× at max conf
+        const t = Math.min(1, Math.max(0, (effectiveConfidence - minConf) / Math.max(1, maxConf - minConf)));
+        const maxNotional = cfg.maxPositionDollars ?? baseNotional * 1.5;
+        notional = baseNotional + t * (Math.max(maxNotional, baseNotional) - baseNotional);
+      } else {
+        notional = cfg.maxPositionDollars != null ? Math.min(baseNotional, cfg.maxPositionDollars) : baseNotional;
       }
-      const pctNotional = Math.max(1, (account.equity * scaledSizePct) / 100);
-      const dollarCap = cfg.maxPositionDollars ?? null;
-      const notional = dollarCap != null ? Math.min(pctNotional, dollarCap) : pctNotional;
       const qty = Math.floor(notional / price);
       if (qty < 1) continue;
 

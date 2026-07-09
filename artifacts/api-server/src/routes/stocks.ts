@@ -395,12 +395,22 @@ router.get("/stocks/bot/performance", async (_req, res) => {
       `) as unknown as Promise<{ rows: any[] }>,
     ]);
 
-    // Build cumulative equity curve from daily P&L rows
+    // Build cumulative equity curve from daily P&L rows.
+    // Always prepend a $0 anchor at the start of the current month so the
+    // chart visibly starts flat even before the first realized trade.
     let cum = 0;
-    const equityCurve = ((dailyRes as any).rows ?? []).map((r: any) => {
+    const dailyRows = (dailyRes as any).rows ?? [];
+    const tradePoints = dailyRows.map((r: any) => {
       cum += Number(r.daily_pnl) || 0;
       return { date: String(r.day), cumPnl: parseFloat(cum.toFixed(2)) };
     });
+    const anchorDate = new Date();
+    anchorDate.setDate(1);
+    const anchor = anchorDate.toISOString().slice(0, 10);
+    const firstDate = tradePoints.length > 0 ? tradePoints[0].date : null;
+    const equityCurve = firstDate && firstDate <= anchor
+      ? tradePoints
+      : [{ date: anchor, cumPnl: 0 }, ...tradePoints];
 
     const s = ((summaryRes as any).rows ?? [])[0] ?? {};
     const totalWins = Number(s.total_wins) || 0;
