@@ -222,9 +222,11 @@ router.put("/stocks/bot/config", requireAuth, async (req, res) => {
   const allowed: (keyof StockBotConfig)[] = [
     "enabled", "mode", "tradingModes", "positionSizePct", "maxConcurrentPositions",
     "maxDayPositions", "maxSwingPositions", "maxLongPositions", "dailyLossLimit",
-    "minConfidence", "stopLossPct", "targetGainPct", "swingMaxHoldDays",
-    "longMaxHoldDays", "earningsBlackout", "earningsBlackoutHours", "newsSensitivity",
-    "sectorFocus", "maxPositionDollars",
+    "minConfidence", "stopLossPct", "targetGainPct",
+    "dayStopLossPct", "dayTargetGainPct", "swingStopLossPct", "swingTargetGainPct", "longStopLossPct",
+    "swingMaxHoldDays", "longMaxHoldDays", "earningsBlackout", "earningsBlackoutHours",
+    "newsSensitivity", "sectorFocus", "maxPositionDollars",
+    "dynamicSizing", "minMarketCapBillion", "maxSectorPct",
   ];
   const partial: Partial<StockBotConfig> = {};
   for (const k of allowed) {
@@ -264,6 +266,36 @@ router.post("/stocks/bot/positions/:ticker/close", requireAuth, async (req, res)
 });
 
 // ---------- History / positions / P&L ----------
+
+/** Open bets from the DB — includes confidence, stop, target, signals. */
+router.get("/stocks/bot/bets/open", async (_req, res) => {
+  try {
+    const cfg = getConfig();
+    const rows = (await db.execute(sql`
+      SELECT id, ticker, trading_mode, confidence, signals, stop_loss, target_price,
+             peak_price, entry_price, notional, sector, created_at
+      FROM stock_bot_bets
+      WHERE action = 'buy' AND exited_at IS NULL AND mode = ${cfg.mode}
+      ORDER BY created_at DESC
+    `)) as unknown as { rows: any[] };
+    const bets = (rows.rows ?? []).map((r) => ({
+      id: String(r.id),
+      ticker: String(r.ticker),
+      tradingMode: r.trading_mode as string,
+      confidence: r.confidence != null ? Number(r.confidence) : null,
+      stopLoss: r.stop_loss != null ? Number(r.stop_loss) : null,
+      targetPrice: r.target_price != null ? Number(r.target_price) : null,
+      peakPrice: r.peak_price != null ? Number(r.peak_price) : null,
+      entryPrice: r.entry_price != null ? Number(r.entry_price) : null,
+      signals: r.signals ?? null,
+      sector: r.sector ?? null,
+      createdAt: r.created_at,
+    }));
+    res.json({ bets });
+  } catch {
+    res.status(500).json({ error: "Failed to load open bets" });
+  }
+});
 
 router.get("/stocks/bot/positions", async (_req, res) => {
   try {
@@ -322,6 +354,88 @@ router.get("/stocks/bot/history", async (req, res) => {
     res.json({ history });
   } catch {
     res.status(500).json({ error: "Failed to load history" });
+  }
+});
+
+router.get("/stocks/bot/performance", async (_req, res) => {
+  try {
+    const cfg = getConfig();
+    const [dailyRes, modeRes, summaryRes] = await Promise.all([
+      db.execute(sql`
+        SELECT
+          DATE(exited_at AT TIME ZONE 'America/New_York') AS day,
+          COALESCE(SUM(pnl), 0) AS daily_pnl
+        FROM stock_bot_bets
+        WHERE exited_at IS NOT NULL AND mode = ${cfg.mode} AND archived_at IS NULL
+        GROUP BY 1
+        ORDER BY 1 ASC
+      `) as unknown as Promise<{ rows: any[] }>,
+      db.execute(sql`
+        SELECT
+          trading_mode,
+          COUNT(*) FILTER (WHERE outcome = 'win')  AS wins,
+          COUNT(*) FILTER (WHERE outcome = 'loss') AS losses,
+          COALESCE(SUM(pnl), 0)                    AS total_pnl
+        FROM stock_bot_bets
+        WHERE exited_at IS NOT NULL AND mode = ${cfg.mode} AND archived_at IS NULL
+        GROUP BY 1
+      `) as unknown as Promise<{ rows: any[] }>,
+      db.execute(sql`
+        SELECT
+          COUNT(*)                                              AS total_trades,
+          COUNT(*) FILTER (WHERE outcome = 'win')              AS total_wins,
+          COUNT(*) FILTER (WHERE outcome = 'loss')             AS total_losses,
+          COALESCE(AVG(pnl) FILTER (WHERE outcome = 'win'),  0) AS avg_win,
+          COALESCE(AVG(pnl) FILTER (WHERE outcome = 'loss'), 0) AS avg_loss,
+          COALESCE(MAX(pnl), 0)                               AS best_trade,
+          COALESCE(MIN(pnl), 0)                               AS worst_trade,
+          COALESCE(SUM(pnl), 0)                               AS total_pnl
+        FROM stock_bot_bets
+        WHERE exited_at IS NOT NULL AND mode = ${cfg.mode} AND archived_at IS NULL
+      `) as unknown as Promise<{ rows: any[] }>,
+    ]);
+
+    // Build cumulative equity curve from daily P&L rows
+    let cum = 0;
+    const equityCurve = ((dailyRes as any).rows ?? []).map((r: any) => {
+      cum += Number(r.daily_pnl) || 0;
+      return { date: String(r.day), cumPnl: parseFloat(cum.toFixed(2)) };
+    });
+
+    const s = ((summaryRes as any).rows ?? [])[0] ?? {};
+    const totalWins = Number(s.total_wins) || 0;
+    const totalLosses = Number(s.total_losses) || 0;
+
+    const byMode: Record<string, { wins: number; losses: number; totalPnl: number }> = {
+      day: { wins: 0, losses: 0, totalPnl: 0 },
+      swing: { wins: 0, losses: 0, totalPnl: 0 },
+      long: { wins: 0, losses: 0, totalPnl: 0 },
+    };
+    for (const r of (modeRes as any).rows ?? []) {
+      if (r.trading_mode && byMode[r.trading_mode]) {
+        byMode[r.trading_mode] = {
+          wins: Number(r.wins) || 0,
+          losses: Number(r.losses) || 0,
+          totalPnl: parseFloat((Number(r.total_pnl) || 0).toFixed(2)),
+        };
+      }
+    }
+
+    res.json({
+      equityCurve,
+      summary: {
+        totalTrades: Number(s.total_trades) || 0,
+        winRate: totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) : 0,
+        avgWin: parseFloat((Number(s.avg_win) || 0).toFixed(2)),
+        avgLoss: parseFloat((Number(s.avg_loss) || 0).toFixed(2)),
+        bestTrade: parseFloat((Number(s.best_trade) || 0).toFixed(2)),
+        worstTrade: parseFloat((Number(s.worst_trade) || 0).toFixed(2)),
+        totalPnl: parseFloat((Number(s.total_pnl) || 0).toFixed(2)),
+      },
+      byMode,
+    });
+  } catch {
+    res.status(500).json({ error: "Failed to load performance data" });
   }
 });
 

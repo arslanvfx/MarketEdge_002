@@ -204,6 +204,11 @@ export interface StockBotConfig {
   minConfidence: number;
   stopLossPct: number;
   targetGainPct: number;
+  dayStopLossPct?: number;
+  dayTargetGainPct?: number;
+  swingStopLossPct?: number;
+  swingTargetGainPct?: number;
+  longStopLossPct?: number;
   swingMaxHoldDays: number;
   longMaxHoldDays: number;
   earningsBlackout: boolean;
@@ -212,6 +217,9 @@ export interface StockBotConfig {
   autoStartStop: boolean;
   sectorFocus: string[];
   maxPositionDollars: number | null;
+  dynamicSizing: boolean;
+  minMarketCapBillion: number;
+  maxSectorPct: number;
 }
 
 export interface AlpacaAccount {
@@ -239,6 +247,21 @@ export interface BotDecision {
   horizon: TradingMode | null;
   confidence: number | null;
   reason: string;
+  claudeReasoning?: string | null;
+}
+
+export interface BotPerformance {
+  equityCurve: { date: string; cumPnl: number }[];
+  summary: {
+    totalTrades: number;
+    winRate: number;
+    avgWin: number;
+    avgLoss: number;
+    bestTrade: number;
+    worstTrade: number;
+    totalPnl: number;
+  };
+  byMode: Record<"day" | "swing" | "long", { wins: number; losses: number; totalPnl: number }>;
 }
 
 export interface BotCycleStatus {

@@ -23,6 +23,12 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   minConfidence: 60,
   stopLossPct: 3,
   targetGainPct: 6,
+  // per-mode overrides start undefined (fall back to global)
+  dayStopLossPct: undefined,
+  dayTargetGainPct: undefined,
+  swingStopLossPct: undefined,
+  swingTargetGainPct: undefined,
+  longStopLossPct: undefined,
   swingMaxHoldDays: 5,
   longMaxHoldDays: 30,
   earningsBlackout: true,
@@ -31,6 +37,9 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   autoStartStop: true,
   sectorFocus: [],
   maxPositionDollars: null,
+  dynamicSizing: false,
+  minMarketCapBillion: 0,
+  maxSectorPct: 0,
 };
 
 let current: StockBotConfig = { ...DEFAULT_CONFIG };

@@ -62,6 +62,8 @@ export interface BotDecision {
   horizon: TradingMode | null;
   confidence: number | null;
   reason: string;
+  /** Claude research summary — populated for ENTER decisions in current session. */
+  claudeReasoning?: string | null;
 }
 
 const DECISION_LOG_MAX = 50;
@@ -293,20 +295,23 @@ async function managePositions(
       else if (nearClose || !marketOpen) reason = "eod_close";
       else if (heldMs >= maxHoldMs("day", cfg)) reason = "max_hold";
     } else if (bet.tradingMode === "swing") {
-      // Swing: +8% target / −4% stop (task-spec rules), plus max-hold days.
-      if (gainPct <= -SWING_STOP_PCT) reason = "swing_stop";
-      else if (gainPct >= SWING_TARGET_PCT) reason = "swing_target";
+      // Swing: target/stop from per-mode config with hardcoded fallback.
+      const swingStop = cfg.swingStopLossPct ?? SWING_STOP_PCT;
+      const swingTarget = cfg.swingTargetGainPct ?? SWING_TARGET_PCT;
+      if (gainPct <= -swingStop) reason = "swing_stop";
+      else if (gainPct >= swingTarget) reason = "swing_target";
       else if (bet.stopLoss != null && price <= bet.stopLoss) reason = "stop_loss";
       else if (heldMs >= maxHoldMs("swing", cfg)) reason = "max_hold";
     } else {
-      // Long: trailing −6% stop from peak + research re-rating each cycle.
+      // Long: trailing stop from per-mode config with hardcoded fallback.
+      const longTrailStop = cfg.longStopLossPct ?? LONG_TRAIL_STOP_PCT;
       const peak = Math.max(bet.peakPrice ?? bet.entryPrice, price);
       if (peak > (bet.peakPrice ?? 0)) await updatePeak(bet.id, peak);
       const drawdownPct = peak > 0 ? ((peak - price) / peak) * 100 : 0;
       const research = getCachedResearch(bet.ticker);
       if (research && research.confidence < LONG_MIN_RESEARCH_CONF) {
         reason = `research_downgrade (conf ${research.confidence})`;
-      } else if (drawdownPct >= LONG_TRAIL_STOP_PCT) {
+      } else if (drawdownPct >= longTrailStop) {
         reason = "trailing_stop";
       } else if (bet.stopLoss != null && price <= bet.stopLoss) {
         reason = "stop_loss";
@@ -574,6 +579,19 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       const price = signals.price;
       if (price <= 0) continue;
 
+      // Minimum market cap filter (graceful: skips only when data is present)
+      if (cfg.minMarketCapBillion > 0) {
+        const uniEntry = lookupUniverse(ticker) as any;
+        const mcap: number | null = uniEntry?.marketCap ?? null;
+        if (mcap != null && mcap < cfg.minMarketCapBillion * 1e9) {
+          recordDecision({
+            ticker, action: "SKIP", horizon: mode, confidence: null,
+            reason: `market cap below $${cfg.minMarketCapBillion}B threshold`,
+          });
+          continue;
+        }
+      }
+
       // Level 1 entry timing gate (fail-closed): tight spread + buy-side
       // dominant book are both required — missing quote data blocks entry.
       const quote = await getLevel1Quote(ticker);
@@ -599,14 +617,45 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         continue;
       }
 
-      const pctNotional = Math.max(1, (account.equity * cfg.positionSizePct) / 100);
+      // Dynamic sizing: scale position size proportionally to confidence
+      let scaledSizePct = cfg.positionSizePct;
+      if (cfg.dynamicSizing && effectiveConfidence > cfg.minConfidence) {
+        const minConf = cfg.minConfidence;
+        const maxConf = 80;
+        const t = Math.min(1, (effectiveConfidence - minConf) / Math.max(1, maxConf - minConf));
+        scaledSizePct = cfg.positionSizePct * (1 + t * 0.5); // up to 1.5× at max conf
+      }
+      const pctNotional = Math.max(1, (account.equity * scaledSizePct) / 100);
       const dollarCap = cfg.maxPositionDollars ?? null;
       const notional = dollarCap != null ? Math.min(pctNotional, dollarCap) : pctNotional;
       const qty = Math.floor(notional / price);
       if (qty < 1) continue;
 
-      const stopLoss = price * (1 - cfg.stopLossPct / 100);
-      const targetPrice = price * (1 + cfg.targetGainPct / 100);
+      // Sector concentration cap
+      if (cfg.maxSectorPct > 0 && sector) {
+        const totalBudget = open.reduce((s, b) => s + b.notional, 0);
+        if (totalBudget > 0) {
+          const sectorBudget = open.filter(b => b.sector === sector).reduce((s, b) => s + b.notional, 0);
+          const sectorPct = (sectorBudget / totalBudget) * 100;
+          if (sectorPct >= cfg.maxSectorPct) {
+            recordDecision({
+              ticker, action: "SKIP", horizon: mode, confidence: effectiveConfidence,
+              reason: `sector ${sector} at ${sectorPct.toFixed(0)}% ≥ cap ${cfg.maxSectorPct}%`,
+            });
+            continue;
+          }
+        }
+      }
+
+      // Per-mode stop/target (fall back to global if not set)
+      const stopPct = mode === "day" ? (cfg.dayStopLossPct ?? cfg.stopLossPct)
+        : mode === "swing" ? (cfg.swingStopLossPct ?? cfg.stopLossPct)
+        : (cfg.longStopLossPct ?? cfg.stopLossPct);
+      const targetPct = mode === "day" ? (cfg.dayTargetGainPct ?? cfg.targetGainPct)
+        : mode === "swing" ? (cfg.swingTargetGainPct ?? cfg.targetGainPct)
+        : cfg.targetGainPct;
+      const stopLoss = price * (1 - stopPct / 100);
+      const targetPrice = price * (1 + targetPct / 100);
       const features = buildFeatures(candles, news, earnings, getSectorMomentum(sector));
 
       let orderId: string | null = null;
@@ -659,6 +708,7 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         reason: research
           ? `research ${research.horizon} conf ${research.confidence} + technicals @ $${filledPrice.toFixed(2)}`
           : `technical signal @ $${filledPrice.toFixed(2)}`,
+        claudeReasoning: research?.summary ?? null,
       });
       logger.info(
         {

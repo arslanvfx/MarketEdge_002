@@ -141,8 +141,14 @@ export interface StockBotConfig {
   maxLongPositions: number;
   dailyLossLimit: number;        // $ loss before halting for the day
   minConfidence: number;         // 50-100 entry gate
-  stopLossPct: number;           // trailing/hard stop %
-  targetGainPct: number;         // take-profit target %
+  stopLossPct: number;           // global trailing/hard stop % (fallback)
+  targetGainPct: number;         // global take-profit target % (fallback)
+  // Per-mode stop/target overrides (undefined = fall back to global)
+  dayStopLossPct?: number;
+  dayTargetGainPct?: number;
+  swingStopLossPct?: number;
+  swingTargetGainPct?: number;
+  longStopLossPct?: number;
   swingMaxHoldDays: number;
   longMaxHoldDays: number;
   earningsBlackout: boolean;     // avoid entries within blackout window
@@ -151,4 +157,8 @@ export interface StockBotConfig {
   autoStartStop: boolean;        // auto-enable at market open, disable at close
   sectorFocus: string[];         // [] = all sectors; else restrict to these sectors
   maxPositionDollars: number | null; // null = no cap; otherwise min(%, $) sizing
+  // Advanced
+  dynamicSizing: boolean;        // scale position size by confidence (minConf→maxCap)
+  minMarketCapBillion: number;   // 0=any, 1, 5, 10 → filter micro-caps
+  maxSectorPct: number;          // 0=disabled; max % of open budget in one sector
 }
