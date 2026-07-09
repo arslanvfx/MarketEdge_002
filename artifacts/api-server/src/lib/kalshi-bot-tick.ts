@@ -28,6 +28,7 @@ import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
+  fetchLiveDirection,
   getLatestCoinSignals,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
@@ -738,21 +739,39 @@ async function _runBotTick(
     }
   }
 
-  // ── Choppy-market late-entry + proximity gates ───────────────────────────
-  // In windows tagged as "choppy" by the stability analyser two additional
-  // guards raise the bar before a bet fires:
-  //   1. Minimum minutes elapsed — wait for early candles to establish a
-  //      directional bias (choppyMinEntryMinutes, default 5).  Entering at
-  //      minute 1–2 in a choppy window produces a ~28% win rate; waiting
-  //      until minute 5+ gives price action time to commit to a side.
-  //   2. Price-side proximity — the live coin price must already be on the
-  //      correct side of the Kalshi target by at least choppyProximityPct%
-  //      (default 0.20%).  A YES call with the price sitting below the target
-  //      at minute 5 has historically produced 0% wins in live data.
-  // Both gates are bypassed in freeRunMode.
+  // ── Choppy-market late-entry + signal-refresh + proximity gates ──────────
+  // In windows tagged as "choppy" three additional guards apply:
+  //
+  //   1. Time gate (choppyMinEntryMinutes, default 5): hold back entry until
+  //      the market has had time to establish a directional bias.  Entering
+  //      at minute 1–2 in choppy conditions produces a ~28% win rate.
+  //
+  //   2. Signal refresh: once past the time gate, explicitly refresh Claude's
+  //      direction before reading any signals.
+  //      • Stat is always live — re-computes from predCache (~30s cadence).
+  //      • ML is always live — infers from predCache inline every call.
+  //      • Claude is only as fresh as the last liveDirectionCache write.
+  //        At window-open that cache is populated (minute 0); its TTL is 5
+  //        minutes.  At minute 5+ it is expired.  fetchLiveDirection(sym, false)
+  //        triggers a fresh (cheap) Claude call when the cache is stale, then
+  //        writes the result into liveDirectionCache so the next
+  //        getLatestCoinSignals call reads it automatically.
+  //      If the refresh shows Claude has flipped direction since makeBotDecision
+  //      ran (which saw the pre-refresh, potentially 5-min-old opening call),
+  //      return without a skip record — the next 15s tick will re-run
+  //      makeBotDecision with the now-fresh cached direction and produce the
+  //      correct decision automatically.
+  //
+  //   3. Proximity gate (choppyProximityPct, default 0.20%): after confirming
+  //      the refreshed direction, the live price must be on the correct side
+  //      of the Kalshi target by at least this margin.
+  //
+  // All three gates are bypassed in freeRunMode.
   if (!S.config.freeRunMode) {
     const trendStability = windowStabilityCache.get(sym) ?? null;
     if (trendStability === "choppy") {
+
+      // ── Gate 1: Time ──────────────────────────────────────────────────────
       const choppyMinMin = S.config.choppyMinEntryMinutes ?? 5;
       if (choppyMinMin > 0 && minutesElapsed < choppyMinMin) {
         logger.info(
@@ -761,6 +780,39 @@ async function _runBotTick(
         );
         return;
       }
+
+      // ── Gate 2: Pre-entry signal refresh (Claude) ─────────────────────────
+      // Stat and ML are always current (predCache, ~30s).  Claude needs an
+      // explicit nudge once the 5-min liveDirectionCache TTL has expired.
+      try {
+        await fetchLiveDirection(sym, false);
+      } catch {
+        // non-fatal — fall through with the most recent cached Claude signal
+      }
+      // Re-read ALL signals post-refresh.  Stat and ML were already live;
+      // Claude is now current from the call above (or the unexpired cache).
+      const freshSignals = getLatestCoinSignals(sym);
+      const betAbove = direction === "yes"; // true = expecting close above target
+      if (
+        freshSignals.claudeEnabled &&
+        freshSignals.claudeAbove !== null &&
+        freshSignals.claudeAbove !== betAbove
+      ) {
+        logger.info(
+          {
+            sym, direction, betAbove,
+            freshClaude: freshSignals.claudeAbove,
+            freshStat:   freshSignals.statAbove,
+            freshML:     freshSignals.mlAbove,
+          },
+          "[kalshi-bot] choppy window: Claude direction flipped after pre-entry refresh — deferring to next tick",
+        );
+        // Do NOT persist a skip record — we just need to re-evaluate on the
+        // next tick, which will call makeBotDecision with the freshened cache.
+        return;
+      }
+
+      // ── Gate 3: Proximity ─────────────────────────────────────────────────
       const choppyProxPct = S.config.choppyProximityPct ?? 0.20;
       const choppyLivePrice = getCachedPrediction(sym)?.price ?? null;
       if (choppyLivePrice != null && kalshiTarget > 0) {
