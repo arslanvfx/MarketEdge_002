@@ -464,6 +464,11 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
 
   if (open.length >= cfg.maxConcurrentPositions) return 0;
 
+  // Track sector exposures added in this cycle so that intra-cycle multi-entry
+  // concentration is accounted for (open was captured before the loop).
+  const cycleSectorNotional = new Map<string, number>();
+  let cycleTotalNotional = 0;
+
   const { candidates: allCandidates, scannerByTicker } = await entryCandidates(cfg);
 
   // Sector focus filter: if sectorFocus is non-empty, only consider tickers in
@@ -653,22 +658,28 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       const qty = Math.floor(notional / price);
       if (qty < 1) continue;
 
-      // Sector concentration cap — evaluated as post-entry projection so that
-      // a new trade that would push sector share over the cap is blocked.
+      // Sector concentration cap.
+      // We use the combined deployed capital (pre-existing open bets + entries
+      // already made this cycle) as the effective portfolio basis. When that basis
+      // is zero (empty portfolio, first entry of the cycle), we skip the check —
+      // a single first position cannot be "over-concentrated" relative to an empty
+      // book, and the cap is only meaningful once there is a portfolio to diversify.
       if (cfg.maxSectorPct > 0 && sector) {
         const proposedNotional = qty * price;
         const existingTotal = open.reduce((s, b) => s + b.notional, 0);
-        const existingSector = open.filter(b => b.sector === sector).reduce((s, b) => s + b.notional, 0);
-        const projectedTotal = existingTotal + proposedNotional;
-        const projectedSectorPct = projectedTotal > 0
-          ? ((existingSector + proposedNotional) / projectedTotal) * 100
-          : 0;
-        if (projectedSectorPct > cfg.maxSectorPct) {
-          recordDecision({
-            ticker, action: "SKIP", horizon: mode, confidence: effectiveConfidence,
-            reason: `sector ${sector} would reach ${projectedSectorPct.toFixed(0)}% > cap ${cfg.maxSectorPct}%`,
-          });
-          continue;
+        const effectiveTotal = existingTotal + cycleTotalNotional;
+        if (effectiveTotal > 0) {
+          const existingSector = open.filter(b => b.sector === sector).reduce((s, b) => s + b.notional, 0);
+          const cycleSector = cycleSectorNotional.get(sector) ?? 0;
+          const projectedTotal = effectiveTotal + proposedNotional;
+          const projectedSectorPct = ((existingSector + cycleSector + proposedNotional) / projectedTotal) * 100;
+          if (projectedSectorPct > cfg.maxSectorPct) {
+            recordDecision({
+              ticker, action: "SKIP", horizon: mode, confidence: effectiveConfidence,
+              reason: `sector ${sector} would reach ${projectedSectorPct.toFixed(0)}% > cap ${cfg.maxSectorPct}%`,
+            });
+            continue;
+          }
         }
       }
 
@@ -728,6 +739,11 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       entries++;
       modeCounts[mode] = (modeCounts[mode] ?? 0) + 1;
       held.add(heldKey(ticker, mode));
+      // Update cycle-level sector tracking so subsequent candidates in this
+      // same cycle see an accurate concentration picture.
+      const filledNotional = qty * filledPrice;
+      cycleTotalNotional += filledNotional;
+      if (sector) cycleSectorNotional.set(sector, (cycleSectorNotional.get(sector) ?? 0) + filledNotional);
       recordDecision({
         ticker, action: "ENTER", horizon: mode, confidence: effectiveConfidence,
         reason: research
