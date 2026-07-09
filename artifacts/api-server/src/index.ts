@@ -336,6 +336,12 @@ async function runStockMigrations(): Promise<void> {
         ON stock_research_reports (ticker, created_at DESC)
     `);
     await client.query(`
+      ALTER TABLE stock_research_reports ADD COLUMN IF NOT EXISTS stance TEXT
+    `);
+    await client.query(`
+      ALTER TABLE stock_research_reports ADD COLUMN IF NOT EXISTS valuation TEXT
+    `);
+    await client.query(`
       ALTER TABLE stock_bot_bets ADD COLUMN IF NOT EXISTS peak_price NUMERIC(14,4)
     `);
     await client.query(`

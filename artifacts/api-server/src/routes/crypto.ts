@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { getAuth } from "@clerk/express";
 import { getAiSpendLevel, setAiSpendLevel, AI_SPEND_LABELS, isAiFeatureEnabled, type AiSpendLevel } from "../lib/ai-spend";
 import {
   fetchCryptoPredictions,
@@ -512,7 +513,23 @@ router.get("/crypto/ai-spend", (_req, res) => {
   res.json({ level, labels: AI_SPEND_LABELS });
 });
 
-router.post("/crypto/ai-spend", (req, res) => {
+// Admin guard (same pattern as bot control routes): requires a signed-in
+// Clerk user; if BOT_ADMIN_CLERK_USER_ID is set, only that user may mutate.
+function requireAdmin(req: any, res: any, next: any) {
+  const auth = getAuth(req);
+  if (!auth?.userId) {
+    res.status(401).json({ error: "Unauthorized — must be signed in to change AI spend" });
+    return;
+  }
+  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
+  if (adminId && auth.userId !== adminId) {
+    res.status(403).json({ error: "Forbidden — not authorized to change AI spend" });
+    return;
+  }
+  next();
+}
+
+router.post("/crypto/ai-spend", requireAdmin, (req, res) => {
   const { level } = req.body as { level?: string };
   if (level !== "off" && level !== "eco" && level !== "balanced" && level !== "max") {
     res.status(400).json({ error: "level must be off | eco | balanced | max" });

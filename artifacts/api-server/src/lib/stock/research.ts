@@ -17,7 +17,7 @@ import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { logger } from "../logger";
 import { getScoredNews } from "./news";
 import { getEarnings, getLatestEarningsSurprise } from "./earnings";
-import type { NewsItem, ResearchHorizon, ResearchReport } from "./types";
+import type { NewsItem, ResearchHorizon, ResearchReport, ResearchStance } from "./types";
 
 const RESEARCH_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 8192;
@@ -79,27 +79,63 @@ function rowToReport(r: any): ResearchReport {
     const f = typeof r.factors_json === "string" ? JSON.parse(r.factors_json) : r.factors_json;
     if (f && Array.isArray(f.bull) && Array.isArray(f.bear)) factors = f;
   } catch { /* keep empty */ }
+  const confidence = Number(r.confidence) || 0;
   return {
     ticker: r.ticker,
     companyName: r.company_name ?? r.ticker,
     sector: r.sector ?? "Other",
     horizon: (["day", "swing", "long"].includes(r.horizon) ? r.horizon : "swing") as ResearchHorizon,
-    confidence: Number(r.confidence) || 0,
+    stance: normalizeStance(r.stance, confidence),
+    confidence,
     summary: r.summary ?? "",
     bullFactors: factors.bull,
     bearFactors: factors.bear,
+    valuation: r.valuation ?? "",
     price: r.price != null ? Number(r.price) : null,
     webSearchUsed: !!r.web_search_used,
     createdAt: new Date(r.created_at).toISOString(),
   };
 }
 
+/**
+ * Normalize a stored/parsed stance. Legacy rows (pre-stance) fall back to a
+ * confidence-derived stance so old reports still sort into the right list.
+ */
+export function normalizeStance(raw: unknown, confidence: number): ResearchStance {
+  if (raw === "buy_now" || raw === "buy" || raw === "watch" || raw === "avoid") return raw;
+  if (confidence >= 80) return "buy_now";
+  if (confidence >= 60) return "buy";
+  if (confidence >= 40) return "watch";
+  return "avoid";
+}
+
+export interface ResearchLists {
+  /** Top 20 highest-conviction immediate buys (stance buy_now/buy, confidence-sorted). */
+  topBuys: ResearchReport[];
+  /** Stocks Claude says to stay away from or sell. */
+  avoid: ResearchReport[];
+  /** Everything researched, confidence-sorted (the full "best in market" list). */
+  all: ResearchReport[];
+}
+
+/** Build the actionable lists from the latest report per ticker. */
+export async function getResearchLists(): Promise<ResearchLists> {
+  const all = await getLatestReports(500);
+  const topBuys = all
+    .filter((r) => r.stance === "buy_now" || r.stance === "buy")
+    .slice(0, 20);
+  const avoid = all
+    .filter((r) => r.stance === "avoid")
+    .sort((a, b) => a.confidence - b.confidence);
+  return { topBuys, avoid, all };
+}
+
 /** Latest report per ticker (one row each), newest first. */
 export async function getLatestReports(limit = 100): Promise<ResearchReport[]> {
   const res = (await db.execute(sql`
     SELECT DISTINCT ON (ticker)
-      ticker, company_name, sector, horizon, confidence, summary, factors_json,
-      price, web_search_used, created_at
+      ticker, company_name, sector, horizon, stance, confidence, summary, factors_json,
+      valuation, price, web_search_used, created_at
     FROM stock_research_reports
     ORDER BY ticker, created_at DESC
   `)) as unknown as { rows: any[] };
@@ -112,8 +148,8 @@ export async function getLatestReports(limit = 100): Promise<ResearchReport[]> {
 /** Full report history for one ticker, newest first. */
 export async function getReportsForTicker(ticker: string, limit = 10): Promise<ResearchReport[]> {
   const res = (await db.execute(sql`
-    SELECT ticker, company_name, sector, horizon, confidence, summary, factors_json,
-           price, web_search_used, created_at
+    SELECT ticker, company_name, sector, horizon, stance, confidence, summary, factors_json,
+           valuation, price, web_search_used, created_at
     FROM stock_research_reports
     WHERE ticker = ${ticker.toUpperCase()}
     ORDER BY created_at DESC
@@ -127,8 +163,8 @@ export async function initResearchFromDB(): Promise<void> {
   try {
     const res = (await db.execute(sql`
       SELECT DISTINCT ON (ticker)
-        ticker, company_name, sector, horizon, confidence, summary, factors_json,
-        price, web_search_used, created_at
+        ticker, company_name, sector, horizon, stance, confidence, summary, factors_json,
+        valuation, price, web_search_used, created_at
       FROM stock_research_reports
       WHERE created_at >= date_trunc('day', NOW())
       ORDER BY ticker, created_at DESC
@@ -149,12 +185,12 @@ export async function initResearchFromDB(): Promise<void> {
 async function persistReport(rep: ResearchReport): Promise<void> {
   await db.execute(sql`
     INSERT INTO stock_research_reports
-      (ticker, company_name, sector, horizon, confidence, summary, factors_json,
-       price, web_search_used, created_at)
+      (ticker, company_name, sector, horizon, stance, confidence, summary, factors_json,
+       valuation, price, web_search_used, created_at)
     VALUES
-      (${rep.ticker}, ${rep.companyName}, ${rep.sector}, ${rep.horizon}, ${rep.confidence},
+      (${rep.ticker}, ${rep.companyName}, ${rep.sector}, ${rep.horizon}, ${rep.stance}, ${rep.confidence},
        ${rep.summary}, ${JSON.stringify({ bull: rep.bullFactors, bear: rep.bearFactors })}::jsonb,
-       ${rep.price}, ${rep.webSearchUsed}, NOW())
+       ${rep.valuation}, ${rep.price}, ${rep.webSearchUsed}, NOW())
   `);
 }
 
@@ -195,7 +231,7 @@ function buildPrompt(ticker: string, ctx: ResearchTechContext, news: NewsItem[],
     .map((n) => `- [${n.publishedAt?.slice(0, 10) ?? "?"}] "${n.headline}"${n.sentiment ? ` (${n.sentiment})` : ""}`)
     .join("\n") || "- (no recent news on file)";
 
-  return `You are an elite equity research analyst deciding whether ${ticker} (${ctx.companyName}, ${ctx.sector}) is a high-potential LONG opportunity right now, and on what horizon.
+  return `You are an elite equity research analyst deciding whether ${ticker} (${ctx.companyName}, ${ctx.sector}) is a high-potential LONG opportunity right now, and on what horizon. Real money follows your verdict — the owner hates losing money, so be decisive and honest: a clear AVOID on a weak stock is as valuable as a strong buy call.
 
 TECHNICAL SNAPSHOT:
 - Price: $${ctx.price.toFixed(2)} (${ctx.changePct >= 0 ? "+" : ""}${ctx.changePct.toFixed(2)}% today)
@@ -206,17 +242,23 @@ ${extra.length ? extra.join("\n") + "\n" : ""}
 RECENT NEWS ON FILE:
 ${newsLines}
 
-${webSearchSupported ? `Use web search to check the latest on: "${ticker} stock news analyst rating ${monthYear}" — recent analyst upgrades/downgrades, earnings surprises, and sector catalysts. Limit yourself to at most 2 searches.` : "Base your judgment on the data above only."}
+${webSearchSupported ? `Use web search (at most 3 searches) to verify: (1) "${ticker} stock news analyst rating ${monthYear}" — recent analyst upgrades/downgrades, earnings surprises, sector catalysts; (2) "${ticker} valuation P/E revenue growth ${monthYear}" — current fundamentals: valuation vs peers, revenue/EPS growth, margins, debt. Ground your verdict in BOTH technicals and fundamentals.` : "Base your judgment on the data above only."}
 
 Classify the SINGLE best trading horizon for a long position:
 - "day": strong intraday momentum setup (volume surge, catalyst today)
 - "swing": 2–10 day setup (trend alignment, upcoming catalyst, analyst momentum)
 - "long": multi-week/month accumulation (undervalued vs trend, durable catalysts)
 
-Then respond with ONLY this JSON (no prose before or after):
-{"horizon":"day"|"swing"|"long","confidence":0-100,"bullFactors":["3 specific bullish factors"],"bearFactors":["2 specific bearish risks"],"summary":"2-3 sentence thesis citing specifics"}
+Give an actionable stance:
+- "buy_now": exceptional setup — technicals AND fundamentals aligned, buy immediately
+- "buy": solid setup worth entering on this horizon
+- "watch": interesting but wait for a better entry or confirmation
+- "avoid": stay away or sell — deteriorating technicals, overvaluation, or negative catalysts
 
-Confidence rubric: 80+ exceptional conviction, 60-79 solid setup, 40-59 mixed, <40 avoid. Be skeptical — most stocks deserve <60.`;
+Then respond with ONLY this JSON (no prose before or after):
+{"horizon":"day"|"swing"|"long","stance":"buy_now"|"buy"|"watch"|"avoid","confidence":0-100,"bullFactors":["3 specific bullish factors"],"bearFactors":["2 specific bearish risks"],"valuation":"1-2 sentences on fundamentals: valuation vs peers, growth, balance sheet","summary":"2-3 sentence thesis citing specifics"}
+
+Confidence rubric: 80+ exceptional conviction, 60-79 solid setup, 40-59 mixed, <40 weak. Be skeptical — most stocks deserve <60 and "watch" or "avoid". Reserve "buy_now" for the truly exceptional.`;
 }
 
 async function researchOne(
@@ -251,7 +293,7 @@ async function researchOne(
       max_tokens: MAX_TOKENS,
       messages: [{ role: "user", content: prompt }],
       ...(useTools
-        ? { tools: [{ type: "web_search_20250305" as const, name: "web_search" as const, max_uses: 2 }] }
+        ? { tools: [{ type: "web_search_20250305" as const, name: "web_search" as const, max_uses: 3 }] }
         : {}),
     });
 
@@ -278,9 +320,11 @@ async function researchOne(
     .join("\n");
   const parsed = JSON.parse(extractJson(text)) as {
     horizon?: string;
+    stance?: string;
     confidence?: number;
     bullFactors?: unknown;
     bearFactors?: unknown;
+    valuation?: string;
     summary?: string;
   };
 
@@ -289,15 +333,18 @@ async function researchOne(
   const toStrings = (v: unknown, max: number): string[] =>
     Array.isArray(v) ? v.filter((x) => typeof x === "string").map((s) => s.slice(0, 300)).slice(0, max) : [];
 
+  const confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence ?? 0)));
   const rep: ResearchReport = {
     ticker: T,
     companyName: ctx.companyName,
     sector: ctx.sector,
     horizon,
-    confidence: Math.max(0, Math.min(100, Math.round(parsed.confidence ?? 0))),
+    stance: normalizeStance(parsed.stance, confidence),
+    confidence,
     summary: typeof parsed.summary === "string" ? parsed.summary.slice(0, 800) : "",
     bullFactors: toStrings(parsed.bullFactors, 4),
     bearFactors: toStrings(parsed.bearFactors, 3),
+    valuation: typeof parsed.valuation === "string" ? parsed.valuation.slice(0, 600) : "",
     price: ctx.price > 0 ? ctx.price : null,
     webSearchUsed: usedWebSearch,
     createdAt: new Date().toISOString(),

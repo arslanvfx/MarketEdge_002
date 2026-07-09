@@ -8,7 +8,7 @@ import { getAuth } from "@clerk/express";
 import { alpacaConfigured, getAccount, getPositions } from "../lib/stock/alpaca";
 import { getConfig, saveConfig } from "../lib/stock/config";
 import { getScannerResults, runScan, lastScanTime, getScanProgress } from "../lib/stock/scanner";
-import { getLatestReports, getReportsForTicker, getResearchStatus, getResearchProgress } from "../lib/stock/research";
+import { getLatestReports, getReportsForTicker, getResearchStatus, getResearchProgress, getResearchLists } from "../lib/stock/research";
 import { getUniverseStatus } from "../lib/stock/market-universe";
 import { getScoredNews } from "../lib/stock/news";
 import { getEarnings } from "../lib/stock/earnings";
@@ -87,6 +87,15 @@ router.get("/stocks/research", async (_req, res) => {
     res.json({ reports, running, ready, progress: getResearchProgress() });
   } catch {
     res.status(500).json({ error: "Failed to load research reports" });
+  }
+});
+
+router.get("/stocks/research/lists", async (_req, res) => {
+  try {
+    const lists = await getResearchLists();
+    res.json(lists);
+  } catch {
+    res.status(500).json({ error: "Failed to build research lists" });
   }
 });
 

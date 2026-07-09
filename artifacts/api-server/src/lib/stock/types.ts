@@ -78,15 +78,21 @@ export interface StockSignals {
 
 export type ResearchHorizon = "day" | "swing" | "long";
 
+/** Claude's actionable verdict on a researched stock. */
+export type ResearchStance = "buy_now" | "buy" | "watch" | "avoid";
+
 export interface ResearchReport {
   ticker: string;
   companyName: string;
   sector: string;
   horizon: ResearchHorizon;
+  stance: ResearchStance;
   confidence: number; // 0-100
   summary: string;
   bullFactors: string[];
   bearFactors: string[];
+  /** 1-2 sentence financials/valuation assessment (P/E vs peers, growth, balance sheet). */
+  valuation: string;
   price: number | null;
   webSearchUsed: boolean;
   createdAt: string;

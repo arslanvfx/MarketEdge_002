@@ -228,7 +228,12 @@ async function managePositions(
     const gainPct = bet.entryPrice > 0 ? ((price - bet.entryPrice) / bet.entryPrice) * 100 : 0;
     let reason: string | null = null;
 
-    if (bet.tradingMode === "day") {
+    // Claude stance override: today's research says stay away / sell → exit
+    // swing & long positions (day trades are already flattened intraday).
+    const stanceRep = bet.tradingMode !== "day" ? getCachedResearch(bet.ticker) : undefined;
+    if (stanceRep?.stance === "avoid") {
+      reason = "research_avoid (Claude: stay away/sell)";
+    } else if (bet.tradingMode === "day") {
       // Day trades: hard stop/target if set, forced flat 15 min before close.
       if (bet.stopLoss != null && price <= bet.stopLoss) reason = "stop_loss";
       else if (bet.targetPrice != null && price >= bet.targetPrice) reason = "target";
@@ -408,6 +413,16 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
   for (const cand of candidates) {
     if (open.length + entries >= cfg.maxConcurrentPositions) break;
     const ticker = cand.ticker;
+
+    // Claude stance gate: never enter a stock on today's stay-away/sell list.
+    if (cand.report?.stance === "avoid") {
+      recordDecision({
+        ticker, action: "SKIP", horizon: cand.horizon,
+        confidence: cand.report.confidence,
+        reason: "Claude research stance: avoid (stay away/sell)",
+      });
+      continue;
+    }
 
     // Resolve which horizon this entry would use. Research-driven candidates
     // use their recommended horizon; flexible candidates take the first active

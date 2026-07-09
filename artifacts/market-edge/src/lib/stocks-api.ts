@@ -145,18 +145,30 @@ export interface StockAnalysis {
 
 export type ResearchHorizon = TradingMode;
 
+/** Claude's actionable verdict on a researched stock. */
+export type ResearchStance = "buy_now" | "buy" | "watch" | "avoid";
+
 export interface ResearchReport {
   ticker: string;
   companyName: string;
   sector: string;
   horizon: ResearchHorizon;
+  stance: ResearchStance;
   confidence: number;      // 0-100 conviction in the upside thesis
   bullFactors: string[];
   bearFactors: string[];
+  /** Financials/valuation assessment (P/E vs peers, growth, balance sheet). */
+  valuation: string;
   summary: string;
   price: number | null;
   webSearchUsed: boolean;
   createdAt: string;
+}
+
+export interface ResearchLists {
+  topBuys: ResearchReport[];
+  avoid: ResearchReport[];
+  all: ResearchReport[];
 }
 
 export interface ResearchProgress {
