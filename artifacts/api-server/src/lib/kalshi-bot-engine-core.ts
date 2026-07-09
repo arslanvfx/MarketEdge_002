@@ -1156,13 +1156,14 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // SOL/DOGE/XRP ML accuracy sits at ~59-60%, just under the global 65% gate.
   // Lower per-coin floors so they qualify for PATH A at their realistic confidence range.
   mlPrimaryMinConfidenceOverrides: { SOL: 60, DOGE: 62, XRP: 60 },
-  // Loss-learning adaptive filters (Task #338)
-  coinStreakPenalty1LossPp: 6,
-  coinStreakPenalty2PlusLossPp: 12,
+  // Loss-learning adaptive filters — loosened since choppy-market gates now
+  // block the misaligned bets that caused most directional / streak losses.
+  coinStreakPenalty1LossPp: 3,
+  coinStreakPenalty2PlusLossPp: 6,
   unanimousMinModelConfidence: 57,
   directionalRegressionLookback: 3,
-  directionalRegressionThreshold: 0.35,
-  directionalRegressionPenaltyPp: 10,
+  directionalRegressionThreshold: 0.25,
+  directionalRegressionPenaltyPp: 5,
   // Choppy-market late-entry gates — wait for direction to establish in noisy windows.
   choppyMinEntryMinutes: 5,
   choppyProximityPct: 0.20,
