@@ -143,13 +143,13 @@ export interface StockBotConfig {
   minConfidence: number;         // 50-100 entry gate
   stopLossPct: number;           // global trailing/hard stop % (fallback)
   targetGainPct: number;         // global take-profit target % (fallback)
-  // Per-mode stop/target overrides (undefined = fall back to global)
-  dayStopLossPct?: number;
-  dayTargetGainPct?: number;
-  swingStopLossPct?: number;
-  swingTargetGainPct?: number;
-  longStopLossPct?: number;
-  longTargetGainPct?: number;
+  // Per-mode stop/target overrides (null = fall back to global)
+  dayStopLossPct: number | null;
+  dayTargetGainPct: number | null;
+  swingStopLossPct: number | null;
+  swingTargetGainPct: number | null;
+  longStopLossPct: number | null;
+  longTargetGainPct: number | null;
   swingMaxHoldDays: number;
   longMaxHoldDays: number;
   earningsBlackout: boolean;     // avoid entries within blackout window

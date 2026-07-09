@@ -23,13 +23,13 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   minConfidence: 60,
   stopLossPct: 3,
   targetGainPct: 6,
-  // per-mode overrides start undefined (fall back to global)
-  dayStopLossPct: undefined,
-  dayTargetGainPct: undefined,
-  swingStopLossPct: undefined,
-  swingTargetGainPct: undefined,
-  longStopLossPct: undefined,
-  longTargetGainPct: undefined,
+  // per-mode overrides: null = fall back to global (null serializes; undefined is omitted by JSON.stringify)
+  dayStopLossPct: null,
+  dayTargetGainPct: null,
+  swingStopLossPct: null,
+  swingTargetGainPct: null,
+  longStopLossPct: null,
+  longTargetGainPct: null,
   swingMaxHoldDays: 5,
   longMaxHoldDays: 30,
   earningsBlackout: true,
@@ -53,6 +53,10 @@ export function setConfigInMemory(cfg: StockBotConfig): void {
   current = cfg;
 }
 
+// Keys that must always be present in the stored jsonb blob.
+// If any are missing from an existing row, the row is backfilled on startup.
+const REQUIRED_KEYS = Object.keys(DEFAULT_CONFIG) as (keyof StockBotConfig)[];
+
 export async function loadConfigFromDB(): Promise<StockBotConfig> {
   try {
     const res = (await db.execute(sql`
@@ -62,6 +66,20 @@ export async function loadConfigFromDB(): Promise<StockBotConfig> {
     if (row?.config) {
       const parsed = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
       current = { ...DEFAULT_CONFIG, ...parsed };
+
+      // Backfill: if the stored blob is missing any required key, persist the
+      // merged config so all keys (including new null-valued ones) are stored.
+      const needsBackfill = REQUIRED_KEYS.some((k) => !(k in parsed));
+      if (needsBackfill) {
+        logger.info("[stock-bot] backfilling config with new default keys");
+        await db.execute(sql`
+          INSERT INTO stock_bot_config (id, config, updated_at)
+          VALUES (${CONFIG_ID}, ${JSON.stringify(current)}::jsonb, NOW())
+          ON CONFLICT (id) DO UPDATE SET
+            config = ${JSON.stringify(current)}::jsonb,
+            updated_at = NOW()
+        `);
+      }
     }
   } catch (err) {
     logger.warn({ err }, "[stock-bot] config load failed (non-fatal)");
