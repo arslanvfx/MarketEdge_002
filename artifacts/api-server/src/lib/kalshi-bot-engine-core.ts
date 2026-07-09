@@ -997,6 +997,21 @@ export interface BotConfig {
   directionalRegressionLookback?: number;    // windows to inspect (default 3)
   directionalRegressionThreshold?: number;   // win rate floor; below this fires the penalty (default 0.35)
   directionalRegressionPenaltyPp?: number;   // pp penalty (default 10)
+
+  // ── Choppy-market late-entry gates ──────────────────────────────────────
+  // When the window's trend stability is tagged as "choppy", these two gates
+  // work together to require a confirmed directional bias before entering:
+  //   1. choppyMinEntryMinutes: defer entry until at least this many minutes
+  //      have elapsed (default 5). Price action needs time to commit in choppy
+  //      conditions.  Set to 0 to disable the time gate entirely.
+  //   2. choppyProximityPct: the live crypto price must already be on the
+  //      correct side of the Kalshi target by at least this many percent.
+  //      YES bet needs price ≥ target × (1 + pct/100).
+  //      NO  bet needs price ≤ target × (1 − pct/100).
+  //      Set to 0 to require only that price is on the correct side (any margin).
+  // Both gates are skipped in freeRunMode.
+  choppyMinEntryMinutes?: number; // minutes (default 5; 0 = disabled)
+  choppyProximityPct?: number;    // % distance from target required (default 0.20; 0 = direction-only)
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1163,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   directionalRegressionLookback: 3,
   directionalRegressionThreshold: 0.35,
   directionalRegressionPenaltyPp: 10,
+  // Choppy-market late-entry gates — wait for direction to establish in noisy windows.
+  choppyMinEntryMinutes: 5,
+  choppyProximityPct: 0.20,
 };
 
 /**

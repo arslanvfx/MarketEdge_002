@@ -813,6 +813,57 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </select>
                 </label>
 
+                {/* Choppy-Market Entry Gates */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5 pt-1">
+                    <Activity className="w-3 h-3" />
+                    Choppy-Market Entry Gates
+                  </span>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    When the window is tagged "choppy", hold back entry until price has committed to a direction.
+                    In live data, choppy windows produce only a 28% win rate at minute 1–2 vs. 50%+ when price
+                    has clearly crossed the Kalshi target.
+                  </span>
+                </label>
+
+                {/* Choppy Min Entry Minutes */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Choppy Min Entry — {merged.choppyMinEntryMinutes ?? 5} min {(merged.choppyMinEntryMinutes ?? 5) === 0 ? "(disabled)" : ""}
+                  </span>
+                  <input
+                    type="range" min={0} max={10} step={1}
+                    value={merged.choppyMinEntryMinutes ?? 5}
+                    onChange={e => setConfigDraft(d => ({ ...d, choppyMinEntryMinutes: parseInt(e.target.value) }))}
+                    className="w-full accent-orange-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0 (off)</span><span>5 min (default)</span><span>10 min</span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    In choppy windows, don't enter until this many minutes have elapsed. Gives the market time to establish direction before committing.
+                  </span>
+                </label>
+
+                {/* Choppy Proximity Pct */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Choppy Proximity — {((merged.choppyProximityPct ?? 0.20)).toFixed(2)}% from strike {(merged.choppyProximityPct ?? 0.20) === 0 ? "(direction only)" : ""}
+                  </span>
+                  <input
+                    type="range" min={0} max={1.0} step={0.05}
+                    value={merged.choppyProximityPct ?? 0.20}
+                    onChange={e => setConfigDraft(d => ({ ...d, choppyProximityPct: parseFloat(e.target.value) }))}
+                    className="w-full accent-orange-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-muted-foreground/60">
+                    <span>0% (side only)</span><span>0.20% (default)</span><span>1.0%</span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-tight">
+                    In choppy windows, price must be this far past the Kalshi target on the correct side. YES needs price ≥ target + X%; NO needs price ≤ target − X%.
+                  </span>
+                </label>
+
                 {/* Window Monitor Readiness Gate */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Window Monitor Ready Gate</span>

@@ -738,6 +738,60 @@ async function _runBotTick(
     }
   }
 
+  // ── Choppy-market late-entry + proximity gates ───────────────────────────
+  // In windows tagged as "choppy" by the stability analyser two additional
+  // guards raise the bar before a bet fires:
+  //   1. Minimum minutes elapsed — wait for early candles to establish a
+  //      directional bias (choppyMinEntryMinutes, default 5).  Entering at
+  //      minute 1–2 in a choppy window produces a ~28% win rate; waiting
+  //      until minute 5+ gives price action time to commit to a side.
+  //   2. Price-side proximity — the live coin price must already be on the
+  //      correct side of the Kalshi target by at least choppyProximityPct%
+  //      (default 0.20%).  A YES call with the price sitting below the target
+  //      at minute 5 has historically produced 0% wins in live data.
+  // Both gates are bypassed in freeRunMode.
+  if (!S.config.freeRunMode) {
+    const trendStability = windowStabilityCache.get(sym) ?? null;
+    if (trendStability === "choppy") {
+      const choppyMinMin = S.config.choppyMinEntryMinutes ?? 5;
+      if (choppyMinMin > 0 && minutesElapsed < choppyMinMin) {
+        logger.info(
+          { sym, direction, minutesElapsed: minutesElapsed.toFixed(1), choppyMinMin },
+          "[kalshi-bot] SKIP — choppy window: waiting for entry minute gate",
+        );
+        return;
+      }
+      const choppyProxPct = S.config.choppyProximityPct ?? 0.20;
+      const choppyLivePrice = getCachedPrediction(sym)?.price ?? null;
+      if (choppyLivePrice != null && kalshiTarget > 0) {
+        const pricePctFromTarget = ((choppyLivePrice - kalshiTarget) / kalshiTarget) * 100;
+        const priceOnCorrectSide =
+          direction === "yes"
+            ? pricePctFromTarget >= choppyProxPct
+            : -pricePctFromTarget >= choppyProxPct;
+        if (!priceOnCorrectSide) {
+          logger.info(
+            { sym, direction, livePrice: choppyLivePrice, kalshiTarget,
+              pricePctFromTarget: +pricePctFromTarget.toFixed(3), choppyProxPct },
+            "[kalshi-bot] SKIP — choppy window: price not sufficiently past target for bet direction (proximity gate)",
+          );
+          if (lastDecisionWindowKey.get(sym) !== windowKey) {
+            lastDecisionWindowKey.set(sym, windowKey);
+            await persistBetRecord({
+              symbol: sym, windowKey, ticker: kalshiTicker, direction,
+              action: "skip",
+              signals: { ...decision.signals, reason: "choppy-proximity",
+                livePrice: choppyLivePrice, kalshiTarget,
+                pricePctFromTarget: +pricePctFromTarget.toFixed(3), choppyProxPct },
+              entryPrice: yesPrice, kalshiTarget,
+            });
+          }
+          return;
+        }
+      }
+    }
+  }
+
   // ── LIVE-ASK FILL PRICE ──────────────────────────────────────────────────
   // Use the live Kalshi bid/ask (cached from the most recent fetchKalshiTarget
   // call, typically ≤12s old) to compute the order price and contract count.

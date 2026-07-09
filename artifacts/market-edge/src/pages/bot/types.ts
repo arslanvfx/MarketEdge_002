@@ -61,6 +61,8 @@ export interface BotConfig {
   directionalRegressionLookback?: number;
   directionalRegressionThreshold?: number;
   directionalRegressionPenaltyPp?: number;
+  choppyMinEntryMinutes?: number;
+  choppyProximityPct?: number;
 }
 
 export interface LogicModeStats {
