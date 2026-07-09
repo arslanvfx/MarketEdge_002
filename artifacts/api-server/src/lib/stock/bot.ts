@@ -79,10 +79,15 @@ function recordDecision(d: Omit<BotDecision, "ts">): void {
   if (decisionLog.length > DECISION_LOG_MAX) decisionLog.length = DECISION_LOG_MAX;
 
   // Persist asynchronously so a slow/unavailable DB never blocks the bot cycle.
+  // For ENTER decisions, we embed claudeReasoning into the reason field using a
+  // delimiter so it survives restarts without a schema change.
+  const persistedReason = decision.claudeReasoning
+    ? `${decision.reason}|||${decision.claudeReasoning}`
+    : decision.reason;
   db.execute(sql`
     INSERT INTO stock_bot_decisions (ticker, action, horizon, confidence, reason, ts)
     VALUES (${decision.ticker}, ${decision.action}, ${decision.horizon},
-            ${decision.confidence}, ${decision.reason}, to_timestamp(${decision.ts / 1000}))
+            ${decision.confidence}, ${persistedReason}, to_timestamp(${decision.ts / 1000}))
   `).catch((err) => logger.warn({ err }, "[stock-bot] decision persist failed"));
 
   // Opportunistic retention cleanup, throttled so it doesn't run every insert.
@@ -112,13 +117,18 @@ export async function initDecisionLogFromDB(): Promise<void> {
   const rows = res.rows ?? [];
   decisionLog.length = 0;
   for (const r of rows) {
+    const rawReason = String(r.reason ?? "");
+    const delimIdx = rawReason.indexOf("|||");
+    const reason = delimIdx >= 0 ? rawReason.slice(0, delimIdx) : rawReason;
+    const claudeReasoning = delimIdx >= 0 ? rawReason.slice(delimIdx + 3) : undefined;
     decisionLog.push({
       ts: new Date(r.ts).getTime(),
       ticker: String(r.ticker),
       action: r.action as BotDecision["action"],
       horizon: (r.horizon ?? null) as TradingMode | null,
       confidence: r.confidence != null ? Number(r.confidence) : null,
-      reason: String(r.reason ?? ""),
+      reason,
+      claudeReasoning,
     });
   }
   lastDecisionCleanupAt = Date.now();
@@ -295,22 +305,24 @@ async function managePositions(
       else if (nearClose || !marketOpen) reason = "eod_close";
       else if (heldMs >= maxHoldMs("day", cfg)) reason = "max_hold";
     } else if (bet.tradingMode === "swing") {
-      // Swing: target/stop from per-mode config with hardcoded fallback.
-      const swingStop = cfg.swingStopLossPct ?? SWING_STOP_PCT;
-      const swingTarget = cfg.swingTargetGainPct ?? SWING_TARGET_PCT;
+      // Swing: target/stop from per-mode config, falling back to global config.
+      const swingStop = cfg.swingStopLossPct ?? cfg.stopLossPct;
+      const swingTarget = cfg.swingTargetGainPct ?? cfg.targetGainPct;
       if (gainPct <= -swingStop) reason = "swing_stop";
       else if (gainPct >= swingTarget) reason = "swing_target";
       else if (bet.stopLoss != null && price <= bet.stopLoss) reason = "stop_loss";
       else if (heldMs >= maxHoldMs("swing", cfg)) reason = "max_hold";
     } else {
-      // Long: trailing stop from per-mode config with hardcoded fallback.
-      const longTrailStop = cfg.longStopLossPct ?? LONG_TRAIL_STOP_PCT;
+      // Long: trailing stop from per-mode config, falling back to global config.
+      const longTrailStop = cfg.longStopLossPct ?? cfg.stopLossPct;
       const peak = Math.max(bet.peakPrice ?? bet.entryPrice, price);
       if (peak > (bet.peakPrice ?? 0)) await updatePeak(bet.id, peak);
       const drawdownPct = peak > 0 ? ((peak - price) / peak) * 100 : 0;
       const research = getCachedResearch(bet.ticker);
       if (research && research.confidence < LONG_MIN_RESEARCH_CONF) {
         reason = `research_downgrade (conf ${research.confidence})`;
+      } else if (cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
+        reason = "long_target";
       } else if (drawdownPct >= longTrailStop) {
         reason = "trailing_stop";
       } else if (bet.stopLoss != null && price <= bet.stopLoss) {
@@ -579,14 +591,17 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       const price = signals.price;
       if (price <= 0) continue;
 
-      // Minimum market cap filter (graceful: skips only when data is present)
+      // Minimum market cap filter.
+      // Market cap data is not provided by Alpaca's standard equity API.
+      // This filter is a graceful no-op until a fundamental data feed
+      // (e.g., a static universe map with market caps or a Polygon.io integration)
+      // is wired in. When mcapBillion is null (data absent), the check is skipped.
       if (cfg.minMarketCapBillion > 0) {
-        const uniEntry = lookupUniverse(ticker) as any;
-        const mcap: number | null = uniEntry?.marketCap ?? null;
-        if (mcap != null && mcap < cfg.minMarketCapBillion * 1e9) {
+        const mcapBillion: number | null = null; // TODO: integrate fundamental data source
+        if (mcapBillion !== null && mcapBillion < cfg.minMarketCapBillion) {
           recordDecision({
             ticker, action: "SKIP", horizon: mode, confidence: null,
-            reason: `market cap below $${cfg.minMarketCapBillion}B threshold`,
+            reason: `market cap ${mcapBillion.toFixed(0)}B below $${cfg.minMarketCapBillion}B threshold`,
           });
           continue;
         }
@@ -631,19 +646,22 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       const qty = Math.floor(notional / price);
       if (qty < 1) continue;
 
-      // Sector concentration cap
+      // Sector concentration cap — evaluated as post-entry projection so that
+      // a new trade that would push sector share over the cap is blocked.
       if (cfg.maxSectorPct > 0 && sector) {
-        const totalBudget = open.reduce((s, b) => s + b.notional, 0);
-        if (totalBudget > 0) {
-          const sectorBudget = open.filter(b => b.sector === sector).reduce((s, b) => s + b.notional, 0);
-          const sectorPct = (sectorBudget / totalBudget) * 100;
-          if (sectorPct >= cfg.maxSectorPct) {
-            recordDecision({
-              ticker, action: "SKIP", horizon: mode, confidence: effectiveConfidence,
-              reason: `sector ${sector} at ${sectorPct.toFixed(0)}% ≥ cap ${cfg.maxSectorPct}%`,
-            });
-            continue;
-          }
+        const proposedNotional = qty * price;
+        const existingTotal = open.reduce((s, b) => s + b.notional, 0);
+        const existingSector = open.filter(b => b.sector === sector).reduce((s, b) => s + b.notional, 0);
+        const projectedTotal = existingTotal + proposedNotional;
+        const projectedSectorPct = projectedTotal > 0
+          ? ((existingSector + proposedNotional) / projectedTotal) * 100
+          : 0;
+        if (projectedSectorPct > cfg.maxSectorPct) {
+          recordDecision({
+            ticker, action: "SKIP", horizon: mode, confidence: effectiveConfidence,
+            reason: `sector ${sector} would reach ${projectedSectorPct.toFixed(0)}% > cap ${cfg.maxSectorPct}%`,
+          });
+          continue;
         }
       }
 
@@ -653,7 +671,7 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         : (cfg.longStopLossPct ?? cfg.stopLossPct);
       const targetPct = mode === "day" ? (cfg.dayTargetGainPct ?? cfg.targetGainPct)
         : mode === "swing" ? (cfg.swingTargetGainPct ?? cfg.targetGainPct)
-        : cfg.targetGainPct;
+        : (cfg.longTargetGainPct ?? cfg.targetGainPct);
       const stopLoss = price * (1 - stopPct / 100);
       const targetPrice = price * (1 + targetPct / 100);
       const features = buildFeatures(candles, news, earnings, getSectorMomentum(sector));

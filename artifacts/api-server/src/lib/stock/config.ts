@@ -29,6 +29,7 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   swingStopLossPct: undefined,
   swingTargetGainPct: undefined,
   longStopLossPct: undefined,
+  longTargetGainPct: undefined,
   swingMaxHoldDays: 5,
   longMaxHoldDays: 30,
   earningsBlackout: true,

@@ -223,7 +223,7 @@ router.put("/stocks/bot/config", requireAuth, async (req, res) => {
     "enabled", "mode", "tradingModes", "positionSizePct", "maxConcurrentPositions",
     "maxDayPositions", "maxSwingPositions", "maxLongPositions", "dailyLossLimit",
     "minConfidence", "stopLossPct", "targetGainPct",
-    "dayStopLossPct", "dayTargetGainPct", "swingStopLossPct", "swingTargetGainPct", "longStopLossPct",
+    "dayStopLossPct", "dayTargetGainPct", "swingStopLossPct", "swingTargetGainPct", "longStopLossPct", "longTargetGainPct",
     "swingMaxHoldDays", "longMaxHoldDays", "earningsBlackout", "earningsBlackoutHours",
     "newsSensitivity", "sectorFocus", "maxPositionDollars",
     "dynamicSizing", "minMarketCapBillion", "maxSectorPct",

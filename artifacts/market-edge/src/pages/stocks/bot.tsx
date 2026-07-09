@@ -30,7 +30,10 @@ interface OpenBetDetail {
   targetPrice: number | null;
   peakPrice: number | null;
   entryPrice: number | null;
-  signals: { claude?: { reasoning?: string }; research?: { summary?: string } } | null;
+  signals: {
+    claude?: { reasoning?: string; rating?: string };
+    research?: { summary?: string; stance?: string };
+  } | null;
   sector: string | null;
 }
 
@@ -558,7 +561,7 @@ export default function StockBot() {
               <table className="w-full text-sm">
                 <thead className="bg-muted/40 text-xs text-muted-foreground">
                   <tr>
-                    {["Ticker", "Mode", "Confidence", "Entry", "Current", "Mkt Value", "P&L", "Progress", ""].map((h) => (
+                    {["Ticker", "Mode", "Confidence", "Stance", "Entry", "Current", "Mkt Value", "P&L", "Progress", ""].map((h) => (
                       <th key={h} className="text-left font-medium px-3 py-2 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -597,6 +600,23 @@ export default function StockBot() {
                               {bet.confidence}%
                             </span>
                           ) : "—"}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          {(() => {
+                            const rating = bet?.signals?.claude?.rating ?? bet?.signals?.research?.stance;
+                            if (!rating) return <span className="text-muted-foreground">—</span>;
+                            const isPos = rating === "buy" || rating === "buy_now";
+                            const isNeg = rating === "sell" || rating === "avoid";
+                            return (
+                              <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
+                                isPos ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                                : isNeg ? "border-red-500/40 bg-red-500/10 text-red-400"
+                                : "border-amber-500/40 bg-amber-500/10 text-amber-400"
+                              }`}>
+                                {rating.replace("_", " ")}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td className="px-3 py-2.5 text-foreground">{fmtUsd(p.avgEntry)}</td>
                         <td className="px-3 py-2.5 text-foreground">{fmtUsd(p.currentPrice)}</td>
@@ -658,11 +678,11 @@ export default function StockBot() {
               const capKey = m === "day" ? "maxDayPositions" : m === "swing" ? "maxSwingPositions" : "maxLongPositions";
               const cap = merged[capKey as keyof StockBotConfig] as number | undefined;
               const stopKey = m === "day" ? "dayStopLossPct" : m === "swing" ? "swingStopLossPct" : "longStopLossPct";
-              const targetKey = m === "day" ? "dayTargetGainPct" : m === "swing" ? "swingTargetGainPct" : undefined;
+              const targetKey = m === "day" ? "dayTargetGainPct" : m === "swing" ? "swingTargetGainPct" : "longTargetGainPct";
               const stopVal = (merged[stopKey as keyof StockBotConfig] as number | undefined) ?? merged.stopLossPct;
-              const targetVal = targetKey ? ((merged[targetKey as keyof StockBotConfig] as number | undefined) ?? merged.targetGainPct) : merged.targetGainPct;
+              const targetVal = (merged[targetKey as keyof StockBotConfig] as number | undefined) ?? merged.targetGainPct;
               const isStopOverridden = (merged[stopKey as keyof StockBotConfig] as number | undefined) != null;
-              const isTargetOverridden = targetKey ? (merged[targetKey as keyof StockBotConfig] as number | undefined) != null : false;
+              const isTargetOverridden = (merged[targetKey as keyof StockBotConfig] as number | undefined) != null;
 
               return (
                 <div key={m} className={`rounded-lg border p-4 transition-colors space-y-3 ${on ? "border-emerald-500/40 bg-emerald-500/5" : "border-border bg-card"}`}>
@@ -695,20 +715,18 @@ export default function StockBot() {
                         onMouseUp={(e) => saveSlider(stopKey as keyof StockBotConfig, Number((e.target as HTMLInputElement).value))}
                         className="w-full mt-0.5 accent-red-500" />
                     </div>
-                    {m !== "long" && targetKey && (
-                      <div>
-                        <label className="text-[11px] text-muted-foreground flex justify-between">
-                          <span>Target gain: <span className="text-foreground font-semibold">{targetVal?.toFixed(1)}%</span></span>
-                          {!isTargetOverridden && <span className="text-muted-foreground/60">(global)</span>}
-                        </label>
-                        <input type="range" min={1} max={50} step={0.5}
-                          value={targetVal ?? merged.targetGainPct ?? 6}
-                          onChange={(e) => setField(targetKey as keyof StockBotConfig, Number(e.target.value) as never)}
-                          onPointerUp={(e) => saveSlider(targetKey as keyof StockBotConfig, Number((e.target as HTMLInputElement).value))}
-                          onMouseUp={(e) => saveSlider(targetKey as keyof StockBotConfig, Number((e.target as HTMLInputElement).value))}
-                          className="w-full mt-0.5 accent-emerald-500" />
-                      </div>
-                    )}
+                    <div>
+                      <label className="text-[11px] text-muted-foreground flex justify-between">
+                        <span>Target gain: <span className="text-foreground font-semibold">{targetVal?.toFixed(1)}%</span></span>
+                        {!isTargetOverridden && <span className="text-muted-foreground/60">(global)</span>}
+                      </label>
+                      <input type="range" min={1} max={50} step={0.5}
+                        value={targetVal ?? merged.targetGainPct ?? 6}
+                        onChange={(e) => setField(targetKey as keyof StockBotConfig, Number(e.target.value) as never)}
+                        onPointerUp={(e) => saveSlider(targetKey as keyof StockBotConfig, Number((e.target as HTMLInputElement).value))}
+                        onMouseUp={(e) => saveSlider(targetKey as keyof StockBotConfig, Number((e.target as HTMLInputElement).value))}
+                        className="w-full mt-0.5 accent-emerald-500" />
+                    </div>
                   </div>
                 </div>
               );

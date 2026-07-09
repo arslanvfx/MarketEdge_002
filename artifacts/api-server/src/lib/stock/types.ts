@@ -149,6 +149,7 @@ export interface StockBotConfig {
   swingStopLossPct?: number;
   swingTargetGainPct?: number;
   longStopLossPct?: number;
+  longTargetGainPct?: number;
   swingMaxHoldDays: number;
   longMaxHoldDays: number;
   earningsBlackout: boolean;     // avoid entries within blackout window
