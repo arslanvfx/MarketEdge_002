@@ -23,6 +23,7 @@ export const stockBotBetsTable = pgTable("stock_bot_bets", {
   exitReason: text("exit_reason"),
   outcome: text("outcome"),                  // "win" | "loss" | "push" | null
   alpacaOrderId: text("alpaca_order_id"),
+  peakPrice: numeric("peak_price", { precision: 14, scale: 4 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   exitedAt: timestamp("exited_at", { withTimezone: true }),
   evaluatedAt: timestamp("evaluated_at", { withTimezone: true }),

@@ -82,10 +82,19 @@ export default function StockResearch() {
   const running = data?.running ?? false;
   const progress = data?.progress;
 
+  // "All Reports" only shows actionable buy candidates (buy_now or buy).
+  // Avoid stocks live exclusively in the Stay Away / Sell tab.
+  // Watch-rated stocks are hidden everywhere — not good enough to buy, not
+  // bad enough to warn about.
+  const buyReports = useMemo(
+    () => reports.filter((r) => r.stance === "buy_now" || r.stance === "buy"),
+    [reports],
+  );
+
   const viewReports: ResearchReport[] =
     view === "top" ? lists?.topBuys ?? []
     : view === "avoid" ? lists?.avoid ?? []
-    : reports;
+    : buyReports;
 
   const filtered = useMemo(() => {
     const q = search.trim().toUpperCase();
@@ -103,7 +112,7 @@ export default function StockResearch() {
   }, [viewReports]);
 
   const VIEWS: { key: ListView; label: string; icon: typeof Zap; count: number; activeCls: string }[] = [
-    { key: "all", label: "All Reports", icon: ListChecks, count: reports.length, activeCls: "border-sky-500/50 bg-sky-500/10 text-sky-400" },
+    { key: "all", label: "Buy Candidates", icon: ListChecks, count: buyReports.length, activeCls: "border-sky-500/50 bg-sky-500/10 text-sky-400" },
     { key: "top", label: "Top 20 Buy Now", icon: Zap, count: lists?.topBuys.length ?? 0, activeCls: "border-emerald-500/50 bg-emerald-500/10 text-emerald-400" },
     { key: "avoid", label: "Stay Away / Sell", icon: ShieldAlert, count: lists?.avoid.length ?? 0, activeCls: "border-red-500/50 bg-red-500/10 text-red-400" },
   ];

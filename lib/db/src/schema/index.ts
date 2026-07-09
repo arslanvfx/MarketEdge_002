@@ -12,4 +12,6 @@ export * from "./stockBotConfig";
 export * from "./stockMlTables";
 export * from "./stockScannerResults";
 export * from "./stockNewsCache";
+export * from "./stockResearchReports";
+export * from "./stockBotDecisions";
 export * from "./botEntryTimingSnapshots";
