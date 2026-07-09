@@ -37,17 +37,13 @@ import { getCachedResearch, getTodayReports } from "./research";
 import { lookupUniverse } from "./universe";
 import { watchlistTickers } from "./watchlist";
 import type { Candle, TradingMode, StockBotConfig, ResearchReport, ScannerRow } from "./types";
+import { DAY_EOD_BUFFER_MS, evaluateExitReason } from "./bot-manage-core";
 
 let running = false;
 let lastCycleAt = 0;
 let lastCycleSummary = "";
 
 // ── Per-horizon exit rules (Task spec) ──────────────────────────────────────
-const DAY_EOD_BUFFER_MS = 15 * 60 * 1000; // close day trades 15 min before close
-const SWING_TARGET_PCT = 8;
-const SWING_STOP_PCT = 4;
-const LONG_MIN_RESEARCH_CONF = 60;        // exit long if re-rated below this
-const LONG_TRAIL_STOP_PCT = 6;            // −6% trailing stop from peak
 const LONG_ENTRY_MIN_CONF = 75;           // research confidence gate for long entries
 
 // ── Level 1 entry-timing gate ───────────────────────────────────────────────
@@ -156,11 +152,6 @@ interface OpenBetRow {
   createdAt: Date;
 }
 
-function maxHoldMs(mode: TradingMode, cfg: StockBotConfig): number {
-  if (mode === "day") return 6.5 * 60 * 60 * 1000; // close intraday
-  if (mode === "swing") return cfg.swingMaxHoldDays * 24 * 60 * 60 * 1000;
-  return cfg.longMaxHoldDays * 24 * 60 * 60 * 1000;
-}
 
 async function openBets(mode: "paper" | "live"): Promise<OpenBetRow[]> {
   const res = (await db.execute(sql`
@@ -289,48 +280,19 @@ async function managePositions(
   for (const bet of open) {
     const price = await getLatestPrice(bet.ticker);
     if (price == null || price <= 0) continue;
-    const heldMs = Date.now() - bet.createdAt.getTime();
-    const gainPct = bet.entryPrice > 0 ? ((price - bet.entryPrice) / bet.entryPrice) * 100 : 0;
-    let reason: string | null = null;
 
-    // Claude stance override: today's research says stay away / sell → exit
-    // swing & long positions (day trades are already flattened intraday).
-    const stanceRep = bet.tradingMode !== "day" ? getCachedResearch(bet.ticker) : undefined;
-    if (stanceRep?.stance === "avoid") {
-      reason = "research_avoid (Claude: stay away/sell)";
-    } else if (bet.tradingMode === "day") {
-      // Day trades: hard stop/target if set, forced flat 15 min before close.
-      if (bet.stopLoss != null && price <= bet.stopLoss) reason = "stop_loss";
-      else if (bet.targetPrice != null && price >= bet.targetPrice) reason = "target";
-      else if (nearClose || !marketOpen) reason = "eod_close";
-      else if (heldMs >= maxHoldMs("day", cfg)) reason = "max_hold";
-    } else if (bet.tradingMode === "swing") {
-      // Swing: target/stop from per-mode config, falling back to global config.
-      const swingStop = cfg.swingStopLossPct ?? cfg.stopLossPct;
-      const swingTarget = cfg.swingTargetGainPct ?? cfg.targetGainPct;
-      if (gainPct <= -swingStop) reason = "swing_stop";
-      else if (gainPct >= swingTarget) reason = "swing_target";
-      else if (bet.stopLoss != null && price <= bet.stopLoss) reason = "stop_loss";
-      else if (heldMs >= maxHoldMs("swing", cfg)) reason = "max_hold";
-    } else {
-      // Long: trailing stop from per-mode config, falling back to global config.
-      const longTrailStop = cfg.longStopLossPct ?? cfg.stopLossPct;
-      const peak = Math.max(bet.peakPrice ?? bet.entryPrice, price);
-      if (peak > (bet.peakPrice ?? 0)) await updatePeak(bet.id, peak);
-      const drawdownPct = peak > 0 ? ((peak - price) / peak) * 100 : 0;
-      const research = getCachedResearch(bet.ticker);
-      if (research && research.confidence < LONG_MIN_RESEARCH_CONF) {
-        reason = `research_downgrade (conf ${research.confidence})`;
-      } else if (cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
-        reason = "long_target";
-      } else if (drawdownPct >= longTrailStop) {
-        reason = "trailing_stop";
-      } else if (bet.stopLoss != null && price <= bet.stopLoss) {
-        reason = "stop_loss";
-      } else if (heldMs >= maxHoldMs("long", cfg)) {
-        reason = "max_hold";
-      }
-    }
+    const research = bet.tradingMode !== "day" ? getCachedResearch(bet.ticker) ?? null : null;
+    const { reason, newPeak } = evaluateExitReason({
+      bet,
+      price,
+      cfg,
+      marketOpen,
+      nearClose,
+      nowMs: Date.now(),
+      research,
+    });
+
+    if (newPeak != null) await updatePeak(bet.id, newPeak);
 
     if (reason) {
       // Exits require an open market (except forced EOD which we still attempt).
