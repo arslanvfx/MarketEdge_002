@@ -20,7 +20,7 @@ import { getEarnings, getLatestEarningsSurprise } from "./earnings";
 import type { NewsItem, ResearchHorizon, ResearchReport, ResearchStance } from "./types";
 
 const RESEARCH_MODEL = "claude-sonnet-4-6";
-const MAX_TOKENS = 8192;
+const MAX_TOKENS = 2048; // JSON output is small; 8192 was massively over-provisioned
 const CONCURRENCY = 2;
 
 // Whether the AI proxy accepts the web_search server tool. Starts optimistic;
@@ -293,7 +293,7 @@ async function researchOne(
       max_tokens: MAX_TOKENS,
       messages: [{ role: "user", content: prompt }],
       ...(useTools
-        ? { tools: [{ type: "web_search_20250305" as const, name: "web_search" as const, max_uses: 3 }] }
+        ? { tools: [{ type: "web_search_20250305" as const, name: "web_search" as const, max_uses: 1 }] }
         : {}),
     });
 

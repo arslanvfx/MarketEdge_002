@@ -30,7 +30,7 @@ import { runResearchPass, getResearchProgress, type ResearchTechContext } from "
 import type { Candle, Direction, ScannerRow, Sentiment } from "./types";
 
 const DEEP_SCORE_LIMIT = 150; // Tier 1 → Tier 2 cut
-const RESEARCH_LIMIT = 30;    // Tier 2 → Tier 3 cut
+const RESEARCH_LIMIT = 10;    // Tier 2 → Tier 3 cut (top 10 only — AI cost control)
 const SCORE_BATCH = 5;        // concurrent deep-score requests
 const SNAPSHOT_CHUNK = 500;   // symbols per snapshots call
 
