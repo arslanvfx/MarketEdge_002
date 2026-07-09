@@ -9,6 +9,7 @@ import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
+import { initResearchFromDB } from "./lib/stock/research";
 import { runBotCycle as runStockBotCycle } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
 import { initAiSpend } from "./lib/ai-spend";
@@ -316,6 +317,28 @@ async function runStockMigrations(): Promise<void> {
         ON stock_ml_snapshots (ticker, snapshot_at)
     `);
     await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_research_reports (
+        id              SERIAL PRIMARY KEY,
+        ticker          TEXT NOT NULL,
+        company_name    TEXT,
+        sector          TEXT,
+        horizon         TEXT NOT NULL,
+        confidence      NUMERIC(6,2) NOT NULL,
+        summary         TEXT,
+        factors_json    JSONB,
+        price           NUMERIC(14,4),
+        web_search_used BOOLEAN DEFAULT FALSE,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS stock_research_ticker
+        ON stock_research_reports (ticker, created_at DESC)
+    `);
+    await client.query(`
+      ALTER TABLE stock_bot_bets ADD COLUMN IF NOT EXISTS peak_price NUMERIC(14,4)
+    `);
+    await client.query(`
       CREATE TABLE IF NOT EXISTS stock_ml_model_state (
         ticker           TEXT PRIMARY KEY,
         weights          JSONB NOT NULL,
@@ -350,6 +373,8 @@ async function startStockVertical(): Promise<void> {
 
   // Restore lastScanAt from DB so the UI shows the existing results immediately.
   await initLastScanAt();
+  // Restore today's research reports so the bot can read them right away.
+  await initResearchFromDB();
 
   // Startup scan (force=true so it runs even when market is closed, using
   // last-session prices to populate the UI immediately).

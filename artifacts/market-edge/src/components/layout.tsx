@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useUser, useClerk, Show } from "@clerk/react";
-import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, Bot, Radar, Star, BarChart3, History, Zap, Leaf } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Target, LogOut, Sparkles, CandlestickChart, Bot, Radar, Star, BarChart3, History, Zap, Leaf, FlaskConical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -41,6 +41,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const stocksNavigation = [
     { name: "Stock Scanner", href: "/stocks/scanner", icon: Radar },
+    { name: "Stock Research", href: "/stocks/research", icon: FlaskConical },
     { name: "Stock Watchlist", href: "/stocks/watchlist", icon: Star },
     { name: "Stock Bot", href: "/stocks/bot", icon: Bot },
     { name: "Stock History", href: "/stocks/history", icon: History },

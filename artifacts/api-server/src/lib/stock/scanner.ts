@@ -1,56 +1,80 @@
-// Market scanner: ranks the universe (+ watchlist) for the best short-term
-// opportunities across sectors. Runs on a schedule and persists results to
-// stock_scanner_results for instant UI reads. Results survive server restarts.
+// Market-wide tiered scanner. Ranks the ENTIRE pre-filtered US equity market
+// (see market-universe.ts) for the best opportunities, in three tiers:
 //
-// Scan strategy:
-//   1. One batched snapshot call prices the whole universe (fast).
-//   2. Top movers per sector get full candle + news + stat scoring (parallel).
-//   3. Results are upserted to DB immediately after each ticker so partial
-//      progress is visible if the scan is interrupted.
-// Scan progress is tracked in-memory and exposed via getScanProgress() so the
-// UI can show a live progress bar.
+//   Tier 1 — fast technical screen of ALL candidates using fresh bulk
+//            snapshots only (momentum, volume surge, spread) — no per-ticker
+//            API calls.
+//   Tier 2 — full candle + news + stat deep scoring for the top-150 Tier 1
+//            tickers (+ watchlist, always included). Rows persist to
+//            stock_scanner_results immediately for live partial progress.
+//   Tier 3 — Claude + web research for the top-30 Tier 2 tickers, stored as
+//            research reports (research.ts).
+//
+// Progress across all tiers is tracked in-memory and exposed via
+// getScanProgress() so the UI can show a live pipeline indicator.
 
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { logger } from "../logger";
 import { isAiFeatureEnabled } from "../ai-spend";
-import { alpacaConfigured, getSnapshots, getBars, getClock } from "./alpaca";
-import { STOCK_UNIVERSE, SECTORS, lookupUniverse } from "./universe";
+import { alpacaConfigured, getSnapshots, getBars, getClock, type StockSnapshot } from "./alpaca";
+import { getMarketUniverse, getUniverseStatus, type UniverseCandidate } from "./market-universe";
+import { lookupUniverse } from "./universe";
 import { statSignal } from "./ai";
 import { getScoredNews, aggregateSentiment } from "./news";
 import { getEarnings } from "./earnings";
 import { efficiencyRatio, sma } from "./indicators";
 import { watchlistTickers } from "./watchlist";
 import { getConfig } from "./config";
-import { runResearchPass } from "./research";
+import { runResearchPass, getResearchProgress, type ResearchTechContext } from "./research";
 import type { Candle, Direction, ScannerRow, Sentiment } from "./types";
 
-const TOP_PER_SECTOR = 6;   // movers per sector that get deep scoring
-const SCORE_BATCH = 5;       // concurrent deep-score requests
+const DEEP_SCORE_LIMIT = 150; // Tier 1 → Tier 2 cut
+const RESEARCH_LIMIT = 30;    // Tier 2 → Tier 3 cut
+const SCORE_BATCH = 5;        // concurrent deep-score requests
+const SNAPSHOT_CHUNK = 500;   // symbols per snapshots call
 
 let lastScanAt = 0;
 let scanning = false;
 
 export interface ScanProgress {
   scanning: boolean;
-  phase: "idle" | "snapshots" | "scoring" | "done";
-  total: number;    // tickers that will be deep-scored
-  done: number;     // tickers deep-scored so far
+  phase: "idle" | "snapshots" | "screening" | "scoring" | "research" | "done";
+  /** Tier 2 deep-scoring totals (kept as total/done/pct for UI compat). */
+  total: number;
+  done: number;
   currentTicker: string;
-  pct: number;      // 0-100
+  pct: number; // 0-100 across the deep-scoring tier
+  /** Tier 1: how many tickers were screened market-wide. */
+  screened: number;
+  /** Universe size the screen ran against. */
+  universeSize: number;
+  /** Tier 3 research progress. */
+  researchTotal: number;
+  researchDone: number;
+  researchRunning: boolean;
 }
 
-let progress: ScanProgress = {
-  scanning: false,
-  phase: "idle",
-  total: 0,
-  done: 0,
-  currentTicker: "",
-  pct: 0,
+const IDLE: ScanProgress = {
+  scanning: false, phase: "idle", total: 0, done: 0, currentTicker: "", pct: 0,
+  screened: 0, universeSize: 0, researchTotal: 0, researchDone: 0, researchRunning: false,
 };
 
+let progress: ScanProgress = { ...IDLE };
+
 export function getScanProgress(): ScanProgress {
-  return { ...progress };
+  const r = getResearchProgress();
+  // The research tier runs in the background after the scan returns, so the
+  // phase is derived from live research state rather than the stored value.
+  const phase = !scanning && r.running ? "research" : progress.phase;
+  return {
+    ...progress,
+    phase,
+    researchTotal: r.total,
+    researchDone: r.done,
+    researchRunning: r.running,
+    universeSize: progress.universeSize || getUniverseStatus().candidateCount,
+  };
 }
 
 /** Sector-average recent momentum, used as an ML/context feature. */
@@ -77,6 +101,16 @@ export async function initLastScanAt(): Promise<void> {
   }
 }
 
+/** Tier 1 fast score from snapshot data only — no per-ticker API calls. */
+function fastScore(s: StockSnapshot): number {
+  const volSurge = s.prevVolume > 0 ? s.volume / s.prevVolume : 0;
+  let score = Math.abs(s.changePct) * 2;          // momentum magnitude
+  if (volSurge >= 2) score += 6;                  // strong volume surge
+  else if (volSurge >= 1.3) score += 3;
+  if (s.spreadPct != null && s.spreadPct < 0.15) score += 1; // very liquid
+  return score;
+}
+
 export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned: number; scored: number }> {
   if (scanning) return { scanned: 0, scored: 0 };
   if (!alpacaConfigured()) {
@@ -84,7 +118,7 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
     return { scanned: 0, scored: 0 };
   }
   scanning = true;
-  progress = { scanning: true, phase: "snapshots", total: 0, done: 0, currentTicker: "", pct: 0 };
+  progress = { ...IDLE, scanning: true, phase: "snapshots" };
   try {
     const cfg = getConfig();
 
@@ -97,7 +131,7 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
         if (!clock.isOpen) {
           logger.info("[stock-scanner] skipped — market closed (auto-scan)");
           scanning = false;
-          progress = { scanning: false, phase: "idle", total: 0, done: 0, currentTicker: "", pct: 0 };
+          progress = { ...IDLE };
           return { scanned: 0, scored: 0 };
         }
       } catch (err) {
@@ -105,65 +139,60 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
       }
     }
 
+    // ── Tier 0: market-wide pre-filtered universe (4h cached) ────────────────
+    const universe = await getMarketUniverse();
+    const uniByTicker = new Map<string, UniverseCandidate>(universe.map((c) => [c.ticker, c]));
     const watch = new Set(await watchlistTickers());
-    const tickers = Array.from(new Set([...STOCK_UNIVERSE.map((e) => e.ticker), ...watch]));
+    const tickers = Array.from(new Set([...universe.map((c) => c.ticker), ...watch]));
+    progress.universeSize = tickers.length;
 
-    // ── Phase 1: batch snapshot (one call, very fast) ─────────────────────────
-    const snaps = await getSnapshots(tickers);
+    // ── Tier 1: fresh bulk snapshots + fast screen ───────────────────────────
+    progress.phase = "screening";
+    const snaps: Record<string, StockSnapshot> = {};
+    for (let i = 0; i < tickers.length; i += SNAPSHOT_CHUNK) {
+      const chunk = tickers.slice(i, i + SNAPSHOT_CHUNK);
+      try {
+        Object.assign(snaps, await getSnapshots(chunk));
+      } catch (err) {
+        logger.warn({ err, chunkStart: i }, "[stock-scanner] snapshot chunk failed");
+      }
+      progress.screened = Math.min(tickers.length, i + chunk.length);
+    }
+    progress.screened = tickers.length;
 
-    // Sector momentum = mean daily change across the sector.
+    // Sector momentum = mean daily change across each known sector.
     const bySector = new Map<string, number[]>();
-    for (const e of STOCK_UNIVERSE) {
-      const s = snaps[e.ticker];
+    for (const t of tickers) {
+      const s = snaps[t];
       if (!s) continue;
-      const arr = bySector.get(e.sector) ?? [];
+      const sector = uniByTicker.get(t)?.sector ?? lookupUniverse(t)?.sector;
+      if (!sector || sector === "Other") continue;
+      const arr = bySector.get(sector) ?? [];
       arr.push(s.changePct);
-      bySector.set(e.sector, arr);
+      bySector.set(sector, arr);
     }
     for (const [sector, arr] of bySector) {
       sectorMomentum.set(sector, arr.reduce((a, b) => a + b, 0) / (arr.length || 1));
     }
 
-    // Pick movers per sector (largest absolute daily move), always include watchlist.
-    const shortlist = new Set<string>(watch);
-    for (const sector of SECTORS) {
-      const inSector = STOCK_UNIVERSE.filter((e) => e.sector === sector)
-        .map((e) => ({ ticker: e.ticker, chg: Math.abs(snaps[e.ticker]?.changePct ?? 0) }))
-        .sort((a, b) => b.chg - a.chg)
-        .slice(0, TOP_PER_SECTOR);
-      for (const m of inSector) shortlist.add(m.ticker);
+    // Rank all screened tickers by fast score; watchlist always advances.
+    const ranked = tickers
+      .filter((t) => snaps[t])
+      .map((t) => ({ ticker: t, fs: fastScore(snaps[t]) }))
+      .sort((a, b) => b.fs - a.fs);
+    const shortlist = new Set<string>(Array.from(watch).filter((t) => snaps[t]));
+    for (const { ticker } of ranked) {
+      if (shortlist.size >= DEEP_SCORE_LIMIT) break;
+      shortlist.add(ticker);
     }
 
-    // ── Phase 2: deep-score shortlist in parallel batches ────────────────────
+    // ── Tier 2: deep-score shortlist in parallel batches ────────────────────
     const shortlistArr = Array.from(shortlist);
-    progress = { scanning: true, phase: "scoring", total: shortlistArr.length, done: 0, currentTicker: "", pct: 0 };
+    progress.phase = "scoring";
+    progress.total = shortlistArr.length;
 
-    const rowMap = new Map<string, ScannerRow>();
+    const scoredRows: ScannerRow[] = [];
 
-    // First pass: basic rows for all tickers (no deep scoring)
-    for (const ticker of tickers) {
-      const snap = snaps[ticker];
-      const uni = lookupUniverse(ticker);
-      const sector = uni?.sector ?? "Other";
-      const price = snap?.price ?? 0;
-      const changePct = snap?.changePct ?? 0;
-      rowMap.set(ticker, {
-        ticker,
-        companyName: uni?.name ?? ticker,
-        sector,
-        price,
-        changePct,
-        score: Math.abs(changePct),
-        direction: (changePct >= 0 ? "up" : "down") as Direction,
-        confidence: 50,
-        newsSentiment: "neutral" as Sentiment,
-        earningsSoon: false,
-        details: { basic: true },
-        updatedAt: new Date().toISOString(),
-      });
-    }
-
-    // Parallel batch deep-scoring for the shortlist.
     for (let i = 0; i < shortlistArr.length; i += SCORE_BATCH) {
       const batch = shortlistArr.slice(i, i + SCORE_BATCH);
       await Promise.all(batch.map(async (ticker) => {
@@ -180,8 +209,9 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
           const stat = statSignal(candles);
           const news = await getScoredNews(ticker);
           const agg = aggregateSentiment(news);
-          const uni = lookupUniverse(ticker);
-          const sector = uni?.sector ?? "Other";
+          const cand = uniByTicker.get(ticker);
+          const sector = cand?.sector ?? lookupUniverse(ticker)?.sector ?? "Other";
+          const companyName = cand?.name ?? lookupUniverse(ticker)?.name ?? ticker;
           const earn = await getEarnings(ticker, getConfig().earningsBlackoutHours);
           const er = efficiencyRatio(candles.map((c) => c.c), 14);
 
@@ -208,18 +238,22 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
                 ? 0
                 : -1;
 
+          const snap = snaps[ticker];
+          const volumeSurge =
+            snap && snap.prevVolume > 0 ? snap.volume / snap.prevVolume : null;
+
           const score =
             (stat.confidence - 50) * (0.6 + 0.8 * er) +
-            Math.abs(snaps[ticker]?.changePct ?? 0) * 2 +
+            Math.abs(snap?.changePct ?? 0) * 2 +
             newsAlign * 8 -
             (earn?.soon ? 6 : 0);
 
           const row: ScannerRow = {
             ticker,
-            companyName: uni?.name ?? ticker,
+            companyName,
             sector,
-            price: snaps[ticker]?.price ?? 0,
-            changePct: snaps[ticker]?.changePct ?? 0,
+            price: snap?.price ?? 0,
+            changePct: snap?.changePct ?? 0,
             score,
             direction: stat.direction,
             confidence: stat.confidence,
@@ -236,11 +270,12 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
               sma21: isNaN(sma21) ? null : Number(sma21.toFixed(2)),
               sma50: isNaN(sma50) ? null : Number(sma50.toFixed(2)),
               sma180: isNaN(sma180) ? null : Number(sma180.toFixed(2)),
+              volumeSurge: volumeSurge != null ? Number(volumeSurge.toFixed(2)) : null,
               dailyBarsCount: dailyCandles.length,
             },
             updatedAt: new Date().toISOString(),
           };
-          rowMap.set(ticker, row);
+          scoredRows.push(row);
 
           // Persist immediately so partial results are visible in the UI.
           await persistRow(row);
@@ -248,45 +283,71 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
           logger.warn({ err, ticker }, "[stock-scanner] deep scoring failed");
         } finally {
           progress.done++;
-          progress.pct = Math.round((progress.done / progress.total) * 100);
+          progress.pct = Math.round((progress.done / Math.max(1, progress.total)) * 100);
         }
       }));
     }
 
-    // Persist basic rows for non-shortlisted tickers (fast batch).
-    const basicTickers = tickers.filter((t) => !shortlist.has(t));
-    for (const ticker of basicTickers) {
-      const row = rowMap.get(ticker);
-      if (row) await persistRow(row).catch(() => {});
-    }
+    // Drop stale rows so the results table always reflects the current market
+    // view (the market-wide universe rotates tickers in and out daily).
+    await db.execute(sql`
+      DELETE FROM stock_scanner_results WHERE updated_at < NOW() - INTERVAL '24 hours'
+    `).catch((err) => logger.warn({ err }, "[stock-scanner] stale-row cleanup failed"));
 
-    const rows = Array.from(rowMap.values());
     lastScanAt = Date.now();
-    const scored = shortlistArr.length;
-    progress = { scanning: false, phase: "done", total: shortlistArr.length, done: scored, currentTicker: "", pct: 100 };
-    logger.info({ scanned: rows.length, scored }, "[stock-scanner] scan complete");
+    const scored = scoredRows.length;
+    progress.phase = "research";
+    logger.info(
+      { universe: tickers.length, screened: ranked.length, scored },
+      "[stock-scanner] tiers 1-2 complete",
+    );
 
-    // Fire-and-forget Claude research pass for the top-20 scored tickers.
+    // ── Tier 3: Claude + web research for the top scored tickers ────────────
     if (isAiFeatureEnabled("stock_research")) {
-      const top20 = [...rows]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 20)
-        .map((r) => r.ticker);
-      runResearchPass(top20).catch((err) =>
-        logger.warn({ err }, "[stock-scanner] research pass error"),
-      );
+      const top = [...scoredRows].sort((a, b) => b.score - a.score).slice(0, RESEARCH_LIMIT);
+      const candidates = top.map((r) => {
+        const snap = snaps[r.ticker];
+        const d = (r.details ?? {}) as Record<string, any>;
+        const ctx: ResearchTechContext = {
+          price: r.price,
+          changePct: r.changePct,
+          rsi: typeof d.rsi === "number" ? d.rsi : null,
+          sma21: d.sma21 ?? null,
+          sma50: d.sma50 ?? null,
+          sma180: d.sma180 ?? null,
+          volumeSurge: d.volumeSurge ?? (snap && snap.prevVolume > 0 ? snap.volume / snap.prevVolume : null),
+          sector: r.sector,
+          companyName: r.companyName,
+        };
+        return { ticker: r.ticker, ctx };
+      });
+      // Fire-and-forget: research runs in the background after the scan returns.
+      runResearchPass(candidates)
+        .catch((err) => logger.warn({ err }, "[stock-scanner] research pass error"))
+        .finally(() => {
+          if (!scanning) progress.phase = "done";
+        });
     }
 
-    return { scanned: rows.length, scored };
+    progress = {
+      ...progress,
+      scanning: false,
+      phase: "done",
+      currentTicker: "",
+      pct: 100,
+    };
+    logger.info({ scanned: tickers.length, scored }, "[stock-scanner] scan complete");
+
+    return { scanned: tickers.length, scored };
   } finally {
     scanning = false;
     // Keep "done" phase visible for 30s after scan finishes.
-    if (progress.phase !== "done") {
-      progress = { scanning: false, phase: "idle", total: 0, done: 0, currentTicker: "", pct: 0 };
+    if (progress.phase !== "done" && progress.phase !== "research") {
+      progress = { ...IDLE };
     }
     setTimeout(() => {
-      if (!scanning) {
-        progress = { scanning: false, phase: "idle", total: 0, done: 0, currentTicker: "", pct: 0 };
+      if (!scanning && !getResearchProgress().running) {
+        progress = { ...IDLE };
       }
     }, 30_000);
   }

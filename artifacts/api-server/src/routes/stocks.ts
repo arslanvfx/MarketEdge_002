@@ -8,7 +8,8 @@ import { getAuth } from "@clerk/express";
 import { alpacaConfigured, getAccount, getPositions } from "../lib/stock/alpaca";
 import { getConfig, saveConfig } from "../lib/stock/config";
 import { getScannerResults, runScan, lastScanTime, getScanProgress } from "../lib/stock/scanner";
-import { getAllResearch, getResearchStatus } from "../lib/stock/research";
+import { getLatestReports, getReportsForTicker, getResearchStatus, getResearchProgress } from "../lib/stock/research";
+import { getUniverseStatus } from "../lib/stock/market-universe";
 import { getScoredNews } from "../lib/stock/news";
 import { getEarnings } from "../lib/stock/earnings";
 import { getCandles, getChartData, CHART_RANGES, type ChartRange } from "../lib/stock/data";
@@ -45,10 +46,12 @@ function requireAuth(req: any, res: any, next: any): void {
 // ---------- Meta ----------
 
 router.get("/stocks/meta", (_req, res) => {
+  const uni = getUniverseStatus();
   res.json({
     configured: alpacaConfigured(),
     sectors: SECTORS,
-    universeSize: STOCK_UNIVERSE.length,
+    universeSize: uni.candidateCount > 0 ? uni.candidateCount : STOCK_UNIVERSE.length,
+    universe: uni,
     lastScanAt: lastScanTime(),
   });
 });
@@ -77,10 +80,27 @@ router.get("/stocks/scanner/progress", (_req, res) => {
   res.json(getScanProgress());
 });
 
-router.get("/stocks/research", (_req, res) => {
-  const { running, ready } = getResearchStatus();
-  const results = getAllResearch();
-  res.json({ results, running, ready });
+router.get("/stocks/research", async (_req, res) => {
+  try {
+    const { running, ready } = getResearchStatus();
+    const reports = await getLatestReports(200);
+    res.json({ reports, running, ready, progress: getResearchProgress() });
+  } catch {
+    res.status(500).json({ error: "Failed to load research reports" });
+  }
+});
+
+router.get("/stocks/research/:ticker", async (req, res) => {
+  try {
+    const reports = await getReportsForTicker(req.params.ticker, 10);
+    if (reports.length === 0) {
+      res.status(404).json({ error: "No research reports for this ticker" });
+      return;
+    }
+    res.json({ ticker: req.params.ticker.toUpperCase(), reports });
+  } catch {
+    res.status(500).json({ error: "Failed to load research reports" });
+  }
 });
 
 // ---------- Watchlist ----------

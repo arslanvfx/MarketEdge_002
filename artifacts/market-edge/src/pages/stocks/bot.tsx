@@ -4,13 +4,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Play, Pause, DollarSign, Wallet, Zap, ShieldAlert, Loader2, RefreshCw,
   TrendingUp, TrendingDown, Save, AlertTriangle, Activity, CheckCircle2, X,
+  ListChecks, FlaskConical,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { StocksShell } from "./stocks-shell";
 import {
   stockGet, stockAuth, closeStockPosition, fmtUsd, fmtPct, fmtSignedUsd, SECTORS,
-  type BotStatus, type StockBotConfig, type TradingMode,
+  type BotStatus, type StockBotConfig, type TradingMode, type BotDecision, type ScanProgress,
 } from "@/lib/stocks-api";
 
 const MODE_LABELS: Record<TradingMode, string> = {
@@ -41,6 +42,12 @@ export default function StockBot() {
     queryKey: ["stocks-bot-positions"],
     queryFn: () => stockGet("/bot/positions"),
     refetchInterval: 10_000,
+  });
+
+  const { data: scanProgress } = useQuery<ScanProgress>({
+    queryKey: ["stocks-scanner-progress"],
+    queryFn: () => stockGet("/scanner/progress"),
+    refetchInterval: 5_000,
   });
 
   // Clear stale draft when backend config changes (e.g. after a save/restart).
@@ -251,6 +258,46 @@ export default function StockBot() {
             {status.cycle.lastCycleAt > 0 && ` · ${new Date(status.cycle.lastCycleAt).toLocaleTimeString()}`}
           </div>
         )}
+
+        {/* Research pipeline progress */}
+        {(scanProgress?.scanning || scanProgress?.researchRunning) && (
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-xs text-sky-300 flex items-center gap-2">
+            <FlaskConical className="w-4 h-4 flex-shrink-0" />
+            {scanProgress.researchRunning ? (
+              <span>
+                Researching top picks — {scanProgress.researchDone} / {scanProgress.researchTotal} reports done
+              </span>
+            ) : scanProgress.phase === "screening" ? (
+              <span>Screening market — {scanProgress.screened} / {scanProgress.universeSize} stocks</span>
+            ) : scanProgress.phase === "scoring" ? (
+              <span>Deep-scoring {scanProgress.done} / {scanProgress.total} candidates</span>
+            ) : (
+              <span>Scan pipeline running…</span>
+            )}
+            <Loader2 className="w-3.5 h-3.5 animate-spin ml-auto" />
+          </div>
+        )}
+
+        {/* Decision feed */}
+        <section>
+          <h2 className="text-sm font-bold text-foreground mb-3 flex items-center gap-2">
+            <ListChecks className="w-4 h-4 text-sky-400" /> Decision Feed
+            <span className="text-xs font-normal text-muted-foreground">
+              (last {status?.cycle?.decisions?.length ?? 0} decisions)
+            </span>
+          </h2>
+          {(status?.cycle?.decisions?.length ?? 0) === 0 ? (
+            <div className="rounded-lg border border-border bg-card px-4 py-6 text-center text-sm text-muted-foreground">
+              No decisions yet — the bot logs every ENTER / EXIT / SKIP here as it evaluates candidates.
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border bg-card divide-y divide-border max-h-80 overflow-y-auto">
+              {(status?.cycle?.decisions ?? []).map((d, i) => (
+                <DecisionRow key={`${d.ts}-${d.ticker}-${i}`} d={d} />
+              ))}
+            </div>
+          )}
+        </section>
 
         {/* Live positions */}
         <section>
@@ -472,6 +519,35 @@ export default function StockBot() {
         </section>
       </div>
     </StocksShell>
+  );
+}
+
+function DecisionRow({ d }: { d: BotDecision }) {
+  const badge =
+    d.action === "ENTER"
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+      : d.action === "EXIT"
+        ? "border-sky-500/40 bg-sky-500/10 text-sky-400"
+        : "border-border bg-muted/30 text-muted-foreground";
+  return (
+    <div className="flex items-center gap-3 px-4 py-2 text-xs" data-testid={`decision-${d.ticker}-${d.ts}`}>
+      <span className="text-muted-foreground w-16 flex-shrink-0 font-mono">
+        {new Date(d.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+      </span>
+      <span className={`font-bold px-1.5 py-0.5 rounded border w-14 text-center flex-shrink-0 ${badge}`}>
+        {d.action}
+      </span>
+      <span className="font-bold text-foreground w-14 flex-shrink-0">{d.ticker}</span>
+      {d.horizon && (
+        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-violet-500/40 bg-violet-500/10 text-violet-400 flex-shrink-0">
+          {d.horizon}
+        </span>
+      )}
+      {d.confidence != null && (
+        <span className="text-[10px] font-semibold text-muted-foreground flex-shrink-0">{d.confidence}%</span>
+      )}
+      <span className="text-muted-foreground truncate" title={d.reason}>{d.reason}</span>
+    </div>
   );
 }
 

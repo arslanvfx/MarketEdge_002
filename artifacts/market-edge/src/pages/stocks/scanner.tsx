@@ -10,19 +10,11 @@ import { StocksShell } from "./stocks-shell";
 import { StockDetail } from "./stock-detail";
 import {
   stockGet, stockAuth, fmtUsd, fmtPct, sentimentColor, SECTORS,
-  type ScannerRow, type WatchlistEntry, type ResearchResult, type StockBotConfig,
+  type ScannerRow, type WatchlistEntry, type ResearchReport, type StockBotConfig,
+  type ScanProgress,
 } from "@/lib/stocks-api";
 
 type SortKey = "score" | "changePct" | "confidence" | "price";
-
-interface ScanProgress {
-  scanning: boolean;
-  phase: "idle" | "snapshots" | "scoring" | "done";
-  total: number;
-  done: number;
-  currentTicker: string;
-  pct: number;
-}
 
 export default function StockScanner() {
   const { getToken } = useAuth();
@@ -71,7 +63,7 @@ export default function StockScanner() {
   });
 
   const { data: researchData } = useQuery<{
-    results: Record<string, ResearchResult>;
+    reports: ResearchReport[];
     running: boolean;
     ready: string[];
   }>({
@@ -88,7 +80,11 @@ export default function StockScanner() {
     refetchInterval: 60_000,
   });
 
-  const researchMap = researchData?.results ?? {};
+  const researchMap = useMemo(() => {
+    const m: Record<string, ResearchReport> = {};
+    for (const r of researchData?.reports ?? []) m[r.ticker] = r;
+    return m;
+  }, [researchData]);
   const researchRunning = researchData?.running ?? false;
   const botSectorFocus = botCfgData?.config?.sectorFocus ?? [];
 
@@ -154,6 +150,12 @@ export default function StockScanner() {
   // Human-readable scan status
   const scanStatusText = (() => {
     if (progressPhase === "snapshots") return "Fetching prices…";
+    if (progressPhase === "screening") {
+      return `Screening market — ${progressData?.screened ?? 0} / ${progressData?.universeSize ?? 0} stocks`;
+    }
+    if (progressPhase === "research") {
+      return `Researching top picks — ${progressData?.researchDone ?? 0} / ${progressData?.researchTotal ?? 0}`;
+    }
     if (progressPhase === "scoring") {
       return currentTicker
         ? `Scoring ${progressData?.done ?? 0} / ${progressData?.total ?? 0} — ${currentTicker}`
@@ -229,9 +231,11 @@ export default function StockScanner() {
                   progressPhase === "done" ? "bg-emerald-500" : "bg-emerald-500/70"
                 }`}
                 style={{
-                  width: progressPhase === "snapshots" ? "8%" :
+                  width: progressPhase === "snapshots" ? "5%" :
+                         progressPhase === "screening" ? "15%" :
+                         progressPhase === "research" ? "95%" :
                          progressPhase === "done" ? "100%" :
-                         `${Math.max(8, progressPct)}%`
+                         `${Math.max(15, progressPct)}%`
                 }}
               />
             </div>
@@ -330,25 +334,26 @@ function fmtAge(ts: number): string {
   return `${Math.floor(sec / 3600)}h ago`;
 }
 
-function ResearchBadge({ r }: { r: ResearchResult }) {
-  const cfg = {
-    Buy:   { cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400", dot: "bg-emerald-400" },
-    Hold:  { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400",       dot: "bg-amber-400" },
-    Avoid: { cls: "border-red-500/40 bg-red-500/10 text-red-400",             dot: "bg-red-400" },
-  }[r.verdict];
+function ResearchBadge({ r }: { r: ResearchReport }) {
+  const cfg =
+    r.confidence >= 70
+      ? { cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400", dot: "bg-emerald-400" }
+      : r.confidence >= 40
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", dot: "bg-amber-400" }
+        : { cls: "border-red-500/40 bg-red-500/10 text-red-400", dot: "bg-red-400" };
   return (
     <span
       className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border cursor-help ${cfg.cls}`}
-      title={r.reason || r.verdict}
+      title={r.summary || r.horizon}
     >
       <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
-      {r.score} · {r.verdict}
+      {r.confidence} · {r.horizon}
     </span>
   );
 }
 
 function ScannerCard({ row, research, watched, botExcluded, onOpen, onToggleWatch }: {
-  row: ScannerRow; research?: ResearchResult; watched: boolean; botExcluded: boolean; onOpen: () => void; onToggleWatch: () => void;
+  row: ScannerRow; research?: ResearchReport; watched: boolean; botExcluded: boolean; onOpen: () => void; onToggleWatch: () => void;
 }) {
   const up = row.direction === "up";
   const rsiRaw = row.details?.rsi;

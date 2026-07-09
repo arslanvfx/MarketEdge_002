@@ -21,6 +21,7 @@ import { BuilderProvider } from "./lib/builder-context";
 import { AlertsNotifier } from "./components/alerts-notifier";
 
 const StockScanner = lazy(() => import("./pages/stocks/scanner"));
+const StockResearch = lazy(() => import("./pages/stocks/research"));
 const StockWatchlist = lazy(() => import("./pages/stocks/watchlist"));
 const StockBot = lazy(() => import("./pages/stocks/bot"));
 const StockHistory = lazy(() => import("./pages/stocks/history"));
@@ -184,6 +185,9 @@ function ClerkProviderWithRoutes() {
             <Route path="/stocks" component={() => <Redirect to="/stocks/scanner" />} />
             <Route path="/stocks/scanner">
               <Layout><Suspense fallback={<StocksFallback />}><StockScanner /></Suspense></Layout>
+            </Route>
+            <Route path="/stocks/research">
+              <Layout><Suspense fallback={<StocksFallback />}><StockResearch /></Suspense></Layout>
             </Route>
             <Route path="/stocks/watchlist">
               <Layout><Suspense fallback={<StocksFallback />}><StockWatchlist /></Suspense></Layout>

@@ -1,10 +1,11 @@
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Radar, Star, Bot, History, BarChart3, AlertTriangle, TrendingUp } from "lucide-react";
+import { Radar, Star, Bot, History, BarChart3, AlertTriangle, TrendingUp, FlaskConical } from "lucide-react";
 import { stockGet, type StockMeta } from "@/lib/stocks-api";
 
 const TABS = [
   { name: "Scanner", href: "/stocks/scanner", icon: Radar },
+  { name: "Research", href: "/stocks/research", icon: FlaskConical },
   { name: "Watchlist", href: "/stocks/watchlist", icon: Star },
   { name: "Bot", href: "/stocks/bot", icon: Bot },
   { name: "History", href: "/stocks/history", icon: History },

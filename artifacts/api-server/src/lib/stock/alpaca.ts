@@ -109,22 +109,114 @@ export async function getLatestPrice(symbol: string): Promise<number | null> {
   }
 }
 
-/** Batched snapshots for many symbols: latest price + daily bar. */
+export interface StockSnapshot {
+  price: number;
+  prevClose: number;
+  changePct: number;
+  /** Today's traded volume (falls back to previous session when today is 0). */
+  volume: number;
+  /** Previous session's volume. */
+  prevVolume: number;
+  bid: number;
+  ask: number;
+  bidSize: number;
+  askSize: number;
+  /** (ask − bid) / mid × 100, or null when the quote is missing/crossed. */
+  spreadPct: number | null;
+}
+
+/** Batched snapshots for many symbols: latest price, quote, and daily bars. */
 export async function getSnapshots(
   symbols: string[],
-): Promise<Record<string, { price: number; prevClose: number; changePct: number }>> {
+): Promise<Record<string, StockSnapshot>> {
   if (symbols.length === 0) return {};
   const params = new URLSearchParams({ symbols: symbols.join(","), feed: "iex" });
   const url = `${DATA_BASE}/v2/stocks/snapshots?${params}`;
   const data = await req<Record<string, any>>(url);
-  const out: Record<string, { price: number; prevClose: number; changePct: number }> = {};
+  const out: Record<string, StockSnapshot> = {};
   for (const [sym, snap] of Object.entries(data)) {
     const price = snap?.latestTrade?.p ?? snap?.dailyBar?.c ?? 0;
     const prevClose = snap?.prevDailyBar?.c ?? snap?.dailyBar?.o ?? price;
     const changePct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
-    out[sym] = { price, prevClose, changePct };
+    const volume = Number(snap?.dailyBar?.v) || 0;
+    const prevVolume = Number(snap?.prevDailyBar?.v) || 0;
+    const bid = Number(snap?.latestQuote?.bp) || 0;
+    const ask = Number(snap?.latestQuote?.ap) || 0;
+    const bidSize = Number(snap?.latestQuote?.bs) || 0;
+    const askSize = Number(snap?.latestQuote?.as) || 0;
+    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+    const spreadPct = mid > 0 && ask >= bid ? ((ask - bid) / mid) * 100 : null;
+    out[sym] = { price, prevClose, changePct, volume, prevVolume, bid, ask, bidSize, askSize, spreadPct };
   }
   return out;
+}
+
+// ---------- Assets (market-wide universe) ----------
+
+export interface AlpacaAsset {
+  symbol: string;
+  name: string;
+  exchange: string;
+  fractionable: boolean;
+}
+
+/**
+ * All active, tradable US equities. This is the raw market-wide asset list
+ * (~8–11k symbols); callers pre-filter via snapshots before using it. Leveraged
+ * ETF-style tickers and OTC listings are excluded at the exchange level by
+ * Alpaca's `tradable` flag; we additionally drop non-standard symbols
+ * (units/warrants/preferred shares with ./- suffixes) which have poor data.
+ */
+export async function getAssets(mode: "paper" | "live" = "paper"): Promise<AlpacaAsset[]> {
+  const params = new URLSearchParams({ status: "active", asset_class: "us_equity" });
+  const data = await req<any[]>(`${tradingBase(mode)}/v2/assets?${params}`);
+  return (data ?? [])
+    .filter((a) => a.tradable && /^[A-Z]{1,5}$/.test(a.symbol))
+    .map((a) => ({
+      symbol: a.symbol,
+      name: a.name ?? a.symbol,
+      exchange: a.exchange ?? "",
+      fractionable: !!a.fractionable,
+    }));
+}
+
+// ---------- Level 1 quote (entry-timing signal) ----------
+
+export interface Level1Quote {
+  bid: number;
+  ask: number;
+  bidSize: number;
+  askSize: number;
+  /** (ask − bid) / mid × 100, or null when the book is empty/crossed. */
+  spreadPct: number | null;
+  /** bidSize / askSize, or null when askSize is 0. >1 means buy-side dominant. */
+  imbalance: number | null;
+}
+
+/** Real-time Level 1 quote for a symbol (IEX feed). */
+export async function getLevel1Quote(symbol: string): Promise<Level1Quote | null> {
+  try {
+    const url = `${DATA_BASE}/v2/stocks/${encodeURIComponent(symbol)}/quotes/latest?feed=iex`;
+    const data = await req<{ quote?: { bp: number; ap: number; bs: number; as: number } }>(url);
+    const q = data.quote;
+    if (!q) return null;
+    const bid = Number(q.bp) || 0;
+    const ask = Number(q.ap) || 0;
+    const bidSize = Number(q.bs) || 0;
+    const askSize = Number(q.as) || 0;
+    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+    return {
+      bid,
+      ask,
+      bidSize,
+      askSize,
+      spreadPct: mid > 0 && ask >= bid ? ((ask - bid) / mid) * 100 : null,
+      imbalance: askSize > 0 ? bidSize / askSize : null,
+    };
+  } catch (err) {
+    logger.warn({ err, symbol }, "[alpaca] level1 quote failed");
+    return null;
+  }
 }
 
 /** Raw news items for one or more tickers (Benzinga feed via Alpaca). */

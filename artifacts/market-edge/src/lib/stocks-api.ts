@@ -34,10 +34,19 @@ export interface WatchlistEntry {
   addedAt: string;
 }
 
+export interface UniverseStatus {
+  builtAt: number;
+  totalAssets: number;
+  candidateCount: number;
+  source: "market" | "static-fallback" | "none";
+  building: boolean;
+}
+
 export interface StockMeta {
   configured: boolean;
   sectors: string[];
   universeSize: number;
+  universe?: UniverseStatus;
   lastScanAt: number;
 }
 
@@ -134,12 +143,40 @@ export interface StockAnalysis {
   chart?: ChartData | null;
 }
 
-export interface ResearchResult {
+export type ResearchHorizon = TradingMode;
+
+export interface ResearchReport {
   ticker: string;
-  score: number;        // 0-100
-  verdict: "Buy" | "Hold" | "Avoid";
-  reason: string;
-  researchedAt: string;
+  companyName: string;
+  sector: string;
+  horizon: ResearchHorizon;
+  confidence: number;      // 0-100 conviction in the upside thesis
+  bullFactors: string[];
+  bearFactors: string[];
+  summary: string;
+  price: number | null;
+  webSearchUsed: boolean;
+  createdAt: string;
+}
+
+export interface ResearchProgress {
+  running: boolean;
+  total: number;
+  done: number;
+}
+
+export interface ScanProgress {
+  scanning: boolean;
+  phase: "idle" | "snapshots" | "screening" | "scoring" | "research" | "done";
+  total: number;
+  done: number;
+  currentTicker: string;
+  pct: number;
+  screened: number;
+  universeSize: number;
+  researchTotal: number;
+  researchDone: number;
+  researchRunning: boolean;
 }
 
 export interface StockBotConfig {
@@ -183,10 +220,20 @@ export interface AlpacaPosition {
   unrealizedPlpc: number;
 }
 
+export interface BotDecision {
+  ts: number;
+  ticker: string;
+  action: "ENTER" | "EXIT" | "SKIP";
+  horizon: TradingMode | null;
+  confidence: number | null;
+  reason: string;
+}
+
 export interface BotCycleStatus {
   lastCycleAt: number;
   lastCycleSummary: string;
   running: boolean;
+  decisions?: BotDecision[];
 }
 
 export interface BotStatus {

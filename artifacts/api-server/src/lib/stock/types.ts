@@ -76,6 +76,22 @@ export interface StockSignals {
   combinedConfidence: number;
 }
 
+export type ResearchHorizon = "day" | "swing" | "long";
+
+export interface ResearchReport {
+  ticker: string;
+  companyName: string;
+  sector: string;
+  horizon: ResearchHorizon;
+  confidence: number; // 0-100
+  summary: string;
+  bullFactors: string[];
+  bearFactors: string[];
+  price: number | null;
+  webSearchUsed: boolean;
+  createdAt: string;
+}
+
 export interface ScannerRow {
   ticker: string;
   companyName: string;
