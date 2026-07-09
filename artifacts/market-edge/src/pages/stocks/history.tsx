@@ -12,6 +12,27 @@ import {
 
 const PAGE_SIZE = 20;
 
+// Friendly labels for the bot's exit reason codes (persisted on the bet row at
+// close time). Unknown codes fall back to de-snake-cased raw text.
+const EXIT_REASON_LABELS: Record<string, string> = {
+  stop_loss: "Stop loss hit",
+  target: "Target price hit",
+  eod_close: "End-of-day close",
+  max_hold: "Max hold time reached",
+  swing_stop: "Swing stop (\u22124%)",
+  swing_target: "Swing target (+8%)",
+  trailing_stop: "Trailing stop (\u22126% from peak)",
+  manual: "Closed manually",
+};
+
+function fmtExitReason(raw: string | null): string | null {
+  if (!raw) return null;
+  if (EXIT_REASON_LABELS[raw]) return EXIT_REASON_LABELS[raw];
+  const downgrade = raw.match(/^research_downgrade \(conf (\d+)\)$/);
+  if (downgrade) return `Research downgrade (conf ${downgrade[1]})`;
+  return raw.replace(/_/g, " ");
+}
+
 export default function StockHistory() {
   const [page, setPage] = useState(0);
 
@@ -67,7 +88,13 @@ export default function StockHistory() {
                         <td className={`px-3 py-2 font-semibold ${pnl == null ? "text-muted-foreground" : pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {pnl == null ? "—" : fmtSignedUsd(pnl)}
                         </td>
-                        <td className="px-3 py-2 text-muted-foreground text-xs">{r.exit_reason ?? "—"}</td>
+                        <td
+                          className="px-3 py-2 text-muted-foreground text-xs whitespace-nowrap"
+                          title={r.exit_reason ?? undefined}
+                          data-testid={`exit-reason-${r.id}`}
+                        >
+                          {fmtExitReason(r.exit_reason) ?? "—"}
+                        </td>
                         <td className="px-3 py-2">
                           {r.outcome === "win" ? (
                             <span className="inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="w-3.5 h-3.5" />win</span>
