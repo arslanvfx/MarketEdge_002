@@ -26,6 +26,7 @@ import {
   closePosition,
 } from "./alpaca";
 import { getConfig, saveConfig } from "./config";
+import { selectEntryMode, heldKey } from "./bot-entry-core";
 import { getCandles } from "./data";
 import { buildSignals } from "./ai";
 import { buildFeatures, recordOutcome } from "./ml";
@@ -378,7 +379,9 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
   const pdtBlocked = account.patternDayTrader && account.equity < 25000;
 
   const open = await openBets(cfg.mode);
-  const held = new Set(open.map((b) => b.ticker));
+  // Held guard is per (ticker, horizon): the same ticker may hold concurrent
+  // day/swing/long positions, but never two positions in the same horizon.
+  const held = new Set(open.map((b) => heldKey(b.ticker, b.tradingMode)));
   const modeCounts: Record<TradingMode, number> = { day: 0, swing: 0, long: 0 };
   for (const b of open) modeCounts[b.tradingMode] = (modeCounts[b.tradingMode] ?? 0) + 1;
   const capFor = (m: TradingMode) =>
@@ -405,21 +408,22 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
   for (const cand of candidates) {
     if (open.length + entries >= cfg.maxConcurrentPositions) break;
     const ticker = cand.ticker;
-    if (held.has(ticker)) continue;
 
     // Resolve which horizon this entry would use. Research-driven candidates
     // use their recommended horizon; flexible candidates take the first active
-    // mode with capacity (day → swing → long preference).
-    const wanted: TradingMode[] = cand.horizon
-      ? [cand.horizon]
-      : (["day", "swing", "long"] as TradingMode[]);
-    const mode = wanted.find((m) => {
-      if (!cfg.tradingModes.includes(m)) return false;
-      if (m === "day" && pdtBlocked) return false;
-      return (modeCounts[m] ?? 0) < capFor(m);
+    // mode with capacity (day → swing → long preference). A horizon already
+    // held for this ticker is skipped, but other horizons remain eligible.
+    const { mode, allHeld } = selectEntryMode({
+      ticker,
+      horizon: cand.horizon,
+      held,
+      modeCounts,
+      caps: { day: cfg.maxDayPositions, swing: cfg.maxSwingPositions, long: cfg.maxLongPositions },
+      activeModes: cfg.tradingModes,
+      pdtBlocked,
     });
     if (!mode) {
-      if (cand.report) {
+      if (cand.report && !allHeld) {
         recordDecision({
           ticker, action: "SKIP", horizon: cand.horizon,
           confidence: cand.report.confidence,
@@ -581,7 +585,7 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       `);
       entries++;
       modeCounts[mode] = (modeCounts[mode] ?? 0) + 1;
-      held.add(ticker);
+      held.add(heldKey(ticker, mode));
       recordDecision({
         ticker, action: "ENTER", horizon: mode, confidence: effectiveConfidence,
         reason: research
