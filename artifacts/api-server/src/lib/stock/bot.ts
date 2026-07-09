@@ -54,7 +54,7 @@ const LONG_ENTRY_MIN_CONF = 75;           // research confidence gate for long e
 const MAX_ENTRY_SPREAD_PCT = 0.3;
 const MIN_ENTRY_IMBALANCE = 1.2;
 
-// ── Rolling decision log (last 50, in-memory) ───────────────────────────────
+// ── Rolling decision log (last 50 in-memory, persisted to stock_bot_decisions)
 export interface BotDecision {
   ts: number;
   ticker: string;
@@ -64,11 +64,64 @@ export interface BotDecision {
   reason: string;
 }
 
+const DECISION_LOG_MAX = 50;
+const DECISION_RETENTION_DAYS = 7;
+const DECISION_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // prune at most every 6h
+
 const decisionLog: BotDecision[] = [];
+let lastDecisionCleanupAt = 0;
 
 function recordDecision(d: Omit<BotDecision, "ts">): void {
-  decisionLog.unshift({ ts: Date.now(), ...d });
-  if (decisionLog.length > 50) decisionLog.length = 50;
+  const decision: BotDecision = { ts: Date.now(), ...d };
+  decisionLog.unshift(decision);
+  if (decisionLog.length > DECISION_LOG_MAX) decisionLog.length = DECISION_LOG_MAX;
+
+  // Persist asynchronously so a slow/unavailable DB never blocks the bot cycle.
+  db.execute(sql`
+    INSERT INTO stock_bot_decisions (ticker, action, horizon, confidence, reason, ts)
+    VALUES (${decision.ticker}, ${decision.action}, ${decision.horizon},
+            ${decision.confidence}, ${decision.reason}, to_timestamp(${decision.ts / 1000}))
+  `).catch((err) => logger.warn({ err }, "[stock-bot] decision persist failed"));
+
+  // Opportunistic retention cleanup, throttled so it doesn't run every insert.
+  const now = Date.now();
+  if (now - lastDecisionCleanupAt >= DECISION_CLEANUP_INTERVAL_MS) {
+    lastDecisionCleanupAt = now;
+    cleanupOldDecisions();
+  }
+}
+
+function cleanupOldDecisions(): void {
+  db.execute(sql`
+    DELETE FROM stock_bot_decisions
+    WHERE ts < NOW() - make_interval(days => ${DECISION_RETENTION_DAYS})
+  `).catch((err) => logger.warn({ err }, "[stock-bot] decision cleanup failed"));
+}
+
+/** Hydrate the in-memory decision feed from the DB after a restart. */
+export async function initDecisionLogFromDB(): Promise<void> {
+  const res = (await db.execute(sql`
+    SELECT ticker, action, horizon, confidence, reason, ts
+    FROM stock_bot_decisions
+    WHERE ts >= NOW() - make_interval(days => ${DECISION_RETENTION_DAYS})
+    ORDER BY ts DESC
+    LIMIT ${DECISION_LOG_MAX}
+  `)) as unknown as { rows: any[] };
+  const rows = res.rows ?? [];
+  decisionLog.length = 0;
+  for (const r of rows) {
+    decisionLog.push({
+      ts: new Date(r.ts).getTime(),
+      ticker: String(r.ticker),
+      action: r.action as BotDecision["action"],
+      horizon: (r.horizon ?? null) as TradingMode | null,
+      confidence: r.confidence != null ? Number(r.confidence) : null,
+      reason: String(r.reason ?? ""),
+    });
+  }
+  lastDecisionCleanupAt = Date.now();
+  cleanupOldDecisions();
+  logger.info({ count: decisionLog.length }, "[stock-bot] decision log hydrated from DB");
 }
 
 export function getDecisionLog(): BotDecision[] {

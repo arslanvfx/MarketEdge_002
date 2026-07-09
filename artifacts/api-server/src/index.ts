@@ -10,7 +10,7 @@ import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
 import { initResearchFromDB } from "./lib/stock/research";
-import { runBotCycle as runStockBotCycle } from "./lib/stock/bot";
+import { runBotCycle as runStockBotCycle, initDecisionLogFromDB } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
 import { initAiSpend } from "./lib/ai-spend";
 
@@ -345,6 +345,21 @@ async function runStockMigrations(): Promise<void> {
       ALTER TABLE stock_bot_bets ADD COLUMN IF NOT EXISTS peak_price NUMERIC(14,4)
     `);
     await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_bot_decisions (
+        id         SERIAL PRIMARY KEY,
+        ticker     TEXT NOT NULL,
+        action     TEXT NOT NULL,
+        horizon    TEXT,
+        confidence NUMERIC(6,2),
+        reason     TEXT NOT NULL,
+        ts         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS stock_bot_decisions_ts
+        ON stock_bot_decisions (ts DESC)
+    `);
+    await client.query(`
       CREATE TABLE IF NOT EXISTS stock_ml_model_state (
         ticker           TEXT PRIMARY KEY,
         weights          JSONB NOT NULL,
@@ -370,6 +385,11 @@ async function startStockVertical(): Promise<void> {
   );
   await initStockMLFromDB().catch((err) =>
     logger.warn({ err }, "[stock-ml] init failed (non-fatal)"),
+  );
+  // Hydrate the decision feed before the Alpaca gate so the dashboard shows
+  // history even when broker keys are missing.
+  await initDecisionLogFromDB().catch((err) =>
+    logger.warn({ err }, "[stock-bot] decision log hydrate failed (non-fatal)"),
   );
 
   if (!alpacaConfigured()) {
