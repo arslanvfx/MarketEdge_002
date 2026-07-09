@@ -481,8 +481,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     directionalRegressionLookback,
     directionalRegressionThreshold,
     directionalRegressionPenaltyPp,
-    choppyMinEntryMinutes,
-    choppyProximityPct,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -535,8 +533,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     directionalRegressionLookback?: number;
     directionalRegressionThreshold?: number;
     directionalRegressionPenaltyPp?: number;
-    choppyMinEntryMinutes?: number;
-    choppyProximityPct?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -682,13 +678,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof directionalRegressionPenaltyPp === "number" && directionalRegressionPenaltyPp >= 0 && directionalRegressionPenaltyPp <= 30) {
     partial.directionalRegressionPenaltyPp = directionalRegressionPenaltyPp;
-  }
-  // Choppy-market entry guards
-  if (typeof choppyMinEntryMinutes === "number" && choppyMinEntryMinutes >= 0 && choppyMinEntryMinutes <= 12) {
-    partial.choppyMinEntryMinutes = choppyMinEntryMinutes;
-  }
-  if (typeof choppyProximityPct === "number" && choppyProximityPct >= 0 && choppyProximityPct <= 2.0) {
-    partial.choppyProximityPct = choppyProximityPct;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

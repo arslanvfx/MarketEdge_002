@@ -56,13 +56,13 @@ function mlGateInputs(overrides: Partial<CorePairInputs> = {}): CorePairInputs {
 test("streak penalty: DEFAULT_BOT_CONFIG has correct 1-loss and 2+-loss penalty defaults", () => {
   assert.strictEqual(
     DEFAULT_BOT_CONFIG.coinStreakPenalty1LossPp,
-    3,
-    "1-loss streak penalty should default to 3pp",
+    6,
+    "1-loss streak penalty should default to 6pp",
   );
   assert.strictEqual(
     DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp,
-    6,
-    "2+-loss streak penalty should default to 6pp",
+    12,
+    "2+-loss streak penalty should default to 12pp",
   );
 });
 
@@ -79,32 +79,32 @@ test("streak penalty: DEFAULT_BOT_CONFIG unanimousMinModelConfidence defaults to
 // The streak penalty raises minConfidence (the threshold), NOT reduces decision.confidence.
 // A bet fires only when: decision.confidence >= minConfidence + streakPenalty
 
-test("streak penalty: 1 consecutive loss raises the required floor by 3pp — blocks a borderline bet", () => {
+test("streak penalty: 1 consecutive loss raises the required floor by 6pp — blocks a borderline bet", () => {
   const minConf = 60;
-  const pen1 = DEFAULT_BOT_CONFIG.coinStreakPenalty1LossPp!; // 3
-  const raisedFloor = minConf + pen1; // 63
-  // A decision.confidence of 62% would pass the base floor (62 ≥ 60) but fail
-  // the raised floor (62 < 63), so the bet is skipped.
-  const decisionConf = 62;
+  const pen1 = DEFAULT_BOT_CONFIG.coinStreakPenalty1LossPp!; // 6
+  const raisedFloor = minConf + pen1; // 66
+  // A decision.confidence of 64% would pass the base floor (64 ≥ 60) but fail
+  // the raised floor (64 < 66), so the bet is skipped.
+  const decisionConf = 64;
   assert.ok(decisionConf >= minConf, "base floor: decision would be allowed without streak");
   assert.ok(decisionConf < raisedFloor, "raised floor: decision should be blocked by 1-loss streak penalty");
 });
 
-test("streak penalty: 2+ consecutive losses raises the required floor by 6pp — blocks a borderline bet", () => {
+test("streak penalty: 2+ consecutive losses raises the required floor by 12pp — blocks a borderline bet", () => {
   const minConf = 60;
-  const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!; // 6
-  const raisedFloor = minConf + pen2; // 66
-  const decisionConf = 64;
+  const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!; // 12
+  const raisedFloor = minConf + pen2; // 72
+  const decisionConf = 70;
   assert.ok(decisionConf >= minConf, "base floor: decision would be allowed without streak");
   assert.ok(decisionConf < raisedFloor, "raised floor: decision should be blocked by 2+-loss streak penalty");
 });
 
 test("streak penalty: a confident-enough bet still passes even with streak penalty", () => {
   const minConf = 60;
-  const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!; // 6
-  const raisedFloor = minConf + pen2; // 66
+  const pen2 = DEFAULT_BOT_CONFIG.coinStreakPenalty2PlusLossPp!; // 12
+  const raisedFloor = minConf + pen2; // 72
   const decisionConf = 75;
-  assert.ok(decisionConf >= raisedFloor, "a 75% confidence bet should still clear the 2+-loss raised floor (66%)");
+  assert.ok(decisionConf >= raisedFloor, "a 75% confidence bet should still clear the 2+-loss raised floor (72%)");
 });
 
 test("streak penalty: freeRunMode exempts coins from streak penalty", () => {
@@ -388,12 +388,12 @@ test("directional dampener: DEFAULT_BOT_CONFIG has correct directional filter de
     "directionalRegressionLookback should default to 3 windows",
   );
   assert.ok(
-    Math.abs((DEFAULT_BOT_CONFIG.directionalRegressionThreshold ?? 0) - 0.25) < 0.001,
-    "directionalRegressionThreshold should default to 0.25",
+    Math.abs((DEFAULT_BOT_CONFIG.directionalRegressionThreshold ?? 0) - 0.35) < 0.001,
+    "directionalRegressionThreshold should default to 0.35",
   );
   assert.strictEqual(
     DEFAULT_BOT_CONFIG.directionalRegressionPenaltyPp,
-    5,
-    "directionalRegressionPenaltyPp should default to 5pp",
+    10,
+    "directionalRegressionPenaltyPp should default to 10pp",
   );
 });
