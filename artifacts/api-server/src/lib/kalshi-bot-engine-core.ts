@@ -1166,7 +1166,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   directionalRegressionPenaltyPp: 5,
   // Choppy-market late-entry gates — wait for direction to establish in noisy windows.
   choppyMinEntryMinutes: 5,
-  choppyProximityPct: 0.20,
+  choppyProximityPct: 0.10,
 };
 
 /**
