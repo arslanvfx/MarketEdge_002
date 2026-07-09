@@ -11,7 +11,7 @@ import { getScannerResults, runScan, lastScanTime, getScanProgress } from "../li
 import { getAllResearch, getResearchStatus } from "../lib/stock/research";
 import { getScoredNews } from "../lib/stock/news";
 import { getEarnings } from "../lib/stock/earnings";
-import { getCandles } from "../lib/stock/data";
+import { getCandles, getChartData, CHART_RANGES, type ChartRange } from "../lib/stock/data";
 import { buildSignals } from "../lib/stock/ai";
 import { getSectorMomentum } from "../lib/stock/scanner";
 import { lookupUniverse, STOCK_UNIVERSE, SECTORS } from "../lib/stock/universe";
@@ -129,12 +129,19 @@ router.get("/stocks/news/:ticker", async (req, res) => {
 router.get("/stocks/analysis/:ticker", async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
   const mode = (String(req.query.mode ?? "day") as TradingMode);
+  const rangeParam = String(req.query.range ?? "1D");
+  const range: ChartRange = (CHART_RANGES as string[]).includes(rangeParam)
+    ? (rangeParam as ChartRange)
+    : "1D";
   try {
     if (!alpacaConfigured()) {
       res.status(503).json({ error: "Alpaca not configured" });
       return;
     }
-    const candles = await getCandles(ticker, ["day", "swing", "long"].includes(mode) ? mode : "day");
+    const [candles, chart] = await Promise.all([
+      getCandles(ticker, ["day", "swing", "long"].includes(mode) ? mode : "day"),
+      getChartData(ticker, range).catch(() => null),
+    ]);
     if (candles.length < 20) {
       res.status(422).json({ error: "Insufficient market data for analysis" });
       return;
@@ -153,6 +160,7 @@ router.get("/stocks/analysis/:ticker", async (req, res) => {
       companyName: uni?.name ?? ticker,
       ml: { ...signals.ml, ...mlStatus(ticker) },
       candles: candles.slice(-120),
+      chart,
     });
   } catch (err) {
     res.status(500).json({ error: "Analysis failed" });

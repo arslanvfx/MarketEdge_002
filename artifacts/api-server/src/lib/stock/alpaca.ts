@@ -52,21 +52,42 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 
 // ---------- Market data ----------
 
-/** Fetch historical bars (candles) for a symbol. timeframe e.g. "5Min", "1Day". */
+/** Approx. bars per trading day for a given Alpaca timeframe string. */
+function barsPerDay(timeframe: string): number {
+  if (timeframe === "1Day") return 1;
+  if (timeframe === "1Hour") return 7;
+  const m = /^(\d+)Min$/.exec(timeframe);
+  if (m) return Math.max(1, Math.floor(390 / Number(m[1])));
+  return 1;
+}
+
+/**
+ * Fetch historical bars (candles) for a symbol. timeframe e.g. "5Min", "1Day".
+ *
+ * Alpaca defaults `start` to the beginning of the current trading day, so
+ * without an explicit start a multi-day request (e.g. 250 daily bars) returns
+ * only today's bar. We compute a start far enough back (trading days →
+ * calendar days with weekend/holiday slack) that `limit` bars are available.
+ */
 export async function getBars(
   symbol: string,
   timeframe: string,
   limit = 100,
 ): Promise<Candle[]> {
+  const tradingDays = Math.ceil(limit / barsPerDay(timeframe));
+  const calendarDays = Math.ceil(tradingDays * 1.6) + 5;
+  const start = new Date(Date.now() - calendarDays * 86_400_000).toISOString();
   const params = new URLSearchParams({
     timeframe,
     limit: String(limit),
+    start,
     adjustment: "raw",
     feed: "iex", // IEX feed is available on the free data plan
+    sort: "desc", // newest first so `limit` always keeps the most recent bars
   });
   const url = `${DATA_BASE}/v2/stocks/${encodeURIComponent(symbol)}/bars?${params}`;
   const data = await req<{ bars?: any[] }>(url);
-  return (data.bars ?? []).map((b) => ({
+  return (data.bars ?? []).reverse().map((b) => ({
     t: new Date(b.t).getTime(),
     o: b.o,
     h: b.h,

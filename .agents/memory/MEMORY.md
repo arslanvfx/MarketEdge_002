@@ -75,3 +75,4 @@
 - [Fast-agreement early entry](fast-agreement-early-entry.md) — stat+ML agreement (one ≥60 conf) must bypass the Claude-pending guard; waiting for Claude in min 0-3 caused zero NO bets ever
 - [calcROI NO-bet block](calcROI-no-bet-block.md) — calcROI used cents format (100-p)/p but yesPrice is 0-1 dollars; blocked every NO bet via MIN_ROI_PCT gate; fix: use (1-p)/p and guard yesPrice<1
 - [All-three signal gate](all-three-signal-gate.md) — bot bets only when stat+Claude+ML all non-null via getLatestCoinSignals; no fallbacks; 3 gate layers (pipeline/tick/engine) + 10-min predCache freshness guard
+- [Alpaca bars default start](alpaca-bars-start.md) — bars API defaults start=today; multi-day fetches return 1 bar unless explicit start + sort=desc (then reverse); always go through getBars()

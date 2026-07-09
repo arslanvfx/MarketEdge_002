@@ -351,6 +351,8 @@ function ScannerCard({ row, research, watched, botExcluded, onOpen, onToggleWatc
   row: ScannerRow; research?: ResearchResult; watched: boolean; botExcluded: boolean; onOpen: () => void; onToggleWatch: () => void;
 }) {
   const up = row.direction === "up";
+  const rsiRaw = row.details?.rsi;
+  const rsi = typeof rsiRaw === "number" && !isNaN(rsiRaw) ? rsiRaw : null;
   return (
     <div
       onClick={onOpen}
@@ -390,6 +392,19 @@ function ScannerCard({ row, research, watched, botExcluded, onOpen, onToggleWatc
         {botExcluded && (
           <span className="inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border border-border/60 text-muted-foreground/60" title={`Sector "${row.sector}" is outside the bot's active sector focus`}>
             Bot excluded
+          </span>
+        )}
+        {rsi != null && (
+          <span
+            className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
+              rsi > 50
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                : "border-border/60 text-muted-foreground"
+            }`}
+            title={rsi > 50 ? "RSI above 50 — bullish momentum" : "RSI at or below 50"}
+            data-testid={`rsi-badge-${row.ticker}`}
+          >
+            RSI {Math.round(rsi)}{rsi > 50 ? " ↑" : ""}
           </span>
         )}
         {(row.details?.maAlignment as boolean) && (

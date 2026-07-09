@@ -1,9 +1,6 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip as RTooltip, ReferenceLine,
-} from "recharts";
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from "@/components/ui/sheet";
@@ -12,105 +9,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
+import { StockChart } from "./stock-chart";
 import {
   stockGet, closeStockPosition, fmtUsd, fmtPct, fmtSignedUsd, sentimentColor,
-  type AnalystRating, type StockAnalysis, type Candle, type BotStatus, type Direction,
+  type AnalystRating, type StockAnalysis, type BotStatus, type Direction, type ChartRange,
 } from "@/lib/stocks-api";
-
-// ─── Bollinger Bands over close prices (period 20, 2σ) ───────────────────────
-function bollinger(candles: Candle[], period = 20, mult = 2) {
-  return candles.map((_, i) => {
-    if (i < period - 1) return { mid: null, upper: null, lower: null };
-    const slice = candles.slice(i - period + 1, i + 1).map((c) => c.c);
-    const mean = slice.reduce((a, b) => a + b, 0) / period;
-    const variance = slice.reduce((a, b) => a + (b - mean) ** 2, 0) / period;
-    const sd = Math.sqrt(variance);
-    return { mid: mean, upper: mean + mult * sd, lower: mean - mult * sd };
-  });
-}
-
-function rsiSeries(candles: Candle[], period = 14): (number | null)[] {
-  const out: (number | null)[] = [];
-  let gains = 0, losses = 0;
-  for (let i = 0; i < candles.length; i++) {
-    if (i === 0) { out.push(null); continue; }
-    const diff = candles[i].c - candles[i - 1].c;
-    const gain = Math.max(0, diff);
-    const loss = Math.max(0, -diff);
-    if (i <= period) {
-      gains += gain; losses += loss;
-      if (i === period) {
-        const rs = losses === 0 ? 100 : gains / losses;
-        out.push(100 - 100 / (1 + rs));
-      } else out.push(null);
-    } else {
-      gains = (gains * (period - 1) + gain) / period;
-      losses = (losses * (period - 1) + loss) / period;
-      const rs = losses === 0 ? 100 : gains / losses;
-      out.push(100 - 100 / (1 + rs));
-    }
-  }
-  return out;
-}
-
-// ─── SVG candlestick chart with Bollinger overlay ────────────────────────────
-function CandleChart({ candles }: { candles: Candle[] }) {
-  const W = 640, H = 240, padL = 48, padR = 12, padT = 12, padB = 20;
-  const bb = useMemo(() => bollinger(candles), [candles]);
-
-  if (candles.length < 2) {
-    return <div className="h-[240px] flex items-center justify-center text-sm text-muted-foreground">No chart data</div>;
-  }
-
-  const lows = candles.map((c) => c.l);
-  const highs = candles.map((c) => c.h);
-  const bbLow = bb.map((b) => b.lower).filter((v): v is number => v != null);
-  const bbHigh = bb.map((b) => b.upper).filter((v): v is number => v != null);
-  const min = Math.min(...lows, ...bbLow);
-  const max = Math.max(...highs, ...bbHigh);
-  const range = max - min || 1;
-
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const x = (i: number) => padL + (i / (candles.length - 1)) * plotW;
-  const y = (v: number) => padT + (1 - (v - min) / range) * plotH;
-  const cw = Math.max(1.5, (plotW / candles.length) * 0.6);
-
-  const bandPath = (key: "upper" | "lower" | "mid") => {
-    const pts = bb.map((b, i) => (b[key] != null ? `${x(i)},${y(b[key]!)}` : null)).filter(Boolean);
-    return pts.join(" ");
-  };
-
-  const gridVals = [min, min + range * 0.25, min + range * 0.5, min + range * 0.75, max];
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-[240px]" preserveAspectRatio="none">
-      {gridVals.map((v, i) => (
-        <g key={i}>
-          <line x1={padL} y1={y(v)} x2={W - padR} y2={y(v)} stroke="currentColor" className="text-border" strokeWidth={0.5} opacity={0.4} />
-          <text x={4} y={y(v) + 3} className="fill-muted-foreground" fontSize={9}>{v.toFixed(2)}</text>
-        </g>
-      ))}
-      {/* Bollinger bands */}
-      <polyline points={bandPath("upper")} fill="none" stroke="#38bdf8" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
-      <polyline points={bandPath("lower")} fill="none" stroke="#38bdf8" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
-      <polyline points={bandPath("mid")} fill="none" stroke="#a78bfa" strokeWidth={1} opacity={0.5} />
-      {/* Candles */}
-      {candles.map((c, i) => {
-        const up = c.c >= c.o;
-        const color = up ? "#34d399" : "#f87171";
-        const bodyTop = y(Math.max(c.o, c.c));
-        const bodyBot = y(Math.min(c.o, c.c));
-        return (
-          <g key={i}>
-            <line x1={x(i)} y1={y(c.h)} x2={x(i)} y2={y(c.l)} stroke={color} strokeWidth={1} />
-            <rect x={x(i) - cw / 2} y={bodyTop} width={cw} height={Math.max(1, bodyBot - bodyTop)} fill={color} />
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
 
 function DirBadge({ dir, confidence }: { dir: Direction; confidence: number }) {
   const up = dir === "up";
@@ -168,13 +71,15 @@ export function StockDetail({ ticker, onClose }: { ticker: string | null; onClos
   const qc = useQueryClient();
   const [confirmClose, setConfirmClose] = useState(false);
   const [closing, setClosing] = useState(false);
+  const [range, setRange] = useState<ChartRange>("1D");
 
-  const { data, isLoading, error } = useQuery<StockAnalysis>({
-    queryKey: ["stock-analysis", ticker],
-    queryFn: () => stockGet<StockAnalysis>(`/analysis/${ticker}`),
+  const { data, isLoading, error, isFetching } = useQuery<StockAnalysis>({
+    queryKey: ["stock-analysis", ticker, range],
+    queryFn: () => stockGet<StockAnalysis>(`/analysis/${ticker}?range=${range}`),
     enabled: open,
     refetchInterval: open ? 10_000 : false,
     retry: false,
+    placeholderData: (prev) => prev,
   });
 
   const { data: botStatus } = useQuery<BotStatus>({
@@ -212,12 +117,6 @@ export function StockDetail({ ticker, onClose }: { ticker: string | null; onClos
       setConfirmClose(false);
     }
   }
-
-  const rsiData = useMemo(() => {
-    if (!data?.candles) return [];
-    const rsi = rsiSeries(data.candles);
-    return data.candles.map((c, i) => ({ i, t: c.t, rsi: rsi[i] })).filter((d) => d.rsi != null);
-  }, [data?.candles]);
 
   return (
     <Sheet open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -268,25 +167,14 @@ export function StockDetail({ ticker, onClose }: { ticker: string | null; onClos
               {/* Chart */}
               <div className="rounded-lg border border-border bg-card p-3">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground mb-2">
-                  <LineIcon className="w-3.5 h-3.5" /> 5-min candles · Bollinger Bands (20, 2σ)
+                  <LineIcon className="w-3.5 h-3.5" /> Price · 21D / 50D / 180D MA · RSI (14)
                 </div>
-                <CandleChart candles={data.candles} />
-                {rsiData.length > 3 && (
-                  <div className="mt-2">
-                    <div className="text-[11px] text-muted-foreground mb-1">RSI (14)</div>
-                    <ResponsiveContainer width="100%" height={70}>
-                      <LineChart data={rsiData} margin={{ top: 4, right: 12, bottom: 0, left: -18 }}>
-                        <XAxis dataKey="i" hide />
-                        <YAxis domain={[0, 100]} ticks={[30, 70]} tick={{ fontSize: 9 }} width={28} />
-                        <ReferenceLine y={70} stroke="#f87171" strokeDasharray="3 3" opacity={0.5} />
-                        <ReferenceLine y={30} stroke="#34d399" strokeDasharray="3 3" opacity={0.5} />
-                        <RTooltip contentStyle={{ background: "hsl(222 47% 11%)", border: "1px solid hsl(216 34% 17%)", borderRadius: 8, fontSize: 11 }}
-                          formatter={(v: number) => [Math.round(v), "RSI"]} labelFormatter={() => ""} />
-                        <Line type="monotone" dataKey="rsi" stroke="#a78bfa" strokeWidth={1.5} dot={false} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
+                <StockChart
+                  chart={data.chart}
+                  range={range}
+                  onRangeChange={setRange}
+                  loading={isFetching}
+                />
               </div>
 
               {/* Signals */}

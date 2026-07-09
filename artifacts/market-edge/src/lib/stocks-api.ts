@@ -101,6 +101,22 @@ export interface Candle {
   v: number;
 }
 
+export type ChartRange = "1D" | "5D" | "1M" | "3M" | "6M" | "1Y";
+
+export const CHART_RANGES: ChartRange[] = ["1D", "5D", "1M", "3M", "6M", "1Y"];
+
+export interface ChartData {
+  range: ChartRange;
+  resolution: string;
+  candles: Candle[];
+  /** Per-candle 21-day SMA (flat current daily level on intraday ranges). */
+  sma21: (number | null)[];
+  sma50: (number | null)[];
+  sma180: (number | null)[];
+  /** Per-candle RSI(14) at the chart's own resolution. */
+  rsi14: (number | null)[];
+}
+
 export interface StockAnalysis {
   ticker: string;
   price: number;
@@ -115,6 +131,7 @@ export interface StockAnalysis {
   sector: string;
   companyName: string;
   candles: Candle[];
+  chart?: ChartData | null;
 }
 
 export interface ResearchResult {
