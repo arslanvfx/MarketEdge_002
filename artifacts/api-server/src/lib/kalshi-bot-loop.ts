@@ -246,14 +246,28 @@ async function _firePipelineEntryForCoin(sym: string, windowKey: string): Promis
   const kalshiData = getKalshiCachedData(sym);
   const prediction  = getCachedPrediction(sym);
 
+  // If the Kalshi market for this window hasn't published yet (ticker/strike/price can
+  // all be null for 4-8 min after window-open), runBotTickForCoin would silently return
+  // at the "no market data" guard — leaving the coin permanently locked in
+  // pipelineEntryFiredThisWindow and blocking Phase-3 from ever retrying.
+  // Release the lock so Phase-3's per-tick loop can place the bet once data arrives.
+  if (!kalshiData?.ticker || kalshiData.value === null || kalshiData.yesPrice == null) {
+    pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
+    logger.info(
+      { sym, windowKey, hasTicker: !!kalshiData?.ticker, hasValue: kalshiData?.value != null, hasPrice: kalshiData?.yesPrice != null },
+      "[pipeline] completion trigger: Kalshi market not ready — releasing lock for Phase-3 retry",
+    );
+    return;
+  }
+
   logger.info({ sym, windowKey }, "[pipeline] completion trigger: all models ready — evaluating entry");
 
   try {
     await runBotTickForCoin(
       sym,
-      kalshiData?.ticker   ?? null,
-      kalshiData?.value    ?? null,
-      kalshiData?.yesPrice ?? null,
+      kalshiData.ticker,
+      kalshiData.value,
+      kalshiData.yesPrice,
       prediction?.candles  ?? [],
     );
   } catch (err) {
