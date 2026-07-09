@@ -112,8 +112,23 @@ export function setAiSpendLevel(level: AiSpendLevel): void {
     .catch((e: unknown) => logger.error({ err: e }, "[ai-spend] persist error"));
 }
 
-/** Returns true when the given Claude feature should run at the current spend level. */
+// Crypto features that are disabled in development to avoid unnecessary API costs.
+// Production (NODE_ENV=production) respects the configured spend level normally.
+const CRYPTO_FEATURES = new Set<AiFeature>([
+  "crypto_snap",
+  "crypto_live_dir",
+  "crypto_stability",
+  "crypto_btc_call",
+  "market_summary",
+]);
+
+/** Returns true when the given Claude feature should run at the current spend level.
+ *  In development all crypto AI calls are always OFF — only stock features are
+ *  available for local testing. Production respects the configured spend level. */
 export function isAiFeatureEnabled(feature: AiFeature): boolean {
+  if (process.env.NODE_ENV !== "production" && CRYPTO_FEATURES.has(feature)) {
+    return false;
+  }
   return ENABLED[currentLevel].has(feature);
 }
 
