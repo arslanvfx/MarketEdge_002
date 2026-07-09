@@ -739,6 +739,34 @@ async function _runBotTick(
     }
   }
 
+  // ── Stability-pending gate ────────────────────────────────────────────────
+  // The window-open prefetch dispatches Claude stability analysis fire-and-forget.
+  // The pipeline completion trigger (_firePipelineEntryForCoin) can arrive here
+  // BEFORE that async analysis writes to windowStabilityCache, leaving it empty.
+  // When the cache is empty, windowStabilityCache.get(sym) returns null, so the
+  // choppy gate below (`if (trendStability === "choppy")`) is false — the gate
+  // is completely bypassed and the bot bets blind.
+  //
+  // Fix: mirror the identical stability-wait gate that Phase 3 of the scheduler
+  // loop applies.  Both entry paths (pipeline trigger and 15s polling tick) must
+  // pass through _runBotTick, so a single guard here covers both.  Bypassed in
+  // freeRunMode and when the crypto_stability AI feature is disabled.
+  if (!S.config.freeRunMode && isAiFeatureEnabled("crypto_stability") && !windowStabilityCache.has(sym)) {
+    const clockElapsedS = (Date.now() - new Date(windowKey).getTime()) / 1000;
+    if (clockElapsedS < STABILITY_WAIT_MAX_S) {
+      logger.info(
+        { sym, windowKey, clockElapsedS: Math.round(clockElapsedS), waitMaxS: STABILITY_WAIT_MAX_S },
+        "[kalshi-bot] deferring entry — trend stability analysis still in-flight",
+      );
+      return;
+    }
+    // Past the wait ceiling — proceed without stability data, same as Phase 3.
+    logger.warn(
+      { sym, windowKey, clockElapsedS: Math.round(clockElapsedS) },
+      "[kalshi-bot] stability analysis timeout — proceeding without trend data",
+    );
+  }
+
   // ── Choppy-market late-entry + signal-refresh + proximity gates ──────────
   // In windows tagged as "choppy" three additional guards apply:
   //
