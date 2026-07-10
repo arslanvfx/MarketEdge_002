@@ -244,15 +244,24 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       {(() => {
                         const dm = r.decisionMode ?? "classic";
                         const meta: Record<string, { label: string; cls: string }> = {
-                          classic:   { label: "Classic",   cls: "bg-sky-500/10 text-sky-400/80" },
-                          ml_gate:   { label: "ML Gate",   cls: "bg-violet-500/10 text-violet-400/80" },
-                          consensus: { label: "Consensus", cls: "bg-amber-500/10 text-amber-400/80" },
-                          unanimous: { label: "Unanimous", cls: "bg-emerald-500/10 text-emerald-400/80" },
+                          classic:          { label: "Classic",      cls: "bg-sky-500/10 text-sky-400/80" },
+                          ml_gate:          { label: "ML Gate",      cls: "bg-violet-500/10 text-violet-400/80" },
+                          consensus:        { label: "Consensus",    cls: "bg-amber-500/10 text-amber-400/80" },
+                          unanimous:        { label: "Unanimous",    cls: "bg-emerald-500/10 text-emerald-400/80" },
+                          position_confirm: { label: "Pos-Confirm",  cls: "bg-cyan-500/10 text-cyan-400/80" },
+                          conviction:       { label: "Conviction",   cls: "bg-yellow-500/20 text-yellow-300 font-bold" },
                         };
                         const { label, cls } = meta[dm] ?? { label: dm, cls: "bg-muted/30 text-muted-foreground" };
+                        const convictionYesPrice = dm === "conviction"
+                          ? (sigs?.yesPrice as number | null ?? null)
+                          : null;
                         return (
-                          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${cls}`}>
+                          <span className={`flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded ${cls}`}>
+                            {dm === "conviction" && <Zap className="w-2.5 h-2.5 shrink-0" />}
                             {label}
+                            {convictionYesPrice != null && (
+                              <span className="opacity-80 ml-0.5">· YES {Math.round(convictionYesPrice * 100)}¢</span>
+                            )}
                           </span>
                         );
                       })()}
@@ -352,6 +361,32 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       {isPendingEval && (
                         <span className="text-amber-400/70">· awaiting window close price</span>
                       )}
+                      {r.decisionMode === "conviction" && (() => {
+                        const yp       = sigs?.yesPrice as number | null ?? null;
+                        const agreeing = sigs?.signalsAgreeing as number | null ?? null;
+                        const total    = sigs?.signalsTotal    as number | null ?? null;
+                        const reasoning = sigs?.reasoning as string | null ?? null;
+                        if (yp == null) return null;
+                        // Always show the Kalshi YES price — it's the trigger threshold.
+                        // For YES bets the payout return = 1/yp; for NO bets it's 1/(1-yp).
+                        const sideCost = r.direction === "no" ? 1 - yp : yp;
+                        const ret = sideCost > 0 ? (1 / sideCost).toFixed(2) : null;
+                        return (
+                          <span className="flex items-center gap-1 flex-wrap text-yellow-400/80 font-medium">
+                            <Zap className="w-3 h-3 shrink-0" />
+                            YES at {Math.round(yp * 100)}¢
+                            {ret && <span className="text-muted-foreground font-normal">· {ret}× {r.direction === "no" ? "NO" : "YES"} return</span>}
+                            {agreeing != null && total != null && total > 0 && (
+                              <span className="text-muted-foreground font-normal">· {agreeing}/{total} models agree</span>
+                            )}
+                            {reasoning && (
+                              <span className="text-muted-foreground/70 font-normal text-[10px] w-full mt-0.5 truncate" title={reasoning}>
+                                {reasoning}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })()}
                     </div>
                   </div>
                 );

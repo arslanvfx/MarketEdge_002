@@ -1229,6 +1229,7 @@ async function _runBotTick(
     regime: S.regimeCache.get(sym) ?? null,
     trendStability: windowStabilityCache.get(sym) ?? null,
     windowDoubtPenalty: S.currentWindowDoubtPenalty,
+    reasoning: decision.reasoning ?? null,
   };
 
   await persistBetRecord({
