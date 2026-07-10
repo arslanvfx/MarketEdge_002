@@ -260,18 +260,97 @@ async function _firePipelineEntryForCoin(sym: string, windowKey: string): Promis
     return;
   }
 
+  // ── Bet delay with fresh re-analysis ────────────────────────────────────
+  // When betDelayMinutes > 0, hold off from placing a bet until that many
+  // minutes have elapsed since window-open.  If signals arrived before the
+  // delay threshold, schedule a deferred entry: wait for the remaining time,
+  // then run a fresh pipeline re-check (updated Claude + stat signals) and
+  // fire the tick so the bot acts on current market direction — not the
+  // opening snapshot.  Phase-3 sees the pipeline lock and leaves this coin
+  // alone while the timer is pending.
+  const betDelayMs = (S.config.betDelayMinutes ?? 0) * 60_000;
+  if (betDelayMs > 0) {
+    const windowKeyMs = new Date(windowKey).getTime();
+    const clockElapsedMs = Date.now() - windowKeyMs;
+    const remainingMs = betDelayMs - clockElapsedMs;
+
+    if (remainingMs > 0) {
+      logger.info(
+        { sym, windowKey, betDelayMinutes: S.config.betDelayMinutes, clockElapsedMs: Math.round(clockElapsedMs), waitingMs: Math.round(remainingMs) },
+        "[pipeline] bet delay active — holding entry, will re-analyze when delay elapses",
+      );
+      setTimeout(() => {
+        _firePipelineEntryAfterDelay(sym, windowKey).catch(err =>
+          logger.warn({ err, sym, windowKey }, "[pipeline] delayed entry error (non-fatal)"),
+        );
+      }, remainingMs);
+      return; // hold here — the scheduled callback will do the actual entry
+    }
+    // Already past the delay (signals arrived late) — fall through to immediate entry
+    // but still run a fresh re-check below before placing the bet.
+    logger.info(
+      { sym, windowKey, betDelayMinutes: S.config.betDelayMinutes, clockElapsedMs: Math.round(clockElapsedMs) },
+      "[pipeline] bet delay already elapsed — running fresh re-check before entry",
+    );
+    await runPipelineRecheck(sym, windowKey);
+  }
+
   logger.info({ sym, windowKey }, "[pipeline] completion trigger: all models ready — evaluating entry");
 
   try {
-    await runBotTickForCoin(
-      sym,
-      kalshiData.ticker,
-      kalshiData.value,
-      kalshiData.yesPrice,
-      prediction?.candles  ?? [],
-    );
+    const kd = getKalshiCachedData(sym);
+    const pred = getCachedPrediction(sym);
+    if (!kd?.ticker || kd.value === null || kd.yesPrice == null) {
+      logger.warn({ sym, windowKey }, "[pipeline] Kalshi data vanished before entry — releasing lock");
+      pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
+      return;
+    }
+    await runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []);
   } catch (err) {
     logger.warn({ err, sym, windowKey }, "[pipeline] completion-triggered tick error (non-fatal)");
+  }
+}
+
+/**
+ * Called by the bet-delay timer.  Re-checks signals (fresh Claude + stat read)
+ * then fires the entry tick.  Guards against window expiry and already-open positions.
+ */
+async function _firePipelineEntryAfterDelay(sym: string, windowKey: string): Promise<void> {
+  if (!S.config.enabled || S.paused) return;
+  if (S.dbDegradedSince !== null) return;
+  if (currentWindowKey() !== windowKey) {
+    logger.debug({ sym, windowKey }, "[pipeline] delayed entry: window expired — skipping");
+    pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
+    return;
+  }
+  if (openPositions.has(sym)) {
+    logger.debug({ sym, windowKey }, "[pipeline] delayed entry: position already open — skipping");
+    return;
+  }
+
+  logger.info({ sym, windowKey, betDelayMinutes: S.config.betDelayMinutes }, "[pipeline] bet delay elapsed — running fresh re-analysis before entry");
+
+  // Fresh re-check: updated Claude + stat signals so the entry decision
+  // reflects current market direction, not the opening snapshot.
+  try {
+    await runPipelineRecheck(sym, windowKey);
+  } catch (err) {
+    logger.warn({ err, sym, windowKey }, "[pipeline] delayed re-check failed — proceeding with cached signals");
+  }
+
+  const kd = getKalshiCachedData(sym);
+  const pred = getCachedPrediction(sym);
+  if (!kd?.ticker || kd.value === null || kd.yesPrice == null) {
+    logger.warn({ sym, windowKey }, "[pipeline] delayed entry: Kalshi data missing — releasing lock");
+    pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
+    return;
+  }
+
+  logger.info({ sym, windowKey }, "[pipeline] delayed entry: firing entry tick with fresh signals");
+  try {
+    await runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []);
+  } catch (err) {
+    logger.warn({ err, sym, windowKey }, "[pipeline] delayed entry tick error (non-fatal)");
   }
 }
 

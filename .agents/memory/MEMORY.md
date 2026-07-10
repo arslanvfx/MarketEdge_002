@@ -1,4 +1,5 @@
 - [Pipeline lock released on Kalshi-null](pipeline-lock-kalshi-null.md) — pipelineEntryFiredThisWindow must be deleted when Kalshi data missing at trigger time; permanent lock silently kills all bets
+- [betDelayMinutes — delayed entry with re-analysis](bet-delay-minutes.md) — delays YES+NO entry N min then fires fresh runPipelineRecheck before tick; differs from minNoEntryMinutes (NO-only, no recheck)
 - [ml_gate ML-primary formula](ml-gate-ml-primary.md) — ml_gate flipped so ML leads direction; CLAUDE_BOOST=6/CLAUDE_PENALTY=6 replace ML_BOOST=8; no hard veto; ML_BOOST kept as alias=6 for compat
 - [predCache override YES bias](pred-cache-override-bias.md) — applyStatPredCacheOverride used livePrice>=target (not model forecast); all-YES bias in bullish markets; fix: guard on openingAbove!==null returns snap immediately
 - [Pipeline signal cascade bug](pipeline-signal-cascade.md) — statAbove was livePrice>=kalshiTarget (raw snapshot, not the model); wrong stat poisoned Claude context + ML features 14/15; fix: use getStatWindowCall()+getTrackerWindowCall() same as predictor page

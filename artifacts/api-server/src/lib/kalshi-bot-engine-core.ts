@@ -932,6 +932,15 @@ export interface BotConfig {
   // Set to 0 to disable (allow NO bets at any minute).
   minNoEntryMinutes: number;     // minutes (default 1)
 
+  // Delayed entry with fresh re-analysis: when > 0, the bot holds off placing
+  // any bet until this many minutes have elapsed since window-open.  Unlike
+  // minNoEntryMinutes (which only defers NO bets, no re-analysis), betDelayMinutes
+  // applies to BOTH YES and NO, and automatically triggers a fresh Claude + stat
+  // re-check immediately before the entry fires so the bot acts on updated
+  // signals — not the opening snapshot.
+  // 0 = disabled (enter immediately when all signals are ready).
+  betDelayMinutes?: number;      // minutes (default 0 = disabled)
+
   // Window Monitor readiness gate: when true, the bot skips entry for a coin
   // until the Window Monitor has collected ≥2 minutes of intra-window data
   // (or ≥5 min on the fallback path without pre-window ER).  This is a
@@ -1127,6 +1136,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxSlippageCents: 10,
   minReturnMultiple: 1.45,
   minNoEntryMinutes: 1,
+  betDelayMinutes: 0,
   requireMonitorReady: true,
   // Confidence-based dynamic bet sizing — disabled by default (legacy behavior).
   enableDynamicSizing: false,

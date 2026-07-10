@@ -605,6 +605,24 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </select>
                 </label>
 
+                {/* Bet Delay (fresh re-analysis) */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Bet Delay — wait &amp; re-analyze before entry
+                  </span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.betDelayMinutes ?? 0}
+                    onChange={e => setConfigDraft(d => ({ ...d, betDelayMinutes: parseInt(e.target.value) }))}>
+                    <option value={0}>Disabled — enter immediately when signals ready</option>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map(m => (
+                      <option key={m} value={m}>{m} min — hold entry, re-analyze at T+{m}m before betting</option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-muted-foreground/70">
+                    When set, models monitor the market during the delay. Claude runs a fresh analysis at the entry moment — not the opening snapshot.
+                  </span>
+                </label>
+
                 {/* Max Bets Per Window */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Max Bets / Window</span>
