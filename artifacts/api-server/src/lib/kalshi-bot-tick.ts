@@ -443,24 +443,35 @@ async function _runBotTick(
   // rather miss the window than bet with incomplete signal data.
   {
     const live = getLatestCoinSignals(sym);
-    const lockPrice = S.config.kalshiLockPrice ?? 0.90;
-    const isConvictionAtThreshold =
+    // Extreme-price threshold: ≥92 % YES or ≤8 % YES.  At these prices the
+    // Kalshi market itself is the conviction signal — Claude's opinion adds no
+    // information.  Claude is also suppressed in conviction mode (no API calls
+    // ever fire), so requiring claudeAbove here would silently block all bets.
+    // We bypass the Claude null-check only when BOTH conditions hold:
+    //   1. decisionMode === "conviction"
+    //   2. yesPrice is at the extreme threshold (≥0.92 or ≤0.08)
+    //
+    // The engine itself (makeBotDecision) also skips the Claude gate for
+    // conviction mode, so stat+ML are the only signals that must be ready.
+    const EXTREME_YES = 0.92;
+    const EXTREME_NO  = 0.08;
+    const isConvictionExtreme =
       S.config.decisionMode === "conviction" &&
       yesPrice !== null &&
-      (yesPrice >= lockPrice || yesPrice <= (1 - lockPrice));
+      (yesPrice >= EXTREME_YES || yesPrice <= EXTREME_NO);
 
-    if (isConvictionAtThreshold) {
+    if (isConvictionExtreme) {
       // Bypass Claude requirement — Claude is suppressed in conviction mode.
       if (live.statAbove === null || live.mlAbove === null) {
         logger.info(
-          { sym, windowKey, secondsElapsed, yesPrice, lockPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
-          "[kalshi-bot] conviction: price at threshold — waiting for stat+ML (Claude suppressed)",
+          { sym, windowKey, secondsElapsed, yesPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
+          "[kalshi-bot] conviction extreme-price: waiting for stat+ML (Claude suppressed)",
         );
         return;
       }
       logger.debug(
-        { sym, windowKey, yesPrice, lockPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
-        "[kalshi-bot] conviction: price at lockPrice threshold — stat+ML ready, bypassing Claude gate",
+        { sym, windowKey, yesPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
+        "[kalshi-bot] conviction extreme-price: stat+ML ready — bypassing Claude gate",
       );
     } else {
       if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {

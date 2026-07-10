@@ -222,26 +222,35 @@ function _makeBotDecisionInner(
   // Claude's extended-thinking call takes 30-120s after the window opens.
   // We always wait — no fast-agreement bypass — the new pipeline requires
   // Stat + Claude + ML to all complete before any entry decision is made.
-  if (statAbove === null || claudeAbove === null || mlAbove === null) {
-    const missing = (
-      [statAbove === null && "Stat", claudeAbove === null && "Claude", mlAbove === null && "ML"] as Array<string | false>
-    ).filter(Boolean).join("+");
-    const pendingSnapshot: SignalSnapshot = {
-      statAbove, claudeAbove, mlAbove,
-      windowMonitor: wmRec, windowMonitorReady: wmReady,
-      yesPrice, ev: null, signalAccuracyPct, minutesElapsed,
-      signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
-      statConfidence: liveStatConf,
-      claudeConfidence, mlConfidence,
-      warmupActive: true,
-      roiPct: null,
-    };
-    return {
-      action: "SKIP",
-      confidence: 0,
-      reasoning: `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`,
-      signals: pendingSnapshot,
-    };
+  //
+  // EXCEPTION — conviction mode: Claude calls are suppressed entirely so
+  // claudeAbove will always be null.  The conviction engine (computeConvictionDecision)
+  // does not use Claude; requiring it here would block every conviction bet before
+  // the conviction logic even runs.  We skip the Claude null-check only for conviction.
+  {
+    const convictionMode = config.decisionMode === "conviction";
+    const claudeMissing = !convictionMode && claudeAbove === null;
+    if (statAbove === null || claudeMissing || mlAbove === null) {
+      const missing = (
+        [statAbove === null && "Stat", claudeMissing && "Claude", mlAbove === null && "ML"] as Array<string | false>
+      ).filter(Boolean).join("+");
+      const pendingSnapshot: SignalSnapshot = {
+        statAbove, claudeAbove, mlAbove,
+        windowMonitor: wmRec, windowMonitorReady: wmReady,
+        yesPrice, ev: null, signalAccuracyPct, minutesElapsed,
+        signalsAgreeing: 0, signalsTotal: 0, agreementTarget: null,
+        statConfidence: liveStatConf,
+        claudeConfidence, mlConfidence,
+        warmupActive: true,
+        roiPct: null,
+      };
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`,
+        signals: pendingSnapshot,
+      };
+    }
   }
 
   const wmFactors = wmSignal?.factors;
