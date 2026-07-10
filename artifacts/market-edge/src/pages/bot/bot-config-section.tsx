@@ -388,7 +388,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       { id: "consensus",        label: "Consensus",        desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
                       { id: "position_confirm", label: "Position Confirm", desc: "Bet on WHERE price IS (above/below strike) — models become vetoes, not predictors" },
-                      { id: "conviction",      label: "Conviction",      desc: "Fires the moment Kalshi's YES price hits 90¢ — the market itself declaring 90% certainty. $1 bets, near-zero reversal risk." },
+                      { id: "conviction",      label: "Conviction",      desc: "Fires when Kalshi's YES price hits 90¢ (BET YES) or drops to 10¢ (BET NO) — the market itself declaring 90%+ certainty in either direction." },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
                       const needsML = m.id === "ml_gate" || m.id === "unanimous";
@@ -479,8 +479,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       Conviction Settings
                     </span>
                     <span className="text-[11px] text-muted-foreground/80 leading-relaxed">
-                      Fires the moment Kalshi&apos;s own YES price crosses the trigger threshold — the market itself is declaring high certainty.
-                      No spot-price math needed. Models are soft advisors; a bet only skips if ALL available models unanimously oppose.
+                      Fires when Kalshi&apos;s contract price itself declares certainty in either direction — YES ≥ trigger (BET YES) or NO ≥ trigger meaning YES ≤ (1 − trigger) (BET NO).
+                      No spot-price math. Models are soft advisors; a bet only skips if ALL available models unanimously oppose that direction.
                       Bot re-checks every 5 seconds so a cross at any point in the window is caught quickly.
                     </span>
                     <label className="flex flex-col gap-1.5 mt-1">

@@ -75,6 +75,7 @@
 - [Bot signal pipeline architecture](bot-signal-pipeline.md) — stale-signal gate replaced by window-keyed pipeline; no more TTL gaps; Claude prompt includes explicit window close time; see kalshi-bot-pipeline.ts
 - [ml_gate Path A sentinel removal](ml-gate-path-a.md) — mlMinConfidence:999 blocked ML from ever leading; replaced with per-coin overrides via BotConfig.mlPrimaryMinConfidenceOverrides; ETH/XRP/SOL default 58
 - [Pipeline-completion entry trigger](pipeline-completion-trigger.md) — time buffer REMOVED; pipeline fires _firePipelineEntryForCoin immediately on initial complete; pipelineEntryFiredThisWindow Set prevents Phase-3 double-eval; cleared on window transition
+- [Conviction mode pipeline bypass](conviction-pipeline-bypass.md) — conviction MUST skip _firePipelineEntryForCoin (model readiness ≠ price cross); pipeline lock released so per-tick loop handles entry at ≥90¢/≤10¢
 - [Fast-agreement early entry](fast-agreement-early-entry.md) — stat+ML agreement (one ≥60 conf) must bypass the Claude-pending guard; waiting for Claude in min 0-3 caused zero NO bets ever
 - [calcROI NO-bet block](calcROI-no-bet-block.md) — calcROI used cents format (100-p)/p but yesPrice is 0-1 dollars; blocked every NO bet via MIN_ROI_PCT gate; fix: use (1-p)/p and guard yesPrice<1
 - [All-three signal gate](all-three-signal-gate.md) — bot bets only when stat+Claude+ML all non-null via getLatestCoinSignals; no fallbacks; 3 gate layers (pipeline/tick/engine) + 10-min predCache freshness guard

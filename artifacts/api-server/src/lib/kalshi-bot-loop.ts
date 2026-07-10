@@ -245,6 +245,18 @@ async function _firePipelineEntryForCoin(sym: string, windowKey: string): Promis
     return;
   }
 
+  // Conviction mode does NOT use pipeline-triggered entry.  The signal is the Kalshi
+  // price crossing a threshold (≥90¢ YES or ≤10¢ NO) — model readiness is irrelevant
+  // to that condition.  Release the lock so the per-tick loop (which checks the live
+  // YES price every 5 s) handles entry whenever the threshold is actually crossed.
+  // Without this guard the pipeline fires immediately on model completion while the
+  // market is still pricing YES at 50¢, which bypasses the conviction price gate.
+  if (S.config.decisionMode === "conviction") {
+    pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
+    logger.debug({ sym, windowKey }, "[pipeline] conviction mode — pipeline-triggered entry skipped; per-tick loop handles price-cross entry");
+    return;
+  }
+
   const kalshiData = getKalshiCachedData(sym);
   const prediction  = getCachedPrediction(sym);
 
