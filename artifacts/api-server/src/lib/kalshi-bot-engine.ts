@@ -494,81 +494,86 @@ function _makeBotDecisionInner(
     // livePrice or kalshiTarget unavailable — fall through to classic
   }
 
-  // ── Decision Mode: market_lock ───────────────────────────────────────────
-  // Terminal-window strategy: bet when the market is "locked in" — price is
-  // well clear of the Kalshi strike with only 1-2 minutes left for reversal.
-  // Direction = WHERE livePrice IS vs strike (same as position_confirm).
-  // Veto threshold raised: only SKIP if ALL 3 models disagree (vs ≥2 for
-  // position_confirm) because the large price buffer IS the primary signal.
-  // Confidence scales with distance — the farther from strike, the better.
-  // Falls back to classic if livePrice or kalshiTarget unavailable.
-  if (decisionMode === "market_lock") {
-    const bufferPct = config.priceBufferPct ?? 0;
+  // ── Decision Mode: conviction ─────────────────────────────────────────────
+  // Fires when the Kalshi contract price itself declares ≥90% confidence.
+  // yesAsk >= kalshiLockPrice  → market says YES wins → BET YES
+  // yesAsk <= (1-kalshiLockPrice) → market says NO wins → BET NO
+  // No spot-price-vs-strike math needed — the Kalshi crowd IS the signal.
+  // Models are soft advisory: unanimous opposition → SKIP.
+  if (decisionMode === "conviction") {
+    const lockPrice = config.kalshiLockPrice ?? 0.90;
 
-    if (livePrice != null && livePrice > 0 && kalshiTarget != null && kalshiTarget > 0) {
-      const priceAbove = livePrice > kalshiTarget;
-      const action: BotDecisionAction = priceAbove ? "BET_YES" : "BET_NO";
-      const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
-
-      // Buffer gate — stricter than position_confirm (default 2.0%)
-      if (bufferPct > 0 && distancePct < bufferPct) {
-        return {
-          action: "SKIP",
-          confidence: 0,
-          reasoning: `market-lock: price only ${distancePct.toFixed(3)}% from strike — below ${bufferPct}% lock threshold (market not settled enough)`,
-          signals: buildSnapshot(null),
-        };
-      }
-
-      // Model veto: only skip if ALL 3 non-null models disagree with price direction.
-      // At T+13 with price 2%+ clear, a single dissenting model is noise.
-      const models = [statAbove, claudeAbove, mlAbove];
-      const nonNullModels = models.filter(m => m !== null);
-      const vetoCount  = models.filter(m => m !== null && m !== priceAbove).length;
-      const agreeCount = models.filter(m => m !== null && m === priceAbove).length;
-
-      if (nonNullModels.length >= 2 && vetoCount >= nonNullModels.length) {
-        return {
-          action: "SKIP",
-          confidence: 0,
-          reasoning: `market-lock: ALL ${vetoCount} available models veto ${priceAbove ? "YES" : "NO"} — unanimous model opposition, skipping`,
-          signals: buildSnapshot(null, agreeCount, nonNullModels.length),
-        };
-      }
-
-      // Confidence: base 65 + distance bonus (5pp per 0.5% of clearance, max +25pp)
-      // + small model-agree bonus (max +5pp). Distance is the dominant signal.
-      const distanceBonus = Math.min((distancePct / 0.5) * 5, 25);
-      const agreeBonus    = Math.min(agreeCount * 2, 5);
-      const confidence    = Math.round(65 + distanceBonus + agreeBonus);
-
-      if (confidence < config.minConfidence) {
-        return {
-          action: "SKIP",
-          confidence,
-          reasoning: `market-lock: confidence ${confidence}% below minimum ${config.minConfidence}%`,
-          signals: buildSnapshot(null, agreeCount, nonNullModels.length, action),
-        };
-      }
-
-      const mlReturnGate = checkMinReturnGate(action, yesPrice, config.minReturnMultiple);
-      if (mlReturnGate.blocked) {
-        return {
-          action: "SKIP",
-          confidence,
-          reasoning: `market-lock: ${mlReturnGate.reason}`,
-          signals: buildSnapshot(null, agreeCount, nonNullModels.length),
-        };
-      }
-
+    if (yesPrice == null) {
       return {
-        action,
-        confidence,
-        reasoning: `market-lock: price ${distancePct.toFixed(2)}% ${priceAbove ? "above" : "below"} strike → ${action === "BET_YES" ? "YES" : "NO"} (dist_bonus=${distanceBonus.toFixed(0)}pp models=${agreeCount}/${nonNullModels.length} conf=${confidence}%)`,
-        signals: buildSnapshot(null, agreeCount, nonNullModels.length, action),
+        action: "SKIP",
+        confidence: 0,
+        reasoning: "conviction: Kalshi yes price unavailable",
+        signals: buildSnapshot(null),
       };
     }
-    // livePrice or kalshiTarget unavailable — fall through to classic
+
+    const isYesLocked = yesPrice >= lockPrice;
+    const isNoLocked  = yesPrice <= (1 - lockPrice);
+
+    if (!isYesLocked && !isNoLocked) {
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `conviction: yes price ${yesPrice.toFixed(2)} not yet at lock threshold ${lockPrice.toFixed(2)} (need ≥${lockPrice.toFixed(2)} for YES or ≤${(1-lockPrice).toFixed(2)} for NO)`,
+        signals: buildSnapshot(null),
+      };
+    }
+
+    const action: BotDecisionAction = isYesLocked ? "BET_YES" : "BET_NO";
+    const priceAbove = isYesLocked;
+
+    // Unanimous model veto: all available models oppose → SKIP
+    const models = [statAbove, claudeAbove, mlAbove];
+    const nonNull    = models.filter(m => m !== null);
+    const vetoCount  = models.filter(m => m !== null && m !== priceAbove).length;
+    const agreeCount = models.filter(m => m !== null && m === priceAbove).length;
+
+    if (nonNull.length >= 2 && vetoCount >= nonNull.length) {
+      return {
+        action: "SKIP",
+        confidence: 0,
+        reasoning: `conviction: ALL ${vetoCount} models oppose ${priceAbove ? "YES" : "NO"} — skipping`,
+        signals: buildSnapshot(null, agreeCount, nonNull.length),
+      };
+    }
+
+    // Confidence: scales with how far into the locked zone the price is
+    // (0.90→95, 0.95→97.5, 0.99→99.5 → capped at 95) + small agree bonus
+    const lockedPrice  = priceAbove ? yesPrice : (1 - yesPrice);
+    const baseConf     = Math.round(50 + lockedPrice * 50);
+    const agreeBonus   = Math.min(agreeCount * 2, 5);
+    const confidence   = Math.min(baseConf + agreeBonus, 95);
+
+    if (confidence < config.minConfidence) {
+      return {
+        action: "SKIP",
+        confidence,
+        reasoning: `conviction: confidence ${confidence}% below minimum ${config.minConfidence}%`,
+        signals: buildSnapshot(null, agreeCount, nonNull.length, action),
+      };
+    }
+
+    const mlReturnGate = checkMinReturnGate(action, yesPrice, config.minReturnMultiple);
+    if (mlReturnGate.blocked) {
+      return {
+        action: "SKIP",
+        confidence,
+        reasoning: `conviction: ${mlReturnGate.reason}`,
+        signals: buildSnapshot(null, agreeCount, nonNull.length),
+      };
+    }
+
+    return {
+      action,
+      confidence,
+      reasoning: `conviction: Kalshi ${priceAbove ? "YES" : "NO"} at ${lockedPrice.toFixed(2)} (lock≥${lockPrice}) — ${agreeCount}/${nonNull.length} models agree, return=${(1/lockedPrice).toFixed(2)}×`,
+      signals: buildSnapshot(null, agreeCount, nonNull.length, action),
+    };
   }
 
   // ── Classic path (also used by ml_primary) ────────────────────────────────

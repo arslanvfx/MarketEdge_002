@@ -1,6 +1,6 @@
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm" | "market_lock";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm" | "conviction";
 
 export interface BotConfig {
   betSize: number;
@@ -63,7 +63,7 @@ export interface BotConfig {
   directionalRegressionThreshold?: number;
   directionalRegressionPenaltyPp?: number;
   priceBufferPct?: number;
-  enableDynamicEntry?: boolean;
+  kalshiLockPrice?: number;
 }
 
 export interface LogicModeStats {

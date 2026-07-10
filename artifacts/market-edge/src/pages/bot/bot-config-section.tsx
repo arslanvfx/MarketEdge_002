@@ -30,6 +30,7 @@ interface BotConfigSectionProps {
 export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, status, activeMode, presetsData, modeDefaults, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
   const hasDraft = Object.keys(configDraft).length > 0;
   const [defaultsAppliedFor, setDefaultsAppliedFor] = React.useState<string | null>(null);
+  const isConviction = (merged.decisionMode ?? "classic") === "conviction";
   return (
     <>
         {/* ── Config Settings ── */}
@@ -153,6 +154,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </span>
                 </label>
 
+                {!isConviction && (<>
                 {/* Dynamic (confidence-based) sizing toggle */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Dynamic Sizing</span>
@@ -209,6 +211,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   );
                 })()}
 
+                </>)}
+                {!isConviction && (<>
                 {/* ── Live Mode Guards ─────────────────────────────────── */}
                 <div className="col-span-full border-t border-amber-500/20 pt-3 -mt-1">
                   <span className="text-xs font-semibold text-amber-400/90 flex items-center gap-1.5">
@@ -311,6 +315,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-[10px] text-muted-foreground/60">Fill vs expected price warning threshold (0 = off)</span>
                 </label>
 
+                </>)}
                 {/* Min Return Multiple */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Min Return (×)</span>
@@ -327,6 +332,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </label>
                 {/* ──────────────────────────────────────────────────────── */}
 
+                {!isConviction && (<>
                 {/* Daily Loss Limit */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Daily Loss Limit ($)</span>
@@ -357,6 +363,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     onChange={e => setConfigDraft(d => ({ ...d, minConfidence: parseInt(e.target.value) }))} />
                 </label>
 
+                </>)}
                 {/* ML Veto — only shown in ML Gate mode */}
                 {(merged.decisionMode ?? "classic") === "ml_gate" && (
                   <div className="flex flex-col gap-1.5">
@@ -381,7 +388,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       { id: "consensus",        label: "Consensus",        desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
                       { id: "position_confirm", label: "Position Confirm", desc: "Bet on WHERE price IS (above/below strike) — models become vetoes, not predictors" },
-                      { id: "market_lock",     label: "Market Lock",     desc: "Last 1–2 min only — price 2%+ clear of strike = market decided. High-size, low-ROI, near-zero reversal risk" },
+                      { id: "conviction",      label: "Conviction",      desc: "Fires the moment Kalshi's YES price hits 90¢ — the market itself declaring 90% certainty. $1 bets, near-zero reversal risk." },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
                       const needsML = m.id === "ml_gate" || m.id === "unanimous";
@@ -464,55 +471,36 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </div>
                 )}
 
-                {/* Market Lock Settings */}
-                {(merged.decisionMode ?? "classic") === "market_lock" && (
-                  <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
-                    <span className="text-xs font-medium text-amber-400 flex items-center gap-1.5">
-                      <Target className="w-3 h-3" />
-                      Market Lock Settings
+                {/* Conviction Settings */}
+                {isConviction && (
+                  <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-violet-500/20 bg-violet-500/5 p-3">
+                    <span className="text-xs font-medium text-violet-400 flex items-center gap-1.5">
+                      <Zap className="w-3 h-3" />
+                      Conviction Settings
                     </span>
                     <span className="text-[11px] text-muted-foreground/80 leading-relaxed">
-                      Enters only in the last 1–2 minutes when price is well clear of the Kalshi strike.
-                      Direction = WHERE price already IS. Models are advisory only — all 3 must unanimously oppose before a bet is skipped.
-                      Works best with large bet sizes since ROI is intentionally low (10–20%) but the market is essentially decided.
+                      Fires the moment Kalshi&apos;s own YES price crosses the trigger threshold — the market itself is declaring high certainty.
+                      No spot-price math needed. Models are soft advisors; a bet only skips if ALL available models unanimously oppose.
+                      Bot re-checks every 5 seconds so a cross at any point in the window is caught quickly.
                     </span>
                     <label className="flex flex-col gap-1.5 mt-1">
                       <span className="text-xs text-muted-foreground">
-                        Lock Threshold — {(merged.priceBufferPct ?? 0) === 0 ? "Off (any distance)" : `${merged.priceBufferPct ?? 0}% min distance from strike`}
+                        Kalshi Price Trigger — {(merged.kalshiLockPrice ?? 0.90).toFixed(2)} ({((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢)
                       </span>
                       <div className="flex items-center gap-3">
-                        <input type="range" min={0.5} max={5} step={0.25}
-                          className="flex-1"
-                          value={merged.priceBufferPct ?? 2.0}
-                          onChange={e => setConfigDraft(d => ({ ...d, priceBufferPct: parseFloat(e.target.value) }))} />
-                        <span className="text-xs font-mono text-amber-400 w-12 text-right">
-                          {(merged.priceBufferPct ?? 2.0).toFixed(2)}%
+                        <input type="range" min={0.80} max={0.97} step={0.01}
+                          className="flex-1 accent-violet-500"
+                          value={merged.kalshiLockPrice ?? 0.90}
+                          onChange={e => setConfigDraft(d => ({ ...d, kalshiLockPrice: parseFloat(e.target.value) }))} />
+                        <span className="text-xs font-mono text-violet-400 w-16 text-right">
+                          {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢ / {((1 - (merged.kalshiLockPrice ?? 0.90)) * 100).toFixed(0)}¢
                         </span>
                       </div>
                       <span className="text-[10px] text-muted-foreground/70">
-                        {`Price must be ≥${(merged.priceBufferPct ?? 2.0).toFixed(2)}% clear of the strike. At 2%+, a reversal in 90 seconds requires an extraordinary move. Higher = safer, fewer bets.`}
+                        BET YES when Kalshi YES ≥ {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢ · BET NO when YES ≤ {((1 - (merged.kalshiLockPrice ?? 0.90)) * 100).toFixed(0)}¢.
+                        Higher threshold = fewer bets, higher certainty. 90¢ means the market assigns 90%+ probability.
+                        Max payout at {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢ entry: {(1 / (merged.kalshiLockPrice ?? 0.90)).toFixed(2)}×.
                       </span>
-                    </label>
-                    <label className="flex items-center justify-between mt-1 cursor-pointer select-none">
-                      <div className="flex flex-col gap-0.5">
-                        <span className="text-xs text-muted-foreground">Dynamic Entry</span>
-                        <span className="text-[10px] text-muted-foreground/60 leading-tight">
-                          {(merged.enableDynamicEntry ?? true)
-                            ? "ON — monitors every 15s; fires the moment price clears the threshold (catches T+8 moves, not just T+13)"
-                            : "OFF — fires once at the betDelayMinutes mark (fixed timer, original behavior)"}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setConfigDraft(d => ({ ...d, enableDynamicEntry: !(d.enableDynamicEntry ?? true) }))}
-                        className={`relative ml-4 h-5 w-9 shrink-0 rounded-full transition-colors ${
-                          (merged.enableDynamicEntry ?? true) ? "bg-amber-500" : "bg-muted-foreground/30"
-                        }`}
-                      >
-                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
-                          (merged.enableDynamicEntry ?? true) ? "translate-x-4" : "translate-x-0.5"
-                        }`} />
-                      </button>
                     </label>
                   </div>
                 )}
@@ -611,6 +599,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   })()}
                 </div>
 
+                {!isConviction && (<>
                 {/* Profit Lock */}
                 <div className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Profit Lock</span>
@@ -732,6 +721,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     onChange={e => setConfigDraft(d => ({ ...d, phase2ThresholdPp: parseInt(e.target.value) }))} />
                 </label>
 
+                </>)}
+                {!isConviction && (<>
                 {/* ── Entry Timing ───────────────────────────────── */}
                 <div className="flex flex-col gap-1.5">
                   <span className="text-xs font-medium text-muted-foreground">Entry Timing</span>
@@ -841,6 +832,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </select>
                 </label>
 
+                </>)}
+                {!isConviction && (<>
                 {/* Direction Cap Enable */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Directional Balance Filter</span>
@@ -1065,6 +1058,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </span>
                 </label>
 
+                </>)}
                 {/* Master Enable */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Bot Master Switch</span>

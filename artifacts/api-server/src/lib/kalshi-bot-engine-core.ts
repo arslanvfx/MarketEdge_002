@@ -813,7 +813,7 @@ export function checkMomentumOverride(
 // without pulling in the ./crypto or DB modules.
 // ---------------------------------------------------------------------------
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm" | "market_lock";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm" | "conviction";
 
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
@@ -830,7 +830,7 @@ export interface BotConfig {
   maxEntryMinutes: number;   // ceiling: don't enter after this many minutes into the window; 0 = disabled (no ceiling)
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
-  enableDynamicEntry?: boolean;      // market_lock only: evaluate every tick instead of once at betDelayMinutes; priceBufferPct is the trigger
+  kalshiLockPrice?: number;           // conviction only: Kalshi YES price trigger (default 0.90; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)

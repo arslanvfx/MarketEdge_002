@@ -195,35 +195,34 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   //
   // betDelayMinutes=13: block all entry until T+13 (2 min remain).
   // maxEntryMinutes=14: latest entry at T+14 (1 min remain).
-  // minRemainingMinutes=1: absolute floor — 1 min must remain.
-  // priceBufferPct=2.0: price must be 2% clear of the strike.
-  // minReturnMultiple=1.10: 10% min ROI — max entry YES price ~90¢.
-  // betSize=10/maxBetSize=50: $10–$50 per bet; scale up once track record built.
-  market_lock: {
-    decisionMode: "market_lock",
+  // minReturnMultiple=1.05: ~5% min ROI — max YES entry ~95¢.
+  // kalshiLockPrice=0.90: fire when Kalshi YES ≥ 90¢ (BET_YES) or ≤ 10¢ (BET_NO).
+  // betSize=1/maxBetSize=2: start small — $1–$2 flat bets.
+  // windowEntryBufferSeconds=60: wait 60s for Kalshi market to publish after window open.
+  conviction: {
+    decisionMode: "conviction",
     minConfidence: 50,
-    minReturnMultiple: 1.10,
+    minReturnMultiple: 1.05,
+    kalshiLockPrice: 0.90,
     betDelayMinutes: 0,
-    maxEntryMinutes: 13,
-    minRemainingMinutes: 2,
-    windowEntryBufferSeconds: 120,
-    enableDynamicEntry: true,
+    maxEntryMinutes: 14,
+    minRemainingMinutes: 1,
+    windowEntryBufferSeconds: 60,
     requireMonitorReady: false,
-    enableDynamicSizing: true,
-    betSize: 10,
-    maxBetSize: 50,
-    maxBetsPerWindow: 4,
-    profitLockPct: 97,
+    enableDynamicSizing: false,
+    betSize: 1,
+    maxBetSize: 2,
+    maxBetsPerWindow: 2,
+    profitLockPct: 0,
     enableMidExit: false,
-    priceBufferPct: 2.0,
     regimePenalty: 0,
     enableDirectionCap: false,
     maxSameDirectionBets: 4,
     enableMomentumFilter: false,
-    consensusMinCents: 25,
+    consensusMinCents: 0,
     momentumLookbackCandles: 6,
     phase2ThresholdPp: 30,
-    minHoldMinutes: 1,
+    minHoldMinutes: 0,
   },
 };
 
@@ -670,7 +669,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     betDelayMinutes,
     minNoEntryMinutes,
     priceBufferPct,
-    enableDynamicEntry,
+    kalshiLockPrice,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -685,7 +684,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxBetsPerWindow?: number;
     betDelayMinutes?: number;
     minNoEntryMinutes?: number;
-    enableDynamicEntry?: boolean;
+    kalshiLockPrice?: number;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -738,7 +737,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "position_confirm" || decisionMode === "market_lock") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "position_confirm" || decisionMode === "conviction") {
     // When switching modes: apply built-in mode defaults as a baseline, then
     // layer the saved user preset on top (if one exists), then apply any
     // explicit overrides from this request on top of that.
@@ -883,8 +882,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof priceBufferPct === "number" && priceBufferPct >= 0 && priceBufferPct <= 5) {
     partial.priceBufferPct = priceBufferPct;
   }
-  if (typeof enableDynamicEntry === "boolean") {
-    partial.enableDynamicEntry = enableDynamicEntry;
+  if (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) {
+    partial.kalshiLockPrice = kalshiLockPrice;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
