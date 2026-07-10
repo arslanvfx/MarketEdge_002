@@ -681,6 +681,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     preConvictionThreshold,
     useRestingLimitOrders,
     convictionRestingWindowMinutes,
+    minWindowEntryMinutes,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -699,6 +700,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     preConvictionThreshold?: number;
     useRestingLimitOrders?: boolean;
     convictionRestingWindowMinutes?: number;
+    minWindowEntryMinutes?: number;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -911,6 +913,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   // 0 = disabled (arm at any time); 1–14 = arm only when ≤ N minutes remain
   if (typeof convictionRestingWindowMinutes === "number" && convictionRestingWindowMinutes >= 0 && convictionRestingWindowMinutes <= 14) {
     partial.convictionRestingWindowMinutes = convictionRestingWindowMinutes;
+  }
+  // 0 = disabled; 1–13 = block new bets in the first N minutes (bypass if yesPrice ≥ 0.92 or ≤ 0.08)
+  if (typeof minWindowEntryMinutes === "number" && minWindowEntryMinutes >= 0 && minWindowEntryMinutes <= 13) {
+    partial.minWindowEntryMinutes = minWindowEntryMinutes;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

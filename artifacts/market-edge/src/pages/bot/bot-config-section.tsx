@@ -800,6 +800,29 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </span>
                   </label>
 
+                  {/* Early-Window Lockout (minWindowEntryMinutes) */}
+                  <label className="flex flex-col gap-1.5 mt-1">
+                    <span className="text-xs text-muted-foreground">
+                      No Bets Before
+                      {(merged.minWindowEntryMinutes ?? 0) > 0 && (
+                        <span className="ml-1 text-amber-400">T+{merged.minWindowEntryMinutes}m</span>
+                      )}
+                    </span>
+                    <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                      value={merged.minWindowEntryMinutes ?? 0}
+                      onChange={e => setConfigDraft(d => ({ ...d, minWindowEntryMinutes: parseInt(e.target.value, 10) }))}>
+                      <option value={0}>No lockout — bets allowed immediately</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
+                        <option key={m} value={m}>Block first {m} min (override at ≥92¢ / ≤8¢)</option>
+                      ))}
+                    </select>
+                    {(merged.minWindowEntryMinutes ?? 0) > 0 && (
+                      <span className="text-xs text-muted-foreground/70">
+                        No bets in the first {merged.minWindowEntryMinutes} min unless YES price hits ≥92¢ or ≤8¢.
+                      </span>
+                    )}
+                  </label>
+
                   {/* Latest Entry (maxEntryMinutes) */}
                   <label className="flex flex-col gap-1.5 mt-1">
                     <span className="text-xs text-muted-foreground">Latest Entry</span>

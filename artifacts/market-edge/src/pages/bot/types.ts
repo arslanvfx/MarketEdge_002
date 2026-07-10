@@ -52,6 +52,7 @@ export interface BotConfig {
   consensusMinCents: number;
   momentumLookbackCandles: number;
   windowEntryBufferSeconds?: number;
+  minWindowEntryMinutes?: number;
   betDelayMinutes?: number;
   minHoldMinutes?: number;
   enableMidExit?: boolean;

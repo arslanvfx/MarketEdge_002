@@ -371,6 +371,26 @@ async function _runBotTick(
   // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
+  // Early-window lockout: hard block on new bets for the first N minutes of the window.
+  // Bypassed only when yesPrice hits an extreme (≥ 0.92 or ≤ 0.08) — conviction-level
+  // certainty overrides the time gate regardless of elapsed time.
+  {
+    const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
+    if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
+      const isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
+      if (!isExtreme) {
+        logger.debug(
+          { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
+          "[kalshi-bot] early-window lockout — waiting for time gate or extreme price (≥92¢/≤8¢)",
+        );
+        return;
+      }
+      logger.info(
+        { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
+        "[kalshi-bot] early-window lockout bypassed — extreme price override",
+      );
+    }
+  }
   // Floor: early-exit the tick if fewer than minRemainingMinutes remain.
   // This is a soft/configurable guard checked at tick start.  The hard
   // non-configurable 3-minute floor is re-checked with fresh Date.now()
