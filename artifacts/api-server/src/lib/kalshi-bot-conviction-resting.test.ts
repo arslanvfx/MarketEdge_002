@@ -197,3 +197,101 @@ test("tick source: paperCostPerContract uses (1 - paperFillYesPrice) for NO side
     "paperCostPerContract formula must include (1 - paperFillYesPrice) for NO side in kalshi-bot-tick.ts",
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Stateful cancel — source wiring
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel must stay in restingOrders until confirmed.  We verify:
+//   - cancelRequested flag is set (not immediate delete) on stale/near-expiry
+//   - cancel is retried on error (order stays in map when cancelOrder throws)
+//   - removal only happens after cancelOrder resolves (true or false/404)
+
+test("loop source: stale window sets cancelRequested rather than deleting immediately", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // Verify the new pattern: set cancelRequested on window-change, don't delete immediately
+  assert.ok(
+    src.includes("re.cancelRequested = true"),
+    "loop must set re.cancelRequested = true (not immediately delete) on stale window",
+  );
+});
+
+test("loop source: cancel is confirmed before removing from restingOrders", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // The stateful path: await cancelOrder → then restingOrders.delete
+  const cancelIdx = src.indexOf("await cancelOrder(re.orderId)");
+  const deleteAfterCancel = src.indexOf("restingOrders.delete(sym)", cancelIdx);
+  assert.ok(cancelIdx > 0,         "loop must await cancelOrder(re.orderId)");
+  assert.ok(deleteAfterCancel > cancelIdx, "restingOrders.delete must come after await cancelOrder in the cancel path");
+});
+
+test("loop source: cancel error leaves order in map (retry on next tick)", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // The catch block for cancel must NOT delete from map — it should just warn and continue
+  assert.ok(
+    src.includes("Cancel API call failed — leave in map, retry on next tick"),
+    "loop must keep order in restingOrders when cancelOrder throws (retry semantics)",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. 404 retry — source wiring
+// ─────────────────────────────────────────────────────────────────────────────
+// A single 404 from getOrder may be transient.  We verify:
+//   - notFoundCount is incremented on each 404
+//   - entry stays in map while notFoundCount < 3
+//   - definitive treatment (block + remove) only after ≥3 consecutive 404s
+
+test("loop source: notFoundCount is incremented on 404 from getOrder", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  assert.ok(
+    src.includes("re.notFoundCount = nf"),
+    "loop must track notFoundCount per order for 404 retry logic",
+  );
+});
+
+test("loop source: entry stays in map when notFoundCount < 3 (transient 404)", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  assert.ok(
+    src.includes("nf < 3"),
+    "loop must keep order in restingOrders when 404 count is below threshold (transient retry)",
+  );
+});
+
+test("loop source: definitive 404 after 3 attempts blocks reactive re-entry", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  // After 3 attempts: convictionFiredThisWindow is set, then order removed
+  const definitiveIdx = src.indexOf("after 3 attempts");
+  assert.ok(definitiveIdx > 0, "loop must have 3-attempt 404 definitive handling");
+  const firedIdx = src.indexOf("convictionFiredThisWindow.add", definitiveIdx);
+  const delIdx   = src.indexOf("restingOrders.delete(sym)", definitiveIdx);
+  assert.ok(firedIdx > definitiveIdx, "convictionFiredThisWindow.add must follow the 3-attempt 404 marker");
+  assert.ok(delIdx   > definitiveIdx, "restingOrders.delete must follow the 3-attempt 404 marker");
+});
+
+test("loop source: getOrder throw leaves order in map (retry next tick)", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  assert.ok(
+    src.includes("getOrder threw — will retry next tick"),
+    "loop must keep order in restingOrders when getOrder throws unexpectedly (retry semantics)",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. RestingOrderEntry interface fields
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("state: RestingOrderEntry has cancelRequested optional field", () => {
+  const src = readSrc("kalshi-bot-state.ts");
+  assert.ok(
+    src.includes("cancelRequested?: boolean"),
+    "RestingOrderEntry must have cancelRequested?: boolean for stateful cancel retry",
+  );
+});
+
+test("state: RestingOrderEntry has notFoundCount optional field", () => {
+  const src = readSrc("kalshi-bot-state.ts");
+  assert.ok(
+    src.includes("notFoundCount?: number"),
+    "RestingOrderEntry must have notFoundCount?: number for 404 retry tracking",
+  );
+});

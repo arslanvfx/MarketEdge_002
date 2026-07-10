@@ -547,62 +547,103 @@ export async function runBotLoopTick(): Promise<void> {
   // On fill: record the position to DB and openPositions, mark
   //   convictionFiredThisWindow so the reactive IOC path doesn't double-bet.
   // On window change or near-expiry (<2 min): cancel the order.
-  // On getOrder failure (404 = stale/cleared): remove from tracking.
+  // Resting GTC limit order poll — fills, cancellations, and window cleanup.
+  //
+  // Stateful cancel: orders stay in `restingOrders` until the cancel is *confirmed*
+  // (cancelOrder returns true or 404).  If the cancel API call fails (network/exchange
+  // error), the entry stays and we retry on the next tick.  This prevents live GTC
+  // orders from remaining on exchange untracked.
+  //
+  // 404 retry: a single 404 from getOrder may be transient (e.g. just-filled orders
+  // can briefly 404 before Kalshi archives them).  We retry up to 3× before treating
+  // the 404 as definitive and blocking reactive re-entry for safety.
   if (restingOrders.size > 0) {
     const restingWindowNow = currentWindowKey();
     for (const [sym, re] of Array.from(restingOrders.entries())) {
-      // Cancel if the window has rolled over (order is stale)
+      // ── Step 1: mark orders that should be cancelled ───────────────────────
+      // Window has rolled over (stale order)
       if (re.windowKey !== restingWindowNow) {
-        restingOrders.delete(sym);
-        if (S.botMode === "live") {
-          cancelOrder(re.orderId).catch((err: unknown) => logger.warn(
-            { err, sym, orderId: re.orderId },
-            "[kalshi-bot] conviction resting: cancel failed (window-change)",
-          ));
+        if (!re.cancelRequested) {
+          re.cancelRequested = true;
+          restingOrders.set(sym, re);
+          logger.info(
+            { sym, orderId: re.orderId, oldWindow: re.windowKey, newWindow: restingWindowNow },
+            "[kalshi-bot] conviction resting: window changed — cancel requested (will confirm on next tick)",
+          );
         }
-        logger.info(
-          { sym, orderId: re.orderId, oldWindow: re.windowKey, newWindow: restingWindowNow },
-          "[kalshi-bot] conviction resting: cancelled stale order (window changed)",
-        );
+      } else {
+        // Near-expiry: < 2 minutes remain in the window
+        const restingWindowMs = new Date(re.windowKey).getTime();
+        const restingElapsedS = (Date.now() - restingWindowMs) / 1000;
+        const restingRemainingS = 15 * 60 - restingElapsedS;
+        if (restingRemainingS < 2 * 60 && !re.cancelRequested) {
+          re.cancelRequested = true;
+          restingOrders.set(sym, re);
+          logger.info(
+            { sym, orderId: re.orderId, restingRemainingS: Math.round(restingRemainingS) },
+            "[kalshi-bot] conviction resting: near-expiry — cancel requested (will confirm on next tick)",
+          );
+        }
+      }
+
+      // ── Step 2: paper mode — no API calls needed ───────────────────────────
+      // Paper fills are recorded immediately at placement; resting entries are
+      // display-only and cleaned up on window transition.
+      if (S.botMode !== "live") {
+        if (re.cancelRequested) restingOrders.delete(sym);
         continue;
       }
-      // Cancel if < 2 minutes remain in the window — too late to fill usefully
-      const restingWindowMs = new Date(re.windowKey).getTime();
-      const restingElapsedS = (Date.now() - restingWindowMs) / 1000;
-      const restingRemainingS = 15 * 60 - restingElapsedS;
-      if (restingRemainingS < 2 * 60) {
-        restingOrders.delete(sym);
-        if (S.botMode === "live") {
-          cancelOrder(re.orderId).catch((err: unknown) => logger.warn(
-            { err, sym, orderId: re.orderId },
-            "[kalshi-bot] conviction resting: cancel failed (near-expiry)",
-          ));
+
+      // ── Step 3: execute pending cancels (stateful, retry-on-error) ─────────
+      if (re.cancelRequested) {
+        try {
+          const cancelled = await cancelOrder(re.orderId);
+          // true = confirmed cancel; false = 404 (already cleared by exchange)
+          restingOrders.delete(sym);
+          logger.info(
+            { sym, orderId: re.orderId, cancelled },
+            "[kalshi-bot] conviction resting: cancel confirmed — removed from tracking",
+          );
+        } catch (cancelErr) {
+          // Cancel API call failed — leave in map, retry on next tick
+          logger.warn(
+            { cancelErr, sym, orderId: re.orderId },
+            "[kalshi-bot] conviction resting: cancel failed — will retry on next tick",
+          );
         }
-        logger.info(
-          { sym, orderId: re.orderId, restingRemainingS: Math.round(restingRemainingS) },
-          "[kalshi-bot] conviction resting: cancelled near-expiry order (<2 min remain)",
-        );
         continue;
       }
-      // Paper mode — fills are recorded immediately at placement time in the tick;
-      // resting entries are only kept as display state, not for actual polling.
-      if (S.botMode !== "live") continue;
-      // Poll fill status from Kalshi
+
+      // ── Step 4: poll fill status ────────────────────────────────────────────
       try {
         const fillInfo = await getOrder(re.orderId, re.side);
+
         if (fillInfo === null) {
-          // 404: order cleared by exchange — may have filled or expired with no fill data.
-          // Conservatively mark convictionFiredThisWindow so the reactive IOC path cannot
-          // create a duplicate position for the rest of this window (double-entry risk).
-          const staleKey = `${sym}:${re.windowKey}`;
-          convictionFiredThisWindow.add(staleKey);
-          restingOrders.delete(sym);
-          logger.warn(
-            { sym, orderId: re.orderId },
-            "[kalshi-bot] conviction resting: order 404 — exchange cleared order; reactive entry blocked for this window to prevent double exposure",
-          );
+          // 404: order not found — may be transient (just-filled orders can briefly 404
+          // before Kalshi archives them with status="filled").  Retry up to 3× before
+          // treating as definitive.
+          const nf = (re.notFoundCount ?? 0) + 1;
+          if (nf < 3) {
+            re.notFoundCount = nf;
+            restingOrders.set(sym, re);
+            logger.debug(
+              { sym, orderId: re.orderId, notFoundCount: nf },
+              `[kalshi-bot] conviction resting: getOrder 404 (attempt ${nf}/3) — retrying`,
+            );
+          } else {
+            // Definitive 404 after 3 attempts: block reactive re-entry to prevent double
+            // exposure, then drop tracking.  Log prominently for manual reconciliation.
+            const staleKey = `${sym}:${re.windowKey}`;
+            convictionFiredThisWindow.add(staleKey);
+            restingOrders.delete(sym);
+            logger.warn(
+              { sym, orderId: re.orderId, notFoundCount: nf },
+              "[kalshi-bot] conviction resting: order 404 after 3 attempts — exchange cleared order; reactive entry BLOCKED; manual reconciliation may be needed if order was filled",
+            );
+          }
           continue;
         }
+
         if (fillInfo.status === "filled" || (fillInfo.filledCount > 0 && fillInfo.status !== "resting")) {
           // Order filled — record position and mark conviction fired
           const fillYesPrice = fillInfo.avgPrice ?? re.limitPrice;
@@ -673,9 +714,8 @@ export async function runBotLoopTick(): Promise<void> {
         }
         // status === "resting" with 0 fills — still pending, nothing to do
       } catch (err) {
-        // getOrder error (including 404 for expired/unknown orders) — remove from tracking
-        restingOrders.delete(sym);
-        logger.warn({ err, sym, orderId: re.orderId }, "[kalshi-bot] conviction resting: getOrder failed — removed from tracking");
+        // getOrder threw unexpectedly — leave in map and retry next tick
+        logger.warn({ err, sym, orderId: re.orderId }, "[kalshi-bot] conviction resting: getOrder threw — will retry next tick");
       }
     }
   }

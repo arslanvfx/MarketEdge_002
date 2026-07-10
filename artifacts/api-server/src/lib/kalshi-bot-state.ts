@@ -190,6 +190,8 @@ export interface RestingOrderEntry {
   windowKey: string;
   placedAt: number;         // Date.now() at placement
   kalshiTarget: number | null;
+  cancelRequested?: boolean; // set true when we want to cancel; order stays in map until confirmed
+  notFoundCount?: number;    // consecutive 404 count from getOrder; treat as definitive after ≥3
 }
 export const restingOrders = new Map<string, RestingOrderEntry>(); // key = sym
 export const pausedCoins = new Map<string, number>();
