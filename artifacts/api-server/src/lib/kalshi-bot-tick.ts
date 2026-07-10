@@ -463,7 +463,7 @@ async function _runBotTick(
     triggerWindowPipeline(sym, windowKey); // fire-and-forget, idempotent
   }
 
-  // ── All-signals gate (HARD RULE) ───────────────────────────────────────────
+  // ── All-signals gate (HARD RULE — non-conviction modes only) ─────────────
   // The bot must NEVER enter a bet unless ALL THREE model signals — stat,
   // Claude, and ML — are non-null.  Signals are read LIVE from the predictor
   // layer (the same caches the Crypto Predictor page displays), not from the
@@ -475,63 +475,19 @@ async function _runBotTick(
   // unaffected: this gate only blocks NEW entries, and _runBotTick for open
   // positions is handled in Phase 2 before this point.)
   //
-  // CONVICTION MODE + EXTREME PRICE — Claude is fully suppressed in conviction
-  // mode (no calls are ever made), so claudeAbove will always be null.
-  // We bypass the Claude requirement ONLY when the market price has already
-  // crossed the configured conviction lockPrice (default 0.90 / 0.10).  At
-  // that price point the market itself is the conviction signal; waiting for
-  // Claude would silently block every bet the mode is designed to make.
-  //
-  // For prices below the lockPrice in conviction mode, all three signals are
-  // still required — but this never blocks a real bet since makeBotDecision
-  // also gates on yesPrice >= lockPrice before returning BET_YES/BET_NO.
-  //
-  // ALL OTHER MODES — hard three-signal rule: stat + Claude + ML must all be
-  // non-null before we enter.  There is no time-based fallback — we would
-  // rather miss the window than bet with incomplete signal data.
-  {
+  // CONVICTION MODE — price alone is the signal.  All model gates are bypassed
+  // entirely.  The engine fires purely on yesPrice vs lockPrice.
+  if (S.config.decisionMode !== "conviction") {
     const live = getLatestCoinSignals(sym);
-    // Extreme-price threshold: ≥92 % YES or ≤8 % YES.  At these prices the
-    // Kalshi market itself is the conviction signal — Claude's opinion adds no
-    // information.  Claude is also suppressed in conviction mode (no API calls
-    // ever fire), so requiring claudeAbove here would silently block all bets.
-    // We bypass the Claude null-check only when BOTH conditions hold:
-    //   1. decisionMode === "conviction"
-    //   2. yesPrice is at the extreme threshold (≥0.92 or ≤0.08)
-    //
-    // The engine itself (makeBotDecision) also skips the Claude gate for
-    // conviction mode, so stat+ML are the only signals that must be ready.
-    const EXTREME_YES = 0.92;
-    const EXTREME_NO  = 0.08;
-    const isConvictionExtreme =
-      S.config.decisionMode === "conviction" &&
-      yesPrice !== null &&
-      (yesPrice >= EXTREME_YES || yesPrice <= EXTREME_NO);
-
-    if (isConvictionExtreme) {
-      // Bypass Claude requirement — Claude is suppressed in conviction mode.
-      if (live.statAbove === null || live.mlAbove === null) {
-        logger.info(
-          { sym, windowKey, secondsElapsed, yesPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
-          "[kalshi-bot] conviction extreme-price: waiting for stat+ML (Claude suppressed)",
-        );
-        return;
-      }
-      logger.debug(
-        { sym, windowKey, yesPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
-        "[kalshi-bot] conviction extreme-price: stat+ML ready — bypassing Claude gate",
+    if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
+      logger.info(
+        {
+          sym, windowKey, secondsElapsed,
+          statAbove: live.statAbove, claudeAbove: live.claudeAbove, mlAbove: live.mlAbove,
+        },
+        "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
       );
-    } else {
-      if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
-        logger.info(
-          {
-            sym, windowKey, secondsElapsed,
-            statAbove: live.statAbove, claudeAbove: live.claudeAbove, mlAbove: live.mlAbove,
-          },
-          "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
-        );
-        return;
-      }
+      return;
     }
   }
 
@@ -799,14 +755,16 @@ async function _runBotTick(
     }
 
     // ── Strike proximity guard ─────────────────────────────────────────────
-    // Skip when the live price is within 0.05% of the Kalshi target.
+    // Skip when the live price is within 0.03% of the Kalshi target.
     // At that proximity a single tick crosses the strike and flips the
     // outcome — the bet is effectively a coin flip regardless of signals.
     // Only applied on the "at risk" side for each direction:
     //   NO  bet + price barely below target → one tick up = loss
     //   YES bet + price barely above target → one tick down = loss
+    // Bypassed in conviction mode — at 88-92¢/8-12¢, being close to strike
+    // is the whole point; blocking these bets defeats the mode entirely.
     const livePrice = pred?.price;
-    if (!S.config.freeRunMode && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
+    if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
       const STRIKE_PROXIMITY_PCT = 0.03;
       const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
       const tooClose =
