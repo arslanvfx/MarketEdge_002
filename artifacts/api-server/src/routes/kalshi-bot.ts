@@ -74,13 +74,16 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   // Key fixes vs naive defaults:
   //   • minConfidence 55 (not 60) — ML Gate formula produces 49–57% in practice
   //   • minReturnMultiple 1.2 (not 1.5) — high-priced coins (86¢) give only 1.17×
-  //   • maxEntryMinutes 10 (not 7) — gives headroom after betDelayMinutes=7 fires
+  //   • betDelayMinutes 0 — pipeline fires entry the instant all signals confirm;
+  //     no artificial wait needed; windowEntryBufferSeconds=120 (not in UI) is the
+  //     real Kalshi-publish safety buffer that prevents the first-tick blind spot
+  //   • maxEntryMinutes 0 (unlimited) — pipeline controls the gate, not a clock limit
   ml_gate: {
     decisionMode: "ml_gate",
     minConfidence: 55,
     minReturnMultiple: 1.2,
-    betDelayMinutes: 7,
-    maxEntryMinutes: 10,
+    betDelayMinutes: 0,
+    maxEntryMinutes: 0,
     minRemainingMinutes: 3,
     windowEntryBufferSeconds: 120,
     requireMonitorReady: true,
