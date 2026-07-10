@@ -71,19 +71,20 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minHoldMinutes: 3,
   },
   // ML Gate: ML leads direction; Claude is a hard co-decider (direction veto).
-  // Key fixes vs naive defaults:
-  //   • minConfidence 55 (not 60) — ML Gate formula produces 49–57% in practice
-  //   • minReturnMultiple 1.2 (not 1.5) — high-priced coins (86¢) give only 1.17×
-  //   • betDelayMinutes 0 — pipeline fires entry the instant all signals confirm;
-  //     no artificial wait needed; windowEntryBufferSeconds=120 (not in UI) is the
-  //     real Kalshi-publish safety buffer that prevents the first-tick blind spot
-  //   • maxEntryMinutes 0 (unlimited) — pipeline controls the gate, not a clock limit
+  // Entry fires immediately once all 3 signals (stat+Claude+ML) confirm direction
+  // against the updated Kalshi target — no artificial delay needed.
+  // windowEntryBufferSeconds=120 (backend-only, not in UI) is the Kalshi-publish
+  // safety buffer that blocks the first-tick blind spot; betDelayMinutes=0 means
+  // the pipeline fires the instant the recheck comes back with all signals ready.
+  // maxEntryMinutes=8: no new bets after 8 min elapsed (leaves ≥7 min to resolve).
+  // minRemainingMinutes=3: hard floor — abort tick when <3 min left in window.
+  // minReturnMultiple=1.5: require 1.5× return floor to cover spread + edge.
   ml_gate: {
     decisionMode: "ml_gate",
     minConfidence: 55,
-    minReturnMultiple: 1.2,
+    minReturnMultiple: 1.5,
     betDelayMinutes: 0,
-    maxEntryMinutes: 0,
+    maxEntryMinutes: 8,
     minRemainingMinutes: 3,
     windowEntryBufferSeconds: 120,
     requireMonitorReady: true,
@@ -151,22 +152,29 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 2,
   },
+  // Position Confirm: direction = WHERE price IS vs the Kalshi strike (not a prediction).
+  // Models act as soft vetoes only. Strategy: wait 2 min for price to confirm its
+  // side of the strike, then bet only if it's ≥0.25% clear of the strike (priceBufferPct).
+  // maxEntryMinutes=9: late entries lose edge when position can flip in <6 remaining min.
+  // minRemainingMinutes=3: same floor as ML Gate.
+  // minReturnMultiple=1.3: slightly higher than Unanimous — positional bets carry flip risk.
+  // minConfidence=58: lower floor since price-position is the primary signal, not model conf.
   position_confirm: {
     decisionMode: "position_confirm",
-    minConfidence: 60,
-    minReturnMultiple: 1.1,
-    betDelayMinutes: 7,
-    maxEntryMinutes: 11,
-    minRemainingMinutes: 2,
+    minConfidence: 58,
+    minReturnMultiple: 1.3,
+    betDelayMinutes: 2,
+    maxEntryMinutes: 9,
+    minRemainingMinutes: 3,
     windowEntryBufferSeconds: 120,
     requireMonitorReady: true,
     enableDynamicSizing: true,
     betSize: 1,
     maxBetSize: 3,
-    maxBetsPerWindow: 6,
+    maxBetsPerWindow: 5,
     profitLockPct: 97,
     enableMidExit: false,
-    priceBufferPct: 0,
+    priceBufferPct: 0.25,
     regimePenalty: 12,
     enableDirectionCap: true,
     maxSameDirectionBets: 3,

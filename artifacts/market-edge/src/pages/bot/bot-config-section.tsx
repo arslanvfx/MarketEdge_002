@@ -533,8 +533,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             <span className="text-sky-400/70 font-medium">Built-in defaults:</span>{" "}
                             {typeof d.minConfidence === "number" && `conf ≥${d.minConfidence}%`}
                             {typeof d.minReturnMultiple === "number" && ` · return ≥${d.minReturnMultiple}×`}
-                            {typeof d.betDelayMinutes === "number" && d.betDelayMinutes > 0 && ` · entry at T+${d.betDelayMinutes}m`}
+                            {typeof d.betDelayMinutes === "number" && d.betDelayMinutes > 0 ? ` · entry at T+${d.betDelayMinutes}m` : " · enter immediately"}
                             {typeof d.maxEntryMinutes === "number" && d.maxEntryMinutes > 0 && ` · latest T+${d.maxEntryMinutes}m`}
+                            {typeof d.minRemainingMinutes === "number" && d.minRemainingMinutes > 0 && ` · ≥${d.minRemainingMinutes}m left`}
+                            {typeof (d as Record<string, unknown>).priceBufferPct === "number" && (d as Record<string, unknown>).priceBufferPct as number > 0 && ` · ≥${(d as Record<string, unknown>).priceBufferPct}% strike clearance`}
                             {typeof d.betSize === "number" && ` · $${d.betSize} bet`}
                           </p>
                         )}
