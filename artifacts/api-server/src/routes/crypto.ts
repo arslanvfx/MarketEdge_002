@@ -741,37 +741,41 @@ router.get("/crypto/window-monitor-accuracy/:symbol", async (req, res) => {
 // suggestion at 1.5 × stdDev (so the guard only fires in the tail, not routinely).
 // POST body: { lateWindowMinutes?: number (default 7), days?: number (default 60) }
 router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
-  const { lateWindowMinutes = 7, days = 60 } = (req.body ?? {}) as {
+  const { lateWindowMinutes = 7, days = 60, multiplier = 1.5 } = (req.body ?? {}) as {
     lateWindowMinutes?: number;
     days?: number;
+    multiplier?: number;
   };
-  const lateWinMins = Math.max(1, Math.min(14, Number(lateWindowMinutes) || 7));
+  const lateWinMins  = Math.max(1, Math.min(14, Number(lateWindowMinutes) || 7));
   const lookbackDays = Math.max(1, Math.min(365, Number(days) || 60));
+  const sdMultiplier = Math.max(0.5, Math.min(4, Number(multiplier) || 1.5));
 
   try {
-    const { db, kalshiBotBetsTable } = await import("@workspace/db");
+    const { db, predictionRecordsTable } = await import("@workspace/db");
     const { and, isNotNull, sql: drizzleSql } = await import("drizzle-orm");
 
+    // Use prediction_records: every window produces a snapshot with
+    // priceAtSnapshot (live price) and kalshiTarget (strike).  This gives an
+    // unbiased sample of where the price sits relative to the strike at each
+    // window's mid-point, not just when bets were placed.
     const rows = await db
       .select({
-        symbol: kalshiBotBetsTable.symbol,
-        windowKey: kalshiBotBetsTable.windowKey,
-        createdAt: kalshiBotBetsTable.createdAt,
-        kalshiTarget: kalshiBotBetsTable.kalshiTarget,
-        cryptoPriceAtEntry: kalshiBotBetsTable.cryptoPriceAtEntry,
+        symbol:          predictionRecordsTable.symbol,
+        snappedAt:       predictionRecordsTable.snappedAt,
+        kalshiTarget:    predictionRecordsTable.kalshiTarget,
+        priceAtSnapshot: predictionRecordsTable.priceAtSnapshot,
       })
-      .from(kalshiBotBetsTable)
+      .from(predictionRecordsTable)
       .where(
         and(
-          isNotNull(kalshiBotBetsTable.kalshiTarget),
-          isNotNull(kalshiBotBetsTable.cryptoPriceAtEntry),
-          drizzleSql`${kalshiBotBetsTable.action} = 'bet'`,
-          drizzleSql`${kalshiBotBetsTable.createdAt} >= NOW() - (${lookbackDays} || ' days')::interval`,
+          isNotNull(predictionRecordsTable.kalshiTarget),
+          drizzleSql`${predictionRecordsTable.snappedAt} >= NOW() - (${lookbackDays} || ' days')::interval`,
+          drizzleSql`${predictionRecordsTable.source} = 'stat'`,   // one row per window per coin
         ),
       )
-      .limit(5000);
+      .limit(10000);
 
-    // Group by symbol and phase
+    // Group by symbol and phase (early / late), keyed by minutes remaining in the 15-min window.
     type PhaseData = { distances: number[] };
     const bySymbol = new Map<string, { early: PhaseData; late: PhaseData }>();
 
@@ -779,24 +783,19 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
       const sym = row.symbol ?? "";
       if (!sym) continue;
       const target = parseFloat(String(row.kalshiTarget));
-      const price = parseFloat(String(row.cryptoPriceAtEntry));
+      const price  = parseFloat(String(row.priceAtSnapshot));
       if (!isFinite(target) || target <= 0 || !isFinite(price) || price <= 0) continue;
 
       const distancePct = Math.abs(price - target) / target * 100;
 
-      // Determine window phase: windowKey is an ISO timestamp or Unix ms string.
-      // Minutes elapsed = (createdAt − windowKey) / 60_000.
-      // Minutes remaining = 15 − minutesElapsed.
-      let minutesRemaining = 7.5; // default to middle if we can't compute
-      const wkRaw = row.windowKey;
-      const caRaw = row.createdAt;
-      if (wkRaw && caRaw) {
-        const wkMs = typeof wkRaw === "number" ? wkRaw : new Date(wkRaw).getTime();
-        const caMs = new Date(caRaw).getTime();
-        if (isFinite(wkMs) && isFinite(caMs) && caMs > wkMs) {
-          const elapsedMins = (caMs - wkMs) / 60_000;
-          minutesRemaining = Math.max(0, 15 - elapsedMins);
-        }
+      // Compute minutes remaining: snap time relative to the 15-min boundary.
+      // Window boundary = floor(snappedAt to nearest 15 min).
+      let minutesRemaining = 7.5; // fallback mid-window
+      const snapMs = row.snappedAt ? new Date(row.snappedAt).getTime() : NaN;
+      if (isFinite(snapMs)) {
+        const boundary15Ms = Math.floor(snapMs / (15 * 60_000)) * (15 * 60_000);
+        const elapsedMins  = (snapMs - boundary15Ms) / 60_000;
+        minutesRemaining   = Math.max(0, 15 - elapsedMins);
       }
 
       if (!bySymbol.has(sym)) {
@@ -812,7 +811,7 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
 
     function stdDev(values: number[]): number {
       if (values.length < 2) return 0;
-      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      const mean     = values.reduce((a, b) => a + b, 0) / values.length;
       const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / (values.length - 1);
       return Math.sqrt(variance);
     }
@@ -820,9 +819,13 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
     function summarize(d: PhaseData) {
       const n = d.distances.length;
       if (n === 0) return { n: 0, mean: null, stdDev: null, suggested: null };
-      const mean = d.distances.reduce((a, b) => a + b, 0) / n;
-      const sd = stdDev(d.distances);
-      const suggested = parseFloat(Math.max(0, mean - 1.5 * sd).toFixed(3));
+      const mean      = d.distances.reduce((a, b) => a + b, 0) / n;
+      const sd        = stdDev(d.distances);
+      // suggested = multiplier × stdDev: a threshold derived from drift alone.
+      // A bet is blocked when its distancePct < threshold, i.e. when it is in
+      // the lower tail of the price-to-strike distribution.  Higher multiplier
+      // = wider guard zone = more bets blocked near the strike.
+      const suggested = parseFloat((sdMultiplier * sd).toFixed(3));
       return { n, mean: parseFloat(mean.toFixed(4)), stdDev: parseFloat(sd.toFixed(4)), suggested };
     }
 
@@ -831,7 +834,7 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
       result[sym] = { early: summarize(data.early), late: summarize(data.late) };
     }
 
-    res.json({ ok: true, lateWindowMinutes: lateWinMins, lookbackDays, bySym: result });
+    res.json({ ok: true, lateWindowMinutes: lateWinMins, lookbackDays, multiplier: sdMultiplier, bySym: result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "calibration failed";
     res.status(500).json({ error: msg });

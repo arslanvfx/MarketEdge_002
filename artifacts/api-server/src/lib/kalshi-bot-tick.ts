@@ -422,9 +422,10 @@ async function _runBotTick(
         : (S.config.proximityEarlyPctOverrides ?? {});
       const threshold = overrideMap[sym] ?? globalThreshold;
       if (threshold > 0 && distancePct < threshold) {
-        logger.debug(
-          { sym, distancePct: +distancePct.toFixed(3), threshold, isLate, minutesRemaining: +minutesRemaining.toFixed(1) },
-          "[kalshi-bot] proximity guard — live price within strike zone, skipping",
+        const phase = isLate ? "late" : "early";
+        logger.info(
+          { sym, distancePct: +distancePct.toFixed(3), threshold, phase, minutesRemaining: +minutesRemaining.toFixed(1) },
+          `[kalshi-bot] proximity guard [${sym}]: ${distancePct.toFixed(2)}% from strike — need ${threshold.toFixed(2)}% (${phase}, ${minutesRemaining.toFixed(1)} min remaining)`,
         );
         return;
       }
