@@ -157,9 +157,11 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   // on one side of the strike (mid-window), then fire a fresh re-analysis against the
   // current price — so the bet is on the CONFIRMED position, not the opening snapshot.
   // betDelayMinutes=7: hold entry until T+7, then run fresh Claude + stat recheck.
-  // maxEntryMinutes=10: must have entered by T+10 (leaves ≥5 min to resolve).
-  // minRemainingMinutes=3: same floor as ML Gate — abort if <3 min left.
-  // priceBufferPct=0.25: price must be ≥0.25% clear of the Kalshi strike to confirm side.
+  // maxEntryMinutes=12: window stays open until T+12; minRemainingMinutes=3 is the floor
+  //   (together they define the entry window as T+7 to T+12 — 5-minute window to fire).
+  // priceBufferPct=0.05: just enough to block coins sitting exactly ON the strike
+  //   (0.000% like the DOGE loss); coins 0.05%+ clear are meaningfully on one side.
+  //   0.25% was too tight — all winners in the successful window were 0.057–0.45% clear.
   // minReturnMultiple=1.3: positional bets carry flip risk; require meaningful edge.
   // minConfidence=58: lower floor since price-position is the primary signal, not model conf.
   position_confirm: {
@@ -167,7 +169,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minConfidence: 58,
     minReturnMultiple: 1.3,
     betDelayMinutes: 7,
-    maxEntryMinutes: 10,
+    maxEntryMinutes: 12,
     minRemainingMinutes: 3,
     windowEntryBufferSeconds: 120,
     requireMonitorReady: true,
@@ -177,7 +179,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     maxBetsPerWindow: 5,
     profitLockPct: 97,
     enableMidExit: false,
-    priceBufferPct: 0.25,
+    priceBufferPct: 0.05,
     regimePenalty: 12,
     enableDirectionCap: true,
     maxSameDirectionBets: 3,
