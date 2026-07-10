@@ -26,6 +26,7 @@ import { getLatestCoinSignals } from "./crypto-signals";
 import {
   computeCorePairDecision,
   computeMLGateDecision,
+  computeConvictionDecision,
   ML_WEIGHT,
   CLAUDE_WEIGHT,
   ML_BOOST,
@@ -66,6 +67,7 @@ import {
   type BotDecisionAction,
   type CorePairInputs,
   type CorePairResult,
+  type ConvictionInputs,
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
@@ -74,6 +76,7 @@ import {
 // Re-export constants and types so callers only import from this file.
 export {
   computeCorePairDecision,
+  computeConvictionDecision,
   computeMLGateDecision,
   ML_WEIGHT,
   CLAUDE_WEIGHT,
@@ -123,6 +126,7 @@ export {
   type BotDecisionAction,
   type CorePairInputs,
   type CorePairResult,
+  type ConvictionInputs,
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
@@ -495,117 +499,31 @@ function _makeBotDecisionInner(
   }
 
   // ── Decision Mode: conviction ─────────────────────────────────────────────
-  // Fires when the Kalshi contract price itself declares ≥90% confidence.
-  // yesAsk >= kalshiLockPrice  → market says YES wins → BET YES
-  // yesAsk <= (1-kalshiLockPrice) → market says NO wins → BET NO
-  // No spot-price-vs-strike math needed — the Kalshi crowd IS the signal.
-  // Models are soft advisory: unanimous opposition → SKIP.
+  // Delegates to the pure computeConvictionDecision in kalshi-bot-engine-core.
+  // See that function's JSDoc for the full zone map and invariant documentation.
   if (decisionMode === "conviction") {
-    const lockPrice = config.kalshiLockPrice ?? 0.90;
-
-    if (yesPrice == null) {
-      return {
-        action: "SKIP",
-        confidence: 0,
-        reasoning: "conviction: Kalshi yes price unavailable",
-        signals: buildSnapshot(null),
-      };
-    }
-
-    // ── Pre-entry resting zone ─────────────────────────────────────────────
-    // When the YES price is approaching the lock threshold (inside the pre-entry
-    // band) and resting orders are enabled, return RESTING_LIMIT so the tick can
-    // place a GTC limit order at exactly lockPrice.  The order sits in the Kalshi
-    // book and fills at our target price even if the next visible market price
-    // skips from 75¢ directly to 96¢ without passing through 90¢.
-    //
-    //   YES pre-entry zone: preThresh ≤ yesPrice < lockPrice
-    //   NO  pre-entry zone: (1−lockPrice) < yesPrice ≤ (1−preThresh)
-    //
-    // A unanimous model veto still blocks the resting order — the same guard
-    // used for the reactive path.
-    const preThresh   = config.preConvictionThreshold ?? 0.87;
-    const useResting  = config.useRestingLimitOrders !== false; // default true
-    if (useResting && preThresh < lockPrice) {
-      const isYesPreEntry = yesPrice >= preThresh && yesPrice < lockPrice;
-      const isNoPreEntry  = yesPrice <= (1 - preThresh) && yesPrice > (1 - lockPrice);
-      if (isYesPreEntry || isNoPreEntry) {
-        const priceAbovePre = isYesPreEntry;
-        const modelsList = [statAbove, claudeAbove, mlAbove];
-        const nonNullPre = modelsList.filter(m => m !== null);
-        const vetoPre    = modelsList.filter(m => m !== null && m !== priceAbovePre).length;
-        const agreePre   = modelsList.filter(m => m !== null && m === priceAbovePre).length;
-        if (nonNullPre.length === 0 || vetoPre < nonNullPre.length) {
-          // Models not unanimously vetoing — pre-position a resting limit
-          return {
-            action: "RESTING_LIMIT",
-            confidence: 0,
-            reasoning: `conviction: pre-entry ${priceAbovePre ? "YES" : "NO"} at ${yesPrice.toFixed(2)} (pre-thresh=${preThresh}) — resting GTC at ${(priceAbovePre ? lockPrice : (1 - lockPrice)).toFixed(2)} (${agreePre}/${nonNullPre.length} models agree)`,
-            signals: buildSnapshot(null, agreePre, nonNullPre.length, priceAbovePre ? "BET_YES" : "BET_NO"),
-          };
-        }
-      }
-    }
-
-    const isYesLocked = yesPrice >= lockPrice;
-    const isNoLocked  = yesPrice <= (1 - lockPrice);
-
-    if (!isYesLocked && !isNoLocked) {
-      return {
-        action: "SKIP",
-        confidence: 0,
-        reasoning: `conviction: yes price ${yesPrice.toFixed(2)} not yet at lock threshold ${lockPrice.toFixed(2)} (need ≥${lockPrice.toFixed(2)} for YES or ≤${(1-lockPrice).toFixed(2)} for NO)`,
-        signals: buildSnapshot(null),
-      };
-    }
-
-    const action: BotDecisionAction = isYesLocked ? "BET_YES" : "BET_NO";
-    const priceAbove = isYesLocked;
-
-    // Unanimous model veto: all available models oppose → SKIP
-    const models = [statAbove, claudeAbove, mlAbove];
-    const nonNull    = models.filter(m => m !== null);
-    const vetoCount  = models.filter(m => m !== null && m !== priceAbove).length;
-    const agreeCount = models.filter(m => m !== null && m === priceAbove).length;
-
-    if (nonNull.length >= 2 && vetoCount >= nonNull.length) {
-      return {
-        action: "SKIP",
-        confidence: 0,
-        reasoning: `conviction: ALL ${vetoCount} models oppose ${priceAbove ? "YES" : "NO"} — skipping`,
-        signals: buildSnapshot(null, agreeCount, nonNull.length),
-      };
-    }
-
-    // Confidence: scales with how far into the locked zone the price is
-    // (0.90→95, 0.95→97.5, 0.99→99.5 → capped at 95) + small agree bonus
-    const lockedPrice  = priceAbove ? yesPrice : (1 - yesPrice);
-    const baseConf     = Math.round(50 + lockedPrice * 50);
-    const agreeBonus   = Math.min(agreeCount * 2, 5);
-    const confidence   = Math.min(baseConf + agreeBonus, 95);
-
-    if (confidence < config.minConfidence) {
-      return {
-        action: "SKIP",
-        confidence,
-        reasoning: `conviction: confidence ${confidence}% below minimum ${config.minConfidence}%`,
-        signals: buildSnapshot(null, agreeCount, nonNull.length, action),
-      };
-    }
-
-    // NOTE: minReturnMultiple is intentionally NOT checked here.
-    // The lockPrice threshold already guarantees a minimum return of 1/lockPrice
-    // (e.g. 90¢ lock → ≥1.11× return).  Applying a separate minReturnMultiple floor
-    // on top creates a contradiction: the more certain the market is (96¢, 97¢…),
-    // the lower the return and the more likely the bet gets blocked — the opposite
-    // of what conviction mode is for.  Users control the return floor via the
-    // lockPrice slider; raising it from 0.90 → 0.95 raises the min return to 1.05×.
-
+    const cvResult = computeConvictionDecision({
+      yesPrice,
+      statAbove, claudeAbove, mlAbove,
+      lockPrice:   config.kalshiLockPrice         ?? 0.90,
+      preThresh:   config.preConvictionThreshold  ?? 0.87,
+      useResting:  config.useRestingLimitOrders  !== false,
+      minConfidence: config.minConfidence,
+    });
+    // For RESTING_LIMIT the intended direction is encoded in signalsAgreeing/Total
+    // via the pre-entry zone direction; derive agreementTarget for the snapshot.
+    const cvAgreementTarget: BotDecisionAction | null =
+      cvResult.action === "BET_YES" || cvResult.action === "BET_NO"
+        ? cvResult.action
+        : cvResult.action === "RESTING_LIMIT"
+        ? (yesPrice !== null && yesPrice >= (config.preConvictionThreshold ?? 0.87)
+            ? "BET_YES" : "BET_NO")
+        : null;
     return {
-      action,
-      confidence,
-      reasoning: `conviction: Kalshi ${priceAbove ? "YES" : "NO"} at ${lockedPrice.toFixed(2)} (lock≥${lockPrice}) — ${agreeCount}/${nonNull.length} models agree, return=${(1/lockedPrice).toFixed(2)}×`,
-      signals: buildSnapshot(null, agreeCount, nonNull.length, action),
+      action:     cvResult.action,
+      confidence: cvResult.confidence,
+      reasoning:  cvResult.reasoning,
+      signals: buildSnapshot(null, cvResult.signalsAgreeing, cvResult.signalsTotal, cvAgreementTarget),
     };
   }
 

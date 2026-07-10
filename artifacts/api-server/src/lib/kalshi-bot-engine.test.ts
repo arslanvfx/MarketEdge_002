@@ -27,6 +27,7 @@ import assert from "node:assert/strict";
 import {
   computeCorePairDecision,
   computeMLGateDecision,
+  computeConvictionDecision,
   CLAUDE_BOOST,
   CLAUDE_PENALTY,
   STAT_BOOST,
@@ -51,6 +52,7 @@ import {
   tickCircuitBreakerWindow,
   type CorePairInputs,
   type CircuitBreakerState,
+  type ConvictionInputs,
 } from "./kalshi-bot-engine-core.ts";
 
 const DEFAULT_MIN_CONFIDENCE = 60;
@@ -1538,5 +1540,222 @@ test("mlGate: EV gate blocks negative-EV YES bet", () => {
 test("mlGate: min-return gate blocks deep ITM YES bet", () => {
   const r = computeMLGateDecision(mlGateInp({ yesPrice: 0.92, minReturnMultiple: 1.45 }));
   assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /below minimum/);
+});
+
+// ---------------------------------------------------------------------------
+// CONVICTION MODE: computeConvictionDecision — pure resting-GTC decision core
+//
+// Invariants verified here:
+//   1. RESTING_LIMIT fires when preThresh ≤ yesPrice < lockPrice (pre-entry zone)
+//   2. BET_YES fires (not RESTING_LIMIT) when yesPrice ≥ lockPrice
+//   3. SKIP fires when unanimous model veto exists in the pre-entry zone
+//
+// Double-bet prevention (invariant 4 — tick-level):
+//   The zones [preThresh, lockPrice) and [lockPrice, 1] are non-overlapping by
+//   construction, so the engine CANNOT return RESTING_LIMIT and BET_YES in the
+//   same tick for any single yesPrice value.  This is verified by the boundary
+//   tests below.  The tick layer additionally guards with two Sets:
+//     • convictionRestingFiredThisWindow — blocks a second RESTING_LIMIT call
+//     • convictionFiredThisWindow        — set after paper-fill or GTC fill;
+//       blocks the reactive IOC/FOK path even if yesPrice later crosses lockPrice
+//   Together they guarantee at most one order per coin per window.
+// ---------------------------------------------------------------------------
+
+function cvInp(overrides: Partial<ConvictionInputs> = {}): ConvictionInputs {
+  return {
+    yesPrice:      0.88,   // default: inside pre-entry zone (preThresh=0.87, lockPrice=0.90)
+    statAbove:     null,
+    claudeAbove:   null,
+    mlAbove:       null,
+    lockPrice:     0.90,
+    preThresh:     0.87,
+    useResting:    true,
+    minConfidence: 70,
+    ...overrides,
+  };
+}
+
+// ── Invariant 1: RESTING_LIMIT in the pre-entry zone ─────────────────────────
+
+test("conviction: preThresh ≤ yesPrice < lockPrice → RESTING_LIMIT (no models)", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.88 }));
+  assert.equal(r.action, "RESTING_LIMIT");
+  assert.match(r.reasoning, /pre-entry YES/);
+  assert.match(r.reasoning, /resting GTC/);
+});
+
+test("conviction: yesPrice exactly at preThresh → RESTING_LIMIT (lower bound inclusive)", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.87 }));
+  assert.equal(r.action, "RESTING_LIMIT");
+});
+
+test("conviction: yesPrice one cent below lockPrice → RESTING_LIMIT (upper bound exclusive)", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.89 }));
+  assert.equal(r.action, "RESTING_LIMIT");
+});
+
+test("conviction: models partially agree in pre-entry zone → RESTING_LIMIT (partial agree is not veto)", () => {
+  // 2 agree, 1 opposes — not unanimously vetoing → still resting
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.88,
+    statAbove: true, claudeAbove: true, mlAbove: false,
+  }));
+  assert.equal(r.action, "RESTING_LIMIT");
+  assert.equal(r.signalsAgreeing, 2);
+  assert.equal(r.signalsTotal, 3);
+});
+
+test("conviction: no models available in pre-entry zone → RESTING_LIMIT (no veto possible)", () => {
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.88,
+    statAbove: null, claudeAbove: null, mlAbove: null,
+  }));
+  assert.equal(r.action, "RESTING_LIMIT");
+});
+
+test("conviction: NO pre-entry zone → RESTING_LIMIT (symmetric)", () => {
+  // lockPrice=0.90 → NO pre-entry zone is (0.10, 0.13] where yesPrice = 1 - preThresh to 1 - lockPrice
+  // 1 - preThresh = 1 - 0.87 = 0.13; 1 - lockPrice = 0.10
+  // isNoPreEntry: yesPrice ≤ 0.13 && yesPrice > 0.10
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.12 }));
+  assert.equal(r.action, "RESTING_LIMIT");
+  assert.match(r.reasoning, /pre-entry NO/);
+});
+
+// ── Invariant 2: BET_YES / BET_NO at lockPrice — never RESTING_LIMIT ─────────
+
+test("conviction: yesPrice exactly at lockPrice → BET_YES (not RESTING_LIMIT)", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.90 }));
+  assert.equal(r.action, "BET_YES");
+  assert.notEqual(r.action, "RESTING_LIMIT");
+});
+
+test("conviction: yesPrice above lockPrice → BET_YES", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.95 }));
+  assert.equal(r.action, "BET_YES");
+});
+
+test("conviction: yesPrice below (1-lockPrice) → BET_NO (not RESTING_LIMIT)", () => {
+  // lockPrice=0.90 → NO locked zone is yesPrice ≤ 0.10.
+  // Use 0.09 (clearly inside the locked zone, away from the floating-point boundary
+  // where 1 − 0.90 ≈ 0.09999… in IEEE 754).
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.09 }));
+  assert.equal(r.action, "BET_NO");
+  assert.notEqual(r.action, "RESTING_LIMIT");
+});
+
+test("conviction: BET_YES zone and RESTING_LIMIT zone are non-overlapping at boundary (no double-bet possible from same tick)", () => {
+  // Same inputs, two prices: one in [preThresh, lockPrice), one at lockPrice.
+  // The engine CANNOT return both — proves the zones are exclusive and a single
+  // tick can never simultaneously trigger RESTING_LIMIT and BET_YES.
+  const restingZone = computeConvictionDecision(cvInp({ yesPrice: 0.89 }));
+  const betZone     = computeConvictionDecision(cvInp({ yesPrice: 0.90 }));
+  assert.equal(restingZone.action, "RESTING_LIMIT", "89¢ is in resting zone");
+  assert.equal(betZone.action,     "BET_YES",        "90¢ is in bet zone");
+  assert.notEqual(restingZone.action, betZone.action, "zones are mutually exclusive");
+});
+
+test("conviction: BET_YES confidence formula — 50 + lockedPrice*50 + agreeBonus, capped at 95", () => {
+  // yesPrice=0.90 → lockedPrice=0.90 → baseConf=round(50+45)=95; agreeBonus=0 → conf=95
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.90, statAbove: null, claudeAbove: null, mlAbove: null,
+    minConfidence: 0,
+  }));
+  assert.equal(r.action, "BET_YES");
+  assert.equal(r.confidence, 95);
+});
+
+test("conviction: agree bonus adds up to 5pp max", () => {
+  // yesPrice=0.90 → baseConf=95; agreeBonus = min(3*2, 5) = 5 → capped at 95 anyway
+  // Use 0.91 to get baseConf < 95: round(50 + 0.91*50) = round(95.5) = 96 → capped 95
+  // Use 0.80: round(50+40)=90; agreeBonus=min(3*2,5)=5 → 95
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.80, statAbove: true, claudeAbove: true, mlAbove: true,
+    lockPrice: 0.70, minConfidence: 0,
+  }));
+  assert.equal(r.action, "BET_YES");
+  const expected = Math.min(Math.round(50 + 0.80 * 50) + Math.min(3 * 2, 5), 95);
+  assert.equal(r.confidence, expected);
+});
+
+// ── Invariant 3: Unanimous model veto in the pre-entry zone → SKIP ───────────
+
+test("conviction: ALL 3 models oppose YES direction in pre-entry zone → SKIP (unanimous veto)", () => {
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.88,
+    statAbove: false, claudeAbove: false, mlAbove: false,
+  }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /not yet at lock threshold/);
+});
+
+test("conviction: ALL 2 non-null models oppose in pre-entry zone → SKIP (unanimous veto with 2 models)", () => {
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.88,
+    statAbove: false, claudeAbove: false, mlAbove: null,
+  }));
+  assert.equal(r.action, "SKIP");
+});
+
+test("conviction: unanimous veto in pre-entry zone produces different action than non-veto", () => {
+  // With no models (no veto) → RESTING_LIMIT
+  const noModels = computeConvictionDecision(cvInp({ yesPrice: 0.88 }));
+  // With all models opposing → SKIP
+  const allOppose = computeConvictionDecision(cvInp({
+    yesPrice: 0.88,
+    statAbove: false, claudeAbove: false, mlAbove: false,
+  }));
+  assert.equal(noModels.action,   "RESTING_LIMIT");
+  assert.equal(allOppose.action,  "SKIP");
+});
+
+test("conviction: unanimous veto at lockPrice (locked zone) → SKIP", () => {
+  // All models oppose in the reactive locked zone too
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.92,
+    statAbove: false, claudeAbove: false, mlAbove: false,
+    minConfidence: 0,
+  }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /ALL.*models oppose/);
+});
+
+test("conviction: single model opposing in locked zone does NOT veto (need ≥2 and unanimous)", () => {
+  // Only 1 model available (stat=false), 2 needed for veto → not vetoed
+  const r = computeConvictionDecision(cvInp({
+    yesPrice: 0.92,
+    statAbove: false, claudeAbove: null, mlAbove: null,
+    minConfidence: 0,
+  }));
+  assert.equal(r.action, "BET_YES");
+});
+
+// ── Additional edge cases ─────────────────────────────────────────────────────
+
+test("conviction: yesPrice null → SKIP", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: null }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /unavailable/);
+});
+
+test("conviction: yesPrice between lockPrice and preThresh (mid zone, not locked) → SKIP", () => {
+  // preThresh=0.87, lockPrice=0.90. Price at 0.85 is below the pre-entry zone.
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.85 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /not yet at lock threshold/);
+});
+
+test("conviction: useResting=false → no RESTING_LIMIT; price in pre-entry zone → SKIP", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.88, useResting: false }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /not yet at lock threshold/);
+});
+
+test("conviction: confidence below minConfidence in locked zone → SKIP with confidence value preserved", () => {
+  // yesPrice=0.90 → confidence=95; set minConfidence=100 → SKIP
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.90, minConfidence: 100 }));
+  assert.equal(r.action, "SKIP");
+  assert.equal(r.confidence, 95);
   assert.match(r.reasoning, /below minimum/);
 });
