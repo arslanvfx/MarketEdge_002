@@ -734,12 +734,16 @@ router.get("/crypto/window-monitor-accuracy/:symbol", async (req, res) => {
 });
 
 // ── Entry proximity calibration ───────────────────────────────────────────────
-// Analyses historical kalshi_bot_bets to suggest per-coin proximity thresholds.
-// For each coin, splits bets into early-window (≥lateWindow min remaining) and
-// late-window (< lateWindow min remaining), computes the std dev of
-// |cryptoPriceAtEntry - kalshiTarget| / kalshiTarget × 100, then returns a
-// suggestion at 1.5 × stdDev (so the guard only fires in the tail, not routinely).
-// POST body: { lateWindowMinutes?: number (default 7), days?: number (default 60) }
+// Derives per-coin, per-phase proximity thresholds from window_timing_snapshots.
+// That table records currentPrice + kalshiTarget at minuteMark seconds into
+// each 15-min window (marks: 60, 180, 360, 540, 720 = T+1, T+3, T+6, T+9, T+12),
+// giving 5 unbiased intra-window price-vs-strike samples per coin per window —
+// not selection-biased by which windows the bot entered.
+//
+// Phase split: marks where (15min − minuteMark/60) ≤ lateWindowMinutes are "late".
+// Threshold = multiplier × stdDev of distancePct per phase.
+// A bet is skipped when its distancePct < threshold (price is in the near-strike tail).
+// POST body: { lateWindowMinutes?: number (default 7), days?: number (default 60), multiplier?: number (default 1.5) }
 router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
   const { lateWindowMinutes = 7, days = 60, multiplier = 1.5 } = (req.body ?? {}) as {
     lateWindowMinutes?: number;
@@ -749,33 +753,36 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
   const lateWinMins  = Math.max(1, Math.min(14, Number(lateWindowMinutes) || 7));
   const lookbackDays = Math.max(1, Math.min(365, Number(days) || 60));
   const sdMultiplier = Math.max(0.5, Math.min(4, Number(multiplier) || 1.5));
+  // A phase bucket with fewer than this many samples gets suggested=null (too little data).
+  const MIN_SAMPLES  = 10;
+  // lateWindowMins maps to minuteMark threshold in seconds: marks >= this are "late".
+  const lateMarkS = (15 - lateWinMins) * 60; // e.g. lateWinMins=7 → 8min*60=480s
 
   try {
-    const { db, predictionRecordsTable } = await import("@workspace/db");
+    const { db, windowTimingSnapshotsTable } = await import("@workspace/db");
     const { and, isNotNull, sql: drizzleSql } = await import("drizzle-orm");
 
-    // Use prediction_records: every window produces a snapshot with
-    // priceAtSnapshot (live price) and kalshiTarget (strike).  This gives an
-    // unbiased sample of where the price sits relative to the strike at each
-    // window's mid-point, not just when bets were placed.
+    // window_timing_snapshots has multiple rows per coin per window (one per
+    // minuteMark), recorded at regular 15-min snap intervals.  This is the
+    // correct unbiased source for calibrating how far the price sits from the
+    // strike at early vs late points within a window.
     const rows = await db
       .select({
-        symbol:          predictionRecordsTable.symbol,
-        snappedAt:       predictionRecordsTable.snappedAt,
-        kalshiTarget:    predictionRecordsTable.kalshiTarget,
-        priceAtSnapshot: predictionRecordsTable.priceAtSnapshot,
+        symbol:       windowTimingSnapshotsTable.symbol,
+        minuteMark:   windowTimingSnapshotsTable.minuteMark,
+        kalshiTarget: windowTimingSnapshotsTable.kalshiTarget,
+        currentPrice: windowTimingSnapshotsTable.currentPrice,
       })
-      .from(predictionRecordsTable)
+      .from(windowTimingSnapshotsTable)
       .where(
         and(
-          isNotNull(predictionRecordsTable.kalshiTarget),
-          drizzleSql`${predictionRecordsTable.snappedAt} >= NOW() - (${lookbackDays} || ' days')::interval`,
-          drizzleSql`${predictionRecordsTable.source} = 'stat'`,   // one row per window per coin
+          isNotNull(windowTimingSnapshotsTable.kalshiTarget),
+          isNotNull(windowTimingSnapshotsTable.currentPrice),
+          drizzleSql`${windowTimingSnapshotsTable.windowKey} >= to_char(NOW() - (${lookbackDays} || ' days')::interval, 'YYYY-MM-DD"T"HH24:MI')`,
         ),
       )
-      .limit(10000);
+      .limit(50000);
 
-    // Group by symbol and phase (early / late), keyed by minutes remaining in the 15-min window.
     type PhaseData = { distances: number[] };
     const bySymbol = new Map<string, { early: PhaseData; late: PhaseData }>();
 
@@ -783,26 +790,18 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
       const sym = row.symbol ?? "";
       if (!sym) continue;
       const target = parseFloat(String(row.kalshiTarget));
-      const price  = parseFloat(String(row.priceAtSnapshot));
+      const price  = parseFloat(String(row.currentPrice));
       if (!isFinite(target) || target <= 0 || !isFinite(price) || price <= 0) continue;
 
       const distancePct = Math.abs(price - target) / target * 100;
-
-      // Compute minutes remaining: snap time relative to the 15-min boundary.
-      // Window boundary = floor(snappedAt to nearest 15 min).
-      let minutesRemaining = 7.5; // fallback mid-window
-      const snapMs = row.snappedAt ? new Date(row.snappedAt).getTime() : NaN;
-      if (isFinite(snapMs)) {
-        const boundary15Ms = Math.floor(snapMs / (15 * 60_000)) * (15 * 60_000);
-        const elapsedMins  = (snapMs - boundary15Ms) / 60_000;
-        minutesRemaining   = Math.max(0, 15 - elapsedMins);
-      }
+      const mark = row.minuteMark ?? 0; // seconds into window
+      const isLate = mark >= lateMarkS;
 
       if (!bySymbol.has(sym)) {
         bySymbol.set(sym, { early: { distances: [] }, late: { distances: [] } });
       }
       const bucket = bySymbol.get(sym)!;
-      if (minutesRemaining <= lateWinMins) {
+      if (isLate) {
         bucket.late.distances.push(distancePct);
       } else {
         bucket.early.distances.push(distancePct);
@@ -819,13 +818,14 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
     function summarize(d: PhaseData) {
       const n = d.distances.length;
       if (n === 0) return { n: 0, mean: null, stdDev: null, suggested: null };
-      const mean      = d.distances.reduce((a, b) => a + b, 0) / n;
-      const sd        = stdDev(d.distances);
-      // suggested = multiplier × stdDev: a threshold derived from drift alone.
-      // A bet is blocked when its distancePct < threshold, i.e. when it is in
-      // the lower tail of the price-to-strike distribution.  Higher multiplier
-      // = wider guard zone = more bets blocked near the strike.
-      const suggested = parseFloat((sdMultiplier * sd).toFixed(3));
+      const mean = d.distances.reduce((a, b) => a + b, 0) / n;
+      const sd   = stdDev(d.distances);
+      // threshold = multiplier × stdDev.  A bet is blocked when distancePct < threshold,
+      // i.e. the lower sdMultiplier std devs of the distribution.  If sample count is
+      // too low to be reliable, return null so the UI shows "—" instead of guessing.
+      const suggested = n >= MIN_SAMPLES
+        ? parseFloat((sdMultiplier * sd).toFixed(3))
+        : null;
       return { n, mean: parseFloat(mean.toFixed(4)), stdDev: parseFloat(sd.toFixed(4)), suggested };
     }
 
@@ -834,7 +834,7 @@ router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
       result[sym] = { early: summarize(data.early), late: summarize(data.late) };
     }
 
-    res.json({ ok: true, lateWindowMinutes: lateWinMins, lookbackDays, multiplier: sdMultiplier, bySym: result });
+    res.json({ ok: true, lateWindowMinutes: lateWinMins, lookbackDays, multiplier: sdMultiplier, minSamples: MIN_SAMPLES, bySym: result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "calibration failed";
     res.status(500).json({ error: msg });
