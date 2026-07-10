@@ -656,6 +656,17 @@ async function _runBotTick(
     const restingWindowMs = new Date(windowKey).getTime();
     const restingElapsedS = (Date.now() - restingWindowMs) / 1000;
     const restingRemainingS = 15 * 60 - restingElapsedS;
+    // Time-gate: only arm the resting GTC when ≤ N minutes remain (default 5).
+    // Early in the window the price can easily reverse; this avoids false triggers.
+    // Set convictionRestingWindowMinutes=0 to disable (arm at any time in window).
+    const restingGateMinutes = S.config.convictionRestingWindowMinutes ?? 5;
+    if (restingGateMinutes > 0 && restingRemainingS > restingGateMinutes * 60) {
+      logger.debug(
+        { sym, restingRemainingMinutes: Math.round(restingRemainingS / 60), restingGateMinutes },
+        `[kalshi-bot] conviction resting: too early — ${Math.round(restingRemainingS / 60)}min > ${restingGateMinutes}min gate; waiting`,
+      );
+      return;
+    }
     if (restingRemainingS < 3 * 60) {
       logger.debug(
         { sym, restingRemainingS: Math.round(restingRemainingS) },

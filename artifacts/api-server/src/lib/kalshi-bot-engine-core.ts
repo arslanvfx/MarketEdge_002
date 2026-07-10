@@ -833,6 +833,7 @@ export interface BotConfig {
   kalshiLockPrice?: number;           // conviction only: Kalshi YES price trigger (default 0.90; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
   preConvictionThreshold?: number;    // conviction only: yesPrice threshold below lockPrice to pre-position a resting GTC limit (default 0.87)
   useRestingLimitOrders?: boolean;    // conviction only: when true (default) place a resting GTC at lockPrice once pre-entry zone is reached; false = reactive-only
+  convictionRestingWindowMinutes?: number; // conviction only: only arm the pre-entry GTC when ≤ this many minutes remain in the window (default 5; 0 = disabled)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)

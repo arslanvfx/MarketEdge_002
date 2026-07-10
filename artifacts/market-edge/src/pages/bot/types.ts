@@ -66,6 +66,7 @@ export interface BotConfig {
   kalshiLockPrice?: number;
   preConvictionThreshold?: number;
   useRestingLimitOrders?: boolean;
+  convictionRestingWindowMinutes?: number;
 }
 
 export interface LogicModeStats {

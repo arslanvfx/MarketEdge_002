@@ -211,6 +211,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     kalshiLockPrice: 0.90,
     preConvictionThreshold: 0.87,
     useRestingLimitOrders: true,
+    convictionRestingWindowMinutes: 5,
     betDelayMinutes: 0,
     maxEntryMinutes: 14,
     minRemainingMinutes: 1,
@@ -679,6 +680,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     kalshiLockPrice,
     preConvictionThreshold,
     useRestingLimitOrders,
+    convictionRestingWindowMinutes,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -696,6 +698,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     kalshiLockPrice?: number;
     preConvictionThreshold?: number;
     useRestingLimitOrders?: boolean;
+    convictionRestingWindowMinutes?: number;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -904,6 +907,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof useRestingLimitOrders === "boolean") {
     partial.useRestingLimitOrders = useRestingLimitOrders;
+  }
+  // 0 = disabled (arm at any time); 1–14 = arm only when ≤ N minutes remain
+  if (typeof convictionRestingWindowMinutes === "number" && convictionRestingWindowMinutes >= 0 && convictionRestingWindowMinutes <= 14) {
+    partial.convictionRestingWindowMinutes = convictionRestingWindowMinutes;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

@@ -516,26 +516,48 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </label>
                     {/* Pre-entry threshold slider — only shown when resting is enabled */}
                     {merged.useRestingLimitOrders !== false && (
-                      <label className="flex flex-col gap-1.5 mt-1">
-                        <span className="text-xs text-muted-foreground">
-                          Pre-entry Zone — {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢ to {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢
-                        </span>
-                        <div className="flex items-center gap-3">
-                          <input type="range" min={0.75} max={0.95} step={0.01}
-                            className="flex-1 accent-violet-500"
-                            value={merged.preConvictionThreshold ?? 0.87}
-                            onChange={e => setConfigDraft(d => ({ ...d, preConvictionThreshold: parseFloat(e.target.value) }))} />
-                          <span className="text-xs font-mono text-violet-400 w-16 text-right">
-                            {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢
+                      <>
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground">
+                            Pre-entry Zone — {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢ to {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢
                           </span>
-                        </div>
-                        <span className="text-[10px] text-muted-foreground/70">
-                          When YES price enters this zone a GTC limit order is queued at the lock price (
-                          {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢). Catches gaps where the
-                          market jumps from {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢
-                          directly to 96¢+ without stopping at {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢.
-                        </span>
-                      </label>
+                          <div className="flex items-center gap-3">
+                            <input type="range" min={0.75} max={0.95} step={0.01}
+                              className="flex-1 accent-violet-500"
+                              value={merged.preConvictionThreshold ?? 0.87}
+                              onChange={e => setConfigDraft(d => ({ ...d, preConvictionThreshold: parseFloat(e.target.value) }))} />
+                            <span className="text-xs font-mono text-violet-400 w-16 text-right">
+                              {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/70">
+                            When YES price enters this zone a GTC limit order is queued at the lock price (
+                            {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢). Catches gaps where the
+                            market jumps from {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢
+                            directly to 96¢+ without stopping at {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢.
+                          </span>
+                        </label>
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground">
+                            GTC Entry Gate — arm when {(merged.convictionRestingWindowMinutes ?? 5) === 0 ? "any time" : `≤ ${merged.convictionRestingWindowMinutes ?? 5} min remain`}
+                            {(merged.convictionRestingWindowMinutes ?? 5) === 0 && <span className="text-amber-400 ml-1">(arms any time)</span>}
+                          </span>
+                          <div className="flex items-center gap-3">
+                            <input type="range" min={0} max={14} step={1}
+                              className="flex-1 accent-violet-500"
+                              value={merged.convictionRestingWindowMinutes ?? 5}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionRestingWindowMinutes: parseInt(e.target.value, 10) }))} />
+                            <span className="text-xs font-mono text-violet-400 w-16 text-right">
+                              {(merged.convictionRestingWindowMinutes ?? 5) === 0 ? "any time" : `≤ ${merged.convictionRestingWindowMinutes ?? 5} min`}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/70">
+                            Only queue the resting GTC when this many minutes or fewer remain. With time
+                            to spare the price can reverse before the window closes. Default 5 min = only
+                            pre-position in the final stretch. Set to 0 to arm immediately.
+                          </span>
+                        </label>
+                      </>
                     )}
                   </div>
                 )}
