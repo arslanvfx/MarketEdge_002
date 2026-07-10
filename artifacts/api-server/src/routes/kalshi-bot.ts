@@ -738,7 +738,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "position_confirm") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "position_confirm" || decisionMode === "market_lock") {
     // When switching modes: apply built-in mode defaults as a baseline, then
     // layer the saved user preset on top (if one exists), then apply any
     // explicit overrides from this request on top of that.
