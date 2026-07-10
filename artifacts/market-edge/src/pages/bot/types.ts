@@ -68,6 +68,12 @@ export interface BotConfig {
   preConvictionThreshold?: number;
   useRestingLimitOrders?: boolean;
   convictionRestingWindowMinutes?: number;
+  proximityGuardEnabled?: boolean;
+  proximityEarlyPct?: number;
+  proximityLatePct?: number;
+  proximityLateWindowMinutes?: number;
+  proximityEarlyPctOverrides?: Record<string, number>;
+  proximityLatePctOverrides?: Record<string, number>;
 }
 
 export interface LogicModeStats {

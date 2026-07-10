@@ -733,6 +733,111 @@ router.get("/crypto/window-monitor-accuracy/:symbol", async (req, res) => {
   }
 });
 
+// ── Entry proximity calibration ───────────────────────────────────────────────
+// Analyses historical kalshi_bot_bets to suggest per-coin proximity thresholds.
+// For each coin, splits bets into early-window (≥lateWindow min remaining) and
+// late-window (< lateWindow min remaining), computes the std dev of
+// |cryptoPriceAtEntry - kalshiTarget| / kalshiTarget × 100, then returns a
+// suggestion at 1.5 × stdDev (so the guard only fires in the tail, not routinely).
+// POST body: { lateWindowMinutes?: number (default 7), days?: number (default 60) }
+router.post("/crypto/bot/calibrate-proximity", async (req, res) => {
+  const { lateWindowMinutes = 7, days = 60 } = (req.body ?? {}) as {
+    lateWindowMinutes?: number;
+    days?: number;
+  };
+  const lateWinMins = Math.max(1, Math.min(14, Number(lateWindowMinutes) || 7));
+  const lookbackDays = Math.max(1, Math.min(365, Number(days) || 60));
+
+  try {
+    const { db, kalshiBotBetsTable } = await import("@workspace/db");
+    const { and, isNotNull, sql: drizzleSql } = await import("drizzle-orm");
+
+    const rows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        windowKey: kalshiBotBetsTable.windowKey,
+        createdAt: kalshiBotBetsTable.createdAt,
+        kalshiTarget: kalshiBotBetsTable.kalshiTarget,
+        cryptoPriceAtEntry: kalshiBotBetsTable.cryptoPriceAtEntry,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          isNotNull(kalshiBotBetsTable.kalshiTarget),
+          isNotNull(kalshiBotBetsTable.cryptoPriceAtEntry),
+          drizzleSql`${kalshiBotBetsTable.action} = 'bet'`,
+          drizzleSql`${kalshiBotBetsTable.createdAt} >= NOW() - (${lookbackDays} || ' days')::interval`,
+        ),
+      )
+      .limit(5000);
+
+    // Group by symbol and phase
+    type PhaseData = { distances: number[] };
+    const bySymbol = new Map<string, { early: PhaseData; late: PhaseData }>();
+
+    for (const row of rows) {
+      const sym = row.symbol ?? "";
+      if (!sym) continue;
+      const target = parseFloat(String(row.kalshiTarget));
+      const price = parseFloat(String(row.cryptoPriceAtEntry));
+      if (!isFinite(target) || target <= 0 || !isFinite(price) || price <= 0) continue;
+
+      const distancePct = Math.abs(price - target) / target * 100;
+
+      // Determine window phase: windowKey is an ISO timestamp or Unix ms string.
+      // Minutes elapsed = (createdAt − windowKey) / 60_000.
+      // Minutes remaining = 15 − minutesElapsed.
+      let minutesRemaining = 7.5; // default to middle if we can't compute
+      const wkRaw = row.windowKey;
+      const caRaw = row.createdAt;
+      if (wkRaw && caRaw) {
+        const wkMs = typeof wkRaw === "number" ? wkRaw : new Date(wkRaw).getTime();
+        const caMs = new Date(caRaw).getTime();
+        if (isFinite(wkMs) && isFinite(caMs) && caMs > wkMs) {
+          const elapsedMins = (caMs - wkMs) / 60_000;
+          minutesRemaining = Math.max(0, 15 - elapsedMins);
+        }
+      }
+
+      if (!bySymbol.has(sym)) {
+        bySymbol.set(sym, { early: { distances: [] }, late: { distances: [] } });
+      }
+      const bucket = bySymbol.get(sym)!;
+      if (minutesRemaining <= lateWinMins) {
+        bucket.late.distances.push(distancePct);
+      } else {
+        bucket.early.distances.push(distancePct);
+      }
+    }
+
+    function stdDev(values: number[]): number {
+      if (values.length < 2) return 0;
+      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / (values.length - 1);
+      return Math.sqrt(variance);
+    }
+
+    function summarize(d: PhaseData) {
+      const n = d.distances.length;
+      if (n === 0) return { n: 0, mean: null, stdDev: null, suggested: null };
+      const mean = d.distances.reduce((a, b) => a + b, 0) / n;
+      const sd = stdDev(d.distances);
+      const suggested = parseFloat(Math.max(0, mean - 1.5 * sd).toFixed(3));
+      return { n, mean: parseFloat(mean.toFixed(4)), stdDev: parseFloat(sd.toFixed(4)), suggested };
+    }
+
+    const result: Record<string, { early: ReturnType<typeof summarize>; late: ReturnType<typeof summarize> }> = {};
+    for (const [sym, data] of bySymbol) {
+      result[sym] = { early: summarize(data.early), late: summarize(data.late) };
+    }
+
+    res.json({ ok: true, lateWindowMinutes: lateWinMins, lookbackDays, bySym: result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "calibration failed";
+    res.status(500).json({ error: msg });
+  }
+});
+
 // Bot entry timing analytics — composite ML Gate direction accuracy per minute (0–14).
 // ?coin=BTC restricts to one coin; ?days=30 limits to last N days; ?mode=paper|live.
 router.get("/crypto/bot/entry-timing", async (req, res) => {

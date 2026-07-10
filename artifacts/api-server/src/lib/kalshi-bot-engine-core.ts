@@ -1175,6 +1175,24 @@ export interface BotConfig {
   // Example: 0.3 means price must be ≥0.3% above/below strike to enter.
   // Higher values → fewer bets, more cushion against reversals.
   priceBufferPct?: number;                   // % (default 0 = disabled)
+
+  // ── Entry proximity guard ─────────────────────────────────────────────────
+  // Mode-agnostic gate: skip entry when the live crypto price is within
+  // `threshold`% of the Kalshi strike price.  In coin-flip territory the bot
+  // has no real edge regardless of model signals.
+  //
+  // Two phases split by minutesRemaining vs. proximityLateWindowMinutes:
+  //   Early phase  — first (15 − lateWindow) minutes of the window.
+  //   Late phase   — final lateWindow minutes (price tends to converge here).
+  //
+  // Per-coin overrides (Record<symbol, %>) replace the global default for
+  // that coin.  0 = disabled for that phase (no proximity gate).
+  proximityGuardEnabled?: boolean;           // master toggle (default false)
+  proximityEarlyPct?: number;               // % distance required during early phase (default 0)
+  proximityLatePct?: number;                // % distance required during late phase (default 0)
+  proximityLateWindowMinutes?: number;      // minutes remaining when late phase starts (default 7)
+  proximityEarlyPctOverrides?: Record<string, number>; // per-coin early-phase %
+  proximityLatePctOverrides?: Record<string, number>;  // per-coin late-phase %
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,6 +1346,13 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   directionalRegressionThreshold: 0.35,
   directionalRegressionPenaltyPp: 10,
   priceBufferPct: 0,
+  // Entry proximity guard — disabled by default; enable and calibrate via the bot config UI.
+  proximityGuardEnabled: false,
+  proximityEarlyPct: 0,
+  proximityLatePct: 0,
+  proximityLateWindowMinutes: 7,
+  proximityEarlyPctOverrides: {},
+  proximityLatePctOverrides: {},
 };
 
 /**

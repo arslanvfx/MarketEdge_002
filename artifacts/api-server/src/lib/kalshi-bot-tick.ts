@@ -403,6 +403,34 @@ async function _runBotTick(
   }
   if (!kalshiTicker || kalshiTarget === null) return;
 
+  // ── Entry proximity guard ──────────────────────────────────────────────────
+  // Skip new entries when the live price is too close to the Kalshi strike.
+  // Coin-flip territory → the bot has no real edge regardless of model signals.
+  // Gated by S.config.proximityGuardEnabled so it is inert unless turned on.
+  if (S.config.proximityGuardEnabled) {
+    const proximityLivePrice = getCachedPrediction(sym)?.price ?? null;
+    if (proximityLivePrice != null && kalshiTarget > 0) {
+      const distancePct = Math.abs(proximityLivePrice - kalshiTarget) / kalshiTarget * 100;
+      const minutesRemaining = (15 * 60 - secondsElapsed) / 60;
+      const lateWindowMins = S.config.proximityLateWindowMinutes ?? 7;
+      const isLate = minutesRemaining <= lateWindowMins;
+      const globalThreshold = isLate
+        ? (S.config.proximityLatePct ?? 0)
+        : (S.config.proximityEarlyPct ?? 0);
+      const overrideMap = isLate
+        ? (S.config.proximityLatePctOverrides ?? {})
+        : (S.config.proximityEarlyPctOverrides ?? {});
+      const threshold = overrideMap[sym] ?? globalThreshold;
+      if (threshold > 0 && distancePct < threshold) {
+        logger.debug(
+          { sym, distancePct: +distancePct.toFixed(3), threshold, isLate, minutesRemaining: +minutesRemaining.toFixed(1) },
+          "[kalshi-bot] proximity guard — live price within strike zone, skipping",
+        );
+        return;
+      }
+    }
+  }
+
   // New-ticker detection: when a new Kalshi ticker is first seen for a symbol,
   // trigger the window pipeline (fire-and-forget, idempotent).  The pipeline
   // runs Claude with a rich prompt that includes the explicit window-close time,

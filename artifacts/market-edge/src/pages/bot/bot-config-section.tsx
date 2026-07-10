@@ -27,10 +27,19 @@ interface BotConfigSectionProps {
   qc: QueryClient;
 }
 
+type CalibrateResult = Record<string, {
+  early: { n: number; mean: number | null; stdDev: number | null; suggested: number | null };
+  late:  { n: number; mean: number | null; stdDev: number | null; suggested: number | null };
+}>;
+
 export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, status, activeMode, presetsData, modeDefaults, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
   const hasDraft = Object.keys(configDraft).length > 0;
   const [defaultsAppliedFor, setDefaultsAppliedFor] = React.useState<string | null>(null);
   const [reEvalState, setReEvalState] = React.useState<{ loading: boolean; msg: string | null }>({ loading: false, msg: null });
+  const [proximityCalibrating, setProximityCalibrating] = React.useState(false);
+  const [proximityCalibResult, setProximityCalibResult] = React.useState<CalibrateResult | null>(null);
+  const [proximityCalibMsg, setProximityCalibMsg] = React.useState<string | null>(null);
+  const [proximityExpanded, setProximityExpanded] = React.useState(false);
 
   async function runReEvaluate() {
     setReEvalState({ loading: true, msg: null });
@@ -1081,6 +1090,267 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     ))}
                   </select>
                 </label>
+
+                {/* ── Entry Proximity Guard ─────────────────────────────── */}
+                <div className="col-span-full border border-border/60 rounded-xl bg-muted/10 p-3 space-y-3">
+                  <button
+                    type="button"
+                    className="w-full flex items-center gap-2 text-left"
+                    onClick={() => setProximityExpanded(x => !x)}
+                  >
+                    <Target className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    <span className="text-xs font-semibold text-teal-400">Entry Proximity Guard</span>
+                    <div className={`ml-2 text-[10px] px-1.5 py-0.5 rounded font-medium ${(merged.proximityGuardEnabled ?? false) ? "bg-teal-500/20 text-teal-300" : "bg-muted text-muted-foreground"}`}>
+                      {(merged.proximityGuardEnabled ?? false) ? "ON" : "OFF"}
+                    </div>
+                    <span className="ml-auto text-muted-foreground">{proximityExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}</span>
+                  </button>
+                  <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                    Skips entry when the live price is within X% of the Kalshi strike. In coin-flip territory the bot has no real edge — this guard filters those bets out.
+                    Two phases: <span className="text-teal-400/80">Early</span> (first 8 min) and <span className="text-teal-400/80">Late</span> (final 7 min). Per-coin overrides take precedence.
+                  </p>
+
+                  {proximityExpanded && (
+                    <div className="space-y-3 pt-1">
+                      {/* Master toggle */}
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, proximityGuardEnabled: !(merged.proximityGuardEnabled ?? false) }))}
+                          className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${(merged.proximityGuardEnabled ?? false) ? "bg-teal-500" : "bg-muted"}`}>
+                          <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${(merged.proximityGuardEnabled ?? false) ? "translate-x-4" : ""}`} />
+                        </button>
+                        <span className={`text-xs font-medium ${(merged.proximityGuardEnabled ?? false) ? "text-teal-400" : "text-muted-foreground"}`}>
+                          {(merged.proximityGuardEnabled ?? false) ? "Enabled — proximity gate is active" : "Disabled — no proximity filtering"}
+                        </span>
+                      </label>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        {/* Late-window phase threshold */}
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Late Phase Starts (min remaining)</span>
+                          <select
+                            className="bg-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground"
+                            value={merged.proximityLateWindowMinutes ?? 7}
+                            onChange={e => setConfigDraft(d => ({ ...d, proximityLateWindowMinutes: parseInt(e.target.value, 10) }))}>
+                            {[3, 4, 5, 6, 7, 8, 9, 10].map(m => (
+                              <option key={m} value={m}>≤ {m} min remaining</option>
+                            ))}
+                          </select>
+                        </label>
+
+                        {/* Early-window global threshold */}
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Early Phase Min Distance (%)</span>
+                          <input
+                            type="number" min={0} max={5} step={0.05}
+                            className="bg-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground"
+                            value={merged.proximityEarlyPct ?? 0}
+                            onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setConfigDraft(d => ({ ...d, proximityEarlyPct: v })); }} />
+                          <span className="text-[9px] text-muted-foreground/60">0 = disabled for early phase</span>
+                        </label>
+
+                        {/* Late-window global threshold */}
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Late Phase Min Distance (%)</span>
+                          <input
+                            type="number" min={0} max={5} step={0.05}
+                            className="bg-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground"
+                            value={merged.proximityLatePct ?? 0}
+                            onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setConfigDraft(d => ({ ...d, proximityLatePct: v })); }} />
+                          <span className="text-[9px] text-muted-foreground/60">0 = disabled for late phase</span>
+                        </label>
+
+                        {/* Auto-calibrate button */}
+                        <div className="flex flex-col gap-1 justify-end">
+                          <button
+                            type="button"
+                            disabled={proximityCalibrating}
+                            onClick={async () => {
+                              setProximityCalibrating(true);
+                              setProximityCalibMsg(null);
+                              try {
+                                const resp = await fetch(`${API_BASE}/crypto/bot/calibrate-proximity`, {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  credentials: "include",
+                                  body: JSON.stringify({ lateWindowMinutes: merged.proximityLateWindowMinutes ?? 7, days: 60 }),
+                                });
+                                const data = await resp.json() as { ok?: boolean; bySym?: CalibrateResult; error?: string };
+                                if (data.ok && data.bySym) {
+                                  setProximityCalibResult(data.bySym);
+                                  setProximityCalibMsg("✓ Calibration complete — review suggestions below");
+                                } else {
+                                  setProximityCalibMsg(`⚠ ${data.error ?? "Calibration failed"}`);
+                                }
+                              } catch {
+                                setProximityCalibMsg("⚠ Request failed");
+                              } finally {
+                                setProximityCalibrating(false);
+                              }
+                            }}
+                            className="rounded-md px-3 py-1.5 text-xs font-medium border border-teal-500/40 bg-teal-500/10 text-teal-300 hover:bg-teal-500/20 transition-colors disabled:opacity-50 flex items-center gap-1.5 justify-center"
+                          >
+                            {proximityCalibrating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <BarChart3 className="w-3 h-3" />}
+                            {proximityCalibrating ? "Calibrating…" : "Auto-calibrate"}
+                          </button>
+                          {proximityCalibMsg && (
+                            <span className={`text-[9px] ${proximityCalibMsg.startsWith("✓") ? "text-teal-400" : "text-yellow-400"}`}>{proximityCalibMsg}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Calibration results */}
+                      {proximityCalibResult && (() => {
+                        const coins = Object.keys(proximityCalibResult).sort();
+                        if (coins.length === 0) return null;
+                        return (
+                          <div className="rounded-lg border border-teal-500/20 bg-teal-500/5 p-2.5 space-y-2">
+                            <div className="text-[10px] font-medium text-teal-400">Calibration Suggestions (1.5× std dev below mean — apply per coin or as globals)</div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-[9px]">
+                                <thead>
+                                  <tr className="text-muted-foreground/60 border-b border-border/40">
+                                    <th className="text-left pb-1 pr-2">Coin</th>
+                                    <th className="text-right pb-1 pr-2">Early bets</th>
+                                    <th className="text-right pb-1 pr-2">Early suggest</th>
+                                    <th className="text-right pb-1 pr-2">Late bets</th>
+                                    <th className="text-right pb-1 pr-2">Late suggest</th>
+                                    <th className="text-right pb-1">Apply</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {coins.map(sym => {
+                                    const r = proximityCalibResult[sym];
+                                    const earlySugg = r.early.suggested ?? 0;
+                                    const lateSugg = r.late.suggested ?? 0;
+                                    const earlyOverride = (merged.proximityEarlyPctOverrides ?? {})[sym];
+                                    const lateOverride = (merged.proximityLatePctOverrides ?? {})[sym];
+                                    return (
+                                      <tr key={sym} className="border-b border-border/20 last:border-0">
+                                        <td className="py-1 pr-2 font-medium text-foreground">{sym}</td>
+                                        <td className="py-1 pr-2 text-right text-muted-foreground">{r.early.n}</td>
+                                        <td className="py-1 pr-2 text-right text-teal-300">{earlySugg > 0 ? `${earlySugg.toFixed(3)}%` : "—"}</td>
+                                        <td className="py-1 pr-2 text-right text-muted-foreground">{r.late.n}</td>
+                                        <td className="py-1 pr-2 text-right text-teal-300">{lateSugg > 0 ? `${lateSugg.toFixed(3)}%` : "—"}</td>
+                                        <td className="py-1 text-right">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setConfigDraft(d => ({
+                                                ...d,
+                                                proximityEarlyPctOverrides: {
+                                                  ...(d.proximityEarlyPctOverrides ?? merged.proximityEarlyPctOverrides ?? {}),
+                                                  [sym]: earlySugg,
+                                                },
+                                                proximityLatePctOverrides: {
+                                                  ...(d.proximityLatePctOverrides ?? merged.proximityLatePctOverrides ?? {}),
+                                                  [sym]: lateSugg,
+                                                },
+                                              }));
+                                            }}
+                                            className="px-1.5 py-0.5 rounded bg-teal-500/20 text-teal-300 hover:bg-teal-500/30 transition-colors text-[8px]"
+                                          >
+                                            Apply
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Per-coin override table (current values) */}
+                      {(() => {
+                        const earlyOverrides = merged.proximityEarlyPctOverrides ?? {};
+                        const lateOverrides = merged.proximityLatePctOverrides ?? {};
+                        const allCoins = Array.from(new Set([...Object.keys(earlyOverrides), ...Object.keys(lateOverrides)])).sort();
+                        if (allCoins.length === 0) return (
+                          <p className="text-[9px] text-muted-foreground/50">No per-coin overrides set. Use Auto-calibrate or edit manually.</p>
+                        );
+                        return (
+                          <div className="space-y-1">
+                            <div className="text-[10px] font-medium text-muted-foreground">Per-coin overrides (active)</div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-[9px]">
+                                <thead>
+                                  <tr className="text-muted-foreground/60 border-b border-border/40">
+                                    <th className="text-left pb-1 pr-2">Coin</th>
+                                    <th className="text-right pb-1 pr-2">Early %</th>
+                                    <th className="text-right pb-1 pr-2">Late %</th>
+                                    <th className="text-right pb-1">Clear</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {allCoins.map(sym => (
+                                    <tr key={sym} className="border-b border-border/20 last:border-0">
+                                      <td className="py-1 pr-2 font-medium">{sym}</td>
+                                      <td className="py-1 pr-2 text-right">
+                                        <input
+                                          type="number" min={0} max={5} step={0.05}
+                                          className="w-16 bg-background border border-border/60 rounded px-1 py-0.5 text-right text-[9px]"
+                                          value={earlyOverrides[sym] ?? ""}
+                                          placeholder="global"
+                                          onChange={e => {
+                                            const v = parseFloat(e.target.value);
+                                            setConfigDraft(d => ({
+                                              ...d,
+                                              proximityEarlyPctOverrides: {
+                                                ...(d.proximityEarlyPctOverrides ?? merged.proximityEarlyPctOverrides ?? {}),
+                                                [sym]: isNaN(v) ? 0 : v,
+                                              },
+                                            }));
+                                          }} />
+                                      </td>
+                                      <td className="py-1 pr-2 text-right">
+                                        <input
+                                          type="number" min={0} max={5} step={0.05}
+                                          className="w-16 bg-background border border-border/60 rounded px-1 py-0.5 text-right text-[9px]"
+                                          value={lateOverrides[sym] ?? ""}
+                                          placeholder="global"
+                                          onChange={e => {
+                                            const v = parseFloat(e.target.value);
+                                            setConfigDraft(d => ({
+                                              ...d,
+                                              proximityLatePctOverrides: {
+                                                ...(d.proximityLatePctOverrides ?? merged.proximityLatePctOverrides ?? {}),
+                                                [sym]: isNaN(v) ? 0 : v,
+                                              },
+                                            }));
+                                          }} />
+                                      </td>
+                                      <td className="py-1 text-right">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setConfigDraft(d => {
+                                              const newEarly = { ...(d.proximityEarlyPctOverrides ?? merged.proximityEarlyPctOverrides ?? {}) };
+                                              const newLate  = { ...(d.proximityLatePctOverrides  ?? merged.proximityLatePctOverrides  ?? {}) };
+                                              delete newEarly[sym];
+                                              delete newLate[sym];
+                                              return { ...d, proximityEarlyPctOverrides: newEarly, proximityLatePctOverrides: newLate };
+                                            });
+                                          }}
+                                          className="px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[8px]"
+                                        >
+                                          ✕
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
 
                 {/* Window Monitor Readiness Gate */}
                 <label className="flex flex-col gap-1.5">
