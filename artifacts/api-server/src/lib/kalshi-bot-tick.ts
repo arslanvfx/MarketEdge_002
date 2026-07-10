@@ -43,6 +43,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
+  convictionFiredThisWindow,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -1047,6 +1048,15 @@ async function _runBotTick(
     }
   }
   // ─────────────────────────────────────────────────────────────────────────
+
+  // Conviction once-per-window lock: mark synchronously before any await so that
+  // a concurrent tick (e.g. the 5s scheduler vs the pipeline-completion trigger)
+  // cannot also read the guard as "not fired" and place a duplicate bet.
+  // The Phase-3 scheduler in kalshi-bot-loop.ts checks this same Set and skips
+  // conviction coins that are already marked.  Cleared on window transition.
+  if (S.config.decisionMode === "conviction") {
+    convictionFiredThisWindow.add(`${sym}:${windowKey}`);
+  }
 
   logger.info(
     {

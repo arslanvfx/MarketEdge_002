@@ -168,6 +168,11 @@ export const windowBetDetails = new Map<string, { direction: "yes" | "no"; confi
 export const windowDirectionCounts = new Map<"yes" | "no", number>();
 export const windowFailedFills = new Set<string>();
 export const windowZeroFillAttempts = new Map<string, number>();
+// Tracks which `sym:windowKey` pairs have already attempted a conviction-mode
+// entry this window.  Prevents repeated bets when the Kalshi YES price oscillates
+// across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
+// transition alongside the other per-window guards.
+export const convictionFiredThisWindow = new Set<string>();
 export const pausedCoins = new Map<string, number>();
 export const paperCoinDailyLoss = new Map<string, number>();
 export const liveCoinDailyLoss = new Map<string, number>();

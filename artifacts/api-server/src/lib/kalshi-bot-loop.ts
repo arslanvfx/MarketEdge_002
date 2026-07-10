@@ -41,6 +41,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
+  convictionFiredThisWindow,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -450,6 +451,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowDirectionCounts.clear();
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
+    convictionFiredThisWindow.clear();
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
     // Clear bet details older than the current window to prevent map growth.
     for (const k of windowBetDetails.keys()) {
@@ -1092,6 +1094,15 @@ export async function runBotLoopTick(): Promise<void> {
         continue;
       }
       // conviction mode: fall through — tick loop re-evaluates every 5s
+    }
+    // Conviction once-per-window guard: after a conviction entry has been attempted
+    // (regardless of FOK fill outcome), block any further entry for this coin this
+    // window.  This prevents repeated bets when the Kalshi YES price oscillates
+    // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢ every tick).
+    if (isConviction && convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
+      filteredByNewGuards.add(sym);
+      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "conviction: already entered this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      continue;
     }
 
     // Conviction mode: enforce windowEntryBufferSeconds as minimum warmup before
