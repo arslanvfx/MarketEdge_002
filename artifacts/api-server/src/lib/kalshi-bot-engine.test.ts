@@ -1759,3 +1759,48 @@ test("conviction: confidence below minConfidence in locked zone → SKIP with co
   assert.equal(r.confidence, 95);
   assert.match(r.reasoning, /below minimum/);
 });
+
+// ── Proximity guard bypass (pure condition) ───────────────────────────────────
+// The proximity guard in kalshi-bot-tick.ts is bypassed when
+// decisionMode === "conviction" AND yesPrice is at the extreme threshold
+// (≥ 0.92 or ≤ 0.08).  This mirrors the minWindowEntryMinutes bypass.
+// We test the bypass condition as a pure expression to keep the test free of
+// I/O dependencies while still locking in the exact semantics.
+
+function proximityBypass(decisionMode: string, yesPrice: number | null): boolean {
+  return (
+    decisionMode === "conviction" &&
+    yesPrice !== null &&
+    (yesPrice >= 0.92 || yesPrice <= 0.08)
+  );
+}
+
+test("proximity guard bypass: conviction + extreme YES price (≥ 0.92) → bypass", () => {
+  assert.equal(proximityBypass("conviction", 0.92), true);
+  assert.equal(proximityBypass("conviction", 0.95), true);
+  assert.equal(proximityBypass("conviction", 1.00), true);
+});
+
+test("proximity guard bypass: conviction + extreme NO price (≤ 0.08) → bypass", () => {
+  assert.equal(proximityBypass("conviction", 0.08), true);
+  assert.equal(proximityBypass("conviction", 0.05), true);
+  assert.equal(proximityBypass("conviction", 0.00), true);
+});
+
+test("proximity guard bypass: conviction + non-extreme price → no bypass", () => {
+  assert.equal(proximityBypass("conviction", 0.50), false);
+  assert.equal(proximityBypass("conviction", 0.91), false); // just below YES threshold
+  assert.equal(proximityBypass("conviction", 0.09), false); // just above NO threshold
+});
+
+test("proximity guard bypass: non-conviction modes → no bypass even at extreme prices", () => {
+  assert.equal(proximityBypass("classic",          0.92), false);
+  assert.equal(proximityBypass("ml_gate",          0.08), false);
+  assert.equal(proximityBypass("consensus",        0.95), false);
+  assert.equal(proximityBypass("unanimous",        0.05), false);
+  assert.equal(proximityBypass("position_confirm", 0.92), false);
+});
+
+test("proximity guard bypass: conviction + null yesPrice → no bypass", () => {
+  assert.equal(proximityBypass("conviction", null), false);
+});

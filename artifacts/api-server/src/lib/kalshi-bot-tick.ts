@@ -407,27 +407,46 @@ async function _runBotTick(
   // Skip new entries when the live price is too close to the Kalshi strike.
   // Coin-flip territory → the bot has no real edge regardless of model signals.
   // Gated by S.config.proximityGuardEnabled so it is inert unless turned on.
+  //
+  // CONVICTION MODE + EXTREME PRICE bypass: when the Kalshi YES price is already
+  // at or beyond the extreme threshold (≥ 0.92 or ≤ 0.08) in conviction mode,
+  // the market itself is the signal — the spot price being close to the strike
+  // is exactly *why* the market is pricing at 92 ¢ or 8 ¢.  Blocking these bets
+  // defeats the purpose of conviction mode.  This mirrors the same bypass used
+  // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
-    const proximityLivePrice = getCachedPrediction(sym)?.price ?? null;
-    if (proximityLivePrice != null && kalshiTarget > 0) {
-      const distancePct = Math.abs(proximityLivePrice - kalshiTarget) / kalshiTarget * 100;
-      const minutesRemaining = (15 * 60 - secondsElapsed) / 60;
-      const lateWindowMins = S.config.proximityLateWindowMinutes ?? 7;
-      const isLate = minutesRemaining <= lateWindowMins;
-      const globalThreshold = isLate
-        ? (S.config.proximityLatePct ?? 0)
-        : (S.config.proximityEarlyPct ?? 0);
-      const overrideMap = isLate
-        ? (S.config.proximityLatePctOverrides ?? {})
-        : (S.config.proximityEarlyPctOverrides ?? {});
-      const threshold = overrideMap[sym] ?? globalThreshold;
-      if (threshold > 0 && distancePct < threshold) {
-        const phase = isLate ? "late" : "early";
-        logger.info(
-          { sym, distancePct: +distancePct.toFixed(3), threshold, phase, minutesRemaining: +minutesRemaining.toFixed(1) },
-          `[kalshi-bot] proximity guard [${sym}]: ${distancePct.toFixed(2)}% from strike — need ${threshold.toFixed(2)}% (${phase}, ${minutesRemaining.toFixed(1)} min remaining)`,
-        );
-        return;
+    const proximityIsConvictionExtreme =
+      S.config.decisionMode === "conviction" &&
+      yesPrice !== null &&
+      (yesPrice >= 0.92 || yesPrice <= 0.08);
+
+    if (proximityIsConvictionExtreme) {
+      logger.debug(
+        { sym, yesPrice },
+        "[kalshi-bot] proximity guard bypassed — conviction mode at extreme price",
+      );
+    } else {
+      const proximityLivePrice = getCachedPrediction(sym)?.price ?? null;
+      if (proximityLivePrice != null && kalshiTarget > 0) {
+        const distancePct = Math.abs(proximityLivePrice - kalshiTarget) / kalshiTarget * 100;
+        const minutesRemaining = (15 * 60 - secondsElapsed) / 60;
+        const lateWindowMins = S.config.proximityLateWindowMinutes ?? 7;
+        const isLate = minutesRemaining <= lateWindowMins;
+        const globalThreshold = isLate
+          ? (S.config.proximityLatePct ?? 0)
+          : (S.config.proximityEarlyPct ?? 0);
+        const overrideMap = isLate
+          ? (S.config.proximityLatePctOverrides ?? {})
+          : (S.config.proximityEarlyPctOverrides ?? {});
+        const threshold = overrideMap[sym] ?? globalThreshold;
+        if (threshold > 0 && distancePct < threshold) {
+          const phase = isLate ? "late" : "early";
+          logger.info(
+            { sym, distancePct: +distancePct.toFixed(3), threshold, phase, minutesRemaining: +minutesRemaining.toFixed(1) },
+            `[kalshi-bot] proximity guard [${sym}]: ${distancePct.toFixed(2)}% from strike — need ${threshold.toFixed(2)}% (${phase}, ${minutesRemaining.toFixed(1)} min remaining)`,
+          );
+          return;
+        }
       }
     }
   }
