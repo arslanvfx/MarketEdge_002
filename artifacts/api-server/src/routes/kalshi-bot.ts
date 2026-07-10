@@ -194,8 +194,8 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   // Enter only in the last 1-2 minutes when price is 2%+ clear of the Kalshi
   // strike — at that point the market is locked in and reversal is near-impossible.
   //
-  // betDelayMinutes=13: block all entry until T+13 (2 min remain).
-  // maxEntryMinutes=14: latest entry at T+14 (1 min remain).
+  // betDelayMinutes=0: no forced delay — enter as soon as price hits the lock threshold.
+  // maxEntryMinutes=0: no ceiling — conviction bets fire any time in the window.
   // minReturnMultiple=1.00: disabled — the lockPrice slider IS the return dial.
   //   At 0.90 lock the minimum return is already 1/0.90=1.11×; raising lockPrice
   //   raises the minimum return.  A separate minReturnMultiple gate would block
@@ -213,7 +213,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     useRestingLimitOrders: true,
     convictionRestingWindowMinutes: 5,
     betDelayMinutes: 0,
-    maxEntryMinutes: 14,
+    maxEntryMinutes: 0,
     minRemainingMinutes: 1,
     windowEntryBufferSeconds: 60,
     requireMonitorReady: false,
