@@ -427,28 +427,40 @@ async function _runBotTick(
   // unaffected: this gate only blocks NEW entries, and _runBotTick for open
   // positions is handled in Phase 2 before this point.)
   //
-  // CONVICTION MODE — Claude is fully suppressed (no calls are made) so
-  // claudeAbove will always be null.  Requiring it here would silently block
-  // every bet.  In conviction mode the market price IS the primary signal;
-  // we only require stat + ML to be ready.
+  // CONVICTION MODE + EXTREME PRICE — Claude is fully suppressed in conviction
+  // mode (no calls are ever made), so claudeAbove will always be null.
+  // We bypass the Claude requirement ONLY when the market price has already
+  // crossed the configured conviction lockPrice (default 0.90 / 0.10).  At
+  // that price point the market itself is the conviction signal; waiting for
+  // Claude would silently block every bet the mode is designed to make.
+  //
+  // For prices below the lockPrice in conviction mode, all three signals are
+  // still required — but this never blocks a real bet since makeBotDecision
+  // also gates on yesPrice >= lockPrice before returning BET_YES/BET_NO.
   //
   // ALL OTHER MODES — hard three-signal rule: stat + Claude + ML must all be
   // non-null before we enter.  There is no time-based fallback — we would
   // rather miss the window than bet with incomplete signal data.
   {
     const live = getLatestCoinSignals(sym);
-    if (S.config.decisionMode === "conviction") {
-      // Only wait for stat and ML — Claude never runs in conviction mode.
+    const lockPrice = S.config.kalshiLockPrice ?? 0.90;
+    const isConvictionAtThreshold =
+      S.config.decisionMode === "conviction" &&
+      yesPrice !== null &&
+      (yesPrice >= lockPrice || yesPrice <= (1 - lockPrice));
+
+    if (isConvictionAtThreshold) {
+      // Bypass Claude requirement — Claude is suppressed in conviction mode.
       if (live.statAbove === null || live.mlAbove === null) {
         logger.info(
-          { sym, windowKey, secondsElapsed, statAbove: live.statAbove, mlAbove: live.mlAbove },
-          "[kalshi-bot] conviction: waiting for stat+ML signals — no bet yet",
+          { sym, windowKey, secondsElapsed, yesPrice, lockPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
+          "[kalshi-bot] conviction: price at threshold — waiting for stat+ML (Claude suppressed)",
         );
         return;
       }
       logger.debug(
-        { sym, windowKey, yesPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
-        "[kalshi-bot] conviction: stat+ML ready — proceeding (Claude suppressed)",
+        { sym, windowKey, yesPrice, lockPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
+        "[kalshi-bot] conviction: price at lockPrice threshold — stat+ML ready, bypassing Claude gate",
       );
     } else {
       if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
