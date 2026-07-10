@@ -266,6 +266,12 @@ export default function BotDashboard() {
     refetchInterval: 30_000,
   });
 
+  const { data: modeDefaultsData } = useQuery<{ defaults: Partial<Record<string, object>> }>({
+    queryKey: ["bot-mode-defaults"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/config/mode-defaults`).then(r => r.json()),
+    staleTime: Infinity,
+  });
+
   const { data: backtestData } = useQuery<{ modes: BacktestModeStats[] }>({
     queryKey: ["bot-backtest-modes"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/backtest-modes`).then(r => r.json()),
@@ -632,6 +638,7 @@ export default function BotDashboard() {
           status={status}
           activeMode={activeMode}
           presetsData={presetsData}
+          modeDefaults={modeDefaultsData?.defaults}
           savingPreset={savingPreset}
           savePreset={savePreset}
           presetMsg={presetMsg}

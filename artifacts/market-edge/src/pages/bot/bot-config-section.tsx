@@ -16,6 +16,7 @@ interface BotConfigSectionProps {
   status: BotStatus | undefined;
   activeMode: "paper" | "live";
   presetsData: { presets: Partial<Record<string, object>> } | undefined;
+  modeDefaults: Partial<Record<string, object>> | undefined;
   savingPreset: boolean;
   savePreset: () => Promise<void>;
   presetMsg: string | null;
@@ -26,8 +27,9 @@ interface BotConfigSectionProps {
   qc: QueryClient;
 }
 
-export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, status, activeMode, presetsData, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
+export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, status, activeMode, presetsData, modeDefaults, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
   const hasDraft = Object.keys(configDraft).length > 0;
+  const [defaultsAppliedFor, setDefaultsAppliedFor] = React.useState<string | null>(null);
   return (
     <>
         {/* ── Config Settings ── */}
@@ -375,18 +377,27 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     {([
                       { id: "classic",          label: "Classic",          desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
-                      { id: "ml_gate",          label: "ML Gate",          desc: "Stat+Claude decide direction; ML vetos if it disagrees" },
+                      { id: "ml_gate",          label: "ML Gate",          desc: "ML leads direction; Claude is a required co-decider — disagree → SKIP" },
                       { id: "consensus",        label: "Consensus",        desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
                       { id: "position_confirm", label: "Position Confirm", desc: "Bet on WHERE price IS (above/below strike) — models become vetoes, not predictors" },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
                       const needsML = m.id === "ml_gate" || m.id === "unanimous";
+                      const hasDefaults = !!modeDefaults?.[m.id];
                       return (
                         <button
                           key={m.id}
                           type="button"
-                          onClick={() => setConfigDraft(d => ({ ...d, decisionMode: m.id }))}
+                          onClick={() => {
+                            const modeSpecificDefaults = modeDefaults?.[m.id] as Partial<BotConfig> | undefined;
+                            setConfigDraft(d => ({
+                              ...d,
+                              decisionMode: m.id,
+                              ...(modeSpecificDefaults ?? {}),
+                            }));
+                            setDefaultsAppliedFor(m.id);
+                          }}
                           className={`text-left rounded-xl p-3 border transition-all ${
                             isSelected
                               ? "border-sky-500/60 bg-sky-500/10 ring-1 ring-sky-500/30"
@@ -398,6 +409,11 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             {isSelected && <span className="ml-1.5 text-[9px] text-sky-400/70">✓ selected</span>}
                           </div>
                           <div className="text-[10px] text-muted-foreground/80 leading-tight">{m.desc}</div>
+                          {hasDefaults && !isSelected && (
+                            <div className="mt-1.5 text-[9px] text-muted-foreground/50">
+                              ✦ auto-configures on select
+                            </div>
+                          )}
                           {needsML && (
                             <div className={`mt-1.5 text-[9px] font-medium px-1.5 py-0.5 rounded inline-block ${
                               status?.mlStatus?.ready
@@ -447,34 +463,94 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </div>
                 )}
 
-                {/* Mode preset — save current config as a recall point for this mode */}
-                <div className="col-span-2 flex flex-col gap-1.5 rounded-xl border border-border/60 bg-muted/20 p-3">
+                {/* Mode config panel — defaults, saved preset, and save actions */}
+                <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 p-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-muted-foreground">Mode Preset</span>
-                    <button
-                      type="button"
-                      disabled={savingPreset}
-                      onClick={savePreset}
-                      className="text-[10px] px-2.5 py-1 rounded-lg border border-border bg-background/60 text-muted-foreground hover:text-foreground hover:border-border/80 transition-colors disabled:opacity-50"
-                    >
-                      {savingPreset ? "Saving…" : `Save as ${(merged.decisionMode ?? "classic")} preset`}
-                    </button>
+                    <span className="text-xs font-medium text-muted-foreground">Mode Configuration</span>
+                    <div className="flex items-center gap-2">
+                      {/* Reset to built-in defaults for this mode */}
+                      {modeDefaults?.[(merged.decisionMode ?? "classic")] && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const dm = merged.decisionMode ?? "classic";
+                            const d = modeDefaults?.[dm] as Partial<BotConfig> | undefined;
+                            if (d) {
+                              setConfigDraft(prev => ({ ...prev, ...d }));
+                              setDefaultsAppliedFor(dm);
+                            }
+                          }}
+                          className="text-[10px] px-2.5 py-1 rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors"
+                        >
+                          Reset to defaults
+                        </button>
+                      )}
+                      {/* Save current config as preset for this mode */}
+                      <button
+                        type="button"
+                        disabled={savingPreset}
+                        onClick={savePreset}
+                        className="text-[10px] px-2.5 py-1 rounded-lg border border-border bg-background/60 text-muted-foreground hover:text-foreground hover:border-border/80 transition-colors disabled:opacity-50"
+                      >
+                        {savingPreset ? "Saving…" : `Save as preset`}
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Defaults-applied confirmation banner */}
+                  {defaultsAppliedFor === (merged.decisionMode ?? "classic") && (
+                    <div className="flex items-start gap-2 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-2">
+                      <Zap className="w-3 h-3 text-sky-400 mt-0.5 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[10px] text-sky-400 font-medium">Optimised defaults applied for {defaultsAppliedFor}</p>
+                        <p className="text-[9px] text-muted-foreground/70 mt-0.5">
+                          Review settings below, then click <strong>Save Config</strong> to apply. You can still adjust individual fields.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setDefaultsAppliedFor(null)}
+                        className="text-muted-foreground/40 hover:text-muted-foreground transition-colors shrink-0"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+
                   {presetMsg && (
                     <span className={`text-[10px] ${presetMsg.includes("✓") ? "text-emerald-400" : "text-yellow-400"}`}>{presetMsg}</span>
                   )}
+
+                  {/* Built-in defaults summary for the current mode */}
                   {(() => {
                     const dm = merged.decisionMode ?? "classic";
-                    const p = presetsData?.presets?.[dm] as Record<string, unknown> | undefined;
-                    if (!p) return (
-                      <p className="text-[9px] text-muted-foreground/50">No preset saved for <span className="font-medium">{dm}</span> yet. Configure settings and save to auto-apply on next mode switch.</p>
-                    );
+                    const d = modeDefaults?.[dm] as Record<string, unknown> | undefined;
+                    const savedPreset = presetsData?.presets?.[dm] as Record<string, unknown> | undefined;
                     return (
-                      <p className="text-[9px] text-muted-foreground/60">
-                        Preset saved for <span className="font-medium text-sky-400/80">{dm}</span> — auto-applied when you switch to this mode.
-                        {typeof p.minConfidence === "number" && ` Min conf: ${p.minConfidence}%.`}
-                        {typeof p.betSize === "number" && ` Bet: $${p.betSize}.`}
-                      </p>
+                      <div className="space-y-1">
+                        {d && (
+                          <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
+                            <span className="text-sky-400/70 font-medium">Built-in defaults:</span>{" "}
+                            {typeof d.minConfidence === "number" && `conf ≥${d.minConfidence}%`}
+                            {typeof d.minReturnMultiple === "number" && ` · return ≥${d.minReturnMultiple}×`}
+                            {typeof d.betDelayMinutes === "number" && d.betDelayMinutes > 0 && ` · entry at T+${d.betDelayMinutes}m`}
+                            {typeof d.maxEntryMinutes === "number" && d.maxEntryMinutes > 0 && ` · latest T+${d.maxEntryMinutes}m`}
+                            {typeof d.betSize === "number" && ` · $${d.betSize} bet`}
+                          </p>
+                        )}
+                        {savedPreset ? (
+                          <p className="text-[9px] text-emerald-400/70">
+                            ✓ Saved preset for <span className="font-medium">{dm}</span> — overrides built-in defaults on mode switch.
+                            {typeof savedPreset.minConfidence === "number" && ` Conf: ${savedPreset.minConfidence}%.`}
+                            {typeof savedPreset.betSize === "number" && ` Bet: $${savedPreset.betSize}.`}
+                          </p>
+                        ) : (
+                          <p className="text-[9px] text-muted-foreground/40">
+                            No custom preset saved yet — built-in defaults auto-apply when switching to this mode.
+                            Save a preset to lock in your own calibrated settings.
+                          </p>
+                        )}
+                      </div>
                     );
                   })()}
                 </div>

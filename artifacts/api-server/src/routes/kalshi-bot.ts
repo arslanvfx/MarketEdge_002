@@ -41,6 +41,140 @@ import { eq, sql } from "drizzle-orm";
 
 const PRESET_ROW_ID = "mode_presets";
 
+// Built-in optimised defaults for each decision mode.
+// Applied automatically when switching to a mode with no saved user preset.
+// These are the empirically-tuned values that prevent the most common blockers
+// (confidence too high, return floor too strict, entry timing conflicts).
+export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotConfig>>> = {
+  classic: {
+    decisionMode: "classic",
+    minConfidence: 65,
+    minReturnMultiple: 1.3,
+    betDelayMinutes: 0,
+    maxEntryMinutes: 0,
+    minRemainingMinutes: 2,
+    windowEntryBufferSeconds: 60,
+    requireMonitorReady: true,
+    enableDynamicSizing: true,
+    betSize: 1,
+    maxBetSize: 3,
+    maxBetsPerWindow: 6,
+    profitLockPct: 95,
+    enableMidExit: false,
+    regimePenalty: 15,
+    enableDirectionCap: true,
+    maxSameDirectionBets: 4,
+    enableMomentumFilter: true,
+    consensusMinCents: 25,
+    momentumLookbackCandles: 6,
+    phase2ThresholdPp: 30,
+    minHoldMinutes: 3,
+  },
+  // ML Gate: ML leads direction; Claude is a hard co-decider (direction veto).
+  // Key fixes vs naive defaults:
+  //   • minConfidence 55 (not 60) — ML Gate formula produces 49–57% in practice
+  //   • minReturnMultiple 1.2 (not 1.5) — high-priced coins (86¢) give only 1.17×
+  //   • maxEntryMinutes 10 (not 7) — gives headroom after betDelayMinutes=7 fires
+  ml_gate: {
+    decisionMode: "ml_gate",
+    minConfidence: 55,
+    minReturnMultiple: 1.2,
+    betDelayMinutes: 7,
+    maxEntryMinutes: 10,
+    minRemainingMinutes: 3,
+    windowEntryBufferSeconds: 120,
+    requireMonitorReady: true,
+    enableDynamicSizing: true,
+    betSize: 1,
+    maxBetSize: 3,
+    maxBetsPerWindow: 6,
+    profitLockPct: 97,
+    enableMidExit: false,
+    mlVetoMinConfidence: 65,
+    regimePenalty: 12,
+    enableDirectionCap: true,
+    maxSameDirectionBets: 3,
+    enableMomentumFilter: true,
+    consensusMinCents: 25,
+    momentumLookbackCandles: 6,
+    phase2ThresholdPp: 30,
+    minHoldMinutes: 3,
+  },
+  consensus: {
+    decisionMode: "consensus",
+    minConfidence: 58,
+    minReturnMultiple: 1.2,
+    betDelayMinutes: 3,
+    maxEntryMinutes: 10,
+    minRemainingMinutes: 3,
+    windowEntryBufferSeconds: 60,
+    requireMonitorReady: true,
+    enableDynamicSizing: true,
+    betSize: 1,
+    maxBetSize: 3,
+    maxBetsPerWindow: 6,
+    profitLockPct: 97,
+    enableMidExit: false,
+    regimePenalty: 12,
+    enableDirectionCap: true,
+    maxSameDirectionBets: 3,
+    enableMomentumFilter: true,
+    consensusMinCents: 25,
+    momentumLookbackCandles: 6,
+    phase2ThresholdPp: 30,
+    minHoldMinutes: 3,
+  },
+  unanimous: {
+    decisionMode: "unanimous",
+    minConfidence: 60,
+    minReturnMultiple: 1.1,
+    betDelayMinutes: 2,
+    maxEntryMinutes: 11,
+    minRemainingMinutes: 2,
+    windowEntryBufferSeconds: 60,
+    requireMonitorReady: true,
+    enableDynamicSizing: true,
+    betSize: 1,
+    maxBetSize: 5,
+    maxBetsPerWindow: 6,
+    profitLockPct: 97,
+    enableMidExit: false,
+    regimePenalty: 10,
+    enableDirectionCap: true,
+    maxSameDirectionBets: 3,
+    enableMomentumFilter: true,
+    consensusMinCents: 25,
+    momentumLookbackCandles: 6,
+    phase2ThresholdPp: 30,
+    minHoldMinutes: 2,
+  },
+  position_confirm: {
+    decisionMode: "position_confirm",
+    minConfidence: 60,
+    minReturnMultiple: 1.1,
+    betDelayMinutes: 7,
+    maxEntryMinutes: 11,
+    minRemainingMinutes: 2,
+    windowEntryBufferSeconds: 120,
+    requireMonitorReady: true,
+    enableDynamicSizing: true,
+    betSize: 1,
+    maxBetSize: 3,
+    maxBetsPerWindow: 6,
+    profitLockPct: 97,
+    enableMidExit: false,
+    priceBufferPct: 0,
+    regimePenalty: 12,
+    enableDirectionCap: true,
+    maxSameDirectionBets: 3,
+    enableMomentumFilter: true,
+    consensusMinCents: 25,
+    momentumLookbackCandles: 6,
+    phase2ThresholdPp: 30,
+    minHoldMinutes: 3,
+  },
+};
+
 async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<BotConfig>>>> {
   try {
     const rows = await db.select().from(botConfigTable).where(eq(botConfigTable.id, PRESET_ROW_ID)).limit(1);
@@ -551,16 +685,17 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.minConfidence = minConfidence;
   }
   if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "position_confirm") {
-    // When switching modes: auto-load the saved preset for the new mode (if any),
-    // then apply any explicit overrides from this request on top.
+    // When switching modes: apply built-in mode defaults as a baseline, then
+    // layer the saved user preset on top (if one exists), then apply any
+    // explicit overrides from this request on top of that.
+    // Priority (highest wins): request body > saved preset > built-in defaults.
+    const builtIn = BUILT_IN_MODE_DEFAULTS[decisionMode as DecisionMode];
+    if (builtIn) Object.assign(partial, builtIn);
+
     const presets = await readModePresets();
     const modePreset = presets[decisionMode as DecisionMode];
     if (modePreset) {
       Object.assign(partial, modePreset);
-    } else if (decisionMode === "ml_gate" && typeof minConfidence !== "number") {
-      // No saved ml_gate preset and no explicit minConfidence: apply a sensible
-      // default of 62% — lower than the classic 65% since ML validates each bet.
-      partial.minConfidence = 62;
     }
     partial.decisionMode = decisionMode;
   }
@@ -1046,6 +1181,14 @@ router.get("/crypto/bot/config/presets", async (_req, res) => {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
   }
+});
+
+// GET /crypto/bot/config/mode-defaults — return built-in optimised defaults
+// for every decision mode.  Used by the frontend to pre-fill the config form
+// when the user selects a mode so they see the recommended settings immediately
+// without having to save first.  Always returns 200 (static data, no DB access).
+router.get("/crypto/bot/config/mode-defaults", (_req, res) => {
+  res.json({ defaults: BUILT_IN_MODE_DEFAULTS });
 });
 
 // POST /crypto/bot/config/save-preset — save current bot config as preset for
