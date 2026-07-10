@@ -513,20 +513,12 @@ function _makeBotDecisionInner(
   if (decisionMode === "conviction") {
     const cvResult = computeConvictionDecision({
       yesPrice,
-      statAbove, claudeAbove, mlAbove,
-      lockPrice:   config.kalshiLockPrice         ?? 0.90,
-      preThresh:   config.preConvictionThreshold  ?? 0.87,
-      useResting:  config.useRestingLimitOrders  !== false,
+      lockPrice:     config.kalshiLockPrice ?? 0.90,
       minConfidence: config.minConfidence,
     });
-    // For RESTING_LIMIT the intended direction is encoded in signalsAgreeing/Total
-    // via the pre-entry zone direction; derive agreementTarget for the snapshot.
     const cvAgreementTarget: BotDecisionAction | null =
       cvResult.action === "BET_YES" || cvResult.action === "BET_NO"
         ? cvResult.action
-        : cvResult.action === "RESTING_LIMIT"
-        ? (yesPrice !== null && yesPrice >= (config.preConvictionThreshold ?? 0.87)
-            ? "BET_YES" : "BET_NO")
         : null;
     return {
       action:     cvResult.action,

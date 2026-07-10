@@ -83,3 +83,4 @@
 - [Stock entry gates fail-closed](stock-entry-gates-fail-closed.md) — every stock bot entry gate must block on missing data (null volumeSurge/report/quote), never pass silently; record SKIP with reason
 - [Alpaca bars default start](alpaca-bars-start.md) — bars API defaults start=today; multi-day fetches return 1 bar unless explicit start + sort=desc (then reverse); always go through getBars()
 - [Kalshi eval settlement edge cases](kalshi-eval-settlement-edge-cases.md) — strict `>` (not `>=`) for at-strike; per-row eval isolation; resting GTC guard must not clear on failure; re-evaluate admin endpoint uses query params
+- [Conviction mode — pure reactive FOK](conviction-mode-reactive.md) — no GTC, no model veto, no pre-entry zone; fires FOK at yesPrice≥lockPrice (YES) or ≤1-lockPrice (NO); ConvictionInputs has only yesPrice/lockPrice/minConfidence

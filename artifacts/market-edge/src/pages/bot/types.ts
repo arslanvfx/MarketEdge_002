@@ -65,9 +65,6 @@ export interface BotConfig {
   directionalRegressionPenaltyPp?: number;
   priceBufferPct?: number;
   kalshiLockPrice?: number;
-  preConvictionThreshold?: number;
-  useRestingLimitOrders?: boolean;
-  convictionRestingWindowMinutes?: number;
   proximityGuardEnabled?: boolean;
   proximityEarlyPct?: number;
   proximityLatePct?: number;

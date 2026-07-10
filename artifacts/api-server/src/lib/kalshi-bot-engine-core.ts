@@ -37,7 +37,7 @@
 //
 // Post-pipeline: EV gate, minReturnMultiple gate (applied in computeCorePairDecision).
 
-export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP" | "RESTING_LIMIT";
+export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP";
 
 // Base confidence when Claude+Stat both agree (Path B full pair).
 export const BASE_CONFIDENCE_FULL_PAIR = 65;
@@ -188,45 +188,23 @@ function computeEV(yesPrice: number | null, signalAccuracyPct: number | null): n
 // Conviction mode — pure decision core
 // ---------------------------------------------------------------------------
 //
-// The conviction decision mode fires based on the Kalshi contract price itself
-// (not a spot-price-vs-strike comparison).  The market crowd's pricing is the
-// signal:
-//   yesPrice ≥ lockPrice              → BET_YES
-//   yesPrice ≤ (1 − lockPrice)        → BET_NO
-//   preThresh ≤ yesPrice < lockPrice  → RESTING_LIMIT (GTC pre-position)
-//   (1−lockPrice) < yesPrice ≤ (1−preThresh) → RESTING_LIMIT (NO side)
+// The conviction decision mode fires a reactive FOK based solely on the
+// Kalshi contract price.  The market crowd's pricing is the signal:
+//   yesPrice ≥ lockPrice         → BET_YES (reactive FOK)
+//   yesPrice ≤ (1 − lockPrice)   → BET_NO  (reactive FOK)
+//   otherwise                    → SKIP (waiting for market to settle)
 //
-// Models are soft advisory only — unanimous opposition (≥2 models all opposing)
-// blocks both the resting order and the reactive bet.
-//
-// The RESTING_LIMIT result is consumed by the tick layer which places a single
-// GTC limit order at exactly lockPrice.  The tick's `convictionRestingFiredThisWindow`
-// and `convictionFiredThisWindow` Sets guarantee only one order per window:
-//   • RESTING_LIMIT → GTC placed → convictionRestingFiredThisWindow set
-//   • If price later jumps to lockPrice, BET_YES/NO fires but tick checks
-//     convictionFiredThisWindow (set after paper-fill or GTC fill detection)
-//     and blocks the redundant IOC → no double exposure.
-//
-// Invariant: for any given yesPrice, the engine can return AT MOST ONE of
-// RESTING_LIMIT or BET_YES/NO — the zones [preThresh, lockPrice) and
-// [lockPrice, 1] are non-overlapping by construction.
+// No models, no veto, no resting GTC orders — purely reactive.
 
 export interface ConvictionInputs {
-  yesPrice:    number | null;
-  statAbove:   boolean | null;
-  claudeAbove: boolean | null;
-  mlAbove:     boolean | null;
-  lockPrice?:  number;   // default 0.90
-  preThresh?:  number;   // default 0.87 (pre-entry zone lower bound)
-  useResting?: boolean;  // default true
+  yesPrice:      number | null;
+  lockPrice?:    number;   // default 0.90
   minConfidence: number;
 }
 
 export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult {
-  const { yesPrice, statAbove, claudeAbove, mlAbove, minConfidence } = inp;
-  const lockPrice  = inp.lockPrice  ?? 0.90;
-  const preThresh  = inp.preThresh  ?? 0.87;
-  const useResting = inp.useResting !== false; // default true
+  const { yesPrice, minConfidence } = inp;
+  const lockPrice = inp.lockPrice ?? 0.90;
 
   if (yesPrice == null) {
     return {
@@ -239,35 +217,6 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
     };
   }
 
-  // ── Pre-entry resting zone ─────────────────────────────────────────────────
-  // Models not unanimously vetoing → return RESTING_LIMIT so the tick places a
-  // single GTC limit order at lockPrice.  Unanimous veto → fall through to the
-  // non-locked-zone SKIP (price is in the band but models all oppose).
-  if (useResting && preThresh < lockPrice) {
-    const isYesPreEntry = yesPrice >= preThresh && yesPrice < lockPrice;
-    const isNoPreEntry  = yesPrice <= (1 - preThresh) && yesPrice > (1 - lockPrice);
-    if (isYesPreEntry || isNoPreEntry) {
-      const priceAbovePre = isYesPreEntry;
-      const modelsList = [statAbove, claudeAbove, mlAbove];
-      const nonNullPre = modelsList.filter(m => m !== null);
-      const vetoPre    = modelsList.filter(m => m !== null && m !== priceAbovePre).length;
-      const agreePre   = modelsList.filter(m => m !== null && m === priceAbovePre).length;
-      if (nonNullPre.length === 0 || vetoPre < nonNullPre.length) {
-        // Not unanimously vetoed — pre-position a resting limit
-        return {
-          action: "RESTING_LIMIT",
-          confidence: 0,
-          reasoning: `conviction: pre-entry ${priceAbovePre ? "YES" : "NO"} at ${yesPrice.toFixed(2)} (pre-thresh=${preThresh}) — resting GTC at ${(priceAbovePre ? lockPrice : (1 - lockPrice)).toFixed(2)} (${agreePre}/${nonNullPre.length} models agree)`,
-          signalsAgreeing: agreePre,
-          signalsTotal: nonNullPre.length,
-          ev: null,
-        };
-      }
-      // Unanimous veto in pre-entry zone — fall through to the !isYesLocked SKIP
-    }
-  }
-
-  // ── Reactive locked zone ───────────────────────────────────────────────────
   const isYesLocked = yesPrice >= lockPrice;
   const isNoLocked  = yesPrice <= (1 - lockPrice);
 
@@ -283,54 +232,26 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   }
 
   const action: BotDecisionAction = isYesLocked ? "BET_YES" : "BET_NO";
-  const priceAbove = isYesLocked;
-
-  // Unanimous model veto: all available models oppose → SKIP
-  const models = [statAbove, claudeAbove, mlAbove];
-  const nonNull    = models.filter(m => m !== null);
-  const vetoCount  = models.filter(m => m !== null && m !== priceAbove).length;
-  const agreeCount = models.filter(m => m !== null && m === priceAbove).length;
-
-  if (nonNull.length >= 2 && vetoCount >= nonNull.length) {
-    return {
-      action: "SKIP",
-      confidence: 0,
-      reasoning: `conviction: ALL ${vetoCount} models oppose ${priceAbove ? "YES" : "NO"} — skipping`,
-      signalsAgreeing: agreeCount,
-      signalsTotal: nonNull.length,
-      ev: null,
-    };
-  }
-
-  // Confidence scales with how far into the locked zone the price is
-  // (0.90 → 95, 0.95 → 97.5, 0.99 → 99.5 → capped at 95) + small agree bonus
-  const lockedPrice = priceAbove ? yesPrice : (1 - yesPrice);
-  const baseConf    = Math.round(50 + lockedPrice * 50);
-  const agreeBonus  = Math.min(agreeCount * 2, 5);
-  const confidence  = Math.min(baseConf + agreeBonus, 95);
+  const lockedPrice = isYesLocked ? yesPrice : (1 - yesPrice);
+  const confidence  = Math.min(Math.round(50 + lockedPrice * 50), 95);
 
   if (confidence < minConfidence) {
     return {
       action: "SKIP",
       confidence,
       reasoning: `conviction: confidence ${confidence}% below minimum ${minConfidence}%`,
-      signalsAgreeing: agreeCount,
-      signalsTotal: nonNull.length,
+      signalsAgreeing: 0,
+      signalsTotal: 0,
       ev: null,
     };
   }
 
-  // NOTE: minReturnMultiple is intentionally NOT checked here.
-  // The lockPrice threshold already guarantees 1/lockPrice return (e.g. 90¢ → ≥1.11×).
-  // Applying a separate floor creates a contradiction: the more certain the market
-  // (96¢, 97¢…), the lower the return and the more likely the bet gets blocked.
-  // Users control the return floor via the lockPrice slider.
   return {
     action,
     confidence,
-    reasoning: `conviction: Kalshi ${priceAbove ? "YES" : "NO"} at ${lockedPrice.toFixed(2)} (lock≥${lockPrice}) — ${agreeCount}/${nonNull.length} models agree, return=${(1 / lockedPrice).toFixed(2)}×`,
-    signalsAgreeing: agreeCount,
-    signalsTotal: nonNull.length,
+    reasoning: `conviction: Kalshi ${isYesLocked ? "YES" : "NO"} at ${lockedPrice.toFixed(2)} (lock≥${lockPrice}) — return=${(1 / lockedPrice).toFixed(2)}×`,
+    signalsAgreeing: 0,
+    signalsTotal: 0,
     ev: null,
   };
 }
@@ -983,9 +904,6 @@ export interface BotConfig {
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
   minWindowEntryMinutes?: number;     // hard lockout: no bets in the first N minutes of a window; bypassed when yesPrice ≥ 0.92 or ≤ 0.08; 0/undefined = disabled
   kalshiLockPrice?: number;           // conviction only: Kalshi YES price trigger (default 0.90; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
-  preConvictionThreshold?: number;    // conviction only: yesPrice threshold below lockPrice to pre-position a resting GTC limit (default 0.87)
-  useRestingLimitOrders?: boolean;    // conviction only: when true (default) place a resting GTC at lockPrice once pre-entry zone is reached; false = reactive-only
-  convictionRestingWindowMinutes?: number; // conviction only: only arm the pre-entry GTC when ≤ this many minutes remain in the window (default 5; 0 = disabled)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)

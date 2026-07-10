@@ -209,9 +209,6 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minConfidence: 50,
     minReturnMultiple: 1.00,
     kalshiLockPrice: 0.90,
-    preConvictionThreshold: 0.87,
-    useRestingLimitOrders: true,
-    convictionRestingWindowMinutes: 5,
     betDelayMinutes: 0,
     maxEntryMinutes: 0,
     minRemainingMinutes: 1,
@@ -678,9 +675,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minNoEntryMinutes,
     priceBufferPct,
     kalshiLockPrice,
-    preConvictionThreshold,
-    useRestingLimitOrders,
-    convictionRestingWindowMinutes,
     minWindowEntryMinutes,
   } = req.body as {
     betSize?: number;
@@ -697,9 +691,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     betDelayMinutes?: number;
     minNoEntryMinutes?: number;
     kalshiLockPrice?: number;
-    preConvictionThreshold?: number;
-    useRestingLimitOrders?: boolean;
-    convictionRestingWindowMinutes?: number;
     minWindowEntryMinutes?: number;
     enabled?: boolean;
     quietHoursStart?: number;
