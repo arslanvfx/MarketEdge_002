@@ -443,32 +443,81 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   };
 }
 
-export async function cancelOrder(orderId: string): Promise<void> {
+// Cancel a resting order.  Returns true on 200/204 (cancelled), false on 404
+// (order already gone — filled or expired), throws on other errors.
+// NOTE: kalshiFetch is NOT used here because it always calls res.json(), which
+// throws on a 204 No Content response (successful cancel with no body).
+export async function cancelOrder(orderId: string): Promise<boolean> {
   if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
-  await kalshiFetch("DELETE", `/portfolio/orders/${orderId}`);
+  const path = `/portfolio/orders/${orderId}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const res = await fetch(`${KALSHI_TRADE_BASE}${path}`, {
+      method: "DELETE",
+      headers: makeSignedHeaders("DELETE", path),
+      signal: ctrl.signal,
+    });
+    if (res.status === 200 || res.status === 204) return true;
+    if (res.status === 404) return false; // order already gone — not an error
+    const text = await res.text().catch(() => "");
+    throw new Error(`Kalshi DELETE ${path} → ${res.status}: ${text}`);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-// Fetch current fill status for an existing order.
+// Normalized fill status returned by getOrder.
+export type OrderStatus = "resting" | "filled" | "cancelled" | "unknown";
+
+// Fetch current fill status for a resting order.
+// Returns null when the order is not found (404 — expired or already cleared).
+// NOTE: kalshiFetch is NOT used here so 404 can be handled non-fatally and the
+// response shape can tolerate fields being strings or numbers (Kalshi type drift).
 export async function getOrder(
   orderId: string,
   side: "yes" | "no",
-): Promise<{ filledCount: number; status: string; avgPrice: number | null }> {
+): Promise<{ filledCount: number; status: OrderStatus; avgPrice: number | null } | null> {
   if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
-  const data = await kalshiFetch<{
-    order?: {
-      status?: string;
-      yes_count?: number;
-      no_count?: number;
-      avg_price?: number;
+  const path = `/portfolio/orders/${orderId}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const res = await fetch(`${KALSHI_TRADE_BASE}${path}`, {
+      method: "GET",
+      headers: makeSignedHeaders("GET", path),
+      signal: ctrl.signal,
+    });
+    if (res.status === 404) return null; // order cleared by exchange — non-fatal
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Kalshi GET ${path} → ${res.status}: ${text}`);
+    }
+    const data = (await res.json()) as {
+      order?: {
+        status?: string;
+        yes_count?: number | string;
+        no_count?: number | string;
+        avg_price?: number | string;
+      };
     };
-  }>("GET", `/portfolio/orders/${orderId}`);
-  const o = data.order ?? {};
-  const filled = side === "yes" ? (o.yes_count ?? 0) : (o.no_count ?? 0);
-  return {
-    filledCount: filled,
-    status: o.status ?? "unknown",
-    avgPrice: o.avg_price != null ? o.avg_price / 100 : null,
-  };
+    const o = data.order ?? {};
+    // Number() handles both numeric and string fields (Kalshi type drift)
+    const filled = side === "yes" ? Number(o.yes_count ?? 0) : Number(o.no_count ?? 0);
+    const raw = (o.status ?? "").toLowerCase();
+    const status: OrderStatus =
+      raw.includes("rest")                         ? "resting"   :
+      raw.includes("execut") || raw.includes("fill") ? "filled"  :
+      raw.includes("cancel")                       ? "cancelled" : "unknown";
+    const avgRaw = o.avg_price != null ? Number(o.avg_price) : null;
+    return {
+      filledCount: Number.isFinite(filled) ? Math.round(filled) : 0,
+      status,
+      avgPrice: avgRaw != null && Number.isFinite(avgRaw) ? avgRaw / 100 : null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 // NOTE: getOrder is unused in the hot path — fill_or_kill orders resolve
 // immediately in placeOrder's response, so there is no resting order to poll.

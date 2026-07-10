@@ -584,12 +584,23 @@ export async function runBotLoopTick(): Promise<void> {
         );
         continue;
       }
-      // Paper mode — resting orders are simulated; no API poll needed
+      // Paper mode — fills are recorded immediately at placement time in the tick;
+      // resting entries are only kept as display state, not for actual polling.
       if (S.botMode !== "live") continue;
       // Poll fill status from Kalshi
       try {
         const fillInfo = await getOrder(re.orderId, re.side);
-        if (fillInfo.filledCount > 0 && fillInfo.status !== "resting") {
+        if (fillInfo === null) {
+          // 404: order cleared by exchange — it may have already filled or expired.
+          // Without fill count/price data we can't record a position, so just remove.
+          restingOrders.delete(sym);
+          logger.info(
+            { sym, orderId: re.orderId },
+            "[kalshi-bot] conviction resting: order 404 (cleared by exchange) — removed from tracking",
+          );
+          continue;
+        }
+        if (fillInfo.status === "filled" || (fillInfo.filledCount > 0 && fillInfo.status !== "resting")) {
           // Order filled — record position and mark conviction fired
           const fillYesPrice = fillInfo.avgPrice ?? re.limitPrice;
           const fillCostPerContract = re.side === "yes" ? fillYesPrice : (1 - fillYesPrice);

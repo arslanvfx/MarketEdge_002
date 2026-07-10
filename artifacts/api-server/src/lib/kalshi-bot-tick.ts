@@ -583,18 +583,64 @@ async function _runBotTick(
       "[kalshi-bot] conviction: placing resting GTC limit order at lock price",
     );
     if (S.botMode === "paper") {
-      // Paper: simulate a resting order (no real API call); the poll loop will
-      // cancel it at window expiry or skip it if the reactive path fires first.
-      restingOrders.set(sym, {
-        orderId: `paper-resting-${Date.now()}-${sym}`,
-        sym, ticker: kalshiTicker, side: restingDir,
-        limitPrice: gtcLimitPrice, requestedCount, windowKey,
-        placedAt: Date.now(), kalshiTarget,
-      });
-      logger.info(
-        { sym, windowKey, restingDir, gtcLimitPrice },
-        "[kalshi-bot] conviction: paper resting GTC simulated",
-      );
+      // Paper: immediately simulate a fill at the lock price.  There is no real
+      // order book to rest in, so we assume the order would have been filled at
+      // our target price — consistent with how other paper bets are recorded.
+      const paperFillYesPrice = gtcLimitPrice;
+      const paperCostPerContract = paperFillYesPrice;
+      const paperBetAmount = requestedCount * paperCostPerContract;
+      const paperPositionId = globalThis.crypto.randomUUID();
+      const paperKalshiTarget = kalshiTarget ?? 0;
+      const paperPos: import("./kalshi-bot-state").OpenPosition = {
+        id: paperPositionId,
+        symbol: sym,
+        windowKey,
+        ticker: kalshiTicker,
+        direction: restingDir,
+        entryYesPrice: paperFillYesPrice,
+        contractCount: requestedCount,
+        betAmount: paperBetAmount,
+        kalshiTarget: paperKalshiTarget,
+        openedAt: Date.now(),
+        cryptoPriceAtEntry: null,
+        exitState: makeInitialExitState(paperFillYesPrice),
+        entryDecision: {
+          action: restingDir === "yes" ? "BET_YES" : "BET_NO",
+          confidence: Math.round(50 + lockPriceGTC * 50),
+          reasoning: `conviction: paper resting GTC filled immediately at ${paperFillYesPrice.toFixed(2)}`,
+          signals: {} as never,
+        },
+        phase2Activated: false,
+        entryMode: S.botMode,
+        source: "bot",
+        entrySignals: { statAbove: null, claudeAbove: null, mlAbove: null },
+      };
+      openPositions.set(sym, paperPos);
+      convictionFiredThisWindow.add(restingKey2);
+      try {
+        await persistBetRecord({
+          symbol: sym, windowKey, ticker: kalshiTicker, direction: restingDir,
+          action: "bet",
+          signals: {} as never,
+          entryPrice: paperFillYesPrice,
+          kalshiTarget: paperKalshiTarget,
+          contractCount: requestedCount,
+          betAmount: paperBetAmount,
+          insertId: paperPositionId,
+          cryptoPriceAtEntry: null,
+          decisionMode: "conviction",
+          mode: S.botMode,
+          entryYesPrice: paperFillYesPrice,
+        });
+        const paperTotalKey = `${windowKey}:${S.botMode}`;
+        windowTotalBets.set(paperTotalKey, (windowTotalBets.get(paperTotalKey) ?? 0) + 1);
+        logger.info(
+          { sym, windowKey, restingDir, paperFillYesPrice, requestedCount, paperBetAmount },
+          "[kalshi-bot] conviction: paper resting GTC filled immediately (simulated)",
+        );
+      } catch (paperDbErr) {
+        logger.error({ paperDbErr, sym }, "[kalshi-bot] conviction resting: paper DB record failed");
+      }
     } else {
       // Live: submit a real GTC limit order to Kalshi
       try {
