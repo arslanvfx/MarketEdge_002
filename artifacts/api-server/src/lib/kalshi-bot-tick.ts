@@ -999,18 +999,23 @@ async function _runBotTick(
   // remaining" can easily try to place an order with <1 min remaining.
   //
   // This re-check uses fresh Date.now() so it is ALWAYS accurate regardless of
-  // tick latency.  3 minutes is the absolute minimum and cannot be configured
-  // away — the configurable minRemainingMinutes guard above provides additional
-  // tuning on top of this hard floor.
-  const HARD_LATE_ENTRY_FLOOR_S = 3 * 60; // 3 minutes — non-negotiable
+  // tick latency.  For conviction mode the hard floor matches the configured
+  // minRemainingMinutes (default 1 min) — conviction is designed to catch
+  // end-of-window certainty and a 3-min floor would block exactly those bets.
+  // For all other modes the floor stays at 3 minutes (non-negotiable safety
+  // margin against fill latency eating into settlement time).
+  const isConvictionMode = S.config.decisionMode === "conviction";
+  const HARD_LATE_ENTRY_FLOOR_S = isConvictionMode
+    ? Math.max((S.config.minRemainingMinutes ?? 1) * 60, 60)  // conviction: min 60s absolute floor
+    : 3 * 60;                                                   // other modes: 3 min non-negotiable
   const nowMs = Date.now();
   const windowStartMs = new Date(windowKey + ":00Z").getTime();
   const secondsElapsedNow = isNaN(windowStartMs) ? 0 : (nowMs - windowStartMs) / 1000;
   const secondsRemainingNow = 15 * 60 - secondsElapsedNow;
   if (secondsRemainingNow < HARD_LATE_ENTRY_FLOOR_S) {
     logger.warn(
-      { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS: HARD_LATE_ENTRY_FLOOR_S },
-      "[kalshi-bot] HARD FLOOR — aborting bet, fewer than 3 minutes remain in window",
+      { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS: HARD_LATE_ENTRY_FLOOR_S, isConvictionMode },
+      "[kalshi-bot] HARD FLOOR — aborting bet, insufficient time remaining in window",
     );
     return;
   }
