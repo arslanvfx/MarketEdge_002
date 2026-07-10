@@ -295,3 +295,60 @@ test("state: RestingOrderEntry has notFoundCount optional field", () => {
     "RestingOrderEntry must have notFoundCount?: number for 404 retry tracking",
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. Double-exposure prevention guards
+// ─────────────────────────────────────────────────────────────────────────────
+// Three layered guards prevent a resting GTC and a reactive IOC from both being
+// live simultaneously, which would create unmanaged double exposure.
+
+test("tick source: reactive IOC blocked when resting order is active (restingOrders.has guard)", () => {
+  const src = readSrc("kalshi-bot-tick.ts");
+  // Guard sits between RESTING_LIMIT return and "Place the bet"
+  assert.ok(
+    src.includes("SKIP — conviction resting GTC active; blocking reactive IOC/FOK to prevent double exposure"),
+    "tick must block reactive IOC/FOK when restingOrders.has(sym) (double-exposure prevention)",
+  );
+});
+
+test("tick source: new resting placement blocked when existing order still tracked (cancel-pending)", () => {
+  const src = readSrc("kalshi-bot-tick.ts");
+  assert.ok(
+    src.includes("existing resting order still tracked — skipping new placement to avoid losing tracking of live GTC"),
+    "tick must block new GTC placement when an existing restingOrders entry exists for sym (cancel-pending guard)",
+  );
+});
+
+test("loop source: resting fill skips if position already open (duplicate fill guard)", () => {
+  const src = readSrc("kalshi-bot-loop.ts");
+  assert.ok(
+    src.includes("fill detected but position already open — duplicate fill dropped"),
+    "loop must guard against creating a second openPosition when fill detected but position already exists",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. Frontend BotConfig type completeness
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("frontend types: BotConfig includes preConvictionThreshold", () => {
+  const src = fs.readFileSync(
+    path.resolve(__dirname, "../../../../artifacts/market-edge/src/pages/bot/types.ts"),
+    "utf8",
+  );
+  assert.ok(
+    src.includes("preConvictionThreshold?: number"),
+    "frontend BotConfig must include preConvictionThreshold?: number",
+  );
+});
+
+test("frontend types: BotConfig includes useRestingLimitOrders", () => {
+  const src = fs.readFileSync(
+    path.resolve(__dirname, "../../../../artifacts/market-edge/src/pages/bot/types.ts"),
+    "utf8",
+  );
+  assert.ok(
+    src.includes("useRestingLimitOrders?: boolean"),
+    "frontend BotConfig must include useRestingLimitOrders?: boolean",
+  );
+});

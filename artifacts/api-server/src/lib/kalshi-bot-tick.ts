@@ -637,6 +637,21 @@ async function _runBotTick(
     if (convictionFiredThisWindow.has(restingKey2)) return;
     // Already have an open position for this coin — skip
     if (openPositions.has(sym)) return;
+    // A resting order from a prior window (or same window) is still being tracked
+    // — its cancel may be in-flight or pending confirmation.  Placing a new GTC
+    // now would overwrite the restingOrders entry and lose tracking of the old live
+    // order on exchange, leaving unmanaged exposure.  Wait until the poll loop
+    // confirms the old order is gone before placing a new one.
+    {
+      const existingResting = restingOrders.get(sym);
+      if (existingResting) {
+        logger.info(
+          { sym, existingOrderId: existingResting.orderId, cancelRequested: existingResting.cancelRequested ?? false, existingWindow: existingResting.windowKey },
+          "[kalshi-bot] conviction resting: existing resting order still tracked — skipping new placement to avoid losing tracking of live GTC",
+        );
+        return;
+      }
+    }
     // Not enough time for the resting order to fill and exit
     const restingWindowMs = new Date(windowKey).getTime();
     const restingElapsedS = (Date.now() - restingWindowMs) / 1000;
@@ -763,6 +778,18 @@ async function _runBotTick(
       }
     }
     return; // Do NOT fall through to the normal IOC/FOK entry path
+  }
+
+  // Block reactive IOC/FOK if a resting GTC limit order is still active for this
+  // coin.  The GTC will fill (or be cancelled by the poll loop) on its own — allowing
+  // a reactive IOC here too would leave both orders live simultaneously and create
+  // double exposure if both fill.
+  if (restingOrders.has(sym)) {
+    logger.info(
+      { sym, windowKey, orderId: restingOrders.get(sym)?.orderId },
+      "[kalshi-bot] SKIP — conviction resting GTC active; blocking reactive IOC/FOK to prevent double exposure",
+    );
+    return;
   }
 
   // Place the bet

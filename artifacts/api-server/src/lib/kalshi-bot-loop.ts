@@ -645,6 +645,16 @@ export async function runBotLoopTick(): Promise<void> {
         }
 
         if (fillInfo.status === "filled" || (fillInfo.filledCount > 0 && fillInfo.status !== "resting")) {
+          // Guard: reactive IOC may have already filled and recorded a position for this coin.
+          // If so, the resting fill is a duplicate — drop it and log for manual reconciliation.
+          if (openPositions.has(sym)) {
+            restingOrders.delete(sym);
+            logger.warn(
+              { sym, orderId: re.orderId, filledCount: fillInfo.filledCount },
+              "[kalshi-bot] conviction resting: fill detected but position already open — duplicate fill dropped; manual reconciliation may be needed for this order",
+            );
+            continue;
+          }
           // Order filled — record position and mark conviction fired
           const fillYesPrice = fillInfo.avgPrice ?? re.limitPrice;
           const fillCostPerContract = re.side === "yes" ? fillYesPrice : (1 - fillYesPrice);

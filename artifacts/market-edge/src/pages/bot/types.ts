@@ -64,6 +64,8 @@ export interface BotConfig {
   directionalRegressionPenaltyPp?: number;
   priceBufferPct?: number;
   kalshiLockPrice?: number;
+  preConvictionThreshold?: number;
+  useRestingLimitOrders?: boolean;
 }
 
 export interface LogicModeStats {
