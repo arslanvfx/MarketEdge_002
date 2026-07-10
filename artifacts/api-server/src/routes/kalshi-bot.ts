@@ -209,6 +209,8 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minConfidence: 50,
     minReturnMultiple: 1.00,
     kalshiLockPrice: 0.90,
+    preConvictionThreshold: 0.87,
+    useRestingLimitOrders: true,
     betDelayMinutes: 0,
     maxEntryMinutes: 14,
     minRemainingMinutes: 1,

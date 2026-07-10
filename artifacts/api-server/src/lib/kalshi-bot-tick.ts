@@ -22,7 +22,7 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
-  fetchKalshiMarketResult, fetchKalshiSettledMarkets,
+  fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
 } from "./kalshi-trader";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
@@ -43,7 +43,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow,
+  convictionFiredThisWindow, convictionRestingFiredThisWindow, restingOrders, type RestingOrderEntry,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -532,6 +532,104 @@ async function _runBotTick(
     logger.info({ sym, exitedDir, newDir, confidence: decision.confidence }, "[kalshi-bot] flip re-entry — entering opposite direction after mid-exit");
     // Clear the flip record so we don't double-guard
     midExitedWindows.delete(sym);
+  }
+
+  // ── RESTING_LIMIT: pre-conviction GTC order at the lock price ────────────
+  // The engine returned RESTING_LIMIT because yesPrice entered the pre-entry
+  // zone (approaching lockPrice from below for YES; from above for NO) and
+  // resting limit orders are enabled.  We place a single GTC order at exactly
+  // lockPrice so the exchange fills us at our target even if the next visible
+  // market tick jumps past it entirely (e.g. 74¢ → 96¢).
+  //
+  // Guards: one resting order per coin per window; skip if a reactive bet
+  //   already fired; skip if there is already an open position; require ≥3 min
+  //   remaining so the order has a meaningful chance of filling.
+  if (decision.action === "RESTING_LIMIT") {
+    const restingWindowKey2 = windowKey; // alias for clarity
+    const restingKey2 = `${sym}:${restingWindowKey2}`;
+    // Already placed a resting order this window — skip silently
+    if (convictionRestingFiredThisWindow.has(restingKey2)) return;
+    // Already entered reactively — skip
+    if (convictionFiredThisWindow.has(restingKey2)) return;
+    // Already have an open position for this coin — skip
+    if (openPositions.has(sym)) return;
+    // Not enough time for the resting order to fill and exit
+    const restingWindowMs = new Date(windowKey).getTime();
+    const restingElapsedS = (Date.now() - restingWindowMs) / 1000;
+    const restingRemainingS = 15 * 60 - restingElapsedS;
+    if (restingRemainingS < 3 * 60) {
+      logger.debug(
+        { sym, restingRemainingS: Math.round(restingRemainingS) },
+        "[kalshi-bot] conviction resting: <3 min remaining — not placing resting order",
+      );
+      return;
+    }
+    if (!kalshiTicker) {
+      logger.debug({ sym }, "[kalshi-bot] conviction resting: no Kalshi ticker — skipping");
+      return;
+    }
+    // Direction derived from the engine's signals.agreementTarget
+    const restingDir: "yes" | "no" =
+      (decision.signals.agreementTarget === "BET_YES") ? "yes" : "no";
+    const lockPriceGTC = S.config.kalshiLockPrice ?? 0.90;
+    // YES-side price: for YES exposure = lockPrice, for NO exposure = 1−lockPrice
+    const gtcLimitPrice = restingDir === "yes" ? lockPriceGTC : (1 - lockPriceGTC);
+    const costPerContract = gtcLimitPrice; // YES-side price = cost per contract
+    const requestedCount = Math.max(1, Math.floor(S.config.betSize / costPerContract));
+    // Claim the resting slot synchronously before any await
+    convictionRestingFiredThisWindow.add(restingKey2);
+    logger.info(
+      { sym, windowKey, restingDir, gtcLimitPrice: gtcLimitPrice.toFixed(2), requestedCount, restingRemainingS: Math.round(restingRemainingS), mode: S.botMode },
+      "[kalshi-bot] conviction: placing resting GTC limit order at lock price",
+    );
+    if (S.botMode === "paper") {
+      // Paper: simulate a resting order (no real API call); the poll loop will
+      // cancel it at window expiry or skip it if the reactive path fires first.
+      restingOrders.set(sym, {
+        orderId: `paper-resting-${Date.now()}-${sym}`,
+        sym, ticker: kalshiTicker, side: restingDir,
+        limitPrice: gtcLimitPrice, requestedCount, windowKey,
+        placedAt: Date.now(), kalshiTarget,
+      });
+      logger.info(
+        { sym, windowKey, restingDir, gtcLimitPrice },
+        "[kalshi-bot] conviction: paper resting GTC simulated",
+      );
+    } else {
+      // Live: submit a real GTC limit order to Kalshi
+      try {
+        const gtcResult = await placeOrder({
+          ticker: kalshiTicker,
+          side: restingDir,
+          action: "buy",
+          count: requestedCount,
+          type: "limit",
+          limitPrice: gtcLimitPrice,
+          timeInForce: "good_till_cancelled",
+        });
+        if (gtcResult.orderId) {
+          restingOrders.set(sym, {
+            orderId: gtcResult.orderId, sym, ticker: kalshiTicker, side: restingDir,
+            limitPrice: gtcLimitPrice, requestedCount, windowKey,
+            placedAt: Date.now(), kalshiTarget,
+          });
+          logger.info(
+            { sym, windowKey, orderId: gtcResult.orderId, gtcLimitPrice, requestedCount, filledNow: gtcResult.filledCount },
+            "[kalshi-bot] conviction: resting GTC placed",
+          );
+          // If it filled immediately (yesPrice was already at/past the limit),
+          // the poll loop detects the fill on the next tick and records the position.
+        } else {
+          // placeOrder succeeded but returned no orderId — roll back the guard
+          convictionRestingFiredThisWindow.delete(restingKey2);
+          logger.warn({ sym }, "[kalshi-bot] conviction resting: no orderId returned — guard cleared");
+        }
+      } catch (err) {
+        convictionRestingFiredThisWindow.delete(restingKey2);
+        logger.warn({ err, sym }, "[kalshi-bot] conviction resting: placeOrder failed — guard cleared");
+      }
+    }
+    return; // Do NOT fall through to the normal IOC/FOK entry path
   }
 
   if (decision.action === "SKIP") {

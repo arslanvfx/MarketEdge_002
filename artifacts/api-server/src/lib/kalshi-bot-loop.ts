@@ -22,7 +22,7 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
-  fetchKalshiMarketResult, fetchKalshiSettledMarkets,
+  fetchKalshiMarketResult, fetchKalshiSettledMarkets, cancelOrder, getOrder,
 } from "./kalshi-trader";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
@@ -41,7 +41,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow,
+  convictionFiredThisWindow, convictionRestingFiredThisWindow, restingOrders, type RestingOrderEntry,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -57,7 +57,7 @@ import {
 } from "./kalshi-bot-state";
 import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
-import { closePosition } from "./kalshi-bot-close";
+import { closePosition, persistBetRecord } from "./kalshi-bot-close";
 import { runBotTickForCoin } from "./kalshi-bot-tick";
 import {
   triggerWindowPipeline, runPipelineRecheck, registerPipelineCompleteCallback,
@@ -464,6 +464,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
+    convictionRestingFiredThisWindow.clear();
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
     // Clear bet details older than the current window to prevent map growth.
     for (const k of windowBetDetails.keys()) {
@@ -540,6 +541,130 @@ export async function runBotLoopTick(): Promise<void> {
       .filter(c => KALSHI_SERIES[c.symbol])
       .map(c => fetchKalshiTarget(c.symbol).catch(() => null)),
   );
+
+  // ── Poll resting GTC limit orders (conviction mode) ──────────────────────
+  // Runs every tick after Phase 1 so we have fresh Kalshi data.
+  // On fill: record the position to DB and openPositions, mark
+  //   convictionFiredThisWindow so the reactive IOC path doesn't double-bet.
+  // On window change or near-expiry (<2 min): cancel the order.
+  // On getOrder failure (404 = stale/cleared): remove from tracking.
+  if (restingOrders.size > 0) {
+    const restingWindowNow = currentWindowKey();
+    for (const [sym, re] of Array.from(restingOrders.entries())) {
+      // Cancel if the window has rolled over (order is stale)
+      if (re.windowKey !== restingWindowNow) {
+        restingOrders.delete(sym);
+        if (S.botMode === "live") {
+          cancelOrder(re.orderId).catch((err: unknown) => logger.warn(
+            { err, sym, orderId: re.orderId },
+            "[kalshi-bot] conviction resting: cancel failed (window-change)",
+          ));
+        }
+        logger.info(
+          { sym, orderId: re.orderId, oldWindow: re.windowKey, newWindow: restingWindowNow },
+          "[kalshi-bot] conviction resting: cancelled stale order (window changed)",
+        );
+        continue;
+      }
+      // Cancel if < 2 minutes remain in the window — too late to fill usefully
+      const restingWindowMs = new Date(re.windowKey).getTime();
+      const restingElapsedS = (Date.now() - restingWindowMs) / 1000;
+      const restingRemainingS = 15 * 60 - restingElapsedS;
+      if (restingRemainingS < 2 * 60) {
+        restingOrders.delete(sym);
+        if (S.botMode === "live") {
+          cancelOrder(re.orderId).catch((err: unknown) => logger.warn(
+            { err, sym, orderId: re.orderId },
+            "[kalshi-bot] conviction resting: cancel failed (near-expiry)",
+          ));
+        }
+        logger.info(
+          { sym, orderId: re.orderId, restingRemainingS: Math.round(restingRemainingS) },
+          "[kalshi-bot] conviction resting: cancelled near-expiry order (<2 min remain)",
+        );
+        continue;
+      }
+      // Paper mode — resting orders are simulated; no API poll needed
+      if (S.botMode !== "live") continue;
+      // Poll fill status from Kalshi
+      try {
+        const fillInfo = await getOrder(re.orderId, re.side);
+        if (fillInfo.filledCount > 0 && fillInfo.status !== "resting") {
+          // Order filled — record position and mark conviction fired
+          const fillYesPrice = fillInfo.avgPrice ?? re.limitPrice;
+          const fillCostPerContract = re.side === "yes" ? fillYesPrice : (1 - fillYesPrice);
+          const actualBetAmount = fillInfo.filledCount * fillCostPerContract;
+          const id = globalThis.crypto.randomUUID();
+          const restingKalshiTarget = re.kalshiTarget ?? 0;
+          const newPosition: import("./kalshi-bot-state").OpenPosition = {
+            id,
+            symbol: sym,
+            windowKey: re.windowKey,
+            ticker: re.ticker,
+            direction: re.side,
+            entryYesPrice: fillYesPrice,
+            contractCount: fillInfo.filledCount,
+            betAmount: actualBetAmount,
+            kalshiTarget: restingKalshiTarget,
+            openedAt: Date.now(),
+            cryptoPriceAtEntry: null,
+            exitState: makeInitialExitState(fillYesPrice),
+            entryDecision: {
+              action: re.side === "yes" ? "BET_YES" : "BET_NO",
+              confidence: Math.round(50 + re.limitPrice * 50),
+              reasoning: `conviction: resting GTC filled at ${fillYesPrice.toFixed(2)} (order=${re.orderId})`,
+              signals: {} as never,
+            },
+            phase2Activated: false,
+            entryMode: S.botMode,
+            source: "bot",
+            entrySignals: { statAbove: null, claudeAbove: null, mlAbove: null },
+          };
+          openPositions.set(sym, newPosition);
+          convictionFiredThisWindow.add(`${sym}:${re.windowKey}`);
+          restingOrders.delete(sym);
+          // Persist to DB
+          try {
+            await persistBetRecord({
+              symbol: sym,
+              windowKey: re.windowKey,
+              ticker: re.ticker,
+              direction: re.side,
+              action: "bet",
+              signals: {} as never,
+              entryPrice: fillYesPrice,
+              kalshiTarget: restingKalshiTarget,
+              contractCount: fillInfo.filledCount,
+              betAmount: actualBetAmount,
+              insertId: id,
+              cryptoPriceAtEntry: null,
+              decisionMode: "conviction",
+              mode: S.botMode,
+              entryYesPrice: fillYesPrice,
+            });
+            const totalKey = `${re.windowKey}:${S.botMode}`;
+            windowTotalBets.set(totalKey, (windowTotalBets.get(totalKey) ?? 0) + 1);
+            logger.info(
+              { sym, orderId: re.orderId, fillYesPrice, filledCount: fillInfo.filledCount, actualBetAmount, side: re.side },
+              "[kalshi-bot] conviction: resting GTC filled and recorded",
+            );
+          } catch (dbErr) {
+            logger.error({ dbErr, sym, orderId: re.orderId }, "[kalshi-bot] conviction resting: DB record failed");
+          }
+        } else if (fillInfo.status === "cancelled") {
+          // Externally cancelled — clean up and allow retry later this window
+          restingOrders.delete(sym);
+          convictionRestingFiredThisWindow.delete(`${sym}:${re.windowKey}`);
+          logger.info({ sym, orderId: re.orderId }, "[kalshi-bot] conviction resting: order cancelled externally — guard cleared");
+        }
+        // status === "resting" with 0 fills — still pending, nothing to do
+      } catch (err) {
+        // getOrder error (including 404 for expired/unknown orders) — remove from tracking
+        restingOrders.delete(sym);
+        logger.warn({ err, sym, orderId: re.orderId }, "[kalshi-bot] conviction resting: getOrder failed — removed from tracking");
+      }
+    }
+  }
 
   // Window-open prefetch + stability orchestration.
   // On a new window: clear per-window caches and immediately void-launch the

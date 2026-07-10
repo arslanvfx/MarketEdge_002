@@ -266,7 +266,7 @@ export interface PlaceOrderParams {
   //                          cancel the rest. Used for entries: a partial fill is
   //                          accepted and the position is tracked by actual fill count.
   // Defaults to "fill_or_kill" so existing callers (buyYes/buyNo/sellYes/sellNo) are unchanged.
-  timeInForce?: "fill_or_kill" | "immediate_or_cancel";
+  timeInForce?: "fill_or_kill" | "immediate_or_cancel" | "good_till_cancelled";
   yesPrice?: number; // reference YES price as a fraction (0-1); used to bound the marketable-limit price
   // Minimum payout multiple (1/cost). When > 1, the marketable-limit price is
   // capped so a contract can NEVER fill at a cost whose payout multiple falls

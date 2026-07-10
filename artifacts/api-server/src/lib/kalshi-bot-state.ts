@@ -173,6 +173,25 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
+// Tracks which `sym:windowKey` pairs have already placed a resting GTC limit order
+// this window.  One resting order per coin per window — prevents placing a second
+// GTC if the price oscillates in/out of the pre-entry zone.
+export const convictionRestingFiredThisWindow = new Set<string>();
+
+// Resting GTC limit orders placed by conviction mode.  Polled every tick to detect
+// fills or trigger cancellation at window transition.  keyed by sym (one per coin).
+export interface RestingOrderEntry {
+  orderId: string;
+  sym: string;
+  ticker: string;
+  side: "yes" | "no";
+  limitPrice: number;       // the GTC price we placed at (= kalshiLockPrice)
+  requestedCount: number;   // contracts requested
+  windowKey: string;
+  placedAt: number;         // Date.now() at placement
+  kalshiTarget: number | null;
+}
+export const restingOrders = new Map<string, RestingOrderEntry>(); // key = sym
 export const pausedCoins = new Map<string, number>();
 export const paperCoinDailyLoss = new Map<string, number>();
 export const liveCoinDailyLoss = new Map<string, number>();

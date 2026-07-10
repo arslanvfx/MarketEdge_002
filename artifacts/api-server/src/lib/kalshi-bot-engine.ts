@@ -512,6 +512,41 @@ function _makeBotDecisionInner(
       };
     }
 
+    // ── Pre-entry resting zone ─────────────────────────────────────────────
+    // When the YES price is approaching the lock threshold (inside the pre-entry
+    // band) and resting orders are enabled, return RESTING_LIMIT so the tick can
+    // place a GTC limit order at exactly lockPrice.  The order sits in the Kalshi
+    // book and fills at our target price even if the next visible market price
+    // skips from 75¢ directly to 96¢ without passing through 90¢.
+    //
+    //   YES pre-entry zone: preThresh ≤ yesPrice < lockPrice
+    //   NO  pre-entry zone: (1−lockPrice) < yesPrice ≤ (1−preThresh)
+    //
+    // A unanimous model veto still blocks the resting order — the same guard
+    // used for the reactive path.
+    const preThresh   = config.preConvictionThreshold ?? 0.87;
+    const useResting  = config.useRestingLimitOrders !== false; // default true
+    if (useResting && preThresh < lockPrice) {
+      const isYesPreEntry = yesPrice >= preThresh && yesPrice < lockPrice;
+      const isNoPreEntry  = yesPrice <= (1 - preThresh) && yesPrice > (1 - lockPrice);
+      if (isYesPreEntry || isNoPreEntry) {
+        const priceAbovePre = isYesPreEntry;
+        const modelsList = [statAbove, claudeAbove, mlAbove];
+        const nonNullPre = modelsList.filter(m => m !== null);
+        const vetoPre    = modelsList.filter(m => m !== null && m !== priceAbovePre).length;
+        const agreePre   = modelsList.filter(m => m !== null && m === priceAbovePre).length;
+        if (nonNullPre.length === 0 || vetoPre < nonNullPre.length) {
+          // Models not unanimously vetoing — pre-position a resting limit
+          return {
+            action: "RESTING_LIMIT",
+            confidence: 0,
+            reasoning: `conviction: pre-entry ${priceAbovePre ? "YES" : "NO"} at ${yesPrice.toFixed(2)} (pre-thresh=${preThresh}) — resting GTC at ${(priceAbovePre ? lockPrice : (1 - lockPrice)).toFixed(2)} (${agreePre}/${nonNullPre.length} models agree)`,
+            signals: buildSnapshot(null, agreePre, nonNullPre.length, priceAbovePre ? "BET_YES" : "BET_NO"),
+          };
+        }
+      }
+    }
+
     const isYesLocked = yesPrice >= lockPrice;
     const isNoLocked  = yesPrice <= (1 - lockPrice);
 

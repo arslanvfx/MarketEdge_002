@@ -37,7 +37,7 @@
 //
 // Post-pipeline: EV gate, minReturnMultiple gate (applied in computeCorePairDecision).
 
-export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP";
+export type BotDecisionAction = "BET_YES" | "BET_NO" | "SKIP" | "RESTING_LIMIT";
 
 // Base confidence when Claude+Stat both agree (Path B full pair).
 export const BASE_CONFIDENCE_FULL_PAIR = 65;
@@ -831,6 +831,8 @@ export interface BotConfig {
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
   kalshiLockPrice?: number;           // conviction only: Kalshi YES price trigger (default 0.90; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
+  preConvictionThreshold?: number;    // conviction only: yesPrice threshold below lockPrice to pre-position a resting GTC limit (default 0.87)
+  useRestingLimitOrders?: boolean;    // conviction only: when true (default) place a resting GTC at lockPrice once pre-entry zone is reached; false = reactive-only
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)

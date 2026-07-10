@@ -502,6 +502,41 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         Max payout at {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢ entry: {(1 / (merged.kalshiLockPrice ?? 0.90)).toFixed(2)}×.
                       </span>
                     </label>
+                    {/* Resting GTC toggle */}
+                    <label className="flex items-center gap-2 mt-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="accent-violet-500 w-3.5 h-3.5"
+                        checked={merged.useRestingLimitOrders !== false}
+                        onChange={e => setConfigDraft(d => ({ ...d, useRestingLimitOrders: e.target.checked }))}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        Resting GTC pre-position — place a limit order at lock price when market enters the pre-entry zone
+                      </span>
+                    </label>
+                    {/* Pre-entry threshold slider — only shown when resting is enabled */}
+                    {merged.useRestingLimitOrders !== false && (
+                      <label className="flex flex-col gap-1.5 mt-1">
+                        <span className="text-xs text-muted-foreground">
+                          Pre-entry Zone — {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢ to {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢
+                        </span>
+                        <div className="flex items-center gap-3">
+                          <input type="range" min={0.75} max={0.95} step={0.01}
+                            className="flex-1 accent-violet-500"
+                            value={merged.preConvictionThreshold ?? 0.87}
+                            onChange={e => setConfigDraft(d => ({ ...d, preConvictionThreshold: parseFloat(e.target.value) }))} />
+                          <span className="text-xs font-mono text-violet-400 w-16 text-right">
+                            {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-muted-foreground/70">
+                          When YES price enters this zone a GTC limit order is queued at the lock price (
+                          {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢). Catches gaps where the
+                          market jumps from {((merged.preConvictionThreshold ?? 0.87) * 100).toFixed(0)}¢
+                          directly to 96¢+ without stopping at {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢.
+                        </span>
+                      </label>
+                    )}
                   </div>
                 )}
 
