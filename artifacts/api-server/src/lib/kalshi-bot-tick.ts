@@ -491,7 +491,7 @@ async function _runBotTick(
   // (handled inside makeBotDecision: ≥2 model vetoes → SKIP).  Applying a
   // hard Claude veto here would silently kill all bets where Claude's directional
   // prediction happens to disagree with the current price position.
-  if (S.config.decisionMode !== "position_confirm") {
+  if (S.config.decisionMode !== "position_confirm" && S.config.decisionMode !== "market_lock") {
     const dirSigs = decision.signals as { claudeAbove?: boolean | null };
     if (decision.action === "BET_YES" && dirSigs.claudeAbove === false) {
       logger.info(

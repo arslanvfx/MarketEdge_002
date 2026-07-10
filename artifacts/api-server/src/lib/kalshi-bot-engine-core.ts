@@ -813,7 +813,7 @@ export function checkMomentumOverride(
 // without pulling in the ./crypto or DB modules.
 // ---------------------------------------------------------------------------
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm" | "market_lock";
 
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)

@@ -8,7 +8,7 @@ export { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
 import { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
 
 type BotMode = "paper" | "live";
-type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
+type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm" | "market_lock";
 
 // ---------------------------------------------------------------------------
 // History

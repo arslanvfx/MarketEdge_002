@@ -189,6 +189,41 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 3,
   },
+  // Market Lock: terminal-window "free money" strategy.
+  // Enter only in the last 1-2 minutes when price is 2%+ clear of the Kalshi
+  // strike — at that point the market is locked in and reversal is near-impossible.
+  //
+  // betDelayMinutes=13: block all entry until T+13 (2 min remain).
+  // maxEntryMinutes=14: latest entry at T+14 (1 min remain).
+  // minRemainingMinutes=1: absolute floor — 1 min must remain.
+  // priceBufferPct=2.0: price must be 2% clear of the strike.
+  // minReturnMultiple=1.10: 10% min ROI — max entry YES price ~90¢.
+  // betSize=10/maxBetSize=50: $10–$50 per bet; scale up once track record built.
+  market_lock: {
+    decisionMode: "market_lock",
+    minConfidence: 50,
+    minReturnMultiple: 1.10,
+    betDelayMinutes: 13,
+    maxEntryMinutes: 14,
+    minRemainingMinutes: 1,
+    windowEntryBufferSeconds: 0,
+    requireMonitorReady: false,
+    enableDynamicSizing: true,
+    betSize: 10,
+    maxBetSize: 50,
+    maxBetsPerWindow: 4,
+    profitLockPct: 97,
+    enableMidExit: false,
+    priceBufferPct: 2.0,
+    regimePenalty: 0,
+    enableDirectionCap: false,
+    maxSameDirectionBets: 4,
+    enableMomentumFilter: false,
+    consensusMinCents: 25,
+    momentumLookbackCandles: 6,
+    phase2ThresholdPp: 30,
+    minHoldMinutes: 1,
+  },
 };
 
 async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<BotConfig>>>> {

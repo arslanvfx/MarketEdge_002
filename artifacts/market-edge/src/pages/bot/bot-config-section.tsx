@@ -381,6 +381,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       { id: "consensus",        label: "Consensus",        desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
                       { id: "position_confirm", label: "Position Confirm", desc: "Bet on WHERE price IS (above/below strike) — models become vetoes, not predictors" },
+                      { id: "market_lock",     label: "Market Lock",     desc: "Last 1–2 min only — price 2%+ clear of strike = market decided. High-size, low-ROI, near-zero reversal risk" },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
                       const needsML = m.id === "ml_gate" || m.id === "unanimous";
@@ -458,6 +459,38 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         {(merged.priceBufferPct ?? 0) === 0
                           ? "Any price position qualifies — bet fires as soon as models don't veto"
                           : `Price must be ≥${(merged.priceBufferPct ?? 0).toFixed(2)}% above/below the Kalshi strike — smaller buffer = more bets, larger = safer cushion against reversals`}
+                      </span>
+                    </label>
+                  </div>
+                )}
+
+                {/* Market Lock Settings */}
+                {(merged.decisionMode ?? "classic") === "market_lock" && (
+                  <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+                    <span className="text-xs font-medium text-amber-400 flex items-center gap-1.5">
+                      <Target className="w-3 h-3" />
+                      Market Lock Settings
+                    </span>
+                    <span className="text-[11px] text-muted-foreground/80 leading-relaxed">
+                      Enters only in the last 1–2 minutes when price is well clear of the Kalshi strike.
+                      Direction = WHERE price already IS. Models are advisory only — all 3 must unanimously oppose before a bet is skipped.
+                      Works best with large bet sizes since ROI is intentionally low (10–20%) but the market is essentially decided.
+                    </span>
+                    <label className="flex flex-col gap-1.5 mt-1">
+                      <span className="text-xs text-muted-foreground">
+                        Lock Threshold — {(merged.priceBufferPct ?? 0) === 0 ? "Off (any distance)" : `${merged.priceBufferPct ?? 0}% min distance from strike`}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        <input type="range" min={0.5} max={5} step={0.25}
+                          className="flex-1"
+                          value={merged.priceBufferPct ?? 2.0}
+                          onChange={e => setConfigDraft(d => ({ ...d, priceBufferPct: parseFloat(e.target.value) }))} />
+                        <span className="text-xs font-mono text-amber-400 w-12 text-right">
+                          {(merged.priceBufferPct ?? 2.0).toFixed(2)}%
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/70">
+                        {`Price must be ≥${(merged.priceBufferPct ?? 2.0).toFixed(2)}% clear of the strike. At 2%+, a reversal in 90 seconds requires an extraordinary move. Higher = safer, fewer bets.`}
                       </span>
                     </label>
                   </div>

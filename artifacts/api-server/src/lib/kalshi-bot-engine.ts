@@ -494,6 +494,83 @@ function _makeBotDecisionInner(
     // livePrice or kalshiTarget unavailable — fall through to classic
   }
 
+  // ── Decision Mode: market_lock ───────────────────────────────────────────
+  // Terminal-window strategy: bet when the market is "locked in" — price is
+  // well clear of the Kalshi strike with only 1-2 minutes left for reversal.
+  // Direction = WHERE livePrice IS vs strike (same as position_confirm).
+  // Veto threshold raised: only SKIP if ALL 3 models disagree (vs ≥2 for
+  // position_confirm) because the large price buffer IS the primary signal.
+  // Confidence scales with distance — the farther from strike, the better.
+  // Falls back to classic if livePrice or kalshiTarget unavailable.
+  if (decisionMode === "market_lock") {
+    const bufferPct = config.priceBufferPct ?? 0;
+
+    if (livePrice != null && livePrice > 0 && kalshiTarget != null && kalshiTarget > 0) {
+      const priceAbove = livePrice > kalshiTarget;
+      const action: BotDecisionAction = priceAbove ? "BET_YES" : "BET_NO";
+      const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
+
+      // Buffer gate — stricter than position_confirm (default 2.0%)
+      if (bufferPct > 0 && distancePct < bufferPct) {
+        return {
+          action: "SKIP",
+          confidence: 0,
+          reasoning: `market-lock: price only ${distancePct.toFixed(3)}% from strike — below ${bufferPct}% lock threshold (market not settled enough)`,
+          signals: buildSnapshot(null),
+        };
+      }
+
+      // Model veto: only skip if ALL 3 non-null models disagree with price direction.
+      // At T+13 with price 2%+ clear, a single dissenting model is noise.
+      const models = [statAbove, claudeAbove, mlAbove];
+      const nonNullModels = models.filter(m => m !== null);
+      const vetoCount  = models.filter(m => m !== null && m !== priceAbove).length;
+      const agreeCount = models.filter(m => m !== null && m === priceAbove).length;
+
+      if (nonNullModels.length >= 2 && vetoCount >= nonNullModels.length) {
+        return {
+          action: "SKIP",
+          confidence: 0,
+          reasoning: `market-lock: ALL ${vetoCount} available models veto ${priceAbove ? "YES" : "NO"} — unanimous model opposition, skipping`,
+          signals: buildSnapshot(null, agreeCount, nonNullModels.length),
+        };
+      }
+
+      // Confidence: base 65 + distance bonus (5pp per 0.5% of clearance, max +25pp)
+      // + small model-agree bonus (max +5pp). Distance is the dominant signal.
+      const distanceBonus = Math.min((distancePct / 0.5) * 5, 25);
+      const agreeBonus    = Math.min(agreeCount * 2, 5);
+      const confidence    = Math.round(65 + distanceBonus + agreeBonus);
+
+      if (confidence < config.minConfidence) {
+        return {
+          action: "SKIP",
+          confidence,
+          reasoning: `market-lock: confidence ${confidence}% below minimum ${config.minConfidence}%`,
+          signals: buildSnapshot(null, agreeCount, nonNullModels.length, action),
+        };
+      }
+
+      const mlReturnGate = checkMinReturnGate(action, yesPrice, config.minReturnMultiple);
+      if (mlReturnGate.blocked) {
+        return {
+          action: "SKIP",
+          confidence,
+          reasoning: `market-lock: ${mlReturnGate.reason}`,
+          signals: buildSnapshot(null, agreeCount, nonNullModels.length),
+        };
+      }
+
+      return {
+        action,
+        confidence,
+        reasoning: `market-lock: price ${distancePct.toFixed(2)}% ${priceAbove ? "above" : "below"} strike → ${action === "BET_YES" ? "YES" : "NO"} (dist_bonus=${distanceBonus.toFixed(0)}pp models=${agreeCount}/${nonNullModels.length} conf=${confidence}%)`,
+        signals: buildSnapshot(null, agreeCount, nonNullModels.length, action),
+      };
+    }
+    // livePrice or kalshiTarget unavailable — fall through to classic
+  }
+
   // ── Classic path (also used by ml_primary) ────────────────────────────────
   // unanimousMinModelConfidence is ml_gate-only; do not pass it here so the
   // classic unanimous bypass behaviour remains unchanged.
