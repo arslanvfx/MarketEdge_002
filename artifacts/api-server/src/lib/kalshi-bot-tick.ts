@@ -1250,6 +1250,8 @@ async function _runBotTick(
     // Persist the snapshotted entry mode (not the live global) so a mid-fill
     // mode flip cannot mislabel this row on restart.
     mode: entryMode,
+    // Kalshi YES contract price at decision time (used for conviction threshold analysis).
+    entryYesPrice: yesPrice,
   });
   // Mark this window as having a recorded decision so SKIP dedup works correctly
   lastDecisionWindowKey.set(sym, windowKey);

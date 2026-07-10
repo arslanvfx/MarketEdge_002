@@ -35,4 +35,7 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   // Originating source of the bet: "bot" (automated) | "manual" (placed via dashboard button).
   // Null for rows written before this field was added (treated as "bot").
   source: text("source"),
+  // Kalshi YES contract price (0–1) at the moment the bet decision was made.
+  // Populated for all bets; especially useful for conviction mode threshold analysis.
+  entryYesPrice: numeric("entry_yes_price", { precision: 8, scale: 4 }),
 });

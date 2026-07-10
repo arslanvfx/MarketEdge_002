@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, BotStepEntry } from "./bot/types";
+import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, BotStepEntry, ConvictionThresholdData } from "./bot/types";
 import { API_BASE, fmt$, fmtPct, fmtCrypto, wkToEst, utcToEst, ET_LABEL } from "./bot/utils";
 import { ConditionsPanel, ClearPausesButton } from "./bot/conditions-panel";
 import { BotHeader } from "./bot/bot-header";
@@ -28,6 +28,7 @@ import { AutoTuneHistory } from "./bot/autotune-history";
 import { ManualOrderModal } from "./bot/manual-order-modal";
 import { BotStepsPanel } from "./bot/bot-steps";
 import { CoinSignalBoard } from "./bot/coin-signal-board";
+import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -276,6 +277,13 @@ export default function BotDashboard() {
     queryKey: ["bot-backtest-modes"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/backtest-modes`).then(r => r.json()),
     refetchInterval: 10 * 60_000,
+  });
+
+  const { data: convictionThresholdData } = useQuery<ConvictionThresholdData>({
+    queryKey: ["bot-conviction-threshold", activeMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/conviction-threshold-analysis?mode=${activeMode}`).then(r => r.json()),
+    refetchInterval: 10 * 60_000,
+    staleTime: 5 * 60_000,
   });
 
   const { data: coinGuardData } = useQuery<CoinGuardState>({
@@ -655,6 +663,13 @@ export default function BotDashboard() {
           setBtPerfTab={setBtPerfTab}
           activeMode={activeMode}
         />
+        {(merged?.decisionMode === "conviction" || (convictionThresholdData?.totalBets ?? 0) > 0) && (
+          <ConvictionThresholdPanel
+            data={convictionThresholdData}
+            currentLockPrice={merged?.kalshiLockPrice}
+            activeMode={activeMode}
+          />
+        )}
         {/* ── Per-Coin Stats ── */}
         {(stats?.bySymbol?.length ?? 0) > 0 && (
           <div className="bg-card border border-border rounded-xl overflow-hidden">

@@ -307,6 +307,109 @@ export async function getBotLogicPerformance(filterMode?: BotMode): Promise<Logi
 }
 
 // ---------------------------------------------------------------------------
+// Conviction price threshold analysis
+// ---------------------------------------------------------------------------
+
+export interface ConvictionPriceBand {
+  /** Label shown in UI, e.g. "88–90¢" */
+  band: string;
+  /** Lower bound (inclusive), 0–1 scale */
+  lowerBound: number;
+  /** Upper bound (exclusive), 0–1 scale */
+  upperBound: number;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+}
+
+/**
+ * Returns win-rate / P&L breakdown of conviction-mode bets by YES-price band.
+ * Bands: <88¢, 88–90¢, 90–92¢, 92–95¢, ≥95¢
+ * Also returns a suggestedLockPrice (band lower-bound with highest win rate, ≥5 bets).
+ */
+export async function getConvictionThresholdAnalysis(
+  filterMode?: BotMode,
+): Promise<{ bands: ConvictionPriceBand[]; suggestedLockPrice: number | null; totalBets: number }> {
+  const BANDS: Array<{ band: string; lo: number; hi: number }> = [
+    { band: "<88¢",   lo: 0,    hi: 0.88 },
+    { band: "88–90¢", lo: 0.88, hi: 0.90 },
+    { band: "90–92¢", lo: 0.90, hi: 0.92 },
+    { band: "92–95¢", lo: 0.92, hi: 0.95 },
+    { band: "≥95¢",   lo: 0.95, hi: 1.01 },
+  ];
+
+  try {
+    const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
+    const rows = await db
+      .select({
+        direction: kalshiBotBetsTable.direction,
+        entryYesPrice: kalshiBotBetsTable.entryYesPrice,
+        outcome: kalshiBotBetsTable.outcome,
+        pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+          AND ${kalshiBotBetsTable.decisionMode} = 'conviction'
+          AND ${kalshiBotBetsTable.entryYesPrice} IS NOT NULL
+          AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`,
+      );
+
+    const acc = BANDS.map(b => ({ ...b, bets: 0, wins: 0, losses: 0, pnl: 0 }));
+
+    for (const r of rows) {
+      const rawPrice = parseFloat(String(r.entryYesPrice));
+      if (isNaN(rawPrice) || rawPrice <= 0) continue;
+      // For NO bets the stored price is the YES side (low price) — use the
+      // effective "locked" side to match conviction logic.
+      const dir = r.direction as string | null;
+      const lockedPrice = dir === "no" ? 1 - rawPrice : rawPrice;
+      const p = parseFloat(r.pnl ?? "0");
+      const isWin  = r.outcome === "win"  || (r.outcome == null && p > 0);
+      const isLoss = r.outcome === "loss" || (r.outcome == null && p < 0);
+
+      for (const b of acc) {
+        if (lockedPrice >= b.lo && lockedPrice < b.hi) {
+          b.bets++;
+          b.pnl += p;
+          if (isWin)  b.wins++;
+          if (isLoss) b.losses++;
+          break;
+        }
+      }
+    }
+
+    const bands: ConvictionPriceBand[] = acc.map(b => ({
+      band: b.band,
+      lowerBound: b.lo,
+      upperBound: b.hi,
+      bets: b.bets,
+      wins: b.wins,
+      losses: b.losses,
+      pnl: b.pnl,
+      winRate: b.bets > 0 ? b.wins / b.bets : null,
+    }));
+
+    // Suggest the lower-bound of the best band that has ≥5 bets
+    const eligible = bands.filter(b => b.bets >= 5 && b.lowerBound > 0 && b.winRate != null);
+    const bestBand = eligible.reduce<ConvictionPriceBand | null>(
+      (best, b) => (best == null || b.winRate! > best.winRate! ? b : best),
+      null,
+    );
+
+    return {
+      bands,
+      suggestedLockPrice: bestBand ? bestBand.lowerBound : null,
+      totalBets: rows.length,
+    };
+  } catch {
+    return { bands: [], suggestedLockPrice: null, totalBets: 0 };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Decision mode backtest
 // ---------------------------------------------------------------------------
 

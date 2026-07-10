@@ -18,6 +18,7 @@ import {
   clearBetHistoryOld,
   getBotLogicPerformance,
   getBacktestModes,
+  getConvictionThresholdAnalysis,
   clearAllPauses,
   getCoinGuardState,
   placeManualOrder,
@@ -1062,6 +1063,22 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
   try {
     const modes = await getBacktestModes();
     res.json({ modes });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/conviction-threshold-analysis?mode=paper|live
+// Returns win-rate breakdown of conviction-mode bets by entry YES price band,
+// plus an auto-suggested optimal lock price (best win-rate band with ≥5 bets, all-time).
+router.get("/crypto/bot/conviction-threshold-analysis", async (req, res) => {
+  try {
+    const rawMode = req.query.mode;
+    const filterMode: "paper" | "live" | undefined =
+      rawMode === "paper" || rawMode === "live" ? rawMode : undefined;
+    const result = await getConvictionThresholdAnalysis(filterMode);
+    res.json(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

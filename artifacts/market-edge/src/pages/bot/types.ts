@@ -136,6 +136,24 @@ export interface HistoryRecord {
   createdAt: string; exitedAt: string | null;
   decisionMode: string | null;
   source: string | null;
+  entryYesPrice: string | null;
+}
+
+export interface ConvictionPriceBand {
+  band: string;
+  lowerBound: number;
+  upperBound: number;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+}
+
+export interface ConvictionThresholdData {
+  bands: ConvictionPriceBand[];
+  suggestedLockPrice: number | null;
+  totalBets: number;
 }
 
 export interface WindowEval {

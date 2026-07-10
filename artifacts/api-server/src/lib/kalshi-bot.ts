@@ -35,12 +35,14 @@ export {
   getBotLogicPerformance,
   getBacktestModes,
   backtestModeApproval,
+  getConvictionThresholdAnalysis,
 } from "./kalshi-bot-analytics";
 export type {
   TrendPoint,
   CoinBotStats,
   LogicModeStats,
   BacktestModeStats,
+  ConvictionPriceBand,
 } from "./kalshi-bot-analytics";
 
 // ---------------------------------------------------------------------------
