@@ -558,15 +558,13 @@ function _makeBotDecisionInner(
       };
     }
 
-    const mlReturnGate = checkMinReturnGate(action, yesPrice, config.minReturnMultiple);
-    if (mlReturnGate.blocked) {
-      return {
-        action: "SKIP",
-        confidence,
-        reasoning: `conviction: ${mlReturnGate.reason}`,
-        signals: buildSnapshot(null, agreeCount, nonNull.length),
-      };
-    }
+    // NOTE: minReturnMultiple is intentionally NOT checked here.
+    // The lockPrice threshold already guarantees a minimum return of 1/lockPrice
+    // (e.g. 90¢ lock → ≥1.11× return).  Applying a separate minReturnMultiple floor
+    // on top creates a contradiction: the more certain the market is (96¢, 97¢…),
+    // the lower the return and the more likely the bet gets blocked — the opposite
+    // of what conviction mode is for.  Users control the return floor via the
+    // lockPrice slider; raising it from 0.90 → 0.95 raises the min return to 1.05×.
 
     return {
       action,

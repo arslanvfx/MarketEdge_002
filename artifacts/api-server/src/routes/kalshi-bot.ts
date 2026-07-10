@@ -196,14 +196,18 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   //
   // betDelayMinutes=13: block all entry until T+13 (2 min remain).
   // maxEntryMinutes=14: latest entry at T+14 (1 min remain).
-  // minReturnMultiple=1.05: ~5% min ROI — max YES entry ~95¢.
+  // minReturnMultiple=1.00: disabled — the lockPrice slider IS the return dial.
+  //   At 0.90 lock the minimum return is already 1/0.90=1.11×; raising lockPrice
+  //   raises the minimum return.  A separate minReturnMultiple gate would block
+  //   very-high-certainty bets (96¢, 97¢) whose return dips below 1.05×, which
+  //   is exactly backwards for a certainty-based mode.
   // kalshiLockPrice=0.90: fire when Kalshi YES ≥ 90¢ (BET_YES) or ≤ 10¢ (BET_NO).
   // betSize=1/maxBetSize=2: start small — $1–$2 flat bets.
   // windowEntryBufferSeconds=60: wait 60s for Kalshi market to publish after window open.
   conviction: {
     decisionMode: "conviction",
     minConfidence: 50,
-    minReturnMultiple: 1.05,
+    minReturnMultiple: 1.00,
     kalshiLockPrice: 0.90,
     betDelayMinutes: 0,
     maxEntryMinutes: 14,
