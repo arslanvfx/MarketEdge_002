@@ -591,12 +591,15 @@ export async function runBotLoopTick(): Promise<void> {
       try {
         const fillInfo = await getOrder(re.orderId, re.side);
         if (fillInfo === null) {
-          // 404: order cleared by exchange — it may have already filled or expired.
-          // Without fill count/price data we can't record a position, so just remove.
+          // 404: order cleared by exchange — may have filled or expired with no fill data.
+          // Conservatively mark convictionFiredThisWindow so the reactive IOC path cannot
+          // create a duplicate position for the rest of this window (double-entry risk).
+          const staleKey = `${sym}:${re.windowKey}`;
+          convictionFiredThisWindow.add(staleKey);
           restingOrders.delete(sym);
-          logger.info(
+          logger.warn(
             { sym, orderId: re.orderId },
-            "[kalshi-bot] conviction resting: order 404 (cleared by exchange) — removed from tracking",
+            "[kalshi-bot] conviction resting: order 404 — exchange cleared order; reactive entry blocked for this window to prevent double exposure",
           );
           continue;
         }

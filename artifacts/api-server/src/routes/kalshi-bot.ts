@@ -677,6 +677,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minNoEntryMinutes,
     priceBufferPct,
     kalshiLockPrice,
+    preConvictionThreshold,
+    useRestingLimitOrders,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -692,6 +694,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     betDelayMinutes?: number;
     minNoEntryMinutes?: number;
     kalshiLockPrice?: number;
+    preConvictionThreshold?: number;
+    useRestingLimitOrders?: boolean;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -891,6 +895,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) {
     partial.kalshiLockPrice = kalshiLockPrice;
+  }
+  // preConvictionThreshold must be < kalshiLockPrice (or the current config lock price
+  // if not being changed simultaneously) to form a valid pre-entry band.
+  const effectiveLockPrice = typeof kalshiLockPrice === "number" ? kalshiLockPrice : (getBotState().config.kalshiLockPrice ?? 0.90);
+  if (typeof preConvictionThreshold === "number" && preConvictionThreshold >= 0.50 && preConvictionThreshold < effectiveLockPrice) {
+    partial.preConvictionThreshold = preConvictionThreshold;
+  }
+  if (typeof useRestingLimitOrders === "boolean") {
+    partial.useRestingLimitOrders = useRestingLimitOrders;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
