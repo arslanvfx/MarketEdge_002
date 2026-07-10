@@ -82,3 +82,4 @@
 - [Stock research stance lists](stock-research-stance.md) — Claude stance buy_now/buy/watch/avoid drives Top-20/avoid lists + bot entry veto & swing/long exit; no conf floor on "buy"; normalizeStance for legacy rows; ai-spend is per-env + admin-guarded
 - [Stock entry gates fail-closed](stock-entry-gates-fail-closed.md) — every stock bot entry gate must block on missing data (null volumeSurge/report/quote), never pass silently; record SKIP with reason
 - [Alpaca bars default start](alpaca-bars-start.md) — bars API defaults start=today; multi-day fetches return 1 bar unless explicit start + sort=desc (then reverse); always go through getBars()
+- [Kalshi eval settlement edge cases](kalshi-eval-settlement-edge-cases.md) — strict `>` (not `>=`) for at-strike; per-row eval isolation; resting GTC guard must not clear on failure; re-evaluate admin endpoint uses query params

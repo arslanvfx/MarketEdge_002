@@ -30,6 +30,27 @@ interface BotConfigSectionProps {
 export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, status, activeMode, presetsData, modeDefaults, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
   const hasDraft = Object.keys(configDraft).length > 0;
   const [defaultsAppliedFor, setDefaultsAppliedFor] = React.useState<string | null>(null);
+  const [reEvalState, setReEvalState] = React.useState<{ loading: boolean; msg: string | null }>({ loading: false, msg: null });
+
+  async function runReEvaluate() {
+    setReEvalState({ loading: true, msg: null });
+    try {
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 16);
+      const res = await fetch(`${API_BASE}/crypto/bot/re-evaluate-bets?since=${encodeURIComponent(since)}&limit=200`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      });
+      const data = await res.json() as { ok?: boolean; checked?: number; corrected?: number; error?: string };
+      if (data.ok) {
+        setReEvalState({ loading: false, msg: data.corrected ? `✓ Fixed ${data.corrected} bet${data.corrected > 1 ? "s" : ""} (checked ${data.checked})` : `✓ All ${data.checked} bets correct` });
+      } else {
+        setReEvalState({ loading: false, msg: `⚠ ${data.error ?? "Unknown error"}` });
+      }
+    } catch {
+      setReEvalState({ loading: false, msg: "⚠ Request failed" });
+    }
+  }
   const isConviction = (merged.decisionMode ?? "classic") === "conviction";
   return (
     <>
@@ -1233,6 +1254,30 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 {persistMsg === "failed" && (
                   <span className="text-xs text-yellow-400">⚠ Applied (not persisted)</span>
                 )}
+              </div>
+
+              {/* Admin: re-evaluate historical bets against Kalshi's authoritative RTI result */}
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-border">
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={reEvalState.loading}
+                    onClick={runReEvaluate}
+                    className="border-violet-500/40 text-violet-400 hover:bg-violet-500/10 text-xs gap-1"
+                  >
+                    {reEvalState.loading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                    {reEvalState.loading ? "Checking…" : "Re-evaluate Settled Bets"}
+                  </Button>
+                  {reEvalState.msg && (
+                    <span className={`text-xs ${reEvalState.msg.startsWith("✓") ? "text-emerald-400" : "text-yellow-400"}`}>
+                      {reEvalState.msg}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] text-muted-foreground/70">
+                  Re-checks the last 30 days of settled bets against Kalshi's authoritative RTI result and corrects any mis-evaluated outcomes.
+                </span>
               </div>
             </div>
           )}

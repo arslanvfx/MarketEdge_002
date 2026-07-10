@@ -799,13 +799,18 @@ async function _runBotTick(
           // If it filled immediately (yesPrice was already at/past the limit),
           // the poll loop detects the fill on the next tick and records the position.
         } else {
-          // placeOrder succeeded but returned no orderId — roll back the guard
-          convictionRestingFiredThisWindow.delete(restingKey2);
-          logger.warn({ sym }, "[kalshi-bot] conviction resting: no orderId returned — guard cleared");
+          // placeOrder succeeded but returned no orderId.  Keep the guard set
+          // so we don't re-attempt this window — a duplicate live GTC on
+          // exchange (if the order did land) would create unmanaged exposure.
+          logger.warn({ sym }, "[kalshi-bot] conviction resting: no orderId returned — guard held to prevent duplicate orders");
         }
       } catch (err) {
-        convictionRestingFiredThisWindow.delete(restingKey2);
-        logger.warn({ err, sym }, "[kalshi-bot] conviction resting: placeOrder failed — guard cleared");
+        // Keep the guard set even on failure.  Clearing it would cause an
+        // infinite retry loop every 5 s.  If the first attempt actually
+        // reached Kalshi (response lost in transit), a retry would create
+        // a duplicate live GTC order.  We accept missing this window rather
+        // than risking duplicate exposure.
+        logger.warn({ err, sym }, "[kalshi-bot] conviction resting: placeOrder failed — guard held; skipping window to prevent duplicate orders");
       }
     }
     return; // Do NOT fall through to the normal IOC/FOK entry path

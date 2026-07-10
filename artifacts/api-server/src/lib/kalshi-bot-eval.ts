@@ -140,6 +140,12 @@ export async function evalClosedBets(): Promise<void> {
       let correctedPnl: number | null = null;
       let closePrice: number | null = null;
 
+      // Per-row try-catch: a DB write failure on one row must not abort
+      // evaluation of the remaining rows in this batch. Each failure is
+      // logged; the row stays with evaluatedAt=NULL and will be retried on
+      // the next evalClosedBets call (runs every tick).
+      try {
+
       if (row.action === "expired") {
         // ── Settlement evaluation ─────────────────────────────────────────────
         // Priority order:
@@ -237,7 +243,10 @@ export async function evalClosedBets(): Promise<void> {
             continue;
           }
 
-          const priceAboveStrike = closePrice >= strike;
+          // Kalshi settles "above" as strictly > strike (not >=).
+          // At exactly the strike, Kalshi settles NO (below).
+          // Using >= here would misclassify exact-strike closes as YES wins.
+          const priceAboveStrike = closePrice > strike;
           const won = row.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
           outcome = won ? "win" : "loss";
 
@@ -359,6 +368,16 @@ export async function evalClosedBets(): Promise<void> {
       }
 
       evaluated++;
+
+      } catch (rowErr) {
+        // DB write (or price fetch) failed for this row — log and continue so
+        // other rows in the batch are still processed.  This row keeps
+        // evaluatedAt=NULL and will be retried on the next evalClosedBets call.
+        logger.warn(
+          { err: rowErr, id: row.id, sym: row.symbol, windowKey: row.windowKey },
+          "[kalshi-bot] evalClosedBets: row evaluation failed — will retry on next tick",
+        );
+      }
     }
 
     if (evaluated > 0) {
