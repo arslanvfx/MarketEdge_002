@@ -813,7 +813,7 @@ export function checkMomentumOverride(
 // without pulling in the ./crypto or DB modules.
 // ---------------------------------------------------------------------------
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm";
 
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
@@ -1006,6 +1006,19 @@ export interface BotConfig {
   directionalRegressionLookback?: number;    // windows to inspect (default 3)
   directionalRegressionThreshold?: number;   // win rate floor; below this fires the penalty (default 0.35)
   directionalRegressionPenaltyPp?: number;   // pp penalty (default 10)
+
+  // ── Position Confirmation Mode ────────────────────────────────────────────
+  // When decisionMode === "position_confirm", the bot derives bet direction
+  // from WHERE the live price is relative to the Kalshi strike (above → YES,
+  // below → NO) rather than from model predictions.  Models become soft vetoes:
+  // if ≥2 of the 3 models disagree with the live price position, the bet is
+  // skipped (reversal likely).
+  //
+  // priceBufferPct: minimum % distance required between the live price and the
+  // Kalshi strike to place a bet.  0 = disabled (any distance accepted).
+  // Example: 0.3 means price must be ≥0.3% above/below strike to enter.
+  // Higher values → fewer bets, more cushion against reversals.
+  priceBufferPct?: number;                   // % (default 0 = disabled)
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,6 +1171,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   directionalRegressionLookback: 3,
   directionalRegressionThreshold: 0.35,
   directionalRegressionPenaltyPp: 10,
+  priceBufferPct: 0,
 };
 
 /**

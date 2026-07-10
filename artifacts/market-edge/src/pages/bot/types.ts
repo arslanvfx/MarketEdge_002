@@ -1,6 +1,6 @@
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "position_confirm";
 
 export interface BotConfig {
   betSize: number;
@@ -62,6 +62,7 @@ export interface BotConfig {
   directionalRegressionLookback?: number;
   directionalRegressionThreshold?: number;
   directionalRegressionPenaltyPp?: number;
+  priceBufferPct?: number;
 }
 
 export interface LogicModeStats {

@@ -483,6 +483,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     directionalRegressionPenaltyPp,
     betDelayMinutes,
     minNoEntryMinutes,
+    priceBufferPct,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -537,6 +538,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     directionalRegressionLookback?: number;
     directionalRegressionThreshold?: number;
     directionalRegressionPenaltyPp?: number;
+    priceBufferPct?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -548,7 +550,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "position_confirm") {
     // When switching modes: auto-load the saved preset for the new mode (if any),
     // then apply any explicit overrides from this request on top.
     const presets = await readModePresets();
@@ -688,6 +690,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof minNoEntryMinutes === "number" && minNoEntryMinutes >= 0 && minNoEntryMinutes <= 10) {
     partial.minNoEntryMinutes = minNoEntryMinutes;
+  }
+  if (typeof priceBufferPct === "number" && priceBufferPct >= 0 && priceBufferPct <= 2) {
+    partial.priceBufferPct = priceBufferPct;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

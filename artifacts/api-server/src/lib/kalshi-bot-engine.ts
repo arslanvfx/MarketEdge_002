@@ -187,6 +187,7 @@ function _makeBotDecisionInner(
   minutesElapsed: number,
   signalAccuracyPct: number | null,
   kalshiTarget?: number | null,
+  livePrice?: number | null,
 ): BotDecision {
   const sym = symbol.toUpperCase();
 
@@ -421,6 +422,78 @@ function _makeBotDecisionInner(
     };
   }
 
+  // ── Decision Mode: position_confirm ──────────────────────────────────────
+  // Direction comes from WHERE the live price is vs the Kalshi strike — not
+  // from model predictions.  Models become soft vetoes: ≥2 dissenting models
+  // → SKIP (reversal likely).  Falls back to classic if livePrice or
+  // kalshiTarget is unavailable.
+  if (decisionMode === "position_confirm") {
+    const bufferPct = config.priceBufferPct ?? 0;
+
+    if (livePrice != null && livePrice > 0 && kalshiTarget != null && kalshiTarget > 0) {
+      const priceAbove = livePrice > kalshiTarget;
+      const action: BotDecisionAction = priceAbove ? "BET_YES" : "BET_NO";
+      const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
+
+      // Buffer gate: price must have enough cushion above/below the strike
+      if (bufferPct > 0 && distancePct < bufferPct) {
+        return {
+          action: "SKIP",
+          confidence: 0,
+          reasoning: `position-confirm: price only ${distancePct.toFixed(3)}% from strike — below ${bufferPct}% buffer (not enough cushion to absorb reversal)`,
+          signals: buildSnapshot(null),
+        };
+      }
+
+      // Model veto count: how many non-null models disagree with price direction
+      const models = [statAbove, claudeAbove, mlAbove];
+      const vetoCount  = models.filter(m => m !== null && m !== priceAbove).length;
+      const agreeCount = models.filter(m => m !== null && m === priceAbove).length;
+
+      // ≥2 models veto → reversal risk is too high
+      if (vetoCount >= 2) {
+        return {
+          action: "SKIP",
+          confidence: 0,
+          reasoning: `position-confirm: ${vetoCount}/3 models veto ${priceAbove ? "YES" : "NO"} — reversal signal, not betting against model consensus`,
+          signals: buildSnapshot(null, agreeCount, 3),
+        };
+      }
+
+      // Confidence: base 60 + 5pp per agreeing model (max +15) + distance bonus (max +10)
+      const distanceBonus = Math.min(distancePct * 5, 10);
+      const agreeBonus    = agreeCount * 5;
+      const confidence    = Math.round(60 + agreeBonus + distanceBonus);
+
+      if (confidence < config.minConfidence) {
+        return {
+          action: "SKIP",
+          confidence,
+          reasoning: `position-confirm: confidence ${confidence}% below minimum ${config.minConfidence}%`,
+          signals: buildSnapshot(null, agreeCount, 3, action),
+        };
+      }
+
+      const pcReturnGate = checkMinReturnGate(action, yesPrice, config.minReturnMultiple);
+      if (pcReturnGate.blocked) {
+        return {
+          action: "SKIP",
+          confidence,
+          reasoning: `position-confirm: ${pcReturnGate.reason}`,
+          signals: buildSnapshot(null, agreeCount, 3),
+        };
+      }
+
+      return {
+        action,
+        confidence,
+        reasoning: `position-confirm: price ${distancePct.toFixed(2)}% ${priceAbove ? "above" : "below"} strike → ${action === "BET_YES" ? "YES" : "NO"} (models agree=${agreeCount}/3 veto=${vetoCount} conf=${confidence}%)`,
+        signals: buildSnapshot(null, agreeCount, 3, action),
+      };
+    }
+    // livePrice or kalshiTarget unavailable — fall through to classic
+  }
+
   // ── Classic path (also used by ml_primary) ────────────────────────────────
   // unanimousMinModelConfidence is ml_gate-only; do not pass it here so the
   // classic unanimous bypass behaviour remains unchanged.
@@ -463,8 +536,9 @@ export function makeBotDecision(
   minutesElapsed: number,
   signalAccuracyPct: number | null,
   kalshiTarget?: number | null,
+  livePrice?: number | null,
 ): BotDecision {
-  const inner = _makeBotDecisionInner(symbol, config, kalshiTicker, yesPrice, minutesElapsed, signalAccuracyPct, kalshiTarget);
+  const inner = _makeBotDecisionInner(symbol, config, kalshiTicker, yesPrice, minutesElapsed, signalAccuracyPct, kalshiTarget, livePrice);
 
   // NO-direction early-minute gate: defer NO bets until minutesElapsed ≥ minNoEntryMinutes.
   // At minute 0 the orderbook is freshly priced and our signals have less edge on NO bets

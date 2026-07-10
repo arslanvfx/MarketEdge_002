@@ -422,6 +422,9 @@ async function _runBotTick(
   // Use ensemble signal accuracy (from prediction_records historyStore) for the
   // EV gate — not the bot's own win rate, which is contaminated by exit decisions.
   const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
+  // livePrice: used by position_confirm mode to gate on current price vs strike.
+  // Read from the predictor cache — same source as the strike-proximity guard below.
+  const livePrice = getCachedPrediction(sym)?.price ?? null;
   const decision = makeBotDecision(
     sym,
     S.config,
@@ -430,6 +433,7 @@ async function _runBotTick(
     minutesElapsed,
     signalAcc,
     kalshiTarget,  // pass through so ML doesn't re-fetch a potentially stale cache
+    livePrice,
   );
 
   // ── Bot entry timing snapshot (fire-and-forget, once per minute per coin) ──
