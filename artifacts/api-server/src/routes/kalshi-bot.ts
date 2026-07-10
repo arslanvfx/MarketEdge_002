@@ -481,6 +481,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     directionalRegressionLookback,
     directionalRegressionThreshold,
     directionalRegressionPenaltyPp,
+    betDelayMinutes,
+    minNoEntryMinutes,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -493,6 +495,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minRemainingMinutes?: number;
     windowEntryBufferSeconds?: number;
     maxBetsPerWindow?: number;
+    betDelayMinutes?: number;
+    minNoEntryMinutes?: number;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -678,6 +682,12 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof directionalRegressionPenaltyPp === "number" && directionalRegressionPenaltyPp >= 0 && directionalRegressionPenaltyPp <= 30) {
     partial.directionalRegressionPenaltyPp = directionalRegressionPenaltyPp;
+  }
+  if (typeof betDelayMinutes === "number" && betDelayMinutes >= 0 && betDelayMinutes <= 13) {
+    partial.betDelayMinutes = betDelayMinutes;
+  }
+  if (typeof minNoEntryMinutes === "number" && minNoEntryMinutes >= 0 && minNoEntryMinutes <= 10) {
+    partial.minNoEntryMinutes = minNoEntryMinutes;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

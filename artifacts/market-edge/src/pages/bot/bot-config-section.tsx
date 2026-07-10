@@ -565,63 +565,52 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     onChange={e => setConfigDraft(d => ({ ...d, phase2ThresholdPp: parseInt(e.target.value) }))} />
                 </label>
 
-                {/* Max Entry Time */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Latest Entry into Window</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.maxEntryMinutes ?? 11}
-                    onChange={e => setConfigDraft(d => ({ ...d, maxEntryMinutes: parseInt(e.target.value) }))}>
-                    <option value={0}>Disabled (no ceiling)</option>
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
-                      <option key={m} value={m}>{m} min in ({15 - m} min left)</option>
-                    ))}
-                  </select>
-                </label>
+                {/* ── Entry Timing ───────────────────────────────── */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Entry Timing</span>
 
-                {/* Min Time Remaining */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Min Time Remaining</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.minRemainingMinutes ?? 2}
-                    onChange={e => setConfigDraft(d => ({ ...d, minRemainingMinutes: parseInt(e.target.value) }))}>
-                    <option value={0}>Disabled (no floor)</option>
-                    {[1, 2, 3, 4, 5, 6, 7].map(m => (
-                      <option key={m} value={m}>Don&apos;t enter with &lt;{m} min left</option>
-                    ))}
-                  </select>
-                </label>
+                  {/* Earliest Entry (betDelayMinutes) */}
+                  <label className="flex flex-col gap-1.5 mt-1">
+                    <span className="text-xs text-muted-foreground">Earliest Entry</span>
+                    <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                      value={merged.betDelayMinutes ?? 0}
+                      onChange={e => setConfigDraft(d => ({ ...d, betDelayMinutes: parseInt(e.target.value) }))}>
+                      <option value={0}>Immediately — enter as soon as signals are ready (~T+2 min)</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map(m => (
+                        <option key={m} value={m}>Wait {m} min — re-analyze at T+{m}m, then bet</option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-muted-foreground/70">
+                      "Wait" holds the entry and runs a fresh Claude analysis at the deadline — so the bot acts on current market direction, not the opening snapshot.
+                    </span>
+                  </label>
 
-                {/* Window Entry Buffer */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">
-                    Window Entry Buffer ({merged.windowEntryBufferSeconds ?? 120}s)
-                  </span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.windowEntryBufferSeconds ?? 120}
-                    onChange={e => setConfigDraft(d => ({ ...d, windowEntryBufferSeconds: parseInt(e.target.value) }))}>
-                    {[60, 90, 120, 150, 180, 210, 240].map(s => (
-                      <option key={s} value={s}>{s}s ({Math.floor(s / 60)}m{s % 60 ? ` ${s % 60}s` : ""} after window open)</option>
-                    ))}
-                  </select>
-                </label>
+                  {/* Latest Entry (maxEntryMinutes) */}
+                  <label className="flex flex-col gap-1.5 mt-1">
+                    <span className="text-xs text-muted-foreground">Latest Entry</span>
+                    <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                      value={merged.maxEntryMinutes ?? 11}
+                      onChange={e => setConfigDraft(d => ({ ...d, maxEntryMinutes: parseInt(e.target.value) }))}>
+                      <option value={0}>No ceiling — enter any time signals are ready</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
+                        <option key={m} value={m}>By T+{m} min ({15 - m} min left in window)</option>
+                      ))}
+                    </select>
+                  </label>
 
-                {/* Bet Delay (fresh re-analysis) */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">
-                    Bet Delay — wait &amp; re-analyze before entry
-                  </span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.betDelayMinutes ?? 0}
-                    onChange={e => setConfigDraft(d => ({ ...d, betDelayMinutes: parseInt(e.target.value) }))}>
-                    <option value={0}>Disabled — enter immediately when signals ready</option>
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map(m => (
-                      <option key={m} value={m}>{m} min — hold entry, re-analyze at T+{m}m before betting</option>
-                    ))}
-                  </select>
-                  <span className="text-xs text-muted-foreground/70">
-                    When set, models monitor the market during the delay. Claude runs a fresh analysis at the entry moment — not the opening snapshot.
-                  </span>
-                </label>
+                  {/* Min Time Remaining (minRemainingMinutes) */}
+                  <label className="flex flex-col gap-1.5 mt-1">
+                    <span className="text-xs text-muted-foreground">Min Time Remaining</span>
+                    <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                      value={merged.minRemainingMinutes ?? 2}
+                      onChange={e => setConfigDraft(d => ({ ...d, minRemainingMinutes: parseInt(e.target.value) }))}>
+                      <option value={0}>No floor — enter even in the final minute</option>
+                      {[1, 2, 3, 4, 5, 6, 7].map(m => (
+                        <option key={m} value={m}>Skip if &lt;{m} min left in window</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
 
                 {/* Max Bets Per Window */}
                 <label className="flex flex-col gap-1.5">
