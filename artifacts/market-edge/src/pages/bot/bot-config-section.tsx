@@ -1093,18 +1093,26 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
                 {/* ── Entry Proximity Guard ─────────────────────────────── */}
                 <div className="col-span-full border border-border/60 rounded-xl bg-muted/10 p-3 space-y-3">
-                  <button
-                    type="button"
-                    className="w-full flex items-center gap-2 text-left"
-                    onClick={() => setProximityExpanded(x => !x)}
-                  >
-                    <Target className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                    <span className="text-xs font-semibold text-teal-400">Entry Proximity Guard</span>
-                    <div className={`ml-2 text-[10px] px-1.5 py-0.5 rounded font-medium ${(merged.proximityGuardEnabled ?? false) ? "bg-teal-500/20 text-teal-300" : "bg-muted text-muted-foreground"}`}>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="flex items-center gap-2 text-left flex-1 min-w-0"
+                      onClick={() => setProximityExpanded(x => !x)}
+                    >
+                      <Target className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                      <span className="text-xs font-semibold text-teal-400">Entry Proximity Guard</span>
+                      <span className="ml-auto text-muted-foreground">{proximityExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}</span>
+                    </button>
+                    <button
+                      type="button"
+                      title={(merged.proximityGuardEnabled ?? false) ? "Click to disable proximity guard" : "Click to enable proximity guard"}
+                      onClick={() => setConfigDraft(d => ({ ...d, proximityGuardEnabled: !(merged.proximityGuardEnabled ?? false) }))}
+                      className={`shrink-0 text-[10px] px-2 py-0.5 rounded font-medium border transition-colors ${(merged.proximityGuardEnabled ?? false)
+                        ? "bg-teal-500/20 text-teal-300 border-teal-500/40 hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
+                        : "bg-muted text-muted-foreground border-border hover:bg-teal-500/20 hover:text-teal-300 hover:border-teal-500/40"}`}>
                       {(merged.proximityGuardEnabled ?? false) ? "ON" : "OFF"}
-                    </div>
-                    <span className="ml-auto text-muted-foreground">{proximityExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}</span>
-                  </button>
+                    </button>
+                  </div>
                   <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
                     Skips entry when the live price is within X% of the Kalshi strike. In coin-flip territory the bot has no real edge — this guard filters those bets out.
                     Two phases: <span className="text-teal-400/80">Early</span> (first 8 min) and <span className="text-teal-400/80">Late</span> (final 7 min). Per-coin overrides take precedence.
