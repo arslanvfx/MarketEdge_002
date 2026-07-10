@@ -203,10 +203,11 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     decisionMode: "market_lock",
     minConfidence: 50,
     minReturnMultiple: 1.10,
-    betDelayMinutes: 13,
-    maxEntryMinutes: 14,
-    minRemainingMinutes: 1,
-    windowEntryBufferSeconds: 0,
+    betDelayMinutes: 0,
+    maxEntryMinutes: 13,
+    minRemainingMinutes: 2,
+    windowEntryBufferSeconds: 120,
+    enableDynamicEntry: true,
     requireMonitorReady: false,
     enableDynamicSizing: true,
     betSize: 10,
@@ -669,6 +670,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     betDelayMinutes,
     minNoEntryMinutes,
     priceBufferPct,
+    enableDynamicEntry,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -683,6 +685,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     maxBetsPerWindow?: number;
     betDelayMinutes?: number;
     minNoEntryMinutes?: number;
+    enableDynamicEntry?: boolean;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -877,8 +880,11 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minNoEntryMinutes === "number" && minNoEntryMinutes >= 0 && minNoEntryMinutes <= 10) {
     partial.minNoEntryMinutes = minNoEntryMinutes;
   }
-  if (typeof priceBufferPct === "number" && priceBufferPct >= 0 && priceBufferPct <= 2) {
+  if (typeof priceBufferPct === "number" && priceBufferPct >= 0 && priceBufferPct <= 5) {
     partial.priceBufferPct = priceBufferPct;
+  }
+  if (typeof enableDynamicEntry === "boolean") {
+    partial.enableDynamicEntry = enableDynamicEntry;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

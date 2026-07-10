@@ -50,6 +50,7 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
+  WINDOW_ENTRY_BUFFER_S,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
@@ -1078,10 +1079,31 @@ export async function runBotLoopTick(): Promise<void> {
     // Coins with no pipeline result (deferred Kalshi market) remain eligible for
     // retry via the normal scheduler path so deferred coins are not permanently
     // excluded — they simply re-enter the Phase-3 loop until their market publishes.
+    //
+    // BYPASS for market_lock + enableDynamicEntry: in that mode the bot monitors
+    // on every tick and fires the moment priceBufferPct is cleared — no fixed timer.
+    // The pipeline sets the lock on first completion but we deliberately re-evaluate
+    // each tick so a decisive price move at T+8 is caught within 15 seconds, not
+    // missed because the pipeline already evaluated at T+2 and found no signal yet.
+    const isDynamicMarketLock = S.config.decisionMode === "market_lock" && (S.config.enableDynamicEntry ?? false);
     if (pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`) && !openPositions.has(sym)) {
-      filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "pipeline-triggered entry already evaluated this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
-      continue;
+      if (!isDynamicMarketLock) {
+        filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
+        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "pipeline-triggered entry already evaluated this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+        continue;
+      }
+      // isDynamicMarketLock: fall through — tick loop re-evaluates every 15s
+    }
+
+    // Dynamic market_lock: enforce windowEntryBufferSeconds as minimum warmup before
+    // the first evaluation.  This ensures Kalshi markets have published (typically
+    // T+2-5 min) before we start checking the priceBufferPct trigger.
+    if (isDynamicMarketLock) {
+      const warmupS = S.config.windowEntryBufferSeconds ?? WINDOW_ENTRY_BUFFER_S;
+      if (clockElapsedS < warmupS) {
+        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `market-lock: dynamic warmup (${Math.ceil(warmupS - clockElapsedS)}s until T+${Math.round(warmupS / 60)}min threshold)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+        continue;
+      }
     }
     if (S.config.maxEntryMinutes > 0 && clockElapsedS > S.config.maxEntryMinutes * 60) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `past entry ceiling (>${S.config.maxEntryMinutes}min elapsed, clock=${Math.floor(clockElapsedS)}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });

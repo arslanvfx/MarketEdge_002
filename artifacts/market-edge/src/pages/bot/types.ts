@@ -63,6 +63,7 @@ export interface BotConfig {
   directionalRegressionThreshold?: number;
   directionalRegressionPenaltyPp?: number;
   priceBufferPct?: number;
+  enableDynamicEntry?: boolean;
 }
 
 export interface LogicModeStats {

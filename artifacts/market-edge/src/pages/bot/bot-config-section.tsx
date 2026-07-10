@@ -493,6 +493,27 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         {`Price must be ≥${(merged.priceBufferPct ?? 2.0).toFixed(2)}% clear of the strike. At 2%+, a reversal in 90 seconds requires an extraordinary move. Higher = safer, fewer bets.`}
                       </span>
                     </label>
+                    <label className="flex items-center justify-between mt-1 cursor-pointer select-none">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-xs text-muted-foreground">Dynamic Entry</span>
+                        <span className="text-[10px] text-muted-foreground/60 leading-tight">
+                          {(merged.enableDynamicEntry ?? true)
+                            ? "ON — monitors every 15s; fires the moment price clears the threshold (catches T+8 moves, not just T+13)"
+                            : "OFF — fires once at the betDelayMinutes mark (fixed timer, original behavior)"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, enableDynamicEntry: !(d.enableDynamicEntry ?? true) }))}
+                        className={`relative ml-4 h-5 w-9 shrink-0 rounded-full transition-colors ${
+                          (merged.enableDynamicEntry ?? true) ? "bg-amber-500" : "bg-muted-foreground/30"
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                          (merged.enableDynamicEntry ?? true) ? "translate-x-4" : "translate-x-0.5"
+                        }`} />
+                      </button>
+                    </label>
                   </div>
                 )}
 
