@@ -484,7 +484,7 @@ router.get("/stocks/bot/pnl", async (_req, res) => {
 // (stock_bot_bets, stock_bot_decisions, stock_ml_snapshots).
 // Requires X-Clear-Password header matching CLEAR_LOGS_PASSWORD env var.
 // Used to flush legacy paper-account records after migrating to a new account.
-router.post("/bot/history/clear", async (req, res) => {
+router.post("/stocks/bot/history/clear", async (req, res) => {
   const expected = process.env["CLEAR_LOGS_PASSWORD"];
   if (!expected || req.headers["x-clear-password"] !== expected) {
     res.status(401).json({ error: "Unauthorized — supply X-Clear-Password" });
