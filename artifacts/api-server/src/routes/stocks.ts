@@ -480,25 +480,29 @@ router.get("/stocks/bot/pnl", async (_req, res) => {
   }
 });
 
-// DELETE /stocks/bot/history/all — admin-only: wipe all stock trade history
+// POST /stocks/bot/history/clear — admin-only: wipe all stock trade history
 // (stock_bot_bets, stock_bot_decisions, stock_ml_snapshots).
 // Requires X-Clear-Password header matching CLEAR_LOGS_PASSWORD env var.
 // Used to flush legacy paper-account records after migrating to a new account.
-router.delete("/bot/history/all", async (req, res) => {
+router.post("/bot/history/clear", async (req, res) => {
   const expected = process.env["CLEAR_LOGS_PASSWORD"];
   if (!expected || req.headers["x-clear-password"] !== expected) {
     res.status(401).json({ error: "Unauthorized — supply X-Clear-Password" });
     return;
   }
   try {
-    const r = await db.execute(sql`
-      BEGIN;
-      DELETE FROM stock_bot_bets;
-      DELETE FROM stock_bot_decisions;
-      DELETE FROM stock_ml_snapshots;
-      COMMIT;
-    `);
-    res.json({ ok: true, message: "Stock trade history cleared", result: String(r) });
+    const bets = await db.execute(sql`DELETE FROM stock_bot_bets`);
+    const decisions = await db.execute(sql`DELETE FROM stock_bot_decisions`);
+    const snapshots = await db.execute(sql`DELETE FROM stock_ml_snapshots`);
+    res.json({
+      ok: true,
+      message: "Stock trade history cleared",
+      deleted: {
+        bets: (bets as any).rowCount ?? "?",
+        decisions: (decisions as any).rowCount ?? "?",
+        snapshots: (snapshots as any).rowCount ?? "?",
+      },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
