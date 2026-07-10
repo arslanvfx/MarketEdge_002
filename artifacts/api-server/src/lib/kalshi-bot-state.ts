@@ -116,6 +116,11 @@ export function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Returns the currently active bot decision mode (e.g. "conviction", "classic"). */
+export function getBotDecisionMode(): string {
+  return S.config.decisionMode ?? "classic";
+}
+
 // ---------------------------------------------------------------------------
 // Mutable primitive state wrapped in object so sub-modules can read/write
 // ---------------------------------------------------------------------------

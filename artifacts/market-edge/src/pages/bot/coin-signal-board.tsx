@@ -7,6 +7,7 @@ interface CoinSignalBoardProps {
   liveSignals: Record<string, CoinSignals>;
   kalshiTargets: Record<string, number | null>;
   windowKey?: string | null;
+  decisionMode?: string | null;
 }
 
 function Dir({
@@ -31,10 +32,11 @@ function Dir({
   );
 }
 
-function AgreementBadge({ signals }: { signals: CoinSignals }) {
-  const votes = [signals.statAbove, signals.claudeAbove, signals.mlAbove].filter(
-    (v) => v !== null
-  );
+function AgreementBadge({ signals, excludeClaude }: { signals: CoinSignals; excludeClaude?: boolean }) {
+  const rawVotes = excludeClaude
+    ? [signals.statAbove, signals.mlAbove]
+    : [signals.statAbove, signals.claudeAbove, signals.mlAbove];
+  const votes = rawVotes.filter((v) => v !== null);
   if (votes.length === 0) {
     return <span className="text-muted-foreground/40 text-xs">—</span>;
   }
@@ -71,7 +73,8 @@ function fmtStrike(v: number | null | undefined): string {
 
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
 
-export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey }: CoinSignalBoardProps) {
+export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode }: CoinSignalBoardProps) {
+  const isConviction = decisionMode === "conviction";
   // Pin strikes: once we see a non-null value for a coin, never clear it.
   // Kalshi strike is fixed per window so there's no reason to blank it on refetch.
   const pinnedStrikes = useRef<Record<string, number>>({});
@@ -109,12 +112,14 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey }: CoinS
                   Stat
                 </span>
               </th>
-              <th className="text-left px-3 py-2 font-medium">
-                <span className="inline-flex items-center gap-1">
-                  <Brain className="w-3 h-3" />
-                  Claude
-                </span>
-              </th>
+              {!isConviction && (
+                <th className="text-left px-3 py-2 font-medium">
+                  <span className="inline-flex items-center gap-1">
+                    <Brain className="w-3 h-3" />
+                    Claude
+                  </span>
+                </th>
+              )}
               <th className="text-left px-3 py-2 font-medium">
                 <span className="inline-flex items-center gap-1">
                   <Cpu className="w-3 h-3" />
@@ -141,20 +146,22 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey }: CoinS
                   <td className="px-3 py-2.5">
                     <Dir above={s.statAbove} confidence={s.statConfidence} />
                   </td>
-                  <td className="px-3 py-2.5">
-                    {s.claudeAbove !== null ? (
-                      <span className={s.claudeEnabled ? "" : "opacity-60"} title={s.claudeEnabled ? undefined : "Claude running (passive — auto-pilot slot not active)"}>
-                        <Dir above={s.claudeAbove} confidence={s.claudeConfidence} />
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground/40 text-xs font-mono">—</span>
-                    )}
-                  </td>
+                  {!isConviction && (
+                    <td className="px-3 py-2.5">
+                      {s.claudeAbove !== null ? (
+                        <span className={s.claudeEnabled ? "" : "opacity-60"} title={s.claudeEnabled ? undefined : "Claude running (passive — auto-pilot slot not active)"}>
+                          <Dir above={s.claudeAbove} confidence={s.claudeConfidence} />
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground/40 text-xs font-mono">—</span>
+                      )}
+                    </td>
+                  )}
                   <td className="px-3 py-2.5">
                     <Dir above={s.mlAbove} confidence={s.mlConfidence} />
                   </td>
                   <td className="px-3 py-2.5">
-                    <AgreementBadge signals={s} />
+                    <AgreementBadge signals={s} excludeClaude={isConviction} />
                   </td>
                 </tr>
               );

@@ -4,6 +4,7 @@
 
 import { and, eq, gt, isNotNull, isNull, sql } from "drizzle-orm";
 import { db, windowMonitorOutcomesTable, windowTimingSnapshotsTable } from "@workspace/db";
+import { getBotDecisionMode } from "./kalshi-bot-state";
 import {
   AUTOPILOT_MAX_ACTIVE,
   type AutoPilotDecision,
@@ -890,7 +891,7 @@ export function startPredictionTracker(
                 if (kal != null && prevPredEntry?.value?.price != null) {
                   const oldStatAbove = prevPredEntry.value.price >= kal;
                   const newStatAbove = freshAnalysis.price >= kal;
-                  if (oldStatAbove !== newStatAbove && isCoinClaudeEnabled(sym) && isAiFeatureEnabled("crypto_live_dir")) {
+                  if (oldStatAbove !== newStatAbove && isCoinClaudeEnabled(sym) && isAiFeatureEnabled("crypto_live_dir") && getBotDecisionMode() !== "conviction") {
                     logger.info(
                       "[mid-snap] %s: stat flipped %s→%s — triggering Claude re-check",
                       sym,
@@ -912,7 +913,7 @@ export function startPredictionTracker(
 
         // ── Auto-trigger live-direction re-check ──
         const LIVE_DIR_PERIODIC_MS = 5 * 60_000;
-        if (isCoinClaudeEnabled(sym) && !liveDirectionInFlight.has(sym)) {
+        if (isCoinClaudeEnabled(sym) && !liveDirectionInFlight.has(sym) && getBotDecisionMode() !== "conviction") {
           const cached = liveDirectionCache.get(sym);
           const lastTrigger = liveDirectionLastAutoTrigger.get(sym) ?? 0;
           if (nowMs - lastTrigger > LIVE_DIR_AUTO_COOLDOWN) {

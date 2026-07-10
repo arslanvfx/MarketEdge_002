@@ -618,6 +618,7 @@ export default function BotDashboard() {
             liveSignals={pipelineStatusData.liveSignals}
             kalshiTargets={pipelineStatusData.kalshiTargets ?? {}}
             windowKey={pipelineStatusData.currentWindowKey ?? null}
+            decisionMode={pipelineStatusData.decisionMode ?? null}
           />
         )}
         <BotStepsPanel
