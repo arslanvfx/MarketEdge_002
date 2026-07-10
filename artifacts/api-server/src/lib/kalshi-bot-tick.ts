@@ -427,25 +427,30 @@ async function _runBotTick(
   // unaffected: this gate only blocks NEW entries, and _runBotTick for open
   // positions is handled in Phase 2 before this point.)
   //
-  // EXCEPTION — conviction mode + extreme market price (≥92¢ YES or ≤8¢ YES):
-  // When the Kalshi market itself is pricing the outcome at ≥92 % probability,
-  // Claude's opinion is redundant.  Waiting for Claude in this scenario has
-  // historically caused the bot to miss the entire window (Claude never
-  // completed, market at 98 % YES, zero bets fired).  The market price IS
-  // the conviction signal; we bypass the Claude-pending block only in this case.
+  // CONVICTION MODE — Claude is fully suppressed (no calls are made) so
+  // claudeAbove will always be null.  Requiring it here would silently block
+  // every bet.  In conviction mode the market price IS the primary signal;
+  // we only require stat + ML to be ready.
+  //
+  // ALL OTHER MODES — hard three-signal rule: stat + Claude + ML must all be
+  // non-null before we enter.  There is no time-based fallback — we would
+  // rather miss the window than bet with incomplete signal data.
   {
-    const isConvictionExtreme =
-      S.config.decisionMode === "conviction" &&
-      yesPrice !== null &&
-      (yesPrice >= 0.92 || yesPrice <= 0.08);
-
-    if (isConvictionExtreme) {
-      logger.info(
-        { sym, windowKey, yesPrice, secondsElapsed },
-        "[kalshi-bot] conviction extreme-price: skipping all-signals gate — market price is the signal",
+    const live = getLatestCoinSignals(sym);
+    if (S.config.decisionMode === "conviction") {
+      // Only wait for stat and ML — Claude never runs in conviction mode.
+      if (live.statAbove === null || live.mlAbove === null) {
+        logger.info(
+          { sym, windowKey, secondsElapsed, statAbove: live.statAbove, mlAbove: live.mlAbove },
+          "[kalshi-bot] conviction: waiting for stat+ML signals — no bet yet",
+        );
+        return;
+      }
+      logger.debug(
+        { sym, windowKey, yesPrice, statAbove: live.statAbove, mlAbove: live.mlAbove },
+        "[kalshi-bot] conviction: stat+ML ready — proceeding (Claude suppressed)",
       );
     } else {
-      const live = getLatestCoinSignals(sym);
       if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
         logger.info(
           {
