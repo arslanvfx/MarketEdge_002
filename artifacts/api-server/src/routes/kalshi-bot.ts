@@ -153,18 +153,21 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minHoldMinutes: 2,
   },
   // Position Confirm: direction = WHERE price IS vs the Kalshi strike (not a prediction).
-  // Models act as soft vetoes only. Strategy: wait 2 min for price to confirm its
-  // side of the strike, then bet only if it's ≥0.25% clear of the strike (priceBufferPct).
-  // maxEntryMinutes=9: late entries lose edge when position can flip in <6 remaining min.
-  // minRemainingMinutes=3: same floor as ML Gate.
-  // minReturnMultiple=1.3: slightly higher than Unanimous — positional bets carry flip risk.
+  // Models act as soft vetoes only. Strategy: wait 7 min for price to clearly settle
+  // on one side of the strike (mid-window), then fire a fresh re-analysis against the
+  // current price — so the bet is on the CONFIRMED position, not the opening snapshot.
+  // betDelayMinutes=7: hold entry until T+7, then run fresh Claude + stat recheck.
+  // maxEntryMinutes=10: must have entered by T+10 (leaves ≥5 min to resolve).
+  // minRemainingMinutes=3: same floor as ML Gate — abort if <3 min left.
+  // priceBufferPct=0.25: price must be ≥0.25% clear of the Kalshi strike to confirm side.
+  // minReturnMultiple=1.3: positional bets carry flip risk; require meaningful edge.
   // minConfidence=58: lower floor since price-position is the primary signal, not model conf.
   position_confirm: {
     decisionMode: "position_confirm",
     minConfidence: 58,
     minReturnMultiple: 1.3,
-    betDelayMinutes: 2,
-    maxEntryMinutes: 9,
+    betDelayMinutes: 7,
+    maxEntryMinutes: 10,
     minRemainingMinutes: 3,
     windowEntryBufferSeconds: 120,
     requireMonitorReady: true,
