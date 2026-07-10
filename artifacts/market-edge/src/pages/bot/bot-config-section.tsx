@@ -212,7 +212,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 })()}
 
                 </>)}
-                {!isConviction && (<>
                 {/* ── Live Mode Guards ─────────────────────────────────── */}
                 <div className="col-span-full border-t border-amber-500/20 pt-3 -mt-1">
                   <span className="text-xs font-semibold text-amber-400/90 flex items-center gap-1.5">
@@ -221,6 +220,17 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <p className="text-[10px] text-muted-foreground/60 mt-0.5">Active in live betting only — enforced before each trade</p>
                 </div>
 
+                {/* Max Total Exposure — always visible; in conviction mode BNB alone can fill the cap */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max Total Exposure ($)</span>
+                  <input type="number" min={0} max={500} step={0.5}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxTotalExposure ?? 5}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxTotalExposure: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Max total $ across all open positions at once</span>
+                </label>
+
+                {!isConviction && (<>
                 {/* Min Account Balance */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Min Account Balance ($)</span>
@@ -229,16 +239,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     value={merged.minAccountBalance ?? 5}
                     onChange={e => setConfigDraft(d => ({ ...d, minAccountBalance: parseFloat(e.target.value) }))} />
                   <span className="text-[10px] text-muted-foreground/60">Abort live bet if Kalshi balance drops below this</span>
-                </label>
-
-                {/* Max Total Exposure */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Max Total Exposure ($)</span>
-                  <input type="number" min={0} max={500} step={0.5}
-                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.maxTotalExposure ?? 5}
-                    onChange={e => setConfigDraft(d => ({ ...d, maxTotalExposure: parseFloat(e.target.value) }))} />
-                  <span className="text-[10px] text-muted-foreground/60">Max total $ across all open positions at once</span>
                 </label>
 
                 {/* Max Daily Loss Per Coin */}
