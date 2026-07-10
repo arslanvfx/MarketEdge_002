@@ -534,6 +534,92 @@ async function _runBotTick(
     midExitedWindows.delete(sym);
   }
 
+  if (decision.action === "SKIP") {
+    // Always log the skip reason at info level so production logs show exactly
+    // why each bet was not placed.  DB persistence is deduplicated (once per
+    // window) but the log fires on every tick so the most recent reasoning is
+    // always visible even when the DB write fails due to connection issues.
+    logger.info(
+      {
+        sym, windowKey, secondsElapsed,
+        confidence: decision.confidence,
+        reasoning: decision.reasoning,
+        statAbove: decision.signals.statAbove,
+        claudeAbove: decision.signals.claudeAbove,
+        mlAbove: decision.signals.mlAbove,
+        statConf: decision.signals.statConfidence,
+        claudeConf: decision.signals.claudeConfidence,
+        mlConf: decision.signals.mlConfidence,
+      },
+      "[kalshi-bot] SKIP decision",
+    );
+    // Persist at most once per (symbol, window) to avoid flooding the DB
+    if (lastDecisionWindowKey.get(sym) !== windowKey) {
+      lastDecisionWindowKey.set(sym, windowKey);
+      await persistBetRecord({
+        symbol: sym,
+        windowKey,
+        ticker: kalshiTicker,
+        direction: null,
+        action: "skip",
+        signals: decision.signals,
+        entryPrice: null,
+        kalshiTarget,
+      });
+    }
+    return;
+  }
+
+  // ── Per-coin streak pause ─────────────────────────────────────────────────
+  // If a coin lost N consecutive windows it is S.paused for M windows.  The pause
+  // key is an ISO windowKey string — skip while the current window ≤ pause key.
+  // When the pause expires, clear pauseUntilWindowKey so a future losing streak
+  // can re-arm a new pause without requiring a win to reset the field first.
+  const streakMap = activeCoinStreakState();
+  const streakInfo = streakMap.get(sym);
+  const streakPause = checkStreakPauseGuard(streakInfo?.pauseUntilWindowKey ?? null, windowKey);
+  if (!S.config.freeRunMode && streakPause.blocked) {
+    logger.info(
+      { sym, pauseUntilWindowKey: streakInfo!.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo!.consecutiveLosses },
+      "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
+    );
+    return;
+  } else if (streakPause.expired && streakInfo) {
+    // Pause has expired — clear it so subsequent streaks can trigger new pauses.
+    streakInfo.pauseUntilWindowKey = null;
+    streakMap.set(sym, streakInfo);
+  }
+
+  // ── Pre-entry streak block ────────────────────────────────────────────────
+  // Block entry only after the Nth loss has already been recorded — the coin
+  // gets to attempt the recovery bet and the pause only kicks in if it loses
+  // again.  The post-loss pause (coinStreakPauseWindows) handles the cooldown
+  // after the limit is reached and that pause is set by the eval/close path.
+  if (!S.config.freeRunMode) {
+    const streakLimit = S.config.coinStreakLossLimit ?? 3;
+    const currentLosses = streakInfo?.consecutiveLosses ?? 0;
+    if (streakLimit > 0 && currentLosses >= streakLimit) {
+      logger.info(
+        { sym, currentLosses, streakLimit },
+        "[kalshi-bot] SKIP — pre-entry streak block: already at streak limit",
+      );
+      return;
+    }
+  }
+
+  // ── Per-coin daily loss cap ───────────────────────────────────────────────
+  // Skip for the rest of the UTC day when this coin's losses reach the cap.
+  const coinLossToday = activeCoinDailyLoss().get(sym) ?? 0;
+  const maxCoinLoss = S.config.maxDailyLossPerCoin ?? 3;
+  if (checkDailyLossGuard(coinLossToday, maxCoinLoss)) {
+    logger.info(
+      { sym, coinLossToday: coinLossToday.toFixed(4), maxDailyLossPerCoin: maxCoinLoss },
+      "[kalshi-bot] SKIP — coin has reached its daily loss cap",
+    );
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   // ── RESTING_LIMIT: pre-conviction GTC order at the lock price ────────────
   // The engine returned RESTING_LIMIT because yesPrice entered the pre-entry
   // zone (approaching lockPrice from below for YES; from above for NO) and
@@ -541,12 +627,10 @@ async function _runBotTick(
   // lockPrice so the exchange fills us at our target even if the next visible
   // market tick jumps past it entirely (e.g. 74¢ → 96¢).
   //
-  // Guards: one resting order per coin per window; skip if a reactive bet
-  //   already fired; skip if there is already an open position; require ≥3 min
-  //   remaining so the order has a meaningful chance of filling.
+  // Placed HERE (after all risk guards) so streak-pause, daily-loss-cap, and
+  // every other configured protection applies equally to resting orders.
   if (decision.action === "RESTING_LIMIT") {
-    const restingWindowKey2 = windowKey; // alias for clarity
-    const restingKey2 = `${sym}:${restingWindowKey2}`;
+    const restingKey2 = `${sym}:${windowKey}`;
     // Already placed a resting order this window — skip silently
     if (convictionRestingFiredThisWindow.has(restingKey2)) return;
     // Already entered reactively — skip
@@ -572,14 +656,16 @@ async function _runBotTick(
     const restingDir: "yes" | "no" =
       (decision.signals.agreementTarget === "BET_YES") ? "yes" : "no";
     const lockPriceGTC = S.config.kalshiLockPrice ?? 0.90;
-    // YES-side price: for YES exposure = lockPrice, for NO exposure = 1−lockPrice
+    // YES-side price submitted to Kalshi: lockPrice for YES, (1-lockPrice) for NO.
     const gtcLimitPrice = restingDir === "yes" ? lockPriceGTC : (1 - lockPriceGTC);
-    const costPerContract = gtcLimitPrice; // YES-side price = cost per contract
+    // Economic cost per contract: YES pays yesPrice, NO pays (1-yesPrice).
+    // Both sides cost lockPriceGTC per contract (symmetric conviction threshold).
+    const costPerContract = restingDir === "yes" ? gtcLimitPrice : (1 - gtcLimitPrice);
     const requestedCount = Math.max(1, Math.floor(S.config.betSize / costPerContract));
     // Claim the resting slot synchronously before any await
     convictionRestingFiredThisWindow.add(restingKey2);
     logger.info(
-      { sym, windowKey, restingDir, gtcLimitPrice: gtcLimitPrice.toFixed(2), requestedCount, restingRemainingS: Math.round(restingRemainingS), mode: S.botMode },
+      { sym, windowKey, restingDir, gtcLimitPrice: gtcLimitPrice.toFixed(2), costPerContract: costPerContract.toFixed(2), requestedCount, restingRemainingS: Math.round(restingRemainingS), mode: S.botMode },
       "[kalshi-bot] conviction: placing resting GTC limit order at lock price",
     );
     if (S.botMode === "paper") {
@@ -587,7 +673,8 @@ async function _runBotTick(
       // order book to rest in, so we assume the order would have been filled at
       // our target price — consistent with how other paper bets are recorded.
       const paperFillYesPrice = gtcLimitPrice;
-      const paperCostPerContract = paperFillYesPrice;
+      // Economic cost per contract (same formula as above, for clarity)
+      const paperCostPerContract = restingDir === "yes" ? paperFillYesPrice : (1 - paperFillYesPrice);
       const paperBetAmount = requestedCount * paperCostPerContract;
       const paperPositionId = globalThis.crypto.randomUUID();
       const paperKalshiTarget = kalshiTarget ?? 0;
@@ -677,92 +764,6 @@ async function _runBotTick(
     }
     return; // Do NOT fall through to the normal IOC/FOK entry path
   }
-
-  if (decision.action === "SKIP") {
-    // Always log the skip reason at info level so production logs show exactly
-    // why each bet was not placed.  DB persistence is deduplicated (once per
-    // window) but the log fires on every tick so the most recent reasoning is
-    // always visible even when the DB write fails due to connection issues.
-    logger.info(
-      {
-        sym, windowKey, secondsElapsed,
-        confidence: decision.confidence,
-        reasoning: decision.reasoning,
-        statAbove: decision.signals.statAbove,
-        claudeAbove: decision.signals.claudeAbove,
-        mlAbove: decision.signals.mlAbove,
-        statConf: decision.signals.statConfidence,
-        claudeConf: decision.signals.claudeConfidence,
-        mlConf: decision.signals.mlConfidence,
-      },
-      "[kalshi-bot] SKIP decision",
-    );
-    // Persist at most once per (symbol, window) to avoid flooding the DB
-    if (lastDecisionWindowKey.get(sym) !== windowKey) {
-      lastDecisionWindowKey.set(sym, windowKey);
-      await persistBetRecord({
-        symbol: sym,
-        windowKey,
-        ticker: kalshiTicker,
-        direction: null,
-        action: "skip",
-        signals: decision.signals,
-        entryPrice: null,
-        kalshiTarget,
-      });
-    }
-    return;
-  }
-
-  // ── Per-coin streak pause ─────────────────────────────────────────────────
-  // If a coin lost N consecutive windows it is S.paused for M windows.  The pause
-  // key is an ISO windowKey string — skip while the current window ≤ pause key.
-  // When the pause expires, clear pauseUntilWindowKey so a future losing streak
-  // can re-arm a new pause without requiring a win to reset the field first.
-  const streakMap = activeCoinStreakState();
-  const streakInfo = streakMap.get(sym);
-  const streakPause = checkStreakPauseGuard(streakInfo?.pauseUntilWindowKey ?? null, windowKey);
-  if (!S.config.freeRunMode && streakPause.blocked) {
-    logger.info(
-      { sym, pauseUntilWindowKey: streakInfo!.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo!.consecutiveLosses },
-      "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
-    );
-    return;
-  } else if (streakPause.expired && streakInfo) {
-    // Pause has expired — clear it so subsequent streaks can trigger new pauses.
-    streakInfo.pauseUntilWindowKey = null;
-    streakMap.set(sym, streakInfo);
-  }
-
-  // ── Pre-entry streak block ────────────────────────────────────────────────
-  // Block entry only after the Nth loss has already been recorded — the coin
-  // gets to attempt the recovery bet and the pause only kicks in if it loses
-  // again.  The post-loss pause (coinStreakPauseWindows) handles the cooldown
-  // after the limit is reached and that pause is set by the eval/close path.
-  if (!S.config.freeRunMode) {
-    const streakLimit = S.config.coinStreakLossLimit ?? 3;
-    const currentLosses = streakInfo?.consecutiveLosses ?? 0;
-    if (streakLimit > 0 && currentLosses >= streakLimit) {
-      logger.info(
-        { sym, currentLosses, streakLimit },
-        "[kalshi-bot] SKIP — pre-entry streak block: already at streak limit",
-      );
-      return;
-    }
-  }
-
-  // ── Per-coin daily loss cap ───────────────────────────────────────────────
-  // Skip for the rest of the UTC day when this coin's losses reach the cap.
-  const coinLossToday = activeCoinDailyLoss().get(sym) ?? 0;
-  const maxCoinLoss = S.config.maxDailyLossPerCoin ?? 3;
-  if (checkDailyLossGuard(coinLossToday, maxCoinLoss)) {
-    logger.info(
-      { sym, coinLossToday: coinLossToday.toFixed(4), maxDailyLossPerCoin: maxCoinLoss },
-      "[kalshi-bot] SKIP — coin has reached its daily loss cap",
-    );
-    return;
-  }
-  // ─────────────────────────────────────────────────────────────────────────────
 
   // Place the bet
   const direction: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
