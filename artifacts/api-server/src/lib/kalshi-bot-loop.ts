@@ -623,7 +623,7 @@ export async function runBotLoopTick(): Promise<void> {
         // concurrent tick cannot double-close the same position.
         openPositions.delete(sym);
         try {
-          await closePosition(pos, yp, kd?.value ?? null, "conviction_stop_loss");
+          await closePosition(pos, yp, kd?.value ?? null, "conviction_stop_loss", false, { gtcFallback: true });
         } catch (err) {
           logger.error({ err, sym }, "[kalshi-bot] conviction stop-loss exit failed — restoring position");
           openPositions.set(sym, pos);

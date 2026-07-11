@@ -22,7 +22,7 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
-  fetchKalshiMarketResult, fetchKalshiSettledMarkets,
+  fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
 } from "./kalshi-trader";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
@@ -61,6 +61,16 @@ export async function closePosition(
   currentKalshiTarget: number | null,
   reason: string,
   isLateRecovery = false,
+  options?: {
+    // When true, a FOK exit that fails with "fill_or_kill_insufficient_resting_volume"
+    // is immediately retried as a GTC (resting) limit order at the same aggressive
+    // price rather than throwing and waiting for the next tick.  The position is
+    // treated as closed and the P&L is estimated at the GTC ask price (0.01 worst
+    // case); evalClosedBets will correct the record once Kalshi settles.
+    // Use for stop-loss exits where we want out at any price, not just on a tick
+    // where the book happens to have resting volume.
+    gtcFallback?: boolean;
+  },
 ): Promise<void> {
   const isExpiry = reason === "window_expired";
 
@@ -81,10 +91,45 @@ export async function closePosition(
         : await sellNo(pos.ticker, pos.contractCount);
       fillPrice = result.avgPrice ?? currentYesPrice;
     } catch (err) {
-      logger.error({ err, sym: pos.symbol }, "[kalshi-bot] exit order failed — position remains OPEN; will retry next tick");
-      // Do NOT proceed: openPosition stays live so the next tick retries the exit.
-      // Throwing here prevents the caller from clearing openPosition.
-      throw err;
+      const isFokDry = String((err as Error).message ?? err).includes("fill_or_kill_insufficient");
+      if (isFokDry && options?.gtcFallback) {
+        // FOK failed because the order book has no resting bids at any price.
+        // Place a GTC resting limit order at the most aggressive ask price (0.01)
+        // so it will fill if any buyer appears before the window closes.
+        // The position is removed from tracking immediately — evalClosedBets will
+        // correct the P&L once Kalshi settles the market.
+        logger.warn(
+          { sym: pos.symbol, direction: pos.direction, contractCount: pos.contractCount },
+          "[kalshi-bot] stop-loss FOK failed (no resting bids) — placing GTC resting order at minimum price",
+        );
+        try {
+          const side = pos.direction === "yes" ? ("yes" as const) : ("no" as const);
+          // No limitPrice / yesPrice → computeMarketableLimitPrice("ask", undefined) = 0.01
+          const gtcResult = await placeOrder({
+            ticker: pos.ticker,
+            side,
+            action: "sell",
+            count: pos.contractCount,
+            type: "limit",
+            timeInForce: "good_till_cancelled",
+          });
+          // Use confirmed fill price if the GTC happened to fill immediately; otherwise
+          // record 0.01 as a conservative placeholder (will be corrected by evalClosedBets).
+          fillPrice = gtcResult.avgPrice ?? 0.01;
+          logger.info(
+            { sym: pos.symbol, fillPrice, orderId: gtcResult.orderId },
+            "[kalshi-bot] GTC resting order placed — position marked closed",
+          );
+        } catch (gtcErr) {
+          logger.error({ err: gtcErr, sym: pos.symbol }, "[kalshi-bot] GTC fallback also failed — position remains OPEN; will retry next tick");
+          throw gtcErr;
+        }
+      } else {
+        logger.error({ err, sym: pos.symbol }, "[kalshi-bot] exit order failed — position remains OPEN; will retry next tick");
+        // Do NOT proceed: openPosition stays live so the next tick retries the exit.
+        // Throwing here prevents the caller from clearing openPosition.
+        throw err;
+      }
     }
   }
 
