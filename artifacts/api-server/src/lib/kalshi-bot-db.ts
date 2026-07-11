@@ -94,6 +94,25 @@ export async function loadBotConfigFromDB(): Promise<void> {
         }
         logger.info({ mode: S.botMode }, "[kalshi-bot] mode restored from DB");
       }
+
+      // Backfill any mode-specific fields that are null in the stored config.
+      // This prevents in-memory defaults from diverging from the DB value after
+      // a mode switch (e.g. conviction sets kalshiLockPrice=0.90 in-memory via
+      // BUILT_IN_MODE_DEFAULTS but the DB row may still have null if the row
+      // predates the default or was written by an older build).
+      // Write back to DB so future restarts and log queries always see the
+      // effective value — eliminating "kalshiLockPrice: null" confusion.
+      let needsBackfill = false;
+      const mode = S.config.decisionMode;
+      if (mode === "conviction" && S.config.kalshiLockPrice == null) {
+        S.config.kalshiLockPrice = 0.90;
+        needsBackfill = true;
+      }
+      if (needsBackfill) {
+        logger.info({ mode, kalshiLockPrice: S.config.kalshiLockPrice }, "[kalshi-bot] backfilled null mode defaults — persisting to DB");
+        _persistModeToConfig().catch(() => {});
+      }
+
       logger.info({ config: S.config }, "[kalshi-bot] config loaded from DB");
     } else {
       logger.info("[kalshi-bot] no saved config in DB — seeding defaults");

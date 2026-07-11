@@ -1635,7 +1635,7 @@ test("conviction: yesPrice at 0.01 → SKIP (entry window missed)", () => {
 test("conviction: yesPrice below lockPrice → SKIP", () => {
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.85 }));
   assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /not yet at lock threshold/);
+  assert.match(r.reasoning, /lock threshold/);
 });
 
 test("conviction: yesPrice in mid-zone (0.50) → SKIP", () => {

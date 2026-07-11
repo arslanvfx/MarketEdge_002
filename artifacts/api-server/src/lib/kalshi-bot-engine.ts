@@ -22,6 +22,7 @@ import {
   type WindowBetSignal,
 } from "./crypto";
 import { getLatestCoinSignals } from "./crypto-signals";
+import { getKalshiCachedData } from "./crypto-kalshi";
 
 import {
   computeCorePairDecision,
@@ -514,9 +515,16 @@ function _makeBotDecisionInner(
     // The slider sets a single target (e.g. 0.90).  We auto-apply ±2 ¢ so the
     // entry window is always [target−0.02, target+0.02].
     // Slider at 90¢ → window [88¢–92¢]; slider at 91¢ → window [89¢–93¢].
-    const cvTarget = config.kalshiLockPrice ?? 0.90;
+    const cvTarget  = config.kalshiLockPrice ?? 0.90;
+    // Pull the live orderbook ask/bid from the Kalshi cache so the conviction
+    // trigger uses what you actually PAY (the ask), not the mid-price.
+    // Without this, a wide NO spread can push the mid to the lock threshold
+    // while the actual YES ask is well below it — causing fills at wrong prices.
+    const cvCached  = getKalshiCachedData(sym);
     const cvResult = computeConvictionDecision({
       yesPrice,
+      yesAsk:        cvCached?.yesAsk ?? null,
+      yesBid:        cvCached?.yesBid ?? null,
       lockPrice:     cvTarget - 0.02,
       lockPriceCap:  cvTarget + 0.02,
       minConfidence: config.minConfidence,

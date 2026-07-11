@@ -198,8 +198,16 @@ function computeEV(yesPrice: number | null, signalAccuracyPct: number | null): n
 
 export interface ConvictionInputs {
   yesPrice:       number | null;
-  lockPrice?:     number;   // default 0.88 — minimum NO% (or YES%) to trigger entry
-  lockPriceCap?:  number;   // default 0.92 — maximum NO% (or YES%) allowed; above this is too late
+  // Orderbook ask/bid prices — more accurate than the mid for trigger checks.
+  // yesAsk = what you actually PAY per YES contract (= 1 − no_bid).
+  // yesBid = what you actually PAY per NO contract, expressed as (1 − yesBid)
+  //          i.e. yesBid is what you receive selling YES = what NO costs you.
+  // When both are present they are used for the lock-trigger check instead of
+  // the mid (yesPrice), preventing fills at prices outside the intended window.
+  yesAsk?:        number | null;
+  yesBid?:        number | null;
+  lockPrice?:     number;   // default 0.88 — minimum % to trigger entry
+  lockPriceCap?:  number;   // default 0.92 — maximum % allowed; above this is too late
   minConfidence:  number;
 }
 
@@ -219,14 +227,27 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
     };
   }
 
-  const isYesLocked = yesPrice >= lockPrice;
-  const isNoLocked  = yesPrice <= (1 - lockPrice);
+  // Use the actual orderbook ask/bid prices for the trigger check, not the mid.
+  // yesAsk = what you pay for YES (= 1 − no_bid).
+  // noAsk  = what you pay for NO  (= 1 − yesBid).
+  // Falling back to yesPrice (mid) only when ask/bid are unavailable.
+  //
+  // Example of the mid-price bug this prevents:
+  //   yesAsk=0.80, yesBid=0.96 → mid=(0.80+0.96)/2=0.88 → triggers at lockPrice=0.88
+  //   but you actually fill at 0.80 (8¢ outside the intended window).
+  const yesTrigger = inp.yesAsk  ?? yesPrice;           // cost of YES entry
+  const noTrigger  = inp.yesBid != null
+    ? (1 - inp.yesBid)                                  // cost of NO entry = 1 − yesBid
+    : (1 - yesPrice);                                   // fallback: mid complement
+
+  const isYesLocked = yesTrigger >= lockPrice;
+  const isNoLocked  = noTrigger  >= lockPrice;
 
   if (!isYesLocked && !isNoLocked) {
     return {
       action: "SKIP",
       confidence: 0,
-      reasoning: `conviction: yes price ${yesPrice.toFixed(2)} not yet at lock threshold ${lockPrice.toFixed(2)} (need ≥${lockPrice.toFixed(2)} for YES or ≤${(1 - lockPrice).toFixed(2)} for NO)`,
+      reasoning: `conviction: ask prices not at lock threshold ${lockPrice.toFixed(2)} (yesAsk=${yesTrigger.toFixed(2)} noAsk=${noTrigger.toFixed(2)})`,
       signalsAgreeing: 0,
       signalsTotal: 0,
       ev: null,
@@ -234,18 +255,18 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   }
 
   // Hard cap: if the price has blown past the entry window, skip.
-  // YES: yesPrice must be ≤ lockPriceCap (e.g. ≤ 0.92)
-  // NO:  yesPrice must be ≥ (1 − lockPriceCap) (e.g. ≥ 0.08, meaning NO ≤ 92%)
-  const isTooDeepYes = isYesLocked && yesPrice > lockPriceCap;
-  const isTooDeepNo  = isNoLocked  && yesPrice < (1 - lockPriceCap);
+  // YES: actual YES ask must be ≤ lockPriceCap
+  // NO:  actual NO  ask must be ≤ lockPriceCap
+  const isTooDeepYes = isYesLocked && yesTrigger > lockPriceCap;
+  const isTooDeepNo  = isNoLocked  && noTrigger  > lockPriceCap;
 
   if (isTooDeepYes || isTooDeepNo) {
-    const side        = isYesLocked ? "YES" : "NO";
-    const noPrice     = isYesLocked ? yesPrice : (1 - yesPrice);
+    const side      = isYesLocked ? "YES" : "NO";
+    const askPrice  = isYesLocked ? yesTrigger : noTrigger;
     return {
       action: "SKIP",
       confidence: 0,
-      reasoning: `conviction: ${side} at ${(noPrice * 100).toFixed(0)}% is past the ${(lockPriceCap * 100).toFixed(0)}% cap — entry window missed`,
+      reasoning: `conviction: ${side} ask at ${(askPrice * 100).toFixed(0)}% is past the ${(lockPriceCap * 100).toFixed(0)}% cap — entry window missed`,
       signalsAgreeing: 0,
       signalsTotal: 0,
       ev: null,
@@ -253,7 +274,8 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   }
 
   const action: BotDecisionAction = isYesLocked ? "BET_YES" : "BET_NO";
-  const lockedPrice = isYesLocked ? yesPrice : (1 - yesPrice);
+  // Use actual ask price for confidence — this is what you're paying, not the mid.
+  const lockedPrice = isYesLocked ? yesTrigger : noTrigger;
   const confidence  = Math.min(Math.round(50 + lockedPrice * 50), 95);
 
   if (confidence < minConfidence) {
