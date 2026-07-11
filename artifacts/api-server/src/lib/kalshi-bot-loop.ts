@@ -1446,8 +1446,9 @@ export async function runBotLoopTick(): Promise<void> {
     // high-conviction entries still clear minConfidence after the penalty.
     // Subtracts from the already-profile-capped value for consistency.
     // Bypassed when parole accuracy for this coin/restriction meets the threshold.
+    // Conviction mode: trend stability is irrelevant — price position is the signal.
     let reversingCaution = false;
-    if (stability === "reversing" && decision.action !== "SKIP" && !paroleState.reversing.has(sym)) {
+    if (S.config.decisionMode !== "conviction" && stability === "reversing" && decision.action !== "SKIP" && !paroleState.reversing.has(sym)) {
       effectiveConfidence = effectiveConfidence - 20;
       reversingCaution = true;
       if (effectiveConfidence < S.config.minConfidence) {
@@ -1606,92 +1607,99 @@ export async function runBotLoopTick(): Promise<void> {
           continue;
         }
 
-        // Signal quality gates for YES bets (direction-neutral logic applied
-        // symmetrically to NO bets below):
-        //
-        // Claude and ML are the authoritative directional signals.  A YES bet
-        // is only placed when neither Claude nor ML calls NO.  Stat is a
-        // confidence modifier only (±pp via PATH A boost/penalty) and does NOT
-        // block a bet on its own — the engine already penalises Stat dissent
-        // in the confidence score.
-        //
-        // Note: Claude-ML misalignment is caught earlier (alignment gate in the
-        //   core engine) so by the time we reach here both are guaranteed to
-        //   agree with the bet direction if both are available.
-        const yesSigs = decision.signals as {
-          statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
-          statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
-        };
-        const yesViolation: string[] = [];
-        for (const [name, above] of [
-          ["Claude", yesSigs.claudeAbove] as const,
-          ["ML",     yesSigs.mlAbove]     as const,
-        ]) {
-          if (above == null) continue;
-          if (above === false) yesViolation.push(`${name} says NO`);
-        }
-        if (yesViolation.length > 0) {
-          filteredByNewGuards.add(sym);
-          evalResults.push({
-            symbol: sym,
-            action: "SKIP",
-            confidence: effectiveConfidence,
-            score: 0,
-            reason: `YES quality gate — ${yesViolation.join("; ")}`,
-            windowKey,
-            selected: false,
-            evaluatedAt: now,
-            trendStability: stability,
-            regime,
-          });
-          // Track accuracy only — signal contradiction is a data-quality issue,
-          // not a structural market gate, so no bypass is issued.
-          void recordShadowBet(
-            sym, "yes", effectiveConfidence, decision.signals,
-            kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
-            "yes_quality_gate",
-          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] yes_quality_gate record failed"));
-          continue;
+        // Conviction mode: price position is the sole signal — quality gates
+        // are meaningless because model directions are irrelevant.
+        if (S.config.decisionMode !== "conviction") {
+          // Signal quality gates for YES bets (direction-neutral logic applied
+          // symmetrically to NO bets below):
+          //
+          // Claude and ML are the authoritative directional signals.  A YES bet
+          // is only placed when neither Claude nor ML calls NO.  Stat is a
+          // confidence modifier only (±pp via PATH A boost/penalty) and does NOT
+          // block a bet on its own — the engine already penalises Stat dissent
+          // in the confidence score.
+          //
+          // Note: Claude-ML misalignment is caught earlier (alignment gate in the
+          //   core engine) so by the time we reach here both are guaranteed to
+          //   agree with the bet direction if both are available.
+          const yesSigs = decision.signals as {
+            statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
+            statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
+          };
+          const yesViolation: string[] = [];
+          for (const [name, above] of [
+            ["Claude", yesSigs.claudeAbove] as const,
+            ["ML",     yesSigs.mlAbove]     as const,
+          ]) {
+            if (above == null) continue;
+            if (above === false) yesViolation.push(`${name} says NO`);
+          }
+          if (yesViolation.length > 0) {
+            filteredByNewGuards.add(sym);
+            evalResults.push({
+              symbol: sym,
+              action: "SKIP",
+              confidence: effectiveConfidence,
+              score: 0,
+              reason: `YES quality gate — ${yesViolation.join("; ")}`,
+              windowKey,
+              selected: false,
+              evaluatedAt: now,
+              trendStability: stability,
+              regime,
+            });
+            // Track accuracy only — signal contradiction is a data-quality issue,
+            // not a structural market gate, so no bypass is issued.
+            void recordShadowBet(
+              sym, "yes", effectiveConfidence, decision.signals,
+              kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
+              "yes_quality_gate",
+            ).catch(err => logger.warn({ err, sym }, "[shadow-bet] yes_quality_gate record failed"));
+            continue;
+          }
         }
       }
 
       if (decision.action === "BET_NO") {
-        // Claude and ML are the authoritative directional signals.  A NO bet
-        // is only placed when neither Claude nor ML calls YES.  Stat is a
-        // confidence modifier only and does not block a NO bet on its own.
-        const noSigs = decision.signals as {
-          statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
-          statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
-        };
-        const noViolation: string[] = [];
-        for (const [name, above] of [
-          ["Claude", noSigs.claudeAbove] as const,
-          ["ML",     noSigs.mlAbove]     as const,
-        ]) {
-          if (above == null) continue;
-          if (above === true) noViolation.push(`${name} says YES`);
-        }
-        if (noViolation.length > 0) {
-          filteredByNewGuards.add(sym);
-          evalResults.push({
-            symbol: sym,
-            action: "SKIP",
-            confidence: effectiveConfidence,
-            score: 0,
-            reason: `NO quality gate — ${noViolation.join("; ")}`,
-            windowKey,
-            selected: false,
-            evaluatedAt: now,
-            trendStability: stability,
-            regime,
-          });
-          // Track accuracy only — no structural bypass for signal contradictions.
-          void recordShadowBet(
-            sym, "no", effectiveConfidence, decision.signals,
-            kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
-            "no_quality_gate",
-          ).catch(err => logger.warn({ err, sym }, "[shadow-bet] no_quality_gate record failed"));
-          continue;
+        // Conviction mode: price position is the sole signal — quality gates bypass.
+        if (S.config.decisionMode !== "conviction") {
+          // Claude and ML are the authoritative directional signals.  A NO bet
+          // is only placed when neither Claude nor ML calls YES.  Stat is a
+          // confidence modifier only and does not block a NO bet on its own.
+          const noSigs = decision.signals as {
+            statAbove?: boolean | null; claudeAbove?: boolean | null; mlAbove?: boolean | null;
+            statConfidence?: number | null; claudeConfidence?: number | null; mlConfidence?: number | null;
+          };
+          const noViolation: string[] = [];
+          for (const [name, above] of [
+            ["Claude", noSigs.claudeAbove] as const,
+            ["ML",     noSigs.mlAbove]     as const,
+          ]) {
+            if (above == null) continue;
+            if (above === true) noViolation.push(`${name} says YES`);
+          }
+          if (noViolation.length > 0) {
+            filteredByNewGuards.add(sym);
+            evalResults.push({
+              symbol: sym,
+              action: "SKIP",
+              confidence: effectiveConfidence,
+              score: 0,
+              reason: `NO quality gate — ${noViolation.join("; ")}`,
+              windowKey,
+              selected: false,
+              evaluatedAt: now,
+              trendStability: stability,
+              regime,
+            });
+            // Track accuracy only — no structural bypass for signal contradictions.
+            void recordShadowBet(
+              sym, "no", effectiveConfidence, decision.signals,
+              kalshiData?.value ?? null, windowKey, S.botMode, kalshiData?.ticker ?? null,
+              "no_quality_gate",
+            ).catch(err => logger.warn({ err, sym }, "[shadow-bet] no_quality_gate record failed"));
+            continue;
+          }
         }
       }
     }
@@ -1712,7 +1720,7 @@ export async function runBotLoopTick(): Promise<void> {
     // market. Historical data shows 7/7 NO losses in exactly this configuration.
     // Require ML confirmation (mlAbove === false) OR broad 3-signal agreement to
     // allow entry — otherwise skip.  Bypassed by shadow parole when accuracy qualifies.
-    if (decision.action === "BET_NO" && kalshiData.value !== null && !paroleState.noGate.has(sym)) {
+    if (S.config.decisionMode !== "conviction" && decision.action === "BET_NO" && kalshiData.value !== null && !paroleState.noGate.has(sym)) {
       const livePrice = getCachedPrediction(sym)?.price ?? null;
       const ABOVE_STRIKE_NO_GAP = 0.001; // 0.1% above strike
       if (livePrice !== null && livePrice > kalshiData.value * (1 + ABOVE_STRIKE_NO_GAP)) {

@@ -1118,10 +1118,12 @@ async function _runBotTick(
   //   2. At least one model signal in the decision: signalsTotal ≥ 1.
   //      A signalsTotal of 0 means the engine fired on zero data — impossible
   //      to reach in normal operation but caught here as an ultimate guard.
+  //      Exception: conviction mode uses price position only — signalsTotal is
+  //      intentionally 0 and the price check (noPrice) is the sole guard.
   //   3. kalshiTarget must be non-null (should always be true at this point).
   {
     const noPrice = yesPrice == null && orderLimitPrice == null;
-    const noSignals = (decision.signals?.signalsTotal ?? 0) < 1;
+    const noSignals = config.decisionMode !== "conviction" && (decision.signals?.signalsTotal ?? 0) < 1;
     const noTarget = kalshiTarget == null;
 
     if (noPrice || noSignals || noTarget) {
