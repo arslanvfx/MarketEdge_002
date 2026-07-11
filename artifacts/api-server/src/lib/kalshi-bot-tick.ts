@@ -1177,10 +1177,14 @@ async function _runBotTick(
       direction === "yes"
         ? freshYesAsk
         : freshYesBid != null ? 1 - freshYesBid : null;
+    // Allow a 0.5 ¢ tolerance on each side of [lockPrice, lockPriceCap]:
+    //   92.15 ¢  passes  (0.9215 ≤ 0.92 + 0.005 = 0.925) ✓
+    //   93 ¢     blocked (0.93  >  0.925) ✗
+    const GATE_BUFFER = 0.005;
     const inWindow =
       freshRefPrice != null &&
-      freshRefPrice >= lockPrice &&
-      freshRefPrice <= lockPriceCap;
+      freshRefPrice >= lockPrice - GATE_BUFFER &&
+      freshRefPrice <= lockPriceCap + GATE_BUFFER;
     if (!inWindow) {
       // Release the lock so a future tick can re-evaluate if price recovers.
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
@@ -1188,7 +1192,7 @@ async function _runBotTick(
         {
           sym, direction, windowKey,
           freshRefPrice: freshRefPrice != null ? +freshRefPrice.toFixed(4) : null,
-          lockPrice, lockPriceCap,
+          lockPrice, lockPriceCap, gateBuffer: GATE_BUFFER,
           freshYesAsk, freshYesBid,
         },
         "[kalshi-bot] conviction live-price gate: price moved outside window — order aborted",
