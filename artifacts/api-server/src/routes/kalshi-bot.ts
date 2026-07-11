@@ -892,6 +892,11 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) {
     partial.kalshiLockPrice = kalshiLockPrice;
   }
+  const { convictionStopLossFloor } = body;
+  // 0 = disabled; valid range 0.10–0.85 (below entry floor, above zero)
+  if (typeof convictionStopLossFloor === "number" && convictionStopLossFloor >= 0 && convictionStopLossFloor <= 0.85) {
+    partial.convictionStopLossFloor = convictionStopLossFloor;
+  }
   // preConvictionThreshold must be < kalshiLockPrice (or the current config lock price
   // if not being changed simultaneously) to form a valid pre-entry band.
   const effectiveLockPrice = typeof kalshiLockPrice === "number" ? kalshiLockPrice : (getBotState().config.kalshiLockPrice ?? 0.90);

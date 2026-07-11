@@ -599,6 +599,38 @@ export async function runBotLoopTick(): Promise<void> {
   // _runBotTick returns early after managing an existing position so the
   // same coin does not immediately re-enter in Phase 4 of this tick.
   if (openPositions.size > 0) {
+    // ── Conviction stop-loss ────────────────────────────────────────────────
+    // Checked every tick before the normal exit path.
+    // If the contract we're holding has fallen to or below convictionStopLossFloor,
+    // sell immediately — no model signals needed, pure price floor.
+    //   YES position: contract value = yesPrice.  Exit when yesPrice ≤ floor.
+    //   NO  position: contract value = 1 − yesPrice.  Exit when (1 − yesPrice) ≤ floor.
+    const stopFloor = S.config.convictionStopLossFloor ?? 0;
+    if (S.config.decisionMode === "conviction" && stopFloor > 0) {
+      for (const [sym, pos] of Array.from(openPositions.entries())) {
+        const kd = getKalshiCachedData(sym);
+        const yp = kd?.yesPrice ?? null;
+        if (yp === null) continue;
+        const contractValue = pos.direction === "yes" ? yp : (1 - yp);
+        if (contractValue > stopFloor) continue;
+
+        logger.warn(
+          { sym, direction: pos.direction, contractValue: +contractValue.toFixed(4),
+            stopFloor, entryYesPrice: pos.entryYesPrice },
+          "[kalshi-bot] conviction stop-loss triggered — selling position",
+        );
+        // Delete synchronously first — mirrors the window-expiry pattern so a
+        // concurrent tick cannot double-close the same position.
+        openPositions.delete(sym);
+        try {
+          await closePosition(pos, yp, kd?.value ?? null, "conviction_stop_loss");
+        } catch (err) {
+          logger.error({ err, sym }, "[kalshi-bot] conviction stop-loss exit failed — restoring position");
+          openPositions.set(sym, pos);
+        }
+      }
+    }
+
     for (const [sym] of Array.from(openPositions.entries())) {
       const kalshiData = getKalshiCachedData(sym);
       const prediction = getCachedPrediction(sym);
