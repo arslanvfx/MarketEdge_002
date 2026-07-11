@@ -544,58 +544,58 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </label>
                       );
                     })()}
-                  </div>
-                )}
 
-                {/* Stop-loss floor */}
-                {(() => {
-                  const floor = merged.convictionStopLossFloor ?? 0;
-                  const floorPct = Math.round(floor * 100);
-                  return (
+                    {/* Stop-loss floor */}
+                    {(() => {
+                      const floor = merged.convictionStopLossFloor ?? 0;
+                      const floorPct = Math.round(floor * 100);
+                      return (
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-2">
+                            Stop-Loss Floor —{" "}
+                            {floor === 0
+                              ? <span className="text-muted-foreground/50">Disabled</span>
+                              : <span className="text-red-400 font-mono">Sell if contract drops to {floorPct}¢</span>}
+                          </span>
+                          <div className="flex items-center gap-3">
+                            <input type="range" min={0} max={0.80} step={0.05}
+                              className="flex-1 accent-red-500"
+                              value={floor}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionStopLossFloor: parseFloat(e.target.value) }))} />
+                            <span className="text-xs font-mono w-20 text-right">
+                              {floor === 0
+                                ? <span className="text-muted-foreground/50">Off</span>
+                                : <span className="text-red-400">{floorPct}¢ floor</span>}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/70">
+                            {floor === 0
+                              ? "No automatic exit — position holds until window close."
+                              : `Auto-sell if the contract you hold drops to ${floorPct}¢ or below, regardless of entry price. Checked every 5 seconds.`}
+                          </span>
+                        </label>
+                      );
+                    })()}
+
+                    {/* Conviction daily loss limit */}
                     <label className="flex flex-col gap-1.5 mt-1">
-                      <span className="text-xs text-muted-foreground flex items-center gap-2">
-                        Stop-Loss Floor —{" "}
-                        {floor === 0
-                          ? <span className="text-muted-foreground/50">Disabled</span>
-                          : <span className="text-red-400 font-mono">Sell if contract drops to {floorPct}¢</span>}
+                      <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                        <DollarSign className="w-3 h-3 text-red-400" />
+                        Daily Loss Limit ($)
                       </span>
-                      <div className="flex items-center gap-3">
-                        <input type="range" min={0} max={0.80} step={0.05}
-                          className="flex-1 accent-red-500"
-                          value={floor}
-                          onChange={e => setConfigDraft(d => ({ ...d, convictionStopLossFloor: parseFloat(e.target.value) }))} />
-                        <span className="text-xs font-mono w-20 text-right">
-                          {floor === 0
-                            ? <span className="text-muted-foreground/50">Off</span>
-                            : <span className="text-red-400">{floorPct}¢ floor</span>}
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70">
-                        {floor === 0
-                          ? "No automatic exit — position holds until window close."
-                          : `Auto-sell if the contract you hold drops to ${floorPct}¢ or below, regardless of entry price. Checked every 5 seconds.`}
+                      <input type="number" min={1} max={500} step={1}
+                        className="bg-background border border-red-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
+                        value={merged.convictionDailyLossLimit ?? 50}
+                        onChange={e => {
+                          const v = parseFloat(e.target.value);
+                          if (!Number.isNaN(v) && v > 0) setConfigDraft(d => ({ ...d, convictionDailyLossLimit: v }));
+                        }} />
+                      <span className="text-[10px] text-muted-foreground/60">
+                        Bot pauses for the day once net losses hit this amount. Separate from the global daily loss limit.
                       </span>
                     </label>
-                  );
-                })()}
-
-                {/* Conviction daily loss limit */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                    <DollarSign className="w-3 h-3 text-red-400" />
-                    Conviction Daily Loss Limit ($)
-                  </span>
-                  <input type="number" min={1} max={500} step={1}
-                    className="bg-background border border-red-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.convictionDailyLossLimit ?? 50}
-                    onChange={e => {
-                      const v = parseFloat(e.target.value);
-                      if (!Number.isNaN(v) && v > 0) setConfigDraft(d => ({ ...d, convictionDailyLossLimit: v }));
-                    }} />
-                  <span className="text-[10px] text-muted-foreground/60">
-                    Bot pauses for the day once net losses hit this amount (conviction mode only). Separate from the global daily loss limit.
-                  </span>
-                </label>
+                  </div>
+                )}
 
                 {/* Mode config panel — defaults, saved preset, and save actions */}
                 <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 p-3">
