@@ -697,11 +697,9 @@ async function _runBotTick(
   // ── Candle momentum guard ─────────────────────────────────────────────────
   // Skip entry when the last N one-minute candles are clearly running against
   // the bet direction. Catches intra-window reversals the snap-time model missed.
-  // Threshold: 0.15% net move over the last N closes. Calibrated so normal
-  // noise (~0.05%) doesn't trigger, but a steady push does.
-  // N = config.momentumLookbackCandles (default 8 — extended from legacy 4 to
-  // catch medium-duration drops that leave recent candles oscillating at the low).
-  {
+  // Bypassed in conviction mode — price alone is the signal; candle direction
+  // is already encoded in the Kalshi market price crossing the lock threshold.
+  if (S.config.decisionMode !== "conviction") {
     const lookbackCandles = S.config.momentumLookbackCandles ?? 8;
     const pred = getCachedPrediction(sym);
     const candles = pred?.candles ?? [];
@@ -753,7 +751,10 @@ async function _runBotTick(
         return;
       }
     }
+  }
 
+  {
+    const pred = getCachedPrediction(sym);
     // ── Strike proximity guard ─────────────────────────────────────────────
     // Skip when the live price is within 0.03% of the Kalshi target.
     // At that proximity a single tick crosses the strike and flips the
@@ -794,7 +795,9 @@ async function _runBotTick(
     // is chopping around the target — no directional edge regardless of what
     // the models say.  One crossing is fine (directional momentum shift);
     // zero crossings means price is cleanly on one side (ideal entry).
-    if (!S.config.freeRunMode && kalshiTarget > 0 && pred != null && pred.candles.length >= 6) {
+    // Bypassed in conviction mode — oscillation near the strike is normal
+    // when the market is pricing at extreme probabilities.
+    if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && kalshiTarget > 0 && pred != null && pred.candles.length >= 6) {
       const recent6 = pred.candles.slice(-6);
       let crossings = 0;
       let prevSide: boolean | null = null;
@@ -894,7 +897,9 @@ async function _runBotTick(
   //   NO:  cost = 1−yes_bid; return = 1/cost. Same threshold.
   // 1/1.45 ≈ 0.6897 → nearest cent-aligned ceiling is 0.68 (return 1.471x).
   // We compare against the raw 1/1.45 float so a 0.69 cost (1.449x) is blocked.
-  {
+  // Bypassed in conviction mode — by design the return at 88-92¢ is ~1.09-1.14×;
+  // the high probability is the edge, not the payout multiple.
+  if (S.config.decisionMode !== "conviction") {
     const minReturnFloor = S.config.minReturnMultiple ?? 1.45;
     const maxAllowedCost = 1 / minReturnFloor;
     if (expectedFillCost > maxAllowedCost) {
