@@ -1583,16 +1583,15 @@ test("conviction: yesPrice exactly at cap (0.92) → BET_YES (inclusive)", () =>
 
 // ── YES direction — past the cap → SKIP ───────────────────────────────────────
 
-test("conviction: yesPrice above cap (0.95) → SKIP (entry window missed)", () => {
+test("conviction: yesPrice above cap (0.95) → BET_YES (extreme price bypasses cap)", () => {
+  // ≥ 0.92 is the extreme threshold — market has decisively committed, bet immediately
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.95, minConfidence: 0 }));
-  assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /past the.*cap/);
+  assert.equal(r.action, "BET_YES");
 });
 
-test("conviction: yesPrice at 0.99 → SKIP (entry window missed)", () => {
+test("conviction: yesPrice at 0.99 → BET_YES (extreme price bypasses cap)", () => {
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.99, minConfidence: 0 }));
-  assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /past the.*cap/);
+  assert.equal(r.action, "BET_YES");
 });
 
 // ── NO direction — within the 88–92% entry window ────────────────────────────
@@ -1615,19 +1614,17 @@ test("conviction: yesPrice at NO cap boundary (0.08) → BET_NO (inclusive)", ()
   assert.equal(r.action, "BET_NO");
 });
 
-// ── NO direction — past the cap → SKIP ───────────────────────────────────────
+// ── NO direction — past the cap → BET_NO (extreme price bypasses cap) ────────
 
-test("conviction: yesPrice below NO cap (0.05) → SKIP (entry window missed)", () => {
-  // NO price = 95% — too deep past the 92% cap
+test("conviction: yesPrice below NO cap (0.05) → BET_NO (extreme price bypasses cap)", () => {
+  // yesPrice=0.05 → NO=95% — ≤ 0.08 extreme threshold, market has decided, bet immediately
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.05, minConfidence: 0 }));
-  assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /past the.*cap/);
+  assert.equal(r.action, "BET_NO");
 });
 
-test("conviction: yesPrice at 0.01 → SKIP (entry window missed)", () => {
+test("conviction: yesPrice at 0.01 → BET_NO (extreme price bypasses cap)", () => {
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.01, minConfidence: 0 }));
-  assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /past the.*cap/);
+  assert.equal(r.action, "BET_NO");
 });
 
 // ── SKIP (not yet at threshold) ───────────────────────────────────────────────
