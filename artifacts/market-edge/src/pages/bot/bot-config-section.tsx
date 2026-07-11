@@ -737,7 +737,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             <span className="text-xs text-muted-foreground">
                               Boost Frequency — <span className="text-violet-400 font-mono">{Math.round(prob * 100)}% of bets</span>
                             </span>
-                            <input type="range" min={0.05} max={0.60} step={0.05}
+                            <input type="range" min={0.05} max={1.00} step={0.05}
                               className="accent-violet-500"
                               value={prob}
                               onChange={e => setConfigDraft(d => ({ ...d, convictionBoostProbability: parseFloat(e.target.value) }))} />

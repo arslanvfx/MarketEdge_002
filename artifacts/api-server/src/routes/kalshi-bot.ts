@@ -925,7 +925,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof convictionBoostBetSize === "number" && convictionBoostBetSize >= 0) {
     partial.convictionBoostBetSize = convictionBoostBetSize > 0 ? convictionBoostBetSize : undefined;
   }
-  if (typeof convictionBoostProbability === "number" && convictionBoostProbability >= 0.05 && convictionBoostProbability <= 0.60) {
+  if (typeof convictionBoostProbability === "number" && convictionBoostProbability >= 0.05 && convictionBoostProbability <= 1.0) {
     partial.convictionBoostProbability = convictionBoostProbability;
   }
   if (typeof convictionBoostMinWinRate === "number" && convictionBoostMinWinRate >= 0.50 && convictionBoostMinWinRate <= 0.90) {
