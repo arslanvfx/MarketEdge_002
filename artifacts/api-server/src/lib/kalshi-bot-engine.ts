@@ -224,16 +224,18 @@ function _makeBotDecisionInner(
   // We always wait — no fast-agreement bypass — the new pipeline requires
   // Stat + Claude + ML to all complete before any entry decision is made.
   //
-  // EXCEPTION — conviction mode: Claude calls are suppressed entirely so
-  // claudeAbove will always be null.  The conviction engine (computeConvictionDecision)
-  // does not use Claude; requiring it here would block every conviction bet before
-  // the conviction logic even runs.  We skip the Claude null-check only for conviction.
+  // EXCEPTION — conviction mode: computeConvictionDecision uses only yesPrice /
+  // yesAsk / yesBid and never consults Stat, Claude, or ML.  Null signals must
+  // be treated as "no opinion" (not a blocker) or the engine can never fire —
+  // this is exactly what killed 6-coin windows where stat/ML cached data expired
+  // mid-window.  Bypass ALL three null-checks for conviction.
   {
     const convictionMode = config.decisionMode === "conviction";
-    const claudeMissing = !convictionMode && claudeAbove === null;
-    if (statAbove === null || claudeMissing || mlAbove === null) {
+    const claudeMissing  = !convictionMode && claudeAbove === null;
+    const statMlMissing  = !convictionMode && (statAbove === null || mlAbove === null);
+    if (statMlMissing || claudeMissing) {
       const missing = (
-        [statAbove === null && "Stat", claudeMissing && "Claude", mlAbove === null && "ML"] as Array<string | false>
+        [statMlMissing && statAbove === null && "Stat", claudeMissing && "Claude", statMlMissing && mlAbove === null && "ML"] as Array<string | false>
       ).filter(Boolean).join("+");
       const pendingSnapshot: SignalSnapshot = {
         statAbove, claudeAbove, mlAbove,
