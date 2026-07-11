@@ -594,4 +594,18 @@ app.listen(port, (err) => {
     runDailyThresholdLog();
     setInterval(runDailyThresholdLog, 24 * 60 * 60 * 1_000);
   }, msUntilMidnightUTC());
+
+  // Self-ping keepalive: prevents autoscale deployments from scaling to zero
+  // when there is no active browser traffic (which would kill the bot loop).
+  // Only runs in production; pings the healthcheck endpoint every 4 minutes.
+  if (process.env["NODE_ENV"] === "production") {
+    const appUrl = process.env["REPLIT_APP_URL"] ?? "https://market-combo-analyzer.replit.app";
+    const pingUrl = `${appUrl}/api/healthz`;
+    setInterval(() => {
+      fetch(pingUrl)
+        .then(() => logger.debug("[keepalive] self-ping ok"))
+        .catch((err) => logger.warn({ err }, "[keepalive] self-ping failed (non-fatal)"));
+    }, 4 * 60_000);
+    logger.info({ pingUrl }, "[keepalive] self-ping started (4-min interval)");
+  }
 });
