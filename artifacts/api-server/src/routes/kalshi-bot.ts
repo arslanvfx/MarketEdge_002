@@ -679,6 +679,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minWindowEntryMinutes,
     convictionStopLossFloor,
     convictionDailyLossLimit,
+    convictionBoostBetSize,
+    convictionBoostProbability,
+    convictionBoostMinWinRate,
     coinOverrides,
   } = req.body as {
     betSize?: number;
@@ -739,6 +742,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     priceBufferPct?: number;
     convictionStopLossFloor?: number;
     convictionDailyLossLimit?: number;
+    convictionBoostBetSize?: number;
+    convictionBoostProbability?: number;
+    convictionBoostMinWinRate?: number;
     coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
   };
 
@@ -905,6 +911,16 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionDailyLossLimit === "number" && convictionDailyLossLimit > 0) {
     partial.convictionDailyLossLimit = convictionDailyLossLimit;
+  }
+  // 0 = disabled; > 0 enables boost for that dollar amount
+  if (typeof convictionBoostBetSize === "number" && convictionBoostBetSize >= 0) {
+    partial.convictionBoostBetSize = convictionBoostBetSize > 0 ? convictionBoostBetSize : undefined;
+  }
+  if (typeof convictionBoostProbability === "number" && convictionBoostProbability >= 0.05 && convictionBoostProbability <= 0.60) {
+    partial.convictionBoostProbability = convictionBoostProbability;
+  }
+  if (typeof convictionBoostMinWinRate === "number" && convictionBoostMinWinRate >= 0.50 && convictionBoostMinWinRate <= 0.90) {
+    partial.convictionBoostMinWinRate = convictionBoostMinWinRate;
   }
   if (coinOverrides !== undefined && coinOverrides !== null && typeof coinOverrides === "object" && !Array.isArray(coinOverrides)) {
     const validated: Record<string, { paused?: boolean; maxBetSize?: number }> = {};
