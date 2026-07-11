@@ -1229,7 +1229,9 @@ export async function runBotLoopTick(): Promise<void> {
     // this coin is NOT blocked from Phase-4 for the whole window — the next 60-second
     // tick will re-evaluate it and find the monitor ready.
     // Skipped when _wmBypassActive (unanimous high-confidence signals above).
-    if (!_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
+    // Skipped in conviction mode: conviction is purely reactive to yesPrice; it uses
+    // no WM signals, so waiting for candle accumulation only blocks early entries.
+    if (!isConviction && !_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0,
         reason: `window monitor not ready (${minutesElapsed.toFixed(1)}m elapsed — needs ≥2m)`,
         windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -1241,7 +1243,8 @@ export async function runBotLoopTick(): Promise<void> {
     // mutation atomically, so Phase 4 cannot independently bet this coin.
     // When requireMonitorReady=true: hard block (full-window, not per-tick defer).
     // When requireMonitorReady=false: advisory log only, entry proceeds.
-    {
+    // Skipped in conviction mode: WM signals are irrelevant to price-reactive entry.
+    if (!isConviction) {
       const _stayAway = applyStayAwayGateDecision(
         sym,
         getWindowBetSignal(sym),

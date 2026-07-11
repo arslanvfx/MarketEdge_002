@@ -676,6 +676,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     priceBufferPct,
     kalshiLockPrice,
     minWindowEntryMinutes,
+    convictionStopLossFloor,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -733,6 +734,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     directionalRegressionThreshold?: number;
     directionalRegressionPenaltyPp?: number;
     priceBufferPct?: number;
+    convictionStopLossFloor?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -892,8 +894,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) {
     partial.kalshiLockPrice = kalshiLockPrice;
   }
-  const { convictionStopLossFloor } = body;
-  // 0 = disabled; valid range 0.10–0.85 (below entry floor, above zero)
+  // 0 = disabled; valid range 0–0.85
   if (typeof convictionStopLossFloor === "number" && convictionStopLossFloor >= 0 && convictionStopLossFloor <= 0.85) {
     partial.convictionStopLossFloor = convictionStopLossFloor;
   }
