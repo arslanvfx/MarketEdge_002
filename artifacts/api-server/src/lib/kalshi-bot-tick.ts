@@ -396,8 +396,8 @@ async function _runBotTick(
   // price crossing happens near settlement; blocking it defeats the purpose).
   // The hard pre-order floor below is also bypassed when allowLateEntries=true.
   if (!S.config.allowLateEntries) {
-    const minRemaining = S.config.minRemainingMinutes ?? 3;
-    if (15 * 60 - secondsElapsed < minRemaining * 60) {
+    const minRemaining = S.config.minRemainingMinutes ?? 0;
+    if (minRemaining > 0 && 15 * 60 - secondsElapsed < minRemaining * 60) {
       logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping tick early");
       return;
     }
