@@ -1174,10 +1174,10 @@ async function _runBotTick(
   const secondsElapsedNow = isNaN(windowStartMs) ? 0 : (nowMs - windowStartMs) / 1000;
   const secondsRemainingNow = 15 * 60 - secondsElapsedNow;
   if (!S.config.allowLateEntries) {
-    const HARD_LATE_ENTRY_FLOOR_S = 3 * 60;
-    if (secondsRemainingNow < HARD_LATE_ENTRY_FLOOR_S) {
+    const hardFloorS = (S.config.minRemainingMinutes ?? 0) * 60;
+    if (hardFloorS > 0 && secondsRemainingNow < hardFloorS) {
       logger.warn(
-        { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS: HARD_LATE_ENTRY_FLOOR_S },
+        { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS },
         "[kalshi-bot] HARD FLOOR — aborting bet, insufficient time remaining in window",
       );
       return;
