@@ -1161,6 +1161,9 @@ export interface BotConfig {
   convictionBoostBetSize?: number;       // conviction only: boosted bet size for stable coins (undefined/0 = disabled)
   convictionBoostProbability?: number;   // fraction of windows randomly chosen for boost, 0–1 (default 0.25)
   convictionBoostMinWinRate?: number;    // minimum conviction win rate for a coin to qualify for boost, 0–1 (default 0.70)
+  statRegimeBoostEnabled?: boolean;      // use max bet size only when stat model confirms stable/trending price action
+  statRegimeBoostMinER?: number;         // min efficiency ratio to qualify (0–1, default 0.40); 1=clean trend, 0=pure chop
+  statRegimeBoostMaxOscillations?: number; // max direction reversals in last 15 min to qualify (default 6)
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1305,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionBoostBetSize: undefined,
   convictionBoostProbability: 0.25,
   convictionBoostMinWinRate: 0.70,
+  statRegimeBoostEnabled: false,
+  statRegimeBoostMinER: 0.40,
+  statRegimeBoostMaxOscillations: 6,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,

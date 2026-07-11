@@ -682,6 +682,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionBoostBetSize,
     convictionBoostProbability,
     convictionBoostMinWinRate,
+    statRegimeBoostEnabled,
+    statRegimeBoostMinER,
+    statRegimeBoostMaxOscillations,
     coinOverrides,
   } = req.body as {
     betSize?: number;
@@ -745,6 +748,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionBoostBetSize?: number;
     convictionBoostProbability?: number;
     convictionBoostMinWinRate?: number;
+    statRegimeBoostEnabled?: boolean;
+    statRegimeBoostMinER?: number;
+    statRegimeBoostMaxOscillations?: number;
     coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
   };
 
@@ -921,6 +927,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionBoostMinWinRate === "number" && convictionBoostMinWinRate >= 0.50 && convictionBoostMinWinRate <= 0.90) {
     partial.convictionBoostMinWinRate = convictionBoostMinWinRate;
+  }
+  if (typeof statRegimeBoostEnabled === "boolean") {
+    partial.statRegimeBoostEnabled = statRegimeBoostEnabled;
+  }
+  if (typeof statRegimeBoostMinER === "number" && statRegimeBoostMinER >= 0.10 && statRegimeBoostMinER <= 0.80) {
+    partial.statRegimeBoostMinER = statRegimeBoostMinER;
+  }
+  if (typeof statRegimeBoostMaxOscillations === "number" && statRegimeBoostMaxOscillations >= 1 && statRegimeBoostMaxOscillations <= 14) {
+    partial.statRegimeBoostMaxOscillations = Math.round(statRegimeBoostMaxOscillations);
   }
   if (coinOverrides !== undefined && coinOverrides !== null && typeof coinOverrides === "object" && !Array.isArray(coinOverrides)) {
     const validated: Record<string, { paused?: boolean; maxBetSize?: number }> = {};

@@ -986,22 +986,45 @@ async function _runBotTick(
     convictionBoostWindowCoins.has(sym) &&
     (S.config.convictionBoostBetSize ?? 0) > 0
   ) ? S.config.convictionBoostBetSize! : null;
+  // Stat regime boost: use maxBetSize when the coin's current price action is
+  // stable (high efficiency ratio, low oscillations, no spike candle).
+  // Works in any mode. Does not stack with conviction random boost.
+  const regimeQualified = (() => {
+    if (!(S.config.statRegimeBoostEnabled ?? false)) return false;
+    if (boostBetSize != null) return false; // conviction boost already elevated, no need to stack
+    const ind = getCachedPrediction(sym)?.indicators;
+    if (!ind) return false;
+    const minER  = S.config.statRegimeBoostMinER ?? 0.40;
+    const maxOsc = S.config.statRegimeBoostMaxOscillations ?? 6;
+    return ind.efficiencyRatio >= minER && ind.oscillationCount <= maxOsc && !ind.spikeFlag;
+  })();
   const effectiveMaxBet = (() => {
     const baseMax = boostBetSize ?? (S.config.maxBetSize ?? 2);
     return perCoinMaxBet != null && perCoinMaxBet < baseMax ? perCoinMaxBet : baseMax;
   })();
-  // When a boost is active use the flat boost amount (capped by effectiveMaxBet).
-  // Otherwise run the standard confidence-scaled dynamic sizing against S.config.
+  // Priority: conviction boost → regime boost → confidence-scaled dynamic sizing.
   const targetBetSize = boostBetSize != null
     ? Math.min(boostBetSize, effectiveMaxBet)
-    : Math.min(
-        computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction),
-        effectiveMaxBet,
-      );
+    : regimeQualified
+      ? Math.min(S.config.maxBetSize ?? 2, effectiveMaxBet)
+      : Math.min(
+          computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction),
+          effectiveMaxBet,
+        );
   if (boostBetSize != null) {
     logger.info(
       { sym, boostBetSize, baseBetSize: S.config.betSize, targetBetSize: targetBetSize.toFixed(4) },
       "[kalshi-bot] conviction random boost active — elevated bet size this window",
+    );
+  } else if (regimeQualified) {
+    const ind = getCachedPrediction(sym)?.indicators;
+    logger.info(
+      {
+        sym,
+        er: ind?.efficiencyRatio, oscillations: ind?.oscillationCount, spike: ind?.spikeFlag,
+        maxBetSize: S.config.maxBetSize, targetBetSize: targetBetSize.toFixed(4),
+      },
+      "[kalshi-bot] stat regime boost — stable price action → max bet size this entry",
     );
   } else if (perCoinMaxBet != null && perCoinMaxBet < (S.config.maxBetSize ?? 2)) {
     logger.info(

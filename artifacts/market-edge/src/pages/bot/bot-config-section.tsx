@@ -242,6 +242,72 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 })()}
 
                 </>)}
+
+                {/* ── Stat Regime Max-Bet ───────────────────────────────── */}
+                {!isConviction && (<>
+                <div className="flex flex-col gap-2 border border-blue-500/20 rounded-lg p-3 bg-blue-500/5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-medium text-blue-300 flex items-center gap-1.5">
+                      <Activity className="w-3 h-3" />
+                      Regime-Based Max Bet
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setConfigDraft(d => ({ ...d, statRegimeBoostEnabled: !(merged.statRegimeBoostEnabled ?? false) }))}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.statRegimeBoostEnabled ?? false)
+                        ? "bg-blue-500/20 border-blue-500/50 text-blue-300"
+                        : "bg-background border-border text-muted-foreground"}`}
+                    >
+                      {(merged.statRegimeBoostEnabled ?? false) ? "On" : "Off"}
+                    </button>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                    Uses your max bet size only when the stat model confirms the coin is currently stable and trending — not choppy or spiking. All other entries use the regular bet size.
+                  </span>
+                  {(merged.statRegimeBoostEnabled ?? false) && (<>
+                    {/* Min Efficiency Ratio */}
+                    {(() => {
+                      const er = merged.statRegimeBoostMinER ?? 0.40;
+                      const label = er >= 0.55 ? "Strongly trending" : er >= 0.40 ? "Trending" : er >= 0.25 ? "Drifting" : "Any direction";
+                      return (
+                        <label className="flex flex-col gap-1">
+                          <span className="text-xs text-muted-foreground">
+                            Min Trend Strength — <span className="text-blue-400 font-mono">{er.toFixed(2)}</span>
+                            <span className="text-muted-foreground/50 ml-1.5 text-[10px]">({label})</span>
+                          </span>
+                          <input type="range" min={0.15} max={0.70} step={0.05}
+                            className="accent-blue-500"
+                            value={er}
+                            onChange={e => setConfigDraft(d => ({ ...d, statRegimeBoostMinER: parseFloat(e.target.value) }))} />
+                          <span className="text-[10px] text-muted-foreground/60">
+                            Efficiency ratio: how cleanly price is moving (0 = pure chop, 1 = perfect trend). Higher = stricter.
+                          </span>
+                        </label>
+                      );
+                    })()}
+                    {/* Max Oscillations */}
+                    {(() => {
+                      const osc = merged.statRegimeBoostMaxOscillations ?? 6;
+                      return (
+                        <label className="flex flex-col gap-1">
+                          <span className="text-xs text-muted-foreground">
+                            Max Direction Reversals — <span className="text-blue-400 font-mono">{osc}</span>
+                            <span className="text-muted-foreground/50 ml-1.5 text-[10px]">in last 15 min</span>
+                          </span>
+                          <input type="range" min={2} max={12} step={1}
+                            className="accent-blue-500"
+                            value={osc}
+                            onChange={e => setConfigDraft(d => ({ ...d, statRegimeBoostMaxOscillations: parseInt(e.target.value, 10) }))} />
+                          <span className="text-[10px] text-muted-foreground/60">
+                            How many times price reversed direction. Lower = smoother price action required.
+                          </span>
+                        </label>
+                      );
+                    })()}
+                  </>)}
+                </div>
+                </>)}
+
                 {/* ── Live Mode Guards ─────────────────────────────────── */}
                 <div className="col-span-full border-t border-amber-500/20 pt-3 -mt-1">
                   <span className="text-xs font-semibold text-amber-400/90 flex items-center gap-1.5">

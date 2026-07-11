@@ -75,6 +75,9 @@ export interface BotConfig {
   convictionBoostBetSize?: number;
   convictionBoostProbability?: number;
   convictionBoostMinWinRate?: number;
+  statRegimeBoostEnabled?: boolean;
+  statRegimeBoostMinER?: number;
+  statRegimeBoostMaxOscillations?: number;
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
 }
 
