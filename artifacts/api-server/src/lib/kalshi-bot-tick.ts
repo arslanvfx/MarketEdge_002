@@ -987,38 +987,43 @@ async function _runBotTick(
   //         downgrade to regular bet size (no stat check needed for non-boosted bets).
   const boostBetSize = (() => {
     if (S.config.decisionMode !== "conviction") return null;
-    if ((S.config.convictionBoostBetSize ?? 0) <= 0) return null;
+    // Use explicit convictionBoostBetSize if set; otherwise fall back to maxBetSize.
+    // This lets the feature work without needing a separate dollar-amount config.
+    const targetBoost = (S.config.convictionBoostBetSize ?? 0) > 0
+      ? S.config.convictionBoostBetSize!
+      : (S.config.maxBetSize ?? 0);
+    if (targetBoost <= 0) return null;
     const prob  = S.config.convictionBoostProbability ?? 0.25;
     const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
     const wr    = coinConvictionWinRates.get(sym) ?? null;
     const qualifies = wr === null || wr >= minWr;
     if (!qualifies) {
-      logger.debug({ sym, wr, minWr }, "[kalshi-bot] conviction boost — win-rate gate failed");
+      logger.info({ sym, wr, minWr }, "[kalshi-bot] conviction boost — win-rate gate failed");
       return null;
     }
     if (!(Math.random() < prob)) {
-      logger.debug({ sym, prob }, "[kalshi-bot] conviction boost — random roll failed");
+      logger.info({ sym, prob }, "[kalshi-bot] conviction boost — random roll missed (normal)");
       return null;
     }
     // Random roll passed — check regime: only boost in stable conditions.
     // Choppy or spiking markets downgrade back to regular bet size.
     const ind    = getCachedPrediction(sym)?.indicators;
     if (!ind) {
-      logger.debug({ sym }, "[kalshi-bot] conviction boost — no indicators, staying regular");
+      logger.info({ sym }, "[kalshi-bot] conviction boost — no indicators, staying regular");
       return null;
     }
     const minER  = S.config.statRegimeBoostMinER          ?? 0.40;
     const maxOsc = S.config.statRegimeBoostMaxOscillations ?? 6;
     const stable = ind.efficiencyRatio >= minER && ind.oscillationCount <= maxOsc && !ind.spikeFlag;
     if (!stable) {
-      logger.debug(
+      logger.info(
         { sym, efficiencyRatio: ind.efficiencyRatio, oscillationCount: ind.oscillationCount, spikeFlag: ind.spikeFlag, minER, maxOsc },
         "[kalshi-bot] conviction boost — regime not stable, staying regular",
       );
       return null;
     }
-    logger.info({ sym, boostBetSize: S.config.convictionBoostBetSize, prob, wr }, "[kalshi-bot] conviction boost — all gates passed, using max bet size");
-    return S.config.convictionBoostBetSize!;
+    logger.info({ sym, targetBoost, prob, wr }, "[kalshi-bot] conviction boost — all gates passed, using max bet size");
+    return targetBoost;
   })();
   // Stat regime boost: use maxBetSize when the coin's current price action is
   // stable (high efficiency ratio, low oscillations, no spike candle).
