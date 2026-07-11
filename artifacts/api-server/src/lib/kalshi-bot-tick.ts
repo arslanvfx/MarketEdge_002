@@ -980,20 +980,24 @@ async function _runBotTick(
   // Per-coin maxBetSize override: further caps the bet for this specific coin.
   const perCoinMaxBet = S.config.coinOverrides?.[sym]?.maxBetSize;
   // Conviction random boost: if this coin was selected for a boost this window,
-  // override betSize and maxBetSize with the higher convictionBoostBetSize.
+  // override the bet size with the higher convictionBoostBetSize (flat amount, no dynamic scaling).
   const boostBetSize = (
     S.config.decisionMode === "conviction" &&
     convictionBoostWindowCoins.has(sym) &&
     (S.config.convictionBoostBetSize ?? 0) > 0
   ) ? S.config.convictionBoostBetSize! : null;
-  const effectiveBaseBet = boostBetSize ?? S.config.betSize;
-  const effectiveMaxBet = perCoinMaxBet != null && perCoinMaxBet < (boostBetSize ?? (S.config.maxBetSize ?? 2))
-    ? perCoinMaxBet
-    : (boostBetSize ?? (S.config.maxBetSize ?? 2));
-  const targetBetSize = Math.min(
-    computeDynamicBetSize(decision.confidence, { ...S.config, betSize: effectiveBaseBet, maxBetSize: effectiveMaxBet }, yesPrice, direction),
-    effectiveMaxBet,
-  );
+  const effectiveMaxBet = (() => {
+    const baseMax = boostBetSize ?? (S.config.maxBetSize ?? 2);
+    return perCoinMaxBet != null && perCoinMaxBet < baseMax ? perCoinMaxBet : baseMax;
+  })();
+  // When a boost is active use the flat boost amount (capped by effectiveMaxBet).
+  // Otherwise run the standard confidence-scaled dynamic sizing against S.config.
+  const targetBetSize = boostBetSize != null
+    ? Math.min(boostBetSize, effectiveMaxBet)
+    : Math.min(
+        computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction),
+        effectiveMaxBet,
+      );
   if (boostBetSize != null) {
     logger.info(
       { sym, boostBetSize, baseBetSize: S.config.betSize, targetBetSize: targetBetSize.toFixed(4) },
