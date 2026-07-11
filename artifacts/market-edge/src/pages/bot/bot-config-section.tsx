@@ -839,6 +839,21 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   )}
                 </label>
 
+                {/* Max Bets Per Window — visible in all modes */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max Bets / Window</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxBetsPerWindow ?? 8}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxBetsPerWindow: parseInt(e.target.value) }))}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n} bet{n > 1 ? "s" : ""}</option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-muted-foreground/60">
+                    Max bets placed per 15-min window across all coins (e.g. 2 bets × $10 = $20 max per window)
+                  </span>
+                </label>
+
                 {!isConviction && (<>
                 {/* ── Entry Timing ───────────────────────────────── */}
                 <div className="flex flex-col gap-1.5">
@@ -886,18 +901,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </select>
                   </label>
                 </div>
-
-                {/* Max Bets Per Window */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Max Bets / Window</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.maxBetsPerWindow ?? 8}
-                    onChange={e => setConfigDraft(d => ({ ...d, maxBetsPerWindow: parseInt(e.target.value) }))}>
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
-                      <option key={n} value={n}>{n} bet{n > 1 ? "s" : ""}</option>
-                    ))}
-                  </select>
-                </label>
 
                 {/* Quiet Hours Start */}
                 <label className="flex flex-col gap-1.5">
