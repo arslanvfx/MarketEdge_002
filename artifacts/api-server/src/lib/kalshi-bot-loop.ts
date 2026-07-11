@@ -2063,8 +2063,9 @@ export async function runBotLoopTick(): Promise<void> {
   // Reversing coins that were soft-skipped (trendStability="reversing") and coins
   // blocked by momentum override / directional-cap are excluded from execution.
   const betSymbols  = bets.map(e => e.symbol);
+  const _isConvictionMode = S.config.decisionMode === "conviction";
   const skipSymbols = skips
-    .filter(e => e.trendStability !== "reversing" && !filteredByNewGuards.has(e.symbol))
+    .filter(e => (_isConvictionMode || e.trendStability !== "reversing") && !filteredByNewGuards.has(e.symbol))
     .map(e => e.symbol);
 
   // Snapshot pre-launch open-position state for all candidates.
