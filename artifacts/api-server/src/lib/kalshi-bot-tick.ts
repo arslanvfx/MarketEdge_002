@@ -977,7 +977,21 @@ async function _runBotTick(
   // (e.g. YES at 0.52) receive smaller bets than high-value prices (YES at
   // 0.70) even at the same confidence score.  When enableDynamicSizing is
   // false this returns S.config.betSize unchanged (legacy).
-  const targetBetSize = computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction);
+  // Per-coin maxBetSize override: further caps the bet for this specific coin.
+  const perCoinMaxBet = S.config.coinOverrides?.[sym]?.maxBetSize;
+  const effectiveMaxBet = perCoinMaxBet != null && perCoinMaxBet < (S.config.maxBetSize ?? 2)
+    ? perCoinMaxBet
+    : (S.config.maxBetSize ?? 2);
+  const targetBetSize = Math.min(
+    computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction),
+    effectiveMaxBet,
+  );
+  if (perCoinMaxBet != null && perCoinMaxBet < (S.config.maxBetSize ?? 2)) {
+    logger.info(
+      { sym, perCoinMaxBet, globalMaxBetSize: S.config.maxBetSize, targetBetSize: targetBetSize.toFixed(4) },
+      "[kalshi-bot] per-coin maxBetSize override applied",
+    );
+  }
   const contractCount = Math.floor(targetBetSize / expectedFillCost);
   // If budget can't buy even one contract at the live ask, skip this entry and
   // engage the FOK-cooldown so this coin doesn't retry the same window.
@@ -1015,7 +1029,7 @@ async function _runBotTick(
   // trade entirely before touching Kalshi.  This protects against misconfigured
   // betSize values, unexpected rounding, or any future code change that could
   // inflate contractCount.  A tolerance of $0.01 covers floating-point dust.
-  const maxBetCap = S.config.maxBetSize ?? 2;
+  const maxBetCap = effectiveMaxBet;
   if (checkMaxBetSizeGuard(betAmount, maxBetCap)) {
     logger.error(
       {

@@ -579,6 +579,24 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   );
                 })()}
 
+                {/* Conviction daily loss limit */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                    <DollarSign className="w-3 h-3 text-red-400" />
+                    Conviction Daily Loss Limit ($)
+                  </span>
+                  <input type="number" min={1} max={500} step={1}
+                    className="bg-background border border-red-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.convictionDailyLossLimit ?? 50}
+                    onChange={e => {
+                      const v = parseFloat(e.target.value);
+                      if (!Number.isNaN(v) && v > 0) setConfigDraft(d => ({ ...d, convictionDailyLossLimit: v }));
+                    }} />
+                  <span className="text-[10px] text-muted-foreground/60">
+                    Bot pauses for the day once net losses hit this amount (conviction mode only). Separate from the global daily loss limit.
+                  </span>
+                </label>
+
                 {/* Mode config panel — defaults, saved preset, and save actions */}
                 <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 p-3">
                   <div className="flex items-center justify-between">
@@ -1504,6 +1522,93 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </div>
                 </div>
               )}
+
+              {/* ── Per-Coin Overrides ── */}
+              {(() => {
+                const COINS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "HYPE"];
+                const overrides = (merged.coinOverrides ?? {}) as Record<string, { paused?: boolean; maxBetSize?: number }>;
+                const globalMax = merged.maxBetSize ?? 2;
+                return (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                      <Sliders className="w-3 h-3" />
+                      Per-Coin Overrides
+                    </span>
+                    <div className="rounded-xl border border-border overflow-hidden">
+                      {COINS.map((coin, i) => {
+                        const ov = overrides[coin] ?? {};
+                        const isPaused = ov.paused === true;
+                        const perMax = ov.maxBetSize;
+                        return (
+                          <div
+                            key={coin}
+                            className={`flex items-center gap-3 px-3 py-2 ${i > 0 ? "border-t border-border" : ""} ${isPaused ? "bg-muted/30" : ""}`}
+                          >
+                            {/* Coin label */}
+                            <span className={`text-xs font-mono w-12 font-semibold ${isPaused ? "text-muted-foreground/40 line-through" : "text-foreground"}`}>
+                              {coin}
+                            </span>
+
+                            {/* Pause toggle */}
+                            <button
+                              type="button"
+                              onClick={() => setConfigDraft(d => {
+                                const cur = ((d.coinOverrides ?? merged.coinOverrides ?? {}) as Record<string, { paused?: boolean; maxBetSize?: number }>);
+                                const next = { ...cur, [coin]: { ...cur[coin], paused: !isPaused } };
+                                if (!next[coin].paused && next[coin].maxBetSize == null) delete next[coin];
+                                return { ...d, coinOverrides: next };
+                              })}
+                              className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border transition-colors ${
+                                isPaused
+                                  ? "bg-amber-500/15 border-amber-500/40 text-amber-400"
+                                  : "border-border text-muted-foreground hover:border-border/80 hover:text-foreground"
+                              }`}
+                            >
+                              <Pause className="w-2.5 h-2.5" />
+                              {isPaused ? "Paused" : "Pause"}
+                            </button>
+
+                            {/* Max bet input */}
+                            <div className="flex items-center gap-1.5 ml-auto">
+                              <span className="text-[10px] text-muted-foreground/60">Max $</span>
+                              <input
+                                type="number"
+                                min={0.5}
+                                max={100}
+                                step={0.5}
+                                placeholder={globalMax.toFixed(2)}
+                                value={perMax != null ? perMax : ""}
+                                className="w-20 bg-background border border-border rounded px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/40"
+                                onChange={e => {
+                                  const v = e.target.value === "" ? undefined : parseFloat(e.target.value);
+                                  setConfigDraft(d => {
+                                    const cur = ((d.coinOverrides ?? merged.coinOverrides ?? {}) as Record<string, { paused?: boolean; maxBetSize?: number }>);
+                                    const updated = { ...cur[coin], maxBetSize: v };
+                                    if (v == null) delete updated.maxBetSize;
+                                    const next = { ...cur, [coin]: updated };
+                                    if (!next[coin].paused && next[coin].maxBetSize == null) delete next[coin];
+                                    return { ...d, coinOverrides: next };
+                                  });
+                                }}
+                              />
+                            </div>
+
+                            {/* Active indicator */}
+                            {perMax != null && (
+                              <span className={`text-[10px] font-mono ${perMax < globalMax ? "text-sky-400" : "text-muted-foreground/50"}`}>
+                                {perMax < globalMax ? `↓ capped` : `= global`}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <span className="text-[10px] text-muted-foreground/60">
+                      Pause stops all new bets for that coin. Max $ caps the bet size per contract (blank = use global max). Save to apply.
+                    </span>
+                  </div>
+                );
+              })()}
 
               <div className="flex items-center gap-2 pt-2 border-t border-border">
                 <Button size="sm" disabled={!hasDraft || saving} onClick={saveConfig} className="gap-1">

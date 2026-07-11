@@ -1157,6 +1157,7 @@ export interface BotConfig {
   proximityLateWindowMinutes?: number;      // minutes remaining when late phase starts (default 7)
   proximityEarlyPctOverrides?: Record<string, number>; // per-coin early-phase %
   proximityLatePctOverrides?: Record<string, number>;  // per-coin late-phase %
+  coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;  // per-coin manual pause + bet cap
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,6 +1320,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   proximityLateWindowMinutes: 7,
   proximityEarlyPctOverrides: {},
   proximityLatePctOverrides: {},
+  coinOverrides: {},
 };
 
 /**

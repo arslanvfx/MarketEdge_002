@@ -679,6 +679,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minWindowEntryMinutes,
     convictionStopLossFloor,
     convictionDailyLossLimit,
+    coinOverrides,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -738,6 +739,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     priceBufferPct?: number;
     convictionStopLossFloor?: number;
     convictionDailyLossLimit?: number;
+    coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -903,6 +905,17 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionDailyLossLimit === "number" && convictionDailyLossLimit > 0) {
     partial.convictionDailyLossLimit = convictionDailyLossLimit;
+  }
+  if (coinOverrides !== undefined && coinOverrides !== null && typeof coinOverrides === "object" && !Array.isArray(coinOverrides)) {
+    const validated: Record<string, { paused?: boolean; maxBetSize?: number }> = {};
+    for (const [sym, ov] of Object.entries(coinOverrides)) {
+      if (!ov || typeof ov !== "object") continue;
+      const entry: { paused?: boolean; maxBetSize?: number } = {};
+      if (typeof ov.paused === "boolean") entry.paused = ov.paused;
+      if (typeof ov.maxBetSize === "number" && ov.maxBetSize >= 0.5) entry.maxBetSize = ov.maxBetSize;
+      validated[sym.toUpperCase()] = entry;
+    }
+    partial.coinOverrides = validated;
   }
   // preConvictionThreshold must be < kalshiLockPrice (or the current config lock price
   // if not being changed simultaneously) to form a valid pre-entry band.

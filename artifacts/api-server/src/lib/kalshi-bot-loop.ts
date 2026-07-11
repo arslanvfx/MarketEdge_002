@@ -1456,6 +1456,20 @@ export async function runBotLoopTick(): Promise<void> {
     // post-decision check needed here. If confidence was below the raised floor
     // the engine already returned SKIP, which is caught by Phase-4 guards.)
 
+    // ── Per-coin manual pause ─────────────────────────────────────────────────
+    // User-controlled: permanently skips this coin until the override is removed.
+    // Unlike auto-tune pauses this is NOT bypassed by freeRunMode — the user
+    // explicitly set it and must explicitly clear it.
+    if (S.config.coinOverrides?.[sym]?.paused) {
+      filteredByNewGuards.add(sym);
+      evalResults.push({
+        symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
+        reason: "manually paused",
+        windowKey, selected: false, evaluatedAt: now, trendStability: stability, regime,
+      });
+      continue;
+    }
+
     // ── Per-coin auto-tune pause (shadow probe) ───────────────────────────────
     // Fires after `decision` is computed so we can record a directional shadow
     // bet. checkAllParoles() clears pausedCoins early when shadow accuracy

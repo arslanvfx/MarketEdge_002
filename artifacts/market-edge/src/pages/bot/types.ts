@@ -71,6 +71,8 @@ export interface BotConfig {
   proximityLateWindowMinutes?: number;
   proximityEarlyPctOverrides?: Record<string, number>;
   proximityLatePctOverrides?: Record<string, number>;
+  convictionDailyLossLimit?: number;
+  coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
 }
 
 export interface LogicModeStats {
