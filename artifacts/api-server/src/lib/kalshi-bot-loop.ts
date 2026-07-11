@@ -502,30 +502,11 @@ export async function runBotLoopTick(): Promise<void> {
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
-    // Conviction random boost: assign eligible coins a higher bet size for this window.
-    // Eligibility = coin has ≥ minWinRate recent conviction win rate.
-    // Assignment = random draw per coin, each window independently.
+    // Conviction random boost: the random roll happens per individual bet in the tick,
+    // not here at window transition. Just refresh win-rate data and reset the (now-unused)
+    // Set so nothing carries over from the previous window.
     convictionBoostWindowCoins.clear();
-    refreshConvictionWinRates();   // async, fire-and-forget; uses cached value until next refresh
-    if (S.config.decisionMode === "conviction" && (S.config.convictionBoostBetSize ?? 0) > 0) {
-      const prob  = S.config.convictionBoostProbability ?? 0.25;
-      const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
-      for (const coin of CRYPTO_COINS) {
-        const wr = coinConvictionWinRates.get(coin.symbol) ?? null;
-        // Coins with no history yet are treated as eligible (we can't disqualify
-        // what we haven't measured); coins WITH history must meet minWinRate.
-        const qualifies = wr === null || wr >= minWr;
-        if (qualifies && Math.random() < prob) {
-          convictionBoostWindowCoins.add(coin.symbol);
-        }
-      }
-      if (convictionBoostWindowCoins.size > 0) {
-        logger.info(
-          { boostedCoins: Array.from(convictionBoostWindowCoins), boostBetSize: S.config.convictionBoostBetSize },
-          "[kalshi-bot] conviction boost — selected coins get higher bet size this window",
-        );
-      }
-    }
+    refreshConvictionWinRates();   // async, fire-and-forget; used by per-bet roll in the tick
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
     // Clear bet details older than the current window to prevent map growth.
     for (const k of windowBetDetails.keys()) {

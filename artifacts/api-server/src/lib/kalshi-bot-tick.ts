@@ -43,7 +43,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, convictionBoostWindowCoins,
+  convictionFiredThisWindow, coinConvictionWinRates,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -980,13 +980,18 @@ async function _runBotTick(
   // false this returns S.config.betSize unchanged (legacy).
   // Per-coin maxBetSize override: further caps the bet for this specific coin.
   const perCoinMaxBet = S.config.coinOverrides?.[sym]?.maxBetSize;
-  // Conviction random boost: if this coin was selected for a boost this window,
-  // override the bet size with the higher convictionBoostBetSize (flat amount, no dynamic scaling).
-  const boostBetSize = (
-    S.config.decisionMode === "conviction" &&
-    convictionBoostWindowCoins.has(sym) &&
-    (S.config.convictionBoostBetSize ?? 0) > 0
-  ) ? S.config.convictionBoostBetSize! : null;
+  // Conviction random boost: roll the dice per individual bet (not per window).
+  // Coins with recorded history must meet minWinRate; coins with no history are
+  // treated as eligible (can't disqualify what hasn't been measured).
+  const boostBetSize = (() => {
+    if (S.config.decisionMode !== "conviction") return null;
+    if ((S.config.convictionBoostBetSize ?? 0) <= 0) return null;
+    const prob  = S.config.convictionBoostProbability ?? 0.25;
+    const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
+    const wr    = coinConvictionWinRates.get(sym) ?? null;
+    const qualifies = wr === null || wr >= minWr;
+    return qualifies && Math.random() < prob ? S.config.convictionBoostBetSize! : null;
+  })();
   // Stat regime boost: use maxBetSize when the coin's current price action is
   // stable (high efficiency ratio, low oscillations, no spike candle).
   // Works in any mode. Does not stack with conviction random boost.
