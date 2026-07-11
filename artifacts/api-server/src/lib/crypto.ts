@@ -53,6 +53,7 @@ export {
   getKalshiWindowContext,
   getKalshiCachedData,
   fetchKalshiTarget,
+  fetchOrderbookPrices,
 } from "./crypto-kalshi";
 
 // ── crypto-history ────────────────────────────────────────────────────────────

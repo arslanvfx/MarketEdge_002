@@ -1158,6 +1158,9 @@ export interface BotConfig {
   proximityEarlyPctOverrides?: Record<string, number>; // per-coin early-phase %
   proximityLatePctOverrides?: Record<string, number>;  // per-coin late-phase %
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;  // per-coin manual pause + bet cap
+  convictionBoostBetSize?: number;       // conviction only: boosted bet size for stable coins (undefined/0 = disabled)
+  convictionBoostProbability?: number;   // fraction of windows randomly chosen for boost, 0–1 (default 0.25)
+  convictionBoostMinWinRate?: number;    // minimum conviction win rate for a coin to qualify for boost, 0–1 (default 0.70)
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,6 +1299,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   profitLockPct: 0,
   convictionStopLossFloor: 0,
   convictionDailyLossLimit: 50,
+  convictionBoostBetSize: undefined,
+  convictionBoostProbability: 0.25,
+  convictionBoostMinWinRate: 0.70,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,

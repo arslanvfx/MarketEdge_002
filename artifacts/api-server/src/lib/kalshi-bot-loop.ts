@@ -41,7 +41,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, getBotDecisionMode,
+  convictionFiredThisWindow, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -188,6 +188,44 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
 // Tracks the last time a pipeline re-check was run for each open position.
 // Keyed by sym — cleared on window change by the position-expiry logic.
 const pipelineRecheckAt = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
+// Per-coin conviction win rates — refreshed at most once per hour
+// ---------------------------------------------------------------------------
+let _lastWinRateRefreshAt = 0;
+async function refreshConvictionWinRates(): Promise<void> {
+  const now = Date.now();
+  if (now - _lastWinRateRefreshAt < 60 * 60 * 1000) return; // at most once per hour
+  _lastWinRateRefreshAt = now;
+  try {
+    const rows = await db.execute(sql`
+      SELECT symbol,
+        COUNT(*) FILTER (WHERE outcome = 'win')  AS wins,
+        COUNT(*) FILTER (WHERE outcome = 'loss') AS losses
+      FROM kalshi_bot_bets
+      WHERE mode = 'live'
+        AND decision_mode = 'conviction'
+        AND action = 'expired'
+        AND outcome IS NOT NULL
+        AND created_at >= NOW() - INTERVAL '14 days'
+      GROUP BY symbol
+    `);
+    for (const row of (rows as unknown as { symbol: string; wins: string; losses: string }[])) {
+      const wins   = parseInt(row.wins,   10) || 0;
+      const losses = parseInt(row.losses, 10) || 0;
+      const total  = wins + losses;
+      if (total >= 10) {
+        coinConvictionWinRates.set(row.symbol.toUpperCase(), wins / total);
+      }
+    }
+    logger.debug(
+      { rates: Object.fromEntries(coinConvictionWinRates) },
+      "[kalshi-bot] conviction win rates refreshed",
+    );
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] conviction win rate refresh failed — using cached values");
+  }
+}
 
 // Tracks which `sym:windowKey` pairs have already had their pipeline-completion
 // entry evaluation triggered.  The pipeline callback fires exactly once per coin
@@ -464,6 +502,27 @@ export async function runBotLoopTick(): Promise<void> {
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
+    // Conviction random boost: assign eligible coins a higher bet size for this window.
+    // Eligibility = coin has ≥ minWinRate recent conviction win rate.
+    // Assignment = random draw per coin, each window independently.
+    convictionBoostWindowCoins.clear();
+    refreshConvictionWinRates();   // async, fire-and-forget; uses cached value until next refresh
+    if (S.config.decisionMode === "conviction" && (S.config.convictionBoostBetSize ?? 0) > 0) {
+      const prob  = S.config.convictionBoostProbability ?? 0.25;
+      const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
+      for (const coin of CRYPTO_COINS) {
+        const wr = coinConvictionWinRates.get(coin.symbol) ?? null;
+        if (wr != null && wr >= minWr && Math.random() < prob) {
+          convictionBoostWindowCoins.add(coin.symbol);
+        }
+      }
+      if (convictionBoostWindowCoins.size > 0) {
+        logger.info(
+          { boostedCoins: Array.from(convictionBoostWindowCoins), boostBetSize: S.config.convictionBoostBetSize },
+          "[kalshi-bot] conviction boost — selected coins get higher bet size this window",
+        );
+      }
+    }
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
     // Clear bet details older than the current window to prevent map growth.
     for (const k of windowBetDetails.keys()) {

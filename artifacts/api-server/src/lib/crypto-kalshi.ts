@@ -114,7 +114,7 @@ export function getKalshiCachedData(symbol: string): {
 // is stale or missing price fields.
 // ---------------------------------------------------------------------------
 
-async function fetchOrderbookPrices(
+export async function fetchOrderbookPrices(
   ticker: string,
 ): Promise<{ yesAsk: number | null; yesBid: number | null } | null> {
   const keyId = process.env["KALSHI_API_KEY_ID"] ?? null;

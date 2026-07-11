@@ -26,7 +26,7 @@ import {
 } from "./kalshi-trader";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
-  getCachedPrediction, getKalshiCachedData, fetchKalshiTarget,
+  getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchOrderbookPrices,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
   getLatestCoinSignals,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
@@ -43,7 +43,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow,
+  convictionFiredThisWindow, convictionBoostWindowCoins,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -979,14 +979,27 @@ async function _runBotTick(
   // false this returns S.config.betSize unchanged (legacy).
   // Per-coin maxBetSize override: further caps the bet for this specific coin.
   const perCoinMaxBet = S.config.coinOverrides?.[sym]?.maxBetSize;
-  const effectiveMaxBet = perCoinMaxBet != null && perCoinMaxBet < (S.config.maxBetSize ?? 2)
+  // Conviction random boost: if this coin was selected for a boost this window,
+  // override betSize and maxBetSize with the higher convictionBoostBetSize.
+  const boostBetSize = (
+    S.config.decisionMode === "conviction" &&
+    convictionBoostWindowCoins.has(sym) &&
+    (S.config.convictionBoostBetSize ?? 0) > 0
+  ) ? S.config.convictionBoostBetSize! : null;
+  const effectiveBaseBet = boostBetSize ?? S.config.betSize;
+  const effectiveMaxBet = perCoinMaxBet != null && perCoinMaxBet < (boostBetSize ?? (S.config.maxBetSize ?? 2))
     ? perCoinMaxBet
-    : (S.config.maxBetSize ?? 2);
+    : (boostBetSize ?? (S.config.maxBetSize ?? 2));
   const targetBetSize = Math.min(
-    computeDynamicBetSize(decision.confidence, S.config, yesPrice, direction),
+    computeDynamicBetSize(decision.confidence, { ...S.config, betSize: effectiveBaseBet, maxBetSize: effectiveMaxBet }, yesPrice, direction),
     effectiveMaxBet,
   );
-  if (perCoinMaxBet != null && perCoinMaxBet < (S.config.maxBetSize ?? 2)) {
+  if (boostBetSize != null) {
+    logger.info(
+      { sym, boostBetSize, baseBetSize: S.config.betSize, targetBetSize: targetBetSize.toFixed(4) },
+      "[kalshi-bot] conviction random boost active — elevated bet size this window",
+    );
+  } else if (perCoinMaxBet != null && perCoinMaxBet < (S.config.maxBetSize ?? 2)) {
     logger.info(
       { sym, perCoinMaxBet, globalMaxBetSize: S.config.maxBetSize, targetBetSize: targetBetSize.toFixed(4) },
       "[kalshi-bot] per-coin maxBetSize override applied",
@@ -1186,9 +1199,15 @@ async function _runBotTick(
     // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
     const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);
     await fetchKalshiTarget(sym, windowCloseTime).catch(() => null);
-    const freshData     = getKalshiCachedData(sym);
-    const freshYesAsk   = freshData?.yesAsk ?? null;
-    const freshYesBid   = freshData?.yesBid ?? null;
+    const freshData = getKalshiCachedData(sym);
+    // Prefer authenticated orderbook prices — they reflect the real best-bid/ask
+    // immediately, while the public market list can lag by several seconds.
+    // Fall back to market-list prices if the orderbook call fails.
+    const obPrices = freshData?.ticker
+      ? await fetchOrderbookPrices(freshData.ticker).catch(() => null)
+      : null;
+    const freshYesAsk = obPrices?.yesAsk ?? freshData?.yesAsk ?? null;
+    const freshYesBid = obPrices?.yesBid ?? freshData?.yesBid ?? null;
     // YES direction: use the fresh YES ask.
     // NO  direction: NO ask = 1 − YES bid (the price paid per NO contract).
     const freshRefPrice =
@@ -1286,6 +1305,50 @@ async function _runBotTick(
       }
       fillPrice = result.avgPrice ?? yesPrice;
       orderId = result.orderId;
+
+      // ── CONVICTION POST-FILL ABORT ──────────────────────────────────────────
+      // The live-price gate uses the Kalshi API (market list + orderbook) to
+      // validate price before submitting, but the real exchange fill comes from
+      // the live order book which may move between gate-check and execution.
+      // If the actual fill landed outside the conviction window we immediately
+      // sell the contracts back and abort — never opening the position.
+      // This catches the "stale gate / fast market" case (e.g. 91¢ gate passes
+      // but book moved to 69¢ — fill at 69¢ is NOT a conviction bet).
+      if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
+        const cvTarget  = S.config.kalshiLockPrice ?? 0.90;
+        const cvLow     = cvTarget - 0.02;
+        const cvHigh    = cvTarget + 0.02;
+        // Slot price: how much the entered side cost (YES=avgPrice, NO=1-avgPrice).
+        const fillSlot  = direction === "yes" ? result.avgPrice : (1 - result.avgPrice);
+        const FILL_TOL  = 0.06; // allow 6¢ slippage from the ±2¢ gate window
+        if (fillSlot < cvLow - FILL_TOL || fillSlot > cvHigh + FILL_TOL) {
+          logger.error(
+            {
+              sym, direction,
+              fillSlot: +fillSlot.toFixed(4),
+              cvLow, cvHigh, fillTolerance: FILL_TOL,
+              avgPrice: result.avgPrice,
+              filledCount: result.filledCount,
+            },
+            "[kalshi-bot] CONVICTION POST-FILL ABORT — fill outside conviction window; selling immediately",
+          );
+          try {
+            if (direction === "yes") {
+              await sellYes(kalshiTicker, result.filledCount);
+            } else {
+              await sellNo(kalshiTicker, result.filledCount);
+            }
+            logger.info({ sym, direction }, "[kalshi-bot] conviction post-fill sell executed — position not opened");
+          } catch (sellErr) {
+            logger.error(
+              { err: sellErr, sym },
+              "[kalshi-bot] CRITICAL: conviction post-fill sell FAILED — position may be stranded; check Kalshi account",
+            );
+          }
+          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          return;
+        }
+      }
 
       // Slippage guard: compare actual fill price to the expected yes-price.
       // Tracks CONSECUTIVE bad fills — a clean fill resets the counter.

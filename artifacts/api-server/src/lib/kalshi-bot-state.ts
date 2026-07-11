@@ -191,6 +191,8 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
+export const convictionBoostWindowCoins = new Set<string>();
+export const coinConvictionWinRates = new Map<string, number>();
 export const pausedCoins = new Map<string, number>();
 export const paperCoinDailyLoss = new Map<string, number>();
 export const liveCoinDailyLoss = new Map<string, number>();

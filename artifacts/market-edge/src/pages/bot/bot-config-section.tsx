@@ -595,6 +595,73 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         Bot pauses for the day once net losses hit this amount. Separate from the global daily loss limit.
                       </span>
                     </label>
+
+                    {/* Random Boost Windows */}
+                    <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
+                      <span className="text-[11px] font-medium text-violet-300 flex items-center gap-1.5">
+                        <Trophy className="w-3 h-3" />
+                        Random Boost Windows
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                        Randomly selects windows throughout the day where stable coins (high conviction win rate) get a larger bet size. Coins with too many losses are never boosted.
+                      </span>
+                      {/* Boost bet size */}
+                      <label className="flex flex-col gap-1">
+                        <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                          <DollarSign className="w-3 h-3 text-violet-400" />
+                          Boost Bet Size ($)
+                          {(merged.convictionBoostBetSize ?? 0) === 0 && (
+                            <span className="text-muted-foreground/50 text-[10px]">— disabled</span>
+                          )}
+                        </span>
+                        <input type="number" min={0} max={100} step={1}
+                          className="bg-background border border-violet-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
+                          value={merged.convictionBoostBetSize ?? 0}
+                          onChange={e => {
+                            const v = parseFloat(e.target.value);
+                            setConfigDraft(d => ({ ...d, convictionBoostBetSize: Number.isNaN(v) || v <= 0 ? undefined : v }));
+                          }} />
+                        <span className="text-[10px] text-muted-foreground/60">
+                          Dollar amount for boosted windows. Set to 0 to disable. Must be larger than your normal bet size.
+                        </span>
+                      </label>
+                      {/* Boost probability */}
+                      {(() => {
+                        const prob = merged.convictionBoostProbability ?? 0.25;
+                        return (
+                          <label className="flex flex-col gap-1">
+                            <span className="text-xs text-muted-foreground">
+                              Boost Frequency — <span className="text-violet-400 font-mono">{Math.round(prob * 100)}% of windows</span>
+                            </span>
+                            <input type="range" min={0.05} max={0.60} step={0.05}
+                              className="accent-violet-500"
+                              value={prob}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionBoostProbability: parseFloat(e.target.value) }))} />
+                            <span className="text-[10px] text-muted-foreground/60">
+                              Each window independently rolls this probability. ~{Math.round(prob * 96)} boosts per day across all coins.
+                            </span>
+                          </label>
+                        );
+                      })()}
+                      {/* Min win rate */}
+                      {(() => {
+                        const minWr = merged.convictionBoostMinWinRate ?? 0.70;
+                        return (
+                          <label className="flex flex-col gap-1">
+                            <span className="text-xs text-muted-foreground">
+                              Min Win Rate to Qualify — <span className="text-green-400 font-mono">{Math.round(minWr * 100)}%</span>
+                            </span>
+                            <input type="range" min={0.55} max={0.85} step={0.05}
+                              className="accent-green-500"
+                              value={minWr}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionBoostMinWinRate: parseFloat(e.target.value) }))} />
+                            <span className="text-[10px] text-muted-foreground/60">
+                              Only coins with a conviction win rate at or above this threshold are eligible for boosted bets. Based on last 14 days of live bets.
+                            </span>
+                          </label>
+                        );
+                      })()}
+                    </div>
                   </div>
                 )}
 
