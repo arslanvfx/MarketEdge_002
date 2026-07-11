@@ -993,15 +993,14 @@ async function _runBotTick(
     const wr    = coinConvictionWinRates.get(sym) ?? null;
     const qualifies = wr === null || wr >= minWr;
     if (!qualifies || !(Math.random() < prob)) return null;
-    // Random roll passed — verify the stat model agrees with this bet's direction.
-    const lockPrice  = S.config.kalshiLockPrice ?? 0.90;
-    const intendedYes = yesPrice !== null && yesPrice >= lockPrice;
-    const intendedNo  = yesPrice !== null && yesPrice <= 1 - lockPrice;
-    const { statAbove } = getLatestCoinSignals(sym);
-    const statAgrees = intendedYes ? statAbove === true
-                     : intendedNo  ? statAbove === false
-                     : false;
-    return statAgrees ? S.config.convictionBoostBetSize! : null;
+    // Random roll passed — check regime: only boost in stable conditions.
+    // Choppy or spiking markets downgrade back to regular bet size.
+    const ind    = getCachedPrediction(sym)?.indicators;
+    if (!ind) return null;                                  // no data → stay regular
+    const minER  = S.config.statRegimeBoostMinER          ?? 0.40;
+    const maxOsc = S.config.statRegimeBoostMaxOscillations ?? 6;
+    const stable = ind.efficiencyRatio >= minER && ind.oscillationCount <= maxOsc && !ind.spikeFlag;
+    return stable ? S.config.convictionBoostBetSize! : null;
   })();
   // Stat regime boost: use maxBetSize when the coin's current price action is
   // stable (high efficiency ratio, low oscillations, no spike candle).
