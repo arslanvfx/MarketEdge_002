@@ -362,8 +362,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </label>
                 {/* ──────────────────────────────────────────────────────── */}
 
-                {!isConviction && (<>
-                {/* Daily Loss Limit */}
+                {/* Daily Loss Limit — visible in all modes */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Daily Loss Limit ($)</span>
                   <input type="number" min={1} max={500} step={1}
@@ -371,6 +370,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     value={merged.dailyLossLimit ?? 20}
                     onChange={e => setConfigDraft(d => ({ ...d, dailyLossLimit: parseFloat(e.target.value) }))} />
                 </label>
+
+                {!isConviction && (<>
 
                 {/* Min Signals */}
                 <label className="flex flex-col gap-1.5">
