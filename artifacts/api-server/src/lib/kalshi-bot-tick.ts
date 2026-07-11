@@ -1152,6 +1152,51 @@ async function _runBotTick(
     convictionFiredThisWindow.add(`${sym}:${windowKey}`);
   }
 
+  // ─── CONVICTION LIVE-PRICE GATE ──────────────────────────────────────────
+  // Force a fresh Kalshi API call (bypassing the 5 s cache) immediately before
+  // placing the FOK order.  If the real orderbook has moved outside the
+  // [lockPrice, lockPriceCap] window since the signal fired, abort the order
+  // and release the once-per-window lock so the next tick can retry if the
+  // price re-enters.
+  //
+  // This prevents the "stale cache" fill: cached 92 ¢ → FOK limit 95 ¢ →
+  // real book at 74 ¢ → filled at 74 ¢ (outside the entry window).
+  if (S.config.decisionMode === "conviction") {
+    const lockPrice    = S.config.lockPrice    ?? 0.88;
+    const lockPriceCap = S.config.lockPriceCap ?? 0.92;
+    // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
+    // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
+    const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);
+    await fetchKalshiTarget(sym, windowCloseTime).catch(() => null);
+    const freshData     = getKalshiCachedData(sym);
+    const freshYesAsk   = freshData?.yesAsk ?? null;
+    const freshYesBid   = freshData?.yesBid ?? null;
+    // YES direction: use the fresh YES ask.
+    // NO  direction: NO ask = 1 − YES bid (the price paid per NO contract).
+    const freshRefPrice =
+      direction === "yes"
+        ? freshYesAsk
+        : freshYesBid != null ? 1 - freshYesBid : null;
+    const inWindow =
+      freshRefPrice != null &&
+      freshRefPrice >= lockPrice &&
+      freshRefPrice <= lockPriceCap;
+    if (!inWindow) {
+      // Release the lock so a future tick can re-evaluate if price recovers.
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      logger.warn(
+        {
+          sym, direction, windowKey,
+          freshRefPrice: freshRefPrice != null ? +freshRefPrice.toFixed(4) : null,
+          lockPrice, lockPriceCap,
+          freshYesAsk, freshYesBid,
+        },
+        "[kalshi-bot] conviction live-price gate: price moved outside window — order aborted",
+      );
+      return;
+    }
+  }
+
   logger.info(
     {
       sym, direction, decision: decision.action, confidence: decision.confidence,
