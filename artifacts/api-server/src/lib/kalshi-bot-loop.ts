@@ -1232,10 +1232,12 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
-    const minRem = S.config.minRemainingMinutes ?? 0;
-    if (minRem > 0 && 15 * 60 - clockElapsedS < minRem * 60) {
-      evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining, clock=${Math.floor(clockElapsedS)}s elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
-      continue;
+    if (!S.config.allowLateEntries) {
+      const minRem = S.config.minRemainingMinutes ?? 0;
+      if (minRem > 0 && 15 * 60 - clockElapsedS < minRem * 60) {
+        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining, clock=${Math.floor(clockElapsedS)}s elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+        continue;
+      }
     }
 
     // Signal accuracy — used in makeBotDecision for the EV gate and also in the

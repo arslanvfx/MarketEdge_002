@@ -612,6 +612,26 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       );
                     })()}
 
+                    {/* Allow Late Entries */}
+                    <div className="flex items-center justify-between mt-1">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-xs text-muted-foreground">Allow Late Entries</span>
+                        <span className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                          When on, all time-floor guards are removed — the bot can enter right up to settlement.
+                          Designed for conviction mode where the price crossing happens near window close.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, allowLateEntries: !(merged.allowLateEntries ?? false) }))}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.allowLateEntries ?? false)
+                          ? "bg-violet-500/20 border-violet-500/40 text-violet-300"
+                          : "bg-muted/30 border-border text-muted-foreground"}`}
+                      >
+                        {(merged.allowLateEntries ?? false) ? "On" : "Off"}
+                      </button>
+                    </div>
+
                     {/* Stop-loss floor */}
                     {(() => {
                       const floor = merged.convictionStopLossFloor ?? 0;

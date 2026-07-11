@@ -212,6 +212,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     betDelayMinutes: 0,
     maxEntryMinutes: 0,
     minRemainingMinutes: 1,
+    allowLateEntries: true,
     windowEntryBufferSeconds: 60,
     requireMonitorReady: false,
     enableDynamicSizing: false,
@@ -685,6 +686,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     statRegimeBoostEnabled,
     statRegimeBoostMinER,
     statRegimeBoostMaxOscillations,
+    allowLateEntries,
     coinOverrides,
   } = req.body as {
     betSize?: number;
@@ -751,6 +753,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     statRegimeBoostEnabled?: boolean;
     statRegimeBoostMinER?: number;
     statRegimeBoostMaxOscillations?: number;
+    allowLateEntries?: boolean;
     coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
   };
 
@@ -936,6 +939,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof statRegimeBoostMaxOscillations === "number" && statRegimeBoostMaxOscillations >= 1 && statRegimeBoostMaxOscillations <= 14) {
     partial.statRegimeBoostMaxOscillations = Math.round(statRegimeBoostMaxOscillations);
+  }
+  if (typeof allowLateEntries === "boolean") {
+    partial.allowLateEntries = allowLateEntries;
   }
   if (coinOverrides !== undefined && coinOverrides !== null && typeof coinOverrides === "object" && !Array.isArray(coinOverrides)) {
     const validated: Record<string, { paused?: boolean; maxBetSize?: number }> = {};

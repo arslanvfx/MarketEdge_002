@@ -78,6 +78,7 @@ export interface BotConfig {
   statRegimeBoostEnabled?: boolean;
   statRegimeBoostMinER?: number;
   statRegimeBoostMaxOscillations?: number;
+  allowLateEntries?: boolean;
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
 }
 

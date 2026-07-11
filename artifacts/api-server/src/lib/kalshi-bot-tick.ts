@@ -393,14 +393,15 @@ async function _runBotTick(
     }
   }
   // Floor: early-exit the tick if fewer than minRemainingMinutes remain.
-  // This is a soft/configurable guard checked at tick start.  The hard
-  // non-configurable 3-minute floor is re-checked with fresh Date.now()
-  // immediately before the order is placed — see HARD LATE-ENTRY FLOOR below.
-  // Default 3 to match the hard floor; setting it higher gives extra headroom.
-  const minRemaining = S.config.minRemainingMinutes ?? 3;
-  if (15 * 60 - secondsElapsed < minRemaining * 60) {
-    logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping tick early");
-    return;
+  // Bypassed entirely when allowLateEntries=true (conviction mode design: the
+  // price crossing happens near settlement; blocking it defeats the purpose).
+  // The hard pre-order floor below is also bypassed when allowLateEntries=true.
+  if (!S.config.allowLateEntries) {
+    const minRemaining = S.config.minRemainingMinutes ?? 3;
+    if (15 * 60 - secondsElapsed < minRemaining * 60) {
+      logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping tick early");
+      return;
+    }
   }
   if (!kalshiTicker || kalshiTarget === null) return;
 
@@ -1141,25 +1142,24 @@ async function _runBotTick(
   // remaining" can easily try to place an order with <1 min remaining.
   //
   // This re-check uses fresh Date.now() so it is ALWAYS accurate regardless of
-  // tick latency.  For conviction mode the hard floor matches the configured
-  // minRemainingMinutes (default 1 min) — conviction is designed to catch
-  // end-of-window certainty and a 3-min floor would block exactly those bets.
-  // For all other modes the floor stays at 3 minutes (non-negotiable safety
-  // margin against fill latency eating into settlement time).
-  const isConvictionMode = S.config.decisionMode === "conviction";
-  const HARD_LATE_ENTRY_FLOOR_S = isConvictionMode
-    ? Math.max((S.config.minRemainingMinutes ?? 1) * 60, 60)  // conviction: min 60s absolute floor
-    : 3 * 60;                                                   // other modes: 3 min non-negotiable
+  // tick latency.  When allowLateEntries=true the floor is fully removed —
+  // the bot is designed to catch the price crossing near settlement and any
+  // time floor defeats that purpose.  For all other modes the floor stays at
+  // 3 minutes (non-negotiable safety margin against fill latency eating into
+  // settlement time).
   const nowMs = Date.now();
   const windowStartMs = new Date(windowKey + ":00Z").getTime();
   const secondsElapsedNow = isNaN(windowStartMs) ? 0 : (nowMs - windowStartMs) / 1000;
   const secondsRemainingNow = 15 * 60 - secondsElapsedNow;
-  if (secondsRemainingNow < HARD_LATE_ENTRY_FLOOR_S) {
-    logger.warn(
-      { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS: HARD_LATE_ENTRY_FLOOR_S, isConvictionMode },
-      "[kalshi-bot] HARD FLOOR — aborting bet, insufficient time remaining in window",
-    );
-    return;
+  if (!S.config.allowLateEntries) {
+    const HARD_LATE_ENTRY_FLOOR_S = 3 * 60;
+    if (secondsRemainingNow < HARD_LATE_ENTRY_FLOOR_S) {
+      logger.warn(
+        { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS: HARD_LATE_ENTRY_FLOOR_S },
+        "[kalshi-bot] HARD FLOOR — aborting bet, insufficient time remaining in window",
+      );
+      return;
+    }
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
