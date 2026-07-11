@@ -1005,23 +1005,8 @@ async function _runBotTick(
       logger.info({ sym, prob }, "[kalshi-bot] conviction boost — random roll missed (normal)");
       return null;
     }
-    // Random roll passed — check regime: only boost in stable conditions.
-    // Choppy or spiking markets downgrade back to regular bet size.
-    const ind    = getCachedPrediction(sym)?.indicators;
-    if (!ind) {
-      logger.info({ sym }, "[kalshi-bot] conviction boost — no indicators, staying regular");
-      return null;
-    }
-    const minER  = S.config.statRegimeBoostMinER          ?? 0.40;
-    const maxOsc = S.config.statRegimeBoostMaxOscillations ?? 6;
-    const stable = ind.efficiencyRatio >= minER && ind.oscillationCount <= maxOsc && !ind.spikeFlag;
-    if (!stable) {
-      logger.info(
-        { sym, efficiencyRatio: ind.efficiencyRatio, oscillationCount: ind.oscillationCount, spikeFlag: ind.spikeFlag, minER, maxOsc },
-        "[kalshi-bot] conviction boost — regime not stable, staying regular",
-      );
-      return null;
-    }
+    // In conviction mode the price lock (≥88¢/≤12¢) is already the quality gate.
+    // A separate regime-stability check is redundant and too restrictive — removed.
     logger.info({ sym, targetBoost, prob, wr }, "[kalshi-bot] conviction boost — all gates passed, using max bet size");
     return targetBoost;
   })();
