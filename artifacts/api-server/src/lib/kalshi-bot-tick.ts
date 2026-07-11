@@ -1123,7 +1123,7 @@ async function _runBotTick(
   //   3. kalshiTarget must be non-null (should always be true at this point).
   {
     const noPrice = yesPrice == null && orderLimitPrice == null;
-    const noSignals = config.decisionMode !== "conviction" && (decision.signals?.signalsTotal ?? 0) < 1;
+    const noSignals = S.config.decisionMode !== "conviction" && (decision.signals?.signalsTotal ?? 0) < 1;
     const noTarget = kalshiTarget == null;
 
     if (noPrice || noSignals || noTarget) {
