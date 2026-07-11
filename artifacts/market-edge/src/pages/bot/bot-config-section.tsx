@@ -513,25 +513,37 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       No spot-price math. Models are soft advisors; a bet only skips if ALL available models unanimously oppose that direction.
                       Bot re-checks every 5 seconds so a cross at any point in the window is caught quickly.
                     </span>
-                    <label className="flex flex-col gap-1.5 mt-1">
-                      <span className="text-xs text-muted-foreground">
-                        Kalshi Price Trigger — {(merged.kalshiLockPrice ?? 0.90).toFixed(2)} ({((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢)
-                      </span>
-                      <div className="flex items-center gap-3">
-                        <input type="range" min={0.80} max={0.97} step={0.01}
-                          className="flex-1 accent-violet-500"
-                          value={merged.kalshiLockPrice ?? 0.90}
-                          onChange={e => setConfigDraft(d => ({ ...d, kalshiLockPrice: parseFloat(e.target.value) }))} />
-                        <span className="text-xs font-mono text-violet-400 w-16 text-right">
-                          {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢ / {((1 - (merged.kalshiLockPrice ?? 0.90)) * 100).toFixed(0)}¢
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70">
-                        BET YES when Kalshi YES ≥ {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢ · BET NO when YES ≤ {((1 - (merged.kalshiLockPrice ?? 0.90)) * 100).toFixed(0)}¢.
-                        Higher threshold = fewer bets, higher certainty. 90¢ means the market assigns 90%+ probability.
-                        Max payout at {((merged.kalshiLockPrice ?? 0.90) * 100).toFixed(0)}¢ entry: {(1 / (merged.kalshiLockPrice ?? 0.90)).toFixed(2)}×.
-                      </span>
-                    </label>
+                    {(() => {
+                      const target   = merged.kalshiLockPrice ?? 0.90;
+                      const lo       = target - 0.02;
+                      const hi       = target + 0.02;
+                      const loYes    = Math.round(lo * 100);
+                      const hiYes    = Math.round(hi * 100);
+                      const loNo     = Math.round((1 - hi) * 100);
+                      const hiNo     = Math.round((1 - lo) * 100);
+                      return (
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground">
+                            Kalshi Price Target — {(target * 100).toFixed(0)}¢ &nbsp;
+                            <span className="text-violet-400/80">(entry window {loYes}¢–{hiYes}¢)</span>
+                          </span>
+                          <div className="flex items-center gap-3">
+                            <input type="range" min={0.82} max={0.97} step={0.01}
+                              className="flex-1 accent-violet-500"
+                              value={target}
+                              onChange={e => setConfigDraft(d => ({ ...d, kalshiLockPrice: parseFloat(e.target.value) }))} />
+                            <span className="text-xs font-mono text-violet-400 w-20 text-right">
+                              {loYes}–{hiYes}¢ YES<br />
+                              <span className="text-violet-400/60">{loNo}–{hiNo}¢ NO</span>
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/70">
+                            ±2¢ buffer applied automatically. BET YES when Kalshi YES is {loYes}¢–{hiYes}¢ · BET NO when YES is {loNo}¢–{hiNo}¢.
+                            Higher target = fewer bets, higher certainty. Max payout at {loYes}¢ entry: {(1 / lo).toFixed(2)}×.
+                          </span>
+                        </label>
+                      );
+                    })()}
                   </div>
                 )}
 

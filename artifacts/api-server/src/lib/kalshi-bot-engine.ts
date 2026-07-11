@@ -511,10 +511,14 @@ function _makeBotDecisionInner(
   // Delegates to the pure computeConvictionDecision in kalshi-bot-engine-core.
   // See that function's JSDoc for the full zone map and invariant documentation.
   if (decisionMode === "conviction") {
+    // The slider sets a single target (e.g. 0.90).  We auto-apply ±2 ¢ so the
+    // entry window is always [target−0.02, target+0.02].
+    // Slider at 90¢ → window [88¢–92¢]; slider at 91¢ → window [89¢–93¢].
+    const cvTarget = config.kalshiLockPrice ?? 0.90;
     const cvResult = computeConvictionDecision({
       yesPrice,
-      lockPrice:     config.kalshiLockPrice    ?? 0.88,
-      lockPriceCap:  config.kalshiLockPriceCap ?? 0.92,
+      lockPrice:     cvTarget - 0.02,
+      lockPriceCap:  cvTarget + 0.02,
       minConfidence: config.minConfidence,
     });
     const cvAgreementTarget: BotDecisionAction | null =

@@ -416,11 +416,12 @@ async function _runBotTick(
   // defeats the purpose of conviction mode.  This mirrors the same bypass used
   // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
-    const lockPrice = S.config.kalshiLockPrice ?? 0.88;
+    // Derive the same ±2 ¢ window used by the engine so the bypass is in sync.
+    const convTarget = S.config.kalshiLockPrice ?? 0.90;
     const proximityIsConvictionExtreme =
       S.config.decisionMode === "conviction" &&
       yesPrice !== null &&
-      (yesPrice >= lockPrice || yesPrice <= (1 - lockPrice));
+      (yesPrice >= convTarget - 0.02 || yesPrice <= 1 - (convTarget - 0.02));
 
     if (proximityIsConvictionExtreme) {
       logger.debug(
@@ -1162,8 +1163,11 @@ async function _runBotTick(
   // This prevents the "stale cache" fill: cached 92 ¢ → FOK limit 95 ¢ →
   // real book at 74 ¢ → filled at 74 ¢ (outside the entry window).
   if (S.config.decisionMode === "conviction") {
-    const lockPrice    = S.config.lockPrice    ?? 0.88;
-    const lockPriceCap = S.config.lockPriceCap ?? 0.92;
+    // Derive the ±2 ¢ window from the single slider value (kalshiLockPrice).
+    // This matches the engine derivation in kalshi-bot-engine.ts exactly.
+    const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
+    const lockPrice    = gateTarget - 0.02;
+    const lockPriceCap = gateTarget + 0.02;
     // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
     // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
     const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);
