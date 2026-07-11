@@ -257,8 +257,14 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   // Hard cap: if the price has blown past the entry window, skip.
   // YES: actual YES ask must be ≤ lockPriceCap
   // NO:  actual NO  ask must be ≤ lockPriceCap
-  const isTooDeepYes = isYesLocked && yesTrigger > lockPriceCap;
-  const isTooDeepNo  = isNoLocked  && noTrigger  > lockPriceCap;
+  //
+  // Extreme-price bypass: when yesPrice is already at or past the extreme
+  // threshold (≥ 0.92 YES or ≤ 0.08 / NO ≥ 0.92), the market has decisively
+  // committed — this IS the entry signal, not a missed window.  The cap does
+  // not apply; we bet immediately regardless of how far past 0.92 it is.
+  const isExtremePrice = yesPrice >= 0.92 || yesPrice <= 0.08;
+  const isTooDeepYes = !isExtremePrice && isYesLocked && yesTrigger > lockPriceCap;
+  const isTooDeepNo  = !isExtremePrice && isNoLocked  && noTrigger  > lockPriceCap;
 
   if (isTooDeepYes || isTooDeepNo) {
     const side      = isYesLocked ? "YES" : "NO";
