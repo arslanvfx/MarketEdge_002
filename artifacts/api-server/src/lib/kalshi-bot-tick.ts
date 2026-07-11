@@ -372,22 +372,27 @@ async function _runBotTick(
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
-  // Bypassed only when yesPrice hits an extreme (≥ 0.92 or ≤ 0.08) — conviction-level
-  // certainty overrides the time gate regardless of elapsed time.
+  // Bypassed in conviction mode whenever the price is already in the entry window
+  // (≥ 0.88 for YES or ≤ 0.12 for NO) — the whole point of conviction is to fire
+  // immediately on a price crossing, not to wait for a time gate.
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
     if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
-      const isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
-      if (!isExtreme) {
+      const lockPrice = S.config.kalshiLockPrice ?? 0.88;
+      const isConvictionWindow =
+        S.config.decisionMode === "conviction" &&
+        yesPrice !== null &&
+        (yesPrice >= lockPrice || yesPrice <= (1 - lockPrice));
+      if (!isConvictionWindow) {
         logger.debug(
           { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-          "[kalshi-bot] early-window lockout — waiting for time gate or extreme price (≥92¢/≤8¢)",
+          "[kalshi-bot] early-window lockout — waiting for time gate or conviction price",
         );
         return;
       }
       logger.info(
         { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-        "[kalshi-bot] early-window lockout bypassed — extreme price override",
+        "[kalshi-bot] early-window lockout bypassed — conviction price in entry window",
       );
     }
   }
@@ -415,10 +420,11 @@ async function _runBotTick(
   // defeats the purpose of conviction mode.  This mirrors the same bypass used
   // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
+    const lockPrice = S.config.kalshiLockPrice ?? 0.88;
     const proximityIsConvictionExtreme =
       S.config.decisionMode === "conviction" &&
       yesPrice !== null &&
-      (yesPrice >= 0.92 || yesPrice <= 0.08);
+      (yesPrice >= lockPrice || yesPrice <= (1 - lockPrice));
 
     if (proximityIsConvictionExtreme) {
       logger.debug(

@@ -1117,12 +1117,15 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
-    // Conviction mode: enforce windowEntryBufferSeconds as minimum warmup before
-    // the first evaluation.  Kalshi markets typically publish 30-60s after window open.
+    // Conviction mode: minimal warmup (20s) — just enough for Kalshi to publish
+    // the market after window open.  We intentionally ignore windowEntryBufferSeconds
+    // here because that value was tuned for signal-based modes (momentum override
+    // fires blind without a warm target cache).  Conviction is purely reactive to
+    // yesPrice; the null-price guard below handles any not-yet-published market.
     if (isConviction) {
-      const warmupS = S.config.windowEntryBufferSeconds ?? WINDOW_ENTRY_BUFFER_S;
-      if (clockElapsedS < warmupS) {
-        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: warmup (${Math.ceil(warmupS - clockElapsedS)}s until T+${Math.round(warmupS / 60)}min)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+      const CONVICTION_WARMUP_S = 20;
+      if (clockElapsedS < CONVICTION_WARMUP_S) {
+        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: warmup (${Math.ceil(CONVICTION_WARMUP_S - clockElapsedS)}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
       }
     }
