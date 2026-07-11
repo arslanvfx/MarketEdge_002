@@ -228,6 +228,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     momentumLookbackCandles: 6,
     phase2ThresholdPp: 30,
     minHoldMinutes: 0,
+    convictionDailyLossLimit: 50,
   },
 };
 
@@ -677,6 +678,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     kalshiLockPrice,
     minWindowEntryMinutes,
     convictionStopLossFloor,
+    convictionDailyLossLimit,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -735,6 +737,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     directionalRegressionPenaltyPp?: number;
     priceBufferPct?: number;
     convictionStopLossFloor?: number;
+    convictionDailyLossLimit?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -897,6 +900,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   // 0 = disabled; valid range 0–0.85
   if (typeof convictionStopLossFloor === "number" && convictionStopLossFloor >= 0 && convictionStopLossFloor <= 0.85) {
     partial.convictionStopLossFloor = convictionStopLossFloor;
+  }
+  if (typeof convictionDailyLossLimit === "number" && convictionDailyLossLimit > 0) {
+    partial.convictionDailyLossLimit = convictionDailyLossLimit;
   }
   // preConvictionThreshold must be < kalshiLockPrice (or the current config lock price
   // if not being changed simultaneously) to form a valid pre-entry band.

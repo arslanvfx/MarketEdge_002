@@ -15,7 +15,7 @@ import {
 } from "./crypto";
 import {
   S, openPositions, lastGuardStatesMap, lastGuardReasonMap,
-  activeCoinStreakState, WINDOW_ENTRY_BUFFER_S,
+  activeCoinStreakState, WINDOW_ENTRY_BUFFER_S, getEffectiveDailyLossLimit,
   type BotMode, type BotStatus, type OpenPositionDisplay, type BotStateSnapshot,
 } from "./kalshi-bot-state";
 import {
@@ -80,7 +80,7 @@ export function getBotState(): BotStateSnapshot {
   ).length;
   const status: BotStatus = S.paused
     ? "paused"
-    : S.dailyPnl <= -S.config.dailyLossLimit
+    : S.dailyPnl <= -getEffectiveDailyLossLimit()
     ? "daily_limit_hit"
     : modePositionCount > 0
     ? "position_open"

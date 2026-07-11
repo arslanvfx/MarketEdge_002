@@ -121,6 +121,19 @@ export function getBotDecisionMode(): string {
   return S.config.decisionMode ?? "classic";
 }
 
+/**
+ * Returns the daily loss limit that should be enforced for the current session.
+ * In conviction mode, uses convictionDailyLossLimit (default $50) so the
+ * certainty-based strategy gets its own budget separate from the global limit.
+ * In all other modes falls back to the standard dailyLossLimit.
+ */
+export function getEffectiveDailyLossLimit(): number {
+  if (S.config.decisionMode === "conviction" && S.config.convictionDailyLossLimit != null) {
+    return S.config.convictionDailyLossLimit;
+  }
+  return S.config.dailyLossLimit;
+}
+
 // ---------------------------------------------------------------------------
 // Mutable primitive state wrapped in object so sub-modules can read/write
 // ---------------------------------------------------------------------------

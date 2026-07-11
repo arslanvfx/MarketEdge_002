@@ -949,6 +949,7 @@ export interface BotConfig {
   kalshiLockPrice?: number;           // conviction only: entry trigger (default 0.88; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
   convictionStopLossFloor?: number;   // conviction only: exit when contract value drops to this ¢ floor (0 = disabled)
+  convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
@@ -1293,6 +1294,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   dynamicSizingMaxConfidence: 90,
   profitLockPct: 0,
   convictionStopLossFloor: 0,
+  convictionDailyLossLimit: 50,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,

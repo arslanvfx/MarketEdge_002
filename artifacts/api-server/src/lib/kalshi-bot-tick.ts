@@ -54,7 +54,7 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  tickInFlight,
+  tickInFlight, getEffectiveDailyLossLimit,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
@@ -103,11 +103,11 @@ async function _runBotTick(
 ): Promise<void> {
   resetDailyIfNeeded();
 
-  // Daily loss limit check
-  if (S.dailyPnl <= -S.config.dailyLossLimit) {
+  // Daily loss limit check (uses conviction-specific limit when in conviction mode)
+  if (S.dailyPnl <= -getEffectiveDailyLossLimit()) {
     const limitPos = openPositions.get(sym);
     if (limitPos) {
-      logger.warn({ sym }, "[kalshi-bot] daily limit hit — closing position");
+      logger.warn({ sym, dailyPnl: S.dailyPnl, limit: getEffectiveDailyLossLimit() }, "[kalshi-bot] daily limit hit — closing position");
       await closePosition(limitPos, yesPrice, kalshiTarget, "daily_loss_limit_hit");
       openPositions.delete(sym);
     }
