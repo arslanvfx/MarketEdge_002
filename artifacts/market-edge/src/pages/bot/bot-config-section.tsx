@@ -632,6 +632,24 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </button>
                     </div>
 
+                    {/* Min Time Remaining — only relevant when Allow Late Entries is off */}
+                    {!(merged.allowLateEntries ?? false) && (
+                      <label className="flex flex-col gap-1.5 mt-1">
+                        <span className="text-xs text-muted-foreground">No Entry In Last X Min</span>
+                        <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                          value={merged.minRemainingMinutes ?? 1}
+                          onChange={e => setConfigDraft(d => ({ ...d, minRemainingMinutes: parseInt(e.target.value) }))}>
+                          <option value={0}>No floor — enter even in the final minute</option>
+                          {[1, 2, 3, 4, 5, 6, 7].map(m => (
+                            <option key={m} value={m}>Block last {m} min of window</option>
+                          ))}
+                        </select>
+                        <span className="text-[10px] text-muted-foreground/60">
+                          Prevents entries when fewer than this many minutes remain. Enable Allow Late Entries above to remove this guard entirely.
+                        </span>
+                      </label>
+                    )}
+
                     {/* Stop-loss floor */}
                     {(() => {
                       const floor = merged.convictionStopLossFloor ?? 0;

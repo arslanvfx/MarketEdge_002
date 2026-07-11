@@ -214,7 +214,7 @@ async function refreshConvictionWinRates(): Promise<void> {
       const wins   = parseInt(row.wins,   10) || 0;
       const losses = parseInt(row.losses, 10) || 0;
       const total  = wins + losses;
-      if (total >= 10) {
+      if (total >= 3) {
         coinConvictionWinRates.set(row.symbol.toUpperCase(), wins / total);
       }
     }
@@ -512,7 +512,10 @@ export async function runBotLoopTick(): Promise<void> {
       const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
       for (const coin of CRYPTO_COINS) {
         const wr = coinConvictionWinRates.get(coin.symbol) ?? null;
-        if (wr != null && wr >= minWr && Math.random() < prob) {
+        // Coins with no history yet are treated as eligible (we can't disqualify
+        // what we haven't measured); coins WITH history must meet minWinRate.
+        const qualifies = wr === null || wr >= minWr;
+        if (qualifies && Math.random() < prob) {
           convictionBoostWindowCoins.add(coin.symbol);
         }
       }
