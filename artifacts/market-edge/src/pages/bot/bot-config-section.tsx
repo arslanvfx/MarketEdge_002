@@ -704,10 +704,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
                       <span className="text-[11px] font-medium text-violet-300 flex items-center gap-1.5">
                         <Trophy className="w-3 h-3" />
-                        Random Boost Windows
+                        Random Boost Bets
                       </span>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Randomly selects windows throughout the day where stable coins (high conviction win rate) get a larger bet size. Coins with too many losses are never boosted.
+                        Each individual bet independently rolls the dice. Stable market conditions + high conviction win rate = max bet size. Other bets stay at your normal size.
                       </span>
                       {/* Boost bet size */}
                       <label className="flex flex-col gap-1">
@@ -726,7 +726,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             setConfigDraft(d => ({ ...d, convictionBoostBetSize: Number.isNaN(v) || v <= 0 ? undefined : v }));
                           }} />
                         <span className="text-[10px] text-muted-foreground/60">
-                          Dollar amount for boosted windows. Set to 0 to disable. Must be larger than your normal bet size.
+                          Dollar amount for boosted bets. Set to 0 to disable. Must be larger than your normal bet size.
                         </span>
                       </label>
                       {/* Boost probability */}
@@ -735,14 +735,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         return (
                           <label className="flex flex-col gap-1">
                             <span className="text-xs text-muted-foreground">
-                              Boost Frequency — <span className="text-violet-400 font-mono">{Math.round(prob * 100)}% of windows</span>
+                              Boost Frequency — <span className="text-violet-400 font-mono">{Math.round(prob * 100)}% of bets</span>
                             </span>
                             <input type="range" min={0.05} max={0.60} step={0.05}
                               className="accent-violet-500"
                               value={prob}
                               onChange={e => setConfigDraft(d => ({ ...d, convictionBoostProbability: parseFloat(e.target.value) }))} />
                             <span className="text-[10px] text-muted-foreground/60">
-                              Each window independently rolls this probability. ~{Math.round(prob * 96)} boosts per day across all coins.
+                              Each individual bet independently rolls this probability — some bets go max size, others stay normal.
                             </span>
                           </label>
                         );
