@@ -981,8 +981,10 @@ async function _runBotTick(
   // Per-coin maxBetSize override: further caps the bet for this specific coin.
   const perCoinMaxBet = S.config.coinOverrides?.[sym]?.maxBetSize;
   // Conviction random boost: roll the dice per individual bet (not per window).
-  // Coins with recorded history must meet minWinRate; coins with no history are
-  // treated as eligible (can't disqualify what hasn't been measured).
+  // Gate 1: win-rate eligibility (no history = eligible; history must meet minWinRate).
+  // Gate 2: random probability roll.
+  // Gate 3: stat model must agree with the conviction direction — if it does not,
+  //         downgrade to regular bet size (no stat check needed for non-boosted bets).
   const boostBetSize = (() => {
     if (S.config.decisionMode !== "conviction") return null;
     if ((S.config.convictionBoostBetSize ?? 0) <= 0) return null;
@@ -990,7 +992,16 @@ async function _runBotTick(
     const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
     const wr    = coinConvictionWinRates.get(sym) ?? null;
     const qualifies = wr === null || wr >= minWr;
-    return qualifies && Math.random() < prob ? S.config.convictionBoostBetSize! : null;
+    if (!qualifies || !(Math.random() < prob)) return null;
+    // Random roll passed — verify the stat model agrees with this bet's direction.
+    const lockPrice  = S.config.kalshiLockPrice ?? 0.90;
+    const intendedYes = yesPrice !== null && yesPrice >= lockPrice;
+    const intendedNo  = yesPrice !== null && yesPrice <= 1 - lockPrice;
+    const { statAbove } = getLatestCoinSignals(sym);
+    const statAgrees = intendedYes ? statAbove === true
+                     : intendedNo  ? statAbove === false
+                     : false;
+    return statAgrees ? S.config.convictionBoostBetSize! : null;
   })();
   // Stat regime boost: use maxBetSize when the coin's current price action is
   // stable (high efficiency ratio, low oscillations, no spike candle).
