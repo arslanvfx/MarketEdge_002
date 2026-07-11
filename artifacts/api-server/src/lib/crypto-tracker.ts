@@ -679,7 +679,7 @@ export function startPredictionTracker(
               if (basePred) {
                 updateKalshiWindowPrice(getLastKalshiTicker(sym), analysis.price);
                 const winCtxSnap = getKalshiWindowContext(sym);
-                const useAI = TRAINING_COINS.has(sym) && isAiFeatureEnabled("crypto_snap");
+                const useAI = TRAINING_COINS.has(sym) && isAiFeatureEnabled("crypto_snap") && getBotDecisionMode() !== "conviction";
                 const [ai, kalshiTarget] = await Promise.all([
                   useAI
                     ? refineWithSelfConsistency(analysis, basePred, {

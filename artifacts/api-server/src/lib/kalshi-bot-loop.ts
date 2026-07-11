@@ -41,7 +41,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow,
+  convictionFiredThisWindow, getBotDecisionMode,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -143,7 +143,7 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
   // ── Step 2: stability analysis, gated on Step 1 per coin ────────────────
   // Only coins that PASSED step 1 are dispatched here.  The shared
   // S.stabilityFiredForCoins guard prevents double-dispatch with the bot loop.
-  if (!isAiFeatureEnabled("crypto_stability") || confirmed.length === 0) return;
+  if (getBotDecisionMode() === "conviction" || !isAiFeatureEnabled("crypto_stability") || confirmed.length === 0) return;
 
   const toDispatch = confirmed.filter(sym => !S.stabilityFiredForCoins.has(sym));
   if (toDispatch.length === 0) return;
@@ -575,7 +575,7 @@ export async function runBotLoopTick(): Promise<void> {
     const kd = getKalshiCachedData(sym);
     return kd?.value != null && kd.yesPrice != null;
   });
-  if (pendingCoins.length > 0 && isAiFeatureEnabled("crypto_stability")) {
+  if (pendingCoins.length > 0 && isAiFeatureEnabled("crypto_stability") && getBotDecisionMode() !== "conviction") {
     pendingCoins.forEach(c => S.stabilityFiredForCoins.add(c.symbol.toUpperCase()));
     void Promise.all(
       pendingCoins.map(c => {
