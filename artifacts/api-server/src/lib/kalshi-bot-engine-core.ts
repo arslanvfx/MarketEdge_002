@@ -197,14 +197,16 @@ function computeEV(yesPrice: number | null, signalAccuracyPct: number | null): n
 // No models, no veto, no resting GTC orders — purely reactive.
 
 export interface ConvictionInputs {
-  yesPrice:      number | null;
-  lockPrice?:    number;   // default 0.90
-  minConfidence: number;
+  yesPrice:       number | null;
+  lockPrice?:     number;   // default 0.88 — minimum NO% (or YES%) to trigger entry
+  lockPriceCap?:  number;   // default 0.92 — maximum NO% (or YES%) allowed; above this is too late
+  minConfidence:  number;
 }
 
 export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult {
   const { yesPrice, minConfidence } = inp;
-  const lockPrice = inp.lockPrice ?? 0.90;
+  const lockPrice    = inp.lockPrice    ?? 0.88;
+  const lockPriceCap = inp.lockPriceCap ?? 0.92;
 
   if (yesPrice == null) {
     return {
@@ -231,6 +233,25 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
     };
   }
 
+  // Hard cap: if the price has blown past the entry window, skip.
+  // YES: yesPrice must be ≤ lockPriceCap (e.g. ≤ 0.92)
+  // NO:  yesPrice must be ≥ (1 − lockPriceCap) (e.g. ≥ 0.08, meaning NO ≤ 92%)
+  const isTooDeepYes = isYesLocked && yesPrice > lockPriceCap;
+  const isTooDeepNo  = isNoLocked  && yesPrice < (1 - lockPriceCap);
+
+  if (isTooDeepYes || isTooDeepNo) {
+    const side        = isYesLocked ? "YES" : "NO";
+    const noPrice     = isYesLocked ? yesPrice : (1 - yesPrice);
+    return {
+      action: "SKIP",
+      confidence: 0,
+      reasoning: `conviction: ${side} at ${(noPrice * 100).toFixed(0)}% is past the ${(lockPriceCap * 100).toFixed(0)}% cap — entry window missed`,
+      signalsAgreeing: 0,
+      signalsTotal: 0,
+      ev: null,
+    };
+  }
+
   const action: BotDecisionAction = isYesLocked ? "BET_YES" : "BET_NO";
   const lockedPrice = isYesLocked ? yesPrice : (1 - yesPrice);
   const confidence  = Math.min(Math.round(50 + lockedPrice * 50), 95);
@@ -249,7 +270,7 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   return {
     action,
     confidence,
-    reasoning: `conviction: Kalshi ${isYesLocked ? "YES" : "NO"} at ${lockedPrice.toFixed(2)} (lock≥${lockPrice}) — return=${(1 / lockedPrice).toFixed(2)}×`,
+    reasoning: `conviction: Kalshi ${isYesLocked ? "YES" : "NO"} at ${(lockedPrice * 100).toFixed(0)}% — window [${(lockPrice * 100).toFixed(0)}–${(lockPriceCap * 100).toFixed(0)}%] — return=${(1 / lockedPrice).toFixed(2)}×`,
     signalsAgreeing: 0,
     signalsTotal: 0,
     ev: null,
@@ -903,7 +924,8 @@ export interface BotConfig {
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
   minWindowEntryMinutes?: number;     // hard lockout: no bets in the first N minutes of a window; bypassed when yesPrice ≥ 0.92 or ≤ 0.08; 0/undefined = disabled
-  kalshiLockPrice?: number;           // conviction only: Kalshi YES price trigger (default 0.90; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
+  kalshiLockPrice?: number;           // conviction only: entry trigger (default 0.88; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
+  kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)

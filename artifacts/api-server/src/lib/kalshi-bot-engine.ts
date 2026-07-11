@@ -513,7 +513,8 @@ function _makeBotDecisionInner(
   if (decisionMode === "conviction") {
     const cvResult = computeConvictionDecision({
       yesPrice,
-      lockPrice:     config.kalshiLockPrice ?? 0.90,
+      lockPrice:     config.kalshiLockPrice    ?? 0.88,
+      lockPriceCap:  config.kalshiLockPriceCap ?? 0.92,
       minConfidence: config.minConfidence,
     });
     const cvAgreementTarget: BotDecisionAction | null =

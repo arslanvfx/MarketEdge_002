@@ -1553,42 +1553,81 @@ test("mlGate: min-return gate blocks deep ITM YES bet", () => {
 //   4. No model veto — price alone determines direction
 // ---------------------------------------------------------------------------
 
+// cvInp defaults match production conviction config: trigger=88%, cap=92%
 function cvInp(overrides: Partial<ConvictionInputs> = {}): ConvictionInputs {
   return {
     yesPrice:      0.85,   // default: below lock threshold
-    lockPrice:     0.90,
+    lockPrice:     0.88,
+    lockPriceCap:  0.92,
     minConfidence: 70,
     ...overrides,
   };
 }
 
-// ── YES direction ─────────────────────────────────────────────────────────────
+// ── YES direction — within the 88–92% entry window ───────────────────────────
 
-test("conviction: yesPrice exactly at lockPrice → BET_YES", () => {
-  const r = computeConvictionDecision(cvInp({ yesPrice: 0.90 }));
+test("conviction: yesPrice exactly at lockPrice (0.88) → BET_YES", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.88, minConfidence: 0 }));
   assert.equal(r.action, "BET_YES");
 });
 
-test("conviction: yesPrice above lockPrice → BET_YES", () => {
-  const r = computeConvictionDecision(cvInp({ yesPrice: 0.95 }));
+test("conviction: yesPrice inside window (0.90) → BET_YES", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.90, minConfidence: 0 }));
   assert.equal(r.action, "BET_YES");
 });
 
-test("conviction: yesPrice at 0.99 → BET_YES (no upper band)", () => {
+test("conviction: yesPrice exactly at cap (0.92) → BET_YES (inclusive)", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.92, minConfidence: 0 }));
+  assert.equal(r.action, "BET_YES");
+});
+
+// ── YES direction — past the cap → SKIP ───────────────────────────────────────
+
+test("conviction: yesPrice above cap (0.95) → SKIP (entry window missed)", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.95, minConfidence: 0 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /past the.*cap/);
+});
+
+test("conviction: yesPrice at 0.99 → SKIP (entry window missed)", () => {
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.99, minConfidence: 0 }));
-  assert.equal(r.action, "BET_YES");
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /past the.*cap/);
 });
 
-// ── NO direction ──────────────────────────────────────────────────────────────
+// ── NO direction — within the 88–92% entry window ────────────────────────────
 
-test("conviction: yesPrice below (1-lockPrice) → BET_NO", () => {
+test("conviction: yesPrice exactly at NO trigger (0.12) → BET_NO", () => {
+  // NO price = 1 - 0.12 = 88% — exactly at the trigger
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.12, minConfidence: 0 }));
+  assert.equal(r.action, "BET_NO");
+});
+
+test("conviction: yesPrice inside NO window (0.09) → BET_NO", () => {
+  // NO price = 91%
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.09, minConfidence: 0 }));
   assert.equal(r.action, "BET_NO");
 });
 
-test("conviction: yesPrice at 0.01 → BET_NO (no lower band)", () => {
-  const r = computeConvictionDecision(cvInp({ yesPrice: 0.01, minConfidence: 0 }));
+test("conviction: yesPrice at NO cap boundary (0.08) → BET_NO (inclusive)", () => {
+  // NO price = 92% — exactly at the cap
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.08, minConfidence: 0 }));
   assert.equal(r.action, "BET_NO");
+});
+
+// ── NO direction — past the cap → SKIP ───────────────────────────────────────
+
+test("conviction: yesPrice below NO cap (0.05) → SKIP (entry window missed)", () => {
+  // NO price = 95% — too deep past the 92% cap
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.05, minConfidence: 0 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /past the.*cap/);
+});
+
+test("conviction: yesPrice at 0.01 → SKIP (entry window missed)", () => {
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.01, minConfidence: 0 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /past the.*cap/);
 });
 
 // ── SKIP (not yet at threshold) ───────────────────────────────────────────────
