@@ -873,18 +873,25 @@ async function _runBotTick(
   // the buffer price is the ceiling, not the typical outcome.
   //   YES: bid at min(yesAsk + 0.03, maxCost),  cent-floored
   //   NO:  ask at max(yesBid − 0.03, 1−maxCost), cent-ceiled
+  //
+  // CONVICTION MODE: the return floor cap is removed entirely. At 88-92¢ YES /
+  // 8-12¢ NO the cap (≈0.689) would force the order far from the market and
+  // guarantee zero fills. We still apply a hard 0.01/0.99 sanity bound.
   const _entryReturnFloor = S.config.minReturnMultiple ?? 1.45;
   const _entryMaxCost = 1 / _entryReturnFloor;
+  const isConviction = S.config.decisionMode === "conviction";
   const orderLimitPrice: number | null = (() => {
     const CROSSING_BUFFER = 0.03;
     if (direction === "yes") {
       if (liveYesAsk == null) return null;
       const raw = liveYesAsk + CROSSING_BUFFER;
-      return Math.floor(Math.min(raw, _entryMaxCost) * 100) / 100;
+      const cap = isConviction ? 0.99 : _entryMaxCost;
+      return Math.floor(Math.min(raw, cap) * 100) / 100;
     } else {
       if (liveYesBid == null) return null;
       const raw = liveYesBid - CROSSING_BUFFER;
-      return Math.ceil(Math.max(raw, 1 - _entryMaxCost) * 100) / 100;
+      const floor = isConviction ? 0.01 : (1 - _entryMaxCost);
+      return Math.ceil(Math.max(raw, floor) * 100) / 100;
     }
   })();
 
