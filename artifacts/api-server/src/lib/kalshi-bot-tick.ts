@@ -372,12 +372,12 @@ async function _runBotTick(
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
-  // Bypassed only when yesPrice hits a true extreme (≥ 0.92 or ≤ 0.08) —
-  // at those prices the market has moved so decisively that waiting is worse than acting.
-  // Conviction entries in the normal 88–92% window still respect this time gate.
+  // Bypassed in conviction mode (price cross IS the timing signal — a time gate
+  // defeats the purpose) and when yesPrice hits a true extreme (≥ 0.92 or ≤ 0.08).
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
-    if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
+    const isConvictionMode = S.config.decisionMode === "conviction";
+    if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60 && !isConvictionMode) {
       const isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
       if (!isExtreme) {
         logger.debug(
