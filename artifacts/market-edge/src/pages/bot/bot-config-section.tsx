@@ -837,18 +837,18 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       {(merged.convictionStabilityEnabled ?? true) && (<>
                         {/* Min ER */}
                         {(() => {
-                          const er = merged.convictionStabilityMinER ?? 0.30;
+                          const er = merged.convictionStabilityMinER ?? 0.12;
                           return (
                             <label className="flex flex-col gap-1">
                               <span className="text-xs text-muted-foreground">
                                 Min Efficiency Ratio — <span className="text-violet-400 font-mono">{er.toFixed(2)}</span>
                               </span>
-                              <input type="range" min={0.10} max={0.70} step={0.05}
+                              <input type="range" min={0.05} max={0.40} step={0.01}
                                 className="accent-violet-500"
                                 value={er}
                                 onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMinER: parseFloat(e.target.value) }))} />
                               <span className="text-[10px] text-muted-foreground/60">
-                                ER = |net move| ÷ total path in last 15 min. Higher = cleaner trend required. 0.30 = gentle directional bias.
+                                ER = |net move| ÷ total path in last 15 min. Typical crypto values: 0.05–0.25. 0.12 = gentle bias; 0.20+ = strong trend required.
                               </span>
                             </label>
                           );
@@ -873,18 +873,18 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         })()}
                         {/* Max vol% */}
                         {(() => {
-                          const vol = merged.convictionStabilityMaxVolPct ?? 3.0;
+                          const vol = merged.convictionStabilityMaxVolPct ?? 0.15;
                           return (
                             <label className="flex flex-col gap-1">
                               <span className="text-xs text-muted-foreground">
-                                Max Volatility % — <span className="text-red-400 font-mono">{vol.toFixed(1)}%</span>
+                                Max Volatility % — <span className="text-red-400 font-mono">{vol.toFixed(2)}%</span>
                               </span>
-                              <input type="range" min={0.5} max={8.0} step={0.5}
+                              <input type="range" min={0.02} max={0.50} step={0.01}
                                 className="accent-red-500"
                                 value={vol}
                                 onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxVolPct: parseFloat(e.target.value) }))} />
                               <span className="text-[10px] text-muted-foreground/60">
-                                1-min log-return std dev. Coins above this are classified volatile regardless of ER/osc.
+                                1-min log-return std dev. Typical calm crypto: 0.03–0.08%. 0.15% = loose; 0.06% = strict. Coins above this are volatile regardless of ER/osc.
                               </span>
                             </label>
                           );
@@ -908,9 +908,9 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           );
                         })()}
                         <StabilityPreview
-                          minER={merged.convictionStabilityMinER ?? 0.30}
+                          minER={merged.convictionStabilityMinER ?? 0.12}
                           maxOsc={merged.convictionStabilityMaxOsc ?? 8}
-                          maxVolPct={merged.convictionStabilityMaxVolPct ?? 3.0}
+                          maxVolPct={merged.convictionStabilityMaxVolPct ?? 0.15}
                           minMLConf={merged.convictionStabilityMinMLConf ?? 52}
                         />
                       </>)}

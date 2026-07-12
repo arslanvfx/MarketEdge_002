@@ -199,7 +199,7 @@ async function refreshConvictionWinRates(): Promise<void> {
   if (now - _lastWinRateRefreshAt < 60 * 60 * 1000) return; // at most once per hour
   _lastWinRateRefreshAt = now;
   try {
-    const rows = await db.execute(sql`
+    const result = await db.execute(sql`
       SELECT symbol,
         COUNT(*) FILTER (WHERE outcome = 'win')  AS wins,
         COUNT(*) FILTER (WHERE outcome = 'loss') AS losses
@@ -211,6 +211,7 @@ async function refreshConvictionWinRates(): Promise<void> {
         AND created_at >= NOW() - INTERVAL '14 days'
       GROUP BY symbol
     `);
+    const rows = result.rows ?? result;
     for (const row of (rows as unknown as { symbol: string; wins: string; losses: string }[])) {
       const wins   = parseInt(row.wins,   10) || 0;
       const losses = parseInt(row.losses, 10) || 0;
