@@ -1393,7 +1393,10 @@ export async function runBotLoopTick(): Promise<void> {
     // off entirely we skip this gate so other signals can still operate.
     // After STABILITY_WAIT_MAX_S seconds we proceed anyway and log a warning —
     // this prevents the gate from blocking all entries if Claude is slow or down.
-    if (isAiFeatureEnabled("crypto_stability") && !windowStabilityCache.has(sym)) {
+    // Skipped in conviction mode: conviction is purely reactive to yesPrice vs
+    // lockPrice — it does not use trend-stability direction. Blocking conviction
+    // entries while Claude resolves defeats the purpose of a price-reactive bot.
+    if (!isConviction && isAiFeatureEnabled("crypto_stability") && !windowStabilityCache.has(sym)) {
       if (clockElapsedS < STABILITY_WAIT_MAX_S) {
         evalResults.push({
           symbol: sym,
@@ -1688,7 +1691,9 @@ export async function runBotLoopTick(): Promise<void> {
       // output. windowMonitor ("bet" / "caution" / "stay_away") does not count —
       // it is a meta-signal derived from the models, not an independent source.
       // This prevents single-model bets like XRP (stat=null, claude=null, ML only).
-      {
+      // Skipped in conviction mode: direction is purely yesPrice vs lockPrice;
+      // model signal availability is irrelevant to whether entry should fire.
+      if (!isConviction) {
         const hardSigs = decision.signals as {
           statAbove?: boolean | null;
           claudeAbove?: boolean | null;
