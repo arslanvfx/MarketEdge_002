@@ -657,29 +657,9 @@ export async function runBotLoopTick(): Promise<void> {
         const contractValue = pos.direction === "yes" ? yp : (1 - yp);
         if (contractValue > stopFloor) continue;
 
-        // Spot-price guard: only fire if the crypto price has actually crossed
-        // the Kalshi strike to the losing side. If spot is still on the winning
-        // side the Kalshi market is just pricing uncertainty — let it ride to
-        // settlement rather than locking in an unnecessary loss.
-        const spotPrice = getCachedPrediction(sym)?.price ?? null;
-        const strike    = pos.kalshiTarget;
-        if (spotPrice !== null && strike > 0) {
-          const spotOnWinningSide = pos.direction === "yes"
-            ? spotPrice >= strike   // YES wins when spot is above strike
-            : spotPrice <= strike;  // NO wins when spot is below strike
-          if (spotOnWinningSide) {
-            logger.info(
-              { sym, direction: pos.direction, contractValue: +contractValue.toFixed(4),
-                stopFloor, spotPrice, strike },
-              "[kalshi-bot] conviction stop-loss suppressed — Kalshi market noisy but spot still on winning side",
-            );
-            continue;
-          }
-        }
-
         logger.warn(
           { sym, direction: pos.direction, contractValue: +contractValue.toFixed(4),
-            stopFloor, entryYesPrice: pos.entryYesPrice, spotPrice, strike: pos.kalshiTarget },
+            stopFloor, entryYesPrice: pos.entryYesPrice },
           "[kalshi-bot] conviction stop-loss triggered — selling position",
         );
         // Delete synchronously first — mirrors the window-expiry pattern so a
