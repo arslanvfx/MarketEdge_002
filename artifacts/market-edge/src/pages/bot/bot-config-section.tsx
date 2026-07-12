@@ -1,9 +1,103 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { QueryClient } from "@tanstack/react-query";
+import { useQuery, type QueryClient } from "@tanstack/react-query";
 import React from "react";
 import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode } from "./types";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
+
+const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
+
+interface StabilityPreviewProps {
+  minER: number;
+  maxOsc: number;
+  maxVolPct: number;
+  minMLConf: number;
+}
+
+function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPreviewProps) {
+  const { data, dataUpdatedAt } = useQuery<{
+    coinStability?: Record<string, { er: number; osc: number; volPct: number; mlConf: number | null; windowKey?: string }>;
+  }>({
+    queryKey: ["bot-pipeline-status"],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
+    refetchInterval: 5_000,
+  });
+
+  const coinStability = data?.coinStability;
+  const hasData = coinStability && Object.keys(coinStability).length > 0;
+
+  const results = STABILITY_COINS.map(sym => {
+    const s = coinStability?.[sym];
+    if (!s) return { sym, stable: null as boolean | null, er: null, osc: null, volPct: null, mlConf: null };
+    const stable =
+      s.er >= minER &&
+      s.osc <= maxOsc &&
+      s.volPct <= maxVolPct &&
+      (s.mlConf === null || s.mlConf >= minMLConf);
+    return { sym, stable, er: s.er, osc: s.osc, volPct: s.volPct, mlConf: s.mlConf };
+  });
+
+  const stableCount = results.filter(r => r.stable === true).length;
+  const updatedSec = dataUpdatedAt ? Math.round((Date.now() - dataUpdatedAt) / 1000) : null;
+
+  return (
+    <div className="mt-1 rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-medium text-violet-300 flex items-center gap-1.5">
+          <span className="relative flex h-1.5 w-1.5">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
+          </span>
+          Live eligibility — current thresholds
+        </span>
+        <span className="text-[9px] text-muted-foreground/50 font-mono">
+          {hasData ? `${stableCount}/${STABILITY_COINS.length} stable` : "—"}
+          {updatedSec !== null && updatedSec < 60 && <span className="ml-1 opacity-60">{updatedSec}s ago</span>}
+        </span>
+      </div>
+
+      {!hasData ? (
+        <span className="text-[10px] text-muted-foreground/50 italic">Waiting for indicator data…</span>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {results.map(({ sym, stable, er, osc, volPct, mlConf }) => {
+            const failReasons: string[] = [];
+            if (er !== null && er < minER) failReasons.push(`ER ${er.toFixed(2)}<${minER.toFixed(2)}`);
+            if (osc !== null && osc > maxOsc) failReasons.push(`Osc ${osc}>${maxOsc}`);
+            if (volPct !== null && volPct > maxVolPct) failReasons.push(`Vol ${volPct.toFixed(1)}%>${maxVolPct.toFixed(1)}%`);
+            if (mlConf !== null && mlConf < minMLConf) failReasons.push(`ML ${mlConf.toFixed(0)}%<${minMLConf}%`);
+            const title = stable === null
+              ? `${sym}: no data`
+              : stable
+                ? `${sym}: STABLE → max bet`
+                : `${sym}: volatile (${failReasons.join(", ")})`;
+
+            return (
+              <span
+                key={sym}
+                title={title}
+                className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border cursor-default select-none transition-colors ${
+                  stable === null
+                    ? "bg-muted/30 text-muted-foreground/40 border-border/30"
+                    : stable
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : "bg-amber-500/10 text-amber-400/80 border-amber-500/20"
+                }`}
+              >
+                {stable === true && <Zap className="w-2.5 h-2.5" />}
+                {sym}
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      <span className="text-[9px] text-muted-foreground/40 leading-relaxed">
+        Green = stable → max bet · Amber = volatile → regular bet · Hover for details · Updates every 5 s
+      </span>
+    </div>
+  );
+}
 
 interface BotConfigSectionProps {
   cfg: BotConfig | undefined;
@@ -813,6 +907,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             </label>
                           );
                         })()}
+                        <StabilityPreview
+                          minER={merged.convictionStabilityMinER ?? 0.30}
+                          maxOsc={merged.convictionStabilityMaxOsc ?? 8}
+                          maxVolPct={merged.convictionStabilityMaxVolPct ?? 3.0}
+                          minMLConf={merged.convictionStabilityMinMLConf ?? 52}
+                        />
                       </>)}
                     </div>
                   </div>
