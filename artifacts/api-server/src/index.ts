@@ -1,7 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { fetchAllMarkets } from "./lib/markets";
-import { startPredictionTracker } from "./lib/crypto";
+import { startPredictionTracker, fetchCryptoPredictions } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
 import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
@@ -523,6 +523,12 @@ app.listen(port, (err) => {
         () => {
           runMLBackfillIfNeeded(96)
             .catch((err) => logger.warn({ err }, "[ml-backfill] startup backfill failed (non-fatal)"));
+          // Second pre-warm pass once ML is ready: by now the stat model has
+          // run at least one snap, so this call gets Claude + stat into predCache
+          // together before the first bot tick that needs all three signals.
+          fetchCryptoPredictions()
+            .then(() => logger.info("[startup] prediction cache warmed (post-ML-init pass)"))
+            .catch((err) => logger.warn({ err }, "[startup] post-ML-init pre-warm failed (non-fatal)"));
         },
         (windowKey) => {
           // Tracker fires onNewWindow before the bot loop detects the boundary,
@@ -538,6 +544,14 @@ app.listen(port, (err) => {
         },
       );
       logger.info("Prediction tracker started");
+
+      // Immediate pre-warm: populate predCache for all coins right away so the
+      // bot's first tick (fires 2 s from now) finds stat predictions ready.
+      // This runs in parallel with initMLFromDB — it only needs candles/stats,
+      // not ML state, so the order doesn't matter.
+      fetchCryptoPredictions()
+        .then(() => logger.info("[startup] prediction cache pre-warmed (immediate pass)"))
+        .catch((err) => logger.warn({ err }, "[startup] immediate pre-warm failed (non-fatal)"));
 
       // Kalshi bot loop — runs every 15 s alongside the main tracker.
       // Reduced from 30 s: the prefetch pipeline now fires an immediate tick
