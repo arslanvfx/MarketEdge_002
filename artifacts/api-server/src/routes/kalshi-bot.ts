@@ -646,6 +646,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMinMLConf,
     convictionStabilityMaxBetProbability,
     convictionStabilityMaxBetsPerWindow,
+    maxBetMinWindowEntryMinutes,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -720,6 +721,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMinMLConf?: number;
     convictionStabilityMaxBetProbability?: number;
     convictionStabilityMaxBetsPerWindow?: number;
+    maxBetMinWindowEntryMinutes?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -923,6 +925,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionStabilityMaxBetsPerWindow === "number") {
     partial.convictionStabilityMaxBetsPerWindow = Math.min(3, Math.max(1, Math.round(convictionStabilityMaxBetsPerWindow)));
+  }
+  if (typeof maxBetMinWindowEntryMinutes === "number" && maxBetMinWindowEntryMinutes >= 0 && maxBetMinWindowEntryMinutes <= 13) {
+    partial.maxBetMinWindowEntryMinutes = Math.round(maxBetMinWindowEntryMinutes);
   }
   if (typeof allowLateEntries === "boolean") {
     partial.allowLateEntries = allowLateEntries;
