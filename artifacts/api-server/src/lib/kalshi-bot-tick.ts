@@ -384,23 +384,18 @@ async function _runBotTick(
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
-  // Bypassed only when yesPrice hits a true extreme (≥ 0.92 or ≤ 0.08) —
-  // at those prices the market has decided early and waiting is worse than acting.
+  // This gate is unconditional — no price condition can bypass it.  Both the normal
+  // per-tick path and the pipeline-completion trigger (_firePipelineEntryForCoin /
+  // _firePipelineEntryAfterDelay in kalshi-bot-loop.ts) call through this function,
+  // so this single check covers every entry path.
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
     if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
-      const isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
-      if (!isExtreme) {
-        logger.debug(
-          { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-          "[kalshi-bot] early-window lockout — waiting for time gate or extreme price (≥92¢/≤8¢)",
-        );
-        return;
-      }
-      logger.info(
+      logger.debug(
         { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-        "[kalshi-bot] early-window lockout bypassed — extreme price override",
+        "[kalshi-bot] early-window lockout — waiting for time gate",
       );
+      return;
     }
   }
   // Floor: early-exit the tick if fewer than minRemainingMinutes remain.
