@@ -1095,7 +1095,7 @@ async function _runBotTick(
   if (boostBetSize != null) {
     logger.info(
       { sym, boostBetSize, baseBetSize: S.config.betSize, targetBetSize: targetBetSize.toFixed(4) },
-      "[kalshi-bot] conviction random boost active — elevated bet size this window",
+      "[kalshi-bot] conviction stability gate — STABLE: using max bet size",
     );
   } else if (regimeQualified) {
     const ind = getCachedPrediction(sym)?.indicators;
