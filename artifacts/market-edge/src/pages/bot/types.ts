@@ -85,6 +85,7 @@ export interface BotConfig {
   convictionStabilityMinMLConf?: number;
   convictionStabilityMaxBetProbability?: number;
   convictionStabilityMaxBetsPerWindow?: number;
+  maxBetMinWindowEntryMinutes?: number;
   allowLateEntries?: boolean;
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
 }

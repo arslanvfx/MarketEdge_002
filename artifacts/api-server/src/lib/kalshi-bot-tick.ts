@@ -1047,6 +1047,17 @@ async function _runBotTick(
         );
         return null;
       }
+      // Max-bet timing gate: independent of minWindowEntryMinutes; blocks max-size
+      // bets until the configured number of minutes has elapsed.  Falling back to
+      // regular size does NOT consume the token — it stays available for later.
+      const maxBetEntryGateS = (S.config.maxBetMinWindowEntryMinutes ?? 0) * 60;
+      if (maxBetEntryGateS > 0 && clockElapsedS < maxBetEntryGateS) {
+        logger.info(
+          { sym, elapsed: Math.round(clockElapsedS), gateS: maxBetEntryGateS },
+          "[kalshi-bot] conviction stability — STABLE but max-bet timing gate not elapsed, regular bet size",
+        );
+        return null;
+      }
       // Global per-window token check: the probability was already rolled ONCE at
       // window transition.  If no token is available, all remaining coins use regular
       // size regardless of how stable they are.
@@ -1070,6 +1081,14 @@ async function _runBotTick(
     const wr    = coinConvictionWinRates.get(sym) ?? null;
     if (wr !== null && wr < minWr) {
       logger.info({ sym, wr, minWr }, "[kalshi-bot] conviction boost — win-rate gate failed");
+      return null;
+    }
+    const legacyMaxBetEntryGateS = (S.config.maxBetMinWindowEntryMinutes ?? 0) * 60;
+    if (legacyMaxBetEntryGateS > 0 && clockElapsedS < legacyMaxBetEntryGateS) {
+      logger.info(
+        { sym, elapsed: Math.round(clockElapsedS), gateS: legacyMaxBetEntryGateS },
+        "[kalshi-bot] conviction stability — STABLE but max-bet timing gate not elapsed, regular bet size",
+      );
       return null;
     }
     if (maxBetWindowToken.remaining <= 0) {

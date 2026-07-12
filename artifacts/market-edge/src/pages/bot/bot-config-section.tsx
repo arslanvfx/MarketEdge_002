@@ -913,6 +913,32 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             </label>
                           );
                         })()}
+                        {/* Max-bet entry timing gate */}
+                        {(() => {
+                          const gate = merged.maxBetMinWindowEntryMinutes ?? 0;
+                          return (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                                <Zap className="w-3 h-3 text-amber-400" />
+                                Max-Bet Entry Wait
+                                {gate > 0 && (
+                                  <span className="ml-1 text-amber-400 font-mono">T+{gate}m</span>
+                                )}
+                              </span>
+                              <select className="bg-background border border-violet-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
+                                value={gate}
+                                onChange={e => setConfigDraft(d => ({ ...d, maxBetMinWindowEntryMinutes: parseInt(e.target.value, 10) }))}>
+                                <option value={0}>No wait — max bet allowed immediately</option>
+                                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
+                                  <option key={m} value={m}>Wait until T+{m} min</option>
+                                ))}
+                              </select>
+                              <span className="text-[10px] text-muted-foreground/60">
+                                Max-size bets are blocked until this many minutes into the window. If STABLE but the gate hasn't elapsed, the bot falls back to regular size — the token is not consumed.
+                              </span>
+                            </label>
+                          );
+                        })()}
                         <StabilityPreview
                           minER={merged.convictionStabilityMinER ?? 0.12}
                           maxOsc={merged.convictionStabilityMaxOsc ?? 8}

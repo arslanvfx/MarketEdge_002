@@ -1168,6 +1168,7 @@ export interface BotConfig {
   convictionStabilityMinMLConf?: number;               // min ML confidence to classify stable; null ML = passes (default 52)
   convictionStabilityMaxBetProbability?: number;        // 0–1: probability that a stable coin gets max bet size on each entry (default 0.25)
   convictionStabilityMaxBetsPerWindow?: number;         // how many max-bet slots are available per window when the roll hits (default 1)
+  maxBetMinWindowEntryMinutes?: number;                 // minutes into window before a max-size bet may fire (0 = disabled, default 0)
 }
 
 // ---------------------------------------------------------------------------
