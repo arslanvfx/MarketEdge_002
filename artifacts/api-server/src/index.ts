@@ -549,7 +549,7 @@ app.listen(port, (err) => {
         runBotLoopTick().catch((err) =>
           logger.warn({ err }, "[kalshi-bot] loop tick failed (non-fatal)"),
         );
-      }, 5_000);
+      }, 2_000);
 
       // Auto-tune performance analytics: runs every 15 min, aligned to UTC
       // 15-minute window boundaries (00, 15, 30, 45) so the analytics window
