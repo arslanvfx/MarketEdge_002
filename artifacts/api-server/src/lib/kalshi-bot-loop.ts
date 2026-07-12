@@ -2184,9 +2184,13 @@ export async function runBotLoopTick(): Promise<void> {
     }
   };
 
-  // Fire all bet candidates in parallel so FOK retries and DB writes don't
-  // serialize — all three (or however many Phase 3 approved) attempt concurrently.
-  await Promise.allSettled(betSymbols.map(runCoin));
+  // Fire bet candidates sequentially so each coin's bet increments the global
+  // windowTotalBets counter before the next coin re-checks it. Running in parallel
+  // caused multiple coins to all see globalBetsThisWindow=0 (the Phase-3 snapshot)
+  // and all place bets in the same tick, violating maxBetsPerWindow.
+  for (const sym of betSymbols) {
+    await runCoin(sym);
+  }
 
   // Then manage existing positions (skips) in parallel.
   await Promise.allSettled(skipSymbols.map(runCoin));

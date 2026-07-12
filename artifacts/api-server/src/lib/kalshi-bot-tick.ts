@@ -367,6 +367,15 @@ async function _runBotTick(
     logger.debug({ sym, betsThisWindow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] maxBetsPerWindow reached — skipping entry");
     return;
   }
+  // Live global cap re-check: Phase 3 snapshots globalBetsThisWindow once before
+  // iterating coins, so when bet candidates run sequentially the first coin's bet
+  // must be visible to the next. Reading windowTotalBets here (before any await)
+  // gives the authoritative live count.
+  const globalTotalNow = windowTotalBets.get(`${windowKey}:${S.botMode}`) ?? 0;
+  if (S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
+    logger.debug({ sym, globalTotalNow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] global cap reached at entry — skipping");
+    return;
+  }
 
   // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
   // 0 = disabled (no ceiling — enter at any point).
