@@ -372,8 +372,10 @@ async function _runBotTick(
   // iterating coins, so when bet candidates run sequentially the first coin's bet
   // must be visible to the next. Reading windowTotalBets here (before any await)
   // gives the authoritative live count.
+  // CONVICTION MODE: global cap bypassed — each coin bets independently on price cross;
+  // max-bet slots are governed by convictionStabilityMaxBetsPerWindow.
   const globalTotalNow = windowTotalBets.get(`${windowKey}:${S.botMode}`) ?? 0;
-  if (S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
+  if (S.config.decisionMode !== "conviction" && S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, globalTotalNow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] global cap reached at entry — skipping");
     return;
   }

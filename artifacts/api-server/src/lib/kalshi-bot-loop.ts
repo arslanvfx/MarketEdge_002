@@ -1254,7 +1254,11 @@ export async function runBotLoopTick(): Promise<void> {
     // Global total-bet cap: if maxBetsPerWindow total bets have already been placed
     // across ALL coins this window, skip any coin that has not yet placed a bet.
     // Coins that already placed a bet are allowed to continue (for display/exit purposes).
-    if (globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
+    //
+    // CONVICTION MODE: this cap does NOT apply. Each coin bets independently based on
+    // its own yesPrice crossing 90¢. Max-bet slots are governed separately by
+    // convictionStabilityMaxBetsPerWindow via maxBetWindowToken.
+    if (!isConviction && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${S.config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -2232,12 +2236,21 @@ export async function runBotLoopTick(): Promise<void> {
     }
   };
 
-  // Fire bet candidates sequentially so each coin's bet increments the global
-  // windowTotalBets counter before the next coin re-checks it. Running in parallel
-  // caused multiple coins to all see globalBetsThisWindow=0 (the Phase-3 snapshot)
-  // and all place bets in the same tick, violating maxBetsPerWindow.
-  for (const sym of betSymbols) {
-    await runCoin(sym);
+  // CONVICTION MODE: run all bet candidates in parallel. Each coin independently
+  // fires a FOK on its own yesPrice crossing — there's no global cap to serialize
+  // around (cap is bypassed for conviction), so sequential execution would only
+  // delay coins behind slow FOK retries from earlier coins.
+  //
+  // NON-CONVICTION: fire sequentially so each coin's bet increments windowTotalBets
+  // before the next coin re-checks it. Running in parallel caused multiple coins to
+  // all see globalBetsThisWindow=0 (the Phase-3 snapshot) and all place bets in the
+  // same tick, violating maxBetsPerWindow.
+  if (_isConvictionMode) {
+    await Promise.allSettled(betSymbols.map(runCoin));
+  } else {
+    for (const sym of betSymbols) {
+      await runCoin(sym);
+    }
   }
 
   // Then manage existing positions (skips) in parallel.
