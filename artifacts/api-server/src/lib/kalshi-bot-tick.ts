@@ -1377,11 +1377,16 @@ async function _runBotTick(
     if (direction === "yes" && freshYesAsk != null) {
       expectedFillCost = freshYesAsk;
       const raw = freshYesAsk + CROSSING_BUFFER;
-      orderLimitPrice = Math.floor(Math.min(raw, 0.99) * 100) / 100;
+      // Hard-cap the YES limit at lockPriceCap so the fill can never exceed
+      // the top of the conviction zone (e.g. 92¢).  The exchange fills at
+      // ≤ your limit, so capping here guarantees the fill stays inside bounds.
+      orderLimitPrice = Math.floor(Math.min(raw, lockPriceCap) * 100) / 100;
     } else if (direction === "no" && freshYesBid != null) {
       expectedFillCost = 1 - freshYesBid;
       const raw = freshYesBid - CROSSING_BUFFER;
-      orderLimitPrice = Math.ceil(Math.max(raw, 0.01) * 100) / 100;
+      // For NO orders the limit is expressed as a YES price.  Floor at
+      // (1 - lockPriceCap) so the NO fill price can never exceed lockPriceCap.
+      orderLimitPrice = Math.ceil(Math.max(raw, 1 - lockPriceCap) * 100) / 100;
     }
     const freshContractCount = Math.floor(targetBetSize / expectedFillCost);
     if (freshContractCount >= 1 && freshContractCount !== contractCount) {
