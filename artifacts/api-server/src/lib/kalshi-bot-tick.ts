@@ -866,7 +866,9 @@ async function _runBotTick(
   //   NO:  = 1 − yes_bid (complement of the YES bid credit we receive on fill)
   // Legacy fallback uses the midpoint-based buffer + return-floor cap.
   const legacySideCost = direction === "yes" ? (yesPrice ?? 0.5) : (1 - (yesPrice ?? 0.5));
-  const expectedFillCost: number =
+  // Declared `let` so the conviction live-price gate (below) can re-derive these
+  // values from fresh orderbook prices if the pre-gate cache is stale.
+  let expectedFillCost: number =
     direction === "yes"
       ? (liveLimitPrice ?? computeMarketableLimitPrice("bid", yesPrice, S.config.minReturnMultiple))
       : (liveYesBid != null && liveYesBid > 0
@@ -888,7 +890,9 @@ async function _runBotTick(
   const _entryReturnFloor = S.config.minReturnMultiple ?? 1.45;
   const _entryMaxCost = 1 / _entryReturnFloor;
   const isConviction = S.config.decisionMode === "conviction";
-  const orderLimitPrice: number | null = (() => {
+  // Declared `let` — the conviction live-price gate (below) refreshes the
+  // underlying ask/bid and may recompute this value with fresh prices.
+  let orderLimitPrice: number | null = (() => {
     const CROSSING_BUFFER = 0.03;
     if (direction === "yes") {
       if (liveYesAsk == null) return null;
@@ -1122,7 +1126,7 @@ async function _runBotTick(
       "[kalshi-bot] per-coin maxBetSize override applied",
     );
   }
-  const contractCount = Math.floor(targetBetSize / expectedFillCost);
+  let contractCount = Math.floor(targetBetSize / expectedFillCost);
   // If budget can't buy even one contract at the live ask, skip this entry and
   // engage the FOK-cooldown so this coin doesn't retry the same window.
   if (contractCount < 1) {
@@ -1298,13 +1302,19 @@ async function _runBotTick(
 
   // ─── CONVICTION LIVE-PRICE GATE ──────────────────────────────────────────
   // Force a fresh Kalshi API call (bypassing the 5 s cache) immediately before
-  // placing the FOK order.  If the real orderbook has moved outside the
+  // placing the order.  If the real orderbook has moved outside the
   // [lockPrice, lockPriceCap] window since the signal fired, abort the order
   // and release the once-per-window lock so the next tick can retry if the
   // price re-enters.
   //
-  // This prevents the "stale cache" fill: cached 92 ¢ → FOK limit 95 ¢ →
+  // This prevents the "stale cache" fill: cached 92 ¢ → limit 95 ¢ →
   // real book at 74 ¢ → filled at 74 ¢ (outside the entry window).
+  //
+  // Hoisted outside the gate block so the recompute step below can use them
+  // to update expectedFillCost / contractCount / orderLimitPrice with
+  // fresh values (avoids stale-cache sizing blowup: yesBid 0.93 → 57 contracts).
+  let freshYesAsk: number | null = null;
+  let freshYesBid: number | null = null;
   if (S.config.decisionMode === "conviction") {
     // Derive the ±2 ¢ window from the single slider value (kalshiLockPrice).
     // This matches the engine derivation in kalshi-bot-engine.ts exactly.
@@ -1322,8 +1332,8 @@ async function _runBotTick(
     const obPrices = freshData?.ticker
       ? await fetchOrderbookPrices(freshData.ticker).catch(() => null)
       : null;
-    const freshYesAsk = obPrices?.yesAsk ?? freshData?.yesAsk ?? null;
-    const freshYesBid = obPrices?.yesBid ?? freshData?.yesBid ?? null;
+    freshYesAsk = obPrices?.yesAsk ?? freshData?.yesAsk ?? null;
+    freshYesBid = obPrices?.yesBid ?? freshData?.yesBid ?? null;
     // YES direction: use the fresh YES ask.
     // NO  direction: NO ask = 1 − YES bid (the price paid per NO contract).
     const freshRefPrice =
@@ -1350,6 +1360,40 @@ async function _runBotTick(
         },
         "[kalshi-bot] conviction live-price gate: price moved outside window — order aborted",
       );
+      return;
+    }
+
+    // Gate passed — re-derive sizing from the fresh orderbook prices so that a
+    // stale pre-gate cache (e.g. liveYesBid=0.93 left over from the prior window)
+    // cannot inflate contractCount to 57 on a 4 $ bet and produce a $38 fill.
+    const CROSSING_BUFFER = 0.03;
+    if (direction === "yes" && freshYesAsk != null) {
+      expectedFillCost = freshYesAsk;
+      const raw = freshYesAsk + CROSSING_BUFFER;
+      orderLimitPrice = Math.floor(Math.min(raw, 0.99) * 100) / 100;
+    } else if (direction === "no" && freshYesBid != null) {
+      expectedFillCost = 1 - freshYesBid;
+      const raw = freshYesBid - CROSSING_BUFFER;
+      orderLimitPrice = Math.ceil(Math.max(raw, 0.01) * 100) / 100;
+    }
+    const freshContractCount = Math.floor(targetBetSize / expectedFillCost);
+    if (freshContractCount >= 1 && freshContractCount !== contractCount) {
+      logger.info(
+        {
+          sym, direction,
+          staleCost: contractCount > 0 ? (targetBetSize / contractCount).toFixed(4) : "n/a",
+          freshCost: expectedFillCost.toFixed(4),
+          staleCount: contractCount,
+          freshCount: freshContractCount,
+          freshOrderLimitPrice: orderLimitPrice,
+        },
+        "[kalshi-bot] conviction gate: re-derived sizing from fresh prices",
+      );
+      contractCount = freshContractCount;
+    } else if (freshContractCount < 1) {
+      logger.warn({ sym, direction, expectedFillCost, targetBetSize }, "[kalshi-bot] conviction gate: fresh prices give contractCount<1 — skipping");
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
       return;
     }
   }
@@ -1462,6 +1506,9 @@ async function _runBotTick(
             );
           }
           convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          // Block this coin for the rest of the window so the next tick doesn't
+          // immediately retry and produce another wrong-price abort cycle.
+          windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
           return;
         }
       }
