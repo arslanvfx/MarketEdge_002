@@ -199,16 +199,19 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
               const s = liveSignals[sym];
               const stab = coinStability?.[sym] ?? null;
               const strike = pinnedStrikes[sym] ?? null;
+              const isStale = stab !== null && windowKey != null && stab.windowKey !== windowKey;
               const isStable = stab?.stable === true;
-              const hasData = stab !== null;
+              const hasData = stab !== null && !isStale;
 
               return (
-                <tr key={sym} className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
+                <tr key={sym} className={`border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors${isStale ? " opacity-40" : ""}`}>
                   <td className="px-5 py-2.5 font-bold text-foreground">{sym}</td>
                   <td className="px-3 py-2.5 font-mono text-foreground/60 text-[11px]">{fmtStrike(strike)}</td>
 
                   <td className="px-3 py-2.5">
-                    {!hasData ? (
+                    {isStale ? (
+                      <span className="text-muted-foreground/40 text-xs font-mono">stale</span>
+                    ) : !hasData ? (
                       <span className="text-muted-foreground/40 text-xs font-mono">—</span>
                     ) : isStable ? (
                       <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
@@ -222,19 +225,19 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {stab != null ? <MetricPill value={stab.er.toFixed(2)} ok={stab.er >= minER} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
+                    {stab != null && !isStale ? <MetricPill value={stab.er.toFixed(2)} ok={stab.er >= minER} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {stab != null ? <MetricPill value={String(stab.osc)} ok={stab.osc <= maxOsc} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
+                    {stab != null && !isStale ? <MetricPill value={String(stab.osc)} ok={stab.osc <= maxOsc} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {stab != null ? <MetricPill value={stab.volPct.toFixed(2) + "%"} ok={stab.volPct <= maxVolPct} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
+                    {stab != null && !isStale ? <MetricPill value={stab.volPct.toFixed(2) + "%"} ok={stab.volPct <= maxVolPct} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {(stab?.mlConf ?? s.mlConfidence) != null ? (
+                    {!isStale && (stab?.mlConf ?? s.mlConfidence) != null ? (
                       <MetricPill value={(stab?.mlConf ?? s.mlConfidence)!.toFixed(0) + "%"} ok={(stab?.mlConf ?? s.mlConfidence)! >= minMLConf} />
                     ) : (
                       <span className="text-muted-foreground/40 font-mono">—</span>

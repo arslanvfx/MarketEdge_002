@@ -503,6 +503,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
+    coinStabilityCache.clear();
     // Conviction random boost: the random roll happens per individual bet in the tick,
     // not here at window transition. Just refresh win-rate data and reset the (now-unused)
     // Set so nothing carries over from the previous window.
