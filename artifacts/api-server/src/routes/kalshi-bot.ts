@@ -532,11 +532,6 @@ function pipelineStatusHandler(_req: any, res: any) {
       minConfidence,
       decisionMode,
       coinStability: Object.fromEntries(coinStabilityCache),
-      stabilityFrequency: {
-        windowsElapsed: stabilityWindowCount,
-        electedCoin: stabilityMaxBetElectedCoin,
-        everyNWindows: getBotState().config.convictionStabilityMaxBetEveryNWindows ?? 3,
-      },
       boosts: { mlWeight: ML_WEIGHT, claudeWeight: CLAUDE_WEIGHT, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
       adaptiveFilters: {
         directionalPenaltyYesPp,
@@ -700,7 +695,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMaxOsc,
     convictionStabilityMaxVolPct,
     convictionStabilityMinMLConf,
-    convictionStabilityMaxBetEveryNWindows,
+    convictionStabilityMaxBetProbability,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -773,7 +768,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMaxOsc?: number;
     convictionStabilityMaxVolPct?: number;
     convictionStabilityMinMLConf?: number;
-    convictionStabilityMaxBetEveryNWindows?: number;
+    convictionStabilityMaxBetProbability?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -972,8 +967,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof convictionStabilityMinMLConf === "number" && convictionStabilityMinMLConf >= 50 && convictionStabilityMinMLConf <= 80) {
     partial.convictionStabilityMinMLConf = Math.round(convictionStabilityMinMLConf);
   }
-  if (typeof convictionStabilityMaxBetEveryNWindows === "number" && convictionStabilityMaxBetEveryNWindows >= 1 && convictionStabilityMaxBetEveryNWindows <= 10) {
-    partial.convictionStabilityMaxBetEveryNWindows = Math.round(convictionStabilityMaxBetEveryNWindows);
+  if (typeof convictionStabilityMaxBetProbability === "number" && convictionStabilityMaxBetProbability >= 0 && convictionStabilityMaxBetProbability <= 1) {
+    partial.convictionStabilityMaxBetProbability = convictionStabilityMaxBetProbability;
   }
   if (typeof allowLateEntries === "boolean") {
     partial.allowLateEntries = allowLateEntries;

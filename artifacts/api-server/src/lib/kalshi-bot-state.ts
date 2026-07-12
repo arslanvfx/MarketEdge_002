@@ -192,14 +192,6 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
 export const convictionBoostWindowCoins = new Set<string>();
-// Stability-gate frequency tracking:
-// stabilityWindowCount counts windows since the last max-bet fired and resets to 0 after each one.
-// stabilityMaxBetElectedCoin holds the single coin chosen to receive max-bet this window (null = not yet elected / no eligible window).
-export let stabilityWindowCount = 0;
-export let stabilityMaxBetElectedCoin: string | null = null;
-export function setStabilityWindowCount(n: number) { stabilityWindowCount = n; }
-export function setStabilityMaxBetElectedCoin(sym: string | null) { stabilityMaxBetElectedCoin = sym; }
-
 export interface CoinStabilityResult {
   stable: boolean;
   er: number;
