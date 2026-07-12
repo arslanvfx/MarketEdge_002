@@ -355,6 +355,7 @@ export async function runAutoTuneJob(): Promise<void> {
         exitedAt: kalshiBotBetsTable.exitedAt,
         signals: kalshiBotBetsTable.signals,
         outcome: kalshiBotBetsTable.outcome,
+        isMaxBet: kalshiBotBetsTable.isMaxBet,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -378,6 +379,7 @@ export async function runAutoTuneJob(): Promise<void> {
               : r.exitedAt != null ? String(r.exitedAt) : null,
       signals: (r.signals as Record<string, unknown>) ?? null,
       outcome: r.outcome,
+      isMaxBet: r.isMaxBet ?? false,
     }));
 
     const report = computePerformanceReport(bets);

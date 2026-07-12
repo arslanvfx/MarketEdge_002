@@ -366,6 +366,8 @@ export interface BetRecordArgs {
   source?: "bot" | "manual";
   // Kalshi YES contract price (0–1) at decision time — used for conviction threshold analysis.
   entryYesPrice?: number | null;
+  // True when the stability gate + probability roll upgraded this bet to max size.
+  isMaxBet?: boolean;
 }
 
 export async function persistBetRecord(args: BetRecordArgs): Promise<void> {
@@ -427,6 +429,7 @@ export async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> 
         decisionMode: args.decisionMode ?? null,
         source: args.source ?? "bot",
         entryYesPrice: args.entryYesPrice != null ? String(args.entryYesPrice) : undefined,
+        isMaxBet: args.isMaxBet ?? false,
         createdAt: new Date(),
       }).onConflictDoNothing();
     }

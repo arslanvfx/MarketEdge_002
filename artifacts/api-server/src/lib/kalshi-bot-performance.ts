@@ -13,6 +13,20 @@ export interface SettledBetRecord {
   exitedAt: string | Date | null;
   signals: Record<string, unknown> | null;
   outcome: string | null;
+  isMaxBet?: boolean | null;
+}
+
+export interface MaxBetStats {
+  total: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  totalPnl: number;
+  regularTotal: number;
+  regularWins: number;
+  regularLosses: number;
+  regularWinRate: number | null;
+  regularTotalPnl: number;
 }
 
 export interface SymbolStats {
@@ -124,6 +138,7 @@ export interface PerformanceReport {
   avgConfidenceLosers: number | null;
   exitReasonBreakdown: Record<string, number>;
   circuitBreakerTriggers: number;
+  maxBetStats: MaxBetStats;
   recommendations: string[];
   computedAt: string;
 }
@@ -504,6 +519,28 @@ export function computePerformanceReport(
     );
   }
 
+  // Max-bet vs regular-bet breakdown
+  const maxBets   = settled.filter(b => b.isMaxBet === true);
+  const regBets   = settled.filter(b => !b.isMaxBet);
+  const mbWins    = maxBets.filter(b => b.outcome === "win").length;
+  const mbLosses  = maxBets.filter(b => b.outcome === "loss").length;
+  const mbPnl     = maxBets.reduce((s, b) => s + (b.pnl != null ? parseFloat(String(b.pnl)) : 0), 0);
+  const regWins   = regBets.filter(b => b.outcome === "win").length;
+  const regLosses = regBets.filter(b => b.outcome === "loss").length;
+  const regPnl    = regBets.reduce((s, b) => s + (b.pnl != null ? parseFloat(String(b.pnl)) : 0), 0);
+  const maxBetStats: MaxBetStats = {
+    total: maxBets.length,
+    wins: mbWins,
+    losses: mbLosses,
+    winRate: maxBets.length > 0 ? mbWins / maxBets.length : null,
+    totalPnl: mbPnl,
+    regularTotal: regBets.length,
+    regularWins: regWins,
+    regularLosses: regLosses,
+    regularWinRate: regBets.length > 0 ? regWins / regBets.length : null,
+    regularTotalPnl: regPnl,
+  };
+
   return {
     totalBets,
     wins,
@@ -525,6 +562,7 @@ export function computePerformanceReport(
     avgConfidenceLosers,
     exitReasonBreakdown,
     circuitBreakerTriggers,
+    maxBetStats,
     recommendations: recommendations.slice(0, 4),
     computedAt,
   };

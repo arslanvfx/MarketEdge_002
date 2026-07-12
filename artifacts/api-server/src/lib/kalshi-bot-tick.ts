@@ -1605,6 +1605,8 @@ async function _runBotTick(
     mode: entryMode,
     // Kalshi YES contract price at decision time (used for conviction threshold analysis).
     entryYesPrice: yesPrice,
+    // Max-bet flag: true when the stability gate + probability roll upgraded this bet.
+    isMaxBet: boostBetSize != null,
   });
   // Mark this window as having a recorded decision so SKIP dedup works correctly
   lastDecisionWindowKey.set(sym, windowKey);

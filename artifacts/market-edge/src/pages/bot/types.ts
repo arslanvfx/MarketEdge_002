@@ -256,6 +256,19 @@ export interface HourOfDayStats {
   hour: number;
   wins: number; losses: number; betCount: number; winRate: number | null;
 }
+export interface MaxBetStats {
+  total: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  totalPnl: number;
+  regularTotal: number;
+  regularWins: number;
+  regularLosses: number;
+  regularWinRate: number | null;
+  regularTotalPnl: number;
+}
+
 export interface PerformanceReport {
   totalBets: number; wins: number; losses: number;
   overallWinRate: number | null;
@@ -273,6 +286,7 @@ export interface PerformanceReport {
   avgConfidenceWinners: number | null; avgConfidenceLosers: number | null;
   exitReasonBreakdown: Record<string, number>;
   circuitBreakerTriggers: number;
+  maxBetStats?: MaxBetStats;
   recommendations: string[];
   computedAt: string;
 }

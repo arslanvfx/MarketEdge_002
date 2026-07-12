@@ -35,7 +35,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
-import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, stabilityWindowCount, stabilityMaxBetElectedCoin } from "../lib/kalshi-bot-state";
+import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 

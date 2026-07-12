@@ -118,6 +118,87 @@ export function PerformanceInsights({ perfReportData, statsData, activeMode }: P
                       );
                     })()}
 
+                    {/* Max bet vs regular bet comparison */}
+                    {r.maxBetStats && (r.maxBetStats.total > 0 || r.maxBetStats.regularTotal > 0) && (() => {
+                      const mb = r.maxBetStats!;
+                      const fmt$ = (v: number) => (v >= 0 ? "+" : "") + "$" + Math.abs(v).toFixed(2);
+                      const fmtPct = (v: number | null) => v == null ? "—" : `${Math.round(v * 100)}%`;
+                      const mbColor = mb.winRate == null ? "text-muted-foreground"
+                        : mb.winRate >= 0.60 ? "text-emerald-400"
+                        : mb.winRate >= 0.45 ? "text-amber-400"
+                        : "text-red-400";
+                      const regColor = mb.regularWinRate == null ? "text-muted-foreground"
+                        : mb.regularWinRate >= 0.60 ? "text-emerald-400"
+                        : mb.regularWinRate >= 0.45 ? "text-amber-400"
+                        : "text-red-400";
+                      const pnlColor = (v: number) => v >= 0 ? "text-emerald-400" : "text-red-400";
+                      return (
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-[10px] uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+                              <Zap className="w-3 h-3 text-emerald-400" />
+                              Max Bet vs Regular Bet
+                            </span>
+                            {mb.total === 0 && (
+                              <span className="text-[9px] text-muted-foreground/50 italic">No max bets recorded yet</span>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {/* Max bets card */}
+                            <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3 flex flex-col gap-1">
+                              <div className="flex items-center gap-1 mb-0.5">
+                                <Zap className="w-3 h-3 text-emerald-400" />
+                                <span className="text-[10px] font-semibold text-emerald-300">Max Bets</span>
+                                <span className="ml-auto text-[9px] text-muted-foreground font-mono">{mb.total} bets</span>
+                              </div>
+                              <div className="flex items-baseline gap-1.5">
+                                <span className={`text-xl font-bold ${mbColor}`}>{fmtPct(mb.winRate)}</span>
+                                <span className="text-[10px] text-muted-foreground">win rate</span>
+                              </div>
+                              <div className="flex gap-2 text-[10px]">
+                                <span className="text-emerald-400">{mb.wins}W</span>
+                                <span className="text-muted-foreground/50">/</span>
+                                <span className="text-red-400">{mb.losses}L</span>
+                              </div>
+                              <div className={`text-[10px] font-mono font-semibold ${pnlColor(mb.totalPnl)}`}>
+                                {fmt$(mb.totalPnl)} P&L
+                              </div>
+                            </div>
+                            {/* Regular bets card */}
+                            <div className="rounded-lg border border-border/40 bg-muted/20 p-3 flex flex-col gap-1">
+                              <div className="flex items-center gap-1 mb-0.5">
+                                <span className="text-[10px] font-semibold text-muted-foreground">Regular Bets</span>
+                                <span className="ml-auto text-[9px] text-muted-foreground font-mono">{mb.regularTotal} bets</span>
+                              </div>
+                              <div className="flex items-baseline gap-1.5">
+                                <span className={`text-xl font-bold ${regColor}`}>{fmtPct(mb.regularWinRate)}</span>
+                                <span className="text-[10px] text-muted-foreground">win rate</span>
+                              </div>
+                              <div className="flex gap-2 text-[10px]">
+                                <span className="text-emerald-400">{mb.regularWins}W</span>
+                                <span className="text-muted-foreground/50">/</span>
+                                <span className="text-red-400">{mb.regularLosses}L</span>
+                              </div>
+                              <div className={`text-[10px] font-mono font-semibold ${pnlColor(mb.regularTotalPnl)}`}>
+                                {fmt$(mb.regularTotalPnl)} P&L
+                              </div>
+                            </div>
+                          </div>
+                          {mb.total > 0 && mb.regularTotal > 0 && mb.winRate != null && mb.regularWinRate != null && (() => {
+                            const diff = mb.winRate - mb.regularWinRate;
+                            const absDiff = Math.abs(Math.round(diff * 100));
+                            const better = diff > 0.02 ? "Max bets outperforming" : diff < -0.02 ? "Regular bets outperforming" : "Max and regular bets performing";
+                            const color = diff > 0.02 ? "text-emerald-400" : diff < -0.02 ? "text-amber-400" : "text-muted-foreground";
+                            return (
+                              <div className={`text-[9px] ${color} mt-1`}>
+                                {better} by {absDiff}pp {diff <= 0.02 && diff >= -0.02 ? "(similar)" : ""}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      );
+                    })()}
+
                     {/* Confidence avg W vs L */}
                     {(r.avgConfidenceWinners != null || r.avgConfidenceLosers != null) && (
                       <div className="grid grid-cols-2 gap-3">

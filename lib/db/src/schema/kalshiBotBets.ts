@@ -38,4 +38,7 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   // Kalshi YES contract price (0–1) at the moment the bet decision was made.
   // Populated for all bets; especially useful for conviction mode threshold analysis.
   entryYesPrice: numeric("entry_yes_price", { precision: 8, scale: 4 }),
+  // True when the stability gate + probability roll upgraded this bet to max size.
+  // Null / false for regular-sized bets and all non-bet rows.
+  isMaxBet: boolean("is_max_bet").default(false),
 });

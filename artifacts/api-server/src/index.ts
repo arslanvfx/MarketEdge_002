@@ -209,6 +209,11 @@ async function runStartupMigrations(): Promise<void> {
       ALTER TABLE kalshi_bot_bets
         ADD COLUMN IF NOT EXISTS decision_mode TEXT
     `);
+    // Max-bet flag: true when the stability gate + probability roll upgraded the bet.
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ADD COLUMN IF NOT EXISTS is_max_bet BOOLEAN DEFAULT FALSE
+    `);
   } finally {
     client.release();
   }
