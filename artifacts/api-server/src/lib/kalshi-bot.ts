@@ -36,6 +36,7 @@ export {
   getBacktestModes,
   backtestModeApproval,
   getConvictionThresholdAnalysis,
+  getConvictionStabilityAnalysis,
 } from "./kalshi-bot-analytics";
 export type {
   TrendPoint,
@@ -43,6 +44,9 @@ export type {
   LogicModeStats,
   BacktestModeStats,
   ConvictionPriceBand,
+  StabilityThresholdRow,
+  StabilityDimensionAnalysis,
+  ConvictionStabilityAnalysis,
 } from "./kalshi-bot-analytics";
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import {
   getBotLogicPerformance,
   getBacktestModes,
   getConvictionThresholdAnalysis,
+  getConvictionStabilityAnalysis,
   clearAllPauses,
   getCoinGuardState,
   placeManualOrder,
@@ -1187,6 +1188,25 @@ router.get("/crypto/bot/conviction-threshold-analysis", async (req, res) => {
     const filterMode: "paper" | "live" | undefined =
       rawMode === "paper" || rawMode === "live" ? rawMode : undefined;
     const result = await getConvictionThresholdAnalysis(filterMode);
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/conviction-stability-analysis?mode=paper|live
+// Correlates each conviction bet's market-regime indicators (ER, oscillations,
+// volatility %, ML confidence) at entry against win/loss outcome to identify
+// the threshold values that maximise stable-vs-volatile win rate separation.
+// Stability metrics are captured in the signals JSONB since Task #393.
+// Returns per-dimension threshold scans and suggested optimal defaults.
+router.get("/crypto/bot/conviction-stability-analysis", async (req, res) => {
+  try {
+    const rawMode = req.query.mode;
+    const filterMode: "paper" | "live" | undefined =
+      rawMode === "paper" || rawMode === "live" ? rawMode : undefined;
+    const result = await getConvictionStabilityAnalysis(filterMode);
     res.json(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

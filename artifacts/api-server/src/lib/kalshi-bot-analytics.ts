@@ -503,3 +503,271 @@ export async function getBacktestModes(): Promise<BacktestModeStats[]> {
     return [];
   }
 }
+
+// ---------------------------------------------------------------------------
+// Conviction stability analysis
+// ---------------------------------------------------------------------------
+
+export interface StabilityThresholdRow {
+  /** Human-readable threshold label, e.g. "ER ≥ 0.30" */
+  label: string;
+  threshold: number;
+  /** Bets classified as "stable" at this threshold */
+  stableBets: number;
+  stableWins: number;
+  stableWinRate: number | null;
+  stablePnl: number;
+  /** Bets classified as "volatile" at this threshold */
+  volatileBets: number;
+  volatileWins: number;
+  volatileWinRate: number | null;
+  volatilePnl: number;
+  /** Win-rate difference (stable − volatile); positive = stable outperforms */
+  winRateDelta: number | null;
+}
+
+export interface StabilityDimensionAnalysis {
+  dimension: "er" | "osc" | "volPct" | "mlConf";
+  label: string;
+  /** Higher/lower = stable classification direction */
+  direction: "above" | "below";
+  rows: StabilityThresholdRow[];
+  /** Threshold that maximises win-rate delta for stable vs volatile (≥5 stable bets) */
+  suggestedThreshold: number | null;
+  currentDefault: number;
+}
+
+export interface ConvictionStabilityAnalysis {
+  totalBets: number;
+  /** Bets with stability metrics stored (stabilityEr != null) */
+  betsWithStabilityData: number;
+  /** Overall stable-classified win rate vs volatile-classified win rate */
+  overallStableWinRate: number | null;
+  overallVolatileWinRate: number | null;
+  /** Per-dimension threshold scans */
+  dimensions: StabilityDimensionAnalysis[];
+  /** Composite: win rate when ALL four current defaults are met */
+  currentDefaultsStableWinRate: number | null;
+  currentDefaultsStableBets: number;
+  currentDefaultsVolatileWinRate: number | null;
+  currentDefaultsVolatileBets: number;
+  /** Suggested updated defaults based on empirical data (null when insufficient data) */
+  suggestedDefaults: {
+    minER: number | null;
+    maxOsc: number | null;
+    maxVolPct: number | null;
+    minMLConf: number | null;
+  };
+}
+
+/**
+ * Analyses historical conviction-mode bets to determine optimal stability thresholds.
+ *
+ * Each bet's signals JSONB must contain stabilityEr/stabilityOsc/stabilityVolPct/
+ * stabilityMlConf (persisted since Task #393). For each dimension, we scan a range
+ * of candidate thresholds and compute the win-rate split between "stable" and
+ * "volatile" classifications. The threshold that maximises the stable–volatile delta
+ * with ≥5 stable bets is surfaced as the suggested threshold.
+ */
+export async function getConvictionStabilityAnalysis(
+  filterMode?: BotMode,
+): Promise<ConvictionStabilityAnalysis> {
+  const EMPTY: ConvictionStabilityAnalysis = {
+    totalBets: 0,
+    betsWithStabilityData: 0,
+    overallStableWinRate: null,
+    overallVolatileWinRate: null,
+    dimensions: [],
+    currentDefaultsStableWinRate: null,
+    currentDefaultsStableBets: 0,
+    currentDefaultsVolatileWinRate: null,
+    currentDefaultsVolatileBets: 0,
+    suggestedDefaults: { minER: null, maxOsc: null, maxVolPct: null, minMLConf: null },
+  };
+
+  try {
+    const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
+
+    const rows = await db
+      .select({
+        outcome: kalshiBotBetsTable.outcome,
+        pnl: sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
+        signals: kalshiBotBetsTable.signals,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+          AND ${kalshiBotBetsTable.decisionMode} = 'conviction'
+          AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`,
+      );
+
+    if (rows.length === 0) return { ...EMPTY, totalBets: 0 };
+
+    // Extract stability metrics from signals JSONB for each settled bet.
+    interface BetRecord {
+      win: boolean;
+      loss: boolean;
+      pnl: number;
+      er: number | null;
+      osc: number | null;
+      volPct: number | null;
+      mlConf: number | null;
+      stable: boolean | null;
+    }
+
+    const bets: BetRecord[] = rows.map(r => {
+      const sig = (r.signals ?? {}) as Record<string, unknown>;
+      const p = parseFloat(r.pnl ?? "0");
+      const isWin  = r.outcome === "win"  || (r.outcome == null && p > 0);
+      const isLoss = r.outcome === "loss" || (r.outcome == null && p < 0);
+      return {
+        win: isWin,
+        loss: isLoss,
+        pnl: p,
+        er:      sig.stabilityEr     != null ? Number(sig.stabilityEr)     : null,
+        osc:     sig.stabilityOsc    != null ? Number(sig.stabilityOsc)    : null,
+        volPct:  sig.stabilityVolPct != null ? Number(sig.stabilityVolPct) : null,
+        mlConf:  sig.stabilityMlConf != null ? Number(sig.stabilityMlConf) : null,
+        stable:  sig.stabilityStable != null ? Boolean(sig.stabilityStable) : null,
+      };
+    });
+
+    const betsWithData = bets.filter(b => b.er !== null);
+    const totalBets = bets.length;
+
+    // Current defaults (must stay in sync with DEFAULT_BOT_CONFIG in engine-core.ts).
+    const CUR_MIN_ER    = 0.30;
+    const CUR_MAX_OSC   = 8;
+    const CUR_MAX_VOL   = 3.0;
+    const CUR_MIN_ML    = 52;
+
+    // Helper: compute win-rate accumulator for a boolean split.
+    function split(list: BetRecord[], isStable: (b: BetRecord) => boolean) {
+      let sw = 0, sl = 0, sp = 0, vw = 0, vl = 0, vp = 0;
+      for (const b of list) {
+        if (isStable(b)) { if (b.win) sw++; if (b.loss) sl++; sp += b.pnl; }
+        else             { if (b.win) vw++; if (b.loss) vl++; vp += b.pnl; }
+      }
+      const sb = sw + sl, vb = vw + vl;
+      return { stableWins: sw, stableLosses: sl, stableBets: sb, stablePnl: sp,
+               volatileWins: vw, volatileLosses: vl, volatileBets: vb, volatilePnl: vp,
+               stableWinRate: sb > 0 ? sw / sb : null,
+               volatileWinRate: vb > 0 ? vw / vb : null };
+    }
+
+    // Overall stable vs volatile using the stabilityStable flag stored at entry.
+    const betsWithFlag = bets.filter(b => b.stable !== null);
+    const overall = split(betsWithFlag, b => b.stable === true);
+    const overallStableWinRate  = overall.stableWinRate;
+    const overallVolatileWinRate = overall.volatileWinRate;
+
+    // Current-defaults composite split (only bets with all four metrics).
+    const betsAll = bets.filter(b =>
+      b.er !== null && b.osc !== null && b.volPct !== null,
+    );
+    const defSplit = split(betsAll, b =>
+      b.er! >= CUR_MIN_ER &&
+      b.osc! <= CUR_MAX_OSC &&
+      b.volPct! <= CUR_MAX_VOL &&
+      (b.mlConf === null || b.mlConf >= CUR_MIN_ML),
+    );
+
+    // Per-dimension threshold scan.
+    // For each dimension we enumerate candidate thresholds, split, and record the delta.
+    const MIN_STABLE_BETS = 5; // require at least 5 stable bets before suggesting
+
+    function scanDimension(
+      dimension: StabilityDimensionAnalysis["dimension"],
+      label: string,
+      direction: "above" | "below",
+      candidates: number[],
+      currentDefault: number,
+      getValue: (b: BetRecord) => number | null,
+    ): StabilityDimensionAnalysis {
+      const eligible = bets.filter(b => getValue(b) !== null);
+      const rows_: StabilityThresholdRow[] = candidates.map(thr => {
+        const isStable = direction === "above"
+          ? (b: BetRecord) => (getValue(b) ?? -Infinity) >= thr
+          : (b: BetRecord) => (getValue(b) ?? Infinity) <= thr;
+        const s = split(eligible, isStable);
+        const delta = s.stableWinRate != null && s.volatileWinRate != null
+          ? s.stableWinRate - s.volatileWinRate
+          : null;
+        return {
+          label: direction === "above" ? `${label} ≥ ${thr}` : `${label} ≤ ${thr}`,
+          threshold: thr,
+          stableBets: s.stableBets,
+          stableWins: s.stableWins,
+          stableWinRate: s.stableWinRate,
+          stablePnl: s.stablePnl,
+          volatileBets: s.volatileBets,
+          volatileWins: s.volatileWins,
+          volatileWinRate: s.volatileWinRate,
+          volatilePnl: s.volatilePnl,
+          winRateDelta: delta,
+        };
+      });
+
+      // Best threshold = highest delta with ≥ MIN_STABLE_BETS stable bets.
+      const eligible_ = rows_.filter(r => r.stableBets >= MIN_STABLE_BETS && r.winRateDelta != null);
+      const best = eligible_.reduce<StabilityThresholdRow | null>(
+        (acc, r) => (acc == null || r.winRateDelta! > acc.winRateDelta! ? r : acc),
+        null,
+      );
+
+      return { dimension, label, direction, rows: rows_, suggestedThreshold: best?.threshold ?? null, currentDefault };
+    }
+
+    const dimensions: StabilityDimensionAnalysis[] = [
+      scanDimension(
+        "er", "ER", "above",
+        [0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
+        CUR_MIN_ER,
+        b => b.er,
+      ),
+      scanDimension(
+        "osc", "Oscillations", "below",
+        [4, 5, 6, 7, 8, 9, 10, 12],
+        CUR_MAX_OSC,
+        b => b.osc,
+      ),
+      scanDimension(
+        "volPct", "Volatility %", "below",
+        [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0],
+        CUR_MAX_VOL,
+        b => b.volPct,
+      ),
+      scanDimension(
+        "mlConf", "ML Confidence", "above",
+        [50, 52, 54, 56, 58, 60, 62, 65],
+        CUR_MIN_ML,
+        // null ML passes the gate — treat as the minimum threshold for scan purposes.
+        b => b.mlConf ?? 50,
+      ),
+    ];
+
+    const suggestedDefaults = {
+      minER:    dimensions[0].suggestedThreshold,
+      maxOsc:   dimensions[1].suggestedThreshold,
+      maxVolPct: dimensions[2].suggestedThreshold,
+      minMLConf: dimensions[3].suggestedThreshold != null
+        ? Math.round(dimensions[3].suggestedThreshold)
+        : null,
+    };
+
+    return {
+      totalBets,
+      betsWithStabilityData: betsWithData.length,
+      overallStableWinRate,
+      overallVolatileWinRate,
+      dimensions,
+      currentDefaultsStableWinRate: defSplit.stableWinRate,
+      currentDefaultsStableBets: defSplit.stableBets,
+      currentDefaultsVolatileWinRate: defSplit.volatileWinRate,
+      currentDefaultsVolatileBets: defSplit.volatileBets,
+      suggestedDefaults,
+    };
+  } catch {
+    return EMPTY;
+  }
+}

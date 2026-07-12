@@ -1322,6 +1322,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   statRegimeBoostMinER: 0.40,
   statRegimeBoostMaxOscillations: 6,
   convictionStabilityEnabled: true,
+  // Conservative empirical baselines — set from first-principles until enough
+  // conviction bet history accumulates (≥50 settled bets recommended).
+  // Use GET /crypto/bot/conviction-stability-analysis to compute win-rate-maximising
+  // thresholds from real bet outcomes and update these defaults accordingly.
   convictionStabilityMinER: 0.30,
   convictionStabilityMaxOsc: 8,
   convictionStabilityMaxVolPct: 3.0,

@@ -1554,6 +1554,12 @@ async function _runBotTick(
   // on statConfidence/claudeConfidence alone, which are per-model not per-decision.
   // Task C (2026-07-03): also persist regime, trendStability, and windowDoubtPenalty
   // so post-analysis can evaluate the impact of each Phase-3 filter on outcomes.
+  // Conviction stability: persist the per-coin stability classification (er, osc, volPct,
+  // mlConf, stable) so the /conviction-stability-analysis endpoint can correlate each
+  // bet's market-regime conditions against its win/loss outcome and tune thresholds.
+  const _stabilitySnap = S.config.decisionMode === "conviction"
+    ? coinStabilityCache.get(sym) ?? null
+    : null;
   const enrichedSignals = {
     ...(decision.signals as unknown as Record<string, unknown>),
     effectiveConfidence: decision.confidence,
@@ -1561,6 +1567,12 @@ async function _runBotTick(
     trendStability: windowStabilityCache.get(sym) ?? null,
     windowDoubtPenalty: S.currentWindowDoubtPenalty,
     reasoning: decision.reasoning ?? null,
+    // Conviction-stability metrics at entry — null for non-conviction modes.
+    stabilityEr:     _stabilitySnap?.er     ?? null,
+    stabilityOsc:    _stabilitySnap?.osc    ?? null,
+    stabilityVolPct: _stabilitySnap?.volPct ?? null,
+    stabilityMlConf: _stabilitySnap?.mlConf ?? null,
+    stabilityStable: _stabilitySnap?.stable ?? null,
   };
 
   await persistBetRecord({
