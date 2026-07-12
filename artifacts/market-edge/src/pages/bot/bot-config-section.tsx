@@ -700,22 +700,33 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </span>
                     </label>
 
-                    {/* Random Boost Windows */}
+                    {/* Stability Gate */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
-                      <span className="text-[11px] font-medium text-violet-300 flex items-center gap-1.5">
-                        <Trophy className="w-3 h-3" />
-                        Random Boost Bets
-                      </span>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-violet-300 flex items-center gap-1.5">
+                          <Zap className="w-3 h-3" />
+                          Stability Gate
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, convictionStabilityEnabled: !(merged.convictionStabilityEnabled ?? true) }))}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.convictionStabilityEnabled ?? true)
+                            ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
+                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
+                        >
+                          {(merged.convictionStabilityEnabled ?? true) ? "On" : "Off"}
+                        </button>
+                      </div>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Each individual bet independently rolls the dice. Stable market conditions + high conviction win rate = max bet size. Other bets stay at your normal size.
+                        Classifies each coin as stable or volatile every tick using stat model + ML metrics. Stable coins bet max size; volatile coins use regular bet size. Deterministic — no random rolls.
                       </span>
                       {/* Boost bet size */}
                       <label className="flex flex-col gap-1">
                         <span className="text-xs text-muted-foreground flex items-center gap-1.5">
                           <DollarSign className="w-3 h-3 text-violet-400" />
-                          Boost Bet Size ($)
+                          Stable Bet Size ($)
                           {(merged.convictionBoostBetSize ?? 0) === 0 && (
-                            <span className="text-muted-foreground/50 text-[10px]">— disabled</span>
+                            <span className="text-muted-foreground/50 text-[10px]">— uses Max Bet Size</span>
                           )}
                         </span>
                         <input type="number" min={0} max={100} step={1}
@@ -726,45 +737,83 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             setConfigDraft(d => ({ ...d, convictionBoostBetSize: Number.isNaN(v) || v <= 0 ? undefined : v }));
                           }} />
                         <span className="text-[10px] text-muted-foreground/60">
-                          Dollar amount for boosted bets. Set to 0 to disable. Must be larger than your normal bet size.
+                          Dollar amount for stable-market bets. Leave at 0 to use the global Max Bet Size.
                         </span>
                       </label>
-                      {/* Boost probability */}
-                      {(() => {
-                        const prob = merged.convictionBoostProbability ?? 0.25;
-                        return (
-                          <label className="flex flex-col gap-1">
-                            <span className="text-xs text-muted-foreground">
-                              Boost Frequency — <span className="text-violet-400 font-mono">{Math.round(prob * 100)}% of bets</span>
-                            </span>
-                            <input type="range" min={0.05} max={1.00} step={0.05}
-                              className="accent-violet-500"
-                              value={prob}
-                              onChange={e => setConfigDraft(d => ({ ...d, convictionBoostProbability: parseFloat(e.target.value) }))} />
-                            <span className="text-[10px] text-muted-foreground/60">
-                              Each individual bet independently rolls this probability — some bets go max size, others stay normal.
-                            </span>
-                          </label>
-                        );
-                      })()}
-                      {/* Min win rate */}
-                      {(() => {
-                        const minWr = merged.convictionBoostMinWinRate ?? 0.70;
-                        return (
-                          <label className="flex flex-col gap-1">
-                            <span className="text-xs text-muted-foreground">
-                              Min Win Rate to Qualify — <span className="text-green-400 font-mono">{Math.round(minWr * 100)}%</span>
-                            </span>
-                            <input type="range" min={0.55} max={0.85} step={0.05}
-                              className="accent-green-500"
-                              value={minWr}
-                              onChange={e => setConfigDraft(d => ({ ...d, convictionBoostMinWinRate: parseFloat(e.target.value) }))} />
-                            <span className="text-[10px] text-muted-foreground/60">
-                              Only coins with a conviction win rate at or above this threshold are eligible for boosted bets. Based on last 14 days of live bets.
-                            </span>
-                          </label>
-                        );
-                      })()}
+                      {(merged.convictionStabilityEnabled ?? true) && (<>
+                        {/* Min ER */}
+                        {(() => {
+                          const er = merged.convictionStabilityMinER ?? 0.30;
+                          return (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground">
+                                Min Efficiency Ratio — <span className="text-violet-400 font-mono">{er.toFixed(2)}</span>
+                              </span>
+                              <input type="range" min={0.10} max={0.70} step={0.05}
+                                className="accent-violet-500"
+                                value={er}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMinER: parseFloat(e.target.value) }))} />
+                              <span className="text-[10px] text-muted-foreground/60">
+                                ER = |net move| ÷ total path in last 15 min. Higher = cleaner trend required. 0.30 = gentle directional bias.
+                              </span>
+                            </label>
+                          );
+                        })()}
+                        {/* Max oscillations */}
+                        {(() => {
+                          const osc = merged.convictionStabilityMaxOsc ?? 8;
+                          return (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground">
+                                Max Oscillations — <span className="text-amber-400 font-mono">{osc}</span>
+                              </span>
+                              <input type="range" min={2} max={14} step={1}
+                                className="accent-amber-500"
+                                value={osc}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxOsc: parseInt(e.target.value, 10) }))} />
+                              <span className="text-[10px] text-muted-foreground/60">
+                                Direction reversals in last 15 min. Fewer = choppier market classified volatile.
+                              </span>
+                            </label>
+                          );
+                        })()}
+                        {/* Max vol% */}
+                        {(() => {
+                          const vol = merged.convictionStabilityMaxVolPct ?? 3.0;
+                          return (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground">
+                                Max Volatility % — <span className="text-red-400 font-mono">{vol.toFixed(1)}%</span>
+                              </span>
+                              <input type="range" min={0.5} max={8.0} step={0.5}
+                                className="accent-red-500"
+                                value={vol}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxVolPct: parseFloat(e.target.value) }))} />
+                              <span className="text-[10px] text-muted-foreground/60">
+                                1-min log-return std dev. Coins above this are classified volatile regardless of ER/osc.
+                              </span>
+                            </label>
+                          );
+                        })()}
+                        {/* Min ML conf */}
+                        {(() => {
+                          const mlConf = merged.convictionStabilityMinMLConf ?? 52;
+                          return (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground">
+                                Min ML Confidence — <span className="text-blue-400 font-mono">{mlConf}%</span>
+                              </span>
+                              <input type="range" min={50} max={70} step={1}
+                                className="accent-blue-500"
+                                value={mlConf}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMinMLConf: parseInt(e.target.value, 10) }))} />
+                              <span className="text-[10px] text-muted-foreground/60">
+                                ML model confidence floor. Coins with ML confidence below this are classified volatile. Coins with no ML signal pass this check.
+                              </span>
+                            </label>
+                          );
+                        })()}
+                      </>)}
                     </div>
                   </div>
                 )}

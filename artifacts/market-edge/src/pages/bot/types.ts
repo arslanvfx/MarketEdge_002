@@ -78,6 +78,11 @@ export interface BotConfig {
   statRegimeBoostEnabled?: boolean;
   statRegimeBoostMinER?: number;
   statRegimeBoostMaxOscillations?: number;
+  convictionStabilityEnabled?: boolean;
+  convictionStabilityMinER?: number;
+  convictionStabilityMaxOsc?: number;
+  convictionStabilityMaxVolPct?: number;
+  convictionStabilityMinMLConf?: number;
   allowLateEntries?: boolean;
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
 }
@@ -303,6 +308,16 @@ export interface CoinSignals {
   wmRecommendation: "bet" | "caution" | "stay_away" | null;
   wmReady: boolean;
   claudeEnabled: boolean;
+}
+
+export interface CoinStabilityResult {
+  stable: boolean;
+  er: number;
+  osc: number;
+  volPct: number;
+  mlConf: number | null;
+  windowKey: string;
+  computedAt: number;
 }
 
 export interface BotStepSignal {

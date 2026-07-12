@@ -84,3 +84,4 @@
 - [Alpaca bars default start](alpaca-bars-start.md) — bars API defaults start=today; multi-day fetches return 1 bar unless explicit start + sort=desc (then reverse); always go through getBars()
 - [Kalshi eval settlement edge cases](kalshi-eval-settlement-edge-cases.md) — strict `>` (not `>=`) for at-strike; per-row eval isolation; resting GTC guard must not clear on failure; re-evaluate admin endpoint uses query params
 - [Conviction mode — pure reactive FOK](conviction-mode-reactive.md) — no GTC, no model veto, no pre-entry zone; fires FOK at yesPrice≥lockPrice (YES) or ≤1-lockPrice (NO); ConvictionInputs has only yesPrice/lockPrice/minConfidence
+- [Conviction stability gate](conviction-stability-gate.md) — replaces random roll; stable=ER≥0.30+osc≤8+vol≤3%+ML≥52%+no spike → max bet; volatile → regular; coinStabilityCache Map in state; board shows per-coin conditions

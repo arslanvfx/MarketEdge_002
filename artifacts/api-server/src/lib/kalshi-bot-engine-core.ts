@@ -1171,6 +1171,12 @@ export interface BotConfig {
   statRegimeBoostEnabled?: boolean;      // use max bet size only when stat model confirms stable/trending price action
   statRegimeBoostMinER?: number;         // min efficiency ratio to qualify (0–1, default 0.40); 1=clean trend, 0=pure chop
   statRegimeBoostMaxOscillations?: number; // max direction reversals in last 15 min to qualify (default 6)
+  // Conviction stability gate (replaces random roll when enabled)
+  convictionStabilityEnabled?: boolean;   // when true: stable→max bet, volatile→regular bet (default true)
+  convictionStabilityMinER?: number;      // min efficiency ratio to classify stable (default 0.30)
+  convictionStabilityMaxOsc?: number;     // max oscillations to classify stable (default 8)
+  convictionStabilityMaxVolPct?: number;  // max volatilityPct to classify stable (default 3.0)
+  convictionStabilityMinMLConf?: number;  // min ML confidence to classify stable; null ML = passes (default 52)
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,6 +1321,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   statRegimeBoostEnabled: false,
   statRegimeBoostMinER: 0.40,
   statRegimeBoostMaxOscillations: 6,
+  convictionStabilityEnabled: true,
+  convictionStabilityMinER: 0.30,
+  convictionStabilityMaxOsc: 8,
+  convictionStabilityMaxVolPct: 3.0,
+  convictionStabilityMinMLConf: 52,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,

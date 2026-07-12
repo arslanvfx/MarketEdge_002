@@ -192,6 +192,17 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
 export const convictionBoostWindowCoins = new Set<string>();
+
+export interface CoinStabilityResult {
+  stable: boolean;
+  er: number;
+  osc: number;
+  volPct: number;
+  mlConf: number | null;
+  windowKey: string;
+  computedAt: number;
+}
+export const coinStabilityCache = new Map<string, CoinStabilityResult>();
 export const coinConvictionWinRates = new Map<string, number>();
 export const pausedCoins = new Map<string, number>();
 export const paperCoinDailyLoss = new Map<string, number>();

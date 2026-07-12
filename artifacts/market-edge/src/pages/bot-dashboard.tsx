@@ -299,6 +299,7 @@ export default function BotDashboard() {
     botSteps?: BotStepEntry[];
     minConfidence?: number;
     decisionMode?: string;
+    coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
   }>({
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
@@ -619,6 +620,7 @@ export default function BotDashboard() {
             kalshiTargets={pipelineStatusData.kalshiTargets ?? {}}
             windowKey={pipelineStatusData.currentWindowKey ?? null}
             decisionMode={pipelineStatusData.decisionMode ?? null}
+            coinStability={pipelineStatusData.coinStability}
           />
         )}
         <BotStepsPanel

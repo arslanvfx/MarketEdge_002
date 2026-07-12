@@ -43,7 +43,8 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, coinConvictionWinRates,
+  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache,
+  type CoinStabilityResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -988,19 +989,59 @@ async function _runBotTick(
   // false this returns S.config.betSize unchanged (legacy).
   // Per-coin maxBetSize override: further caps the bet for this specific coin.
   const perCoinMaxBet = S.config.coinOverrides?.[sym]?.maxBetSize;
-  // Conviction random boost: roll the dice per individual bet (not per window).
-  // Gate 1: win-rate eligibility (no history = eligible; history must meet minWinRate).
-  // Gate 2: random probability roll.
-  // Gate 3: stat model must agree with the conviction direction — if it does not,
-  //         downgrade to regular bet size (no stat check needed for non-boosted bets).
+  // Conviction stability gate: classify the coin as stable or volatile using the
+  // stat model indicators + ML confidence.  Stable → max bet size; volatile → normal size.
+  // When convictionStabilityEnabled is false, falls back to the legacy random roll.
   const boostBetSize = (() => {
     if (S.config.decisionMode !== "conviction") return null;
-    // Use explicit convictionBoostBetSize if set; otherwise fall back to maxBetSize.
-    // This lets the feature work without needing a separate dollar-amount config.
     const targetBoost = (S.config.convictionBoostBetSize ?? 0) > 0
       ? S.config.convictionBoostBetSize!
       : (S.config.maxBetSize ?? 0);
     if (targetBoost <= 0) return null;
+
+    if (S.config.convictionStabilityEnabled !== false) {
+      // ── Deterministic stability gate ──────────────────────────────────────
+      const ind = getCachedPrediction(sym)?.indicators;
+      if (!ind) {
+        logger.info({ sym }, "[kalshi-bot] conviction stability — no indicators, treating as volatile");
+        coinStabilityCache.set(sym, { stable: false, er: 0, osc: 0, volPct: 0, mlConf: null, windowKey, computedAt: Date.now() } satisfies CoinStabilityResult);
+        return null;
+      }
+      const mlSig  = getLatestCoinSignals(sym);
+      const mlConf = mlSig?.mlConfidence ?? null;
+      const minER     = S.config.convictionStabilityMinER     ?? 0.30;
+      const maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
+      const maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
+      const minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
+      const erOk  = ind.efficiencyRatio  >= minER;
+      const oscOk = ind.oscillationCount <= maxOsc;
+      const volOk = ind.volatilityPct    <= maxVolPct;
+      const mlOk  = mlConf === null || mlConf >= minMLConf;
+      const stable = erOk && oscOk && volOk && mlOk && !ind.spikeFlag;
+      coinStabilityCache.set(sym, {
+        stable,
+        er: ind.efficiencyRatio,
+        osc: ind.oscillationCount,
+        volPct: ind.volatilityPct,
+        mlConf,
+        windowKey,
+        computedAt: Date.now(),
+      } satisfies CoinStabilityResult);
+      if (!stable) {
+        logger.info(
+          { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, spike: ind.spikeFlag, erOk, oscOk, volOk, mlOk },
+          "[kalshi-bot] conviction stability — VOLATILE: regular bet size",
+        );
+        return null;
+      }
+      logger.info(
+        { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, targetBoost },
+        "[kalshi-bot] conviction stability — STABLE: max bet size",
+      );
+      return targetBoost;
+    }
+
+    // ── Legacy: random probability roll ───────────────────────────────────
     const prob  = S.config.convictionBoostProbability ?? 0.25;
     const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
     const wr    = coinConvictionWinRates.get(sym) ?? null;
@@ -1013,8 +1054,6 @@ async function _runBotTick(
       logger.info({ sym, prob }, "[kalshi-bot] conviction boost — random roll missed (normal)");
       return null;
     }
-    // In conviction mode the price lock (≥88¢/≤12¢) is already the quality gate.
-    // A separate regime-stability check is redundant and too restrictive — removed.
     logger.info({ sym, targetBoost, prob, wr }, "[kalshi-bot] conviction boost — all gates passed, using max bet size");
     return targetBoost;
   })();
