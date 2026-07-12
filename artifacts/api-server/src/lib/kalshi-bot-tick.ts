@@ -1396,6 +1396,27 @@ async function _runBotTick(
       windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
       return;
     }
+    // Post-gate safety re-check: the pre-gate maxBetSizeGuard used stale expectedFillCost
+    // (e.g. 7¢ from a prior window → 57 contracts → $38 fill after exchange prices it
+    // correctly).  Now that we have fresh prices, re-verify the actual expected cost.
+    // In conviction mode this should always be ≤ maxBetCap (the gate constrains
+    // expectedFillCost to 0.875–0.925 → max 11 contracts at $10 cap), but this guard
+    // catches any future code path that could break that invariant.
+    const postGateCost = contractCount * expectedFillCost;
+    if (checkMaxBetSizeGuard(postGateCost, maxBetCap)) {
+      logger.error(
+        {
+          sym, direction, contractCount,
+          expectedFillCost: expectedFillCost.toFixed(4),
+          postGateCost: postGateCost.toFixed(4),
+          maxBetSize: maxBetCap,
+        },
+        "[kalshi-bot] SAFETY ABORT — post-conviction-gate sizing exceeds maxBetSize cap; trade cancelled",
+      );
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
+      return;
+    }
   }
 
   logger.info(
