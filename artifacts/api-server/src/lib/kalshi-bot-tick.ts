@@ -1359,10 +1359,13 @@ async function _runBotTick(
       direction === "yes"
         ? freshYesAsk
         : freshYesBid != null ? 1 - freshYesBid : null;
-    // Allow a 0.5 ¢ tolerance on each side of [lockPrice, lockPriceCap]:
-    //   92.15 ¢  passes  (0.9215 ≤ 0.92 + 0.005 = 0.925) ✓
-    //   93 ¢     blocked (0.93  >  0.925) ✗
-    const GATE_BUFFER = 0.005;
+    // Strict zone enforcement: gate passes ONLY when price is within
+    // [lockPrice, lockPriceCap] with no tolerance.  Kalshi prices are
+    // integer-cent resolution (0.88, 0.89 … 0.92) so 0 is safe.
+    //   88 ¢  passes  (0.88 >= 0.88 && 0.88 <= 0.92) ✓
+    //   87 ¢  blocked (0.87 < 0.88) ✗
+    //   93 ¢  blocked (0.93 > 0.92) ✗
+    const GATE_BUFFER = 0;
     const inWindow =
       freshRefPrice != null &&
       freshRefPrice >= lockPrice - GATE_BUFFER &&
@@ -1532,7 +1535,11 @@ async function _runBotTick(
         const cvHigh    = cvTarget + 0.02;
         // Slot price: how much the entered side cost (YES=avgPrice, NO=1-avgPrice).
         const fillSlot  = direction === "yes" ? result.avgPrice : (1 - result.avgPrice);
-        const FILL_TOL  = 0.03; // 3¢ tolerance — accommodates normal market slippage between gate-check and fill
+        // Zero tolerance: the order limit cap (lockPriceCap) already prevents
+        // above-cap fills at the exchange level.  Any fill outside [cvLow, cvHigh]
+        // is a genuine violation — abort immediately.  Kalshi prices are integer
+        // cents so floating-point edge cases don't apply here.
+        const FILL_TOL  = 0;
         if (fillSlot < cvLow - FILL_TOL || fillSlot > cvHigh + FILL_TOL) {
           logger.error(
             {
