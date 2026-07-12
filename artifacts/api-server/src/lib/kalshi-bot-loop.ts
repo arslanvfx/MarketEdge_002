@@ -1149,11 +1149,12 @@ export async function runBotLoopTick(): Promise<void> {
         const _maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
         const _minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
         coinStabilityCache.set(sym, {
+          // spikeFlag excluded: conviction fires because price hit 90¢ (often a spike);
+          // blocking max bets on that spike is self-defeating.  See kalshi-bot-tick.ts.
           stable: _ind.efficiencyRatio  >= _minER &&
                   _ind.oscillationCount <= _maxOsc &&
                   _ind.volatilityPct    <= _maxVolPct &&
-                  (_mlConf === null || _mlConf >= _minMLConf) &&
-                  !_ind.spikeFlag,
+                  (_mlConf === null || _mlConf >= _minMLConf),
           er:     _ind.efficiencyRatio,
           osc:    _ind.oscillationCount,
           volPct: _ind.volatilityPct,

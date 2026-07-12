@@ -1012,7 +1012,11 @@ async function _runBotTick(
       const oscOk = ind.oscillationCount <= maxOsc;
       const volOk = ind.volatilityPct    <= maxVolPct;
       const mlOk  = mlConf === null || mlConf >= minMLConf;
-      const stable = erOk && oscOk && volOk && mlOk && !ind.spikeFlag;
+      // spikeFlag intentionally excluded here: conviction mode fires BECAUSE
+      // price just hit 90¢ — that sharp move often sets spikeFlag, but the
+      // 90¢ lock threshold is already the certainty filter.  Blocking max bets
+      // on spikes in conviction mode is self-defeating.
+      const stable = erOk && oscOk && volOk && mlOk;
       coinStabilityCache.set(sym, {
         stable,
         er: ind.efficiencyRatio,
