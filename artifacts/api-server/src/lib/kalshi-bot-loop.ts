@@ -43,6 +43,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode,
+  stabilityWindowCount, stabilityMaxBetElectedCoin, setStabilityWindowCount, setStabilityMaxBetElectedCoin,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -505,6 +506,12 @@ export async function runBotLoopTick(): Promise<void> {
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
     coinStabilityCache.clear();
+    // Stability frequency gate: increment the window counter and clear the elected coin.
+    // The election logic runs BEFORE the per-coin for-loop each tick, using coinStabilityCache
+    // data from the previous tick cycle (first tick of a new window has an empty cache so
+    // election is deferred until the second tick, ~30 s into the window — acceptable).
+    setStabilityWindowCount(stabilityWindowCount + 1);
+    setStabilityMaxBetElectedCoin(null);
     // Conviction random boost: the random roll happens per individual bet in the tick,
     // not here at window transition. Just refresh win-rate data and reset the (now-unused)
     // Set so nothing carries over from the previous window.
@@ -1119,6 +1126,43 @@ export async function runBotLoopTick(): Promise<void> {
     S.borderProximityCacheWindow = windowKey;
     logger.debug({ regimeCache: Object.fromEntries(S.regimeCache) },
       "[kalshi-bot] regime cache refreshed");
+  }
+
+  // ── Stability frequency gate: elect the single max-bet coin for this tick ──
+  // Runs once per tick cycle BEFORE individual coin processing.
+  // Uses coinStabilityCache populated by the previous tick (empty on tick 1 of a new window
+  // — election defers ~30 s until the second tick, which is acceptable).
+  // Only elects when: conviction mode + stability gate on + election not yet set for this
+  // window + enough windows have elapsed since the last max bet.
+  if (
+    S.config.decisionMode === "conviction" &&
+    S.config.convictionStabilityEnabled !== false &&
+    stabilityMaxBetElectedCoin === null &&
+    coinStabilityCache.size > 0
+  ) {
+    const freq = S.config.convictionStabilityMaxBetEveryNWindows ?? 3;
+    if (stabilityWindowCount >= freq) {
+      let bestCoin: string | null = null;
+      let bestScore = -Infinity;
+      for (const [sym, s] of coinStabilityCache.entries()) {
+        if (!s.stable) continue;
+        // Primary: highest ER (directional efficiency); tie-break: lowest osc, then lowest volPct
+        const score = s.er * 10 - s.osc * 0.05 - s.volPct;
+        if (score > bestScore) { bestScore = score; bestCoin = sym; }
+      }
+      if (bestCoin !== null) {
+        setStabilityMaxBetElectedCoin(bestCoin);
+        logger.info(
+          { sym: bestCoin, score: bestScore.toFixed(3), freq, windowsElapsed: stabilityWindowCount },
+          "[kalshi-bot] stability frequency gate — max-bet coin elected for this window",
+        );
+      } else {
+        logger.debug(
+          { freq, windowsElapsed: stabilityWindowCount, cacheSize: coinStabilityCache.size },
+          "[kalshi-bot] stability frequency gate — eligible window but no stable coins yet, retrying next tick",
+        );
+      }
+    }
   }
 
   for (const coin of CRYPTO_COINS) {

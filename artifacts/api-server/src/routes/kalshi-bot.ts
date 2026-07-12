@@ -35,7 +35,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
-import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache } from "../lib/kalshi-bot-state";
+import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, stabilityWindowCount, stabilityMaxBetElectedCoin } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -532,6 +532,11 @@ function pipelineStatusHandler(_req: any, res: any) {
       minConfidence,
       decisionMode,
       coinStability: Object.fromEntries(coinStabilityCache),
+      stabilityFrequency: {
+        windowsElapsed: stabilityWindowCount,
+        electedCoin: stabilityMaxBetElectedCoin,
+        everyNWindows: getBotState().config.convictionStabilityMaxBetEveryNWindows ?? 3,
+      },
       boosts: { mlWeight: ML_WEIGHT, claudeWeight: CLAUDE_WEIGHT, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
       adaptiveFilters: {
         directionalPenaltyYesPp,
@@ -695,6 +700,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMaxOsc,
     convictionStabilityMaxVolPct,
     convictionStabilityMinMLConf,
+    convictionStabilityMaxBetEveryNWindows,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -767,6 +773,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMaxOsc?: number;
     convictionStabilityMaxVolPct?: number;
     convictionStabilityMinMLConf?: number;
+    convictionStabilityMaxBetEveryNWindows?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -953,17 +960,20 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.statRegimeBoostMaxOscillations = Math.round(statRegimeBoostMaxOscillations);
   }
   if (typeof convictionStabilityEnabled === "boolean") partial.convictionStabilityEnabled = convictionStabilityEnabled;
-  if (typeof convictionStabilityMinER === "number" && convictionStabilityMinER >= 0.10 && convictionStabilityMinER <= 0.80) {
+  if (typeof convictionStabilityMinER === "number" && convictionStabilityMinER >= 0.02 && convictionStabilityMinER <= 0.80) {
     partial.convictionStabilityMinER = convictionStabilityMinER;
   }
   if (typeof convictionStabilityMaxOsc === "number" && convictionStabilityMaxOsc >= 1 && convictionStabilityMaxOsc <= 14) {
     partial.convictionStabilityMaxOsc = Math.round(convictionStabilityMaxOsc);
   }
-  if (typeof convictionStabilityMaxVolPct === "number" && convictionStabilityMaxVolPct >= 0.5 && convictionStabilityMaxVolPct <= 10.0) {
+  if (typeof convictionStabilityMaxVolPct === "number" && convictionStabilityMaxVolPct >= 0.01 && convictionStabilityMaxVolPct <= 5.0) {
     partial.convictionStabilityMaxVolPct = convictionStabilityMaxVolPct;
   }
   if (typeof convictionStabilityMinMLConf === "number" && convictionStabilityMinMLConf >= 50 && convictionStabilityMinMLConf <= 80) {
     partial.convictionStabilityMinMLConf = Math.round(convictionStabilityMinMLConf);
+  }
+  if (typeof convictionStabilityMaxBetEveryNWindows === "number" && convictionStabilityMaxBetEveryNWindows >= 1 && convictionStabilityMaxBetEveryNWindows <= 10) {
+    partial.convictionStabilityMaxBetEveryNWindows = Math.round(convictionStabilityMaxBetEveryNWindows);
   }
   if (typeof allowLateEntries === "boolean") {
     partial.allowLateEntries = allowLateEntries;

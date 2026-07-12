@@ -44,6 +44,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache,
+  stabilityMaxBetElectedCoin, setStabilityWindowCount,
   type CoinStabilityResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -1044,9 +1045,21 @@ async function _runBotTick(
         );
         return null;
       }
+      // Frequency gate: only the single elected coin gets max bet this window.
+      // stabilityMaxBetElectedCoin is null when: not an eligible window, or election
+      // hasn't fired yet (first tick of window — deferred until coinStabilityCache populates).
+      if (stabilityMaxBetElectedCoin === null || sym !== stabilityMaxBetElectedCoin) {
+        logger.info(
+          { sym, elected: stabilityMaxBetElectedCoin ?? "(not yet elected)" },
+          "[kalshi-bot] conviction stability — STABLE but not the elected max-bet coin this window, regular bet",
+        );
+        return null;
+      }
+      // This coin won the election: reset the window counter so the next max bet waits another N windows.
+      setStabilityWindowCount(0);
       logger.info(
         { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, targetBoost },
-        "[kalshi-bot] conviction stability — STABLE: max bet size",
+        "[kalshi-bot] conviction stability — STABLE + ELECTED: max bet size (frequency counter reset)",
       );
       return targetBoost;
     }

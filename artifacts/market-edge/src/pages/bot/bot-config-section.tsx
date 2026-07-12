@@ -14,9 +14,16 @@ interface StabilityPreviewProps {
   minMLConf: number;
 }
 
-function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPreviewProps) {
+interface StabilityFrequency {
+  windowsElapsed: number;
+  electedCoin: string | null;
+  everyNWindows: number;
+}
+
+function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf, everyNWindowsDraft }: StabilityPreviewProps & { everyNWindowsDraft: number }) {
   const { data, dataUpdatedAt } = useQuery<{
     coinStability?: Record<string, { er: number; osc: number; volPct: number; mlConf: number | null; windowKey?: string }>;
+    stabilityFrequency?: StabilityFrequency;
   }>({
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
@@ -24,6 +31,7 @@ function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPrev
   });
 
   const coinStability = data?.coinStability;
+  const freq = data?.stabilityFrequency;
   const hasData = coinStability && Object.keys(coinStability).length > 0;
 
   const results = STABILITY_COINS.map(sym => {
@@ -40,6 +48,9 @@ function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPrev
   const stableCount = results.filter(r => r.stable === true).length;
   const updatedSec = dataUpdatedAt ? Math.round((Date.now() - dataUpdatedAt) / 1000) : null;
 
+  const windowsUntilNext = freq ? Math.max(0, everyNWindowsDraft - freq.windowsElapsed) : null;
+  const nextEligible = windowsUntilNext === 0;
+
   return (
     <div className="mt-1 rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 flex flex-col gap-2">
       <div className="flex items-center justify-between">
@@ -48,28 +59,51 @@ function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPrev
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
             <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
           </span>
-          Live eligibility — current thresholds
+          Live eligibility
         </span>
         <span className="text-[9px] text-muted-foreground/50 font-mono">
-          {hasData ? `${stableCount}/${STABILITY_COINS.length} stable` : "—"}
+          {hasData ? `${stableCount}/${STABILITY_COINS.length} qualify` : "—"}
           {updatedSec !== null && updatedSec < 60 && <span className="ml-1 opacity-60">{updatedSec}s ago</span>}
         </span>
       </div>
+
+      {/* Frequency status row */}
+      {freq && (
+        <div className={`flex items-center justify-between rounded-md px-2 py-1 text-[10px] border ${
+          freq.electedCoin
+            ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-300"
+            : nextEligible
+              ? "bg-violet-500/10 border-violet-500/25 text-violet-300"
+              : "bg-muted/30 border-border/30 text-muted-foreground/60"
+        }`}>
+          <span className="flex items-center gap-1">
+            <Zap className="w-2.5 h-2.5" />
+            {freq.electedCoin
+              ? <><span className="font-semibold">{freq.electedCoin}</span> elected — max bet this window</>
+              : nextEligible
+                ? "Eligible now — awaiting stable coin"
+                : <>{windowsUntilNext} window{windowsUntilNext !== 1 ? "s" : ""} until next max bet</>
+            }
+          </span>
+          <span className="font-mono opacity-70">{freq.windowsElapsed}/{everyNWindowsDraft}</span>
+        </div>
+      )}
 
       {!hasData ? (
         <span className="text-[10px] text-muted-foreground/50 italic">Waiting for indicator data…</span>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {results.map(({ sym, stable, er, osc, volPct, mlConf }) => {
+            const isElected = freq?.electedCoin === sym;
             const failReasons: string[] = [];
             if (er !== null && er < minER) failReasons.push(`ER ${er.toFixed(2)}<${minER.toFixed(2)}`);
             if (osc !== null && osc > maxOsc) failReasons.push(`Osc ${osc}>${maxOsc}`);
-            if (volPct !== null && volPct > maxVolPct) failReasons.push(`Vol ${volPct.toFixed(1)}%>${maxVolPct.toFixed(1)}%`);
+            if (volPct !== null && volPct > maxVolPct) failReasons.push(`Vol ${volPct.toFixed(2)}%>${maxVolPct.toFixed(2)}%`);
             if (mlConf !== null && mlConf < minMLConf) failReasons.push(`ML ${mlConf.toFixed(0)}%<${minMLConf}%`);
             const title = stable === null
               ? `${sym}: no data`
               : stable
-                ? `${sym}: STABLE → max bet`
+                ? isElected ? `${sym}: ELECTED → max bet this window` : `${sym}: STABLE (qualifies when elected)`
                 : `${sym}: volatile (${failReasons.join(", ")})`;
 
             return (
@@ -79,12 +113,14 @@ function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPrev
                 className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border cursor-default select-none transition-colors ${
                   stable === null
                     ? "bg-muted/30 text-muted-foreground/40 border-border/30"
-                    : stable
-                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                      : "bg-amber-500/10 text-amber-400/80 border-amber-500/20"
+                    : isElected
+                      ? "bg-emerald-500/20 text-emerald-200 border-emerald-400/50 ring-1 ring-emerald-400/30"
+                      : stable
+                        ? "bg-emerald-500/8 text-emerald-400/70 border-emerald-500/20"
+                        : "bg-amber-500/10 text-amber-400/80 border-amber-500/20"
                 }`}
               >
-                {stable === true && <Zap className="w-2.5 h-2.5" />}
+                {isElected && <Zap className="w-2.5 h-2.5" />}
                 {sym}
               </span>
             );
@@ -93,7 +129,7 @@ function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPrev
       )}
 
       <span className="text-[9px] text-muted-foreground/40 leading-relaxed">
-        Green = stable → max bet · Amber = volatile → regular bet · Hover for details · Updates every 5 s
+        Bright green = elected max bet · Dim green = stable but not chosen this window · Amber = volatile · Updates every 5 s
       </span>
     </div>
   );
@@ -907,11 +943,32 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             </label>
                           );
                         })()}
+                        {/* Max bet frequency */}
+                        {(() => {
+                          const freq = merged.convictionStabilityMaxBetEveryNWindows ?? 3;
+                          const freqLabel = freq === 1 ? "every window (~15 min)" : `every ${freq} windows (~${freq * 15} min)`;
+                          return (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                                <Zap className="w-3 h-3 text-emerald-400" />
+                                Max bet frequency — <span className="text-emerald-400 font-mono">{freqLabel}</span>
+                              </span>
+                              <input type="range" min={1} max={10} step={1}
+                                className="accent-emerald-500"
+                                value={freq}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxBetEveryNWindows: parseInt(e.target.value, 10) }))} />
+                              <span className="text-[10px] text-muted-foreground/60">
+                                How often a max bet is allowed. When eligible, the single most-stable coin (highest ER) is chosen — not all stable coins.
+                              </span>
+                            </label>
+                          );
+                        })()}
                         <StabilityPreview
                           minER={merged.convictionStabilityMinER ?? 0.12}
                           maxOsc={merged.convictionStabilityMaxOsc ?? 8}
                           maxVolPct={merged.convictionStabilityMaxVolPct ?? 0.15}
                           minMLConf={merged.convictionStabilityMinMLConf ?? 52}
+                          everyNWindowsDraft={merged.convictionStabilityMaxBetEveryNWindows ?? 3}
                         />
                       </>)}
                     </div>
