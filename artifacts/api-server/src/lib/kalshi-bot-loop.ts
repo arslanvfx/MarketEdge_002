@@ -28,6 +28,7 @@ import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
+  getLatestCoinSignals,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, liveDirectionCache, type TrendStability,
 } from "./crypto";
 import {
@@ -51,9 +52,9 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  WINDOW_ENTRY_BUFFER_S,
+  WINDOW_ENTRY_BUFFER_S, coinStabilityCache,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
-  type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
+  type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState, type CoinStabilityResult,
 } from "./kalshi-bot-state";
 import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
@@ -1121,6 +1122,34 @@ export async function runBotLoopTick(): Promise<void> {
   for (const coin of CRYPTO_COINS) {
     if (!KALSHI_SERIES[coin.symbol]) continue;
     const sym = coin.symbol.toUpperCase();
+
+    // Refresh per-coin stability classification every tick in conviction mode,
+    // regardless of whether this coin proceeds to entry logic.
+    if (S.config.decisionMode === "conviction" && S.config.convictionStabilityEnabled !== false) {
+      const _ind = getCachedPrediction(sym)?.indicators;
+      if (_ind) {
+        const _mlSig  = getLatestCoinSignals(sym);
+        const _mlConf = _mlSig?.mlConfidence ?? null;
+        const _minER     = S.config.convictionStabilityMinER     ?? 0.30;
+        const _maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
+        const _maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
+        const _minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
+        coinStabilityCache.set(sym, {
+          stable: _ind.efficiencyRatio  >= _minER &&
+                  _ind.oscillationCount <= _maxOsc &&
+                  _ind.volatilityPct    <= _maxVolPct &&
+                  (_mlConf === null || _mlConf >= _minMLConf) &&
+                  !_ind.spikeFlag,
+          er:     _ind.efficiencyRatio,
+          osc:    _ind.oscillationCount,
+          volPct: _ind.volatilityPct,
+          mlConf: _mlConf,
+          windowKey,
+          computedAt: Date.now(),
+        } satisfies CoinStabilityResult);
+      }
+    }
+
     const kalshiData = getKalshiCachedData(sym);
     const winCtx = getKalshiWindowContext(sym);
     const secondsElapsed = winCtx?.secondsElapsed ?? 0;

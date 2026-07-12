@@ -580,7 +580,7 @@ router.get("/crypto/bot/status", (_req, res) => {
       minWindows: allML.length > 0 ? Math.min(...allML.map(s => s.windows)) : 0,
       minRequired: 30,
     };
-    res.json({ ...getBotState(), mlStatus });
+    res.json({ ...getBotState(), mlStatus, coinStability: Object.fromEntries(coinStabilityCache) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
@@ -689,6 +689,11 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     statRegimeBoostMaxOscillations,
     allowLateEntries,
     coinOverrides,
+    convictionStabilityEnabled,
+    convictionStabilityMinER,
+    convictionStabilityMaxOsc,
+    convictionStabilityMaxVolPct,
+    convictionStabilityMinMLConf,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -756,6 +761,11 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     statRegimeBoostMaxOscillations?: number;
     allowLateEntries?: boolean;
     coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
+    convictionStabilityEnabled?: boolean;
+    convictionStabilityMinER?: number;
+    convictionStabilityMaxOsc?: number;
+    convictionStabilityMaxVolPct?: number;
+    convictionStabilityMinMLConf?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -940,6 +950,19 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof statRegimeBoostMaxOscillations === "number" && statRegimeBoostMaxOscillations >= 1 && statRegimeBoostMaxOscillations <= 14) {
     partial.statRegimeBoostMaxOscillations = Math.round(statRegimeBoostMaxOscillations);
+  }
+  if (typeof convictionStabilityEnabled === "boolean") partial.convictionStabilityEnabled = convictionStabilityEnabled;
+  if (typeof convictionStabilityMinER === "number" && convictionStabilityMinER >= 0.10 && convictionStabilityMinER <= 0.80) {
+    partial.convictionStabilityMinER = convictionStabilityMinER;
+  }
+  if (typeof convictionStabilityMaxOsc === "number" && convictionStabilityMaxOsc >= 1 && convictionStabilityMaxOsc <= 14) {
+    partial.convictionStabilityMaxOsc = Math.round(convictionStabilityMaxOsc);
+  }
+  if (typeof convictionStabilityMaxVolPct === "number" && convictionStabilityMaxVolPct >= 0.5 && convictionStabilityMaxVolPct <= 10.0) {
+    partial.convictionStabilityMaxVolPct = convictionStabilityMaxVolPct;
+  }
+  if (typeof convictionStabilityMinMLConf === "number" && convictionStabilityMinMLConf >= 50 && convictionStabilityMinMLConf <= 80) {
+    partial.convictionStabilityMinMLConf = Math.round(convictionStabilityMinMLConf);
   }
   if (typeof allowLateEntries === "boolean") {
     partial.allowLateEntries = allowLateEntries;

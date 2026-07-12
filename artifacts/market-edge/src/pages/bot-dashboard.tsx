@@ -621,6 +621,12 @@ export default function BotDashboard() {
             windowKey={pipelineStatusData.currentWindowKey ?? null}
             decisionMode={pipelineStatusData.decisionMode ?? null}
             coinStability={pipelineStatusData.coinStability}
+            stabilityConfig={{
+              minER:     status?.config?.convictionStabilityMinER,
+              maxOsc:    status?.config?.convictionStabilityMaxOsc,
+              maxVolPct: status?.config?.convictionStabilityMaxVolPct,
+              minMLConf: status?.config?.convictionStabilityMinMLConf,
+            }}
           />
         )}
         <BotStepsPanel

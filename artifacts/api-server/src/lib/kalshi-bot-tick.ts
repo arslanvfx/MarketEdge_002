@@ -1034,6 +1034,16 @@ async function _runBotTick(
         );
         return null;
       }
+      // Win-rate secondary gate: even stable coins need minimum historical win rate
+      const minWr2 = S.config.convictionBoostMinWinRate ?? 0.70;
+      const wr2    = coinConvictionWinRates.get(sym) ?? null;
+      if (wr2 !== null && wr2 < minWr2) {
+        logger.info(
+          { sym, wr: wr2.toFixed(2), minWr: minWr2, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount },
+          "[kalshi-bot] conviction stability — STABLE but win-rate below threshold, regular bet size",
+        );
+        return null;
+      }
       logger.info(
         { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, targetBoost },
         "[kalshi-bot] conviction stability — STABLE: max bet size",

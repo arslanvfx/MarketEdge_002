@@ -3,12 +3,20 @@ import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity, Zap, TrendingUp } 
 import type { CoinSignals, CoinStabilityResult } from "./types";
 import { wkToEstRange, ET_LABEL } from "./utils";
 
+interface StabilityThresholds {
+  minER?: number;
+  maxOsc?: number;
+  maxVolPct?: number;
+  minMLConf?: number;
+}
+
 interface CoinSignalBoardProps {
   liveSignals: Record<string, CoinSignals>;
   kalshiTargets: Record<string, number | null>;
   windowKey?: string | null;
   decisionMode?: string | null;
   coinStability?: Record<string, CoinStabilityResult>;
+  stabilityConfig?: StabilityThresholds | null;
 }
 
 function Dir({ above, confidence }: { above: boolean | null; confidence: number | null }) {
@@ -54,7 +62,7 @@ function MetricPill({ value, ok }: { value: string; ok: boolean }) {
 
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
 
-export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability }: CoinSignalBoardProps) {
+export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, stabilityConfig }: CoinSignalBoardProps) {
   const isConviction = decisionMode === "conviction";
   const pinnedStrikes = useRef<Record<string, number>>({});
   for (const [sym, val] of Object.entries(kalshiTargets)) {
@@ -71,6 +79,7 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
         liveSignals={liveSignals}
         coinStability={coinStability}
         windowKey={windowKey}
+        stabilityConfig={stabilityConfig}
       />
     );
   }
@@ -135,9 +144,15 @@ interface MarketConditionsBoardProps {
   liveSignals: Record<string, CoinSignals>;
   coinStability?: Record<string, CoinStabilityResult>;
   windowKey?: string | null;
+  stabilityConfig?: StabilityThresholds | null;
 }
 
-function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, windowKey }: MarketConditionsBoardProps) {
+function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, windowKey, stabilityConfig }: MarketConditionsBoardProps) {
+  const minER     = stabilityConfig?.minER     ?? 0.30;
+  const maxOsc    = stabilityConfig?.maxOsc    ?? 8;
+  const maxVolPct = stabilityConfig?.maxVolPct ?? 3.0;
+  const minMLConf = stabilityConfig?.minMLConf ?? 52;
+
   const hasStability = coinStability && Object.keys(coinStability).length > 0;
   const stableCount = hasStability ? syms.filter(s => coinStability![s]?.stable === true).length : 0;
 
@@ -207,20 +222,20 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {stab != null ? <MetricPill value={stab.er.toFixed(2)} ok={stab.er >= 0.30} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
+                    {stab != null ? <MetricPill value={stab.er.toFixed(2)} ok={stab.er >= minER} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {stab != null ? <MetricPill value={String(stab.osc)} ok={stab.osc <= 8} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
+                    {stab != null ? <MetricPill value={String(stab.osc)} ok={stab.osc <= maxOsc} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {stab != null ? <MetricPill value={stab.volPct.toFixed(2) + "%"} ok={stab.volPct <= 3.0} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
+                    {stab != null ? <MetricPill value={stab.volPct.toFixed(2) + "%"} ok={stab.volPct <= maxVolPct} /> : <span className="text-muted-foreground/40 font-mono">—</span>}
                   </td>
 
                   <td className="px-3 py-2.5">
                     {(stab?.mlConf ?? s.mlConfidence) != null ? (
-                      <MetricPill value={(stab?.mlConf ?? s.mlConfidence)!.toFixed(0) + "%"} ok={(stab?.mlConf ?? s.mlConfidence)! >= 52} />
+                      <MetricPill value={(stab?.mlConf ?? s.mlConfidence)!.toFixed(0) + "%"} ok={(stab?.mlConf ?? s.mlConfidence)! >= minMLConf} />
                     ) : (
                       <span className="text-muted-foreground/40 font-mono">—</span>
                     )}
@@ -244,7 +259,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
 
       <div className="px-5 py-2 border-t border-border/40">
         <span className="text-[10px] text-muted-foreground/50">
-          Stable = ER ≥ 0.30 · Osc ≤ 8 · Vol ≤ 3% · ML ≥ 52% · no spike candle → max bet size
+          Stable = ER ≥ {minER.toFixed(2)} · Osc ≤ {maxOsc} · Vol ≤ {maxVolPct}% · ML ≥ {minMLConf}% · no spike candle → max bet size
         </span>
       </div>
     </div>
