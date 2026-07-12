@@ -27,9 +27,9 @@ export const kalshiTargetCache = new Map<string, {
   yesAsk?: number | null;
   yesBid?: number | null;
 }>();
-// Reduced to 5s so bid/ask data used at order time is always ≤5s stale,
-// matching the near-boundary TTL that was already applied at window edges.
-const KALSHI_TARGET_LIB_TTL = 5_000;
+// 2s so the conviction bot tick (which runs every 2 s) always reads prices that
+// are at most one tick stale, ensuring brief 88–92¢ crossings aren't missed.
+const KALSHI_TARGET_LIB_TTL = 2_000;
 
 // Tracks when each symbol's new-window Kalshi target was first confirmed.
 export const confirmedTargetStore = new Map<string, { ticker: string; confirmedAt: number; target: number }>();

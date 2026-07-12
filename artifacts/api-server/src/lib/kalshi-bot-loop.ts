@@ -1133,6 +1133,18 @@ export async function runBotLoopTick(): Promise<void> {
       "[kalshi-bot] regime cache refreshed");
   }
 
+  // Conviction mode: proactively refresh Kalshi bid/ask prices for every coin
+  // before evaluating them. The tracker snapshot only runs every 30 s — far too
+  // stale for the 88–92¢ window. Fetching in parallel here keeps prices ≤2 s
+  // fresh so the engine never skips a coin based on stale pre-gate data.
+  if (S.config.decisionMode === "conviction") {
+    await Promise.all(
+      CRYPTO_COINS
+        .filter(c => KALSHI_SERIES[c.symbol])
+        .map(c => fetchKalshiTarget(c.symbol.toUpperCase()).catch(() => null)),
+    );
+  }
+
   for (const coin of CRYPTO_COINS) {
     if (!KALSHI_SERIES[coin.symbol]) continue;
     const sym = coin.symbol.toUpperCase();
