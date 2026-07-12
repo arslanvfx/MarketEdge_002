@@ -83,6 +83,8 @@ export interface BotConfig {
   convictionStabilityMaxOsc?: number;
   convictionStabilityMaxVolPct?: number;
   convictionStabilityMinMLConf?: number;
+  convictionStabilityMaxBetProbability?: number;
+  convictionStabilityMaxBetsPerWindow?: number;
   allowLateEntries?: boolean;
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
 }

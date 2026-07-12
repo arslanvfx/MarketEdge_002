@@ -510,12 +510,13 @@ export async function runBotLoopTick(): Promise<void> {
     // All other coins use regular size, regardless of their stability.
     {
       const prob = S.config.convictionStabilityMaxBetProbability ?? S.config.convictionBoostProbability ?? 0.25;
+      const maxSlots = S.config.convictionStabilityMaxBetsPerWindow ?? 1;
       const tokenAvailable = Math.random() < prob;
-      maxBetWindowToken.remaining = tokenAvailable ? 1 : 0;
+      maxBetWindowToken.remaining = tokenAvailable ? maxSlots : 0;
       logger.info(
-        { windowKey: cbWindowNow, prob, tokenAvailable },
+        { windowKey: cbWindowNow, prob, tokenAvailable, maxSlots },
         tokenAvailable
-          ? "[kalshi-bot] max-bet token available this window"
+          ? `[kalshi-bot] max-bet token available this window (${maxSlots} slot${maxSlots !== 1 ? "s" : ""})`
           : "[kalshi-bot] no max-bet token this window — all bets regular size",
       );
     }

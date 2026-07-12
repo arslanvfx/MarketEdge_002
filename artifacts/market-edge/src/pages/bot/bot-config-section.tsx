@@ -927,6 +927,25 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             </label>
                           );
                         })()}
+                        {/* Max bet slots per window */}
+                        {(() => {
+                          const slots = merged.convictionStabilityMaxBetsPerWindow ?? 1;
+                          return (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                                <Zap className="w-3 h-3 text-emerald-400" />
+                                Max bet slots per window — <span className="text-emerald-400 font-mono">{slots} slot{slots !== 1 ? "s" : ""}</span>
+                              </span>
+                              <input type="range" min={1} max={3} step={1}
+                                className="accent-emerald-500"
+                                value={slots}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxBetsPerWindow: parseInt(e.target.value, 10) }))} />
+                              <span className="text-[10px] text-muted-foreground/60">
+                                How many coins can claim max-bet size in a single window when the roll hits. Set above 1 only for high-conviction windows.
+                              </span>
+                            </label>
+                          );
+                        })()}
                         <StabilityPreview
                           minER={merged.convictionStabilityMinER ?? 0.12}
                           maxOsc={merged.convictionStabilityMaxOsc ?? 8}

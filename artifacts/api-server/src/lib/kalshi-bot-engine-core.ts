@@ -1178,6 +1178,7 @@ export interface BotConfig {
   convictionStabilityMaxVolPct?: number;               // max volatilityPct to classify stable (default 0.15)
   convictionStabilityMinMLConf?: number;               // min ML confidence to classify stable; null ML = passes (default 52)
   convictionStabilityMaxBetProbability?: number;        // 0–1: probability that a stable coin gets max bet size on each entry (default 0.25)
+  convictionStabilityMaxBetsPerWindow?: number;         // how many max-bet slots are available per window when the roll hits (default 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1333,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionStabilityMaxVolPct: 0.15,
   convictionStabilityMinMLConf: 52,
   convictionStabilityMaxBetProbability: 0.25,
+  convictionStabilityMaxBetsPerWindow: 1,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,
