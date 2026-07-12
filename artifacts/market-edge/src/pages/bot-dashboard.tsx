@@ -629,12 +629,14 @@ export default function BotDashboard() {
             }}
           />
         )}
-        <BotStepsPanel
-          steps={pipelineStatusData?.botSteps ?? []}
-          minConfidence={pipelineStatusData?.minConfidence ?? null}
-          decisionMode={pipelineStatusData?.decisionMode ?? null}
-          windowKey={pipelineStatusData?.currentWindowKey ?? null}
-        />
+        {pipelineStatusData?.decisionMode !== "conviction" && (
+          <BotStepsPanel
+            steps={pipelineStatusData?.botSteps ?? []}
+            minConfidence={pipelineStatusData?.minConfidence ?? null}
+            decisionMode={pipelineStatusData?.decisionMode ?? null}
+            windowKey={pipelineStatusData?.currentWindowKey ?? null}
+          />
+        )}
         <ActivePositions
           openPosList={openPosList}
           closeManualError={closeManualError}
