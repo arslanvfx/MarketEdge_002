@@ -1351,6 +1351,13 @@ async function _runBotTick(
     if (!inWindow) {
       // Release the lock so a future tick can re-evaluate if price recovers.
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      // Restore the max-bet token if this coin had already claimed it — the
+      // order never executed, so the slot must be returned for the next
+      // qualifying coin this window.
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (order aborted before fill)");
+      }
       logger.warn(
         {
           sym, direction, windowKey,
