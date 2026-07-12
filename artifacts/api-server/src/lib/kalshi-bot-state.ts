@@ -194,8 +194,10 @@ export const convictionFiredThisWindow = new Set<string>();
 export const convictionBoostWindowCoins = new Set<string>();
 export interface CoinStabilityResult {
   stable: boolean;
-  statAbove: boolean | null;
-  mlAbove: boolean | null;
+  er: number;
+  osc: number;
+  volPct: number;
+  mlConf: number | null;
   windowKey: string;
   computedAt: number;
 }

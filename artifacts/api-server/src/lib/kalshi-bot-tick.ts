@@ -1000,34 +1000,62 @@ async function _runBotTick(
     if (targetBoost <= 0) return null;
 
     if (S.config.convictionStabilityEnabled !== false) {
-      // ── Stability gate: stat + ML must both agree with bet direction ───────
-      const mlSig     = getLatestCoinSignals(sym);
-      const statAbove = mlSig?.statAbove ?? null;
-      const mlAbove   = mlSig?.mlAbove   ?? null;
-      const betIsYes  = direction === "yes";
-      const statAgrees = statAbove !== null && statAbove === betIsYes;
-      const mlAgrees   = mlAbove   !== null && mlAbove   === betIsYes;
-      const stable     = statAgrees && mlAgrees;
-      coinStabilityCache.set(sym, { stable, statAbove, mlAbove, windowKey, computedAt: Date.now() } satisfies CoinStabilityResult);
+      // ── Deterministic stability gate ──────────────────────────────────────
+      const ind = getCachedPrediction(sym)?.indicators;
+      if (!ind) {
+        logger.info({ sym }, "[kalshi-bot] conviction stability — no indicators, treating as volatile");
+        coinStabilityCache.set(sym, { stable: false, er: 0, osc: 0, volPct: 0, mlConf: null, windowKey, computedAt: Date.now() } satisfies CoinStabilityResult);
+        return null;
+      }
+      const mlSig  = getLatestCoinSignals(sym);
+      const mlConf = mlSig?.mlConfidence ?? null;
+      const minER     = S.config.convictionStabilityMinER     ?? 0.30;
+      const maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
+      const maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
+      const minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
+      const erOk  = ind.efficiencyRatio  >= minER;
+      const oscOk = ind.oscillationCount <= maxOsc;
+      const volOk = ind.volatilityPct    <= maxVolPct;
+      const mlOk  = mlConf === null || mlConf >= minMLConf;
+      const stable = erOk && oscOk && volOk && mlOk && !ind.spikeFlag;
+      coinStabilityCache.set(sym, {
+        stable,
+        er: ind.efficiencyRatio,
+        osc: ind.oscillationCount,
+        volPct: ind.volatilityPct,
+        mlConf,
+        windowKey,
+        computedAt: Date.now(),
+      } satisfies CoinStabilityResult);
       if (!stable) {
         logger.info(
-          { sym, direction, statAbove, mlAbove, statAgrees, mlAgrees },
-          "[kalshi-bot] conviction stability — signals don't agree with direction: regular bet size",
+          { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, spike: ind.spikeFlag, erOk, oscOk, volOk, mlOk },
+          "[kalshi-bot] conviction stability — VOLATILE: regular bet size",
         );
         return null;
       }
-      // Probability roll: cap how often stable agreement upgrades to max bet.
+      // Win-rate secondary gate: even stable coins need minimum historical win rate
+      const minWr2 = S.config.convictionBoostMinWinRate ?? 0.70;
+      const wr2    = coinConvictionWinRates.get(sym) ?? null;
+      if (wr2 !== null && wr2 < minWr2) {
+        logger.info(
+          { sym, wr: wr2.toFixed(2), minWr: minWr2, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount },
+          "[kalshi-bot] conviction stability — STABLE but win-rate below threshold, regular bet size",
+        );
+        return null;
+      }
+      // Random probability roll: stable coins get max bet size with configurable probability.
       const maxBetProb = S.config.convictionStabilityMaxBetProbability ?? 0.25;
       if (!(Math.random() < maxBetProb)) {
         logger.info(
-          { sym, prob: maxBetProb, statAbove, mlAbove },
+          { sym, prob: maxBetProb, er: ind.efficiencyRatio.toFixed(3) },
           "[kalshi-bot] conviction stability — STABLE but random roll missed, regular bet",
         );
         return null;
       }
       logger.info(
-        { sym, direction, statAbove, mlAbove, prob: maxBetProb, targetBoost },
-        "[kalshi-bot] conviction stability — stat+ML agree + roll passed: max bet size",
+        { sym, prob: maxBetProb, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, targetBoost },
+        "[kalshi-bot] conviction stability — STABLE + roll passed: max bet size",
       );
       return targetBoost;
     }

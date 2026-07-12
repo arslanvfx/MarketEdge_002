@@ -1127,18 +1127,31 @@ export async function runBotLoopTick(): Promise<void> {
     if (!KALSHI_SERIES[coin.symbol]) continue;
     const sym = coin.symbol.toUpperCase();
 
-    // Refresh per-coin stability signals every tick in conviction mode so the
-    // stability analysis UI always shows current data (direction-agnostic snapshot;
-    // actual stable=true/false is computed in the tick once direction is known).
+    // Refresh per-coin stability classification every tick in conviction mode,
+    // regardless of whether this coin proceeds to entry logic.
     if (S.config.decisionMode === "conviction" && S.config.convictionStabilityEnabled !== false) {
-      const _mlSig = getLatestCoinSignals(sym);
-      coinStabilityCache.set(sym, {
-        stable:     false, // placeholder — tick sets the real value with direction context
-        statAbove:  _mlSig?.statAbove ?? null,
-        mlAbove:    _mlSig?.mlAbove   ?? null,
-        windowKey,
-        computedAt: Date.now(),
-      } satisfies CoinStabilityResult);
+      const _ind = getCachedPrediction(sym)?.indicators;
+      if (_ind) {
+        const _mlSig  = getLatestCoinSignals(sym);
+        const _mlConf = _mlSig?.mlConfidence ?? null;
+        const _minER     = S.config.convictionStabilityMinER     ?? 0.30;
+        const _maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
+        const _maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
+        const _minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
+        coinStabilityCache.set(sym, {
+          stable: _ind.efficiencyRatio  >= _minER &&
+                  _ind.oscillationCount <= _maxOsc &&
+                  _ind.volatilityPct    <= _maxVolPct &&
+                  (_mlConf === null || _mlConf >= _minMLConf) &&
+                  !_ind.spikeFlag,
+          er:     _ind.efficiencyRatio,
+          osc:    _ind.oscillationCount,
+          volPct: _ind.volatilityPct,
+          mlConf: _mlConf,
+          windowKey,
+          computedAt: Date.now(),
+        } satisfies CoinStabilityResult);
+      }
     }
 
     const kalshiData = getKalshiCachedData(sym);
