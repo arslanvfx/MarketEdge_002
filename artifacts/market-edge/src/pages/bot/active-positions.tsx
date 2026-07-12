@@ -93,7 +93,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                   ))}
                 </div>
 
-                {pos.entrySignals && (
+                {pos.entrySignals && pos.decisionMode !== "conviction" && (
                   <div className="flex flex-wrap items-center gap-2 mb-3">
                     <span className="text-xs text-muted-foreground self-center">Entry signals:</span>
                     {(["stat", "ml", "claude"] as const).map((key) => {
