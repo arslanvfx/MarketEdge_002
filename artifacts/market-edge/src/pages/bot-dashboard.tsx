@@ -627,6 +627,7 @@ export default function BotDashboard() {
               maxVolPct: status?.config?.convictionStabilityMaxVolPct,
               minMLConf: status?.config?.convictionStabilityMinMLConf,
             }}
+            maxBetMinWindowEntryMinutes={status?.config?.maxBetMinWindowEntryMinutes}
           />
         )}
         {pipelineStatusData?.decisionMode !== "conviction" && (

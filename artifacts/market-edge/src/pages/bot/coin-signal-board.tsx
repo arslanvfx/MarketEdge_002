@@ -1,5 +1,5 @@
-import { useRef } from "react";
-import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity, Zap, TrendingUp } from "lucide-react";
+import { useRef, useState, useEffect } from "react";
+import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity, Zap, TrendingUp, Clock } from "lucide-react";
 import type { CoinSignals, CoinStabilityResult } from "./types";
 import { wkToEstRange, ET_LABEL } from "./utils";
 
@@ -17,6 +17,7 @@ interface CoinSignalBoardProps {
   decisionMode?: string | null;
   coinStability?: Record<string, CoinStabilityResult>;
   stabilityConfig?: StabilityThresholds | null;
+  maxBetMinWindowEntryMinutes?: number | null;
 }
 
 function Dir({ above, confidence }: { above: boolean | null; confidence: number | null }) {
@@ -62,7 +63,7 @@ function MetricPill({ value, ok }: { value: string; ok: boolean }) {
 
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
 
-export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, stabilityConfig }: CoinSignalBoardProps) {
+export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, stabilityConfig, maxBetMinWindowEntryMinutes }: CoinSignalBoardProps) {
   const isConviction = decisionMode === "conviction";
   const pinnedStrikes = useRef<Record<string, number>>({});
   for (const [sym, val] of Object.entries(kalshiTargets)) {
@@ -80,6 +81,7 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
         coinStability={coinStability}
         windowKey={windowKey}
         stabilityConfig={stabilityConfig}
+        maxBetMinWindowEntryMinutes={maxBetMinWindowEntryMinutes}
       />
     );
   }
@@ -145,13 +147,31 @@ interface MarketConditionsBoardProps {
   coinStability?: Record<string, CoinStabilityResult>;
   windowKey?: string | null;
   stabilityConfig?: StabilityThresholds | null;
+  maxBetMinWindowEntryMinutes?: number | null;
 }
 
-function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, windowKey, stabilityConfig }: MarketConditionsBoardProps) {
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, windowKey, stabilityConfig, maxBetMinWindowEntryMinutes }: MarketConditionsBoardProps) {
   const minER     = stabilityConfig?.minER     ?? 0.30;
   const maxOsc    = stabilityConfig?.maxOsc    ?? 8;
   const maxVolPct = stabilityConfig?.maxVolPct ?? 3.0;
   const minMLConf = stabilityConfig?.minMLConf ?? 52;
+
+  const now = useNow(10_000);
+  const maxBetGateS = (maxBetMinWindowEntryMinutes ?? 0) * 60;
+  const windowStartMs = windowKey ? new Date(windowKey + ":00Z").getTime() : null;
+  const clockElapsedS = windowStartMs != null && Number.isFinite(windowStartMs) ? Math.max(0, (now - windowStartMs) / 1000) : null;
+  const gateActive = maxBetGateS > 0 && clockElapsedS != null && clockElapsedS < maxBetGateS;
+  const gateSecondsLeft = gateActive && clockElapsedS != null ? maxBetGateS - clockElapsedS : 0;
+  const gateMinsLeft = Math.ceil(gateSecondsLeft / 60);
 
   const hasStability = coinStability && Object.keys(coinStability).length > 0;
   const stableCount = hasStability ? syms.filter(s => coinStability![s]?.stable === true).length : 0;
@@ -247,6 +267,14 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                   <td className="px-3 py-2.5">
                     {!hasData ? (
                       <span className="text-muted-foreground/40 text-xs">—</span>
+                    ) : isStable && gateActive ? (
+                      <span
+                        className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300"
+                        title={`Max-bet gate active — clears in ${gateMinsLeft}m (maxBetMinWindowEntryMinutes=${maxBetMinWindowEntryMinutes})`}
+                      >
+                        <Clock className="w-2.5 h-2.5 shrink-0" />
+                        Max bet in {gateMinsLeft}m
+                      </span>
                     ) : isStable ? (
                       <span className="text-[10px] font-semibold text-emerald-400">Max</span>
                     ) : (
