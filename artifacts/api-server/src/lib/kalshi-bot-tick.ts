@@ -509,8 +509,6 @@ async function _runBotTick(
   // Use ensemble signal accuracy (from prediction_records historyStore) for the
   // EV gate — not the bot's own win rate, which is contaminated by exit decisions.
   const signalAcc = getPredictionAnalytics(sym).bySource.ensemble.accuracyPct;
-  // livePrice: used by position_confirm mode to gate on current price vs strike.
-  // Read from the predictor cache — same source as the strike-proximity guard below.
   const livePrice = getCachedPrediction(sym)?.price ?? null;
   const decision = makeBotDecision(
     sym,
@@ -573,12 +571,7 @@ async function _runBotTick(
   // is calling BELOW — exactly the bug observed when ML briefly outputted YES
   // at window-open before settling to NO, while Claude's opening call was BELOW.
   //
-  // BYPASS for position_confirm: in that mode direction is determined by where
-  // the live price IS relative to the Kalshi strike — Claude is a soft veto
-  // (handled inside makeBotDecision: ≥2 model vetoes → SKIP).  Applying a
-  // hard Claude veto here would silently kill all bets where Claude's directional
-  // prediction happens to disagree with the current price position.
-  if (S.config.decisionMode !== "position_confirm" && S.config.decisionMode !== "conviction") {
+  if (S.config.decisionMode !== "conviction") {
     const dirSigs = decision.signals as { claudeAbove?: boolean | null };
     if (decision.action === "BET_YES" && dirSigs.claudeAbove === false) {
       logger.info(

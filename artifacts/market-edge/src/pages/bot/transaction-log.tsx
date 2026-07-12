@@ -248,7 +248,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           ml_gate:          { label: "ML Gate",      cls: "bg-violet-500/10 text-violet-400/80" },
                           consensus:        { label: "Consensus",    cls: "bg-amber-500/10 text-amber-400/80" },
                           unanimous:        { label: "Unanimous",    cls: "bg-emerald-500/10 text-emerald-400/80" },
-                          position_confirm: { label: "Pos-Confirm",  cls: "bg-cyan-500/10 text-cyan-400/80" },
+
                           conviction:       { label: "Conviction",   cls: "bg-yellow-500/20 text-yellow-300 font-bold" },
                         };
                         const { label, cls } = meta[dm] ?? { label: dm, cls: "bg-muted/30 text-muted-foreground" };

@@ -154,57 +154,6 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 2,
   },
-  // Position Confirm: direction = WHERE price IS vs the Kalshi strike (not a prediction).
-  // Models act as soft vetoes only. Strategy: wait 7 min for price to clearly settle
-  // on one side of the strike (mid-window), then fire a fresh re-analysis against the
-  // current price — so the bet is on the CONFIRMED position, not the opening snapshot.
-  // betDelayMinutes=7: hold entry until T+7, then run fresh Claude + stat recheck.
-  // maxEntryMinutes=12: window stays open until T+12; minRemainingMinutes=3 is the floor
-  //   (together they define the entry window as T+7 to T+12 — 5-minute window to fire).
-  // priceBufferPct=0.05: just enough to block coins sitting exactly ON the strike
-  //   (0.000% like the DOGE loss); coins 0.05%+ clear are meaningfully on one side.
-  //   0.25% was too tight — all winners in the successful window were 0.057–0.45% clear.
-  // minReturnMultiple=1.3: positional bets carry flip risk; require meaningful edge.
-  // minConfidence=58: lower floor since price-position is the primary signal, not model conf.
-  position_confirm: {
-    decisionMode: "position_confirm",
-    minConfidence: 58,
-    minReturnMultiple: 1.3,
-    betDelayMinutes: 7,
-    maxEntryMinutes: 12,
-    minRemainingMinutes: 3,
-    windowEntryBufferSeconds: 120,
-    requireMonitorReady: true,
-    enableDynamicSizing: true,
-    betSize: 1,
-    maxBetSize: 3,
-    maxBetsPerWindow: 5,
-    profitLockPct: 97,
-    enableMidExit: false,
-    priceBufferPct: 0.05,
-    regimePenalty: 12,
-    enableDirectionCap: true,
-    maxSameDirectionBets: 3,
-    enableMomentumFilter: true,
-    consensusMinCents: 25,
-    momentumLookbackCandles: 6,
-    phase2ThresholdPp: 30,
-    minHoldMinutes: 3,
-  },
-  // Market Lock: terminal-window "free money" strategy.
-  // Enter only in the last 1-2 minutes when price is 2%+ clear of the Kalshi
-  // strike — at that point the market is locked in and reversal is near-impossible.
-  //
-  // betDelayMinutes=0: no forced delay — enter as soon as price hits the lock threshold.
-  // maxEntryMinutes=0: no ceiling — conviction bets fire any time in the window.
-  // minReturnMultiple=1.00: disabled — the lockPrice slider IS the return dial.
-  //   At 0.90 lock the minimum return is already 1/0.90=1.11×; raising lockPrice
-  //   raises the minimum return.  A separate minReturnMultiple gate would block
-  //   very-high-certainty bets (96¢, 97¢) whose return dips below 1.05×, which
-  //   is exactly backwards for a certainty-based mode.
-  // kalshiLockPrice=0.90: fire when Kalshi YES ≥ 90¢ (BET_YES) or ≤ 10¢ (BET_NO).
-  // betSize=1/maxBetSize=2: start small — $1–$2 flat bets.
-  // windowEntryBufferSeconds=60: wait 60s for Kalshi market to publish after window open.
   conviction: {
     decisionMode: "conviction",
     minConfidence: 50,
@@ -782,7 +731,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "position_confirm" || decisionMode === "conviction") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
     // When switching modes: apply built-in mode defaults as a baseline, then
     // layer the saved user preset on top (if one exists), then apply any
     // explicit overrides from this request on top of that.

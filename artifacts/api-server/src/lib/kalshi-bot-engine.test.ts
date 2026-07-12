@@ -1701,7 +1701,7 @@ test("proximity guard bypass: non-conviction modes → no bypass even at extreme
   assert.equal(proximityBypass("ml_gate",          0.08), false);
   assert.equal(proximityBypass("consensus",        0.95), false);
   assert.equal(proximityBypass("unanimous",        0.05), false);
-  assert.equal(proximityBypass("position_confirm", 0.92), false);
+
 });
 
 test("proximity guard bypass: conviction + null yesPrice → no bypass", () => {

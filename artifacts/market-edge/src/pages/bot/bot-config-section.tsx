@@ -578,7 +578,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       { id: "ml_gate",          label: "ML Gate",          desc: "ML leads direction; Claude is a required co-decider — disagree → SKIP" },
                       { id: "consensus",        label: "Consensus",        desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
-                      { id: "position_confirm", label: "Position Confirm", desc: "Bet on WHERE price IS (above/below strike) — models become vetoes, not predictors" },
+
                       { id: "conviction",      label: "Conviction",      desc: "Fires when Kalshi's YES price hits 90¢ (BET YES) or drops to 10¢ (BET NO) — the market itself declaring 90%+ certainty in either direction." },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
@@ -628,39 +628,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </div>
                 </div>
 
-                {/* Price Buffer — only shown in Position Confirm mode */}
-                {(merged.decisionMode ?? "classic") === "position_confirm" && (
-                  <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3">
-                    <span className="text-xs font-medium text-sky-400 flex items-center gap-1.5">
-                      <Target className="w-3 h-3" />
-                      Position Confirm Settings
-                    </span>
-                    <span className="text-[11px] text-muted-foreground/80 leading-relaxed">
-                      Instead of predicting where price will go, the bot bets on where it <em>already is</em> relative to the Kalshi strike.
-                      Models become soft vetoes — if ≥2 disagree with the current position, the bet is skipped.
-                      Works best paired with <strong>Earliest Entry: 7–8 min</strong> so there&apos;s less time left for a reversal.
-                    </span>
-                    <label className="flex flex-col gap-1.5 mt-1">
-                      <span className="text-xs text-muted-foreground">
-                        Price Buffer — {(merged.priceBufferPct ?? 0) === 0 ? "Off (any distance from strike)" : `${merged.priceBufferPct ?? 0}% min distance from strike`}
-                      </span>
-                      <div className="flex items-center gap-3">
-                        <input type="range" min={0} max={1} step={0.05}
-                          className="flex-1"
-                          value={merged.priceBufferPct ?? 0}
-                          onChange={e => setConfigDraft(d => ({ ...d, priceBufferPct: parseFloat(e.target.value) }))} />
-                        <span className="text-xs font-mono text-sky-400 w-12 text-right">
-                          {(merged.priceBufferPct ?? 0) === 0 ? "Off" : `${(merged.priceBufferPct ?? 0).toFixed(2)}%`}
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70">
-                        {(merged.priceBufferPct ?? 0) === 0
-                          ? "Any price position qualifies — bet fires as soon as models don't veto"
-                          : `Price must be ≥${(merged.priceBufferPct ?? 0).toFixed(2)}% above/below the Kalshi strike — smaller buffer = more bets, larger = safer cushion against reversals`}
-                      </span>
-                    </label>
-                  </div>
-                )}
 
                 {/* Conviction Settings */}
                 {isConviction && (
