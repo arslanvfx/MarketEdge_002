@@ -1,4 +1,4 @@
-import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
+import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable, withRetry } from "@workspace/db";
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
@@ -59,11 +59,11 @@ import {
 export async function _persistModeToConfig(): Promise<void> {
   try {
     const snapshot = { ...S.config, mode: S.botMode } as Record<string, unknown>;
-    await db.execute(sql`
+    await withRetry(() => db.execute(sql`
       INSERT INTO bot_config (id, config, updated_at)
       VALUES ('default', ${JSON.stringify(snapshot)}::jsonb, NOW())
       ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-    `);
+    `));
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to persist mode to DB (non-fatal)");
   }
@@ -841,11 +841,11 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   let persisted = false;
   try {
     const stored = { ...snapshot, mode: S.botMode } as Record<string, unknown>;
-    await db.execute(sql`
+    await withRetry(() => db.execute(sql`
       INSERT INTO bot_config (id, config, updated_at)
       VALUES ('default', ${JSON.stringify(stored)}::jsonb, NOW())
       ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-    `);
+    `));
     persisted = true;
   } catch (err) {
     logger.error({ err }, "[kalshi-bot] failed to persist config to DB");
