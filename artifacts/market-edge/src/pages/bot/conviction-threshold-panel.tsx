@@ -1,14 +1,15 @@
-import { Target, TrendingUp, AlertTriangle, Lightbulb, ChevronDown, ChevronUp } from "lucide-react";
+import { Target, TrendingUp, AlertTriangle, Lightbulb, ChevronDown, ChevronUp, Zap } from "lucide-react";
 import { useState } from "react";
-import type { ConvictionThresholdData } from "./types";
+import type { ConvictionThresholdData, MaxBetStats } from "./types";
 
 interface ConvictionThresholdPanelProps {
   data: ConvictionThresholdData | undefined;
   currentLockPrice: number | undefined;
   activeMode: "paper" | "live";
+  maxBetStats?: MaxBetStats | null;
 }
 
-export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode }: ConvictionThresholdPanelProps) {
+export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode, maxBetStats }: ConvictionThresholdPanelProps) {
   const [open, setOpen] = useState(true);
 
   const bands = data?.bands ?? [];
@@ -162,6 +163,73 @@ export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode }:
                 Bands show the effective "locked" side price — YES bets use the yes price, NO bets use (1 − yes price) to match conviction logic.
                 Suggestion requires ≥5 bets in a band. Adjust <span className="font-mono">kalshiLockPrice</span> in Bot Configuration to change the trigger.
               </p>
+
+              {/* Max bet vs regular bet breakdown */}
+              {maxBetStats && (maxBetStats.total > 0 || maxBetStats.regularTotal > 0) && (() => {
+                const mb = maxBetStats;
+                const fmt$ = (v: number) => (v >= 0 ? "+" : "") + "$" + Math.abs(v).toFixed(2);
+                const fmtPct = (v: number | null) => v == null ? "—" : `${Math.round(v * 100)}%`;
+                const wrColor = (v: number | null) => v == null ? "text-muted-foreground"
+                  : v >= 0.60 ? "text-emerald-400"
+                  : v >= 0.45 ? "text-amber-400"
+                  : "text-red-400";
+                const pnlColor = (v: number) => v >= 0 ? "text-emerald-400" : "text-red-400";
+                const diff = mb.total > 0 && mb.regularTotal > 0 && mb.winRate != null && mb.regularWinRate != null
+                  ? mb.winRate - mb.regularWinRate : null;
+                return (
+                  <div className="border-t border-border/50 pt-4">
+                    <div className="flex items-center gap-1.5 mb-3">
+                      <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-xs font-semibold text-foreground">Max Bet vs Regular Bet</span>
+                      {mb.total === 0 && (
+                        <span className="text-[10px] text-muted-foreground/50 italic ml-1">no max bets yet</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3 flex flex-col gap-1">
+                        <div className="flex items-center gap-1 mb-0.5">
+                          <Zap className="w-3 h-3 text-emerald-400" />
+                          <span className="text-[10px] font-semibold text-emerald-300">Max Bets</span>
+                          <span className="ml-auto text-[9px] text-muted-foreground font-mono">{mb.total}</span>
+                        </div>
+                        <div className="flex items-baseline gap-1">
+                          <span className={`text-lg font-bold ${wrColor(mb.winRate)}`}>{fmtPct(mb.winRate)}</span>
+                          <span className="text-[10px] text-muted-foreground">WR</span>
+                        </div>
+                        <div className="flex gap-2 text-[10px]">
+                          <span className="text-emerald-400">{mb.wins}W</span>
+                          <span className="text-muted-foreground/40">/</span>
+                          <span className="text-red-400">{mb.losses}L</span>
+                        </div>
+                        <div className={`text-[10px] font-mono font-semibold ${pnlColor(mb.totalPnl)}`}>{fmt$(mb.totalPnl)}</div>
+                      </div>
+                      <div className="rounded-lg border border-border/40 bg-muted/20 p-3 flex flex-col gap-1">
+                        <div className="flex items-center gap-1 mb-0.5">
+                          <span className="text-[10px] font-semibold text-muted-foreground">Regular Bets</span>
+                          <span className="ml-auto text-[9px] text-muted-foreground font-mono">{mb.regularTotal}</span>
+                        </div>
+                        <div className="flex items-baseline gap-1">
+                          <span className={`text-lg font-bold ${wrColor(mb.regularWinRate)}`}>{fmtPct(mb.regularWinRate)}</span>
+                          <span className="text-[10px] text-muted-foreground">WR</span>
+                        </div>
+                        <div className="flex gap-2 text-[10px]">
+                          <span className="text-emerald-400">{mb.regularWins}W</span>
+                          <span className="text-muted-foreground/40">/</span>
+                          <span className="text-red-400">{mb.regularLosses}L</span>
+                        </div>
+                        <div className={`text-[10px] font-mono font-semibold ${pnlColor(mb.regularTotalPnl)}`}>{fmt$(mb.regularTotalPnl)}</div>
+                      </div>
+                    </div>
+                    {diff != null && (
+                      <p className={`text-[10px] mt-1.5 ${Math.abs(diff) <= 0.02 ? "text-muted-foreground" : diff > 0 ? "text-emerald-400" : "text-amber-400"}`}>
+                        {diff > 0.02 ? `Max bets outperforming by ${Math.round(diff * 100)}pp`
+                          : diff < -0.02 ? `Regular bets outperforming by ${Math.round(Math.abs(diff) * 100)}pp`
+                          : "Max and regular bets performing similarly"}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
             </>
           )}
         </div>

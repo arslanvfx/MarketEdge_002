@@ -915,14 +915,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             <label className="flex flex-col gap-1">
                               <span className="text-xs text-muted-foreground flex items-center gap-1.5">
                                 <Zap className="w-3 h-3 text-emerald-400" />
-                                Max bet chance — <span className="text-emerald-400 font-mono">{pct}% of stable entries</span>
+                                Max bet chance — <span className="text-emerald-400 font-mono">{pct}% chance per window</span>
                               </span>
                               <input type="range" min={0} max={100} step={5}
                                 className="accent-emerald-500"
                                 value={pct}
                                 onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxBetProbability: parseInt(e.target.value, 10) / 100 }))} />
                               <span className="text-[10px] text-muted-foreground/60">
-                                When a stable coin qualifies, it rolls this % chance to bet max size. All other entries use regular size regardless.
+                                Rolled once per window. If it hits, the first stable qualifying coin gets max bet size — all others use regular size regardless.
                               </span>
                             </label>
                           );

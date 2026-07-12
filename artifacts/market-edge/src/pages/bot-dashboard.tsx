@@ -679,6 +679,7 @@ export default function BotDashboard() {
             data={convictionThresholdData}
             currentLockPrice={merged?.kalshiLockPrice}
             activeMode={activeMode}
+            maxBetStats={perfReportData?.report?.maxBetStats}
           />
         )}
         {/* ── Per-Coin Stats ── */}

@@ -43,7 +43,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache,
+  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, maxBetWindowToken,
   type CoinStabilityResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -1044,36 +1044,37 @@ async function _runBotTick(
         );
         return null;
       }
-      // Random probability roll: stable coins get max bet size with configurable probability.
-      const maxBetProb = S.config.convictionStabilityMaxBetProbability ?? 0.25;
-      if (!(Math.random() < maxBetProb)) {
+      // Global per-window token check: the probability was already rolled ONCE at
+      // window transition.  If no token is available, all remaining coins use regular
+      // size regardless of how stable they are.
+      if (maxBetWindowToken.remaining <= 0) {
         logger.info(
-          { sym, prob: maxBetProb, er: ind.efficiencyRatio.toFixed(3) },
-          "[kalshi-bot] conviction stability — STABLE but random roll missed, regular bet",
+          { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount },
+          "[kalshi-bot] conviction stability — STABLE but no max-bet token this window, regular bet",
         );
         return null;
       }
+      maxBetWindowToken.remaining--;
       logger.info(
-        { sym, prob: maxBetProb, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, targetBoost },
-        "[kalshi-bot] conviction stability — STABLE + roll passed: max bet size",
+        { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, targetBoost },
+        "[kalshi-bot] conviction stability — STABLE + max-bet token claimed: max bet size",
       );
       return targetBoost;
     }
 
-    // ── Legacy: random probability roll ───────────────────────────────────
-    const prob  = S.config.convictionBoostProbability ?? 0.25;
-    const minWr = S.config.convictionBoostMinWinRate  ?? 0.70;
+    // ── Legacy path (convictionStabilityEnabled=false): same global token logic ──
+    const minWr = S.config.convictionBoostMinWinRate ?? 0.70;
     const wr    = coinConvictionWinRates.get(sym) ?? null;
-    const qualifies = wr === null || wr >= minWr;
-    if (!qualifies) {
+    if (wr !== null && wr < minWr) {
       logger.info({ sym, wr, minWr }, "[kalshi-bot] conviction boost — win-rate gate failed");
       return null;
     }
-    if (!(Math.random() < prob)) {
-      logger.info({ sym, prob }, "[kalshi-bot] conviction boost — random roll missed (normal)");
+    if (maxBetWindowToken.remaining <= 0) {
+      logger.info({ sym }, "[kalshi-bot] conviction boost — no max-bet token this window, regular bet");
       return null;
     }
-    logger.info({ sym, targetBoost, prob, wr }, "[kalshi-bot] conviction boost — all gates passed, using max bet size");
+    maxBetWindowToken.remaining--;
+    logger.info({ sym, targetBoost, wr }, "[kalshi-bot] conviction boost — max-bet token claimed: max bet size");
     return targetBoost;
   })();
   // Stat regime boost: use maxBetSize when the coin's current price action is

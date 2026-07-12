@@ -192,6 +192,10 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
 export const convictionBoostWindowCoins = new Set<string>();
+// Global per-window max-bet token.  Rolled ONCE at window transition; a coin
+// claims it by decrementing to 0.  At 100% probability exactly 1 max bet slot
+// exists per window; at 25% roughly 1-in-4 windows get a slot.
+export const maxBetWindowToken = { remaining: 0 };
 export interface CoinStabilityResult {
   stable: boolean;
   er: number;

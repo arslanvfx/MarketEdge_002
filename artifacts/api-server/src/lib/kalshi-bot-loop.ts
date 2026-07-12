@@ -42,7 +42,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode,
+  convictionFiredThisWindow, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -505,13 +505,22 @@ export async function runBotLoopTick(): Promise<void> {
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
     coinStabilityCache.clear();
-    // Stability cache: clear per-coin stability results at window transition so stale
-    // indicator data from the previous window doesn't persist into the new one.
-    // Conviction random boost: the random roll happens per individual bet in the tick,
-    // not here at window transition. Just refresh win-rate data and reset the (now-unused)
-    // Set so nothing carries over from the previous window.
+    // Global max-bet token: roll ONCE per window to decide whether any bet this
+    // window is eligible for max-bet size.  The first qualifying coin claims it.
+    // All other coins use regular size, regardless of their stability.
+    {
+      const prob = S.config.convictionStabilityMaxBetProbability ?? S.config.convictionBoostProbability ?? 0.25;
+      const tokenAvailable = Math.random() < prob;
+      maxBetWindowToken.remaining = tokenAvailable ? 1 : 0;
+      logger.info(
+        { windowKey: cbWindowNow, prob, tokenAvailable },
+        tokenAvailable
+          ? "[kalshi-bot] max-bet token available this window"
+          : "[kalshi-bot] no max-bet token this window — all bets regular size",
+      );
+    }
     convictionBoostWindowCoins.clear();
-    refreshConvictionWinRates();   // async, fire-and-forget; used by per-bet roll in the tick
+    refreshConvictionWinRates();   // async, fire-and-forget; used by win-rate gate in the tick
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
     // Clear bet details older than the current window to prevent map growth.
     for (const k of windowBetDetails.keys()) {
