@@ -1480,7 +1480,7 @@ async function _runBotTick(
         const cvHigh    = cvTarget + 0.02;
         // Slot price: how much the entered side cost (YES=avgPrice, NO=1-avgPrice).
         const fillSlot  = direction === "yes" ? result.avgPrice : (1 - result.avgPrice);
-        const FILL_TOL  = 0.06; // allow 6¢ slippage from the ±2¢ gate window
+        const FILL_TOL  = 0.005; // must match GATE_BUFFER — any fill outside [gate-floor, gate-ceil] aborts
         if (fillSlot < cvLow - FILL_TOL || fillSlot > cvHigh + FILL_TOL) {
           logger.error(
             {
