@@ -34,14 +34,15 @@ export type AiFeature =
 
 const ENABLED: Record<AiSpendLevel, Set<AiFeature>> = {
   off: new Set(),
-  // Eco: core bot signals only at minimum thinking depth.
-  // Skips: trend stability (overlaps with momentum filter), market summaries,
-  // research briefs. Keeps snap + live-dir (bot accuracy) and stock signals.
+  // Eco: crypto bot signals (accuracy-critical) + all three stock AI features.
+  // Skips: trend stability, market summaries (low ROI). Includes stock research
+  // so the Research page and bot entry decisions work at minimum cost.
   eco: new Set<AiFeature>([
     "crypto_snap",
     "crypto_live_dir",
     "crypto_btc_call",
     "stock_signal",
+    "stock_research",
     "stock_sentiment",
   ]),
   // Balanced: all features ON at standard thinking depth.
@@ -135,7 +136,7 @@ export function isAiFeatureEnabled(feature: AiFeature): boolean {
 /** Human-readable description of each level's cost impact. */
 export const AI_SPEND_LABELS: Record<AiSpendLevel, { name: string; description: string; costTag: string }> = {
   off:      { name: "Off",      description: "Emergency kill switch — all AI disabled",                                    costTag: "Free"      },
-  eco:      { name: "Eco",      description: "All accuracy-critical features, minimum thinking depth (3K tokens)",         costTag: "~50% cost" },
+  eco:      { name: "Eco",      description: "Crypto bot signals + all stock AI (signal, research, sentiment) at 3K thinking depth", costTag: "~50% cost" },
   balanced: { name: "Balanced", description: "All features, standard thinking depth (5K tokens) + research & summaries",  costTag: "~70% cost" },
   max:      { name: "Max",      description: "All features, deep thinking (8K tokens) + 2× self-consistency on each snap", costTag: "Full cost" },
 };
