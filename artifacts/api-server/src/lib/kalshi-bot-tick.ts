@@ -1540,60 +1540,7 @@ async function _runBotTick(
       fillPrice = result.avgPrice ?? yesPrice;
       orderId = result.orderId;
 
-      // ── CONVICTION POST-FILL ABORT ──────────────────────────────────────────
-      // The live-price gate uses the Kalshi API (market list + orderbook) to
-      // validate price before submitting, but the real exchange fill comes from
-      // the live order book which may move between gate-check and execution.
-      // If the actual fill landed outside the conviction window we immediately
-      // sell the contracts back and abort — never opening the position.
-      // This catches the "stale gate / fast market" case (e.g. 91¢ gate passes
-      // but book moved to 69¢ — fill at 69¢ is NOT a conviction bet).
-      if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
-        const cvTarget  = S.config.kalshiLockPrice ?? 0.90;
-        const cvLow     = cvTarget - 0.02;
-        // cvHigh must match the entry gate's lockPriceCap (cvTarget+0.03) exactly.
-        // The order limit is set to lockPriceCap so a fill at that price is valid —
-        // using cvTarget+0.02 here caused every limit-price fill to trigger an
-        // immediate sell-back (1¢ window mismatch).
-        const cvHigh    = cvTarget + 0.03;
-        // Slot price: how much the entered side cost (YES=avgPrice, NO=1-avgPrice).
-        const fillSlot  = direction === "yes" ? result.avgPrice : (1 - result.avgPrice);
-        // Zero tolerance: the order limit cap (lockPriceCap) already prevents
-        // above-cap fills at the exchange level.  Any fill outside [cvLow, cvHigh]
-        // is a genuine violation — abort immediately.  Kalshi prices are integer
-        // cents so floating-point edge cases don't apply here.
-        const FILL_TOL  = 0;
-        if (fillSlot < cvLow - FILL_TOL || fillSlot > cvHigh + FILL_TOL) {
-          logger.error(
-            {
-              sym, direction,
-              fillSlot: +fillSlot.toFixed(4),
-              cvLow, cvHigh, fillTolerance: FILL_TOL,
-              avgPrice: result.avgPrice,
-              filledCount: result.filledCount,
-            },
-            "[kalshi-bot] CONVICTION POST-FILL ABORT — fill outside conviction window; selling immediately",
-          );
-          try {
-            if (direction === "yes") {
-              await sellYes(kalshiTicker, result.filledCount);
-            } else {
-              await sellNo(kalshiTicker, result.filledCount);
-            }
-            logger.info({ sym, direction }, "[kalshi-bot] conviction post-fill sell executed — position not opened");
-          } catch (sellErr) {
-            logger.error(
-              { err: sellErr, sym },
-              "[kalshi-bot] CRITICAL: conviction post-fill sell FAILED — position may be stranded; check Kalshi account",
-            );
-          }
-          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-          // Block this coin for the rest of the window so the next tick doesn't
-          // immediately retry and produce another wrong-price abort cycle.
-          windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
-          return;
-        }
-      }
+
 
       // Slippage guard: compare actual fill price to the expected yes-price.
       // Tracks CONSECUTIVE bad fills — a clean fill resets the counter.
