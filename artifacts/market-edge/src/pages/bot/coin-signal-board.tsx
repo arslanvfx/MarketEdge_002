@@ -67,7 +67,7 @@ function MetricPill({ value, ok }: { value: string; ok: boolean }) {
   );
 }
 
-const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
+const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC"];
 
 export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, coinTrajectory, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes }: CoinSignalBoardProps) {
   const isConviction = decisionMode === "conviction";

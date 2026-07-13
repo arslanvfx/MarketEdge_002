@@ -175,7 +175,7 @@ export function rowToRecord(row: Record<string, unknown>): PredictionRecord {
 
 export async function initHistoryFromDB(): Promise<void> {
   try {
-    const symbols = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE"];
+    const symbols = [...TRAINING_COINS];
     const rows = await db
       .select()
       .from(predictionRecordsTable)
