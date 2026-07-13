@@ -1173,8 +1173,10 @@ export interface BotConfig {
   maxBetTrajectoryEnabled?: boolean;               // master toggle for max bets (default true)
   regularBetTrajectoryEnabled?: boolean;           // master toggle for regular bets (default false)
   maxBetTrajectoryLookbackMinutes?: number;        // how many 1-min candles to look back for velocity (default 3)
-  maxBetTrajectoryDangerBandPct?: number;          // min safe PROJECTED margin % from target (default 0.40%)
-  maxBetTrajectoryCurrentMarginMinPct?: number;    // min safe CURRENT margin % — block immediately if live price is this close to target (default 0.30%)
+  maxBetTrajectoryDangerBandPct?: number;          // min safe PROJECTED margin % floor (default 0.40%) — actual threshold = max(this, atrPct × dangerBandATR)
+  maxBetTrajectoryCurrentMarginMinPct?: number;    // min safe CURRENT margin % floor (default 0.30%) — actual threshold = max(this, atrPct × currentMarginMinATR)
+  maxBetTrajectoryCurrentMarginMinATR?: number;    // current margin must be ≥ N × ATR (default 1.5) — makes threshold coin-relative
+  maxBetTrajectoryDangerBandATR?: number;          // projected margin must be ≥ N × ATR (default 2.0) — makes threshold coin-relative
   maxBetTrajectoryBlockOnCross?: boolean;          // also block when projection crosses to wrong side of target (default true)
 }
 
@@ -1336,6 +1338,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryLookbackMinutes: 3,
   maxBetTrajectoryDangerBandPct: 0.40,
   maxBetTrajectoryCurrentMarginMinPct: 0.30,
+  maxBetTrajectoryCurrentMarginMinATR: 1.5,
+  maxBetTrajectoryDangerBandATR: 2.0,
   maxBetTrajectoryBlockOnCross: true,
   minHoldMinutes: 4,
   enableMidExit: false,

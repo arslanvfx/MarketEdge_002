@@ -216,13 +216,16 @@ export interface TrajectoryGateResult {
   symbol: string;
   blocked: boolean;
   reason: "projected_cross" | "thin_margin" | "insufficient_data" | null;
-  velocity: number;           // $/min — positive = rising, negative = falling
-  projectedPrice: number;     // estimated underlying price at window close
-  currentMarginPct: number;   // (livePrice - target) / target * 100
-  projectedMarginPct: number; // (projectedPrice - target) / target * 100
+  velocity: number;                      // $/min — positive = rising, negative = falling
+  projectedPrice: number;                // estimated underlying price at window close
+  currentMarginPct: number;              // (livePrice - target) / target * 100
+  projectedMarginPct: number;            // (projectedPrice - target) / target * 100
   minutesRemaining: number;
   direction: "yes" | "no";
   computedAt: number;
+  atrPct: number;                        // recent 5-candle ATR as % of target — coin volatility proxy
+  effectiveCurrentMarginMinPct: number;  // max(fixedFloor, atrPct × multiplier) — actual threshold used
+  effectiveDangerBandPct: number;        // max(fixedFloor, atrPct × multiplier) — actual threshold used
 }
 export const coinTrajectoryCache = new Map<string, TrajectoryGateResult>();
 export const coinConvictionWinRates = new Map<string, number>();

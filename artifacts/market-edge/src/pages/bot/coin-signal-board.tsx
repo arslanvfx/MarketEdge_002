@@ -224,7 +224,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                 <span className="inline-flex items-center gap-1"><Cpu className="w-3 h-3" />ML</span>
               </th>
               <th className="text-left px-3 py-2 font-medium">Bet Size</th>
-              <th className="text-left px-3 py-2 font-medium" title={`Trajectory gate: blocks bets when projected margin < ${dangerBand}% from target or projection crosses target`}>
+              <th className="text-left px-3 py-2 font-medium" title="Trajectory gate: ATR-adaptive thresholds per coin — actual danger band = max(fixed floor, ATR% × multiplier)">
                 <span className="inline-flex items-center gap-1"><TrendingUp className="w-3 h-3" />Trajectory</span>
               </th>
             </tr>
@@ -318,9 +318,16 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                         </span>
                         <span
                           className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
-                          title={`v: ${traj.velocity >= 0 ? "+" : ""}${(+traj.velocity).toFixed(1)}/min · proj: ${(+traj.projectedMarginPct).toFixed(2)}% · ${traj.minutesRemaining != null ? (+traj.minutesRemaining).toFixed(1) : "?"} min left`}
+                          title={[
+                            `v: ${traj.velocity >= 0 ? "+" : ""}${(+traj.velocity).toFixed(2)}/min`,
+                            `cur: ${(+traj.currentMarginPct).toFixed(3)}% (need ≥${traj.effectiveCurrentMarginMinPct != null ? (+traj.effectiveCurrentMarginMinPct).toFixed(3) : "?"}%)`,
+                            `proj: ${(+traj.projectedMarginPct).toFixed(3)}% (need ≥${traj.effectiveDangerBandPct != null ? (+traj.effectiveDangerBandPct).toFixed(3) : "?"}%)`,
+                            `ATR: ${traj.atrPct != null ? (+traj.atrPct).toFixed(3) : "?"}%`,
+                            `${traj.minutesRemaining != null ? (+traj.minutesRemaining).toFixed(1) : "?"} min left`,
+                          ].join(" · ")}
                         >
                           {traj.velocity >= 0 ? "+" : ""}{(+traj.velocity).toFixed(1)}/m · {(+traj.projectedMarginPct).toFixed(2)}%
+                          {traj.atrPct != null && <span className="text-violet-400/70"> · ATR {(+traj.atrPct).toFixed(2)}%</span>}
                         </span>
                       </div>
                     )}

@@ -93,6 +93,8 @@ export interface BotConfig {
   maxBetTrajectoryLookbackMinutes?: number;
   maxBetTrajectoryDangerBandPct?: number;
   maxBetTrajectoryCurrentMarginMinPct?: number;
+  maxBetTrajectoryCurrentMarginMinATR?: number;
+  maxBetTrajectoryDangerBandATR?: number;
   maxBetTrajectoryBlockOnCross?: boolean;
 }
 
@@ -107,6 +109,9 @@ export interface TrajectoryGateResult {
   minutesRemaining: number;
   direction: "yes" | "no";
   computedAt: number;
+  atrPct: number;
+  effectiveCurrentMarginMinPct: number;
+  effectiveDangerBandPct: number;
 }
 
 export interface LogicModeStats {

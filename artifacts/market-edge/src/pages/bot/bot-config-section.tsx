@@ -957,8 +957,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     Trajectory Gate
                   </span>
                   <p className="text-[10px] text-muted-foreground/60 -mt-1">
-                    Blocks bets when the underlying coin price is trending toward the Kalshi target — computed from recent candle velocity projected to window close.
-                    Current margin min: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryCurrentMarginMinPct ?? 0.30).toFixed(2)}%</span> · Projected danger band: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryDangerBandPct ?? 0.40).toFixed(2)}%</span> · Lookback: <span className="font-mono text-violet-300">{merged.maxBetTrajectoryLookbackMinutes ?? 3} min</span>
+                    Blocks bets when price is trending toward the Kalshi target. Thresholds are <strong className="text-violet-300">ATR-adaptive</strong> per coin — effective threshold = max(floor, ATR% × multiplier), so XRP and DOGE require a proportionally wider buffer than BTC.
+                    Cur floor: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryCurrentMarginMinPct ?? 0.30).toFixed(2)}%</span> · Cur ATR×: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryCurrentMarginMinATR ?? 1.5).toFixed(1)}×</span> · Proj floor: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryDangerBandPct ?? 0.40).toFixed(2)}%</span> · Proj ATR×: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryDangerBandATR ?? 2.0).toFixed(1)}×</span> · Lookback: <span className="font-mono text-violet-300">{merged.maxBetTrajectoryLookbackMinutes ?? 3} min</span>
                   </p>
                   <div className="flex gap-4">
                     <label className="flex items-center gap-2 cursor-pointer select-none">

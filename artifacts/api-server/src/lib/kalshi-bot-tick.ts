@@ -76,17 +76,19 @@ const entryTimingWritten = new Set<string>();
 // ---------------------------------------------------------------------------
 function computeTrajectoryGate(
   sym: string,
-  candles: Array<{ c: number; t: number }>,
+  candles: Array<{ c: number; h: number; l: number; t: number }>,
   livePrice: number,
   kalshiTarget: number,
   direction: "yes" | "no",
   clockElapsedS: number,
   config: import("./kalshi-bot-engine").BotConfig,
 ): TrajectoryGateResult {
-  const lookbackMin         = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
-  const dangerBandPct       = config.maxBetTrajectoryDangerBandPct ?? 0.40;       // projected margin floor (% pts)
-  const currentMarginMinPct = config.maxBetTrajectoryCurrentMarginMinPct ?? 0.30; // current margin floor (% pts)
-  const blockOnCross        = config.maxBetTrajectoryBlockOnCross !== false;
+  const lookbackMin             = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
+  const dangerBandPctFloor      = config.maxBetTrajectoryDangerBandPct ?? 0.40;
+  const currentMarginMinPctFloor = config.maxBetTrajectoryCurrentMarginMinPct ?? 0.30;
+  const currentMarginMinATR     = config.maxBetTrajectoryCurrentMarginMinATR ?? 1.5;
+  const dangerBandATR           = config.maxBetTrajectoryDangerBandATR ?? 2.0;
+  const blockOnCross             = config.maxBetTrajectoryBlockOnCross !== false;
 
   const minutesRemaining = Math.max(0, (15 * 60 - clockElapsedS) / 60);
   const currentMarginPct = ((livePrice - kalshiTarget) / kalshiTarget) * 100;
@@ -98,8 +100,29 @@ function computeTrajectoryGate(
       velocity: 0, projectedPrice: livePrice,
       currentMarginPct, projectedMarginPct: currentMarginPct,
       minutesRemaining, direction, computedAt: Date.now(),
+      atrPct: 0, effectiveCurrentMarginMinPct: currentMarginMinPctFloor, effectiveDangerBandPct: dangerBandPctFloor,
     };
   }
+
+  // ── ATR-derived per-coin thresholds ──────────────────────────────────────
+  // True Range = max(H-L, |H-prevC|, |L-prevC|) averaged over last 5 candles.
+  // Expressing ATR as a % of the target gives a coin-normalised volatility unit.
+  // BTC ATR≈$150 at $77k → atrPct≈0.19%; XRP ATR≈$0.02 at $2.50 → atrPct≈0.80%.
+  // Thresholds = max(fixed floor, atrPct × multiplier) so the gate is never
+  // more permissive than the hard floor, but scales up for volatile coins.
+  const atrLookback = Math.min(5, candles.length - 1);
+  let trSum = 0;
+  for (let i = candles.length - atrLookback; i < candles.length; i++) {
+    const h = candles[i].h;
+    const l = candles[i].l;
+    const prevC = candles[i - 1].c;
+    trSum += Math.max(h - l, Math.abs(h - prevC), Math.abs(l - prevC));
+  }
+  const atr    = trSum / atrLookback;
+  const atrPct = (atr / kalshiTarget) * 100;
+
+  const effectiveCurrentMarginMinPct = Math.max(currentMarginMinPctFloor, atrPct * currentMarginMinATR);
+  const effectiveDangerBandPct       = Math.max(dangerBandPctFloor,       atrPct * dangerBandATR);
 
   // Take the close from N minutes ago as the baseline
   const actualLookback = Math.min(lookbackMin, candles.length - 1);
@@ -112,13 +135,13 @@ function computeTrajectoryGate(
   // signedMargin: positive = price is on the "winning" side of the target
   // YES bet wins when price closes ABOVE target → positive margin is good
   // NO  bet wins when price closes BELOW target → negative margin is good
-  const signedCurrentMargin   = direction === "yes" ? currentMarginPct  : -currentMarginPct;
+  const signedCurrentMargin   = direction === "yes" ? currentMarginPct   : -currentMarginPct;
   const signedProjectedMargin = direction === "yes" ? projectedMarginPct : -projectedMarginPct;
 
   // Block if: currently already too close to strike, OR trending to cross/thin
-  const alreadyThin = signedCurrentMargin < currentMarginMinPct;
+  const alreadyThin = signedCurrentMargin   < effectiveCurrentMarginMinPct;
   const willCross   = blockOnCross && signedProjectedMargin < 0;
-  const tooThin     = signedProjectedMargin < dangerBandPct;
+  const tooThin     = signedProjectedMargin < effectiveDangerBandPct;
 
   const blocked = alreadyThin || willCross || tooThin;
   const reason: TrajectoryGateResult["reason"] = willCross
@@ -132,6 +155,7 @@ function computeTrajectoryGate(
     velocity, projectedPrice,
     currentMarginPct, projectedMarginPct,
     minutesRemaining, direction, computedAt: Date.now(),
+    atrPct, effectiveCurrentMarginMinPct, effectiveDangerBandPct,
   };
 }
 
