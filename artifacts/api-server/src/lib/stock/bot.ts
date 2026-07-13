@@ -39,6 +39,7 @@ import { lookupUniverse } from "./universe";
 import { watchlistTickers } from "./watchlist";
 import { getMacroTrend } from "./macro-filter";
 import { consumeNewsAlert, registerPositionTicker, unregisterPositionTicker } from "./news-monitor";
+import { isAiFeatureEnabled } from "../ai-spend";
 import type { Candle, TradingMode, StockBotConfig, ResearchReport, ScannerRow } from "./types";
 import { DAY_EOD_BUFFER_MS, evaluateExitReason } from "./bot-manage-core";
 
@@ -313,7 +314,7 @@ async function managePositions(
     // triggered by: (a) breaking news alert, or (b) swing/long held overnight
     let research = bet.tradingMode !== "day" ? getCachedResearch(bet.ticker) ?? null : null;
 
-    if (marketOpen && bet.tradingMode !== "day" && (newsAlert || bet.tradingMode === "swing" || bet.tradingMode === "long")) {
+    if (marketOpen && isAiFeatureEnabled("stock_research") && bet.tradingMode !== "day" && (newsAlert || bet.tradingMode === "swing" || bet.tradingMode === "long")) {
       const daysHeld = Math.floor((Date.now() - bet.createdAt.getTime()) / 86_400_000);
       const gainPct = bet.entryPrice > 0
         ? (bet.side === "short"

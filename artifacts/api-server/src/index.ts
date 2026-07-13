@@ -426,8 +426,10 @@ async function startStockVertical(): Promise<void> {
       `${Math.round((Date.now() - lastScan) / 60_000)}min`);
   }
 
-  // Auto-scan every 15 min during market hours (pre-market window included).
-  setInterval(scan, 15 * 60_000);
+  // Auto-scan every 20 min during market hours (pre-market window included).
+  // 20 min keeps pre-market gap detection while avoiding the cost of the 15-min
+  // interval introduced with short-selling support.
+  setInterval(scan, 20 * 60_000);
 
   // News monitor: poll Alpaca news for open positions every 5 min during market hours.
   // Results are consumed per-position inside managePositions via consumeNewsAlert().
