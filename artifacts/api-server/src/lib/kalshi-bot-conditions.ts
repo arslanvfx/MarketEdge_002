@@ -382,7 +382,44 @@ export async function runAutoTuneJob(): Promise<void> {
       isMaxBet: r.isMaxBet ?? false,
     }));
 
-    const report = computePerformanceReport(bets);
+    // Separate all-time max-bet query (no limit) so the max-bet stats panel is
+    // never truncated by autoTuneWindowSize.
+    const maxBetRows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        direction: kalshiBotBetsTable.direction,
+        pnl: kalshiBotBetsTable.pnl,
+        exitReason: kalshiBotBetsTable.exitReason,
+        createdAt: kalshiBotBetsTable.createdAt,
+        exitedAt: kalshiBotBetsTable.exitedAt,
+        signals: kalshiBotBetsTable.signals,
+        outcome: kalshiBotBetsTable.outcome,
+        isMaxBet: kalshiBotBetsTable.isMaxBet,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+          AND ${kalshiBotBetsTable.outcome} IS NOT NULL
+          AND ${kalshiBotBetsTable.mode} = ${S.botMode}
+          AND ${kalshiBotBetsTable.isMaxBet} = true
+          AND (${kalshiBotBetsTable.source} IS NULL OR ${kalshiBotBetsTable.source} != 'manual')${resetClause}`,
+      )
+      .orderBy(asc(kalshiBotBetsTable.createdAt));
+
+    const allMaxBets: SettledBetRecord[] = maxBetRows.map(r => ({
+      symbol: r.symbol,
+      direction: r.direction,
+      pnl: r.pnl,
+      exitReason: r.exitReason,
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+      exitedAt: r.exitedAt instanceof Date ? r.exitedAt.toISOString()
+              : r.exitedAt != null ? String(r.exitedAt) : null,
+      signals: (r.signals as Record<string, unknown>) ?? null,
+      outcome: r.outcome,
+      isMaxBet: true,
+    }));
+
+    const report = computePerformanceReport(bets, undefined, allMaxBets);
     cachedPerformanceReportByMode.set(S.botMode, report);
 
     const tuneConfig = {

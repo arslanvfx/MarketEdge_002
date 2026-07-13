@@ -228,6 +228,7 @@ function extractConfidence(signals: Record<string, unknown> | null): number | nu
 export function computePerformanceReport(
   bets: SettledBetRecord[],
   nowOverride?: Date,
+  allMaxBets?: SettledBetRecord[],
 ): PerformanceReport {
   const now = nowOverride ?? new Date();
   const computedAt = now.toISOString();
@@ -519,8 +520,13 @@ export function computePerformanceReport(
     );
   }
 
-  // Max-bet vs regular-bet breakdown
-  const maxBets   = settled.filter(b => b.isMaxBet === true);
+  // Max-bet vs regular-bet breakdown.
+  // When allMaxBets is provided (all-time, no window limit) use it so the
+  // stats aren't truncated by the auto-tune window size.
+  const maxBetSource = (allMaxBets ?? settled).filter(
+    b => b.outcome === "win" || b.outcome === "loss",
+  );
+  const maxBets   = maxBetSource.filter(b => b.isMaxBet === true);
   const regBets   = settled.filter(b => !b.isMaxBet);
   const mbWins    = maxBets.filter(b => b.outcome === "win").length;
   const mbLosses  = maxBets.filter(b => b.outcome === "loss").length;
