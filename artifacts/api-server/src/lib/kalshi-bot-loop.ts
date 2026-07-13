@@ -43,6 +43,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken,
+  maxBetCandidateForWindow,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -505,6 +506,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
     coinStabilityCache.clear();
+    maxBetCandidateForWindow.clear(); // stale window keys no longer relevant
     // Global max-bet token: roll ONCE per window to decide whether any bet this
     // window is eligible for max-bet size.  The first qualifying coin claims it.
     // All other coins use regular size, regardless of their stability.
@@ -2258,6 +2260,45 @@ export async function runBotLoopTick(): Promise<void> {
   // before the next coin re-checks it. Running in parallel caused multiple coins to
   // all see globalBetsThisWindow=0 (the Phase-3 snapshot) and all place bets in the
   // same tick, violating maxBetsPerWindow.
+  // Max-bet pre-selection: before running coins in parallel, score all stable
+  // candidates and record the single best one.  Only the winner can claim the
+  // global token — this eliminates the race where whichever coin's async tick
+  // fires first wins the slot regardless of quality (ER / osc / ML).
+  if (_isConvictionMode && S.config.convictionStabilityEnabled !== false && maxBetWindowToken.remaining > 0) {
+    const minER     = S.config.convictionStabilityMinER     ?? 0.30;
+    const maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
+    const maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
+    const minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
+    let bestSym: string | null = null;
+    let bestScore = -Infinity;
+    for (const sym of betSymbols) {
+      const ind    = getCachedPrediction(sym)?.indicators;
+      const mlConf = getLatestCoinSignals(sym)?.mlConfidence ?? null;
+      if (!ind) continue;
+      if (ind.efficiencyRatio  < minER)     continue;
+      if (ind.oscillationCount > maxOsc)    continue;
+      if (ind.volatilityPct    > maxVolPct) continue;
+      if (mlConf !== null && mlConf < minMLConf) continue;
+      // Composite score: ER is primary (×100), osc penalised (×1.5),
+      // ML confidence secondary (×0.3), volatility penalised (×10).
+      const score = ind.efficiencyRatio * 100
+                  - ind.oscillationCount * 1.5
+                  + (mlConf ?? minMLConf) * 0.3
+                  - ind.volatilityPct * 10;
+      if (score > bestScore) { bestScore = score; bestSym = sym; }
+    }
+    const prev = maxBetCandidateForWindow.get(windowKey);
+    if (prev !== bestSym) {
+      maxBetCandidateForWindow.set(windowKey, bestSym);
+      if (bestSym) {
+        logger.info(
+          { sym: bestSym, score: bestScore.toFixed(2), windowKey },
+          "[kalshi-bot] max-bet candidate pre-selected (best stable coin by ER/osc/ML)",
+        );
+      }
+    }
+  }
+
   if (_isConvictionMode) {
     await Promise.allSettled(betSymbols.map(runCoin));
   } else {

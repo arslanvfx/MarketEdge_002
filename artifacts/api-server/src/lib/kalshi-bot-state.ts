@@ -196,6 +196,11 @@ export const convictionBoostWindowCoins = new Set<string>();
 // claims it by decrementing to 0.  At 100% probability exactly 1 max bet slot
 // exists per window; at 25% roughly 1-in-4 windows get a slot.
 export const maxBetWindowToken = { remaining: 0 };
+// Pre-selected stable coin for the max-bet slot.  Set by the loop BEFORE each
+// parallel tick dispatch so the best-scoring stable coin wins deterministically
+// rather than whichever async tick fires first.
+// Key = windowKey, value = sym of winner (null = no stable candidate found).
+export const maxBetCandidateForWindow = new Map<string, string | null>();
 export interface CoinStabilityResult {
   stable: boolean;
   er: number;

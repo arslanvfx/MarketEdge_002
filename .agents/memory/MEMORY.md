@@ -85,3 +85,4 @@
 - [Kalshi eval settlement edge cases](kalshi-eval-settlement-edge-cases.md) — strict `>` (not `>=`) for at-strike; per-row eval isolation; resting GTC guard must not clear on failure; re-evaluate admin endpoint uses query params
 - [Conviction mode — pure reactive FOK](conviction-mode-reactive.md) — no GTC, no model veto, no pre-entry zone; fires FOK at yesPrice≥lockPrice (YES) or ≤1-lockPrice (NO); ConvictionInputs has only yesPrice/lockPrice/minConfidence
 - [Conviction stability gate](conviction-stability-gate.md) — replaces random roll; stable=ER≥0.30+osc≤8+vol≤3%+ML≥52%+no spike → max bet; volatile → regular; coinStabilityCache Map in state; board shows per-coin conditions
+- [Max-bet pre-selection](max-bet-pre-selection.md) — best stable coin wins token deterministically (ER×100−osc×1.5+mlConf×0.3−vol×10); set before parallel dispatch; guard in IIFE before token claim

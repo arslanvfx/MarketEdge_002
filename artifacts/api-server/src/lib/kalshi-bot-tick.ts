@@ -43,7 +43,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, maxBetWindowToken,
+  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, maxBetWindowToken, maxBetCandidateForWindow,
   type CoinStabilityResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -1061,6 +1061,17 @@ async function _runBotTick(
         logger.info(
           { sym, elapsed: Math.round(clockElapsedS), gateS: maxBetEntryGateS },
           "[kalshi-bot] conviction stability — STABLE but max-bet timing gate not elapsed, regular bet size",
+        );
+        return null;
+      }
+      // Pre-selection guard: only the best-scoring stable coin (ranked by ER,
+      // osc, ML) can claim the max-bet token.  The loop pre-computes the winner
+      // before dispatching parallel ticks so the result is deterministic.
+      const preSelected = maxBetCandidateForWindow.get(windowKey);
+      if (preSelected !== undefined && preSelected !== sym) {
+        logger.info(
+          { sym, preSelected, er: ind.efficiencyRatio.toFixed(3) },
+          "[kalshi-bot] conviction stability — STABLE but not pre-selected for max bet, regular bet size",
         );
         return null;
       }
