@@ -224,11 +224,9 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                 <span className="inline-flex items-center gap-1"><Cpu className="w-3 h-3" />ML</span>
               </th>
               <th className="text-left px-3 py-2 font-medium">Bet Size</th>
-              {hasTrajectory && (
-                <th className="text-left px-3 py-2 font-medium" title={`Trajectory gate: blocks max bets when projected margin < ${dangerBand}% from target`}>
-                  <span className="inline-flex items-center gap-1"><TrendingUp className="w-3 h-3" />Trajectory</span>
-                </th>
-              )}
+              <th className="text-left px-3 py-2 font-medium" title={`Trajectory gate: blocks bets when projected margin < ${dangerBand}% from target or projection crosses target`}>
+                <span className="inline-flex items-center gap-1"><TrendingUp className="w-3 h-3" />Trajectory</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -300,37 +298,33 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                     )}
                   </td>
 
-                  {hasTrajectory && (
-                    <td className="px-3 py-2.5">
-                      {traj == null ? (
-                        <span className="text-muted-foreground/40 font-mono">—</span>
-                      ) : traj.reason === "insufficient_data" ? (
-                        <span className="text-muted-foreground/40 text-[10px]">no data</span>
-                      ) : (
-                        <div className="flex flex-col gap-0.5">
-                          <span
-                            className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${
-                              traj.blocked
-                                ? "bg-red-500/15 text-red-400 border-red-500/25"
-                                : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                            }`}
-                            title={traj.blocked ? `Blocked: ${traj.reason}` : "Trajectory safe"}
-                          >
-                            {traj.blocked
-                              ? traj.reason === "projected_cross" ? "⚠ Cross" : "⚠ Thin"
-                              : "✓ Safe"
-                            }
-                          </span>
-                          <span
-                            className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
-                            title={`Velocity: ${traj.velocity >= 0 ? "+" : ""}${traj.velocity.toFixed(1)}/min · Projected margin: ${traj.projectedMarginPct.toFixed(2)}% · ${traj.minutesRemaining.toFixed(1)} min left`}
-                          >
-                            {traj.velocity >= 0 ? "+" : ""}{traj.velocity.toFixed(1)}/m · {traj.projectedMarginPct.toFixed(2)}%
-                          </span>
-                        </div>
-                      )}
-                    </td>
-                  )}
+                  <td className="px-3 py-2.5">
+                    {traj == null || traj.reason === "insufficient_data" ? (
+                      <span className="text-muted-foreground/40 font-mono">—</span>
+                    ) : (
+                      <div className="flex flex-col gap-0.5">
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${
+                            traj.blocked
+                              ? "bg-red-500/15 text-red-400 border-red-500/25"
+                              : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                          }`}
+                          title={traj.blocked ? `Blocked: ${traj.reason}` : "Trajectory safe"}
+                        >
+                          {traj.blocked
+                            ? traj.reason === "projected_cross" ? "⚠ Cross" : "⚠ Thin"
+                            : "✓ Safe"
+                          }
+                        </span>
+                        <span
+                          className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
+                          title={`Velocity: ${traj.velocity >= 0 ? "+" : ""}${traj.velocity.toFixed(1)}/min · Projected margin: ${traj.projectedMarginPct.toFixed(2)}% · ${traj.minutesRemaining.toFixed(1)} min left`}
+                        >
+                          {traj.velocity >= 0 ? "+" : ""}{traj.velocity.toFixed(1)}/m · {traj.projectedMarginPct.toFixed(2)}%
+                        </span>
+                      </div>
+                    )}
+                  </td>
                 </tr>
               );
             })}
