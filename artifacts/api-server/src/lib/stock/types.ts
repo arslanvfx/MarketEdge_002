@@ -93,6 +93,12 @@ export interface ResearchReport {
   bearFactors: string[];
   /** 1-2 sentence financials/valuation assessment (P/E vs peers, growth, balance sheet). */
   valuation: string;
+  /** Suggested entry price from Claude's analysis (null if not specified). */
+  entryPrice: number | null;
+  /** Suggested price target from Claude's analysis (null if not specified). */
+  targetPrice: number | null;
+  /** Suggested stop-loss level from Claude's analysis (null if not specified). */
+  stopLoss: number | null;
   price: number | null;
   webSearchUsed: boolean;
   createdAt: string;

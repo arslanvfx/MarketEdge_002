@@ -20,7 +20,7 @@ import { getEarnings, getLatestEarningsSurprise } from "./earnings";
 import type { NewsItem, ResearchHorizon, ResearchReport, ResearchStance } from "./types";
 
 const RESEARCH_MODEL = "claude-sonnet-4-6";
-const MAX_TOKENS = 2048; // JSON output is small; 8192 was massively over-provisioned
+const MAX_TOKENS = 4096; // 3 web searches + full indicator brief needs more room
 const CONCURRENCY = 2;
 
 // Whether the AI proxy accepts the web_search server tool. Starts optimistic;
@@ -74,12 +74,16 @@ export function getResearchStatus(): { running: boolean; ready: string[] } {
 }
 
 function rowToReport(r: any): ResearchReport {
-  let factors: { bull: string[]; bear: string[] } = { bull: [], bear: [] };
+  let factors: { bull: string[]; bear: string[]; entryPrice?: number | null; targetPrice?: number | null; stopLoss?: number | null } = { bull: [], bear: [] };
   try {
     const f = typeof r.factors_json === "string" ? JSON.parse(r.factors_json) : r.factors_json;
     if (f && Array.isArray(f.bull) && Array.isArray(f.bear)) factors = f;
   } catch { /* keep empty */ }
   const confidence = Number(r.confidence) || 0;
+  const toPrice = (v: unknown): number | null => {
+    const n = Number(v);
+    return v != null && !isNaN(n) && n > 0 ? n : null;
+  };
   return {
     ticker: r.ticker,
     companyName: r.company_name ?? r.ticker,
@@ -91,6 +95,9 @@ function rowToReport(r: any): ResearchReport {
     bullFactors: factors.bull,
     bearFactors: factors.bear,
     valuation: r.valuation ?? "",
+    entryPrice: toPrice(factors.entryPrice),
+    targetPrice: toPrice(factors.targetPrice),
+    stopLoss: toPrice(factors.stopLoss),
     price: r.price != null ? Number(r.price) : null,
     webSearchUsed: !!r.web_search_used,
     createdAt: new Date(r.created_at).toISOString(),
@@ -189,7 +196,7 @@ async function persistReport(rep: ResearchReport): Promise<void> {
        valuation, price, web_search_used, created_at)
     VALUES
       (${rep.ticker}, ${rep.companyName}, ${rep.sector}, ${rep.horizon}, ${rep.stance}, ${rep.confidence},
-       ${rep.summary}, ${JSON.stringify({ bull: rep.bullFactors, bear: rep.bearFactors })}::jsonb,
+       ${rep.summary}, ${JSON.stringify({ bull: rep.bullFactors, bear: rep.bearFactors, entryPrice: rep.entryPrice, targetPrice: rep.targetPrice, stopLoss: rep.stopLoss })}::jsonb,
        ${rep.valuation}, ${rep.price}, ${rep.webSearchUsed}, NOW())
   `);
 }
@@ -211,54 +218,167 @@ function extractJson(text: string): string {
 export interface ResearchTechContext {
   price: number;
   changePct: number;
-  rsi: number | null;
+  // Moving averages
   sma21: number | null;
   sma50: number | null;
   sma180: number | null;
-  volumeSurge: number | null; // today's volume / prev session volume
+  maAlignment: boolean; // SMA21 > SMA50 (> SMA180 if available)
+  // Momentum & oscillators
+  rsi: number | null;
+  macdLine: number | null;
+  macdSignal: number | null;
+  macdHistogram: number | null;
+  macdCrossover: "bullish" | "bearish" | "none";
+  // Price structure
+  bbPosition: number | null; // 0=at lower band, 1=at upper band
+  bbUpper: number | null;
+  bbLower: number | null;
+  vwap: number | null;
+  // Volatility & trend quality
+  atrPct: number | null;
+  efficiencyRatio: number | null; // 0=chop, 1=clean trend
+  netDriftPct: number | null;
+  // Volume
+  volumeSurge: number | null; // today's vol / prev session
+  volumeBias: number | null;  // -1=selling, +1=buying
+  // Pattern
+  candlePattern: string;
+  // Meta
   sector: string;
   companyName: string;
 }
 
 function buildPrompt(ticker: string, ctx: ResearchTechContext, news: NewsItem[], extra: string[]): string {
   const monthYear = new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" });
-  const maLine = [
-    ctx.sma21 != null ? `SMA21 $${ctx.sma21.toFixed(2)}` : null,
-    ctx.sma50 != null ? `SMA50 $${ctx.sma50.toFixed(2)}` : null,
-    ctx.sma180 != null ? `SMA180 $${ctx.sma180.toFixed(2)}` : null,
-  ].filter(Boolean).join(", ") || "MA data unavailable";
-  const newsLines = news.slice(0, 5)
-    .map((n) => `- [${n.publishedAt?.slice(0, 10) ?? "?"}] "${n.headline}"${n.sentiment ? ` (${n.sentiment})` : ""}`)
-    .join("\n") || "- (no recent news on file)";
 
-  return `You are an elite equity research analyst deciding whether ${ticker} (${ctx.companyName}, ${ctx.sector}) is a high-potential LONG opportunity right now, and on what horizon. Real money follows your verdict — the owner hates losing money, so be decisive and honest: a clear AVOID on a weak stock is as valuable as a strong buy call.
+  // ── Moving averages ───────────────────────────────────────────────────────
+  const maLines = [
+    ctx.sma21  != null ? `SMA(21)=$${ctx.sma21.toFixed(2)}`  : null,
+    ctx.sma50  != null ? `SMA(50)=$${ctx.sma50.toFixed(2)}`  : null,
+    ctx.sma180 != null ? `SMA(180)=$${ctx.sma180.toFixed(2)}` : null,
+  ].filter(Boolean).join(" | ") || "n/a";
+  const maStatus = ctx.maAlignment
+    ? "✅ BULLISH — price above all key MAs (21>50>180)"
+    : ctx.sma21 != null && ctx.sma50 != null && ctx.sma21 > ctx.sma50
+      ? "⚠ MIXED — SMA21>SMA50 but not above SMA180"
+      : "❌ BEARISH — MAs not aligned";
 
-TECHNICAL SNAPSHOT:
-- Price: $${ctx.price.toFixed(2)} (${ctx.changePct >= 0 ? "+" : ""}${ctx.changePct.toFixed(2)}% today)
-- RSI(14): ${ctx.rsi != null ? ctx.rsi.toFixed(0) : "n/a"}
-- Moving averages: ${maLine}
-- Volume vs prior session: ${ctx.volumeSurge != null ? `${ctx.volumeSurge.toFixed(1)}×` : "n/a"}
-${extra.length ? extra.join("\n") + "\n" : ""}
-RECENT NEWS ON FILE:
+  // ── MACD ─────────────────────────────────────────────────────────────────
+  const macdStr = ctx.macdLine != null
+    ? `MACD=${ctx.macdLine.toFixed(3)} | Signal=${ctx.macdSignal?.toFixed(3) ?? "n/a"} | Hist=${ctx.macdHistogram != null ? (ctx.macdHistogram >= 0 ? "+" : "") + ctx.macdHistogram.toFixed(3) : "n/a"}${ctx.macdCrossover !== "none" ? ` 🔔 ${ctx.macdCrossover.toUpperCase()} CROSSOVER` : ""}`
+    : "n/a";
+
+  // ── Bollinger bands ───────────────────────────────────────────────────────
+  const bbStr = ctx.bbPosition != null
+    ? `Position=${(ctx.bbPosition * 100).toFixed(0)}% within bands${ctx.bbUpper != null ? ` | Upper=$${ctx.bbUpper.toFixed(2)} | Lower=$${ctx.bbLower?.toFixed(2) ?? "n/a"}` : ""} (0%=oversold at lower, 100%=overbought at upper)`
+    : "n/a";
+
+  // ── VWAP ─────────────────────────────────────────────────────────────────
+  const vwapStr = ctx.vwap != null
+    ? `$${ctx.vwap.toFixed(2)} — price is ${ctx.price > ctx.vwap ? `$${(ctx.price - ctx.vwap).toFixed(2)} ABOVE (bullish intraday)` : `$${(ctx.vwap - ctx.price).toFixed(2)} BELOW (bearish intraday)`}`
+    : "n/a";
+
+  // ── Volume ────────────────────────────────────────────────────────────────
+  const volStr = [
+    ctx.volumeSurge != null ? `Day surge: ${ctx.volumeSurge.toFixed(1)}× prior session` : null,
+    ctx.volumeBias != null ? `Bias: ${ctx.volumeBias > 0.2 ? "📈 buying pressure" : ctx.volumeBias < -0.2 ? "📉 selling pressure" : "neutral"} (${ctx.volumeBias > 0 ? "+" : ""}${(ctx.volumeBias * 100).toFixed(0)}%)` : null,
+  ].filter(Boolean).join(" | ") || "n/a";
+
+  // ── Trend quality ─────────────────────────────────────────────────────────
+  const erStr = ctx.efficiencyRatio != null
+    ? `${ctx.efficiencyRatio.toFixed(2)} (${ctx.efficiencyRatio >= 0.6 ? "strong trend" : ctx.efficiencyRatio >= 0.3 ? "moderate trend" : "choppy/sideways"})`
+    : "n/a";
+  const driftStr = ctx.netDriftPct != null
+    ? `${ctx.netDriftPct >= 0 ? "+" : ""}${ctx.netDriftPct.toFixed(2)}% over 14 periods`
+    : "n/a";
+  const atrStr = ctx.atrPct != null
+    ? `${ctx.atrPct.toFixed(2)}% daily range (${ctx.atrPct > 3 ? "high vol" : ctx.atrPct > 1.5 ? "moderate vol" : "low vol"})`
+    : "n/a";
+
+  // ── Candle pattern ────────────────────────────────────────────────────────
+  const patternStr = ctx.candlePattern !== "none" && ctx.candlePattern
+    ? `⚡ ${ctx.candlePattern.replace(/_/g, " ").toUpperCase()} detected on latest bar`
+    : "No reversal pattern";
+
+  // ── News ──────────────────────────────────────────────────────────────────
+  const newsLines = news.slice(0, 7)
+    .map((n) => `  • [${n.publishedAt?.slice(0, 10) ?? "?"}] "${n.headline}"${n.sentiment ? ` (${n.sentiment})` : ""}`)
+    .join("\n") || "  • (no recent news on file)";
+
+  return `You are an elite equity research analyst and technical trader. Your job: determine whether ${ticker} (${ctx.companyName}, ${ctx.sector}) is worth buying RIGHT NOW for maximum profit, and on what horizon. Real capital follows your call. Be brutally honest — a decisive AVOID is as valuable as a strong buy.
+
+════════════════════════════════════════
+FULL TECHNICAL BRIEF — ${ticker}
+════════════════════════════════════════
+
+PRICE ACTION
+  Current:     $${ctx.price.toFixed(2)}  (${ctx.changePct >= 0 ? "+" : ""}${ctx.changePct.toFixed(2)}% today)
+
+MOVING AVERAGES
+  Values:  ${maLines}
+  Status:  ${maStatus}
+
+MOMENTUM — RSI & MACD
+  RSI(14): ${ctx.rsi != null ? `${ctx.rsi.toFixed(0)} ${ctx.rsi > 70 ? "⚠ OVERBOUGHT" : ctx.rsi < 30 ? "⚠ OVERSOLD" : ctx.rsi > 55 ? "(bullish momentum)" : ctx.rsi < 45 ? "(bearish pressure)" : "(neutral)"}` : "n/a"}
+  MACD:    ${macdStr}
+
+PRICE STRUCTURE
+  Bollinger: ${bbStr}
+  VWAP:      ${vwapStr}
+
+VOLATILITY & TREND QUALITY
+  ATR:               ${atrStr}
+  Efficiency Ratio:  ${erStr}
+  Net Drift:         ${driftStr}
+
+VOLUME
+  ${volStr}
+
+CANDLE PATTERN
+  ${patternStr}
+
+${extra.length ? "EARNINGS / FUNDAMENTAL CONTEXT\n" + extra.map((e) => "  " + e).join("\n") + "\n" : ""}
+RECENT NEWS (${news.length} items on file)
 ${newsLines}
 
-${webSearchSupported ? `Use web search (at most 3 searches) to verify: (1) "${ticker} stock news analyst rating ${monthYear}" — recent analyst upgrades/downgrades, earnings surprises, sector catalysts; (2) "${ticker} valuation P/E revenue growth ${monthYear}" — current fundamentals: valuation vs peers, revenue/EPS growth, margins, debt. Ground your verdict in BOTH technicals and fundamentals.` : "Base your judgment on the data above only."}
+════════════════════════════════════════
+ANALYSIS INSTRUCTIONS
+════════════════════════════════════════
+${webSearchSupported
+  ? `Run exactly 3 targeted web searches:
+  1. "${ticker} stock news catalyst analyst ${monthYear}" — any recent upgrade/downgrade, earnings beat, sector tailwind, or breaking catalyst
+  2. "${ticker} P/E revenue growth margins valuation ${monthYear}" — fundamentals: is it cheap or expensive vs peers? revenue/EPS trajectory
+  3. "${ticker} institutional buying options flow ${monthYear}" — smart money activity, unusual options, insider buys
 
-Classify the SINGLE best trading horizon for a long position:
-- "day": strong intraday momentum setup (volume surge, catalyst today)
-- "swing": 2–10 day setup (trend alignment, upcoming catalyst, analyst momentum)
-- "long": multi-week/month accumulation (undervalued vs trend, durable catalysts)
+  Synthesize ALL of the technical data above WITH the live fundamental/catalyst picture.`
+  : "Base your judgment only on the technical data above — no live web data available."}
 
-Give an actionable stance:
-- "buy_now": exceptional setup — technicals AND fundamentals aligned, buy immediately
-- "buy": solid setup worth entering on this horizon
-- "watch": interesting but wait for a better entry or confirmation
-- "avoid": stay away or sell — deteriorating technicals, overvaluation, or negative catalysts
+Walk through each indicator systematically:
+1. Trend: are MAs aligned? Is price above VWAP?
+2. Momentum: RSI zone + MACD crossover direction
+3. Structure: Bollinger position — expansion or squeeze?
+4. Volume: confirmation (surge + buying bias) or distribution?
+5. Quality: Efficiency Ratio — trending or choppy?
+6. Catalyst: is there a real fundamental reason driving this, or is it noise?
 
-Then respond with ONLY this JSON (no prose before or after):
-{"horizon":"day"|"swing"|"long","stance":"buy_now"|"buy"|"watch"|"avoid","confidence":0-100,"bullFactors":["3 specific bullish factors"],"bearFactors":["2 specific bearish risks"],"valuation":"1-2 sentences on fundamentals: valuation vs peers, growth, balance sheet","summary":"2-3 sentence thesis citing specifics"}
+════════════════════════════════════════
+CLASSIFICATION
+════════════════════════════════════════
+Best trading horizon for a LONG entry:
+  "day"   — strong intraday setup: volume catalyst + VWAP reclaim + momentum today
+  "swing" — 2-10 day hold: MA alignment + trend quality + near-term catalyst
+  "long"  — multi-week accumulation: undervalued, durable catalyst, strong trend
 
-Confidence rubric: 80+ exceptional conviction, 60-79 solid setup, 40-59 mixed, <40 weak. Be skeptical — most stocks deserve <60 and "watch" or "avoid". Reserve "buy_now" for the truly exceptional.`;
+Actionable stance:
+  "buy_now" — all signals aligned, exceptional conviction, enter immediately
+  "buy"     — solid setup, enter on this horizon
+  "watch"   — interesting but needs confirmation or better entry
+  "avoid"   — deteriorating technicals, negative catalyst, or overextended
+
+Respond with ONLY this JSON (no prose):
+{"horizon":"day"|"swing"|"long","stance":"buy_now"|"buy"|"watch"|"avoid","confidence":0-100,"entryPrice":number|null,"targetPrice":number|null,"stopLoss":number|null,"bullFactors":["3 specific bullish factors citing actual indicator values"],"bearFactors":["2 specific risks"],"valuation":"1-2 sentences: P/E vs peers, revenue growth, balance sheet strength","summary":"3-4 sentence conviction thesis — cite specific indicator readings and the key catalyst"}
+
+Confidence rubric: 85+ = exceptional, all signals aligned; 70-84 = strong, most signals green; 55-69 = solid but mixed; 40-54 = wait for confirmation; <40 = avoid. Be skeptical by default — most stocks are noise. Only "buy_now" when technicals + fundamentals + volume ALL agree.`;
 }
 
 async function researchOne(
@@ -293,7 +413,7 @@ async function researchOne(
       max_tokens: MAX_TOKENS,
       messages: [{ role: "user", content: prompt }],
       ...(useTools
-        ? { tools: [{ type: "web_search_20250305" as const, name: "web_search" as const, max_uses: 1 }] }
+        ? { tools: [{ type: "web_search_20250305" as const, name: "web_search" as const, max_uses: 3 }] }
         : {}),
     });
 
@@ -322,6 +442,9 @@ async function researchOne(
     horizon?: string;
     stance?: string;
     confidence?: number;
+    entryPrice?: number | null;
+    targetPrice?: number | null;
+    stopLoss?: number | null;
     bullFactors?: unknown;
     bearFactors?: unknown;
     valuation?: string;
@@ -334,6 +457,10 @@ async function researchOne(
     Array.isArray(v) ? v.filter((x) => typeof x === "string").map((s) => s.slice(0, 300)).slice(0, max) : [];
 
   const confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence ?? 0)));
+  const toPrice = (v: unknown): number | null => {
+    const n = typeof v === "number" ? v : null;
+    return n != null && n > 0 ? Math.round(n * 100) / 100 : null;
+  };
   const rep: ResearchReport = {
     ticker: T,
     companyName: ctx.companyName,
@@ -345,6 +472,9 @@ async function researchOne(
     bullFactors: toStrings(parsed.bullFactors, 4),
     bearFactors: toStrings(parsed.bearFactors, 3),
     valuation: typeof parsed.valuation === "string" ? parsed.valuation.slice(0, 600) : "",
+    entryPrice: toPrice(parsed.entryPrice),
+    targetPrice: toPrice(parsed.targetPrice),
+    stopLoss: toPrice(parsed.stopLoss),
     price: ctx.price > 0 ? ctx.price : null,
     webSearchUsed: usedWebSearch,
     createdAt: new Date().toISOString(),

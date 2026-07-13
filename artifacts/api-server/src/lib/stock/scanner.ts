@@ -23,14 +23,14 @@ import { lookupUniverse } from "./universe";
 import { statSignal } from "./ai";
 import { getScoredNews, aggregateSentiment } from "./news";
 import { getEarnings } from "./earnings";
-import { efficiencyRatio, sma } from "./indicators";
+import { efficiencyRatio, sma, macd, vwap, bollinger, candleReversal } from "./indicators";
 import { watchlistTickers } from "./watchlist";
 import { getConfig } from "./config";
 import { runResearchPass, getResearchProgress, type ResearchTechContext } from "./research";
 import type { Candle, Direction, ScannerRow, Sentiment } from "./types";
 
 const DEEP_SCORE_LIMIT = 75;  // Tier 1 → Tier 2 cut (reduced to stay within Alpaca free-tier limits)
-const RESEARCH_LIMIT = 10;    // Tier 2 → Tier 3 cut (top 10 only — AI cost control)
+const RESEARCH_LIMIT = 15;    // Tier 2 → Tier 3 cut (top 15 for deeper coverage)
 const SCORE_BATCH = 2;        // concurrent deep-score requests (reduced from 5 to avoid 429 storms)
 const SCORE_BATCH_DELAY_MS = 400; // pause between batches to respect rate limits
 const SNAPSHOT_CHUNK = 500;   // symbols per snapshots call
@@ -215,12 +215,10 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
           const sector = cand?.sector ?? lookupUniverse(ticker)?.sector ?? "Other";
           const companyName = cand?.name ?? lookupUniverse(ticker)?.name ?? ticker;
           const earn = await getEarnings(ticker, getConfig().earningsBlackoutHours);
-          const er = efficiencyRatio(candles.map((c) => c.c), 14);
+          const closes = candles.map((c) => c.c);
+          const er = efficiencyRatio(closes, 14);
 
           // MA alignment: 21-day SMA above 50-day SMA (bullish trend structure).
-          // Also check vs 180-day SMA if we have enough history (the IEX feed
-          // often returns 100–200 bars, so sma180 may be NaN — skip that check
-          // gracefully rather than forcing maAlignment=false for all stocks).
           const dailyCloses = dailyCandles.map((c) => c.c);
           const sma21 = sma(dailyCloses, 21);
           const sma50 = sma(dailyCloses, 50);
@@ -230,7 +228,19 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
             !isNaN(sma21) &&
             !isNaN(sma50) &&
             sma21 > sma50 &&
-            (isNaN(sma180) || sma21 > sma180); // skip 180-check if not enough history
+            (isNaN(sma180) || sma21 > sma180);
+
+          // MACD from daily closes (12, 26, 9).
+          const macdVal = macd(dailyCloses);
+
+          // VWAP from today's intraday bars.
+          const vwapVal = vwap(candles);
+
+          // Bollinger bands on daily closes for support/resistance context.
+          const bb = bollinger(dailyCloses, 20, 2);
+
+          // Candle pattern on the most recent intraday bars.
+          const pattern = candleReversal(candles);
 
           const newsAlign =
             (agg.sentiment === "bullish" && stat.direction === "up") ||
@@ -266,6 +276,16 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
               efficiencyRatio: Number(er.toFixed(2)),
               netDriftPct: Number(stat.netDriftPct.toFixed(2)),
               volumeBias: Number(stat.volumeBias.toFixed(2)),
+              atrPct: Number(stat.atrPct.toFixed(2)),
+              bbPosition: Number(stat.bbPosition.toFixed(2)),
+              bbUpper: isNaN(bb.upper) ? null : Number(bb.upper.toFixed(2)),
+              bbLower: isNaN(bb.lower) ? null : Number(bb.lower.toFixed(2)),
+              candlePattern: pattern,
+              macdLine: Number(macdVal.macd.toFixed(4)),
+              macdSignal: Number(macdVal.signal.toFixed(4)),
+              macdHistogram: Number(macdVal.histogram.toFixed(4)),
+              macdCrossover: macdVal.crossover,
+              vwap: vwapVal > 0 ? Number(vwapVal.toFixed(2)) : null,
               newsCount: news.length,
               reasoning: stat.reasoning,
               maAlignment,
@@ -317,7 +337,21 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
           sma21: d.sma21 ?? null,
           sma50: d.sma50 ?? null,
           sma180: d.sma180 ?? null,
+          maAlignment: d.maAlignment ?? false,
           volumeSurge: d.volumeSurge ?? (snap && snap.prevVolume > 0 ? snap.volume / snap.prevVolume : null),
+          volumeBias: typeof d.volumeBias === "number" ? d.volumeBias : null,
+          atrPct: typeof d.atrPct === "number" ? d.atrPct : null,
+          efficiencyRatio: typeof d.efficiencyRatio === "number" ? d.efficiencyRatio : null,
+          netDriftPct: typeof d.netDriftPct === "number" ? d.netDriftPct : null,
+          bbPosition: typeof d.bbPosition === "number" ? d.bbPosition : null,
+          bbUpper: d.bbUpper ?? null,
+          bbLower: d.bbLower ?? null,
+          candlePattern: d.candlePattern ?? "none",
+          macdLine: typeof d.macdLine === "number" ? d.macdLine : null,
+          macdSignal: typeof d.macdSignal === "number" ? d.macdSignal : null,
+          macdHistogram: typeof d.macdHistogram === "number" ? d.macdHistogram : null,
+          macdCrossover: d.macdCrossover ?? "none",
+          vwap: d.vwap ?? null,
           sector: r.sector,
           companyName: r.companyName,
         };

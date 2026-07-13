@@ -211,3 +211,77 @@ export function candlePatternScore(pattern: CandlePattern): number {
       return 0;
   }
 }
+
+// ── EMA helper (internal) ─────────────────────────────────────────────────────
+function emaSeries(data: number[], period: number): number[] {
+  if (data.length === 0 || period <= 0) return [];
+  const k = 2 / (period + 1);
+  const out: number[] = [];
+  let e = data[0];
+  out.push(e);
+  for (let i = 1; i < data.length; i++) {
+    e = data[i] * k + e * (1 - k);
+    out.push(e);
+  }
+  return out;
+}
+
+export interface MACD {
+  macd: number;
+  signal: number;
+  histogram: number;
+  /** Crossover direction on the most recent bar. */
+  crossover: "bullish" | "bearish" | "none";
+}
+
+/**
+ * Standard MACD (12, 26, 9).
+ * Returns zeros when there is not enough data for a valid reading.
+ */
+export function macd(closes: number[], fastPeriod = 12, slowPeriod = 26, signalPeriod = 9): MACD {
+  if (closes.length < slowPeriod + signalPeriod) {
+    return { macd: 0, signal: 0, histogram: 0, crossover: "none" };
+  }
+
+  const fastEmas = emaSeries(closes, fastPeriod);
+  const slowEmas = emaSeries(closes, slowPeriod);
+
+  // MACD line: only valid once slowPeriod has warmed up.
+  const macdLine: number[] = [];
+  for (let i = slowPeriod - 1; i < closes.length; i++) {
+    macdLine.push(fastEmas[i] - slowEmas[i]);
+  }
+
+  // Signal line: EMA(signalPeriod) of MACD line.
+  const signalLine = emaSeries(macdLine, signalPeriod);
+
+  const lastMACD = macdLine[macdLine.length - 1]!;
+  const prevMACD = macdLine.length > 1 ? macdLine[macdLine.length - 2]! : lastMACD;
+  const lastSignal = signalLine[signalLine.length - 1]!;
+  const prevSignal = signalLine.length > 1 ? signalLine[signalLine.length - 2]! : lastSignal;
+
+  const lastHist = lastMACD - lastSignal;
+  const prevHist = prevMACD - prevSignal;
+
+  let crossover: "bullish" | "bearish" | "none" = "none";
+  if (prevHist <= 0 && lastHist > 0) crossover = "bullish";
+  else if (prevHist >= 0 && lastHist < 0) crossover = "bearish";
+
+  return { macd: lastMACD, signal: lastSignal, histogram: lastHist, crossover };
+}
+
+/**
+ * VWAP (Volume-Weighted Average Price) from intraday candles.
+ * Uses typical price (H+L+C)/3 weighted by volume.
+ */
+export function vwap(candles: Candle[]): number {
+  if (candles.length === 0) return 0;
+  let cumTPV = 0;
+  let cumVol = 0;
+  for (const c of candles) {
+    const tp = (c.h + c.l + c.c) / 3;
+    cumTPV += tp * c.v;
+    cumVol += c.v;
+  }
+  return cumVol > 0 ? cumTPV / cumVol : 0;
+}
