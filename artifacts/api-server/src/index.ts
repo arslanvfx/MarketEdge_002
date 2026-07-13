@@ -8,7 +8,7 @@ import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPn
 import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
-import { runScan as runStockScan, initLastScanAt } from "./lib/stock/scanner";
+import { runScan as runStockScan, initLastScanAt, lastScanTime } from "./lib/stock/scanner";
 import { initResearchFromDB } from "./lib/stock/research";
 import { runBotCycle as runStockBotCycle, initDecisionLogFromDB } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
@@ -407,13 +407,24 @@ async function startStockVertical(): Promise<void> {
   // Restore today's research reports so the bot can read them right away.
   await initResearchFromDB();
 
-  // Startup scan (force=true so it runs even when market is closed, using
-  // last-session prices to populate the UI immediately).
   const scan = () =>
     runStockScan().catch((err) => logger.warn({ err }, "[stock-scanner] scan failed (non-fatal)"));
   const forceScan = () =>
     runStockScan({ force: true }).catch((err) => logger.warn({ err }, "[stock-scanner] scan failed (non-fatal)"));
-  forceScan();
+
+  // Only redo the full startup scan if results are stale (>30 min old).
+  // If we just republished and DB has fresh results from this session, skip the
+  // recompute — the scanner/research data already survives across restarts in DB.
+  const lastScan = lastScanTime();
+  const SCAN_FRESH_MS = 30 * 60_000;
+  if (!lastScan || Date.now() - lastScan > SCAN_FRESH_MS) {
+    logger.info("[stock] startup: results stale or absent — running force scan");
+    forceScan();
+  } else {
+    logger.info("[stock] startup: results fresh (last scan %s ago) — skipping force scan",
+      `${Math.round((Date.now() - lastScan) / 60_000)}min`);
+  }
+
   // Auto-scan every 30 min during market hours; off-hours calls are cheap no-ops.
   setInterval(scan, 30 * 60_000);
 

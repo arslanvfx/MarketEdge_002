@@ -16,17 +16,27 @@ export function Layout({ children }: { children: React.ReactNode }) {
     queryKey: ["ai-spend"],
     queryFn: async () => {
       const res = await fetch(`${API_BASE}/crypto/ai-spend`);
-      return res.json() as Promise<{ level: string; labels: Record<string, string> }>;
+      return res.json() as Promise<{ level: string; stockAiEnabled: boolean; labels: Record<string, string> }>;
     },
     refetchInterval: 20_000,
   });
   const spendLevel = (aiSpend?.level ?? "balanced") as "off" | "eco" | "balanced" | "max";
+  const stockAiEnabled = aiSpend?.stockAiEnabled ?? true;
 
   async function setAiSpend(level: "off" | "eco" | "balanced" | "max") {
     await fetch(`${API_BASE}/crypto/ai-spend`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ level }),
+    });
+    void queryClient.invalidateQueries({ queryKey: ["ai-spend"] });
+  }
+
+  async function setStockAi(enabled: boolean) {
+    await fetch(`${API_BASE}/crypto/ai-spend`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stockAiEnabled: enabled }),
     });
     void queryClient.invalidateQueries({ queryKey: ["ai-spend"] });
   }
@@ -130,51 +140,76 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </Show>
         </nav>
 
-        {/* Global AI spend level — kill switch + Eco/Balanced/Max */}
-        <div className="px-4 pb-3">
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold mb-1.5 px-1">AI Spend</p>
-          {/* Top row: Off toggle */}
-          <button
-            onClick={() => void setAiSpend(spendLevel === "off" ? "balanced" : "off")}
-            className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold mb-1.5 transition-colors ${
-              spendLevel === "off"
-                ? "border-rose-500/60 bg-rose-500/15 text-rose-300"
-                : "border-border bg-background/30 text-muted-foreground hover:text-foreground hover:bg-muted/40"
-            }`}
-          >
-            <span className="flex items-center gap-1.5">
-              <Activity className="w-3 h-3" />
-              AI Kill Switch
-            </span>
-            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${spendLevel === "off" ? "bg-rose-500/30 text-rose-300" : "bg-muted text-muted-foreground"}`}>
-              {spendLevel === "off" ? "OFF" : "ON"}
-            </span>
-          </button>
-          {/* 3-level selector (disabled when off) */}
-          <div className={`flex rounded-lg overflow-hidden border transition-opacity ${spendLevel === "off" ? "border-border/40 opacity-40 pointer-events-none" : "border-border"}`}>
-            {(["eco", "balanced", "max"] as const).map((lvl, i) => {
-              const icons = { eco: <Leaf className="w-2.5 h-2.5" />, balanced: <Zap className="w-2.5 h-2.5" />, max: <Sparkles className="w-2.5 h-2.5" /> };
-              const colors = { eco: "bg-emerald-500/20 text-emerald-300", balanced: "bg-sky-500/20 text-sky-300", max: "bg-violet-500/20 text-violet-300" };
-              return (
-                <button
-                  key={lvl}
-                  onClick={() => void setAiSpend(lvl)}
-                  className={`flex-1 flex items-center justify-center gap-1 py-1.5 text-[10px] font-semibold transition-colors ${i > 0 ? "border-l border-border" : ""} ${
-                    spendLevel === lvl ? colors[lvl] : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
-                  }`}
-                >
-                  {icons[lvl]}
-                  {lvl.charAt(0).toUpperCase() + lvl.slice(1)}
-                </button>
-              );
-            })}
+        {/* AI spend — split crypto / stock controls */}
+        <div className="px-4 pb-3 space-y-3">
+          {/* ── Crypto AI ── */}
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold mb-1.5 px-1">Crypto AI</p>
+            <button
+              onClick={() => void setAiSpend(spendLevel === "off" ? "eco" : "off")}
+              className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold mb-1.5 transition-colors ${
+                spendLevel === "off"
+                  ? "border-rose-500/60 bg-rose-500/15 text-rose-300"
+                  : "border-border bg-background/30 text-muted-foreground hover:text-foreground hover:bg-muted/40"
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <Activity className="w-3 h-3" />
+                Claude for Crypto
+              </span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${spendLevel === "off" ? "bg-rose-500/30 text-rose-300" : "bg-emerald-500/20 text-emerald-300"}`}>
+                {spendLevel === "off" ? "OFF" : "ON"}
+              </span>
+            </button>
+            <div className={`flex rounded-lg overflow-hidden border transition-opacity ${spendLevel === "off" ? "border-border/40 opacity-40 pointer-events-none" : "border-border"}`}>
+              {(["eco", "balanced", "max"] as const).map((lvl, i) => {
+                const icons = { eco: <Leaf className="w-2.5 h-2.5" />, balanced: <Zap className="w-2.5 h-2.5" />, max: <Sparkles className="w-2.5 h-2.5" /> };
+                const colors = { eco: "bg-emerald-500/20 text-emerald-300", balanced: "bg-sky-500/20 text-sky-300", max: "bg-violet-500/20 text-violet-300" };
+                return (
+                  <button
+                    key={lvl}
+                    onClick={() => void setAiSpend(lvl)}
+                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 text-[10px] font-semibold transition-colors ${i > 0 ? "border-l border-border" : ""} ${
+                      spendLevel === lvl ? colors[lvl] : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    {icons[lvl]}
+                    {lvl.charAt(0).toUpperCase() + lvl.slice(1)}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
+              {spendLevel === "off" ? "Crypto: stat + ML only, no Claude" :
+               spendLevel === "eco" ? "Snap · live direction · BTC call (3K)" :
+               spendLevel === "balanced" ? "All crypto features · 5K thinking" :
+               "All crypto · 8K thinking · 2× self-consistency"}
+            </p>
           </div>
-          <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
-            {spendLevel === "off" ? "All Claude calls gated — stat + ML only" :
-             spendLevel === "eco" ? "Eco · crypto signals + full stock research, 3K thinking" :
-             spendLevel === "balanced" ? "Balanced · all features, 5K thinking depth" :
-             "Max · 8K thinking + 2× self-consistency per snap"}
-          </p>
+
+          {/* ── Stock AI ── */}
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold mb-1.5 px-1">Stock AI</p>
+            <button
+              onClick={() => void setStockAi(!stockAiEnabled)}
+              className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors ${
+                stockAiEnabled
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-border bg-background/30 text-muted-foreground hover:text-foreground hover:bg-muted/40"
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <FlaskConical className="w-3 h-3" />
+                Claude for Stocks
+              </span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${stockAiEnabled ? "bg-emerald-500/30 text-emerald-300" : "bg-muted text-muted-foreground"}`}>
+                {stockAiEnabled ? "ON" : "OFF"}
+              </span>
+            </button>
+            <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
+              {stockAiEnabled ? "Research · signals · sentiment active" : "Stock: stat + ML only, no Claude"}
+            </p>
+          </div>
         </div>
 
         <Show when="signed-in">

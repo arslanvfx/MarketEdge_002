@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { getAiSpendLevel, setAiSpendLevel, AI_SPEND_LABELS, isAiFeatureEnabled, type AiSpendLevel } from "../lib/ai-spend";
+import { getAiSpendLevel, setAiSpendLevel, getStockAiEnabled, setStockAiEnabled, AI_SPEND_LABELS, isAiFeatureEnabled, type AiSpendLevel } from "../lib/ai-spend";
 import {
   fetchCryptoPredictions,
   fetchCryptoPrices,
@@ -510,7 +510,7 @@ router.get("/crypto/kalshi-btc-target", async (_req, res) => {
 
 router.get("/crypto/ai-spend", (_req, res) => {
   const level = getAiSpendLevel();
-  res.json({ level, labels: AI_SPEND_LABELS });
+  res.json({ level, stockAiEnabled: getStockAiEnabled(), labels: AI_SPEND_LABELS });
 });
 
 // Admin guard (same pattern as bot control routes): requires a signed-in
@@ -530,13 +530,21 @@ function requireAdmin(req: any, res: any, next: any) {
 }
 
 router.post("/crypto/ai-spend", requireAdmin, (req, res) => {
-  const { level } = req.body as { level?: string };
-  if (level !== "off" && level !== "eco" && level !== "balanced" && level !== "max") {
-    res.status(400).json({ error: "level must be off | eco | balanced | max" });
-    return;
+  const { level, stockAiEnabled } = req.body as { level?: string; stockAiEnabled?: boolean };
+
+  if (level !== undefined) {
+    if (level !== "off" && level !== "eco" && level !== "balanced" && level !== "max") {
+      res.status(400).json({ error: "level must be off | eco | balanced | max" });
+      return;
+    }
+    setAiSpendLevel(level as AiSpendLevel);
   }
-  setAiSpendLevel(level as AiSpendLevel);
-  res.json({ ok: true, level, labels: AI_SPEND_LABELS });
+
+  if (stockAiEnabled !== undefined) {
+    setStockAiEnabled(!!stockAiEnabled);
+  }
+
+  res.json({ ok: true, level: getAiSpendLevel(), stockAiEnabled: getStockAiEnabled(), labels: AI_SPEND_LABELS });
 });
 
 // Dedicated Claude call for the current Kalshi BTC window.

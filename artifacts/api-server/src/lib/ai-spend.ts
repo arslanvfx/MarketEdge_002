@@ -4,13 +4,14 @@
  * Controls which Claude/AI features are active globally.
  * Persists to the DB so the level survives server restarts.
  *
- * Levels:
- *   off      — Emergency kill switch: ALL Claude calls disabled immediately
- *   eco      — Stat + ML only; no Claude anywhere (zero AI cost)
- *   balanced — Claude for bot-critical signals (snap + live direction) +
- *              stock signals/sentiment; skips trend stability, market
- *              summaries, and stock research
- *   max      — All features active (default)
+ * Crypto levels (eco/balanced/max) control ONLY crypto features.
+ * Stock AI is a separate boolean flag controlled independently.
+ *
+ * Levels (crypto only):
+ *   off      — Emergency kill switch: ALL crypto Claude calls disabled
+ *   eco      — Snap + live direction + BTC call only (bot accuracy, minimum cost)
+ *   balanced — All crypto features at standard thinking depth
+ *   max      — All crypto features at max thinking depth + self-consistency
  *
  * GUARANTEE: ML training, stat model, and ML inference are NEVER gated here.
  * Only external Claude/Anthropic API calls are controlled by this module.
@@ -32,42 +33,38 @@ export type AiFeature =
   | "stock_research"    // runResearchPass in stock/scanner.ts
   | "stock_sentiment";  // scoreSentiment in stock/news.ts
 
-const ENABLED: Record<AiSpendLevel, Set<AiFeature>> = {
+// Crypto-only features per spend level. Stock features are gated separately.
+const CRYPTO_ENABLED: Record<AiSpendLevel, Set<AiFeature>> = {
   off: new Set(),
-  // Eco: crypto bot signals (accuracy-critical) + all three stock AI features.
-  // Skips: trend stability, market summaries (low ROI). Includes stock research
-  // so the Research page and bot entry decisions work at minimum cost.
+  // Eco: snap + live-dir + BTC call (bot accuracy, minimum thinking depth)
   eco: new Set<AiFeature>([
     "crypto_snap",
     "crypto_live_dir",
     "crypto_btc_call",
-    "stock_signal",
-    "stock_research",
-    "stock_sentiment",
   ]),
-  // Balanced: all features ON at standard thinking depth.
+  // Balanced: all crypto features at standard thinking depth
   balanced: new Set<AiFeature>([
     "crypto_snap",
     "crypto_live_dir",
     "crypto_stability",
     "crypto_btc_call",
     "market_summary",
-    "stock_signal",
-    "stock_research",
-    "stock_sentiment",
   ]),
-  // Max: all features ON at maximum thinking depth with self-consistency sampling.
+  // Max: all crypto features at maximum thinking depth
   max: new Set<AiFeature>([
     "crypto_snap",
     "crypto_live_dir",
     "crypto_stability",
     "crypto_btc_call",
     "market_summary",
-    "stock_signal",
-    "stock_research",
-    "stock_sentiment",
   ]),
 };
+
+const STOCK_FEATURES = new Set<AiFeature>([
+  "stock_signal",
+  "stock_research",
+  "stock_sentiment",
+]);
 
 /** Extended thinking token budget per spend level. */
 const THINKING_BUDGET: Record<AiSpendLevel, number> = {
@@ -96,25 +93,38 @@ export function getAiSelfConsistency(): number {
 }
 
 let currentLevel: AiSpendLevel = "max";
+let stockAiEnabled = true; // Stock AI on by default; persisted independently
 
 export function getAiSpendLevel(): AiSpendLevel {
   return currentLevel;
 }
 
+export function getStockAiEnabled(): boolean {
+  return stockAiEnabled;
+}
+
 export function setAiSpendLevel(level: AiSpendLevel): void {
   currentLevel = level;
-  void db
+  void persistAiSpend();
+}
+
+export function setStockAiEnabled(enabled: boolean): void {
+  stockAiEnabled = enabled;
+  void persistAiSpend();
+}
+
+async function persistAiSpend(): Promise<void> {
+  await db
     .insert(botConfigTable)
-    .values({ id: "ai_spend", config: { level } as Record<string, unknown>, updatedAt: new Date() })
+    .values({ id: "ai_spend", config: { level: currentLevel, stockAiEnabled } as Record<string, unknown>, updatedAt: new Date() })
     .onConflictDoUpdate({
       target: botConfigTable.id,
-      set: { config: { level } as Record<string, unknown>, updatedAt: new Date() },
+      set: { config: { level: currentLevel, stockAiEnabled } as Record<string, unknown>, updatedAt: new Date() },
     })
-    .catch((e: unknown) => logger.error({ err: e }, "[ai-spend] persist error"));
+    .catch((e: unknown) => { logger.error({ err: e }, "[ai-spend] persist error"); });
 }
 
 // Crypto features that are disabled in development to avoid unnecessary API costs.
-// Production (NODE_ENV=production) respects the configured spend level normally.
 const CRYPTO_FEATURES = new Set<AiFeature>([
   "crypto_snap",
   "crypto_live_dir",
@@ -123,25 +133,28 @@ const CRYPTO_FEATURES = new Set<AiFeature>([
   "market_summary",
 ]);
 
-/** Returns true when the given Claude feature should run at the current spend level.
- *  In development all crypto AI calls are always OFF — only stock features are
- *  available for local testing. Production respects the configured spend level. */
+/** Returns true when the given Claude feature should run.
+ *  - Stock features: gated by stockAiEnabled (independent of crypto level)
+ *  - Crypto features: gated by spend level; always OFF in development */
 export function isAiFeatureEnabled(feature: AiFeature): boolean {
+  if (STOCK_FEATURES.has(feature)) {
+    return stockAiEnabled;
+  }
   if (process.env.NODE_ENV !== "production" && CRYPTO_FEATURES.has(feature)) {
     return false;
   }
-  return ENABLED[currentLevel].has(feature);
+  return CRYPTO_ENABLED[currentLevel].has(feature);
 }
 
-/** Human-readable description of each level's cost impact. */
+/** Human-readable description of each crypto level. */
 export const AI_SPEND_LABELS: Record<AiSpendLevel, { name: string; description: string; costTag: string }> = {
-  off:      { name: "Off",      description: "Emergency kill switch — all AI disabled",                                    costTag: "Free"      },
-  eco:      { name: "Eco",      description: "Crypto bot signals + all stock AI (signal, research, sentiment) at 3K thinking depth", costTag: "~50% cost" },
-  balanced: { name: "Balanced", description: "All features, standard thinking depth (5K tokens) + research & summaries",  costTag: "~70% cost" },
-  max:      { name: "Max",      description: "All features, deep thinking (8K tokens) + 2× self-consistency on each snap", costTag: "Full cost" },
+  off:      { name: "Off",      description: "Emergency kill switch — all crypto Claude calls disabled",                         costTag: "Free"      },
+  eco:      { name: "Eco",      description: "Snap + live direction + BTC call only (bot accuracy, 3K thinking depth)",          costTag: "~30% cost" },
+  balanced: { name: "Balanced", description: "All crypto features at standard thinking depth (5K tokens)",                       costTag: "~60% cost" },
+  max:      { name: "Max",      description: "All crypto features at max thinking depth (8K tokens) + 2× self-consistency",      costTag: "Full cost" },
 };
 
-/** Load persisted spend level from DB (call once at server startup). */
+/** Load persisted spend level and stock AI flag from DB (call once at server startup). */
 export async function initAiSpend(): Promise<void> {
   try {
     const rows = await db
@@ -150,11 +163,15 @@ export async function initAiSpend(): Promise<void> {
       .where(eq(botConfigTable.id, "ai_spend"))
       .limit(1);
     if (rows.length > 0) {
-      const cfg = rows[0].config as { level?: string } | null;
+      const cfg = rows[0].config as { level?: string; stockAiEnabled?: boolean } | null;
       const lvl = cfg?.level;
       if (lvl === "off" || lvl === "eco" || lvl === "balanced" || lvl === "max") {
         currentLevel = lvl;
-        logger.info("[ai-spend] restored spend level: %s", lvl);
+        logger.info("[ai-spend] restored crypto spend level: %s", lvl);
+      }
+      if (typeof cfg?.stockAiEnabled === "boolean") {
+        stockAiEnabled = cfg.stockAiEnabled;
+        logger.info("[ai-spend] restored stock AI enabled: %s", stockAiEnabled);
       }
     }
   } catch (e) {
