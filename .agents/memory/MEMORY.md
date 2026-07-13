@@ -1,3 +1,4 @@
+- [Conviction NO gate — YES ask cross-check](conviction-no-gate-crosscheck.md) — stale yesBid lets bounced market pass gate; FOK limit-sell at 0.06 fills at any YES bid ≥ 6¢; fix: also check freshYesAsk ≤ (1−lockPrice)+0.10
 - [Conviction early-window lockout zone](conviction-early-window-lockout.md) — bypass threshold must match full conviction zone (≥0.88/≤0.12) not just outer extremes (≥0.92/≤0.08); 8-11¢ YES was silently blocked in first 9 min
 - [Pipeline lock released on Kalshi-null](pipeline-lock-kalshi-null.md) — pipelineEntryFiredThisWindow must be deleted when Kalshi data missing at trigger time; permanent lock silently kills all bets
 - [betDelayMinutes — delayed entry with re-analysis](bet-delay-minutes.md) — delays YES+NO entry N min then fires fresh runPipelineRecheck before tick; differs from minNoEntryMinutes (NO-only, no recheck)

@@ -1572,6 +1572,48 @@ async function _runBotTick(
       return;
     }
 
+    // ── NO cross-check (stale-bid guard) ─────────────────────────────────────
+    // The main gate above uses `1 − freshYesBid` as the NO-ask proxy.  If the
+    // bid data is stale (e.g., the orderbook refresh failed and the cached value
+    // still shows the trigger-time bid of 7¢), the gate can pass while the real
+    // market has bounced significantly.
+    //
+    // Problem: an ask-side FOK with limitPrice = 0.06 (sell YES ≥ 6¢) fills at
+    // ANY available YES bid — including a bounced 24¢ bid → NO fill at 76¢,
+    // far outside the conviction zone.
+    //
+    // Cross-check: freshYesAsk is fetched from the authenticated orderbook (a
+    // different data path than yesBid).  If the YES ask has risen more than
+    // 10¢ above the conviction target (1 − lockPrice), the market has moved and
+    // the gate must abort, regardless of what freshYesBid reports.
+    //
+    // Example (NEAR, lockPrice=0.89):
+    //   target YES = 1 − 0.89 = 0.11 (11¢)
+    //   allow up to 0.11 + 0.10 = 0.21 (21¢) for normal bid-ask spread
+    //   freshYesAsk = 0.24 → 0.24 > 0.21 → abort ✓
+    //   freshYesAsk = 0.14 → 0.14 ≤ 0.21 → proceed ✓
+    if (direction === "no" && freshYesAsk != null) {
+      const yesAskBounceThreshold = (1 - lockPrice) + 0.10; // target + 10¢ spread allowance
+      if (freshYesAsk > yesAskBounceThreshold) {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (NO cross-check abort)");
+        }
+        logger.warn(
+          {
+            sym, direction, windowKey,
+            freshYesAsk: +freshYesAsk.toFixed(4),
+            freshYesBid: freshYesBid != null ? +freshYesBid.toFixed(4) : null,
+            yesAskBounceThreshold: +yesAskBounceThreshold.toFixed(4),
+            lockPrice, lockPriceCap,
+          },
+          "[kalshi-bot] conviction live-price gate: NO cross-check — YES ask bounced above target; order aborted",
+        );
+        return;
+      }
+    }
+
     // Gate passed — re-derive sizing from the fresh orderbook prices so that a
     // stale pre-gate cache (e.g. liveYesBid=0.93 left over from the prior window)
     // cannot inflate contractCount to 57 on a 4 $ bet and produce a $38 fill.
