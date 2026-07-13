@@ -525,3 +525,121 @@ export async function runResearchPass(
     researchRunning = false;
   }
 }
+
+// ── Exit re-check ─────────────────────────────────────────────────────────────
+
+export interface ExitResearchResult {
+  shouldExit: boolean;
+  /** Updated confidence in the underlying thesis (not in the exit decision). */
+  confidence: number;
+  reason: string;
+  webSearchUsed: boolean;
+}
+
+const exitCache = new Map<string, { result: ExitResearchResult; computedAt: number }>();
+const EXIT_CACHE_TTL_MS = 4 * 60 * 60_000; // re-check at most every 4 hours
+
+/**
+ * Quick targeted Claude call for an open position: "should I exit now?"
+ *
+ * Designed to be cheap: max_tokens=600, 1 web search max.
+ * Cache TTL is 4h unless a news alert forces an immediate re-check.
+ */
+export async function researchPositionExit(
+  ticker: string,
+  ctx: {
+    price: number;
+    entryPrice: number;
+    gainPct: number;
+    sector: string;
+    companyName: string;
+    tradingMode: string;
+    daysHeld: number;
+    originalSummary?: string;
+    /** Breaking headline that triggered this re-check, if any. */
+    newsAlert?: string;
+  },
+): Promise<ExitResearchResult | null> {
+  const T = ticker.toUpperCase();
+  const cacheKey = `exit:${T}:${todayKey()}`;
+  const cached = exitCache.get(cacheKey);
+  // Skip cache if triggered by a news alert so we always re-check on new info
+  if (cached && Date.now() - cached.computedAt < EXIT_CACHE_TTL_MS && !ctx.newsAlert) {
+    return cached.result;
+  }
+
+  const monthYear = new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const gainStr = ctx.gainPct >= 0 ? `+${ctx.gainPct.toFixed(1)}%` : `${ctx.gainPct.toFixed(1)}%`;
+  const alertBlock = ctx.newsAlert ? `\n⚠ BREAKING NEWS: "${ctx.newsAlert}"\n` : "";
+  const thesisBlock = ctx.originalSummary ? `\nOriginal entry thesis: "${ctx.originalSummary}"\n` : "";
+
+  const prompt = `You are managing an open stock position and must decide whether to EXIT or HOLD RIGHT NOW.
+
+POSITION: ${T} (${ctx.companyName}, ${ctx.sector})
+  Entry: $${ctx.entryPrice.toFixed(2)} | Current: $${ctx.price.toFixed(2)} | P&L: ${gainStr}
+  Horizon: ${ctx.tradingMode} | Days held: ${ctx.daysHeld}${thesisBlock}${alertBlock}
+${webSearchSupported
+  ? `Search "${T} stock news ${monthYear}" for any new risks, downgrades, or catalysts that could affect the position.`
+  : ""}
+
+Return ONLY this JSON (no prose):
+{"shouldExit":true|false,"confidence":0-100,"reason":"1-2 sentences"}
+
+Rules:
+- shouldExit=true: thesis broken, major negative catalyst, better capital allocation, news is materially negative
+- shouldExit=false: thesis intact, normal volatility, position behaving as expected
+- confidence: your current conviction in the STOCK (0=lost all faith, 100=extremely confident)
+- Be decisive. Do not say "hold" just because the loss is small — if thesis broke, exit.`;
+
+  const runCall = async (useTools: boolean) =>
+    anthropic.messages.create({
+      model: RESEARCH_MODEL,
+      max_tokens: 600,
+      messages: [{ role: "user", content: prompt }],
+      ...(useTools
+        ? { tools: [{ type: "web_search_20250305" as const, name: "web_search" as const, max_uses: 1 }] }
+        : {}),
+    });
+
+  try {
+    let message: Awaited<ReturnType<typeof runCall>>;
+    let usedWebSearch = webSearchSupported;
+    try {
+      message = await runCall(webSearchSupported);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (webSearchSupported && /tool|web_search|400|invalid/i.test(msg)) {
+        webSearchSupported = false;
+        usedWebSearch = false;
+        message = await runCall(false);
+      } else {
+        throw err;
+      }
+    }
+
+    const text = message.content
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n");
+    const parsed = JSON.parse(extractJson(text)) as {
+      shouldExit?: boolean;
+      confidence?: number;
+      reason?: string;
+    };
+    const result: ExitResearchResult = {
+      shouldExit: !!parsed.shouldExit,
+      confidence: Math.max(0, Math.min(100, Math.round(parsed.confidence ?? 50))),
+      reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 400) : "",
+      webSearchUsed: usedWebSearch,
+    };
+    exitCache.set(cacheKey, { result, computedAt: Date.now() });
+    logger.info(
+      { ticker: T, shouldExit: result.shouldExit, confidence: result.confidence, newsTriggered: !!ctx.newsAlert },
+      "[stock-research] exit re-check complete",
+    );
+    return result;
+  } catch (err) {
+    logger.warn({ err, ticker: T }, "[stock-research] exit re-check failed — keeping position");
+    return null;
+  }
+}

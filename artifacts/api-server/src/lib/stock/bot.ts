@@ -22,6 +22,7 @@ import {
   getAccount,
   getLatestPrice,
   getLevel1Quote,
+  getOrderBook,
   placeOrder,
   closePosition,
 } from "./alpaca";
@@ -33,9 +34,11 @@ import { buildFeatures, recordOutcome } from "./ml";
 import { getScoredNews } from "./news";
 import { getEarnings } from "./earnings";
 import { getScannerResults, getSectorMomentum } from "./scanner";
-import { getCachedResearch, getTodayReports } from "./research";
+import { getCachedResearch, getTodayReports, researchPositionExit } from "./research";
 import { lookupUniverse } from "./universe";
 import { watchlistTickers } from "./watchlist";
+import { getMacroTrend } from "./macro-filter";
+import { consumeNewsAlert, registerPositionTicker, unregisterPositionTicker } from "./news-monitor";
 import type { Candle, TradingMode, StockBotConfig, ResearchReport, ScannerRow } from "./types";
 import { DAY_EOD_BUFFER_MS, evaluateExitReason } from "./bot-manage-core";
 
@@ -141,6 +144,8 @@ interface OpenBetRow {
   ticker: string;
   sector: string | null;
   tradingMode: TradingMode;
+  /** "long" = long position (buy to open); "short" = short position (sell to open). */
+  side: "long" | "short";
   qty: number;
   entryPrice: number;
   stopLoss: number | null;
@@ -155,16 +160,17 @@ interface OpenBetRow {
 
 async function openBets(mode: "paper" | "live"): Promise<OpenBetRow[]> {
   const res = (await db.execute(sql`
-    SELECT id, ticker, sector, trading_mode, qty, entry_price, stop_loss, target_price,
+    SELECT id, ticker, sector, trading_mode, side, qty, entry_price, stop_loss, target_price,
            peak_price, notional, confidence, signals, created_at
     FROM stock_bot_bets
-    WHERE action = 'buy' AND exited_at IS NULL AND mode = ${mode}
+    WHERE action IN ('buy', 'short_sell') AND exited_at IS NULL AND mode = ${mode}
   `)) as unknown as { rows: any[] };
   return (res.rows ?? []).map((r) => ({
     id: r.id,
     ticker: r.ticker,
     sector: r.sector,
     tradingMode: r.trading_mode as TradingMode,
+    side: (r.side === "short" ? "short" : "long") as "long" | "short",
     qty: Number(r.qty) || 0,
     entryPrice: Number(r.entry_price) || 0,
     stopLoss: r.stop_loss != null ? Number(r.stop_loss) : null,
@@ -205,8 +211,12 @@ async function exitPosition(
     );
     throw err;
   }
-  const pnl = (exitPrice - bet.entryPrice) * bet.qty;
+  // Short P&L is inverted: profit when price drops below entry.
+  const pnl = bet.side === "short"
+    ? (bet.entryPrice - exitPrice) * bet.qty
+    : (exitPrice - bet.entryPrice) * bet.qty;
   const outcome = pnl > 0 ? "win" : pnl < 0 ? "loss" : "push";
+  unregisterPositionTicker(bet.ticker);
   await db.execute(sql`
     UPDATE stock_bot_bets SET
       exit_price = ${exitPrice},
@@ -256,8 +266,23 @@ export async function manualClosePosition(
   if (price == null || price <= 0) price = bet.entryPrice;
 
   await exitPosition(bet, cfg.mode, price, "manual");
-  const pnl = (price - bet.entryPrice) * bet.qty;
+  const pnl = bet.side === "short"
+    ? (bet.entryPrice - price) * bet.qty
+    : (price - bet.entryPrice) * bet.qty;
   return { closed: true, ticker: bet.ticker, qty: bet.qty, exitPrice: price, pnl };
+}
+
+/**
+ * Poll Alpaca news for all currently-open positions.
+ * Called on a 5-min interval by the stock vertical — the results are consumed
+ * per-tick inside managePositions via consumeNewsAlert().
+ */
+export async function runStockNewsCheck(): Promise<void> {
+  const cfg = getConfig();
+  const open = await openBets(cfg.mode);
+  if (open.length === 0) return;
+  const { checkNewsForPositions } = await import("./news-monitor");
+  await checkNewsForPositions(open.map((b) => b.ticker));
 }
 
 /** Persist the running peak price used by the long-horizon trailing stop. */
@@ -281,7 +306,54 @@ async function managePositions(
     const price = await getLatestPrice(bet.ticker);
     if (price == null || price <= 0) continue;
 
-    const research = bet.tradingMode !== "day" ? getCachedResearch(bet.ticker) ?? null : null;
+    // Check for breaking news alert on this position
+    const newsAlert = consumeNewsAlert(bet.ticker);
+
+    // Research for exit gate: cached report OR a fresh Claude exit re-check
+    // triggered by: (a) breaking news alert, or (b) swing/long held overnight
+    let research = bet.tradingMode !== "day" ? getCachedResearch(bet.ticker) ?? null : null;
+
+    if (marketOpen && bet.tradingMode !== "day" && (newsAlert || bet.tradingMode === "swing" || bet.tradingMode === "long")) {
+      const daysHeld = Math.floor((Date.now() - bet.createdAt.getTime()) / 86_400_000);
+      const gainPct = bet.entryPrice > 0
+        ? (bet.side === "short"
+            ? (bet.entryPrice - price) / bet.entryPrice
+            : (price - bet.entryPrice) / bet.entryPrice) * 100
+        : 0;
+      const uni = lookupUniverse(bet.ticker);
+      const exitCheck = await researchPositionExit(bet.ticker, {
+        price,
+        entryPrice: bet.entryPrice,
+        gainPct,
+        sector: bet.sector ?? uni?.sector ?? "Other",
+        companyName: uni?.name ?? bet.ticker,
+        tradingMode: bet.tradingMode,
+        daysHeld,
+        originalSummary: (bet.signals as any)?.research?.summary,
+        newsAlert: newsAlert?.headline,
+      }).catch(() => null);
+
+      if (exitCheck?.shouldExit) {
+        const exitReason = newsAlert
+          ? `claude_exit_news (${newsAlert.headline.slice(0, 80)})`
+          : `claude_exit_recheck (conf ${exitCheck.confidence})`;
+        if (marketOpen) {
+          try {
+            await exitPosition(bet, cfg.mode, price, exitReason);
+            exits++;
+            continue;
+          } catch (err) {
+            logger.warn({ err, ticker: bet.ticker }, "[stock-bot] Claude-triggered exit failed; will retry");
+          }
+        }
+        continue;
+      }
+      // Update the research confidence from Claude's re-check for the rule-based exit below
+      if (exitCheck && research) {
+        research = { ...research, confidence: exitCheck.confidence };
+      }
+    }
+
     const { reason, newPeak } = evaluateExitReason({
       bet,
       price,
@@ -316,6 +388,8 @@ interface EntryCandidate {
   /** Horizon dictated by research; null = flexible (watchlist/scanner). */
   horizon: TradingMode | null;
   report: ResearchReport | null;
+  /** "long" (default) = buy to open; "short" = sell to open. */
+  side?: "long" | "short";
 }
 
 async function entryCandidates(cfg: StockBotConfig): Promise<{
@@ -342,7 +416,7 @@ async function entryCandidates(cfg: StockBotConfig): Promise<{
     candidates.push({ ticker: t, horizon: null, report: getCachedResearch(t) ?? null });
   }
 
-  // 3. Top scanner rows (upward direction) as a fallback pool.
+  // 3. Top scanner rows (upward direction) as a fallback long pool.
   const ranked = scanner
     .filter((r) => r.direction === "up")
     .sort((a, b) => b.score - a.score)
@@ -350,7 +424,23 @@ async function entryCandidates(cfg: StockBotConfig): Promise<{
   for (const r of ranked) {
     if (seen.has(r.ticker)) continue;
     seen.add(r.ticker);
-    candidates.push({ ticker: r.ticker, horizon: null, report: null });
+    candidates.push({ ticker: r.ticker, horizon: null, report: null, side: "long" });
+  }
+
+  // 4. Top downward-trending tickers as short candidates (research-avoid flagged).
+  // Short candidates: scanner rows with direction="down" + research stance="avoid".
+  const shortCandidates = scanner
+    .filter((r) => r.direction === "down")
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+  for (const r of shortCandidates) {
+    const shortKey = `short:${r.ticker}`;
+    if (seen.has(shortKey)) continue;
+    const report = getCachedResearch(r.ticker) ?? null;
+    // Only short when Claude explicitly says avoid (confirmed bearish thesis)
+    if (!report || report.stance !== "avoid") continue;
+    seen.add(shortKey);
+    candidates.push({ ticker: r.ticker, horizon: r.direction === "down" ? "swing" : null, report, side: "short" });
   }
 
   return { candidates, scannerByTicker };
@@ -415,6 +505,18 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
   // PDT guard: if flagged and low equity, block new day trades.
   const pdtBlocked = account.patternDayTrader && account.equity < 25000;
 
+  // ── Macro market filter ─────────────────────────────────────────────────
+  // Block new LONG entries when SPY is in a confirmed intraday downtrend.
+  // Short entries are unaffected (shorts profit in a down market).
+  const macro = await getMacroTrend().catch(() => null);
+  const macroBlocksLongs = macro?.trend === "bearish";
+  if (macroBlocksLongs) {
+    logger.info(
+      { spy: macro?.spyPrice, changePct: macro?.spyChangePct, aboveVwap: macro?.aboveVwap },
+      "[stock-bot] macro bearish — blocking new long entries this cycle",
+    );
+  }
+
   const open = await openBets(cfg.mode);
   // Held guard is per (ticker, horizon): the same ticker may hold concurrent
   // day/swing/long positions, but never two positions in the same horizon.
@@ -451,14 +553,40 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
     if (open.length + entries >= cfg.maxConcurrentPositions) break;
     const ticker = cand.ticker;
 
-    // Claude stance gate: never enter a stock on today's stay-away/sell list.
-    if (cand.report?.stance === "avoid") {
+    const candidateSide: "long" | "short" = cand.side ?? "long";
+
+    // Macro filter: block new long entries when SPY trend is bearish.
+    // Short entries are allowed — shorts benefit from a down market.
+    if (candidateSide === "long" && macroBlocksLongs) {
+      recordDecision({
+        ticker, action: "SKIP", horizon: cand.horizon,
+        confidence: cand.report?.confidence ?? null,
+        reason: `macro bearish (SPY ${macro?.spyChangePct?.toFixed(2)}%) — long entries blocked`,
+      });
+      continue;
+    }
+
+    // Claude stance gate:
+    //   Long entries: never enter when Claude says "avoid".
+    //   Short entries: only enter when Claude says "avoid" (confirmed bearish thesis).
+    if (candidateSide === "long" && cand.report?.stance === "avoid") {
       recordDecision({
         ticker, action: "SKIP", horizon: cand.horizon,
         confidence: cand.report.confidence,
         reason: "Claude research stance: avoid (stay away/sell)",
       });
       continue;
+    }
+    if (candidateSide === "short") {
+      if (!cand.report || cand.report.stance !== "avoid") {
+        // Shorts require explicit Claude bearish confirmation
+        recordDecision({
+          ticker, action: "SKIP", horizon: cand.horizon,
+          confidence: cand.report?.confidence ?? null,
+          reason: "short candidate skipped — Claude stance not 'avoid'",
+        });
+        continue;
+      }
     }
 
     // Resolve which horizon this entry would use. Research-driven candidates
@@ -523,11 +651,16 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         { useClaude: false },
       );
 
-      if (signals.combinedDirection !== "up") {
+      // Direction gate: longs require bullish technicals; shorts require bearish.
+      const requiredDir = candidateSide === "short" ? "down" : "up";
+      if (signals.combinedDirection !== requiredDir) {
         if (cand.report) {
           recordDecision({
             ticker, action: "SKIP", horizon: mode,
-            confidence: cand.report.confidence, reason: "technical signals not bullish",
+            confidence: cand.report.confidence,
+            reason: candidateSide === "short"
+              ? "technical signals not bearish (short requires 'down')"
+              : "technical signals not bullish",
           });
         }
         continue;
@@ -602,6 +735,33 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         continue;
       }
 
+      // Level 2 orderbook gate (soft — skip on bad depth, don't fail-close on missing data).
+      // Longs: skip when sell-side depth dominates (depthImbalance < 0.8 means big ask wall).
+      // Shorts: skip when buy-side depth dominates (depthImbalance > 1.2 means strong buyer support).
+      const MIN_DEPTH_IMBALANCE_LONG = 0.8;
+      const MAX_DEPTH_IMBALANCE_SHORT = 1.2;
+      try {
+        const ob = await getOrderBook(ticker);
+        if (ob) {
+          if (ob.depthImbalance != null && candidateSide === "long" && ob.depthImbalance < MIN_DEPTH_IMBALANCE_LONG) {
+            recordDecision({
+              ticker, action: "SKIP", horizon: mode, confidence: effectiveConfidence,
+              reason: `L2 depth imbalance ${ob.depthImbalance.toFixed(2)} < ${MIN_DEPTH_IMBALANCE_LONG} (ask wall — bad long)`,
+            });
+            continue;
+          }
+          if (ob.depthImbalance != null && candidateSide === "short" && ob.depthImbalance > MAX_DEPTH_IMBALANCE_SHORT) {
+            recordDecision({
+              ticker, action: "SKIP", horizon: mode, confidence: effectiveConfidence,
+              reason: `L2 depth imbalance ${ob.depthImbalance.toFixed(2)} > ${MAX_DEPTH_IMBALANCE_SHORT} (buyer support — bad short)`,
+            });
+            continue;
+          }
+        }
+      } catch {
+        // Orderbook unavailable — proceed without L2 gate (soft fail-open)
+      }
+
       // Dynamic sizing: linearly interpolate from base position size at minConfidence
       // to the max dollar cap at 80%+ confidence. This maps confidence directly to
       // min→max dollar sizing. When maxPositionDollars is unset, the ceiling is 1.5×
@@ -645,25 +805,38 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
         }
       }
 
-      // Per-mode stop/target (fall back to global if not set)
+      // Per-mode stop/target (fall back to global if not set).
+      // Shorts flip the direction: stop is ABOVE entry, target is BELOW entry.
       const stopPct = mode === "day" ? (cfg.dayStopLossPct ?? cfg.stopLossPct)
         : mode === "swing" ? (cfg.swingStopLossPct ?? cfg.stopLossPct)
         : (cfg.longStopLossPct ?? cfg.stopLossPct);
       const targetPct = mode === "day" ? (cfg.dayTargetGainPct ?? cfg.targetGainPct)
         : mode === "swing" ? (cfg.swingTargetGainPct ?? cfg.targetGainPct)
         : (cfg.longTargetGainPct ?? cfg.targetGainPct);
-      const stopLoss = price * (1 - stopPct / 100);
-      const targetPrice = price * (1 + targetPct / 100);
+      const stopLoss = candidateSide === "short"
+        ? price * (1 + stopPct / 100)   // short stop: above entry
+        : price * (1 - stopPct / 100);  // long stop: below entry
+      const targetPrice = candidateSide === "short"
+        ? price * (1 - targetPct / 100) // short target: below entry
+        : price * (1 + targetPct / 100); // long target: above entry
       const features = buildFeatures(candles, news, earnings, getSectorMomentum(sector));
 
+      // Limit orders: for longs we bid 1 cent above ask (crosses the spread to fill
+      // quickly while protecting against stale quotes); for shorts we offer 1 cent
+      // below bid. Both use GTC for swing/long so they survive the session.
+      const limitPrice = candidateSide === "short"
+        ? parseFloat(((quote.bid ?? price) - 0.01).toFixed(2))
+        : parseFloat(((quote.ask ?? price) + 0.01).toFixed(2));
+
       let orderId: string | null = null;
-      let filledPrice = price;
+      let filledPrice = limitPrice;
       try {
         const order = await placeOrder(cfg.mode, {
           symbol: ticker,
           qty,
-          side: "buy",
-          type: "market",
+          side: candidateSide === "short" ? "sell" : "buy",
+          type: "limit",
+          limitPrice,
           timeInForce: mode === "day" ? "day" : "gtc",
         });
         orderId = order.id;
@@ -674,12 +847,13 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       }
 
       const id = randomUUID();
+      const dbAction = candidateSide === "short" ? "short_sell" : "buy";
       await db.execute(sql`
         INSERT INTO stock_bot_bets
           (id, ticker, sector, action, trading_mode, mode, side, qty, signals, confidence,
            entry_price, stop_loss, target_price, peak_price, notional, alpaca_order_id, created_at)
         VALUES
-          (${id}, ${ticker}, ${sector}, 'buy', ${mode}, ${cfg.mode}, 'long', ${qty},
+          (${id}, ${ticker}, ${sector}, ${dbAction}, ${mode}, ${cfg.mode}, ${candidateSide}, ${qty},
            ${JSON.stringify({
              features,
              combinedDirection: signals.combinedDirection,
@@ -701,6 +875,8 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       entries++;
       modeCounts[mode] = (modeCounts[mode] ?? 0) + 1;
       held.add(heldKey(ticker, mode));
+      // Register for intraday news monitoring (swing/long positions)
+      if (mode !== "day") registerPositionTicker(ticker);
       // Update cycle-level sector tracking so subsequent candidates in this
       // same cycle see an accurate concentration picture.
       const filledNotional = qty * filledPrice;
@@ -708,17 +884,21 @@ async function tryEntries(cfg: StockBotConfig): Promise<number> {
       if (sector) cycleSectorNotional.set(sector, (cycleSectorNotional.get(sector) ?? 0) + filledNotional);
       recordDecision({
         ticker, action: "ENTER", horizon: mode, confidence: effectiveConfidence,
-        reason: research
-          ? `research ${research.horizon} conf ${research.confidence} + technicals @ $${filledPrice.toFixed(2)}`
-          : `technical signal @ $${filledPrice.toFixed(2)}`,
+        reason: candidateSide === "short"
+          ? `SHORT ${research?.horizon ?? mode} conf ${research?.confidence ?? effectiveConfidence} @ $${filledPrice.toFixed(2)}`
+          : research
+            ? `research ${research.horizon} conf ${research.confidence} + technicals @ $${filledPrice.toFixed(2)}`
+            : `technical signal @ $${filledPrice.toFixed(2)}`,
         claudeReasoning: research?.summary ?? null,
       });
       logger.info(
         {
           ticker,
+          side: candidateSide,
           mode,
           qty,
           price: filledPrice.toFixed(2),
+          limitPrice,
           conf: effectiveConfidence,
           baseConf: signals.combinedConfidence,
           research: research ? { confidence: research.confidence, horizon: research.horizon } : null,

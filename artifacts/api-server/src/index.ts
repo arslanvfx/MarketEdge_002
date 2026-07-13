@@ -9,6 +9,7 @@ import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt, lastScanTime } from "./lib/stock/scanner";
+import { runStockNewsCheck } from "./lib/stock/bot";
 import { initResearchFromDB } from "./lib/stock/research";
 import { runBotCycle as runStockBotCycle, initDecisionLogFromDB } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
@@ -425,8 +426,16 @@ async function startStockVertical(): Promise<void> {
       `${Math.round((Date.now() - lastScan) / 60_000)}min`);
   }
 
-  // Auto-scan every 30 min during market hours; off-hours calls are cheap no-ops.
-  setInterval(scan, 30 * 60_000);
+  // Auto-scan every 15 min during market hours (pre-market window included).
+  setInterval(scan, 15 * 60_000);
+
+  // News monitor: poll Alpaca news for open positions every 5 min during market hours.
+  // Results are consumed per-position inside managePositions via consumeNewsAlert().
+  setInterval(() => {
+    runStockNewsCheck().catch((err) =>
+      logger.warn({ err }, "[stock-news] news check failed (non-fatal)"),
+    );
+  }, 5 * 60_000);
 
   setInterval(() => {
     runStockBotCycle().catch((err) =>

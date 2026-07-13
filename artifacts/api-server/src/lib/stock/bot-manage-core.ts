@@ -16,10 +16,16 @@ export const LONG_TRAIL_STOP_PCT = 6;
 
 export interface ExitBetInput {
   tradingMode: TradingMode;
+  /** "long" = bought stock, profits when price rises. "short" = sold short, profits when price falls. Defaults to "long". */
+  side?: "long" | "short";
   entryPrice: number;
   stopLoss: number | null;
   targetPrice: number | null;
-  /** Running peak price persisted by the bot; null until first long tick. */
+  /**
+   * Long positions: running peak price (for trailing stop from high).
+   * Short positions: running trough price (for trailing stop from low).
+   * Null until first tick.
+   */
   peakPrice: number | null;
   createdAt: Date;
 }
@@ -71,7 +77,13 @@ export function maxHoldMs(mode: TradingMode, cfg: StockBotConfig): number {
 
 /**
  * Given a bet and its current market snapshot, returns the exit reason (if any)
- * and whether the long-horizon peak price should be updated.
+ * and whether the peak/trough price should be updated.
+ *
+ * Handles both long and short positions:
+ *   Long:  profits when price rises. Stop below entry, target above entry.
+ *          Trailing stop tracks the running PEAK (highest price reached).
+ *   Short: profits when price falls. Stop above entry, target below entry.
+ *          Trailing stop tracks the running TROUGH (lowest price reached).
  *
  * All inputs are plain values — no I/O, no side effects.
  */
@@ -85,18 +97,35 @@ export function evaluateExitReason({
   research,
 }: EvaluateExitParams): EvaluateExitResult {
   const heldMs = nowMs - bet.createdAt.getTime();
-  const gainPct = bet.entryPrice > 0 ? ((price - bet.entryPrice) / bet.entryPrice) * 100 : 0;
+  const side = bet.side ?? "long";
+
+  // Directional gain: positive = profit for either side
+  const gainPct = bet.entryPrice > 0
+    ? side === "short"
+      ? ((bet.entryPrice - price) / bet.entryPrice) * 100
+      : ((price - bet.entryPrice) / bet.entryPrice) * 100
+    : 0;
+
   let reason: string | null = null;
   let newPeak: number | null = null;
 
   // Research-avoid override: exit swing/long when Claude says stay away.
+  // For shorts: research_avoid means Claude says the stock is recovering — cover.
   if (bet.tradingMode !== "day" && research?.stance === "avoid") {
-    reason = "research_avoid (Claude: stay away/sell)";
+    reason = side === "short"
+      ? "research_cover (Claude: stock recovering — cover short)"
+      : "research_avoid (Claude: stay away/sell)";
   } else if (bet.tradingMode === "day") {
     // Day trades: hard stop/target if set, then forced flat near or after close.
-    if (bet.stopLoss != null && price <= bet.stopLoss) {
+    const hitStop = bet.stopLoss != null && (
+      side === "short" ? price >= bet.stopLoss : price <= bet.stopLoss
+    );
+    const hitTarget = bet.targetPrice != null && (
+      side === "short" ? price <= bet.targetPrice : price >= bet.targetPrice
+    );
+    if (hitStop) {
       reason = "stop_loss";
-    } else if (bet.targetPrice != null && price >= bet.targetPrice) {
+    } else if (hitTarget) {
       reason = "target";
     } else if (nearClose || !marketOpen) {
       reason = "eod_close";
@@ -104,35 +133,61 @@ export function evaluateExitReason({
       reason = "max_hold";
     }
   } else if (bet.tradingMode === "swing") {
-    // Swing: per-mode pct if configured, otherwise fall back to global config.
     const swingStop = cfg.swingStopLossPct ?? cfg.stopLossPct;
     const swingTarget = cfg.swingTargetGainPct ?? cfg.targetGainPct;
+    const hitHardStop = bet.stopLoss != null && (
+      side === "short" ? price >= bet.stopLoss : price <= bet.stopLoss
+    );
     if (gainPct <= -swingStop) {
       reason = "swing_stop";
     } else if (gainPct >= swingTarget) {
       reason = "swing_target";
-    } else if (bet.stopLoss != null && price <= bet.stopLoss) {
+    } else if (hitHardStop) {
       reason = "stop_loss";
     } else if (heldMs >= maxHoldMs("swing", cfg)) {
       reason = "max_hold";
     }
   } else {
-    // Long: trailing stop from per-mode config, falling back to global config.
+    // Long/Short multi-week position: trailing stop.
     const longTrailStop = cfg.longStopLossPct ?? cfg.stopLossPct;
-    const peak = Math.max(bet.peakPrice ?? bet.entryPrice, price);
-    if (peak > (bet.peakPrice ?? 0)) newPeak = peak;
-    const drawdownPct = peak > 0 ? ((peak - price) / peak) * 100 : 0;
 
-    if (research != null && research.confidence < LONG_MIN_RESEARCH_CONF) {
-      reason = `research_downgrade (conf ${research.confidence})`;
-    } else if (cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
-      reason = "long_target";
-    } else if (drawdownPct >= longTrailStop) {
-      reason = "trailing_stop";
-    } else if (bet.stopLoss != null && price <= bet.stopLoss) {
-      reason = "stop_loss";
-    } else if (heldMs >= maxHoldMs("long", cfg)) {
-      reason = "max_hold";
+    if (side === "short") {
+      // Short: trough = lowest price (stored in peakPrice field for simplicity).
+      const trough = Math.min(bet.peakPrice ?? bet.entryPrice, price);
+      if (trough < (bet.peakPrice ?? bet.entryPrice)) newPeak = trough;
+      // Drawdown = how far price has rebounded from the trough
+      const reboundPct = trough > 0 ? ((price - trough) / trough) * 100 : 0;
+      const hitHardStop = bet.stopLoss != null && price >= bet.stopLoss;
+
+      if (research != null && research.confidence < LONG_MIN_RESEARCH_CONF) {
+        reason = `research_downgrade (conf ${research.confidence})`;
+      } else if (cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
+        reason = "long_target";
+      } else if (reboundPct >= longTrailStop) {
+        reason = "trailing_stop";
+      } else if (hitHardStop) {
+        reason = "stop_loss";
+      } else if (heldMs >= maxHoldMs("long", cfg)) {
+        reason = "max_hold";
+      }
+    } else {
+      // Long: peak = highest price.
+      const peak = Math.max(bet.peakPrice ?? bet.entryPrice, price);
+      if (peak > (bet.peakPrice ?? 0)) newPeak = peak;
+      const drawdownPct = peak > 0 ? ((peak - price) / peak) * 100 : 0;
+      const hitHardStop = bet.stopLoss != null && price <= bet.stopLoss;
+
+      if (research != null && research.confidence < LONG_MIN_RESEARCH_CONF) {
+        reason = `research_downgrade (conf ${research.confidence})`;
+      } else if (cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
+        reason = "long_target";
+      } else if (drawdownPct >= longTrailStop) {
+        reason = "trailing_stop";
+      } else if (hitHardStop) {
+        reason = "stop_loss";
+      } else if (heldMs >= maxHoldMs("long", cfg)) {
+        reason = "max_hold";
+      }
     }
   }
 

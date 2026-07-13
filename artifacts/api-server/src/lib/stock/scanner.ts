@@ -123,17 +123,28 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
   try {
     const cfg = getConfig();
 
-    // Market-hours gate: skip *automatic* scans when the market is closed so we
-    // don't burn data-rate limits overnight. Manual scans (force=true) bypass this
-    // so users can browse stocks with last-session prices any time.
+    // Market-hours gate: automatic scans are allowed during regular hours AND the
+    // pre-market window (up to 2.5h before open) so gap movers are researched
+    // before the session starts. Manual scans (force=true) always proceed.
     if (!opts.force) {
       try {
         const clock = await getClock(cfg.mode);
         if (!clock.isOpen) {
-          logger.info("[stock-scanner] skipped — market closed (auto-scan)");
-          scanning = false;
-          progress = { ...IDLE };
-          return { scanned: 0, scored: 0 };
+          const msUntilOpen = clock.nextOpen
+            ? new Date(clock.nextOpen).getTime() - Date.now()
+            : Infinity;
+          const PRE_MARKET_WINDOW_MS = 2.5 * 60 * 60_000;
+          const isPreMarket = msUntilOpen > 0 && msUntilOpen <= PRE_MARKET_WINDOW_MS;
+          if (!isPreMarket) {
+            logger.info("[stock-scanner] skipped — market closed and outside pre-market window");
+            scanning = false;
+            progress = { ...IDLE };
+            return { scanned: 0, scored: 0 };
+          }
+          logger.info(
+            { msUntilOpen: Math.round(msUntilOpen / 60_000) + "min" },
+            "[stock-scanner] pre-market scan — finding gap movers before open",
+          );
         }
       } catch (err) {
         logger.warn({ err }, "[stock-scanner] clock check failed — scanning anyway");

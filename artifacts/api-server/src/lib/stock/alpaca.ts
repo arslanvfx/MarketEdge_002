@@ -386,6 +386,51 @@ export async function closePosition(mode: "paper" | "live", symbol: string): Pro
   }
 }
 
+// ---------- Level 2 orderbook ----------
+
+export interface OrderBookLevel {
+  price: number;
+  size: number;
+}
+
+export interface OrderBook {
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  /** Sum of top-5 bid levels. */
+  depth5BidSize: number;
+  /** Sum of top-5 ask levels. */
+  depth5AskSize: number;
+  /** depth5BidSize / depth5AskSize — >1 = buy-side dominant. Null when asks empty. */
+  depthImbalance: number | null;
+}
+
+/**
+ * Real-time Level 2 orderbook snapshot (IEX feed).
+ * Returns null on any error so callers can degrade gracefully.
+ */
+export async function getOrderBook(symbol: string): Promise<OrderBook | null> {
+  try {
+    const url = `${DATA_BASE}/v2/stocks/${encodeURIComponent(symbol)}/orderbooks/latest?feed=iex`;
+    const data = await req<{ orderbook?: { b?: any[]; a?: any[] } }>(url);
+    const ob = data.orderbook;
+    if (!ob) return null;
+    const bids: OrderBookLevel[] = (ob.b ?? []).slice(0, 10).map((l: any) => ({ price: Number(l.p) || 0, size: Number(l.s) || 0 }));
+    const asks: OrderBookLevel[] = (ob.a ?? []).slice(0, 10).map((l: any) => ({ price: Number(l.p) || 0, size: Number(l.s) || 0 }));
+    const depth5BidSize = bids.slice(0, 5).reduce((s, l) => s + l.size, 0);
+    const depth5AskSize = asks.slice(0, 5).reduce((s, l) => s + l.size, 0);
+    return {
+      bids,
+      asks,
+      depth5BidSize,
+      depth5AskSize,
+      depthImbalance: depth5AskSize > 0 ? depth5BidSize / depth5AskSize : null,
+    };
+  } catch (err) {
+    logger.warn({ err, symbol }, "[alpaca] orderbook fetch failed");
+    return null;
+  }
+}
+
 export interface MarketClock {
   isOpen: boolean;
   nextOpen: string;
