@@ -1551,7 +1551,11 @@ async function _runBotTick(
       if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
         const cvTarget  = S.config.kalshiLockPrice ?? 0.90;
         const cvLow     = cvTarget - 0.02;
-        const cvHigh    = cvTarget + 0.02;
+        // cvHigh must match the entry gate's lockPriceCap (cvTarget+0.03) exactly.
+        // The order limit is set to lockPriceCap so a fill at that price is valid —
+        // using cvTarget+0.02 here caused every limit-price fill to trigger an
+        // immediate sell-back (1¢ window mismatch).
+        const cvHigh    = cvTarget + 0.03;
         // Slot price: how much the entered side cost (YES=avgPrice, NO=1-avgPrice).
         const fillSlot  = direction === "yes" ? result.avgPrice : (1 - result.avgPrice);
         // Zero tolerance: the order limit cap (lockPriceCap) already prevents
