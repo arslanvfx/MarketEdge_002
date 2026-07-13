@@ -92,6 +92,7 @@ export interface BotConfig {
   regularBetTrajectoryEnabled?: boolean;
   maxBetTrajectoryLookbackMinutes?: number;
   maxBetTrajectoryDangerBandPct?: number;
+  maxBetTrajectoryCurrentMarginMinPct?: number;
   maxBetTrajectoryBlockOnCross?: boolean;
 }
 

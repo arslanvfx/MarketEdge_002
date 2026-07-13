@@ -1170,11 +1170,12 @@ export interface BotConfig {
   convictionStabilityMaxBetsPerWindow?: number;         // how many max-bet slots are available per window when the roll hits (default 1)
   maxBetMinWindowEntryMinutes?: number;                 // minutes into window before a max-size bet may fire (0 = disabled, default 0)
   // Trajectory gate: blocks max bets when the underlying price is trending dangerously close to the target
-  maxBetTrajectoryEnabled?: boolean;          // master toggle for max bets (default true)
-  regularBetTrajectoryEnabled?: boolean;      // master toggle for regular bets (default false)
-  maxBetTrajectoryLookbackMinutes?: number;   // how many 1-min candles to look back for velocity (default 3)
-  maxBetTrajectoryDangerBandPct?: number;     // min safe projected margin % from target (default 0.15 = 0.15%)
-  maxBetTrajectoryBlockOnCross?: boolean;     // also block when projection crosses to wrong side of target (default true)
+  maxBetTrajectoryEnabled?: boolean;               // master toggle for max bets (default true)
+  regularBetTrajectoryEnabled?: boolean;           // master toggle for regular bets (default false)
+  maxBetTrajectoryLookbackMinutes?: number;        // how many 1-min candles to look back for velocity (default 3)
+  maxBetTrajectoryDangerBandPct?: number;          // min safe PROJECTED margin % from target (default 0.40%)
+  maxBetTrajectoryCurrentMarginMinPct?: number;    // min safe CURRENT margin % — block immediately if live price is this close to target (default 0.30%)
+  maxBetTrajectoryBlockOnCross?: boolean;          // also block when projection crosses to wrong side of target (default true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1333,7 +1334,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryEnabled: true,
   regularBetTrajectoryEnabled: false,
   maxBetTrajectoryLookbackMinutes: 3,
-  maxBetTrajectoryDangerBandPct: 0.15,
+  maxBetTrajectoryDangerBandPct: 0.40,
+  maxBetTrajectoryCurrentMarginMinPct: 0.30,
   maxBetTrajectoryBlockOnCross: true,
   minHoldMinutes: 4,
   enableMidExit: false,

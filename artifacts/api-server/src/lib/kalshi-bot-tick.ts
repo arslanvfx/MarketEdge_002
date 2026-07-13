@@ -83,9 +83,10 @@ function computeTrajectoryGate(
   clockElapsedS: number,
   config: import("./kalshi-bot-engine").BotConfig,
 ): TrajectoryGateResult {
-  const lookbackMin    = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
-  const dangerBandPct  = config.maxBetTrajectoryDangerBandPct ?? 0.15; // in % points
-  const blockOnCross   = config.maxBetTrajectoryBlockOnCross  !== false;
+  const lookbackMin         = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
+  const dangerBandPct       = config.maxBetTrajectoryDangerBandPct ?? 0.40;       // projected margin floor (% pts)
+  const currentMarginMinPct = config.maxBetTrajectoryCurrentMarginMinPct ?? 0.30; // current margin floor (% pts)
+  const blockOnCross        = config.maxBetTrajectoryBlockOnCross !== false;
 
   const minutesRemaining = Math.max(0, (15 * 60 - clockElapsedS) / 60);
   const currentMarginPct = ((livePrice - kalshiTarget) / kalshiTarget) * 100;
@@ -103,23 +104,26 @@ function computeTrajectoryGate(
   // Take the close from N minutes ago as the baseline
   const actualLookback = Math.min(lookbackMin, candles.length - 1);
   const priceNAgo   = candles[candles.length - 1 - actualLookback].c;
-  const velocity    = (livePrice - priceNAgo) / actualLookback; // $/min
+  const velocity    = (livePrice - priceNAgo) / actualLookback; // $/min (assumes 1-min candles)
 
-  const projectedPrice    = livePrice + velocity * minutesRemaining;
+  const projectedPrice     = livePrice + velocity * minutesRemaining;
   const projectedMarginPct = ((projectedPrice - kalshiTarget) / kalshiTarget) * 100;
 
   // signedMargin: positive = price is on the "winning" side of the target
   // YES bet wins when price closes ABOVE target → positive margin is good
   // NO  bet wins when price closes BELOW target → negative margin is good
+  const signedCurrentMargin   = direction === "yes" ? currentMarginPct  : -currentMarginPct;
   const signedProjectedMargin = direction === "yes" ? projectedMarginPct : -projectedMarginPct;
 
-  const willCross = blockOnCross && signedProjectedMargin < 0;
-  const tooThin   = signedProjectedMargin < dangerBandPct;
+  // Block if: currently already too close to strike, OR trending to cross/thin
+  const alreadyThin = signedCurrentMargin < currentMarginMinPct;
+  const willCross   = blockOnCross && signedProjectedMargin < 0;
+  const tooThin     = signedProjectedMargin < dangerBandPct;
 
-  const blocked = willCross || tooThin;
+  const blocked = alreadyThin || willCross || tooThin;
   const reason: TrajectoryGateResult["reason"] = willCross
     ? "projected_cross"
-    : tooThin
+    : (alreadyThin || tooThin)
     ? "thin_margin"
     : null;
 
@@ -1181,8 +1185,10 @@ async function _runBotTick(
       }
       // Trajectory gate: block max bets when the underlying price is trending
       // dangerously close to (or crossing) the Kalshi target.
+      // Use candles[last].c as the live price — it is patched with the live ticker
+      // by the tracker snap loop and is always fresher than predCache.price.
       if (S.config.maxBetTrajectoryEnabled !== false && kalshiTarget != null && candles.length >= 2) {
-        const trajLiveP = getCachedPrediction(sym)?.price ?? candles[candles.length - 1].c;
+        const trajLiveP = candles[candles.length - 1].c;
         const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, clockElapsedS, S.config);
         coinTrajectoryCache.set(sym, traj); // overwrite with precise direction
         if (traj.blocked) {
