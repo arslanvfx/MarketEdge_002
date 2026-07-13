@@ -93,19 +93,15 @@ export interface BotConfig {
   maxBetTrajectoryLookbackMinutes?: number;
   maxBetTrajectoryDangerBandPct?: number;
   maxBetTrajectoryCurrentMarginMinPct?: number;
-  maxBetTrajectoryCurrentMarginMinATR?: number;
-  maxBetTrajectoryDangerBandATR?: number;
-  maxBetTrajectoryAdverseVelocityOnly?: boolean;
-  maxBetTrajectoryTimeWeightEnabled?: boolean;
+  maxBetTrajectoryFinalMinutes?: number;
   maxBetTrajectoryBlockOnCross?: boolean;
-  regularBetTrajectoryDangerBandPct?: number;
-  regularBetTrajectoryDangerBandATR?: number;
+  maxBetTrajectoryMinVelocityATR?: number;
 }
 
 export interface TrajectoryGateResult {
   symbol: string;
   blocked: boolean;
-  reason: "projected_cross" | "thin_margin" | "insufficient_data" | null;
+  reason: "projected_cross" | "gate_inactive" | "insufficient_data" | null;
   velocity: number;
   projectedPrice: number;
   currentMarginPct: number;

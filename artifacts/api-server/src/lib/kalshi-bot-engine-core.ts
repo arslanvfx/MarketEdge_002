@@ -1173,16 +1173,18 @@ export interface BotConfig {
   maxBetTrajectoryEnabled?: boolean;               // master toggle for max bets (default true)
   regularBetTrajectoryEnabled?: boolean;           // master toggle for regular bets (default false)
   maxBetTrajectoryLookbackMinutes?: number;        // how many 1-min candles to look back for velocity (default 3)
-  maxBetTrajectoryDangerBandPct?: number;          // min safe PROJECTED margin % floor (default 0.40%) — actual threshold = max(this, atrPct × dangerBandATR)
-  maxBetTrajectoryCurrentMarginMinPct?: number;    // min safe CURRENT margin % floor (default 0.30%) — actual threshold = max(this, atrPct × currentMarginMinATR)
-  maxBetTrajectoryCurrentMarginMinATR?: number;    // current margin must be ≥ N × ATR (default 1.5) — makes threshold coin-relative
-  maxBetTrajectoryDangerBandATR?: number;          // projected margin must be ≥ N × ATR (default 2.0) — makes threshold coin-relative
-  maxBetTrajectoryAdverseVelocityOnly?: boolean;   // alreadyThin only fires when velocity is toward strike (default true)
-  maxBetTrajectoryTimeWeightEnabled?: boolean;     // loosen projected floor early in window, tighten late (default true)
-  maxBetTrajectoryBlockOnCross?: boolean;          // also block when projection crosses to wrong side of target (default true)
-  // Regular bet trajectory gate — much looser than max bets (regular bets are smaller risk)
-  regularBetTrajectoryDangerBandPct?: number;      // projected margin floor for regular bets (default 0.10%)
-  regularBetTrajectoryDangerBandATR?: number;      // projected margin ATR× for regular bets (default 0.5×)
+  maxBetTrajectoryFinalMinutes?: number;           // gate only activates in final N minutes of window (default 5)
+  maxBetTrajectoryBlockOnCross?: boolean;          // block when momentum projects price to cross the target (default true)
+  maxBetTrajectoryMinVelocityATR?: number;         // min velocity to trigger gate, in ATR/min units (default 0 = any projected cross)
+  // Legacy fields kept for DB compat — no longer used in gate logic
+  maxBetTrajectoryCurrentMarginMinPct?: number;
+  maxBetTrajectoryCurrentMarginMinATR?: number;
+  maxBetTrajectoryDangerBandPct?: number;
+  maxBetTrajectoryDangerBandATR?: number;
+  maxBetTrajectoryAdverseVelocityOnly?: boolean;
+  maxBetTrajectoryTimeWeightEnabled?: boolean;
+  regularBetTrajectoryDangerBandPct?: number;
+  regularBetTrajectoryDangerBandATR?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,15 +1343,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryEnabled: true,
   regularBetTrajectoryEnabled: false,
   maxBetTrajectoryLookbackMinutes: 3,
-  maxBetTrajectoryDangerBandPct: 0.40,
-  maxBetTrajectoryCurrentMarginMinPct: 0.30,
-  maxBetTrajectoryCurrentMarginMinATR: 1.5,
-  maxBetTrajectoryDangerBandATR: 2.0,
-  maxBetTrajectoryAdverseVelocityOnly: true,
-  maxBetTrajectoryTimeWeightEnabled: true,
+  maxBetTrajectoryFinalMinutes: 5,
   maxBetTrajectoryBlockOnCross: true,
-  regularBetTrajectoryDangerBandPct: 0.10,
-  regularBetTrajectoryDangerBandATR: 0.5,
+  maxBetTrajectoryMinVelocityATR: 0,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,

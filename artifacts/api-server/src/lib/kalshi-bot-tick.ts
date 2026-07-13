@@ -82,120 +82,76 @@ function computeTrajectoryGate(
   direction: "yes" | "no",
   clockElapsedS: number,
   config: import("./kalshi-bot-engine").BotConfig,
-  betType: "max" | "regular" = "max",
+  _betType: "max" | "regular" = "max",
 ): TrajectoryGateResult {
-  const lookbackMin    = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
-  const blockOnCross   = config.maxBetTrajectoryBlockOnCross !== false;
-
   const minutesRemaining = Math.max(0, (15 * 60 - clockElapsedS) / 60);
   const currentMarginPct = ((livePrice - kalshiTarget) / kalshiTarget) * 100;
 
-  // ── Per-bet-type threshold config ────────────────────────────────────────
-  // Max bets: full three-check system with strict thresholds (large risk).
-  // Regular bets: only willCross + a much looser projected band (small risk).
-  // Regular bets skip the alreadyThin check entirely — proximity to strike is
-  // normal for a regular bet and the risk doesn't justify blocking on it.
-  const isRegular = betType === "regular";
-  const currentMarginMinPctFloor = config.maxBetTrajectoryCurrentMarginMinPct ?? 0.30;
-  const currentMarginMinATR      = config.maxBetTrajectoryCurrentMarginMinATR ?? 1.5;
-  const dangerBandPctFloor = isRegular
-    ? (config.regularBetTrajectoryDangerBandPct ?? 0.10)
-    : (config.maxBetTrajectoryDangerBandPct     ?? 0.40);
-  const dangerBandATR = isRegular
-    ? (config.regularBetTrajectoryDangerBandATR ?? 0.5)
-    : (config.maxBetTrajectoryDangerBandATR     ?? 2.0);
+  // Shared inactive/early return shape
+  const inactive = (reason: TrajectoryGateResult["reason"]): TrajectoryGateResult => ({
+    symbol: sym, blocked: false, reason,
+    velocity: 0, projectedPrice: livePrice,
+    currentMarginPct, projectedMarginPct: currentMarginPct,
+    minutesRemaining, direction, computedAt: Date.now(),
+    atrPct: 0, effectiveCurrentMarginMinPct: 0, effectiveDangerBandPct: 0,
+    timeWeight: 1, adverseVelocity: false,
+  });
 
-  // Need at least 2 candles to compute a slope
-  if (candles.length < 2) {
-    return {
-      symbol: sym, blocked: false, reason: "insufficient_data",
-      velocity: 0, projectedPrice: livePrice,
-      currentMarginPct, projectedMarginPct: currentMarginPct,
-      minutesRemaining, direction, computedAt: Date.now(),
-      atrPct: 0,
-      effectiveCurrentMarginMinPct: currentMarginMinPctFloor,
-      effectiveDangerBandPct: dangerBandPctFloor,
-      timeWeight: 1, adverseVelocity: false,
-    };
-  }
+  // ── Gate is only meaningful in the final N minutes ────────────────────────
+  // Early in the window a linear velocity projection is too noisy to act on.
+  // The gate stands silent until the window is nearly over, then checks whether
+  // the current freefall momentum is carrying the price through the strike.
+  const finalMinutes = config.maxBetTrajectoryFinalMinutes ?? 5;
+  if (minutesRemaining > finalMinutes) return inactive("gate_inactive");
+  if (candles.length < 2)             return inactive("insufficient_data");
 
-  // ── ATR-derived per-coin thresholds ──────────────────────────────────────
-  // True Range = max(H-L, |H-prevC|, |L-prevC|) averaged over last 5 candles.
-  // Expressing ATR as % of the target normalises across coins:
-  //   BTC ATR≈$150 at $77k → atrPct≈0.19%; XRP ATR≈$0.02 at $2.50 → atrPct≈0.80%.
-  // Threshold = max(fixed floor, atrPct × multiplier).
+  // ── ATR: coin-relative volatility unit for the velocity significance check ─
   const atrLookback = Math.min(5, candles.length - 1);
   let trSum = 0;
   for (let i = candles.length - atrLookback; i < candles.length; i++) {
-    const h = candles[i].h;
-    const l = candles[i].l;
-    const prevC = candles[i - 1].c;
+    const h = candles[i].h, l = candles[i].l, prevC = candles[i - 1].c;
     trSum += Math.max(h - l, Math.abs(h - prevC), Math.abs(l - prevC));
   }
   const atr    = trSum / atrLookback;
   const atrPct = (atr / kalshiTarget) * 100;
 
-  const effectiveCurrentMarginMinPct = Math.max(currentMarginMinPctFloor, atrPct * currentMarginMinATR);
-
-  // ── Time-weight: loosen projected floor early, tighten near window end ───
-  // With 10 min remaining a projection is inherently uncertain — a 0.40% gap
-  // can easily widen to 1.5% before expiry.  With 2 min left the projection
-  // is nearly deterministic, so the full floor is warranted.
-  const timeWeightEnabled = config.maxBetTrajectoryTimeWeightEnabled !== false;
-  const timeWeight = (!timeWeightEnabled || isRegular) ? 1
-    : minutesRemaining > 8 ? 0.50
-    : minutesRemaining > 4 ? 0.75
-    : 1.0;
-
-  const effectiveDangerBandPct = Math.max(dangerBandPctFloor, atrPct * dangerBandATR) * timeWeight;
-
-  // Take the close from N minutes ago as the baseline for velocity
+  // ── Velocity: slope over the last N 1-min candles ────────────────────────
+  const lookbackMin    = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
   const actualLookback = Math.min(lookbackMin, candles.length - 1);
-  const priceNAgo = candles[candles.length - 1 - actualLookback].c;
-  const velocity  = (livePrice - priceNAgo) / actualLookback; // $/min (1-min candles)
+  const priceNAgo      = candles[candles.length - 1 - actualLookback].c;
+  const velocity       = (livePrice - priceNAgo) / actualLookback; // $/min
 
   const projectedPrice     = livePrice + velocity * minutesRemaining;
   const projectedMarginPct = ((projectedPrice - kalshiTarget) / kalshiTarget) * 100;
 
-  // signedMargin/signedVelocity: positive = on the winning side / heading in winning direction
-  // YES wins above target → rising price is good; NO wins below → falling is good
-  const signedCurrentMargin   = direction === "yes" ? currentMarginPct   : -currentMarginPct;
-  const signedProjectedMargin = direction === "yes" ? projectedMarginPct : -projectedMarginPct;
+  // Signed so that positive = good direction for this bet:
+  //   YES wins above target → rising is good; NO wins below → falling is good
   const signedVelocity        = direction === "yes" ? velocity            : -velocity;
+  const signedProjectedMargin = direction === "yes" ? projectedMarginPct : -projectedMarginPct;
 
-  // adverseVelocity: price is moving TOWARD the strike (bad direction)
+  // adverseVelocity: price is moving TOWARD (or through) the strike
   const adverseVelocity = signedVelocity <= 0;
 
-  // ── Three gate checks ────────────────────────────────────────────────────
-  // alreadyThin: current price is dangerously close to the strike.
-  //   For max bets only (regular bets skip this — proximity is normal).
-  //   When adverseVelocityOnly is on (default), only fires if velocity is also
-  //   heading toward the strike — a coin that's thin but running AWAY is fine.
-  const adverseVelocityOnly = config.maxBetTrajectoryAdverseVelocityOnly !== false;
-  const alreadyThin = !isRegular
-    && signedCurrentMargin < effectiveCurrentMarginMinPct
-    && (!adverseVelocityOnly || adverseVelocity);
+  // ── Single gate: freefall projected to cross the target ───────────────────
+  // Block only when:
+  //   1. velocity is adverse (heading toward the strike), AND
+  //   2. at the current rate, price is projected to close on the WRONG side.
+  // Optionally: velocity must be significant (≥ minVelocityATR × ATR/min) to
+  // avoid triggering on negligible drift rather than a real freefall.
+  const blockOnCross  = config.maxBetTrajectoryBlockOnCross !== false;
+  const minVelATR     = config.maxBetTrajectoryMinVelocityATR ?? 0;
+  const velInATR      = atr > 0 ? Math.abs(velocity) / atr : 0;
+  const velSignificant = minVelATR === 0 || velInATR >= minVelATR;
 
-  // willCross: linear projection expects price on the losing side at expiry.
-  const willCross = blockOnCross && signedProjectedMargin < 0;
-
-  // tooThin: projected margin at expiry is inside the danger band.
-  const tooThin = signedProjectedMargin < effectiveDangerBandPct;
-
-  const blocked = alreadyThin || willCross || tooThin;
-  const reason: TrajectoryGateResult["reason"] = willCross
-    ? "projected_cross"
-    : (alreadyThin || tooThin)
-    ? "thin_margin"
-    : null;
+  const willCross = blockOnCross && adverseVelocity && velSignificant && signedProjectedMargin < 0;
 
   return {
-    symbol: sym, blocked, reason,
+    symbol: sym, blocked: willCross, reason: willCross ? "projected_cross" : null,
     velocity, projectedPrice,
     currentMarginPct, projectedMarginPct,
     minutesRemaining, direction, computedAt: Date.now(),
-    atrPct, effectiveCurrentMarginMinPct, effectiveDangerBandPct,
-    timeWeight, adverseVelocity,
+    atrPct, effectiveCurrentMarginMinPct: 0, effectiveDangerBandPct: 0,
+    timeWeight: 1, adverseVelocity,
   };
 }
 

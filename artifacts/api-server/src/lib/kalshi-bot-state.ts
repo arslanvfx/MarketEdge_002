@@ -215,19 +215,19 @@ export const coinStabilityCache = new Map<string, CoinStabilityResult>();
 export interface TrajectoryGateResult {
   symbol: string;
   blocked: boolean;
-  reason: "projected_cross" | "thin_margin" | "insufficient_data" | null;
-  velocity: number;                      // $/min — positive = rising, negative = falling
-  projectedPrice: number;                // estimated underlying price at window close
-  currentMarginPct: number;              // (livePrice - target) / target * 100
-  projectedMarginPct: number;            // (projectedPrice - target) / target * 100
+  reason: "projected_cross" | "gate_inactive" | "insufficient_data" | null;
+  velocity: number;                // $/min — positive = rising, negative = falling
+  projectedPrice: number;          // estimated underlying price at window close
+  currentMarginPct: number;        // (livePrice - target) / target * 100
+  projectedMarginPct: number;      // (projectedPrice - target) / target * 100
   minutesRemaining: number;
   direction: "yes" | "no";
   computedAt: number;
-  atrPct: number;                        // recent 5-candle ATR as % of target — coin volatility proxy
-  effectiveCurrentMarginMinPct: number;  // max(fixedFloor, atrPct × multiplier) — actual threshold used
-  effectiveDangerBandPct: number;        // max(fixedFloor, atrPct × multiplier) × timeWeight — actual threshold used
-  timeWeight: number;                    // 0.5–1.0 — loosens projected floor early in window, tightens near end
-  adverseVelocity: boolean;              // true when velocity is heading toward strike (alreadyThin only fires then)
+  atrPct: number;                  // recent 5-candle ATR as % of target — coin volatility proxy
+  effectiveCurrentMarginMinPct: number; // legacy — always 0 in simplified gate
+  effectiveDangerBandPct: number;       // legacy — always 0 in simplified gate
+  timeWeight: number;              // legacy — always 1 in simplified gate
+  adverseVelocity: boolean;        // true when velocity is heading toward (or past) the strike
 }
 export const coinTrajectoryCache = new Map<string, TrajectoryGateResult>();
 export const coinConvictionWinRates = new Map<string, number>();

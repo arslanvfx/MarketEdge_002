@@ -957,8 +957,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     Trajectory Gate
                   </span>
                   <p className="text-[10px] text-muted-foreground/60 -mt-1">
-                    ATR-adaptive per-coin thresholds. <strong className="text-violet-300">Max bets</strong>: proximity check (only fires when velocity is toward strike) + time-weighted projected band. <strong className="text-violet-300">Regular bets</strong>: only projected-cross + loose band — proximity never blocks them.
-                    Max cur floor: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryCurrentMarginMinPct ?? 0.30).toFixed(2)}%</span> · <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryCurrentMarginMinATR ?? 1.5).toFixed(1)}×ATR</span> · Max proj floor: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryDangerBandPct ?? 0.40).toFixed(2)}%</span> · <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryDangerBandATR ?? 2.0).toFixed(1)}×ATR</span> · Reg proj floor: <span className="font-mono text-violet-300">{(merged.regularBetTrajectoryDangerBandPct ?? 0.10).toFixed(2)}%</span> · <span className="font-mono text-violet-300">{(merged.regularBetTrajectoryDangerBandATR ?? 0.5).toFixed(1)}×ATR</span>
+                    Silent for most of the window. Activates only in the <strong className="text-violet-300">final {merged.maxBetTrajectoryFinalMinutes ?? 5} minutes</strong> and blocks a max bet only when the price is in a freefall with enough momentum to cross the Kalshi strike before close. Does not block based on proximity — only on direction and projected crossing.
+                    Lookback: <span className="font-mono text-violet-300">{merged.maxBetTrajectoryLookbackMinutes ?? 3} min</span>
                   </p>
                   <div className="flex gap-4">
                     <label className="flex items-center gap-2 cursor-pointer select-none">

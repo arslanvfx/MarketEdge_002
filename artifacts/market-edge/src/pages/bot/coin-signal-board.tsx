@@ -299,8 +299,20 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {traj == null || traj.reason === "insufficient_data" || traj.velocity == null || traj.projectedMarginPct == null ? (
+                    {traj == null || traj.reason === "insufficient_data" ? (
                       <span className="text-muted-foreground/40 font-mono">—</span>
+                    ) : traj.reason === "gate_inactive" ? (
+                      <div className="flex flex-col gap-0.5">
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border bg-slate-500/10 text-slate-400 border-slate-500/20"
+                          title={`Gate activates in final ${(+traj.minutesRemaining).toFixed(1)} min (${(+traj.minutesRemaining - (traj.minutesRemaining > 0 ? traj.minutesRemaining : 0)).toFixed(0)} min away)`}
+                        >
+                          ⏳ Watching
+                        </span>
+                        <span className="text-[10px] text-muted-foreground/50 font-mono tabular-nums">
+                          {(+traj.minutesRemaining).toFixed(1)} min left
+                        </span>
+                      </div>
                     ) : (
                       <div className="flex flex-col gap-0.5">
                         <span
@@ -309,26 +321,21 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                               ? "bg-red-500/15 text-red-400 border-red-500/25"
                               : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
                           }`}
-                          title={traj.blocked ? `Blocked: ${traj.reason}` : "Trajectory safe"}
+                          title={traj.blocked ? "Freefall projected to cross strike — max bet blocked" : "No freefall detected — max bet allowed"}
                         >
-                          {traj.blocked
-                            ? traj.reason === "projected_cross" ? "⚠ Cross" : "⚠ Thin"
-                            : "✓ Safe"
-                          }
+                          {traj.blocked ? "⚠ Freefall" : "✓ Safe"}
                         </span>
                         <span
                           className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
                           title={[
                             `vel: ${traj.velocity >= 0 ? "+" : ""}${(+traj.velocity).toFixed(2)}/min (${traj.adverseVelocity ? "toward strike ⚠" : "away ✓"})`,
-                            `cur: ${(+traj.currentMarginPct).toFixed(3)}% (need ≥${traj.effectiveCurrentMarginMinPct != null ? (+traj.effectiveCurrentMarginMinPct).toFixed(3) : "?"}%)`,
-                            `proj: ${(+traj.projectedMarginPct).toFixed(3)}% (need ≥${traj.effectiveDangerBandPct != null ? (+traj.effectiveDangerBandPct).toFixed(3) : "?"}%)`,
+                            `proj close: ${(+traj.projectedMarginPct).toFixed(3)}% vs strike`,
                             `ATR: ${traj.atrPct != null ? (+traj.atrPct).toFixed(3) : "?"}%`,
-                            `time-weight: ${traj.timeWeight != null ? (+traj.timeWeight).toFixed(2) : "?"}×`,
-                            `${traj.minutesRemaining != null ? (+traj.minutesRemaining).toFixed(1) : "?"} min left`,
+                            `${(+traj.minutesRemaining).toFixed(1)} min left`,
                           ].join(" · ")}
                         >
-                          {traj.velocity >= 0 ? "+" : ""}{(+traj.velocity).toFixed(1)}/m · {(+traj.projectedMarginPct).toFixed(2)}%
-                          {traj.atrPct != null && <span className="text-violet-400/70"> · {(+traj.atrPct).toFixed(2)}%ATR</span>}
+                          {traj.velocity >= 0 ? "+" : ""}{(+traj.velocity).toFixed(1)}/m · proj {(+traj.projectedMarginPct).toFixed(2)}%
+                          {traj.atrPct != null && traj.atrPct > 0 && <span className="text-violet-400/70"> · {(+traj.atrPct).toFixed(2)}%ATR</span>}
                           {traj.adverseVelocity && <span className="text-orange-400/70"> ↓</span>}
                         </span>
                       </div>
