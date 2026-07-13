@@ -384,22 +384,36 @@ async function _runBotTick(
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
-  // Bypassed only when yesPrice hits a true extreme (≥ 0.92 or ≤ 0.08) —
-  // at those prices the market has decided early and waiting is worse than acting.
+  // Bypassed when yesPrice is in the conviction zone (or beyond it).
+  //
+  // Non-conviction mode: bypass at ≥92¢ or ≤8¢ (true market extremes).
+  //
+  // Conviction mode: the entry zone IS 88–92¢ (YES bets) or 8–12¢ (NO bets).
+  // The old ≥92¢/≤8¢ threshold only covered the outer edges of those ranges,
+  // blocking valid conviction entries at e.g. 10¢ or 90¢ for the full 9 minutes.
+  // Use the actual conviction window boundaries so any price inside (or beyond)
+  // the zone bypasses the lockout immediately.
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
     if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
-      const isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
+      let isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
+      if (!isExtreme && S.config.decisionMode === "conviction" && yesPrice !== null) {
+        const lockTarget = S.config.kalshiLockPrice ?? 0.90;
+        // YES zone: [lockTarget-0.02, lockTarget+0.02]  e.g. [0.88, 0.92]
+        // NO  zone: [1-(lockTarget+0.02), 1-(lockTarget-0.02)]  e.g. [0.08, 0.12]
+        // Bypass whenever price is anywhere inside or beyond either zone.
+        isExtreme = yesPrice >= (lockTarget - 0.02) || yesPrice <= (1 - (lockTarget - 0.02));
+      }
       if (!isExtreme) {
         logger.debug(
           { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-          "[kalshi-bot] early-window lockout — waiting for time gate or extreme price (≥92¢/≤8¢)",
+          "[kalshi-bot] early-window lockout — waiting for time gate or extreme price",
         );
         return;
       }
       logger.info(
         { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-        "[kalshi-bot] early-window lockout bypassed — extreme price override",
+        "[kalshi-bot] early-window lockout bypassed — conviction zone override",
       );
     }
   }
