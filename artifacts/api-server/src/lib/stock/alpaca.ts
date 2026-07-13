@@ -41,13 +41,22 @@ function tradingBase(mode: "paper" | "live"): string {
   return mode === "live" ? TRADING_LIVE : TRADING_PAPER;
 }
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { ...init, headers: { ...headers(), ...(init?.headers ?? {}) } });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Alpaca ${res.status} ${res.statusText}: ${body.slice(0, 300)}`);
+async function req<T>(url: string, init?: RequestInit, retries = 3): Promise<T> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(url, { ...init, headers: { ...headers(), ...(init?.headers ?? {}) } });
+    if (res.status === 429 && attempt < retries) {
+      // Exponential backoff on rate limit: 1s, 2s, 4s
+      const delay = 1000 * Math.pow(2, attempt);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Alpaca ${res.status} ${res.statusText}: ${body.slice(0, 300)}`);
+    }
+    return (await res.json()) as T;
   }
-  return (await res.json()) as T;
+  throw new Error("Alpaca request failed after retries");
 }
 
 // ---------- Market data ----------
@@ -384,12 +393,19 @@ export interface MarketClock {
   timestamp: string;
 }
 
+// Cache clock results for 5 minutes to prevent 429s from killing auto-start/stop.
+const clockCache = new Map<string, { result: MarketClock; expiresAt: number }>();
+
 export async function getClock(mode: "paper" | "live"): Promise<MarketClock> {
+  const cached = clockCache.get(mode);
+  if (cached && Date.now() < cached.expiresAt) return cached.result;
   const data = await req<any>(`${tradingBase(mode)}/v2/clock`);
-  return {
+  const result: MarketClock = {
     isOpen: !!data.is_open,
     nextOpen: data.next_open,
     nextClose: data.next_close,
     timestamp: data.timestamp,
   };
+  clockCache.set(mode, { result, expiresAt: Date.now() + 5 * 60_000 });
+  return result;
 }

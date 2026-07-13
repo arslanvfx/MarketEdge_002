@@ -29,9 +29,10 @@ import { getConfig } from "./config";
 import { runResearchPass, getResearchProgress, type ResearchTechContext } from "./research";
 import type { Candle, Direction, ScannerRow, Sentiment } from "./types";
 
-const DEEP_SCORE_LIMIT = 150; // Tier 1 → Tier 2 cut
+const DEEP_SCORE_LIMIT = 75;  // Tier 1 → Tier 2 cut (reduced to stay within Alpaca free-tier limits)
 const RESEARCH_LIMIT = 10;    // Tier 2 → Tier 3 cut (top 10 only — AI cost control)
-const SCORE_BATCH = 5;        // concurrent deep-score requests
+const SCORE_BATCH = 2;        // concurrent deep-score requests (reduced from 5 to avoid 429 storms)
+const SCORE_BATCH_DELAY_MS = 400; // pause between batches to respect rate limits
 const SNAPSHOT_CHUNK = 500;   // symbols per snapshots call
 
 let lastScanAt = 0;
@@ -194,6 +195,7 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
     const scoredRows: ScannerRow[] = [];
 
     for (let i = 0; i < shortlistArr.length; i += SCORE_BATCH) {
+      if (i > 0) await new Promise((r) => setTimeout(r, SCORE_BATCH_DELAY_MS));
       const batch = shortlistArr.slice(i, i + SCORE_BATCH);
       await Promise.all(batch.map(async (ticker) => {
         progress.currentTicker = ticker;
