@@ -5,7 +5,7 @@ import React from "react";
 import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode } from "./types";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 
-const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
+const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC"];
 
 interface StabilityPreviewProps {
   minER: number;
@@ -1917,7 +1917,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
               {/* ── Per-Coin Overrides ── */}
               {(() => {
-                const COINS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "HYPE"];
+                const COINS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "HYPE", "NEAR", "ZEC"];
                 const overrides = (merged.coinOverrides ?? {}) as Record<string, { paused?: boolean; maxBetSize?: number }>;
                 const globalMax = merged.maxBetSize ?? 2;
                 return (
