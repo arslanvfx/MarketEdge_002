@@ -111,7 +111,7 @@ export async function closePosition(
             action: "sell",
             count: pos.contractCount,
             type: "limit",
-            timeInForce: "good_till_cancelled",
+            timeInForce: "gtc",
           });
           // Use confirmed fill price if the GTC happened to fill immediately; otherwise
           // record 0.01 as a conservative placeholder (will be corrected by evalClosedBets).

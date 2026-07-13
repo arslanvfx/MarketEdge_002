@@ -266,7 +266,8 @@ export interface PlaceOrderParams {
   //                          cancel the rest. Used for entries: a partial fill is
   //                          accepted and the position is tracked by actual fill count.
   // Defaults to "fill_or_kill" so existing callers (buyYes/buyNo/sellYes/sellNo) are unchanged.
-  timeInForce?: "fill_or_kill" | "immediate_or_cancel" | "good_till_cancelled";
+  // Kalshi v2 API uses abbreviated strings: "gtc" not "good_till_cancelled".
+  timeInForce?: "fill_or_kill" | "immediate_or_cancel" | "good_till_cancelled" | "gtc";
   yesPrice?: number; // reference YES price as a fraction (0-1); used to bound the marketable-limit price
   // Minimum payout multiple (1/cost). When > 1, the marketable-limit price is
   // capped so a contract can NEVER fill at a cost whose payout multiple falls
@@ -414,7 +415,9 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     side: bookSide, // BookSide: "bid" | "ask"
     count: String(params.count), // FixedPointCount string
     price, // required in v2 (YES-side)
-    time_in_force: params.timeInForce ?? "fill_or_kill",
+    // Kalshi v2 API only accepts abbreviated TIF strings.
+    // Map legacy long-form values defensively.
+    time_in_force: (params.timeInForce === "good_till_cancelled" ? "gtc" : (params.timeInForce ?? "fill_or_kill")),
     self_trade_prevention_type: "taker_at_cross",
   };
 
