@@ -53,7 +53,7 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  WINDOW_ENTRY_BUFFER_S, coinStabilityCache,
+  WINDOW_ENTRY_BUFFER_S, coinStabilityCache, coinTrajectoryCache,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState, type CoinStabilityResult,
 } from "./kalshi-bot-state";
@@ -506,6 +506,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
     coinStabilityCache.clear();
+    coinTrajectoryCache.clear();
     maxBetCandidateForWindow.clear(); // stale window keys no longer relevant
     // Global max-bet token: roll ONCE per window to decide whether any bet this
     // window is eligible for max-bet size.  The first qualifying coin claims it.

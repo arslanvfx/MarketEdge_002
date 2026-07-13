@@ -1169,6 +1169,11 @@ export interface BotConfig {
   convictionStabilityMaxBetProbability?: number;        // 0–1: probability that a stable coin gets max bet size on each entry (default 0.25)
   convictionStabilityMaxBetsPerWindow?: number;         // how many max-bet slots are available per window when the roll hits (default 1)
   maxBetMinWindowEntryMinutes?: number;                 // minutes into window before a max-size bet may fire (0 = disabled, default 0)
+  // Trajectory gate: blocks max bets when the underlying price is trending dangerously close to the target
+  maxBetTrajectoryEnabled?: boolean;          // master toggle (default true)
+  maxBetTrajectoryLookbackMinutes?: number;   // how many 1-min candles to look back for velocity (default 3)
+  maxBetTrajectoryDangerBandPct?: number;     // min safe projected margin % from target (default 0.15 = 0.15%)
+  maxBetTrajectoryBlockOnCross?: boolean;     // also block when projection crosses to wrong side of target (default true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,6 +1329,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionStabilityMinMLConf: 52,
   convictionStabilityMaxBetProbability: 0.25,
   convictionStabilityMaxBetsPerWindow: 1,
+  maxBetTrajectoryEnabled: true,
+  maxBetTrajectoryLookbackMinutes: 3,
+  maxBetTrajectoryDangerBandPct: 0.15,
+  maxBetTrajectoryBlockOnCross: true,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,

@@ -211,6 +211,20 @@ export interface CoinStabilityResult {
   computedAt: number;
 }
 export const coinStabilityCache = new Map<string, CoinStabilityResult>();
+
+export interface TrajectoryGateResult {
+  symbol: string;
+  blocked: boolean;
+  reason: "projected_cross" | "thin_margin" | "insufficient_data" | null;
+  velocity: number;           // $/min — positive = rising, negative = falling
+  projectedPrice: number;     // estimated underlying price at window close
+  currentMarginPct: number;   // (livePrice - target) / target * 100
+  projectedMarginPct: number; // (projectedPrice - target) / target * 100
+  minutesRemaining: number;
+  direction: "yes" | "no";
+  computedAt: number;
+}
+export const coinTrajectoryCache = new Map<string, TrajectoryGateResult>();
 export const coinConvictionWinRates = new Map<string, number>();
 export const pausedCoins = new Map<string, number>();
 export const paperCoinDailyLoss = new Map<string, number>();

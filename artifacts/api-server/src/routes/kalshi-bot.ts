@@ -35,7 +35,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
-import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache } from "../lib/kalshi-bot-state";
+import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -481,6 +481,7 @@ function pipelineStatusHandler(_req: any, res: any) {
       minConfidence,
       decisionMode,
       coinStability: Object.fromEntries(coinStabilityCache),
+      coinTrajectory: Object.fromEntries(coinTrajectoryCache),
       boosts: { mlWeight: ML_WEIGHT, claudeWeight: CLAUDE_WEIGHT, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
       adaptiveFilters: {
         directionalPenaltyYesPp,
@@ -530,7 +531,7 @@ router.get("/crypto/bot/status", (_req, res) => {
       minWindows: allML.length > 0 ? Math.min(...allML.map(s => s.windows)) : 0,
       minRequired: 30,
     };
-    res.json({ ...getBotState(), mlStatus, coinStability: Object.fromEntries(coinStabilityCache) });
+    res.json({ ...getBotState(), mlStatus, coinStability: Object.fromEntries(coinStabilityCache), coinTrajectory: Object.fromEntries(coinTrajectoryCache) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

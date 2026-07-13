@@ -300,6 +300,7 @@ export default function BotDashboard() {
     minConfidence?: number;
     decisionMode?: string;
     coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
+    coinTrajectory?: Record<string, import("./bot/types").TrajectoryGateResult>;
   }>({
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
@@ -621,11 +622,15 @@ export default function BotDashboard() {
             windowKey={pipelineStatusData.currentWindowKey ?? null}
             decisionMode={pipelineStatusData.decisionMode ?? null}
             coinStability={pipelineStatusData.coinStability}
+            coinTrajectory={pipelineStatusData.coinTrajectory}
             stabilityConfig={{
               minER:     status?.config?.convictionStabilityMinER,
               maxOsc:    status?.config?.convictionStabilityMaxOsc,
               maxVolPct: status?.config?.convictionStabilityMaxVolPct,
               minMLConf: status?.config?.convictionStabilityMinMLConf,
+            }}
+            trajectoryConfig={{
+              dangerBandPct: status?.config?.maxBetTrajectoryDangerBandPct,
             }}
             maxBetMinWindowEntryMinutes={status?.config?.maxBetMinWindowEntryMinutes}
           />

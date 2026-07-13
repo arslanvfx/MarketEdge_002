@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from "react";
 import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity, Zap, TrendingUp, Clock } from "lucide-react";
-import type { CoinSignals, CoinStabilityResult } from "./types";
+import type { CoinSignals, CoinStabilityResult, TrajectoryGateResult } from "./types";
 import { wkToEstRange, ET_LABEL } from "./utils";
 
 interface StabilityThresholds {
@@ -10,13 +10,19 @@ interface StabilityThresholds {
   minMLConf?: number;
 }
 
+interface TrajectoryThresholds {
+  dangerBandPct?: number;
+}
+
 interface CoinSignalBoardProps {
   liveSignals: Record<string, CoinSignals>;
   kalshiTargets: Record<string, number | null>;
   windowKey?: string | null;
   decisionMode?: string | null;
   coinStability?: Record<string, CoinStabilityResult>;
+  coinTrajectory?: Record<string, TrajectoryGateResult>;
   stabilityConfig?: StabilityThresholds | null;
+  trajectoryConfig?: TrajectoryThresholds | null;
   maxBetMinWindowEntryMinutes?: number | null;
 }
 
@@ -63,7 +69,7 @@ function MetricPill({ value, ok }: { value: string; ok: boolean }) {
 
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
 
-export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, stabilityConfig, maxBetMinWindowEntryMinutes }: CoinSignalBoardProps) {
+export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, coinTrajectory, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes }: CoinSignalBoardProps) {
   const isConviction = decisionMode === "conviction";
   const pinnedStrikes = useRef<Record<string, number>>({});
   for (const [sym, val] of Object.entries(kalshiTargets)) {
@@ -79,8 +85,10 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
         pinnedStrikes={pinnedStrikes.current}
         liveSignals={liveSignals}
         coinStability={coinStability}
+        coinTrajectory={coinTrajectory}
         windowKey={windowKey}
         stabilityConfig={stabilityConfig}
+        trajectoryConfig={trajectoryConfig}
         maxBetMinWindowEntryMinutes={maxBetMinWindowEntryMinutes}
       />
     );
@@ -145,8 +153,10 @@ interface MarketConditionsBoardProps {
   pinnedStrikes: Record<string, number>;
   liveSignals: Record<string, CoinSignals>;
   coinStability?: Record<string, CoinStabilityResult>;
+  coinTrajectory?: Record<string, TrajectoryGateResult>;
   windowKey?: string | null;
   stabilityConfig?: StabilityThresholds | null;
+  trajectoryConfig?: TrajectoryThresholds | null;
   maxBetMinWindowEntryMinutes?: number | null;
 }
 
@@ -159,11 +169,12 @@ function useNow(intervalMs: number): number {
   return now;
 }
 
-function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, windowKey, stabilityConfig, maxBetMinWindowEntryMinutes }: MarketConditionsBoardProps) {
-  const minER     = stabilityConfig?.minER     ?? 0.30;
-  const maxOsc    = stabilityConfig?.maxOsc    ?? 8;
-  const maxVolPct = stabilityConfig?.maxVolPct ?? 3.0;
-  const minMLConf = stabilityConfig?.minMLConf ?? 52;
+function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, coinTrajectory, windowKey, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes }: MarketConditionsBoardProps) {
+  const minER      = stabilityConfig?.minER     ?? 0.30;
+  const maxOsc     = stabilityConfig?.maxOsc    ?? 8;
+  const maxVolPct  = stabilityConfig?.maxVolPct ?? 3.0;
+  const minMLConf  = stabilityConfig?.minMLConf ?? 52;
+  const dangerBand = trajectoryConfig?.dangerBandPct ?? 0.15;
 
   const now = useNow(10_000);
   const maxBetGateS = (maxBetMinWindowEntryMinutes ?? 0) * 60;
@@ -175,6 +186,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
 
   const hasStability = coinStability && Object.keys(coinStability).length > 0;
   const stableCount = hasStability ? syms.filter(s => coinStability![s]?.stable === true).length : 0;
+  const hasTrajectory = coinTrajectory && Object.keys(coinTrajectory).length > 0;
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -212,12 +224,18 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                 <span className="inline-flex items-center gap-1"><Cpu className="w-3 h-3" />ML</span>
               </th>
               <th className="text-left px-3 py-2 font-medium">Bet Size</th>
+              {hasTrajectory && (
+                <th className="text-left px-3 py-2 font-medium" title={`Trajectory gate: blocks max bets when projected margin < ${dangerBand}% from target`}>
+                  <span className="inline-flex items-center gap-1"><TrendingUp className="w-3 h-3" />Trajectory</span>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
             {syms.map((sym) => {
               const s = liveSignals[sym];
               const stab = coinStability?.[sym] ?? null;
+              const traj = coinTrajectory?.[sym] ?? null;
               const strike = pinnedStrikes[sym] ?? null;
               const isStale = stab !== null && windowKey != null && stab.windowKey !== windowKey;
               const isStable = stab?.stable === true;
@@ -281,6 +299,38 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                       <span className="text-[10px] font-semibold text-amber-400">Regular</span>
                     )}
                   </td>
+
+                  {hasTrajectory && (
+                    <td className="px-3 py-2.5">
+                      {traj == null ? (
+                        <span className="text-muted-foreground/40 font-mono">—</span>
+                      ) : traj.reason === "insufficient_data" ? (
+                        <span className="text-muted-foreground/40 text-[10px]">no data</span>
+                      ) : (
+                        <div className="flex flex-col gap-0.5">
+                          <span
+                            className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${
+                              traj.blocked
+                                ? "bg-red-500/15 text-red-400 border-red-500/25"
+                                : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                            }`}
+                            title={traj.blocked ? `Blocked: ${traj.reason}` : "Trajectory safe"}
+                          >
+                            {traj.blocked
+                              ? traj.reason === "projected_cross" ? "⚠ Cross" : "⚠ Thin"
+                              : "✓ Safe"
+                            }
+                          </span>
+                          <span
+                            className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
+                            title={`Velocity: ${traj.velocity >= 0 ? "+" : ""}${traj.velocity.toFixed(1)}/min · Projected margin: ${traj.projectedMarginPct.toFixed(2)}% · ${traj.minutesRemaining.toFixed(1)} min left`}
+                          >
+                            {traj.velocity >= 0 ? "+" : ""}{traj.velocity.toFixed(1)}/m · {traj.projectedMarginPct.toFixed(2)}%
+                          </span>
+                        </div>
+                      )}
+                    </td>
+                  )}
                 </tr>
               );
             })}

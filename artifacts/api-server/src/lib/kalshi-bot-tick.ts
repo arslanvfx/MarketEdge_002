@@ -43,8 +43,8 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, maxBetWindowToken, maxBetCandidateForWindow,
-  type CoinStabilityResult,
+  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
+  type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -66,6 +66,70 @@ import { writeBotEntryTimingSnapshot } from "./kalshi-bot-entry-timing";
 // Deduplication Set for bot entry timing snapshots (cleared implicitly as
 // window keys rotate — each key encodes coin+windowKey+minuteMark+mode).
 const entryTimingWritten = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// Trajectory Gate
+// Computes price velocity from recent 1-min candles and projects where the
+// underlying price will be at window close.  If the projection is too close
+// to — or crosses — the Kalshi target, the max bet is blocked.
+// Pure function: no I/O, no side-effects.
+// ---------------------------------------------------------------------------
+function computeTrajectoryGate(
+  sym: string,
+  candles: Array<{ c: number; t: number }>,
+  livePrice: number,
+  kalshiTarget: number,
+  direction: "yes" | "no",
+  clockElapsedS: number,
+  config: import("./kalshi-bot-engine").BotConfig,
+): TrajectoryGateResult {
+  const lookbackMin    = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
+  const dangerBandPct  = config.maxBetTrajectoryDangerBandPct ?? 0.15; // in % points
+  const blockOnCross   = config.maxBetTrajectoryBlockOnCross  !== false;
+
+  const minutesRemaining = Math.max(0, (15 * 60 - clockElapsedS) / 60);
+  const currentMarginPct = ((livePrice - kalshiTarget) / kalshiTarget) * 100;
+
+  // Need at least 2 candles to compute a slope
+  if (candles.length < 2) {
+    return {
+      symbol: sym, blocked: false, reason: "insufficient_data",
+      velocity: 0, projectedPrice: livePrice,
+      currentMarginPct, projectedMarginPct: currentMarginPct,
+      minutesRemaining, direction, computedAt: Date.now(),
+    };
+  }
+
+  // Take the close from N minutes ago as the baseline
+  const actualLookback = Math.min(lookbackMin, candles.length - 1);
+  const priceNAgo   = candles[candles.length - 1 - actualLookback].c;
+  const velocity    = (livePrice - priceNAgo) / actualLookback; // $/min
+
+  const projectedPrice    = livePrice + velocity * minutesRemaining;
+  const projectedMarginPct = ((projectedPrice - kalshiTarget) / kalshiTarget) * 100;
+
+  // signedMargin: positive = price is on the "winning" side of the target
+  // YES bet wins when price closes ABOVE target → positive margin is good
+  // NO  bet wins when price closes BELOW target → negative margin is good
+  const signedProjectedMargin = direction === "yes" ? projectedMarginPct : -projectedMarginPct;
+
+  const willCross = blockOnCross && signedProjectedMargin < 0;
+  const tooThin   = signedProjectedMargin < dangerBandPct;
+
+  const blocked = willCross || tooThin;
+  const reason: TrajectoryGateResult["reason"] = willCross
+    ? "projected_cross"
+    : tooThin
+    ? "thin_margin"
+    : null;
+
+  return {
+    symbol: sym, blocked, reason,
+    velocity, projectedPrice,
+    currentMarginPct, projectedMarginPct,
+    minutesRemaining, direction, computedAt: Date.now(),
+  };
+}
 
 // Minimum cashout value (per contract) required to allow any mid-window exit.
 // At $0 sell value there is no benefit over holding to expiry — the position
@@ -985,6 +1049,23 @@ async function _runBotTick(
   // false this returns S.config.betSize unchanged (legacy).
   // Per-coin maxBetSize override: further caps the bet for this specific coin.
   const perCoinMaxBet = S.config.coinOverrides?.[sym]?.maxBetSize;
+
+  // Trajectory gate: update cache every tick so the UI always shows fresh data,
+  // even when no bet is being placed.  Direction is estimated from yesPrice vs
+  // lockPrice; the IIFE below re-runs with the precise direction before blocking.
+  if (S.config.decisionMode === "conviction" && kalshiTarget != null && candles.length >= 2) {
+    const trajLivePrice = getCachedPrediction(sym)?.price ?? (candles.length > 0 ? candles[candles.length - 1].c : null);
+    if (trajLivePrice != null) {
+      const _wkMsTraj = new Date(windowKey).getTime();
+      const _clockSTraj = isNaN(_wkMsTraj) ? 0 : (Date.now() - _wkMsTraj) / 1000;
+      const lockP = S.config.kalshiLockPrice ?? 0.88;
+      const guessDir: "yes" | "no" = yesPrice != null && yesPrice >= lockP ? "yes"
+                                   : yesPrice != null && yesPrice <= (1 - lockP) ? "no"
+                                   : yesPrice != null && yesPrice > 0.5 ? "yes" : "no";
+      coinTrajectoryCache.set(sym, computeTrajectoryGate(sym, candles, trajLivePrice, kalshiTarget, guessDir, _clockSTraj, S.config));
+    }
+  }
+
   // Conviction stability gate: classify the coin as stable or volatile using the
   // stat model indicators + ML confidence.  Stable → max bet size; volatile → normal size.
   // When convictionStabilityEnabled is false, falls back to the legacy random roll.
@@ -1061,6 +1142,25 @@ async function _runBotTick(
         );
         return null;
       }
+      // Trajectory gate: block max bets when the underlying price is trending
+      // dangerously close to (or crossing) the Kalshi target.
+      if (S.config.maxBetTrajectoryEnabled !== false && kalshiTarget != null && candles.length >= 2) {
+        const trajLiveP = getCachedPrediction(sym)?.price ?? candles[candles.length - 1].c;
+        const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, clockElapsedS, S.config);
+        coinTrajectoryCache.set(sym, traj); // overwrite with precise direction
+        if (traj.blocked) {
+          logger.info(
+            { sym, reason: traj.reason, velocity: traj.velocity.toFixed(2), currentMarginPct: traj.currentMarginPct.toFixed(3), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1), direction },
+            "[kalshi-bot] trajectory gate — BLOCKED: max bet skipped (price momentum too close to target)",
+          );
+          return null;
+        }
+        logger.info(
+          { sym, velocity: traj.velocity.toFixed(2), currentMarginPct: traj.currentMarginPct.toFixed(3), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1) },
+          "[kalshi-bot] trajectory gate — SAFE: projected margin ok",
+        );
+      }
+
       // Pre-selection guard: only the best-scoring stable coin (ranked by ER,
       // osc, ML) can claim the max-bet token.  The loop pre-computes the winner
       // before dispatching parallel ticks so the result is deterministic.

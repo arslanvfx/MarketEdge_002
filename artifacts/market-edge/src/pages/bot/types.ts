@@ -88,6 +88,23 @@ export interface BotConfig {
   maxBetMinWindowEntryMinutes?: number;
   allowLateEntries?: boolean;
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
+  maxBetTrajectoryEnabled?: boolean;
+  maxBetTrajectoryLookbackMinutes?: number;
+  maxBetTrajectoryDangerBandPct?: number;
+  maxBetTrajectoryBlockOnCross?: boolean;
+}
+
+export interface TrajectoryGateResult {
+  symbol: string;
+  blocked: boolean;
+  reason: "projected_cross" | "thin_margin" | "insufficient_data" | null;
+  velocity: number;
+  projectedPrice: number;
+  currentMarginPct: number;
+  projectedMarginPct: number;
+  minutesRemaining: number;
+  direction: "yes" | "no";
+  computedAt: number;
 }
 
 export interface LogicModeStats {
