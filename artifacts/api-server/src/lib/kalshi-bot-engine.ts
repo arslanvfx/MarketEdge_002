@@ -534,12 +534,19 @@ export function makeBotDecision(
 
   // Compute ROI for the chosen side when yesPrice is available.
   // yesPrice is in 0-1 dollar format (e.g. 0.52 for 52¢); net return = payout / stake.
+  //
+  // CONVICTION MODE: ROI gate is bypassed entirely.  Entry is driven by the
+  // Kalshi yesPrice crossing the lock-price zone (88–92 ¢), not by expected
+  // value — the zone itself IS the edge signal.  Applying the ROI gate here
+  // would incorrectly block conviction bets when the market has strongly priced
+  // in a direction (yesPrice ≈ 0.001 gives NO ROI ≈ 0.1 %) even though the bot
+  // is correctly targeting the opposite zone.
   if (inner.action !== "SKIP" && yesPrice !== null && yesPrice > 0 && yesPrice < 1) {
     const roi = calcROI(inner.action, yesPrice);
     // Always record roiPct so it shows in bet signals even on SKIPs below.
     inner.signals = { ...inner.signals, roiPct: parseFloat(roi.toFixed(2)) };
 
-    if (roi < MIN_ROI_PCT) {
+    if (roi < MIN_ROI_PCT && config.decisionMode !== "conviction") {
       return {
         action: "SKIP",
         confidence: inner.confidence,
