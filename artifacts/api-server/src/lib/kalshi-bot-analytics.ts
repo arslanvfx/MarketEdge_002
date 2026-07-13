@@ -19,7 +19,7 @@ export async function getBotHistory(limit = 20, filterMode?: BotMode, resetAt?: 
     // Only return terminal outcomes for the recent table — bet entries and
     // intermediate marks (e.g. exit_failed) are excluded for fidelity.
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
-    const resetClause = (resetAt && filterMode === "live")
+    const resetClause = resetAt
       ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
       : sql``;
     return await db
@@ -48,7 +48,7 @@ export interface TrendPoint {
 export async function getBotTrend(limit = 50, filterMode?: BotMode, resetAt?: string | null): Promise<TrendPoint[]> {
   try {
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
-    const resetClause = (resetAt && filterMode === "live")
+    const resetClause = resetAt
       ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
       : sql``;
     const rows = await db
@@ -91,7 +91,7 @@ export async function getBotTrend(limit = 50, filterMode?: BotMode, resetAt?: st
 export async function getBotAllHistory(limit = 100, offset = 0, filterMode?: BotMode, resetAt?: string | null): Promise<unknown[]> {
   try {
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
-    const resetClause = (resetAt && filterMode === "live")
+    const resetClause = resetAt
       ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
       : sql``;
     return await db
@@ -138,7 +138,7 @@ export async function getBotStats(filterSymbol?: string, filterMode?: BotMode, r
     if (filterMode) {
       whereClause = sql`${whereClause} AND ${kalshiBotBetsTable.mode} = ${filterMode}`;
     }
-    if (resetAt && filterMode === "live") {
+    if (resetAt) {
       whereClause = sql`${whereClause} AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`;
     }
 
@@ -238,9 +238,12 @@ export interface LogicModeStats {
  * avgConfidence is computed from the statConfidence/claudeConfidence fields
  * stored in the signals JSONB snapshot at bet-placement time.
  */
-export async function getBotLogicPerformance(filterMode?: BotMode): Promise<LogicModeStats[]> {
+export async function getBotLogicPerformance(filterMode?: BotMode, resetAt?: string | null): Promise<LogicModeStats[]> {
   try {
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
+    const resetClause = resetAt
+      ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
+      : sql``;
     const rows = await db
       .select({
         decisionMode: kalshiBotBetsTable.decisionMode,
@@ -251,7 +254,7 @@ export async function getBotLogicPerformance(filterMode?: BotMode): Promise<Logi
       .from(kalshiBotBetsTable)
       .where(
         sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
-          AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}`,
+          AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}${resetClause}`,
       );
 
     const modeMap = new Map<string, { bets: number; wins: number; losses: number; pnl: number; confSum: number; confCount: number }>();

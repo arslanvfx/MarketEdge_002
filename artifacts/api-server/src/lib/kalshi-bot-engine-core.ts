@@ -1006,11 +1006,13 @@ export interface BotConfig {
   paperStartingBalance: number;  // (default 100)
   paperWinReturnRate: number;    // (default 0.5)
   paperBalanceResetAt: string | null; // (default null = count all bets)
-  // liveStatsResetAt: ISO timestamp for a visual-only stats reset in live mode.
-  // All display queries (win/loss %, profit, history, performance report) filter
-  // to bets placed *after* this timestamp.  Zero rows are deleted; the underlying
-  // data is fully preserved for ML training and auto-tune learning.
-  liveStatsResetAt: string | null; // (default null = show all live bets)
+  // liveStatsResetAt / paperStatsResetAt: ISO timestamps for a visual-only stats
+  // reset.  All display queries (win/loss %, profit, history, performance report,
+  // logic-mode performance) filter to bets placed *after* this timestamp.  Zero
+  // rows are deleted; the underlying data is fully preserved for ML training and
+  // auto-tune learning.
+  liveStatsResetAt: string | null;  // (default null = show all live bets)
+  paperStatsResetAt: string | null; // (default null = show all paper bets)
   // Hard cap on the dollar amount of any single bet.  If the computed betAmount
   // would exceed this value the entire trade is aborted and an error is logged.
   // Acts as a safety rail so a misconfigured betSize can never send an outsized
@@ -1305,6 +1307,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   paperWinReturnRate: 0.50,
   paperBalanceResetAt: null,
   liveStatsResetAt: null,
+  paperStatsResetAt: null,
   // Safety cap: hard-abort any bet whose computed dollar cost exceeds this.
   // Conservative default; raise deliberately when going live.
   maxBetSize: 2.00,

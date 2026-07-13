@@ -607,6 +607,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperStartingBalance,
     paperWinReturnRate,
     paperBalanceResetAt,
+    paperStatsResetAt,
     maxBetSize,
     minAccountBalance,
     maxTotalExposure,
@@ -689,6 +690,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
+    paperStatsResetAt?: string | null;
     maxBetSize?: number;
     minAccountBalance?: number;
     maxTotalExposure?: number;
@@ -833,6 +835,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if ("paperBalanceResetAt" in req.body) {
     partial.paperBalanceResetAt = typeof paperBalanceResetAt === "string" ? paperBalanceResetAt : null;
+  }
+  if ("paperStatsResetAt" in req.body) {
+    partial.paperStatsResetAt = typeof paperStatsResetAt === "string" ? paperStatsResetAt : null;
   }
   // Live-mode safety guards
   if (typeof maxBetSize === "number" && maxBetSize >= 0.5 && maxBetSize <= 100) partial.maxBetSize = maxBetSize;
@@ -1029,7 +1034,8 @@ router.get("/crypto/bot/history", async (req, res) => {
   const rawMode = req.query.mode;
   const filterMode: BotMode =
     rawMode === "paper" || rawMode === "live" ? rawMode : getBotState().mode;
-  const resetAt = filterMode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
+  const cfg = getBotState().config;
+  const resetAt = filterMode === "live" ? (cfg.liveStatsResetAt ?? null) : filterMode === "paper" ? (cfg.paperStatsResetAt ?? null) : null;
   try {
     const history = await getBotHistory(limit, filterMode, resetAt);
     res.json({ history });
@@ -1044,7 +1050,8 @@ router.get("/crypto/bot/all-history", async (req, res) => {
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
   const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
-  const resetAt = mode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
+  const cfg2 = getBotState().config;
+  const resetAt = mode === "live" ? (cfg2.liveStatsResetAt ?? null) : mode === "paper" ? (cfg2.paperStatsResetAt ?? null) : null;
   try {
     const history = await getBotAllHistory(limit, offset, mode, resetAt);
     res.json({ history });
@@ -1060,7 +1067,8 @@ router.get("/crypto/bot/stats", async (req, res) => {
     ? req.query.symbol.trim()
     : undefined;
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
-  const resetAt = mode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
+  const cfg3 = getBotState().config;
+  const resetAt = mode === "live" ? (cfg3.liveStatsResetAt ?? null) : mode === "paper" ? (cfg3.paperStatsResetAt ?? null) : null;
   try {
     const stats = await getBotStats(symbol, mode, resetAt);
     res.json(stats);
@@ -1074,7 +1082,8 @@ router.get("/crypto/bot/stats", async (req, res) => {
 router.get("/crypto/bot/trend", async (req, res) => {
   const limit = Math.min(100, Math.max(2, parseInt(String(req.query.limit ?? "50"), 10) || 50));
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
-  const resetAt = mode === "live" ? (getBotState().config.liveStatsResetAt ?? null) : null;
+  const cfg4 = getBotState().config;
+  const resetAt = mode === "live" ? (cfg4.liveStatsResetAt ?? null) : mode === "paper" ? (cfg4.paperStatsResetAt ?? null) : null;
   try {
     const points = await getBotTrend(limit, mode, resetAt);
     res.json(points);
@@ -1143,7 +1152,9 @@ router.get("/crypto/bot/logic-performance", async (req, res) => {
     const rawMode = req.query.mode;
     const filterMode: "paper" | "live" | undefined =
       rawMode === "paper" || rawMode === "live" ? rawMode : undefined;
-    const modes = await getBotLogicPerformance(filterMode);
+    const cfgL = getBotState().config;
+    const resetAt = filterMode === "live" ? (cfgL.liveStatsResetAt ?? null) : filterMode === "paper" ? (cfgL.paperStatsResetAt ?? null) : null;
+    const modes = await getBotLogicPerformance(filterMode, resetAt);
     res.json({ modes });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -1487,13 +1498,17 @@ router.get("/crypto/bot/time-analytics", async (_req, res) => {
 });
 
 // POST /crypto/bot/reset-live-stats — set liveStatsResetAt to NOW() so all
-// visual stats (win/loss %, profit, history, performance report) start fresh
-// from this moment.  Zero rows are deleted; the underlying data is fully
-// preserved for ML training and auto-tune learning.
+// visual stats (win/loss %, profit, history, performance report, logic-mode
+// performance) start fresh from this moment.  Zero rows are deleted; the
+// underlying data is fully preserved for ML training, auto-tune learning, and
+// time analytics (best days / hours).  Also wipes all in-memory guard state:
+// coin streaks, pauses, circuit-breaker, penalty maps, and direction blocks.
 router.post("/crypto/bot/reset-live-stats", requireAuth, async (_req, res) => {
   try {
-    const { config } = await updateBotConfig({ liveStatsResetAt: new Date().toISOString() });
-    res.json({ ok: true, liveStatsResetAt: config.liveStatsResetAt });
+    const now = new Date().toISOString();
+    const { config } = await updateBotConfig({ liveStatsResetAt: now, paperStatsResetAt: now });
+    const resetResult = resetWindowConditions();
+    res.json({ ok: true, liveStatsResetAt: config.liveStatsResetAt, paperStatsResetAt: config.paperStatsResetAt, guardReset: resetResult });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

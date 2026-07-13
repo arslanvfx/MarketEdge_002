@@ -37,6 +37,7 @@ export interface BotConfig {
   paperWinReturnRate: number;
   paperBalanceResetAt: string | null;
   liveStatsResetAt: string | null;
+  paperStatsResetAt: string | null;
   maxBetSize: number;
   minAccountBalance: number;
   maxTotalExposure: number;
