@@ -60,7 +60,7 @@ import {
 import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition, persistBetRecord } from "./kalshi-bot-close";
-import { runBotTickForCoin } from "./kalshi-bot-tick";
+import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-tick";
 import {
   triggerWindowPipeline, runPipelineRecheck, registerPipelineCompleteCallback,
   type PipelineResult,
@@ -601,6 +601,10 @@ export async function runBotLoopTick(): Promise<void> {
       .filter(c => KALSHI_SERIES[c.symbol])
       .map(c => fetchKalshiTarget(c.symbol).catch(() => null)),
   );
+
+  // Refresh trajectory gate data for all coins — runs every tick from window open
+  // so the UI and gate always have current velocity/projection data.
+  refreshTrajectoryForAllCoins();
 
   // Window-open prefetch + stability orchestration.
   // On a new window: clear per-window caches and immediately void-launch the

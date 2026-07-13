@@ -131,6 +131,42 @@ function computeTrajectoryGate(
   };
 }
 
+// ---------------------------------------------------------------------------
+// refreshTrajectoryForAllCoins
+// Runs every main-loop tick (before per-coin bot logic) so the UI and gate
+// always have fresh trajectory data from the very first tick of the window.
+// No I/O — reads only in-memory caches.
+// ---------------------------------------------------------------------------
+export function refreshTrajectoryForAllCoins(): void {
+  const wk = currentWindowKey();
+  const wkMs = wk ? new Date(wk + ":00Z").getTime() : NaN;
+  const clockS = isNaN(wkMs) ? 0 : (Date.now() - wkMs) / 1000;
+  const lockP = S.config.kalshiLockPrice ?? 0.88;
+
+  for (const coin of CRYPTO_COINS) {
+    const sym = coin.symbol;
+    if (!KALSHI_SERIES[sym]) continue;
+
+    const pred    = getCachedPrediction(sym);
+    const candles = pred?.candles ?? [];
+    if (candles.length < 2) continue;
+
+    const livePrice = pred?.price ?? candles[candles.length - 1].c;
+    const target    = recentKalshiTargets.get(sym) ?? null;
+    if (target == null) continue;
+
+    const kd       = getKalshiCachedData(sym);
+    const yesAsk   = kd?.yesAsk ?? null;
+    const yesBid   = kd?.yesBid ?? null;
+    const yesPrice = yesAsk != null ? yesAsk : yesBid != null ? 1 - yesBid : null;
+    const direction: "yes" | "no" = yesPrice != null && yesPrice >= lockP ? "yes"
+                                  : yesPrice != null && yesPrice <= (1 - lockP) ? "no"
+                                  : yesPrice != null && yesPrice > 0.5 ? "yes" : "no";
+
+    coinTrajectoryCache.set(sym, computeTrajectoryGate(sym, candles, livePrice, target, direction, clockS, S.config));
+  }
+}
+
 // Minimum cashout value (per contract) required to allow any mid-window exit.
 // At $0 sell value there is no benefit over holding to expiry — the position
 // might still recover. Only exit when there is meaningful value to capture.
