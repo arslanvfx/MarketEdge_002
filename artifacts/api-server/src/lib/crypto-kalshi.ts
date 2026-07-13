@@ -14,6 +14,8 @@ export const KALSHI_SERIES: Record<string, string> = {
   HYPE: "KXHYPE15M",
   BNB:  "KXBNB15M",
   DOGE: "KXDOGE15M",
+  NEAR: "KXNEAR15M",
+  ZEC:  "KXZEC15M",
 };
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.

@@ -16,13 +16,15 @@ export const COINGECKO = "https://api.coingecko.com/api/v3";
 export const UA = "MarketEdge/1.0 (crypto-predictor)";
 
 export const GECKO_ID: Record<string, string> = {
-  BTC: "bitcoin",
-  ETH: "ethereum",
-  SOL: "solana",
-  XRP: "ripple",
+  BTC:  "bitcoin",
+  ETH:  "ethereum",
+  SOL:  "solana",
+  XRP:  "ripple",
   DOGE: "dogecoin",
   HYPE: "hyperliquid",
   BNB:  "binancecoin",
+  NEAR: "near",
+  ZEC:  "zcash",
 };
 
 export interface CoinDef {
@@ -39,6 +41,8 @@ export const CRYPTO_COINS: CoinDef[] = [
   { symbol: "HYPE", product: "HYPE-USD", name: "Hyperliquid" },
   { symbol: "BNB",  product: "BNB-USD",  name: "BNB" },
   { symbol: "DOGE", product: "DOGE-USD", name: "Dogecoin" },
+  { symbol: "NEAR", product: "NEAR-USD", name: "NEAR Protocol" },
+  { symbol: "ZEC",  product: "ZEC-USD",  name: "Zcash" },
 ];
 
 export interface Prediction {
