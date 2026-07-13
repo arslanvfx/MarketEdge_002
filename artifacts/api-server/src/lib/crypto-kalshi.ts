@@ -164,22 +164,58 @@ export async function fetchOrderbookPrices(
       return null;
     }
     const body = (await resp.json()) as {
+      // Legacy format (integer cents): orderbook.yes / orderbook.no
       orderbook?: { yes?: [number, number][]; no?: [number, number][] };
+      // Current format (string dollars, ascending price):
+      // orderbook_fp.yes_dollars / orderbook_fp.no_dollars
+      orderbook_fp?: {
+        yes_dollars?: [string, string][];
+        no_dollars?: [string, string][];
+      };
     };
+
+    // ── Current format: orderbook_fp (dollars, ASCENDING price order) ──────
+    // Each side lists resting BIDS for that side.  The best bid is the
+    // HIGHEST price → the LAST element of the ascending array.
+    //   best YES bid = last yes_dollars price
+    //   best YES ask = 1 − last no_dollars price (best NO bid complement)
+    const fp = body.orderbook_fp;
+    if (fp && (fp.yes_dollars?.length || fp.no_dollars?.length)) {
+      const yesArr = fp.yes_dollars ?? [];
+      const noArr  = fp.no_dollars  ?? [];
+      const bestYesBid = yesArr.length > 0 ? Number(yesArr[yesArr.length - 1][0]) : null;
+      const bestNoBid  = noArr.length  > 0 ? Number(noArr[noArr.length - 1][0])  : null;
+      const yesBid = bestYesBid != null && Number.isFinite(bestYesBid) ? bestYesBid : null;
+      const yesAsk = bestNoBid  != null && Number.isFinite(bestNoBid)  ? 1 - bestNoBid : null;
+      if (yesBid == null && yesAsk == null) {
+        logger.warn({ ticker }, "[kalshi] fetchOrderbookPrices: orderbook_fp present but empty book");
+        return null;
+      }
+      return { yesBid, yesAsk };
+    }
+
+    // ── Legacy format: orderbook (integer cents 0-100) ──────────────────────
     const ob = body.orderbook;
     const yesBids = ob?.yes ?? [];
     const noBids  = ob?.no  ?? [];
-    // Orderbook prices are in cents (0-100).
-    //   best YES bid = highest price a buyer will pay for YES
-    //   best YES ask = 100 - highest price a buyer will pay for NO
-    const bestYesBidCents = yesBids.length > 0 ? yesBids[0][0] : null;
-    const bestYesAskCents = noBids.length  > 0 ? (100 - noBids[0][0]) : null;
-    if (bestYesBidCents == null && bestYesAskCents == null) return null;
+    const bestYesBidCents = yesBids.length > 0 ? yesBids[yesBids.length - 1][0] : null;
+    const bestNoBidCents  = noBids.length  > 0 ? noBids[noBids.length - 1][0]  : null;
+    if (bestYesBidCents == null && bestNoBidCents == null) {
+      logger.warn(
+        { ticker, keys: Object.keys(body) },
+        "[kalshi] fetchOrderbookPrices: no parsable orderbook in response",
+      );
+      return null;
+    }
     return {
       yesBid: bestYesBidCents != null ? bestYesBidCents / 100 : null,
-      yesAsk: bestYesAskCents != null ? bestYesAskCents / 100 : null,
+      yesAsk: bestNoBidCents  != null ? (100 - bestNoBidCents) / 100 : null,
     };
-  } catch {
+  } catch (err) {
+    logger.warn(
+      { ticker, err: err instanceof Error ? err.message : String(err) },
+      "[kalshi] fetchOrderbookPrices: request failed",
+    );
     return null;
   }
 }

@@ -56,6 +56,7 @@ import {
   assertSetBotModeAllowed,
   resolveStartupMode,
   applyStartupModeRestore,
+  applyLockPrice090Migration,
   DEFAULT_BOT_CONFIG,
   computeDynamicBetSize,
   computeKellyMultiplier,
@@ -109,6 +110,8 @@ export {
   assertSetBotModeAllowed,
   resolveStartupMode,
   applyStartupModeRestore,
+  // One-time conviction lock-price migration (pure, DB-free, unit-testable).
+  applyLockPrice090Migration,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,
@@ -446,7 +449,7 @@ function _makeBotDecisionInner(
     // The slider sets a single target (e.g. 0.90).  We auto-apply ±2 ¢ so the
     // entry window is always [target−0.02, target+0.02].
     // Slider at 90¢ → window [88¢–92¢]; slider at 91¢ → window [89¢–93¢].
-    const cvTarget  = config.kalshiLockPrice ?? 0.91;
+    const cvTarget  = config.kalshiLockPrice ?? 0.90;
     // Pull the live orderbook ask/bid from the Kalshi cache so the conviction
     // trigger uses what you actually PAY (the ask), not the mid-price.
     // Without this, a wide NO spread can push the mid to the lock threshold
@@ -536,7 +539,7 @@ export function makeBotDecision(
   // yesPrice is in 0-1 dollar format (e.g. 0.52 for 52¢); net return = payout / stake.
   //
   // CONVICTION MODE: ROI gate is bypassed entirely.  Entry is driven by the
-  // Kalshi yesPrice crossing the lock-price zone (89–93 ¢), not by expected
+  // Kalshi yesPrice crossing the lock-price zone (88–92 ¢), not by expected
   // value — the zone itself IS the edge signal.  Applying the ROI gate here
   // would incorrectly block conviction bets when the market has strongly priced
   // in a direction (yesPrice ≈ 0.001 gives NO ROI ≈ 0.1 %) even though the bot

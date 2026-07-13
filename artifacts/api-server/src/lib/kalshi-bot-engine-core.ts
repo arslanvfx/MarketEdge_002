@@ -953,8 +953,9 @@ export interface BotConfig {
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
   minWindowEntryMinutes?: number;     // hard lockout: no bets in the first N minutes of a window; bypassed when yesPrice ≥ 0.92 or ≤ 0.08; 0/undefined = disabled
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
-  kalshiLockPrice?: number;           // conviction only: entry target (default 0.91; ±2¢ zone derived around it)
-  lockPrice091Migrated?: boolean;     // one-time startup migration marker: 0.90 → 0.91 target bump applied
+  kalshiLockPrice?: number;           // conviction only: entry target (default 0.90; ±2¢ zone derived around it → [88¢, 92¢])
+  lockPrice091Migrated?: boolean;     // legacy one-time migration marker: 0.90 → 0.91 target bump (superseded)
+  lockPrice090Migrated?: boolean;     // one-time startup migration marker: 0.91 → 0.90 target (zone [88¢, 92¢])
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.30 = sell when contract drops to 30¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately (legacy)
@@ -1382,6 +1383,42 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   proximityLatePctOverrides: {},
   coinOverrides: {},
 };
+
+/**
+ * applyLockPrice090Migration — one-time conviction-target migration to 0.90.
+ *
+ * Pure config transform (mutates the passed config in place) so it can be
+ * unit-tested without a DB. Called once per startup by loadBotConfigFromDB.
+ *
+ * Semantics:
+ *   1. Conviction config with kalshiLockPrice == null → backfill 0.90.
+ *   2. Legacy stored 0.91 (from the superseded 0.90→0.91 migration) with the
+ *      migration flag unset → move to 0.90, exactly once.
+ *   3. ANY config evaluated without the flag set gets the flag set, even when
+ *      no value change is needed. This makes the migration truly one-time:
+ *      a user who later deliberately sets 0.91 via the UI will never be
+ *      auto-reverted on restart, because the flag is already present.
+ *
+ * Returns { changed, migrated }:
+ *   changed  — config was mutated and should be persisted to the DB
+ *   migrated — the 0.91 → 0.90 value migration actually ran (worth logging)
+ */
+export function applyLockPrice090Migration(
+  config: BotConfig,
+): { changed: boolean; migrated: boolean } {
+  if (config.decisionMode === "conviction" && config.kalshiLockPrice == null) {
+    config.kalshiLockPrice = 0.90;
+    config.lockPrice090Migrated = true;
+    return { changed: true, migrated: false };
+  }
+  if (!config.lockPrice090Migrated) {
+    const migrated = config.kalshiLockPrice === 0.91;
+    if (migrated) config.kalshiLockPrice = 0.90;
+    config.lockPrice090Migrated = true;
+    return { changed: true, migrated };
+  }
+  return { changed: false, migrated: false };
+}
 
 /**
  * computeKellyMultiplier — per-position Kelly fraction for a YES or NO bet.

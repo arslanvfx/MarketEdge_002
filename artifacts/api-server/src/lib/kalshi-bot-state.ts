@@ -191,6 +191,11 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
+// Counts emergency closes (out-of-zone fills) per `sym:windowKey` this window.
+// After MAX_EMERGENCY_CLOSES_PER_WINDOW the coin is locked out for the rest of
+// the window — prevents the buy → emergency-close → re-buy bleed loop
+// (XRP filled 4× out of zone in one window on 2026-07-13).
+export const convictionEmergencyCloses = new Map<string, number>();
 export const convictionBoostWindowCoins = new Set<string>();
 // Global per-window max-bet token.  Rolled ONCE at window transition; a coin
 // claims it by decrementing to 0.  At 100% probability exactly 1 max bet slot

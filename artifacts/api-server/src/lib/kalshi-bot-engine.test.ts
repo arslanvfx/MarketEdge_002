@@ -50,6 +50,8 @@ import {
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
+  applyLockPrice090Migration,
+  type BotConfig,
   type CorePairInputs,
   type CircuitBreakerState,
   type ConvictionInputs,
@@ -1706,4 +1708,66 @@ test("proximity guard bypass: non-conviction modes → no bypass even at extreme
 
 test("proximity guard bypass: conviction + null yesPrice → no bypass", () => {
   assert.equal(proximityBypass("conviction", null), false);
+});
+
+// ---------------------------------------------------------------------------
+// applyLockPrice090Migration — one-time conviction lock-price migration
+// ---------------------------------------------------------------------------
+
+function migCfg(overrides: Partial<BotConfig> = {}): BotConfig {
+  return { ...DEFAULT_BOT_CONFIG, ...overrides };
+}
+
+test("lockPrice migration: conviction + null lockPrice → backfilled to 0.90 with flag", () => {
+  const cfg = migCfg({ decisionMode: "conviction", kalshiLockPrice: undefined, lockPrice090Migrated: undefined });
+  const res = applyLockPrice090Migration(cfg);
+  assert.equal(res.changed, true);
+  assert.equal(res.migrated, false);
+  assert.equal(cfg.kalshiLockPrice, 0.90);
+  assert.equal(cfg.lockPrice090Migrated, true);
+});
+
+test("lockPrice migration: legacy 0.91 without flag → migrated to 0.90 once", () => {
+  const cfg = migCfg({ decisionMode: "conviction", kalshiLockPrice: 0.91, lockPrice090Migrated: undefined });
+  const res = applyLockPrice090Migration(cfg);
+  assert.equal(res.changed, true);
+  assert.equal(res.migrated, true);
+  assert.equal(cfg.kalshiLockPrice, 0.90);
+  assert.equal(cfg.lockPrice090Migrated, true);
+});
+
+test("lockPrice migration: config already at 0.90 without flag → flag set, value untouched", () => {
+  const cfg = migCfg({ decisionMode: "conviction", kalshiLockPrice: 0.90, lockPrice090Migrated: undefined });
+  const res = applyLockPrice090Migration(cfg);
+  assert.equal(res.changed, true);
+  assert.equal(res.migrated, false);
+  assert.equal(cfg.kalshiLockPrice, 0.90);
+  assert.equal(cfg.lockPrice090Migrated, true);
+});
+
+test("lockPrice migration: user-set 0.91 AFTER flag → preserved on restart (idempotency)", () => {
+  // Simulates: config evaluated once (flag set), user deliberately sets 0.91
+  // via the UI, server restarts. The migration must NOT revert it.
+  const cfg = migCfg({ decisionMode: "conviction", kalshiLockPrice: 0.91, lockPrice090Migrated: true });
+  const res = applyLockPrice090Migration(cfg);
+  assert.equal(res.changed, false);
+  assert.equal(res.migrated, false);
+  assert.equal(cfg.kalshiLockPrice, 0.91);
+});
+
+test("lockPrice migration: non-conviction mode without flag → flag set, no value backfill", () => {
+  const cfg = migCfg({ decisionMode: "classic", kalshiLockPrice: undefined, lockPrice090Migrated: undefined });
+  const res = applyLockPrice090Migration(cfg);
+  assert.equal(res.changed, true);
+  assert.equal(res.migrated, false);
+  assert.equal(cfg.kalshiLockPrice, undefined);
+  assert.equal(cfg.lockPrice090Migrated, true);
+});
+
+test("lockPrice migration: fully migrated config → no-op", () => {
+  const cfg = migCfg({ decisionMode: "conviction", kalshiLockPrice: 0.90, lockPrice090Migrated: true });
+  const res = applyLockPrice090Migration(cfg);
+  assert.equal(res.changed, false);
+  assert.equal(res.migrated, false);
+  assert.equal(cfg.kalshiLockPrice, 0.90);
 });

@@ -160,7 +160,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     decisionMode: "conviction",
     minConfidence: 50,
     minReturnMultiple: 1.00,
-    kalshiLockPrice: 0.91,
+    kalshiLockPrice: 0.90,
     betDelayMinutes: 0,
     maxEntryMinutes: 0,
     minRemainingMinutes: 1,
@@ -969,7 +969,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   // preConvictionThreshold must be < kalshiLockPrice (or the current config lock price
   // if not being changed simultaneously) to form a valid pre-entry band.
-  const effectiveLockPrice = typeof kalshiLockPrice === "number" ? kalshiLockPrice : (getBotState().config.kalshiLockPrice ?? 0.91);
+  const effectiveLockPrice = typeof kalshiLockPrice === "number" ? kalshiLockPrice : (getBotState().config.kalshiLockPrice ?? 0.90);
   if (typeof preConvictionThreshold === "number" && preConvictionThreshold >= 0.50 && preConvictionThreshold < effectiveLockPrice) {
     partial.preConvictionThreshold = preConvictionThreshold;
   }

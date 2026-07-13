@@ -43,7 +43,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
+  convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -551,7 +551,7 @@ async function _runBotTick(
   // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
     // Derive the same ±2 ¢ window used by the engine so the bypass is in sync.
-    const convTarget = S.config.kalshiLockPrice ?? 0.91;
+    const convTarget = S.config.kalshiLockPrice ?? 0.90;
     const proximityIsConvictionExtreme =
       S.config.decisionMode === "conviction" &&
       yesPrice !== null &&
@@ -892,7 +892,7 @@ async function _runBotTick(
     // Only applied on the "at risk" side for each direction:
     //   NO  bet + price barely below target → one tick up = loss
     //   YES bet + price barely above target → one tick down = loss
-    // Bypassed in conviction mode — at 89-93¢/7-11¢, being close to strike
+    // Bypassed in conviction mode — at 88-92¢/8-12¢, being close to strike
     // is the whole point; blocking these bets defeats the mode entirely.
     const livePrice = pred?.price;
     if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
@@ -1006,7 +1006,7 @@ async function _runBotTick(
   //   YES: bid at min(yesAsk + 0.03, maxCost),  cent-floored
   //   NO:  ask at max(yesBid − 0.03, 1−maxCost), cent-ceiled
   //
-  // CONVICTION MODE: the return floor cap is removed entirely. At 89-93¢ YES /
+  // CONVICTION MODE: the return floor cap is removed entirely. At 88-92¢ YES /
   // 8-12¢ NO the cap (≈0.689) would force the order far from the market and
   // guarantee zero fills. We still apply a hard 0.01/0.99 sanity bound.
   const _entryReturnFloor = S.config.minReturnMultiple ?? 1.45;
@@ -1038,7 +1038,7 @@ async function _runBotTick(
   //   NO:  cost = 1−yes_bid; return = 1/cost. Same threshold.
   // 1/1.45 ≈ 0.6897 → nearest cent-aligned ceiling is 0.68 (return 1.471x).
   // We compare against the raw 1/1.45 float so a 0.69 cost (1.449x) is blocked.
-  // Bypassed in conviction mode — by design the return at 89-93¢ is ~1.08-1.12×;
+  // Bypassed in conviction mode — by design the return at 88-92¢ is ~1.09-1.14×;
   // the high probability is the edge, not the payout multiple.
   if (S.config.decisionMode !== "conviction") {
     const minReturnFloor = S.config.minReturnMultiple ?? 1.45;
@@ -1512,10 +1512,10 @@ async function _runBotTick(
   if (S.config.decisionMode === "conviction") {
     // Derive the ±2 ¢ window from the single slider value (kalshiLockPrice).
     // This matches the engine derivation in kalshi-bot-engine.ts exactly.
-    const gateTarget   = S.config.kalshiLockPrice ?? 0.91;
+    const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
     const lockPrice    = gateTarget - 0.02;
     // Symmetric ±2¢ zone around the target (user requirement):
-    // target 91¢ → zone [89¢, 93¢]. Below the floor: price can flip, too
+    // target 90¢ → zone [88¢, 92¢]. Below the floor: price can flip, too
     // risky. Above the cap: margin too small, not worth the entry.
     const lockPriceCap = gateTarget + 0.02;
     // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
@@ -1523,27 +1523,34 @@ async function _runBotTick(
     const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);
     await fetchKalshiTarget(sym, windowCloseTime).catch(() => null);
     const freshData = getKalshiCachedData(sym);
-    // Prefer authenticated orderbook prices — they reflect the real best-bid/ask
-    // immediately, while the public market list can lag by several seconds.
-    // Fall back to market-list prices if the orderbook call fails.
+    // Authenticated orderbook prices are the only trusted source — they show
+    // the real best-bid/ask while the public market list can lag by minutes.
     const obPrices = freshData?.ticker
       ? await fetchOrderbookPrices(freshData.ticker).catch(() => null)
       : null;
-    freshYesAsk = obPrices?.yesAsk ?? freshData?.yesAsk ?? null;
-    freshYesBid = obPrices?.yesBid ?? freshData?.yesBid ?? null;
 
-    // Log when orderbook is unavailable so we can diagnose the failure.
-    // We do NOT abort here — the bypass-cache fetchKalshiTarget above already
-    // provides a fresh public-API price that is far more current than the 5 s
-    // in-memory cache.  Requiring the authenticated orderbook is too aggressive:
-    // it consistently returns null on production (likely a rate-limit or auth
-    // issue), which would block all conviction bets regardless of price.
+    // FAIL CLOSED: the authenticated orderbook is the ONLY trusted price
+    // source for conviction entries.  The public market-list price can lag
+    // by minutes — on 2026-07-13 it reported XRP ask=0.908 while the real
+    // book was at 0.79, producing repeated out-of-zone fills.  A FOK BUY
+    // always fills at the real best ask ≤ the limit, so ordering off a stale
+    // price is how below-zone fills happen.  No verified book → no order.
+    // The 1 s loop retries on the next tick, so a transient fetch failure
+    // only delays entry by ~1 s.
     if (obPrices == null) {
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (orderbook unavailable)");
+      }
       logger.warn(
-        { sym, direction, windowKey, freshYesAsk, freshYesBid },
-        "[kalshi-bot] conviction live-price gate: authenticated orderbook unavailable — falling back to public API prices",
+        { sym, direction, windowKey, ticker: freshData?.ticker ?? null },
+        "[kalshi-bot] conviction live-price gate: authenticated orderbook unavailable — order aborted (fail closed), will retry next tick",
       );
+      return;
     }
+    freshYesAsk = obPrices.yesAsk;
+    freshYesBid = obPrices.yesBid;
 
     // YES direction: use the fresh YES ask.
     // NO  direction: NO ask = 1 − YES bid (the price paid per NO contract).
@@ -1553,10 +1560,11 @@ async function _runBotTick(
         : freshYesBid != null ? 1 - freshYesBid : null;
     // Strict zone enforcement: gate passes ONLY when price is within
     // [lockPrice, lockPriceCap] with no tolerance.  Kalshi prices are
-    // integer-cent resolution (0.89, 0.90 … 0.93) so 0 is safe.
-    //   89 ¢  passes  (0.89 >= 0.89 && 0.89 <= 0.93) ✓
-    //   88 ¢  blocked (0.88 < 0.89) ✗
-    //   94 ¢  blocked (0.94 > 0.93) ✗
+    // integer-cent resolution (0.88, 0.89 … 0.92) so 0 is safe.
+    // Example with target 0.90 → zone [0.88, 0.92]:
+    //   88 ¢  passes  (0.88 >= 0.88 && 0.88 <= 0.92) ✓
+    //   87 ¢  blocked (0.87 < 0.88) ✗
+    //   93 ¢  blocked (0.93 > 0.92) ✗
     const GATE_BUFFER = 0;
     const inWindow =
       freshRefPrice != null &&
@@ -1666,20 +1674,20 @@ async function _runBotTick(
     // Gate passed — re-derive sizing from the fresh orderbook prices so that a
     // stale pre-gate cache (e.g. liveYesBid=0.93 left over from the prior window)
     // cannot inflate contractCount to 57 on a 4 $ bet and produce a $38 fill.
-    const CROSSING_BUFFER = 0.03;
+    //
+    // Limit price = the EXACT verified ask (no crossing buffer).  A FOK order
+    // at limit=ask fills at that ask or kills instantly if the book moved —
+    // and the 1 s loop retries on the next tick.  The old ask+3¢ buffer only
+    // widened the range of prices the exchange was allowed to fill at, which
+    // is exactly what the user does not want ("fill in the zone or not at all").
     if (direction === "yes" && freshYesAsk != null) {
       expectedFillCost = freshYesAsk;
-      const raw = freshYesAsk + CROSSING_BUFFER;
-      // Hard-cap the YES limit at lockPriceCap so the fill can never exceed
-      // the top of the conviction zone (e.g. 93¢).  The exchange fills at
-      // ≤ your limit, so capping here guarantees the fill stays inside bounds.
-      orderLimitPrice = Math.floor(Math.min(raw, lockPriceCap) * 100) / 100;
+      orderLimitPrice = Math.floor(Math.min(freshYesAsk, lockPriceCap) * 100) / 100;
     } else if (direction === "no" && freshYesBid != null) {
       expectedFillCost = 1 - freshYesBid;
-      const raw = freshYesBid - CROSSING_BUFFER;
       // For NO orders the limit is expressed as a YES price.  Floor at
       // (1 - lockPriceCap) so the NO fill price can never exceed lockPriceCap.
-      orderLimitPrice = Math.ceil(Math.max(raw, 1 - lockPriceCap) * 100) / 100;
+      orderLimitPrice = Math.ceil(Math.max(freshYesBid, 1 - lockPriceCap) * 100) / 100;
     }
     const freshContractCount = Math.floor(targetBetSize / expectedFillCost);
     if (freshContractCount >= 1 && freshContractCount !== contractCount) {
@@ -1823,9 +1831,9 @@ async function _runBotTick(
       //   • if outside [lockPrice, lockPriceCap], immediately close the position
       //     before it is ever recorded as open, then return
       if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
-        const _gt   = S.config.kalshiLockPrice ?? 0.91;
-        const _lp   = +(_gt - 0.02).toFixed(4); // e.g. 0.89 for target 0.91
-        const _lpCap = +(_gt + 0.02).toFixed(4); // e.g. 0.93 for target 0.91
+        const _gt   = S.config.kalshiLockPrice ?? 0.90;
+        const _lp   = +(_gt - 0.02).toFixed(4); // e.g. 0.88 for target 0.90
+        const _lpCap = +(_gt + 0.02).toFixed(4); // e.g. 0.92 for target 0.90
         // Kalshi always returns avgPrice in YES-side terms.
         // For YES bets: fill price IS avgPrice.
         // For NO  bets: fill price = 1 − avgPrice (what we paid per NO contract).
@@ -1860,8 +1868,24 @@ async function _runBotTick(
               "[kalshi-bot] conviction emergency close FAILED — position may be stranded",
             );
           }
-          // Release the lock so the next tick can retry if price re-enters zone.
-          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          // Strike counter: each out-of-zone fill costs real money (spread paid
+          // on the round trip).  Allow up to 2 emergency closes per coin per
+          // window; after that keep the once-per-window lock in place so the
+          // coin cannot re-enter until the next window.  Prevents the
+          // buy → close → re-buy bleed loop (XRP 4× in one window, 2026-07-13).
+          const ecKey = `${sym}:${windowKey}`;
+          const ecCount = (convictionEmergencyCloses.get(ecKey) ?? 0) + 1;
+          convictionEmergencyCloses.set(ecKey, ecCount);
+          const MAX_EMERGENCY_CLOSES_PER_WINDOW = 2;
+          if (ecCount < MAX_EMERGENCY_CLOSES_PER_WINDOW) {
+            // Release the lock so the next tick can retry if price re-enters zone.
+            convictionFiredThisWindow.delete(ecKey);
+          } else {
+            logger.warn(
+              { sym, windowKey, emergencyCloses: ecCount },
+              "[kalshi-bot] conviction emergency-close limit reached — coin locked out for rest of window",
+            );
+          }
           return; // do NOT record as open position
         }
       }
