@@ -1279,33 +1279,36 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 <div className="flex flex-col gap-1.5">
                   <span className="text-xs font-medium text-muted-foreground">Entry Timing</span>
 
-                  {/* Earliest Entry (betDelayMinutes) */}
+                  {/* Earliest Entry (betDelayMinutes) — FLOOR: bot won't buy before T+X */}
                   <label className="flex flex-col gap-1.5 mt-1">
-                    <span className="text-xs text-muted-foreground">Earliest Entry</span>
+                    <span className="text-xs text-muted-foreground">Earliest Entry <span className="text-muted-foreground/50 font-normal">(bot won't buy before this point)</span></span>
                     <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
                       value={merged.betDelayMinutes ?? 0}
                       onChange={e => setConfigDraft(d => ({ ...d, betDelayMinutes: parseInt(e.target.value) }))}>
                       <option value={0}>Immediately — enter as soon as signals are ready (~T+2 min)</option>
-                      {[1, 2, 3, 4, 5, 6, 7, 8].map(m => (
-                        <option key={m} value={m}>Wait {m} min — re-analyze at T+{m}m, then bet</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
+                        <option key={m} value={m}>Wait {m} min — hold until T+{m}m, re-analyze, then bet</option>
                       ))}
                     </select>
                     <span className="text-xs text-muted-foreground/70">
-                      "Wait" holds the entry and runs a fresh Claude analysis at the deadline — so the bot acts on current market direction, not the opening snapshot.
+                      Bot holds the entry until this many minutes into the window, then runs a fresh Claude analysis before placing any bet.
                     </span>
                   </label>
 
-                  {/* Latest Entry (maxEntryMinutes) */}
+                  {/* Latest Entry (maxEntryMinutes) — CEILING: bot won't buy after T+X */}
                   <label className="flex flex-col gap-1.5 mt-1">
-                    <span className="text-xs text-muted-foreground">Latest Entry</span>
+                    <span className="text-xs text-muted-foreground">Latest Entry <span className="text-muted-foreground/50 font-normal">(bot won't buy after this point)</span></span>
                     <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
                       value={merged.maxEntryMinutes ?? 11}
                       onChange={e => setConfigDraft(d => ({ ...d, maxEntryMinutes: parseInt(e.target.value) }))}>
                       <option value={0}>No ceiling — enter any time signals are ready</option>
                       {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
-                        <option key={m} value={m}>By T+{m} min ({15 - m} min left in window)</option>
+                        <option key={m} value={m}>By T+{m} min — skip coin if already past this point ({15 - m} min left)</option>
                       ))}
                     </select>
+                    <span className="text-xs text-muted-foreground/70">
+                      If signals aren't ready by this point, the bot skips the coin for this window rather than betting late.
+                    </span>
                   </label>
 
                   {/* Min Time Remaining (minRemainingMinutes) */}

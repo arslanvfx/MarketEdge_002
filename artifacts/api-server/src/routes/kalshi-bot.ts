@@ -886,7 +886,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof betDelayMinutes === "number" && betDelayMinutes >= 0 && betDelayMinutes <= 13) {
     partial.betDelayMinutes = betDelayMinutes;
   }
-  if (typeof minNoEntryMinutes === "number" && minNoEntryMinutes >= 0 && minNoEntryMinutes <= 10) {
+  if (typeof minNoEntryMinutes === "number" && minNoEntryMinutes >= 0 && minNoEntryMinutes <= 13) {
     partial.minNoEntryMinutes = minNoEntryMinutes;
   }
   if (typeof priceBufferPct === "number" && priceBufferPct >= 0 && priceBufferPct <= 5) {
