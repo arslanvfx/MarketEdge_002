@@ -1533,6 +1533,26 @@ async function _runBotTick(
       : null;
     freshYesAsk = obPrices?.yesAsk ?? freshData?.yesAsk ?? null;
     freshYesBid = obPrices?.yesBid ?? freshData?.yesBid ?? null;
+
+    // Conviction orders REQUIRE authenticated orderbook prices.
+    // The public market list (freshData) can lag 30–60 s — far too stale to
+    // safely enforce the conviction zone.  If the orderbook fetch failed,
+    // abort rather than risk a fill based on a stale mid-price.
+    // (This was the root cause of fills 20–25¢ below the conviction floor:
+    // obPrices returned null → stale yesAsk 87¢ → gate passed → FOK filled at 61¢.)
+    if (obPrices == null) {
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction gate: max-bet token restored (orderbook unavailable)");
+      }
+      logger.warn(
+        { sym, direction, windowKey, freshYesAsk, freshYesBid },
+        "[kalshi-bot] conviction live-price gate: authenticated orderbook unavailable — aborting to avoid stale fill",
+      );
+      return;
+    }
+
     // YES direction: use the fresh YES ask.
     // NO  direction: NO ask = 1 − YES bid (the price paid per NO contract).
     const freshRefPrice =
@@ -1609,6 +1629,43 @@ async function _runBotTick(
             lockPrice, lockPriceCap,
           },
           "[kalshi-bot] conviction live-price gate: NO cross-check — YES ask bounced above target; order aborted",
+        );
+        return;
+      }
+    }
+
+    // ── YES cross-check (stale-ask / race-condition guard) ──────────────────
+    // Mirror of the NO cross-check above.  The main gate uses freshYesAsk from
+    // the authenticated orderbook.  However there is a race window between the
+    // gate check and FOK execution: if the market crashes 5¢+ in that window,
+    // the exchange fills at the new (lower) ask because a BUY limit order
+    // always fills at the best available ask ≤ the limit — there is no minimum.
+    //
+    // Cross-check: freshYesBid tracks the ask closely (typical spread 1–3¢ in
+    // conviction territory).  If freshYesBid has fallen ≥ 5¢ below lockPrice,
+    // the ask has moved outside the conviction zone and we must abort.
+    //
+    // Example (DOGE, gateTarget=0.87 → lockPrice=0.85):
+    //   yesBidDropThreshold = 0.85 − 0.05 = 0.80
+    //   freshYesBid = 0.76 → 0.76 < 0.80 → abort ✓  (would have filled at 78¢)
+    //   freshYesBid = 0.84 → 0.84 ≥ 0.80 → proceed ✓
+    if (direction === "yes" && freshYesBid != null) {
+      const yesBidDropThreshold = lockPrice - 0.05;
+      if (freshYesBid < yesBidDropThreshold) {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (YES cross-check abort)");
+        }
+        logger.warn(
+          {
+            sym, direction, windowKey,
+            freshYesBid: +freshYesBid.toFixed(4),
+            freshYesAsk: freshYesAsk != null ? +freshYesAsk.toFixed(4) : null,
+            yesBidDropThreshold: +yesBidDropThreshold.toFixed(4),
+            lockPrice, lockPriceCap,
+          },
+          "[kalshi-bot] conviction live-price gate: YES cross-check — YES bid crashed below floor; order aborted",
         );
         return;
       }
