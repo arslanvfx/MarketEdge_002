@@ -743,6 +743,36 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       );
                     })()}
 
+                    {/* Stop-loss activation minute */}
+                    {(merged.convictionStopLossFloor ?? 0) > 0 && (() => {
+                      const actMin = merged.convictionStopLossActivationMinute ?? 12;
+                      const remaining = 15 - actMin;
+                      return (
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-2">
+                            Stop-Loss Arm Time —{" "}
+                            {actMin === 0
+                              ? <span className="text-amber-400 font-mono">Armed immediately</span>
+                              : <span className="text-orange-400 font-mono">Arms at minute {actMin} (last {remaining} min)</span>}
+                          </span>
+                          <div className="flex items-center gap-3">
+                            <input type="range" min={0} max={13} step={1}
+                              className="flex-1 accent-orange-500"
+                              value={actMin}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionStopLossActivationMinute: parseInt(e.target.value, 10) }))} />
+                            <span className="text-xs font-mono w-20 text-right text-orange-400">
+                              min {actMin}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/70">
+                            {actMin === 0
+                              ? "Stop-loss fires at any point in the window. Early dips may trigger false exits."
+                              : `Stop-loss only arms after minute ${actMin} — ignores dips in the first ${actMin} min when prices can still recover.`}
+                          </span>
+                        </label>
+                      );
+                    })()}
+
                     {/* Conviction daily loss limit */}
                     <label className="flex flex-col gap-1.5 mt-1">
                       <span className="text-xs text-muted-foreground flex items-center gap-1.5">

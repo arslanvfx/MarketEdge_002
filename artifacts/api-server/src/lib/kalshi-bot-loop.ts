@@ -675,7 +675,14 @@ export async function runBotLoopTick(): Promise<void> {
     // transaction fee on a position that has already effectively expired worthless.
     const NEAR_ZERO_FLOOR = 0.05;
     const stopFloor = S.config.convictionStopLossFloor ?? 0;
-    if (S.config.decisionMode === "conviction" && stopFloor > 0) {
+    // Time-gate: only arm the stop-loss after convictionStopLossActivationMinute minutes
+    // have elapsed in this window (default 12 = last 3 min).  Early-window dips can
+    // recover — arming too early creates false stops on winning trades.
+    const stopActivationMin = S.config.convictionStopLossActivationMinute ?? 0;
+    const windowKeyMs = new Date(newWindowKey).getTime();
+    const clockMinutesElapsed = (Date.now() - windowKeyMs) / 60000;
+    const stopLossArmed = stopActivationMin === 0 || clockMinutesElapsed >= stopActivationMin;
+    if (S.config.decisionMode === "conviction" && stopFloor > 0 && stopLossArmed) {
       for (const [sym, pos] of Array.from(openPositions.entries())) {
         const kd = getKalshiCachedData(sym);
         const yp = kd?.yesPrice ?? null;

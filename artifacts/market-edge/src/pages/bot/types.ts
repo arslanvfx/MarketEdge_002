@@ -72,6 +72,7 @@ export interface BotConfig {
   proximityEarlyPctOverrides?: Record<string, number>;
   proximityLatePctOverrides?: Record<string, number>;
   convictionDailyLossLimit?: number;
+  convictionStopLossActivationMinute?: number;
   convictionBoostBetSize?: number;
   convictionBoostProbability?: number;
   convictionBoostMinWinRate?: number;

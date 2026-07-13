@@ -955,7 +955,8 @@ export interface BotConfig {
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
   kalshiLockPrice?: number;           // conviction only: entry trigger (default 0.88; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
-  convictionStopLossFloor?: number;   // conviction only: absolute contract-value floor (e.g. 0.30 = sell when contract drops to 30¢; skipped if already at/near 0¢; 0 = disabled)
+  convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.30 = sell when contract drops to 30¢; skipped if already at/near 0¢; 0 = disabled)
+  convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately (legacy)
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
@@ -1322,6 +1323,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   dynamicSizingMaxConfidence: 90,
   profitLockPct: 0,
   convictionStopLossFloor: 0,
+  convictionStopLossActivationMinute: 12,
   convictionDailyLossLimit: 50,
   convictionBoostBetSize: undefined,
   convictionBoostProbability: 0.25,
