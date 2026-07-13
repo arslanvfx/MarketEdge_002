@@ -152,10 +152,11 @@ export function refreshTrajectoryForAllCoins(): void {
     if (candles.length < 2) continue;
 
     const livePrice = pred?.price ?? candles[candles.length - 1].c;
-    const target    = recentKalshiTargets.get(sym) ?? null;
-    if (target == null) continue;
 
     const kd       = getKalshiCachedData(sym);
+    const target   = kd?.value ?? null;
+    if (target == null) continue;
+
     const yesAsk   = kd?.yesAsk ?? null;
     const yesBid   = kd?.yesBid ?? null;
     const yesPrice = yesAsk != null ? yesAsk : yesBid != null ? 1 - yesBid : null;

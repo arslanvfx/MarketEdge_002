@@ -569,6 +569,20 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
+  // Phase 1: refresh market data for all Kalshi-enabled coins — in parallel.
+  // Runs unconditionally (before the enabled gate) so the UI always has fresh
+  // Kalshi strike prices and trajectory data regardless of bot enabled state.
+  await Promise.allSettled(
+    CRYPTO_COINS
+      .filter(c => KALSHI_SERIES[c.symbol])
+      .map(c => fetchKalshiTarget(c.symbol).catch(() => null)),
+  );
+
+  // Refresh trajectory gate data for all coins — runs every tick from window open
+  // so the UI and gate always have current velocity/projection data, even when
+  // the bot is disabled or paused.
+  refreshTrajectoryForAllCoins();
+
   if (!S.config.enabled || S.paused) return;
 
   // DB degraded mode: probe for recovery each tick; skip new bets until healthy.
@@ -591,20 +605,6 @@ export async function runBotLoopTick(): Promise<void> {
       return;
     }
   }
-
-  // Phase 1: refresh market data for all Kalshi-enabled coins — in parallel.
-  // All Kalshi API calls fire simultaneously so the slowest coin sets the wait
-  // time, not the sum of all coins.  Failures per-coin are swallowed here;
-  // the prefetch orchestrator (runWindowOpenPrefetch) handles retry logging.
-  await Promise.allSettled(
-    CRYPTO_COINS
-      .filter(c => KALSHI_SERIES[c.symbol])
-      .map(c => fetchKalshiTarget(c.symbol).catch(() => null)),
-  );
-
-  // Refresh trajectory gate data for all coins — runs every tick from window open
-  // so the UI and gate always have current velocity/projection data.
-  refreshTrajectoryForAllCoins();
 
   // Window-open prefetch + stability orchestration.
   // On a new window: clear per-window caches and immediately void-launch the
