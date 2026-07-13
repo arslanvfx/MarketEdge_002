@@ -299,7 +299,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {traj == null || traj.reason === "insufficient_data" ? (
+                    {traj == null || traj.reason === "insufficient_data" || traj.velocity == null || traj.projectedMarginPct == null ? (
                       <span className="text-muted-foreground/40 font-mono">—</span>
                     ) : (
                       <div className="flex flex-col gap-0.5">
@@ -318,9 +318,9 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                         </span>
                         <span
                           className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
-                          title={`Velocity: ${traj.velocity >= 0 ? "+" : ""}${traj.velocity.toFixed(1)}/min · Projected margin: ${traj.projectedMarginPct.toFixed(2)}% · ${traj.minutesRemaining.toFixed(1)} min left`}
+                          title={`v: ${traj.velocity >= 0 ? "+" : ""}${(+traj.velocity).toFixed(1)}/min · proj: ${(+traj.projectedMarginPct).toFixed(2)}% · ${traj.minutesRemaining != null ? (+traj.minutesRemaining).toFixed(1) : "?"} min left`}
                         >
-                          {traj.velocity >= 0 ? "+" : ""}{traj.velocity.toFixed(1)}/m · {traj.projectedMarginPct.toFixed(2)}%
+                          {traj.velocity >= 0 ? "+" : ""}{(+traj.velocity).toFixed(1)}/m · {(+traj.projectedMarginPct).toFixed(2)}%
                         </span>
                       </div>
                     )}
