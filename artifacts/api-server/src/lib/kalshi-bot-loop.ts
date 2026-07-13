@@ -661,27 +661,29 @@ export async function runBotLoopTick(): Promise<void> {
   if (openPositions.size > 0) {
     // ── Conviction stop-loss ────────────────────────────────────────────────
     // Checked every tick before the normal exit path.
-    // convictionStopLossFloor is a fractional drop from the entry contract value
-    // (e.g. 0.15 = exit when contract has dropped 15% from what we paid).
-    //   YES position: entry = entryYesPrice;  exit when yesPrice ≤ entry × (1 − pct)
-    //   NO  position: entry = 1 − entryYesPrice;  exit when (1 − yesPrice) ≤ entry × (1 − pct)
-    const stopDropPct = S.config.convictionStopLossFloor ?? 0;
-    if (S.config.decisionMode === "conviction" && stopDropPct > 0) {
+    // convictionStopLossFloor is an absolute contract-value floor in dollars
+    // (e.g. 0.30 = exit when the contract we hold drops to 30¢ or below).
+    //   YES position: contract value = yesPrice.  Exit when yesPrice ≤ floor.
+    //   NO  position: contract value = 1 − yesPrice.  Exit when (1 − yesPrice) ≤ floor.
+    // Near-zero guard: if the contract has already collapsed to ≤ 5¢ there
+    // is no meaningful recovery value — skip the sell to avoid a pointless
+    // transaction fee on a position that has already effectively expired worthless.
+    const NEAR_ZERO_FLOOR = 0.05;
+    const stopFloor = S.config.convictionStopLossFloor ?? 0;
+    if (S.config.decisionMode === "conviction" && stopFloor > 0) {
       for (const [sym, pos] of Array.from(openPositions.entries())) {
         const kd = getKalshiCachedData(sym);
         const yp = kd?.yesPrice ?? null;
         if (yp === null) continue;
         const contractValue = pos.direction === "yes" ? yp : (1 - yp);
-        const entryContractValue = pos.direction === "yes" ? pos.entryYesPrice : (1 - pos.entryYesPrice);
-        const stopFloor = entryContractValue * (1 - stopDropPct);
+        // Skip if already near-zero (no point selling worthless contracts).
+        if (contractValue <= NEAR_ZERO_FLOOR) continue;
         if (contractValue > stopFloor) continue;
 
         logger.warn(
           { sym, direction: pos.direction,
             contractValue: +contractValue.toFixed(4),
-            entryContractValue: +entryContractValue.toFixed(4),
-            stopFloor: +stopFloor.toFixed(4),
-            stopDropPct,
+            stopFloor,
             entryYesPrice: pos.entryYesPrice },
           "[kalshi-bot] conviction stop-loss triggered — selling position",
         );

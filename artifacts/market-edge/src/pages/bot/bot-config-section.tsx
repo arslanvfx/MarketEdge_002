@@ -737,7 +737,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <span className="text-[10px] text-muted-foreground/70">
                             {floor === 0
                               ? "No automatic exit — position holds until window close."
-                              : `Auto-sell if the contract you hold drops to ${floorPct}¢ or below, regardless of entry price. Checked every 5 seconds.`}
+                              : `Auto-sell if the contract you hold drops to ${floorPct}¢ or below. Skipped if the contract is already at or near 0¢ (no recovery value). Checked every 5 seconds.`}
                           </span>
                         </label>
                       );
