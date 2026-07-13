@@ -1,62 +1,64 @@
 ---
-name: Conviction gate cross-checks — YES ask (NO) and YES bid (YES)
-description: Stale orderbook data or race conditions let bounced/crashed markets pass the conviction gate and fill at wrong prices. Two cross-checks (one per direction) prevent this.
+name: Conviction gate cross-checks + post-fill emergency close
+description: Three-layer system to guarantee conviction fills land in [lockPrice, lockPriceCap]. Pre-order cross-checks (layers 1+2) tightened to 3¢. Layer 3 (post-fill emergency close) is the true hard guarantee.
 ---
 
-## Root causes
+## Root causes of out-of-zone fills
 
-### NO direction — stale yesBid
+### NO direction — stale yesBid + wide cross-check tolerance
 Gate checks `1 − freshYesBid ∈ [lockPrice, lockPriceCap]`.
-If `freshYesBid` is stale (orderbook refresh failed), gate passes while market has bounced.
-The FOK `orderLimitPrice = 0.06` fills at ANY YES bid ≥ 6¢ → 76¢ NO fill.
-**Observed:** NEAR NO [89–94%], trigger at YES=7¢, fill at NO=76¢ (YES bounced to 24¢).
+If `freshYesBid` is stale, gate passes while market has bounced.
+Original NO cross-check tolerance was **10¢** — allowed YES ask at 14¢ through when
+target was 12¢; exchange then filled at YES bid 17¢ = NO 83¢.
+**Observed:** NEAR NO 83¢ fill (YES ask was ~14¢ at gate, bid rose to 17¢ before fill).
 
-### YES direction — stale/slow orderbook OR race condition
+### YES direction — stale orderbook OR race condition
 Gate checks `freshYesAsk ∈ [lockPrice, lockPriceCap]`.
-Two failure modes:
-1. **Orderbook fetch failed** → falls back to public market list `freshData.yesAsk`, which can lag 30–60s → gate sees 87¢, exchange already at 61¢ → FOK fills at 61¢.
-2. **Race condition** → orderbook was fresh at 87¢ but price crashed 9¢ between gate check and FOK execution → FOK BUY YES fills at current ask (no minimum floor on buy limits).
-**Observed:** DOGE YES 87¢ lock, fill at 78¢ (9¢ race). SOL YES 86¢ lock, fill at 61¢ (25¢ stale fallback).
+**Observed:** DOGE YES 78¢ (9¢ race), SOL YES 61¢ (25¢ stale fallback).
 
-## The fixes
+## The three-layer fix (as implemented)
 
-### Fix 1 — Require authenticated orderbook (both directions)
-Before the gate check, abort if `obPrices == null`. Do NOT fall back to the public
-market list for conviction orders. Stale mid-prices are unacceptable.
-
+### Layer 1 — NO cross-check, tolerance 10¢ → 3¢
 ```typescript
-if (obPrices == null) {
-  convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-  // restore boostBetSize token if held
-  logger.warn(..., "authenticated orderbook unavailable — aborting");
-  return;
+const yesAskBounceThreshold = (1 - lockPrice) + 0.03; // was + 0.10
+if (freshYesAsk > yesAskBounceThreshold) { /* abort */ }
+```
+lockPrice=0.88: threshold=0.15. freshYesAsk=0.16 > 0.15 → abort ✓
+Catches: YES ask at 16¢+ when target is 12¢.
+
+### Layer 2 — YES cross-check, tolerance 5¢ → 3¢
+```typescript
+const yesBidDropThreshold = lockPrice - 0.03; // was - 0.05
+if (freshYesBid < yesBidDropThreshold) { /* abort */ }
+```
+lockPrice=0.88: threshold=0.85. freshYesBid=0.84 → abort ✓
+
+### Layer 3 — Post-fill emergency close (TRUE hard guarantee)
+After `placeOrderWithRetry` returns, check the actual Kalshi fill price.
+`result.avgPrice` is always YES-side. Convert for NO: `convFillPrice = 1 - result.avgPrice`.
+```typescript
+if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
+  const _gt    = S.config.kalshiLockPrice ?? 0.90;
+  const _lp    = +(_gt - 0.02).toFixed(4);
+  const _lpCap = +(_gt + 0.03).toFixed(4);
+  const convFillPrice = direction === "yes" ? result.avgPrice : 1 - result.avgPrice;
+  if (convFillPrice < _lp || convFillPrice > _lpCap) {
+    // sellYes(ticker, count) or sellNo(ticker, count) — immediately
+    convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+    return; // do NOT record as open position
+  }
 }
 ```
+This runs after the exchange fill, so it acts on the real price regardless of any
+pre-order race condition. Position is closed before it enters our records.
 
-### Fix 2 — NO cross-check (stale-bid guard)
-After main gate passes, use `freshYesAsk` (independent from `yesBid`) to detect bounce:
+**Why re-derive lockPrice at fill time:** `lockPrice`/`lockPriceCap` are scoped inside
+the conviction `if` block (line ~1512) which closes before `placeOrderWithRetry` (line ~1771).
 
-```typescript
-if (direction === "no" && freshYesAsk != null) {
-  const yesAskBounceThreshold = (1 - lockPrice) + 0.10; // target + 10¢
-  if (freshYesAsk > yesAskBounceThreshold) { /* abort */ }
-}
-```
-lockPrice=0.89: threshold=0.21. freshYesAsk=0.24 > 0.21 → abort ✓
+**Why:** Kalshi limit orders fill at exchange price — BUY YES at ask ≤ limit (no floor),
+SELL YES (= BUY NO) at bid ≥ limit (no ceiling). Pre-order checks only reduce the race
+window; they cannot eliminate it. Layer 3 is the only mechanism that acts on the ACTUAL fill.
 
-### Fix 3 — YES cross-check (stale-ask / race-condition guard)
-After main gate passes, use `freshYesBid` (tracks ask within 1–3¢) to detect crash:
-
-```typescript
-if (direction === "yes" && freshYesBid != null) {
-  const yesBidDropThreshold = lockPrice - 0.05; // 5¢ below floor
-  if (freshYesBid < yesBidDropThreshold) { /* abort */ }
-}
-```
-lockPrice=0.85 (gateTarget=0.87): threshold=0.80. freshYesBid=0.76 < 0.80 → abort ✓
-
-**Why 5¢ for YES vs 10¢ for NO:** YES bid/ask spreads are narrower in conviction territory (87–93¢). 5¢ catches crashes without false positives.
-
-**Why:** Kalshi BUY limit orders fill at best available ask ≤ limit — there is no minimum fill price. The gate is the only protection. Both cross-checks use the opposite side of the book to catch what the main gate cannot detect via its primary data source.
-
-**How to apply:** All three checks live in `kalshi-bot-tick.ts` inside the `if (S.config.decisionMode === "conviction")` block, in order: orderbook null check → main zone gate → NO cross-check → YES cross-check → recompute sizing.
+**How to apply:** All layers in `kalshi-bot-tick.ts` conviction block. Order:
+orderbook null warn → main zone gate → NO cross-check (L1) → YES cross-check (L2) →
+recompute sizing → placeOrderWithRetry → post-fill zone check (L3).

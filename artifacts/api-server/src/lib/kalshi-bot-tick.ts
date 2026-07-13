@@ -1607,7 +1607,7 @@ async function _runBotTick(
     //   freshYesAsk = 0.24 → 0.24 > 0.21 → abort ✓
     //   freshYesAsk = 0.14 → 0.14 ≤ 0.21 → proceed ✓
     if (direction === "no" && freshYesAsk != null) {
-      const yesAskBounceThreshold = (1 - lockPrice) + 0.10; // target + 10¢ spread allowance
+      const yesAskBounceThreshold = (1 - lockPrice) + 0.03; // target + 3¢ spread allowance (was 10¢ — too wide, allowed 17¢ YES = 83¢ NO)
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
@@ -1644,7 +1644,7 @@ async function _runBotTick(
     //   freshYesBid = 0.76 → 0.76 < 0.80 → abort ✓  (would have filled at 78¢)
     //   freshYesBid = 0.84 → 0.84 ≥ 0.80 → proceed ✓
     if (direction === "yes" && freshYesBid != null) {
-      const yesBidDropThreshold = lockPrice - 0.05;
+      const yesBidDropThreshold = lockPrice - 0.03; // was -0.05, tightened to -0.03
       if (freshYesBid < yesBidDropThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
@@ -1815,7 +1815,58 @@ async function _runBotTick(
       fillPrice = result.avgPrice ?? yesPrice;
       orderId = result.orderId;
 
-
+      // ── CONVICTION ZONE FILL VERIFICATION (hard guarantee) ──────────────────
+      // Pre-order checks (cross-checks above) minimise the race window, but
+      // cannot fully prevent it: the exchange always fills a BUY at the ask and
+      // a SELL at the bid at execution time — both can differ from the gate-check
+      // price.  This post-fill check is the final backstop:
+      //   • re-derive lockPrice / lockPriceCap from config (same formula as gate)
+      //   • compare the ACTUAL fill price returned by Kalshi to the zone
+      //   • if outside [lockPrice, lockPriceCap], immediately close the position
+      //     before it is ever recorded as open, then return
+      if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
+        const _gt   = S.config.kalshiLockPrice ?? 0.90;
+        const _lp   = +(_gt - 0.02).toFixed(4); // e.g. 0.88
+        const _lpCap = +(_gt + 0.03).toFixed(4); // e.g. 0.93
+        // Kalshi always returns avgPrice in YES-side terms.
+        // For YES bets: fill price IS avgPrice.
+        // For NO  bets: fill price = 1 − avgPrice (what we paid per NO contract).
+        const convFillPrice = direction === "yes"
+          ? result.avgPrice
+          : 1 - result.avgPrice;
+        if (convFillPrice < _lp || convFillPrice > _lpCap) {
+          logger.error(
+            {
+              sym, direction, windowKey,
+              convFillPrice: +convFillPrice.toFixed(4),
+              avgPrice: +result.avgPrice.toFixed(4),
+              lockPrice: _lp, lockPriceCap: _lpCap,
+              contractCount, ticker: kalshiTicker,
+            },
+            "[kalshi-bot] CONVICTION FILL OUTSIDE ZONE — emergency close",
+          );
+          try {
+            // Immediately sell what we just bought to eliminate the exposure.
+            if (direction === "yes") {
+              await sellYes(kalshiTicker, contractCount);
+            } else {
+              await sellNo(kalshiTicker, contractCount);
+            }
+            logger.warn(
+              { sym, direction, convFillPrice: +convFillPrice.toFixed(4), contractCount },
+              "[kalshi-bot] conviction emergency close: position closed",
+            );
+          } catch (closeErr) {
+            logger.error(
+              { sym, err: String(closeErr) },
+              "[kalshi-bot] conviction emergency close FAILED — position may be stranded",
+            );
+          }
+          // Release the lock so the next tick can retry if price re-enters zone.
+          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          return; // do NOT record as open position
+        }
+      }
 
       // Slippage guard: compare actual fill price to the expected yes-price.
       // Tracks CONSECUTIVE bad fills — a clean fill resets the counter.
