@@ -1370,12 +1370,12 @@ async function _runBotTick(
     // This matches the engine derivation in kalshi-bot-engine.ts exactly.
     const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
     const lockPrice    = gateTarget - 0.02;
-    // +0.05 cap: Kalshi orderbook YES ask is typically 1–3¢ above the
-    // displayed mid when the market shows 90–92%.  The old +0.02 (92¢)
-    // was too tight and aborted every entry inside the conviction zone.
-    // The order limit is still hard-capped at lockPriceCap below (line 1436),
-    // so fills can never exceed 95¢.
-    const lockPriceCap = gateTarget + 0.05;
+    // Hard ceiling at gateTarget + 0.03 (= 93¢ for lockPrice=0.90).
+    // Below 88¢: price can flip, too risky.
+    // 88–93¢: conviction zone — orderbook ask is typically 1–3¢ above the
+    //   displayed mid, so a displayed 90–92% maps to a real ask of ~91–93¢.
+    // Above 93¢: margin is < 7¢/contract, not worth the entry.
+    const lockPriceCap = gateTarget + 0.03;
     // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
     // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
     const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);
@@ -1436,7 +1436,7 @@ async function _runBotTick(
       expectedFillCost = freshYesAsk;
       const raw = freshYesAsk + CROSSING_BUFFER;
       // Hard-cap the YES limit at lockPriceCap so the fill can never exceed
-      // the top of the conviction zone (e.g. 95¢).  The exchange fills at
+      // the top of the conviction zone (e.g. 93¢).  The exchange fills at
       // ≤ your limit, so capping here guarantees the fill stays inside bounds.
       orderLimitPrice = Math.floor(Math.min(raw, lockPriceCap) * 100) / 100;
     } else if (direction === "no" && freshYesBid != null) {

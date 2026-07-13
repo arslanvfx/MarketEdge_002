@@ -19,7 +19,7 @@ Every valid conviction entry was aborted with "price moved outside window".
 
 Evidence from logs: ETH freshYesAsk=0.932, HYPE=0.9345, BNB=0.9535 — all aborted (lockPriceCap=0.92).
 
-**Fix:** `lockPriceCap = gateTarget + 0.05 = 0.95` in both:
+**Fix:** `lockPriceCap = gateTarget + 0.03 = 0.93` in both:
 - `kalshi-bot-tick.ts` (live-price gate before order placement)
 - `kalshi-bot-engine.ts` (computeConvictionDecision trigger)
 
