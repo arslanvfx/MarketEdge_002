@@ -95,7 +95,11 @@ export interface BotConfig {
   maxBetTrajectoryCurrentMarginMinPct?: number;
   maxBetTrajectoryCurrentMarginMinATR?: number;
   maxBetTrajectoryDangerBandATR?: number;
+  maxBetTrajectoryAdverseVelocityOnly?: boolean;
+  maxBetTrajectoryTimeWeightEnabled?: boolean;
   maxBetTrajectoryBlockOnCross?: boolean;
+  regularBetTrajectoryDangerBandPct?: number;
+  regularBetTrajectoryDangerBandATR?: number;
 }
 
 export interface TrajectoryGateResult {
@@ -112,6 +116,8 @@ export interface TrajectoryGateResult {
   atrPct: number;
   effectiveCurrentMarginMinPct: number;
   effectiveDangerBandPct: number;
+  timeWeight: number;
+  adverseVelocity: boolean;
 }
 
 export interface LogicModeStats {

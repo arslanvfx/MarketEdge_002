@@ -82,16 +82,28 @@ function computeTrajectoryGate(
   direction: "yes" | "no",
   clockElapsedS: number,
   config: import("./kalshi-bot-engine").BotConfig,
+  betType: "max" | "regular" = "max",
 ): TrajectoryGateResult {
-  const lookbackMin             = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
-  const dangerBandPctFloor      = config.maxBetTrajectoryDangerBandPct ?? 0.40;
-  const currentMarginMinPctFloor = config.maxBetTrajectoryCurrentMarginMinPct ?? 0.30;
-  const currentMarginMinATR     = config.maxBetTrajectoryCurrentMarginMinATR ?? 1.5;
-  const dangerBandATR           = config.maxBetTrajectoryDangerBandATR ?? 2.0;
-  const blockOnCross             = config.maxBetTrajectoryBlockOnCross !== false;
+  const lookbackMin    = Math.max(1, config.maxBetTrajectoryLookbackMinutes ?? 3);
+  const blockOnCross   = config.maxBetTrajectoryBlockOnCross !== false;
 
   const minutesRemaining = Math.max(0, (15 * 60 - clockElapsedS) / 60);
   const currentMarginPct = ((livePrice - kalshiTarget) / kalshiTarget) * 100;
+
+  // ── Per-bet-type threshold config ────────────────────────────────────────
+  // Max bets: full three-check system with strict thresholds (large risk).
+  // Regular bets: only willCross + a much looser projected band (small risk).
+  // Regular bets skip the alreadyThin check entirely — proximity to strike is
+  // normal for a regular bet and the risk doesn't justify blocking on it.
+  const isRegular = betType === "regular";
+  const currentMarginMinPctFloor = config.maxBetTrajectoryCurrentMarginMinPct ?? 0.30;
+  const currentMarginMinATR      = config.maxBetTrajectoryCurrentMarginMinATR ?? 1.5;
+  const dangerBandPctFloor = isRegular
+    ? (config.regularBetTrajectoryDangerBandPct ?? 0.10)
+    : (config.maxBetTrajectoryDangerBandPct     ?? 0.40);
+  const dangerBandATR = isRegular
+    ? (config.regularBetTrajectoryDangerBandATR ?? 0.5)
+    : (config.maxBetTrajectoryDangerBandATR     ?? 2.0);
 
   // Need at least 2 candles to compute a slope
   if (candles.length < 2) {
@@ -100,16 +112,18 @@ function computeTrajectoryGate(
       velocity: 0, projectedPrice: livePrice,
       currentMarginPct, projectedMarginPct: currentMarginPct,
       minutesRemaining, direction, computedAt: Date.now(),
-      atrPct: 0, effectiveCurrentMarginMinPct: currentMarginMinPctFloor, effectiveDangerBandPct: dangerBandPctFloor,
+      atrPct: 0,
+      effectiveCurrentMarginMinPct: currentMarginMinPctFloor,
+      effectiveDangerBandPct: dangerBandPctFloor,
+      timeWeight: 1, adverseVelocity: false,
     };
   }
 
   // ── ATR-derived per-coin thresholds ──────────────────────────────────────
   // True Range = max(H-L, |H-prevC|, |L-prevC|) averaged over last 5 candles.
-  // Expressing ATR as a % of the target gives a coin-normalised volatility unit.
-  // BTC ATR≈$150 at $77k → atrPct≈0.19%; XRP ATR≈$0.02 at $2.50 → atrPct≈0.80%.
-  // Thresholds = max(fixed floor, atrPct × multiplier) so the gate is never
-  // more permissive than the hard floor, but scales up for volatile coins.
+  // Expressing ATR as % of the target normalises across coins:
+  //   BTC ATR≈$150 at $77k → atrPct≈0.19%; XRP ATR≈$0.02 at $2.50 → atrPct≈0.80%.
+  // Threshold = max(fixed floor, atrPct × multiplier).
   const atrLookback = Math.min(5, candles.length - 1);
   let trSum = 0;
   for (let i = candles.length - atrLookback; i < candles.length; i++) {
@@ -122,26 +136,51 @@ function computeTrajectoryGate(
   const atrPct = (atr / kalshiTarget) * 100;
 
   const effectiveCurrentMarginMinPct = Math.max(currentMarginMinPctFloor, atrPct * currentMarginMinATR);
-  const effectiveDangerBandPct       = Math.max(dangerBandPctFloor,       atrPct * dangerBandATR);
 
-  // Take the close from N minutes ago as the baseline
+  // ── Time-weight: loosen projected floor early, tighten near window end ───
+  // With 10 min remaining a projection is inherently uncertain — a 0.40% gap
+  // can easily widen to 1.5% before expiry.  With 2 min left the projection
+  // is nearly deterministic, so the full floor is warranted.
+  const timeWeightEnabled = config.maxBetTrajectoryTimeWeightEnabled !== false;
+  const timeWeight = (!timeWeightEnabled || isRegular) ? 1
+    : minutesRemaining > 8 ? 0.50
+    : minutesRemaining > 4 ? 0.75
+    : 1.0;
+
+  const effectiveDangerBandPct = Math.max(dangerBandPctFloor, atrPct * dangerBandATR) * timeWeight;
+
+  // Take the close from N minutes ago as the baseline for velocity
   const actualLookback = Math.min(lookbackMin, candles.length - 1);
-  const priceNAgo   = candles[candles.length - 1 - actualLookback].c;
-  const velocity    = (livePrice - priceNAgo) / actualLookback; // $/min (assumes 1-min candles)
+  const priceNAgo = candles[candles.length - 1 - actualLookback].c;
+  const velocity  = (livePrice - priceNAgo) / actualLookback; // $/min (1-min candles)
 
   const projectedPrice     = livePrice + velocity * minutesRemaining;
   const projectedMarginPct = ((projectedPrice - kalshiTarget) / kalshiTarget) * 100;
 
-  // signedMargin: positive = price is on the "winning" side of the target
-  // YES bet wins when price closes ABOVE target → positive margin is good
-  // NO  bet wins when price closes BELOW target → negative margin is good
+  // signedMargin/signedVelocity: positive = on the winning side / heading in winning direction
+  // YES wins above target → rising price is good; NO wins below → falling is good
   const signedCurrentMargin   = direction === "yes" ? currentMarginPct   : -currentMarginPct;
   const signedProjectedMargin = direction === "yes" ? projectedMarginPct : -projectedMarginPct;
+  const signedVelocity        = direction === "yes" ? velocity            : -velocity;
 
-  // Block if: currently already too close to strike, OR trending to cross/thin
-  const alreadyThin = signedCurrentMargin   < effectiveCurrentMarginMinPct;
-  const willCross   = blockOnCross && signedProjectedMargin < 0;
-  const tooThin     = signedProjectedMargin < effectiveDangerBandPct;
+  // adverseVelocity: price is moving TOWARD the strike (bad direction)
+  const adverseVelocity = signedVelocity <= 0;
+
+  // ── Three gate checks ────────────────────────────────────────────────────
+  // alreadyThin: current price is dangerously close to the strike.
+  //   For max bets only (regular bets skip this — proximity is normal).
+  //   When adverseVelocityOnly is on (default), only fires if velocity is also
+  //   heading toward the strike — a coin that's thin but running AWAY is fine.
+  const adverseVelocityOnly = config.maxBetTrajectoryAdverseVelocityOnly !== false;
+  const alreadyThin = !isRegular
+    && signedCurrentMargin < effectiveCurrentMarginMinPct
+    && (!adverseVelocityOnly || adverseVelocity);
+
+  // willCross: linear projection expects price on the losing side at expiry.
+  const willCross = blockOnCross && signedProjectedMargin < 0;
+
+  // tooThin: projected margin at expiry is inside the danger band.
+  const tooThin = signedProjectedMargin < effectiveDangerBandPct;
 
   const blocked = alreadyThin || willCross || tooThin;
   const reason: TrajectoryGateResult["reason"] = willCross
@@ -156,6 +195,7 @@ function computeTrajectoryGate(
     currentMarginPct, projectedMarginPct,
     minutesRemaining, direction, computedAt: Date.now(),
     atrPct, effectiveCurrentMarginMinPct, effectiveDangerBandPct,
+    timeWeight, adverseVelocity,
   };
 }
 
@@ -1643,7 +1683,7 @@ async function _runBotTick(
     const trajLiveP = candles[candles.length - 1].c;
     const _trajWkMs = new Date(windowKey).getTime();
     const _trajClockS = isNaN(_trajWkMs) ? 0 : (Date.now() - _trajWkMs) / 1000;
-    const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, _trajClockS, S.config);
+    const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, _trajClockS, S.config, "regular");
     coinTrajectoryCache.set(sym, traj);
     if (traj.blocked) {
       logger.info(

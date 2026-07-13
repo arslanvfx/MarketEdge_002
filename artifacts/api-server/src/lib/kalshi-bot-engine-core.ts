@@ -1177,7 +1177,12 @@ export interface BotConfig {
   maxBetTrajectoryCurrentMarginMinPct?: number;    // min safe CURRENT margin % floor (default 0.30%) — actual threshold = max(this, atrPct × currentMarginMinATR)
   maxBetTrajectoryCurrentMarginMinATR?: number;    // current margin must be ≥ N × ATR (default 1.5) — makes threshold coin-relative
   maxBetTrajectoryDangerBandATR?: number;          // projected margin must be ≥ N × ATR (default 2.0) — makes threshold coin-relative
+  maxBetTrajectoryAdverseVelocityOnly?: boolean;   // alreadyThin only fires when velocity is toward strike (default true)
+  maxBetTrajectoryTimeWeightEnabled?: boolean;     // loosen projected floor early in window, tighten late (default true)
   maxBetTrajectoryBlockOnCross?: boolean;          // also block when projection crosses to wrong side of target (default true)
+  // Regular bet trajectory gate — much looser than max bets (regular bets are smaller risk)
+  regularBetTrajectoryDangerBandPct?: number;      // projected margin floor for regular bets (default 0.10%)
+  regularBetTrajectoryDangerBandATR?: number;      // projected margin ATR× for regular bets (default 0.5×)
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,7 +1345,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryCurrentMarginMinPct: 0.30,
   maxBetTrajectoryCurrentMarginMinATR: 1.5,
   maxBetTrajectoryDangerBandATR: 2.0,
+  maxBetTrajectoryAdverseVelocityOnly: true,
+  maxBetTrajectoryTimeWeightEnabled: true,
   maxBetTrajectoryBlockOnCross: true,
+  regularBetTrajectoryDangerBandPct: 0.10,
+  regularBetTrajectoryDangerBandATR: 0.5,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,

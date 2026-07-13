@@ -225,7 +225,9 @@ export interface TrajectoryGateResult {
   computedAt: number;
   atrPct: number;                        // recent 5-candle ATR as % of target — coin volatility proxy
   effectiveCurrentMarginMinPct: number;  // max(fixedFloor, atrPct × multiplier) — actual threshold used
-  effectiveDangerBandPct: number;        // max(fixedFloor, atrPct × multiplier) — actual threshold used
+  effectiveDangerBandPct: number;        // max(fixedFloor, atrPct × multiplier) × timeWeight — actual threshold used
+  timeWeight: number;                    // 0.5–1.0 — loosens projected floor early in window, tightens near end
+  adverseVelocity: boolean;              // true when velocity is heading toward strike (alreadyThin only fires then)
 }
 export const coinTrajectoryCache = new Map<string, TrajectoryGateResult>();
 export const coinConvictionWinRates = new Map<string, number>();

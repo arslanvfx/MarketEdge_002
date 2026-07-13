@@ -319,15 +319,17 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                         <span
                           className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
                           title={[
-                            `v: ${traj.velocity >= 0 ? "+" : ""}${(+traj.velocity).toFixed(2)}/min`,
+                            `vel: ${traj.velocity >= 0 ? "+" : ""}${(+traj.velocity).toFixed(2)}/min (${traj.adverseVelocity ? "toward strike ⚠" : "away ✓"})`,
                             `cur: ${(+traj.currentMarginPct).toFixed(3)}% (need ≥${traj.effectiveCurrentMarginMinPct != null ? (+traj.effectiveCurrentMarginMinPct).toFixed(3) : "?"}%)`,
                             `proj: ${(+traj.projectedMarginPct).toFixed(3)}% (need ≥${traj.effectiveDangerBandPct != null ? (+traj.effectiveDangerBandPct).toFixed(3) : "?"}%)`,
                             `ATR: ${traj.atrPct != null ? (+traj.atrPct).toFixed(3) : "?"}%`,
+                            `time-weight: ${traj.timeWeight != null ? (+traj.timeWeight).toFixed(2) : "?"}×`,
                             `${traj.minutesRemaining != null ? (+traj.minutesRemaining).toFixed(1) : "?"} min left`,
                           ].join(" · ")}
                         >
                           {traj.velocity >= 0 ? "+" : ""}{(+traj.velocity).toFixed(1)}/m · {(+traj.projectedMarginPct).toFixed(2)}%
-                          {traj.atrPct != null && <span className="text-violet-400/70"> · ATR {(+traj.atrPct).toFixed(2)}%</span>}
+                          {traj.atrPct != null && <span className="text-violet-400/70"> · {(+traj.atrPct).toFixed(2)}%ATR</span>}
+                          {traj.adverseVelocity && <span className="text-orange-400/70"> ↓</span>}
                         </span>
                       </div>
                     )}
