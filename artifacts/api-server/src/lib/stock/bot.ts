@@ -748,8 +748,20 @@ export async function runBotCycle(): Promise<{ ran: boolean; summary: string }> 
         cfg = await saveConfig({ enabled: true });
         logger.info("[stock-bot] auto-start: market opened");
       } else if (!clock.isOpen && cfg.enabled) {
-        cfg = await saveConfig({ enabled: false });
-        logger.info("[stock-bot] auto-stop: market closed");
+        // Only auto-stop if we are genuinely post-market (market already closed
+        // for the day). Do NOT stop during pre-market: if nextOpen is within
+        // 2 hours we are just waiting for the open, so let the bot sit enabled.
+        const msUntilOpen = clock.nextOpen
+          ? new Date(clock.nextOpen).getTime() - Date.now()
+          : Infinity;
+        const PRE_MARKET_WINDOW_MS = 2 * 60 * 60_000; // 2 hours
+        if (msUntilOpen > PRE_MARKET_WINDOW_MS) {
+          cfg = await saveConfig({ enabled: false });
+          logger.info("[stock-bot] auto-stop: market closed (post-market)");
+        } else {
+          logger.info({ msUntilOpen: Math.round(msUntilOpen / 60_000) + "min" },
+            "[stock-bot] pre-market hold — market opens soon, staying enabled");
+        }
       }
     } catch (err) {
       logger.warn({ err }, "[stock-bot] auto-start/stop clock check failed");
