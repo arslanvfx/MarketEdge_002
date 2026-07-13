@@ -1053,7 +1053,7 @@ async function _runBotTick(
   // Trajectory gate: update cache every tick so the UI always shows fresh data,
   // even when no bet is being placed.  Direction is estimated from yesPrice vs
   // lockPrice; the IIFE below re-runs with the precise direction before blocking.
-  if (S.config.decisionMode === "conviction" && kalshiTarget != null && candles.length >= 2) {
+  if (kalshiTarget != null && candles.length >= 2) {
     const trajLivePrice = getCachedPrediction(sym)?.price ?? (candles.length > 0 ? candles[candles.length - 1].c : null);
     if (trajLivePrice != null) {
       const _wkMsTraj = new Date(windowKey).getTime();
@@ -1570,6 +1570,24 @@ async function _runBotTick(
       windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
       return;
     }
+  }
+
+  // Trajectory gate — regular bets: block if price is trending dangerously into target
+  if (S.config.regularBetTrajectoryEnabled && kalshiTarget != null && candles.length >= 2) {
+    const trajLiveP = getCachedPrediction(sym)?.price ?? candles[candles.length - 1].c;
+    const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, clockElapsedS, S.config);
+    coinTrajectoryCache.set(sym, traj);
+    if (traj.blocked) {
+      logger.info(
+        { sym, reason: traj.reason, velocity: traj.velocity.toFixed(2), currentMarginPct: traj.currentMarginPct.toFixed(3), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1), direction },
+        "[kalshi-bot] trajectory gate (regular) — BLOCKED: bet skipped (price momentum too close to target)",
+      );
+      return;
+    }
+    logger.info(
+      { sym, velocity: traj.velocity.toFixed(2), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1) },
+      "[kalshi-bot] trajectory gate (regular) — SAFE",
+    );
   }
 
   logger.info(

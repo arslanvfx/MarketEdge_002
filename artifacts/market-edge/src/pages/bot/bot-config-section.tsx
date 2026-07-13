@@ -950,6 +950,42 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </div>
                 )}
 
+                {/* Trajectory Gate toggles — visible for all modes */}
+                <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-border/60 bg-muted/20 p-3">
+                  <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                    <TrendingUp className="w-3 h-3 text-violet-400" />
+                    Trajectory Gate
+                  </span>
+                  <p className="text-[10px] text-muted-foreground/60 -mt-1">
+                    Blocks bets when the underlying coin price is trending toward the Kalshi target — computed from recent candle velocity projected to window close.
+                    Danger band: <span className="font-mono text-violet-300">{(merged.maxBetTrajectoryDangerBandPct ?? 0.15).toFixed(2)}%</span> · Lookback: <span className="font-mono text-violet-300">{merged.maxBetTrajectoryLookbackMinutes ?? 3} min</span>
+                  </p>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <button
+                        type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, maxBetTrajectoryEnabled: !(merged.maxBetTrajectoryEnabled ?? true) }))}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.maxBetTrajectoryEnabled ?? true)
+                          ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                          : "bg-muted/40 text-muted-foreground border-border"}`}
+                      >
+                        Max Bets: {(merged.maxBetTrajectoryEnabled ?? true) ? "On" : "Off"}
+                      </button>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <button
+                        type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, regularBetTrajectoryEnabled: !(merged.regularBetTrajectoryEnabled ?? false) }))}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.regularBetTrajectoryEnabled ?? false)
+                          ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                          : "bg-muted/40 text-muted-foreground border-border"}`}
+                      >
+                        Regular Bets: {(merged.regularBetTrajectoryEnabled ?? false) ? "On" : "Off"}
+                      </button>
+                    </label>
+                  </div>
+                </div>
+
                 {/* Mode config panel — defaults, saved preset, and save actions */}
                 <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 p-3">
                   <div className="flex items-center justify-between">

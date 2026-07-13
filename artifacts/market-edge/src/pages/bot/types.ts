@@ -89,6 +89,7 @@ export interface BotConfig {
   allowLateEntries?: boolean;
   coinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number }>;
   maxBetTrajectoryEnabled?: boolean;
+  regularBetTrajectoryEnabled?: boolean;
   maxBetTrajectoryLookbackMinutes?: number;
   maxBetTrajectoryDangerBandPct?: number;
   maxBetTrajectoryBlockOnCross?: boolean;
