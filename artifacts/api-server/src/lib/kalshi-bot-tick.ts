@@ -997,6 +997,11 @@ async function _runBotTick(
       ? S.config.convictionBoostBetSize!
       : (S.config.maxBetSize ?? 0);
     if (targetBoost <= 0) return null;
+    // clockElapsedS: defined here at IIFE top so both stable and legacy paths
+    // can use it.  The outer-scope definition lives inside a block `{ }` and
+    // is not accessible in this IIFE.
+    const _wkMs = new Date(windowKey).getTime();
+    const clockElapsedS = isNaN(_wkMs) ? 0 : (Date.now() - _wkMs) / 1000;
 
     if (S.config.convictionStabilityEnabled !== false) {
       // ── Deterministic stability gate ──────────────────────────────────────
@@ -1050,6 +1055,7 @@ async function _runBotTick(
       // Max-bet timing gate: independent of minWindowEntryMinutes; blocks max-size
       // bets until the configured number of minutes has elapsed.  Falling back to
       // regular size does NOT consume the token — it stays available for later.
+      // (clockElapsedS is defined at the top of this IIFE, shared by all paths.)
       const maxBetEntryGateS = (S.config.maxBetMinWindowEntryMinutes ?? 0) * 60;
       if (maxBetEntryGateS > 0 && clockElapsedS < maxBetEntryGateS) {
         logger.info(
