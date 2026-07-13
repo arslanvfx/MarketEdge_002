@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Search, RefreshCw, Star, TrendingUp, TrendingDown, CalendarClock, Loader2, ArrowUpDown, BarChart2,
+  Search, RefreshCw, Star, TrendingUp, TrendingDown, CalendarClock, Loader2, ArrowUpDown, BarChart2, FlaskConical, Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
@@ -96,6 +96,14 @@ export default function StockScanner() {
   const results = scanData?.results ?? [];
   const lastScanAt = scanData?.lastScanAt ?? 0;
 
+  /** 0 = screened only, 1 = deep scored, 2 = research pick */
+  function rowTier(r: ScannerRow, research?: ResearchReport): 0 | 1 | 2 {
+    if (research && research.stance !== "avoid") return 2;
+    // Deep-scored stocks have rich details (rsi, maAlignment, etc.)
+    if (r.details && (typeof r.details.rsi === "number" || typeof r.details.maAlignment === "boolean")) return 1;
+    return 0;
+  }
+
   const filtered = useMemo(() => {
     const q = search.trim().toUpperCase();
     let rows = results.filter((r) => {
@@ -106,10 +114,23 @@ export default function StockScanner() {
     });
     rows = [...rows].sort((a, b) => {
       if (sortKey === "changePct") return Math.abs(b.changePct) - Math.abs(a.changePct);
+      if (sortKey === "score") {
+        // Tier-aware: research picks → deep scored → screened only, then score within each tier
+        const ta = rowTier(a, researchMap[a.ticker]);
+        const tb = rowTier(b, researchMap[b.ticker]);
+        if (ta !== tb) return tb - ta;
+        // Within research tier: sort by Claude confidence
+        if (ta === 2) {
+          const ca = researchMap[a.ticker]?.confidence ?? 0;
+          const cb = researchMap[b.ticker]?.confidence ?? 0;
+          if (cb !== ca) return cb - ca;
+        }
+        return b.score - a.score;
+      }
       return (b[sortKey] as number) - (a[sortKey] as number);
     });
     return rows;
-  }, [results, sector, search, sortKey, maAlignOnly]);
+  }, [results, sector, search, sortKey, maAlignOnly, researchMap]);
 
   const pinned = filtered.filter((r) => watchSet.has(r.ticker));
   const unpinned = filtered.filter((r) => !watchSet.has(r.ticker));
@@ -308,14 +329,18 @@ export default function StockScanner() {
             )}
             <div>
               {pinned.length > 0 && <div className="text-xs font-semibold text-muted-foreground mb-2">All opportunities</div>}
-              <div className="space-y-1.5">
-                {unpinned.map((r) => {
-                  const excluded = botSectorFocus.length > 0 && !botSectorFocus.includes(r.sector);
-                  return (
-                    <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched={false} botExcluded={excluded} onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
-                  );
-                })}
-              </div>
+              {sortKey === "score"
+                ? <TieredList rows={unpinned} researchMap={researchMap} botSectorFocus={botSectorFocus} rowTier={rowTier} onOpen={(t) => setDetail(t)} onToggleWatch={(r) => toggleWatch(r)} />
+                : (
+                  <div className="space-y-1.5">
+                    {unpinned.map((r) => {
+                      const excluded = botSectorFocus.length > 0 && !botSectorFocus.includes(r.sector);
+                      return (
+                        <ScannerCard key={r.ticker} row={r} research={researchMap[r.ticker]} watched={false} botExcluded={excluded} onOpen={() => setDetail(r.ticker)} onToggleWatch={() => toggleWatch(r)} />
+                      );
+                    })}
+                  </div>
+                )}
             </div>
           </div>
         )}
@@ -332,6 +357,67 @@ function fmtAge(ts: number): string {
   if (sec < 60) return `${sec}s ago`;
   if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
   return `${Math.floor(sec / 3600)}h ago`;
+}
+
+function TieredList({ rows, researchMap, botSectorFocus, rowTier, onOpen, onToggleWatch }: {
+  rows: ScannerRow[];
+  researchMap: Record<string, ResearchReport>;
+  botSectorFocus: string[];
+  rowTier: (r: ScannerRow, research?: ResearchReport) => 0 | 1 | 2;
+  onOpen: (ticker: string) => void;
+  onToggleWatch: (row: ScannerRow) => void;
+}) {
+  const tier2 = rows.filter((r) => rowTier(r, researchMap[r.ticker]) === 2);
+  const tier1 = rows.filter((r) => rowTier(r, researchMap[r.ticker]) === 1);
+  const tier0 = rows.filter((r) => rowTier(r, researchMap[r.ticker]) === 0);
+
+  const renderRows = (list: ScannerRow[]) =>
+    list.map((r) => {
+      const excluded = botSectorFocus.length > 0 && !botSectorFocus.includes(r.sector);
+      return (
+        <ScannerCard
+          key={r.ticker}
+          row={r}
+          research={researchMap[r.ticker]}
+          watched={false}
+          botExcluded={excluded}
+          onOpen={() => onOpen(r.ticker)}
+          onToggleWatch={() => onToggleWatch(r)}
+        />
+      );
+    });
+
+  return (
+    <div className="space-y-4">
+      {tier2.length > 0 && (
+        <div>
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-violet-400 mb-2">
+            <FlaskConical className="w-3.5 h-3.5" /> Research picks
+            <span className="text-muted-foreground font-normal">— Claude-analyzed, highest conviction</span>
+          </div>
+          <div className="space-y-1.5">{renderRows(tier2)}</div>
+        </div>
+      )}
+      {tier1.length > 0 && (
+        <div>
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400 mb-2">
+            <Layers className="w-3.5 h-3.5" /> Deep scored
+            <span className="text-muted-foreground font-normal">— full technical analysis</span>
+          </div>
+          <div className="space-y-1.5">{renderRows(tier1)}</div>
+        </div>
+      )}
+      {tier0.length > 0 && (
+        <div>
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground mb-2">
+            Screened
+            <span className="font-normal">— initial pass only</span>
+          </div>
+          <div className="space-y-1.5">{renderRows(tier0)}</div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ResearchBadge({ r }: { r: ResearchReport }) {
