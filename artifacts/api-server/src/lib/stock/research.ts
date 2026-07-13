@@ -173,7 +173,7 @@ export async function initResearchFromDB(): Promise<void> {
         ticker, company_name, sector, horizon, stance, confidence, summary, factors_json,
         valuation, price, web_search_used, created_at
       FROM stock_research_reports
-      WHERE created_at >= date_trunc('day', NOW())
+      WHERE created_at >= NOW() - INTERVAL '36 hours'
       ORDER BY ticker, created_at DESC
     `)) as unknown as { rows: any[] };
     const day = todayKey();

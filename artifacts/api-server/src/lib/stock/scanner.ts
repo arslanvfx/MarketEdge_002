@@ -337,7 +337,15 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
 
     // ── Tier 3: Claude + web research for the top scored tickers ────────────
     if (isAiFeatureEnabled("stock_research")) {
-      const top = [...scoredRows].sort((a, b) => b.score - a.score).slice(0, RESEARCH_LIMIT);
+      // Only escalate BULLISH candidates (direction="up") to the research phase.
+      // Bearish stocks score high on momentum too (big drops = high score), but
+      // sending them to Claude produces correct "avoid" verdicts that pollute the
+      // buy-candidate list. Research is for finding buy opportunities, not confirming
+      // sells — the bot's short-entry path uses scanner direction directly.
+      const top = [...scoredRows]
+        .filter((r) => r.direction === "up")
+        .sort((a, b) => b.score - a.score)
+        .slice(0, RESEARCH_LIMIT);
       const candidates = top.map((r) => {
         const snap = snaps[r.ticker];
         const d = (r.details ?? {}) as Record<string, any>;
