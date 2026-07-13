@@ -661,22 +661,28 @@ export async function runBotLoopTick(): Promise<void> {
   if (openPositions.size > 0) {
     // ── Conviction stop-loss ────────────────────────────────────────────────
     // Checked every tick before the normal exit path.
-    // If the contract we're holding has fallen to or below convictionStopLossFloor,
-    // sell immediately — no model signals needed, pure price floor.
-    //   YES position: contract value = yesPrice.  Exit when yesPrice ≤ floor.
-    //   NO  position: contract value = 1 − yesPrice.  Exit when (1 − yesPrice) ≤ floor.
-    const stopFloor = S.config.convictionStopLossFloor ?? 0;
-    if (S.config.decisionMode === "conviction" && stopFloor > 0) {
+    // convictionStopLossFloor is a fractional drop from the entry contract value
+    // (e.g. 0.15 = exit when contract has dropped 15% from what we paid).
+    //   YES position: entry = entryYesPrice;  exit when yesPrice ≤ entry × (1 − pct)
+    //   NO  position: entry = 1 − entryYesPrice;  exit when (1 − yesPrice) ≤ entry × (1 − pct)
+    const stopDropPct = S.config.convictionStopLossFloor ?? 0;
+    if (S.config.decisionMode === "conviction" && stopDropPct > 0) {
       for (const [sym, pos] of Array.from(openPositions.entries())) {
         const kd = getKalshiCachedData(sym);
         const yp = kd?.yesPrice ?? null;
         if (yp === null) continue;
         const contractValue = pos.direction === "yes" ? yp : (1 - yp);
+        const entryContractValue = pos.direction === "yes" ? pos.entryYesPrice : (1 - pos.entryYesPrice);
+        const stopFloor = entryContractValue * (1 - stopDropPct);
         if (contractValue > stopFloor) continue;
 
         logger.warn(
-          { sym, direction: pos.direction, contractValue: +contractValue.toFixed(4),
-            stopFloor, entryYesPrice: pos.entryYesPrice },
+          { sym, direction: pos.direction,
+            contractValue: +contractValue.toFixed(4),
+            entryContractValue: +entryContractValue.toFixed(4),
+            stopFloor: +stopFloor.toFixed(4),
+            stopDropPct,
+            entryYesPrice: pos.entryYesPrice },
           "[kalshi-bot] conviction stop-loss triggered — selling position",
         );
         // Delete synchronously first — mirrors the window-expiry pattern so a
