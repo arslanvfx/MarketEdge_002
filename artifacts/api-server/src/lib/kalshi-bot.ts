@@ -37,6 +37,8 @@ export {
   backtestModeApproval,
   getConvictionThresholdAnalysis,
   getConvictionStabilityAnalysis,
+  getPhaseStatus,
+  SCALE_PHASE_PRESETS,
 } from "./kalshi-bot-analytics";
 export type {
   TrendPoint,
@@ -47,6 +49,7 @@ export type {
   StabilityThresholdRow,
   StabilityDimensionAnalysis,
   ConvictionStabilityAnalysis,
+  PhaseStatus,
 } from "./kalshi-bot-analytics";
 
 // ---------------------------------------------------------------------------

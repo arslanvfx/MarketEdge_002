@@ -73,6 +73,8 @@ export interface BotConfig {
   proximityLatePctOverrides?: Record<string, number>;
   convictionDailyLossLimit?: number;
   convictionStopLossActivationMinute?: number;
+  scalePhase?: number;
+  phaseStartedAt?: string | null;
   convictionBoostBetSize?: number;
   convictionBoostProbability?: number;
   convictionBoostMinWinRate?: number;
