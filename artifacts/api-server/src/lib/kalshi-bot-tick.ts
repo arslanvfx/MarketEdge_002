@@ -384,26 +384,13 @@ async function _runBotTick(
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
-  // Bypassed when yesPrice is in the conviction zone (or beyond it).
-  //
-  // Non-conviction mode: bypass at ≥92¢ or ≤8¢ (true market extremes).
-  //
-  // Conviction mode: the entry zone IS 88–92¢ (YES bets) or 8–12¢ (NO bets).
-  // The old ≥92¢/≤8¢ threshold only covered the outer edges of those ranges,
-  // blocking valid conviction entries at e.g. 10¢ or 90¢ for the full 9 minutes.
-  // Use the actual conviction window boundaries so any price inside (or beyond)
-  // the zone bypasses the lockout immediately.
+  // Only bypassed at true market extremes (≥92¢ or ≤8¢) regardless of mode.
+  // Conviction mode respects minWindowEntryMinutes just like any other mode —
+  // the separate maxBetMinWindowEntryMinutes gate controls when max bets are eligible.
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
     if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
-      let isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
-      if (!isExtreme && S.config.decisionMode === "conviction" && yesPrice !== null) {
-        const lockTarget = S.config.kalshiLockPrice ?? 0.90;
-        // YES zone: [lockTarget-0.02, lockTarget+0.02]  e.g. [0.88, 0.92]
-        // NO  zone: [1-(lockTarget+0.02), 1-(lockTarget-0.02)]  e.g. [0.08, 0.12]
-        // Bypass whenever price is anywhere inside or beyond either zone.
-        isExtreme = yesPrice >= (lockTarget - 0.02) || yesPrice <= (1 - (lockTarget - 0.02));
-      }
+      const isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
       if (!isExtreme) {
         logger.debug(
           { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
@@ -411,10 +398,6 @@ async function _runBotTick(
         );
         return;
       }
-      logger.info(
-        { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-        "[kalshi-bot] early-window lockout bypassed — conviction zone override",
-      );
     }
   }
   // Floor: early-exit the tick if fewer than minRemainingMinutes remain.
