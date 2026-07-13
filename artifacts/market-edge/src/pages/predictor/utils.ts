@@ -5,7 +5,7 @@ import { TrendingUp, TrendingDown, Minus } from "lucide-react";
 // ---------------------------------------------------------------------------
 
 // Coins that have Kalshi 15-min markets (must match KALSHI_SERIES in the API).
-export const KALSHI_COINS = ["BTC", "ETH", "SOL", "XRP", "HYPE", "BNB"];
+export const KALSHI_COINS = ["BTC", "ETH", "SOL", "XRP", "HYPE", "BNB", "DOGE", "NEAR", "ZEC"];
 
 export const COIN_STYLE: Record<string, { glyph: string; accent: string; ring: string; glow: string }> = {
   BTC:  { glyph: "₿", accent: "text-amber-400",   ring: "ring-amber-500/40 border-amber-500/40",   glow: "shadow-amber-500/20" },
@@ -16,6 +16,8 @@ export const COIN_STYLE: Record<string, { glyph: string; accent: string; ring: s
   BNB:  { glyph: "B", accent: "text-yellow-300",  ring: "ring-yellow-400/40 border-yellow-400/40",  glow: "shadow-yellow-400/20" },
   LINK: { glyph: "⬡", accent: "text-blue-400",    ring: "ring-blue-500/40 border-blue-500/40",      glow: "shadow-blue-500/20" },
   DOGE: { glyph: "Ð", accent: "text-yellow-400",  ring: "ring-yellow-500/40 border-yellow-500/40",  glow: "shadow-yellow-500/20" },
+  NEAR: { glyph: "Ⓝ", accent: "text-green-400",   ring: "ring-green-500/40 border-green-500/40",    glow: "shadow-green-500/20" },
+  ZEC:  { glyph: "ⓩ", accent: "text-orange-400",  ring: "ring-orange-500/40 border-orange-500/40",  glow: "shadow-orange-500/20" },
 };
 
 export function formatPrice(p: number): string {

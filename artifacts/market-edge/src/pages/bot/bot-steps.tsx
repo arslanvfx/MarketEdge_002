@@ -13,7 +13,7 @@ interface BotStepsPanelProps {
   windowKey: string | null;
 }
 
-const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"];
+const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC"];
 
 function CheckItem({
   label,
