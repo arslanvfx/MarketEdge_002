@@ -1534,23 +1534,17 @@ async function _runBotTick(
     freshYesAsk = obPrices?.yesAsk ?? freshData?.yesAsk ?? null;
     freshYesBid = obPrices?.yesBid ?? freshData?.yesBid ?? null;
 
-    // Conviction orders REQUIRE authenticated orderbook prices.
-    // The public market list (freshData) can lag 30–60 s — far too stale to
-    // safely enforce the conviction zone.  If the orderbook fetch failed,
-    // abort rather than risk a fill based on a stale mid-price.
-    // (This was the root cause of fills 20–25¢ below the conviction floor:
-    // obPrices returned null → stale yesAsk 87¢ → gate passed → FOK filled at 61¢.)
+    // Log when orderbook is unavailable so we can diagnose the failure.
+    // We do NOT abort here — the bypass-cache fetchKalshiTarget above already
+    // provides a fresh public-API price that is far more current than the 5 s
+    // in-memory cache.  Requiring the authenticated orderbook is too aggressive:
+    // it consistently returns null on production (likely a rate-limit or auth
+    // issue), which would block all conviction bets regardless of price.
     if (obPrices == null) {
-      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-      if (boostBetSize != null) {
-        maxBetWindowToken.remaining++;
-        logger.info({ sym }, "[kalshi-bot] conviction gate: max-bet token restored (orderbook unavailable)");
-      }
       logger.warn(
         { sym, direction, windowKey, freshYesAsk, freshYesBid },
-        "[kalshi-bot] conviction live-price gate: authenticated orderbook unavailable — aborting to avoid stale fill",
+        "[kalshi-bot] conviction live-price gate: authenticated orderbook unavailable — falling back to public API prices",
       );
-      return;
     }
 
     // YES direction: use the fresh YES ask.

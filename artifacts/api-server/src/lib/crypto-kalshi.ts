@@ -156,7 +156,13 @@ export async function fetchOrderbookPrices(
       },
       signal: AbortSignal.timeout(4000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      logger.warn(
+        { ticker, status: resp.status, statusText: resp.statusText },
+        "[kalshi] fetchOrderbookPrices: non-OK response",
+      );
+      return null;
+    }
     const body = (await resp.json()) as {
       orderbook?: { yes?: [number, number][]; no?: [number, number][] };
     };
