@@ -155,7 +155,7 @@ export function refreshTrajectoryForAllCoins(): void {
     const candles = pred?.candles ?? [];
     if (candles.length < 2) continue;
 
-    const livePrice = pred?.price ?? candles[candles.length - 1].c;
+    const livePrice = candles[candles.length - 1].c; // live-patched last candle close
 
     const kd       = getKalshiCachedData(sym);
     const target   = kd?.value ?? null;
@@ -1095,16 +1095,14 @@ async function _runBotTick(
   // even when no bet is being placed.  Direction is estimated from yesPrice vs
   // lockPrice; the IIFE below re-runs with the precise direction before blocking.
   if (kalshiTarget != null && candles.length >= 2) {
-    const trajLivePrice = getCachedPrediction(sym)?.price ?? (candles.length > 0 ? candles[candles.length - 1].c : null);
-    if (trajLivePrice != null) {
-      const _wkMsTraj = new Date(windowKey).getTime();
-      const _clockSTraj = isNaN(_wkMsTraj) ? 0 : (Date.now() - _wkMsTraj) / 1000;
-      const lockP = S.config.kalshiLockPrice ?? 0.88;
-      const guessDir: "yes" | "no" = yesPrice != null && yesPrice >= lockP ? "yes"
-                                   : yesPrice != null && yesPrice <= (1 - lockP) ? "no"
-                                   : yesPrice != null && yesPrice > 0.5 ? "yes" : "no";
-      coinTrajectoryCache.set(sym, computeTrajectoryGate(sym, candles, trajLivePrice, kalshiTarget, guessDir, _clockSTraj, S.config));
-    }
+    const trajLivePrice = candles[candles.length - 1].c; // live-patched last candle close
+    const _wkMsTraj = new Date(windowKey).getTime();
+    const _clockSTraj = isNaN(_wkMsTraj) ? 0 : (Date.now() - _wkMsTraj) / 1000;
+    const lockP = S.config.kalshiLockPrice ?? 0.88;
+    const guessDir: "yes" | "no" = yesPrice != null && yesPrice >= lockP ? "yes"
+                                 : yesPrice != null && yesPrice <= (1 - lockP) ? "no"
+                                 : yesPrice != null && yesPrice > 0.5 ? "yes" : "no";
+    coinTrajectoryCache.set(sym, computeTrajectoryGate(sym, candles, trajLivePrice, kalshiTarget, guessDir, _clockSTraj, S.config));
   }
 
   // Conviction stability gate: classify the coin as stable or volatile using the
@@ -1615,10 +1613,13 @@ async function _runBotTick(
     }
   }
 
-  // Trajectory gate — regular bets: block if price is trending dangerously into target
+  // Trajectory gate — regular bets: block if price is trending dangerously into target.
+  // Use live-patched last candle close — always fresher than predCache.price.
   if (S.config.regularBetTrajectoryEnabled && kalshiTarget != null && candles.length >= 2) {
-    const trajLiveP = getCachedPrediction(sym)?.price ?? candles[candles.length - 1].c;
-    const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, clockElapsedS, S.config);
+    const trajLiveP = candles[candles.length - 1].c;
+    const _trajWkMs = new Date(windowKey).getTime();
+    const _trajClockS = isNaN(_trajWkMs) ? 0 : (Date.now() - _trajWkMs) / 1000;
+    const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, _trajClockS, S.config);
     coinTrajectoryCache.set(sym, traj);
     if (traj.blocked) {
       logger.info(
