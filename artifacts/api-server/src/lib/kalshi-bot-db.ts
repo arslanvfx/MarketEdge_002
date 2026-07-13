@@ -105,8 +105,18 @@ export async function loadBotConfigFromDB(): Promise<void> {
       let needsBackfill = false;
       const mode = S.config.decisionMode;
       if (mode === "conviction" && S.config.kalshiLockPrice == null) {
-        S.config.kalshiLockPrice = 0.90;
+        S.config.kalshiLockPrice = 0.91;
+        S.config.lockPrice091Migrated = true;
         needsBackfill = true;
+      }
+      // One-time migration: conviction target moved 0.90 → 0.91 so the ±2¢
+      // zone is [89¢, 93¢]. Flag-gated: if the user later deliberately sets
+      // 0.90 again via the UI, this will NOT re-bump it on restart.
+      if (S.config.kalshiLockPrice === 0.90 && !S.config.lockPrice091Migrated) {
+        S.config.kalshiLockPrice = 0.91;
+        S.config.lockPrice091Migrated = true;
+        needsBackfill = true;
+        logger.info("[kalshi-bot] one-time migration: kalshiLockPrice 0.90 → 0.91 (zone [89¢, 93¢])");
       }
       if (needsBackfill) {
         logger.info({ mode, kalshiLockPrice: S.config.kalshiLockPrice }, "[kalshi-bot] backfilled null mode defaults — persisting to DB");

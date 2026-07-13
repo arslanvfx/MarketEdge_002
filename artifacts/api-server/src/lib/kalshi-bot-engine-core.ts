@@ -953,7 +953,8 @@ export interface BotConfig {
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
   minWindowEntryMinutes?: number;     // hard lockout: no bets in the first N minutes of a window; bypassed when yesPrice ≥ 0.92 or ≤ 0.08; 0/undefined = disabled
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
-  kalshiLockPrice?: number;           // conviction only: entry trigger (default 0.88; yesAsk >= this fires BET_YES, <= 1-this fires BET_NO)
+  kalshiLockPrice?: number;           // conviction only: entry target (default 0.91; ±2¢ zone derived around it)
+  lockPrice091Migrated?: boolean;     // one-time startup migration marker: 0.90 → 0.91 target bump applied
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.30 = sell when contract drops to 30¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately (legacy)

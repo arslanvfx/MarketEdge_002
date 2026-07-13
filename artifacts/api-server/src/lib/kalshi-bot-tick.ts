@@ -551,7 +551,7 @@ async function _runBotTick(
   // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
     // Derive the same ±2 ¢ window used by the engine so the bypass is in sync.
-    const convTarget = S.config.kalshiLockPrice ?? 0.90;
+    const convTarget = S.config.kalshiLockPrice ?? 0.91;
     const proximityIsConvictionExtreme =
       S.config.decisionMode === "conviction" &&
       yesPrice !== null &&
@@ -892,7 +892,7 @@ async function _runBotTick(
     // Only applied on the "at risk" side for each direction:
     //   NO  bet + price barely below target → one tick up = loss
     //   YES bet + price barely above target → one tick down = loss
-    // Bypassed in conviction mode — at 88-92¢/8-12¢, being close to strike
+    // Bypassed in conviction mode — at 89-93¢/7-11¢, being close to strike
     // is the whole point; blocking these bets defeats the mode entirely.
     const livePrice = pred?.price;
     if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
@@ -1006,7 +1006,7 @@ async function _runBotTick(
   //   YES: bid at min(yesAsk + 0.03, maxCost),  cent-floored
   //   NO:  ask at max(yesBid − 0.03, 1−maxCost), cent-ceiled
   //
-  // CONVICTION MODE: the return floor cap is removed entirely. At 88-92¢ YES /
+  // CONVICTION MODE: the return floor cap is removed entirely. At 89-93¢ YES /
   // 8-12¢ NO the cap (≈0.689) would force the order far from the market and
   // guarantee zero fills. We still apply a hard 0.01/0.99 sanity bound.
   const _entryReturnFloor = S.config.minReturnMultiple ?? 1.45;
@@ -1038,7 +1038,7 @@ async function _runBotTick(
   //   NO:  cost = 1−yes_bid; return = 1/cost. Same threshold.
   // 1/1.45 ≈ 0.6897 → nearest cent-aligned ceiling is 0.68 (return 1.471x).
   // We compare against the raw 1/1.45 float so a 0.69 cost (1.449x) is blocked.
-  // Bypassed in conviction mode — by design the return at 88-92¢ is ~1.09-1.14×;
+  // Bypassed in conviction mode — by design the return at 89-93¢ is ~1.08-1.12×;
   // the high probability is the edge, not the payout multiple.
   if (S.config.decisionMode !== "conviction") {
     const minReturnFloor = S.config.minReturnMultiple ?? 1.45;
@@ -1512,14 +1512,12 @@ async function _runBotTick(
   if (S.config.decisionMode === "conviction") {
     // Derive the ±2 ¢ window from the single slider value (kalshiLockPrice).
     // This matches the engine derivation in kalshi-bot-engine.ts exactly.
-    const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
+    const gateTarget   = S.config.kalshiLockPrice ?? 0.91;
     const lockPrice    = gateTarget - 0.02;
-    // Hard ceiling at gateTarget + 0.03 (= 93¢ for lockPrice=0.90).
-    // Below 88¢: price can flip, too risky.
-    // 88–93¢: conviction zone — orderbook ask is typically 1–3¢ above the
-    //   displayed mid, so a displayed 90–92% maps to a real ask of ~91–93¢.
-    // Above 93¢: margin is < 7¢/contract, not worth the entry.
-    const lockPriceCap = gateTarget + 0.03;
+    // Symmetric ±2¢ zone around the target (user requirement):
+    // target 91¢ → zone [89¢, 93¢]. Below the floor: price can flip, too
+    // risky. Above the cap: margin too small, not worth the entry.
+    const lockPriceCap = gateTarget + 0.02;
     // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
     // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
     const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);
@@ -1555,10 +1553,10 @@ async function _runBotTick(
         : freshYesBid != null ? 1 - freshYesBid : null;
     // Strict zone enforcement: gate passes ONLY when price is within
     // [lockPrice, lockPriceCap] with no tolerance.  Kalshi prices are
-    // integer-cent resolution (0.88, 0.89 … 0.92) so 0 is safe.
-    //   88 ¢  passes  (0.88 >= 0.88 && 0.88 <= 0.92) ✓
-    //   87 ¢  blocked (0.87 < 0.88) ✗
-    //   93 ¢  blocked (0.93 > 0.92) ✗
+    // integer-cent resolution (0.89, 0.90 … 0.93) so 0 is safe.
+    //   89 ¢  passes  (0.89 >= 0.89 && 0.89 <= 0.93) ✓
+    //   88 ¢  blocked (0.88 < 0.89) ✗
+    //   94 ¢  blocked (0.94 > 0.93) ✗
     const GATE_BUFFER = 0;
     const inWindow =
       freshRefPrice != null &&
@@ -1825,9 +1823,9 @@ async function _runBotTick(
       //   • if outside [lockPrice, lockPriceCap], immediately close the position
       //     before it is ever recorded as open, then return
       if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
-        const _gt   = S.config.kalshiLockPrice ?? 0.90;
-        const _lp   = +(_gt - 0.02).toFixed(4); // e.g. 0.88
-        const _lpCap = +(_gt + 0.03).toFixed(4); // e.g. 0.93
+        const _gt   = S.config.kalshiLockPrice ?? 0.91;
+        const _lp   = +(_gt - 0.02).toFixed(4); // e.g. 0.89 for target 0.91
+        const _lpCap = +(_gt + 0.02).toFixed(4); // e.g. 0.93 for target 0.91
         // Kalshi always returns avgPrice in YES-side terms.
         // For YES bets: fill price IS avgPrice.
         // For NO  bets: fill price = 1 − avgPrice (what we paid per NO contract).

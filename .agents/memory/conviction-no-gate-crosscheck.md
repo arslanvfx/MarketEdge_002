@@ -38,9 +38,9 @@ After `placeOrderWithRetry` returns, check the actual Kalshi fill price.
 `result.avgPrice` is always YES-side. Convert for NO: `convFillPrice = 1 - result.avgPrice`.
 ```typescript
 if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
-  const _gt    = S.config.kalshiLockPrice ?? 0.90;
-  const _lp    = +(_gt - 0.02).toFixed(4);
-  const _lpCap = +(_gt + 0.03).toFixed(4);
+  const _gt    = S.config.kalshiLockPrice ?? 0.91;
+  const _lp    = +(_gt - 0.02).toFixed(4); // zone is symmetric ±2¢: target 0.91 → [0.89, 0.93]
+  const _lpCap = +(_gt + 0.02).toFixed(4);
   const convFillPrice = direction === "yes" ? result.avgPrice : 1 - result.avgPrice;
   if (convFillPrice < _lp || convFillPrice > _lpCap) {
     // sellYes(ticker, count) or sellNo(ticker, count) — immediately
