@@ -1830,6 +1830,20 @@ async function _runBotTick(
       fillPrice = result.avgPrice ?? yesPrice;
       orderId = result.orderId;
 
+      // ── IOC PARTIAL FILL CORRECTION ─────────────────────────────────────────
+      // placeOrderWithRetry uses IOC: fills what the book has right now and
+      // cancels the rest.  result.filledCount is the ACTUAL number of contracts
+      // that went through — it can be less than the requested contractCount.
+      // If we don't update contractCount here, we record the wrong position size
+      // (e.g. sent 21, got 2, but store 21 / $19.95 instead of 2 / $1.91).
+      if (result.filledCount > 0 && result.filledCount < contractCount) {
+        logger.warn(
+          { sym, direction, requested: contractCount, filled: result.filledCount, fillPrice },
+          "[kalshi-bot] IOC partial fill — updating contractCount to actual fill",
+        );
+        contractCount = result.filledCount;
+      }
+
       // ── CONVICTION ZONE FILL VERIFICATION (hard guarantee) ──────────────────
       // Pre-order checks (cross-checks above) minimise the race window, but
       // cannot fully prevent it: the exchange always fills a BUY at the ask and
