@@ -54,6 +54,8 @@ export interface BotConfig {
   momentumLookbackCandles: number;
   windowEntryBufferSeconds?: number;
   minWindowEntryMinutes?: number;
+  convictionEarlyBypassEnabled?: boolean;
+  convictionEarlyBypassThreshold?: number;
   betDelayMinutes?: number;
   minHoldMinutes?: number;
   enableMidExit?: boolean;

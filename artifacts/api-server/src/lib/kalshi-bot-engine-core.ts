@@ -951,7 +951,9 @@ export interface BotConfig {
   maxEntryMinutes: number;   // ceiling: don't enter after this many minutes into the window; 0 = disabled (no ceiling)
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
-  minWindowEntryMinutes?: number;     // hard lockout: no bets in the first N minutes of a window; bypassed when yesPrice ≥ 0.92 or ≤ 0.08; 0/undefined = disabled
+  minWindowEntryMinutes?: number;     // hard lockout: no bets in the first N minutes of a window; 0/undefined = disabled
+  convictionEarlyBypassEnabled?: boolean;   // when true (default), minWindowEntryMinutes is bypassed when yesPrice crosses the extreme threshold; false = timer always respected
+  convictionEarlyBypassThreshold?: number;  // YES price threshold for the early bypass (default 0.92); only active when convictionEarlyBypassEnabled=true
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
   kalshiLockPrice?: number;           // conviction only: entry target (default 0.90; ±2¢ zone derived around it → [88¢, 92¢])
   lockPrice091Migrated?: boolean;     // legacy one-time migration marker: 0.90 → 0.91 target bump (superseded)
@@ -1276,6 +1278,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Claude's opening call can resolve.  Config-driven so it can be changed live.
   // 0/undefined in DB → uses this default of 60 s (1 tracker snap cycle).
   windowEntryBufferSeconds: 60,
+  convictionEarlyBypassEnabled: true,
+  convictionEarlyBypassThreshold: 0.92,
   // Allow up to 7 bets per window (matches 7-coin training set: BTC/ETH/XRP/HYPE/BNB/SOL/DOGE).
   maxBetsPerWindow: 7,
   enabled: true,

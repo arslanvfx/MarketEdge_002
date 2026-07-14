@@ -633,6 +633,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     priceBufferPct,
     kalshiLockPrice,
     minWindowEntryMinutes,
+    convictionEarlyBypassEnabled,
+    convictionEarlyBypassThreshold,
     convictionStopLossFloor,
     convictionStopLossActivationMinute,
     convictionDailyLossLimit,
@@ -670,6 +672,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minNoEntryMinutes?: number;
     kalshiLockPrice?: number;
     minWindowEntryMinutes?: number;
+    convictionEarlyBypassEnabled?: boolean;
+    convictionEarlyBypassThreshold?: number;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -980,9 +984,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof convictionRestingWindowMinutes === "number" && convictionRestingWindowMinutes >= 0 && convictionRestingWindowMinutes <= 14) {
     partial.convictionRestingWindowMinutes = convictionRestingWindowMinutes;
   }
-  // 0 = disabled; 1–13 = block new bets in the first N minutes (bypass if yesPrice ≥ 0.92 or ≤ 0.08)
+  // 0 = disabled; 1–13 = block new bets in the first N minutes
   if (typeof minWindowEntryMinutes === "number" && minWindowEntryMinutes >= 0 && minWindowEntryMinutes <= 13) {
     partial.minWindowEntryMinutes = minWindowEntryMinutes;
+  }
+  if (typeof convictionEarlyBypassEnabled === "boolean") {
+    partial.convictionEarlyBypassEnabled = convictionEarlyBypassEnabled;
+  }
+  if (typeof convictionEarlyBypassThreshold === "number" && convictionEarlyBypassThreshold >= 0.80 && convictionEarlyBypassThreshold <= 0.99) {
+    partial.convictionEarlyBypassThreshold = +convictionEarlyBypassThreshold.toFixed(2);
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

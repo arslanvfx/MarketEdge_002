@@ -1237,27 +1237,74 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </>)}
 
                 {/* Early-Window Lockout (minWindowEntryMinutes) — always visible, applies to all modes */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">
-                    No Bets Before
-                    {(merged.minWindowEntryMinutes ?? 0) > 0 && (
-                      <span className="ml-1 text-amber-400">T+{merged.minWindowEntryMinutes}m</span>
-                    )}
-                  </span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.minWindowEntryMinutes ?? 0}
-                    onChange={e => setConfigDraft(d => ({ ...d, minWindowEntryMinutes: parseInt(e.target.value, 10) }))}>
-                    <option value={0}>No lockout — bets allowed immediately</option>
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
-                      <option key={m} value={m}>Block first {m} min (override at ≥92¢ / ≤8¢)</option>
-                    ))}
-                  </select>
-                  {(merged.minWindowEntryMinutes ?? 0) > 0 && (
-                    <span className="text-xs text-muted-foreground/70">
-                      No bets in the first {merged.minWindowEntryMinutes} min unless YES price hits ≥92¢ or ≤8¢.
-                    </span>
-                  )}
-                </label>
+                {(() => {
+                  const lockMin = merged.minWindowEntryMinutes ?? 0;
+                  const bypassOn = merged.convictionEarlyBypassEnabled !== false;
+                  const bypassPct = Math.round((merged.convictionEarlyBypassThreshold ?? 0.92) * 100);
+                  const oppositePct = 100 - bypassPct;
+                  return (
+                    <div className="flex flex-col gap-2">
+                      <label className="flex flex-col gap-1.5">
+                        <span className="text-xs text-muted-foreground">
+                          No Bets Before
+                          {lockMin > 0 && (
+                            <span className="ml-1 text-amber-400">T+{lockMin}m</span>
+                          )}
+                        </span>
+                        <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                          value={lockMin}
+                          onChange={e => setConfigDraft(d => ({ ...d, minWindowEntryMinutes: parseInt(e.target.value, 10) }))}>
+                          <option value={0}>No lockout — bets allowed immediately</option>
+                          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
+                            <option key={m} value={m}>
+                              Block first {m} min{bypassOn ? ` (bypass at ≥${bypassPct}¢ / ≤${oppositePct}¢)` : " (no bypass)"}
+                            </option>
+                          ))}
+                        </select>
+                        {lockMin > 0 && (
+                          <span className="text-xs text-muted-foreground/70">
+                            {bypassOn
+                              ? `No bets in the first ${lockMin} min unless YES price hits ≥${bypassPct}¢ or ≤${oppositePct}¢.`
+                              : `No bets in the first ${lockMin} min — timer is always respected (bypass disabled).`}
+                          </span>
+                        )}
+                      </label>
+
+                      {/* Bypass toggle — only shown when a lockout is active */}
+                      {lockMin > 0 && (
+                        <div className="flex flex-col gap-1.5 pl-3 border-l border-border/40">
+                          <label className="flex items-center gap-2 cursor-pointer select-none">
+                            <input type="checkbox"
+                              className="accent-amber-400"
+                              checked={bypassOn}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassEnabled: e.target.checked }))} />
+                            <span className="text-xs text-muted-foreground">
+                              Allow extreme-price bypass
+                            </span>
+                          </label>
+                          {bypassOn && (
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs text-muted-foreground/70">Bypass threshold (YES price)</span>
+                              <select className="bg-background border border-border/60 rounded-md px-2 py-1 text-xs text-foreground"
+                                value={merged.convictionEarlyBypassThreshold ?? 0.92}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassThreshold: parseFloat(e.target.value) }))}>
+                                {[0.88, 0.89, 0.90, 0.91, 0.92, 0.93, 0.94, 0.95].map(v => {
+                                  const pct = Math.round(v * 100);
+                                  return (
+                                    <option key={v} value={v}>≥{pct}¢ / ≤{100 - pct}¢</option>
+                                  );
+                                })}
+                              </select>
+                              <span className="text-[10px] text-muted-foreground/50">
+                                Timer is skipped when YES price crosses this level before the lockout expires.
+                              </span>
+                            </label>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Max Bets Per Window — visible in all modes */}
                 <label className="flex flex-col gap-1.5">

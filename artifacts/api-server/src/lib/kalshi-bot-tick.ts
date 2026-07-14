@@ -515,14 +515,24 @@ async function _runBotTick(
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
     if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
-      const isExtreme = yesPrice !== null && (yesPrice >= 0.92 || yesPrice <= 0.08);
+      // Bypass: configurable — disabled means the timer is ALWAYS respected.
+      // When enabled, the threshold is user-adjustable (default 0.92).
+      const bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
+      const bypassThreshold = S.config.convictionEarlyBypassThreshold ?? 0.92;
+      const isExtreme = bypassEnabled &&
+        yesPrice !== null &&
+        (yesPrice >= bypassThreshold || yesPrice <= +(1 - bypassThreshold).toFixed(4));
       if (!isExtreme) {
         logger.debug(
-          { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice },
-          "[kalshi-bot] early-window lockout — waiting for time gate or extreme price",
+          { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice, bypassEnabled, bypassThreshold },
+          "[kalshi-bot] early-window lockout — timer active",
         );
         return;
       }
+      logger.debug(
+        { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice, bypassThreshold },
+        "[kalshi-bot] early-window lockout bypassed — extreme price crossed threshold",
+      );
     }
   }
   // Floor: early-exit the tick if fewer than minRemainingMinutes remain.
