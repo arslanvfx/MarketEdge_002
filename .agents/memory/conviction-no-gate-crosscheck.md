@@ -27,7 +27,8 @@ is never auto-reverted on restart.
   Never fall back to public/cached prices for order placement.
 - **Main zone gate**: fresh ref price must be in [lockPrice, lockPriceCap], GATE_BUFFER=0.
 - **Cross-checks**: NO side `freshYesAsk > (1−lockPrice)+0.03` → abort; YES side
-  `freshYesBid < lockPrice−0.03` → abort.
+  `freshYesBid < lockPrice` → abort (hard floor: bid must be ≥ 88¢ so no resting
+  sub-zone sells exist — crossed markets are impossible on Kalshi).
 - **Order limit = exact verified ask** (crossing buffer removed for conviction), still
   clamped inside the zone.
 - **Layer 3 — post-fill emergency close**: after fill, `convFillPrice = avgPrice` (YES) or

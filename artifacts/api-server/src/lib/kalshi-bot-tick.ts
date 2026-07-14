@@ -1634,23 +1634,22 @@ async function _runBotTick(
       }
     }
 
-    // ── YES cross-check (stale-ask / race-condition guard) ──────────────────
-    // Mirror of the NO cross-check above.  The main gate uses freshYesAsk from
-    // the authenticated orderbook.  However there is a race window between the
-    // gate check and FOK execution: if the market crashes 5¢+ in that window,
-    // the exchange fills at the new (lower) ask because a BUY limit order
-    // always fills at the best available ask ≤ the limit — there is no minimum.
+    // ── YES cross-check (hard bid floor) ────────────────────────────────────
+    // A FOK limit-BUY fills at the best available ask ≤ the limit price —
+    // there is no minimum fill price.  If a resting sell order sits at 86¢
+    // and we set limit=88¢, the exchange fills at 86¢.
     //
-    // Cross-check: freshYesBid tracks the ask closely (typical spread 1–3¢ in
-    // conviction territory).  If freshYesBid has fallen ≥ 5¢ below lockPrice,
-    // the ask has moved outside the conviction zone and we must abort.
+    // Hard guarantee: require freshYesBid ≥ lockPrice (≥ 88¢).
+    // If the bid is already ≥ 88¢, buyers are paying ≥ 88¢ — that means
+    // there can be no resting sell orders below 88¢ (a crossed market is
+    // impossible on Kalshi).  So a fill below the zone floor becomes
+    // physically impossible, regardless of any race between gate and fill.
     //
-    // Example (DOGE, gateTarget=0.87 → lockPrice=0.85):
-    //   yesBidDropThreshold = 0.85 − 0.05 = 0.80
-    //   freshYesBid = 0.76 → 0.76 < 0.80 → abort ✓  (would have filled at 78¢)
-    //   freshYesBid = 0.84 → 0.84 ≥ 0.80 → proceed ✓
+    // Example (target 0.90 → lockPrice 0.88):
+    //   freshYesBid = 0.87 → 0.87 < 0.88 → abort ✓  (book has depth below zone)
+    //   freshYesBid = 0.88 → 0.88 ≥ 0.88 → proceed ✓ (entire book in zone)
     if (direction === "yes" && freshYesBid != null) {
-      const yesBidDropThreshold = lockPrice - 0.03; // was -0.05, tightened to -0.03
+      const yesBidDropThreshold = lockPrice; // hard floor: bid must be in zone
       if (freshYesBid < yesBidDropThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
@@ -1665,7 +1664,7 @@ async function _runBotTick(
             yesBidDropThreshold: +yesBidDropThreshold.toFixed(4),
             lockPrice, lockPriceCap,
           },
-          "[kalshi-bot] conviction live-price gate: YES cross-check — YES bid crashed below floor; order aborted",
+          "[kalshi-bot] conviction live-price gate: YES cross-check — bid below zone floor; order aborted (no sub-zone fills possible when bid >= lockPrice)",
         );
         return;
       }
