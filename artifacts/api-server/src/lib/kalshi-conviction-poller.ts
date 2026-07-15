@@ -17,6 +17,13 @@
 //  2. Maintains a dedicated conviction price map with a 1.5 s TTL that the
 //     bot loop reads via getConvictionLivePrice(sym).  If the poller data is
 //     stale (>1.5 s) or absent, callers fall back to getKalshiCachedData.
+//  3. Detects zone entry: when a coin's price enters [lockPrice, lockPriceCap],
+//     the poller clears its convictionAbortCooldown entry so Phase 3 (running
+//     every 1 s) evaluates the coin immediately rather than waiting up to 10 s
+//     for the cooldown to expire.  The live-price gate in the tick always
+//     performs a final authenticated orderbook check before any order is placed
+//     — that is the true guard against out-of-zone fills.  The poller only
+//     removes a throttle delay; it does not place orders itself.
 // ---------------------------------------------------------------------------
 
 import { kalshiTargetCache, fetchKalshiTarget, KALSHI_SERIES } from "./crypto-kalshi";
@@ -24,7 +31,7 @@ import { kalshiTargetCache, fetchKalshiTarget, KALSHI_SERIES } from "./crypto-ka
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S } from "./kalshi-bot-state";
+import { S, convictionAbortCooldown, convictionFiredThisWindow } from "./kalshi-bot-state";
 import { logger } from "./logger";
 
 const POLL_INTERVAL_MS = 1_000;
@@ -45,6 +52,19 @@ let pollerHandle: ReturnType<typeof setInterval> | null = null;
 
 async function pollOnce(): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
+
+  // Derive the conviction zone once per poll from the current config.
+  // Matches the derivation in kalshi-bot-tick.ts exactly.
+  const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
+  const lockPrice    = gateTarget - 0.02;
+  const lockPriceCap = gateTarget + 0.02;
+
+  // Current 15-min window key — used to form the cooldown Map key.
+  const nowMs     = Date.now();
+  const windowKey = new Date(Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000))
+    .toISOString()
+    .slice(0, 16);
+
   await Promise.allSettled(
     syms.map(async (sym) => {
       // forceRefresh=true bypasses the TTL check without deleting the existing
@@ -58,9 +78,49 @@ async function pollOnce(): Promise<void> {
         convictionPriceMap.set(sym, {
           yesAsk: entry.yesAsk ?? null,
           yesBid: entry.yesBid ?? null,
-          fetchedAt: entry.at ?? Date.now(),
+          fetchedAt: entry.at ?? nowMs,
         });
       }
+
+      // ── Zone-entry detection ──────────────────────────────────────────────
+      // If this coin's price has entered [lockPrice, lockPriceCap] on either
+      // side and no bet has been placed this window yet, clear the abort
+      // cooldown so Phase 3 evaluates it on the very next 1 s tick.
+      //
+      // Phase 3 still runs all standard gates including the live-price gate
+      // (which does a fresh authenticated orderbook fetch and enforces the
+      // zone strictly).  No order is placed by the poller — it only removes
+      // the 10 s throttle delay that would otherwise cause a brief zone visit
+      // to be missed entirely.
+      if (convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
+        // Already bet this coin this window — nothing to do.
+        return;
+      }
+
+      const { yesAsk, yesBid } = convictionPriceMap.get(sym) ?? { yesAsk: null, yesBid: null };
+      const noAsk = yesBid != null ? 1 - yesBid : null;
+
+      const yesInZone = yesAsk != null && yesAsk >= lockPrice && yesAsk <= lockPriceCap;
+      const noInZone  = noAsk  != null && noAsk  >= lockPrice && noAsk  <= lockPriceCap;
+
+      if (yesInZone || noInZone) {
+        const cooldownKey = `${sym}:${windowKey}`;
+        const hadCooldown = convictionAbortCooldown.has(cooldownKey);
+        if (hadCooldown) {
+          convictionAbortCooldown.delete(cooldownKey);
+          logger.info(
+            {
+              sym, windowKey,
+              yesAsk: yesAsk != null ? +yesAsk.toFixed(4) : null,
+              noAsk:  noAsk  != null ? +noAsk.toFixed(4)  : null,
+              lockPrice, lockPriceCap,
+              side: yesInZone ? "YES" : "NO",
+            },
+            "[conviction-poller] zone entry detected — cooldown cleared, Phase 3 will evaluate next tick",
+          );
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
     }),
   );
 }
