@@ -28,6 +28,7 @@ import { AutoTuneHistory } from "./bot/autotune-history";
 import { ManualOrderModal } from "./bot/manual-order-modal";
 import { BotStepsPanel } from "./bot/bot-steps";
 import { CoinSignalBoard } from "./bot/coin-signal-board";
+import { KalshiLiveTickerPanel } from "./bot/kalshi-live-ticker-panel";
 import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
@@ -615,6 +616,8 @@ export default function BotDashboard() {
           evaluation={evalData?.evaluation ?? []}
           status={status}
         />
+        <KalshiLiveTickerPanel />
+
         {pipelineStatusData?.liveSignals && (
           <CoinSignalBoard
             liveSignals={pipelineStatusData.liveSignals}

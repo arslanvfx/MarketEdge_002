@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
 import { getAiSpendLevel, setAiSpendLevel, getStockAiEnabled, setStockAiEnabled, AI_SPEND_LABELS, isAiFeatureEnabled, type AiSpendLevel } from "../lib/ai-spend";
+import { kalshiTargetCache } from "../lib/crypto-kalshi";
 import {
   fetchCryptoPredictions,
   fetchCryptoPrices,
@@ -482,6 +483,41 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
   kalshiRouteCache.set(symbol, { data, fetchedAt: Date.now() });
   return data;
 }
+
+// Live Kalshi ticker — all tracked coins in one call, read from in-memory cache.
+// No Kalshi API calls are made here; data is as fresh as the conviction poller
+// (≤1 s in conviction mode) or the 2 s pipeline cache in all other modes.
+router.get("/crypto/kalshi-live", (_req, res) => {
+  const coins = Object.keys(KALSHI_SERIES).map((sym) => {
+    const entry = kalshiTargetCache.get(sym);
+    const yesAsk = entry?.yesAsk ?? null;
+    const yesBid = entry?.yesBid ?? null;
+    const noAsk  = yesBid != null ? +(1 - yesBid).toFixed(4) : null;
+    const returnIfYesPct =
+      yesAsk != null && yesAsk > 0 && yesAsk < 1
+        ? +((1 - yesAsk) / yesAsk * 100).toFixed(1)
+        : null;
+    const returnIfNoPct =
+      noAsk != null && noAsk > 0 && noAsk < 1
+        ? +((1 - noAsk) / noAsk * 100).toFixed(1)
+        : null;
+    return {
+      sym,
+      target:        entry?.value    ?? null,
+      ticker:        entry?.ticker   ?? null,
+      yesAsk,
+      yesBid,
+      yesPrice:      entry?.yesPrice ?? null,
+      noAsk,
+      noBid:         yesAsk != null ? +(1 - yesAsk).toFixed(4) : null,
+      returnIfYesPct,
+      returnIfNoPct,
+      dataAgeMs:     entry ? Date.now() - entry.at : null,
+      closeTime:     entry?.closeTime ?? null,
+    };
+  });
+  res.json({ coins, serverTime: Date.now() });
+});
 
 // Generic endpoint: /crypto/kalshi-target?symbol=BTC|ETH|XRP
 router.get("/crypto/kalshi-target", async (req, res) => {
