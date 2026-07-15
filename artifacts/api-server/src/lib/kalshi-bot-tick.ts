@@ -1348,6 +1348,17 @@ async function _runBotTick(
     return;
   }
   const betAmount = contractCount * expectedFillCost; // expected dollars risked
+  // Conviction daily spend gate: block entry if today's total spend would exceed the configured cap.
+  if ((S.config.convictionMaxDailySpend ?? 0) > 0) {
+    const spendCap = S.config.convictionMaxDailySpend!;
+    if (S.dailySpendAmount + betAmount > spendCap) {
+      logger.info(
+        { sym, dailySpendAmount: S.dailySpendAmount.toFixed(2), betAmount: betAmount.toFixed(2), spendCap },
+        "[kalshi-bot] SKIP — daily spend cap reached",
+      );
+      return;
+    }
+  }
   if (S.config.enableDynamicSizing && targetBetSize !== S.config.betSize) {
     logger.info(
       {
@@ -2059,6 +2070,8 @@ async function _runBotTick(
   lastDecisionWindowKey.set(sym, windowKey);
   // Increment the per-window bet counter so subsequent ticks respect maxBetsPerWindow.
   windowBetCounts.set(windowBetKey, betsThisWindow + 1);
+  // Track gross daily spend so convictionMaxDailySpend gate can block future entries.
+  S.dailySpendAmount += actualBetAmount;
   // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
   // Mode-aware: paper and live each have their own counter.
   const totalKey = `${windowKey}:${S.botMode}`;

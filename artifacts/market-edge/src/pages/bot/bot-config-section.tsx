@@ -243,7 +243,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-xs text-muted-foreground">
                     {(merged.enableDynamicSizing ?? false) ? "Min Bet ($) — at min confidence" : "Bet Size ($)"}
                   </span>
-                  <input type="number" min={0.5} max={25} step={0.5}
+                  <input type="number" min={0.5} max={200} step={0.5}
                     className={`bg-background border rounded-md px-3 py-1.5 text-sm text-foreground ${(merged.betSize ?? 1) > (merged.maxBetSize ?? 2) ? "border-red-500" : "border-border"}`}
                     value={merged.betSize ?? 1}
                     onChange={e => {
@@ -790,6 +790,27 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         }} />
                       <span className="text-[10px] text-muted-foreground/60">
                         Bot pauses for the day once net losses hit this amount. Separate from the global daily loss limit.
+                      </span>
+                    </label>
+
+                    {/* Conviction daily spend limit */}
+                    <label className="flex flex-col gap-1.5 mt-1">
+                      <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                        <DollarSign className="w-3 h-3 text-amber-400" />
+                        Daily Total Spend Limit ($)
+                        {(merged.convictionMaxDailySpend ?? 0) === 0 && (
+                          <span className="text-muted-foreground/50 text-[10px]">— disabled</span>
+                        )}
+                      </span>
+                      <input type="number" min={0} max={10000} step={5}
+                        className="bg-background border border-amber-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
+                        value={merged.convictionMaxDailySpend ?? 0}
+                        onChange={e => {
+                          const v = parseFloat(e.target.value);
+                          setConfigDraft(d => ({ ...d, convictionMaxDailySpend: Number.isNaN(v) || v <= 0 ? undefined : v }));
+                        }} />
+                      <span className="text-[10px] text-muted-foreground/60">
+                        Hard cap on total $ placed as bets today (wins don't reduce this — it only goes up). 0 = no limit.
                       </span>
                     </label>
 

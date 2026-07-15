@@ -144,6 +144,7 @@ export const S = {
   config: { ...DEFAULT_BOT_CONFIG } as BotConfig,
   dailyPnl: 0,
   dailyLossCount: 0,
+  dailySpendAmount: 0,
   dailyDate: new Date().toISOString().slice(0, 10),
   accountBalance: null as number | null,
   cbState: { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 } as CircuitBreakerState,
@@ -354,6 +355,7 @@ export function resetDailyIfNeeded(): void {
     S.dailyDate = today;
     S.dailyPnl = 0;
     S.dailyLossCount = 0;
+    S.dailySpendAmount = 0;
     paperCoinDailyLoss.clear();
     liveCoinDailyLoss.clear();
   }

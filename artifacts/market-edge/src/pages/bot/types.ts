@@ -75,6 +75,7 @@ export interface BotConfig {
   proximityEarlyPctOverrides?: Record<string, number>;
   proximityLatePctOverrides?: Record<string, number>;
   convictionDailyLossLimit?: number;
+  convictionMaxDailySpend?: number;
   convictionStopLossActivationMinute?: number;
   scalePhase?: number;
   phaseStartedAt?: string | null;
@@ -164,7 +165,7 @@ export interface GuardStates {
 export interface BotStatus {
   mode: "paper" | "live"; status: string; paused: boolean;
   config: BotConfig; openPositions: OpenPosition[];
-  dailyPnl: number; accountBalance: number | null;
+  dailyPnl: number; dailySpendAmount: number; accountBalance: number | null;
   warmupSecondsRemaining: number | null; configured: boolean;
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;

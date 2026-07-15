@@ -638,6 +638,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStopLossFloor,
     convictionStopLossActivationMinute,
     convictionDailyLossLimit,
+    convictionMaxDailySpend,
     scalePhase,
     phaseStartedAt,
     convictionBoostBetSize,
@@ -719,6 +720,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStopLossFloor?: number;
     convictionStopLossActivationMinute?: number;
     convictionDailyLossLimit?: number;
+    convictionMaxDailySpend?: number;
     scalePhase?: number;
     phaseStartedAt?: string | null;
     convictionBoostBetSize?: number;
@@ -740,7 +742,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
-  if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 25) partial.betSize = betSize;
+  if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 200) partial.betSize = betSize;
   if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;
   if (typeof signalThreshold === "number" && [2, 3, 4].includes(signalThreshold)) {
     partial.signalThreshold = signalThreshold;
@@ -909,6 +911,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionDailyLossLimit === "number" && convictionDailyLossLimit > 0) {
     partial.convictionDailyLossLimit = convictionDailyLossLimit;
+  }
+  if (typeof convictionMaxDailySpend === "number" && convictionMaxDailySpend >= 0) {
+    partial.convictionMaxDailySpend = convictionMaxDailySpend > 0 ? convictionMaxDailySpend : undefined;
   }
   if (typeof scalePhase === "number" && [1, 2, 3].includes(scalePhase)) {
     partial.scalePhase = scalePhase;
