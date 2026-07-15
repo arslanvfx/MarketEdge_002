@@ -5,7 +5,7 @@
 
 import { logger } from "./logger";
 import { isKalshiConfigured, getCachedKalshiBalance } from "./kalshi-trader";
-import { syncConvictionPoller } from "./kalshi-conviction-poller";
+import { syncConvictionPoller, getPollerStats } from "./kalshi-conviction-poller";
 import {
   DEFAULT_BOT_CONFIG, isInQuietHours, assertSetBotModeAllowed,
   type BotConfig,
@@ -149,6 +149,8 @@ export function getBotState(): BotStateSnapshot {
     dbDegradedSince: S.dbDegradedSince?.toISOString() ?? null,
     isProductionEnv: process.env.NODE_ENV === "production",
     coinStreakState: Object.fromEntries(activeCoinStreakState()),
+    convictionPollerRunning: getPollerStats().running,
+    convictionPriceAgeMs: getPollerStats().priceAgeMs,
   };
 }
 

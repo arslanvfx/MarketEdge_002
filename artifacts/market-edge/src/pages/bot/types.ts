@@ -178,6 +178,8 @@ export interface BotStatus {
     minWindows: number; minRequired: number;
   };
   coinStreakState?: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
+  convictionPollerRunning?: boolean;
+  convictionPriceAgeMs?: Record<string, number>;
 }
 
 export interface HistoryRecord {

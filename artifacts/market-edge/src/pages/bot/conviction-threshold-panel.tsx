@@ -1,4 +1,4 @@
-import { Target, TrendingUp, AlertTriangle, Lightbulb, ChevronDown, ChevronUp, Zap } from "lucide-react";
+import { Target, TrendingUp, AlertTriangle, Lightbulb, ChevronDown, ChevronUp, Zap, Activity, WifiOff } from "lucide-react";
 import { useState } from "react";
 import type { ConvictionThresholdData, MaxBetStats } from "./types";
 
@@ -7,10 +7,21 @@ interface ConvictionThresholdPanelProps {
   currentLockPrice: number | undefined;
   activeMode: "paper" | "live";
   maxBetStats?: MaxBetStats | null;
+  convictionPollerRunning?: boolean;
+  convictionPriceAgeMs?: Record<string, number>;
 }
 
-export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode, maxBetStats }: ConvictionThresholdPanelProps) {
+function fmtAge(ms: number): string {
+  if (ms < 1000) return `${ms}ms ago`;
+  return `${(ms / 1000).toFixed(1)}s ago`;
+}
+
+export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode, maxBetStats, convictionPollerRunning, convictionPriceAgeMs }: ConvictionThresholdPanelProps) {
   const [open, setOpen] = useState(true);
+
+  const pollerKnown = convictionPollerRunning !== undefined;
+  const pollerLive = convictionPollerRunning === true;
+  const priceEntries = convictionPriceAgeMs ? Object.entries(convictionPriceAgeMs) : [];
 
   const bands = data?.bands ?? [];
   const totalBets = data?.totalBets ?? 0;
@@ -39,6 +50,18 @@ export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode, m
           {activeMode}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {pollerKnown && (
+            <span className={`flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+              pollerLive
+                ? "bg-emerald-500/15 text-emerald-400"
+                : "bg-red-500/15 text-red-400"
+            }`}>
+              {pollerLive
+                ? <Activity className="w-3 h-3" />
+                : <WifiOff className="w-3 h-3" />}
+              {pollerLive ? "Poller: live" : "Poller: stopped"}
+            </span>
+          )}
           <span className="text-[10px] text-muted-foreground">{totalBets} settled bets</span>
           {open ? <ChevronUp className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />}
         </div>
@@ -46,6 +69,41 @@ export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode, m
 
       {open && (
         <div className="p-5 space-y-4">
+          {pollerKnown && (
+            <div className={`flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 border text-[10px] ${
+              pollerLive
+                ? "bg-emerald-500/5 border-emerald-500/20"
+                : "bg-red-500/5 border-red-500/20"
+            }`}>
+              <div className="flex items-center gap-1.5 font-semibold">
+                {pollerLive
+                  ? <Activity className="w-3 h-3 text-emerald-400" />
+                  : <WifiOff className="w-3 h-3 text-red-400" />}
+                <span className={pollerLive ? "text-emerald-300" : "text-red-300"}>
+                  {pollerLive ? "1 s price poller running" : "Price poller stopped — falling back to 2 s cache"}
+                </span>
+              </div>
+              {priceEntries.length > 0 && (
+                <div className="flex flex-wrap gap-2 ml-1">
+                  {priceEntries.map(([sym, ageMs]) => (
+                    <span key={sym} className={`font-mono px-1.5 py-0.5 rounded ${
+                      ageMs < 1500
+                        ? "bg-emerald-500/10 text-emerald-300"
+                        : ageMs < 3000
+                        ? "bg-amber-500/10 text-amber-300"
+                        : "bg-red-500/10 text-red-300"
+                    }`}>
+                      {sym} {fmtAge(ageMs)}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {pollerLive && priceEntries.length === 0 && (
+                <span className="text-muted-foreground/60 italic">waiting for first poll…</span>
+              )}
+            </div>
+          )}
+
           {totalBets === 0 ? (
             <div className="text-sm text-muted-foreground italic text-center py-4">
               No settled conviction-mode bets yet. Data will appear here once bets are placed and evaluated.

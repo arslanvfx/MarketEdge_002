@@ -120,3 +120,22 @@ export function syncConvictionPoller(): void {
 export function isConvictionPollerRunning(): boolean {
   return pollerHandle !== null;
 }
+
+export interface ConvictionPollerStats {
+  running: boolean;
+  priceAgeMs: Record<string, number>;
+}
+
+/**
+ * Returns poller health stats: whether it is running and, for each tracked
+ * coin, how many milliseconds ago the most recent price was fetched.
+ * Coins with no data yet are omitted from priceAgeMs.
+ */
+export function getPollerStats(): ConvictionPollerStats {
+  const now = Date.now();
+  const priceAgeMs: Record<string, number> = {};
+  for (const [sym, entry] of convictionPriceMap.entries()) {
+    priceAgeMs[sym] = now - entry.fetchedAt;
+  }
+  return { running: pollerHandle !== null, priceAgeMs };
+}
