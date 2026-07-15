@@ -57,6 +57,7 @@ import {
   resolveStartupMode,
   applyStartupModeRestore,
   applyLockPrice090Migration,
+  applyLockPrice093Bootstrap,
   DEFAULT_BOT_CONFIG,
   computeDynamicBetSize,
   computeKellyMultiplier,
@@ -112,6 +113,7 @@ export {
   applyStartupModeRestore,
   // One-time conviction lock-price migration (pure, DB-free, unit-testable).
   applyLockPrice090Migration,
+  applyLockPrice093Bootstrap,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,

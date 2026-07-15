@@ -958,6 +958,7 @@ export interface BotConfig {
   kalshiLockPrice?: number;           // conviction only: entry target (default 0.90; ±2¢ zone derived around it → [88¢, 92¢])
   lockPrice091Migrated?: boolean;     // legacy one-time migration marker: 0.90 → 0.91 target bump (superseded)
   lockPrice090Migrated?: boolean;     // one-time startup migration marker: 0.91 → 0.90 target (zone [88¢, 92¢])
+  lockPrice093Bootstrap?: boolean;    // one-time startup bootstrap: nudge the old 0.90 default → 0.93 user preference
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.30 = sell when contract drops to 30¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately (legacy)
@@ -1424,6 +1425,25 @@ export function applyLockPrice090Migration(
     return { changed: true, migrated };
   }
   return { changed: false, migrated: false };
+}
+
+/**
+ * applyLockPrice093Bootstrap — one-time startup migration that nudges the
+ * conviction kalshiLockPrice from the old hard-coded default of 0.90 to the
+ * user's preferred 0.93 target (zone [91¢, 95¢]).
+ *
+ * Only fires once (guarded by lockPrice093Bootstrap flag).  Only changes the
+ * value when it is exactly at the old default (0.90) so a user who has
+ * deliberately set a different value is never silently overridden.
+ */
+export function applyLockPrice093Bootstrap(
+  config: BotConfig,
+): { changed: boolean; bumped: boolean } {
+  if (config.lockPrice093Bootstrap) return { changed: false, bumped: false };
+  const bumped = config.kalshiLockPrice === 0.90;
+  if (bumped) config.kalshiLockPrice = 0.93;
+  config.lockPrice093Bootstrap = true;
+  return { changed: true, bumped };
 }
 
 /**

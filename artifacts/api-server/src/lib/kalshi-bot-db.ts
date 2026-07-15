@@ -12,7 +12,7 @@ import {
   DEFAULT_BOT_CONFIG, BET_PROFILES, computeDynamicBetSize, makeBotDecision,
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
-  applyStartupModeRestore, applyLockPrice090Migration, buildStreakSnapshot, restoreStreakState,
+  applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, buildStreakSnapshot, restoreStreakState,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -108,12 +108,22 @@ export async function loadBotConfigFromDB(): Promise<void> {
       // Pure helper (see kalshi-bot-engine-core.ts) — sets the flag on every
       // evaluated config so a later deliberate user value is never reverted.
       const migration = applyLockPrice090Migration(S.config);
-      const needsBackfill = migration.changed;
       if (migration.migrated) {
         logger.info("[kalshi-bot] one-time migration: kalshiLockPrice 0.91 → 0.90 (zone [88¢, 92¢])");
       }
-      if (needsBackfill) {
+      if (migration.changed) {
         logger.info({ mode, kalshiLockPrice: S.config.kalshiLockPrice }, "[kalshi-bot] backfilled null mode defaults — persisting to DB");
+        _persistModeToConfig().catch(() => {});
+      }
+
+      // One-time bootstrap: move 0.90 default → 0.93 user preference (zone [91¢, 95¢]).
+      // Safe: only fires once (flag-guarded) and only if value is exactly at old default.
+      const bootstrap = applyLockPrice093Bootstrap(S.config);
+      if (bootstrap.bumped) {
+        logger.info({ kalshiLockPrice: S.config.kalshiLockPrice }, "[kalshi-bot] bootstrap: kalshiLockPrice 0.90 → 0.93 (zone [91¢, 95¢]) — persisting");
+        _persistModeToConfig().catch(() => {});
+      } else if (bootstrap.changed) {
+        // Flag was set for the first time but value was already custom — still persist the flag.
         _persistModeToConfig().catch(() => {});
       }
 

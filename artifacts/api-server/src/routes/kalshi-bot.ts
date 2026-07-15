@@ -1001,6 +1001,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
+  logger.info({ kalshiLockPrice: updated.kalshiLockPrice, persisted, fields: Object.keys(partial) }, "[kalshi-bot] config saved");
   res.json({ ok: true, config: updated, persisted });
 });
 
