@@ -20,6 +20,10 @@
 // ---------------------------------------------------------------------------
 
 import { kalshiTargetCache, fetchKalshiTarget, KALSHI_SERIES } from "./crypto-kalshi";
+// kalshiTargetCache is imported read-only here — the poller never deletes or
+// mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
+// TTL and atomically overwrites the entry once the live fetch returns, so the
+// shared cache never has a transient null gap visible to other readers.
 import { S } from "./kalshi-bot-state";
 import { logger } from "./logger";
 
@@ -43,18 +47,18 @@ async function pollOnce(): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
   await Promise.allSettled(
     syms.map(async (sym) => {
-      // Delete the shared cache entry to bypass its 2 s TTL guard,
-      // forcing fetchKalshiTarget to hit the Kalshi API live.
-      kalshiTargetCache.delete(sym);
-      await fetchKalshiTarget(sym);
-      // Read back the freshly populated cache entry and mirror it into the
-      // dedicated conviction price map with its own 1.5 s TTL.
+      // forceRefresh=true bypasses the TTL check without deleting the existing
+      // cache entry.  The old entry stays readable to other callers until the
+      // live fetch atomically overwrites it — no transient null gap.
+      await fetchKalshiTarget(sym, undefined, true);
+      // Read the freshly overwritten cache entry and mirror into the dedicated
+      // conviction price map with its own 1.5 s TTL.
       const entry = kalshiTargetCache.get(sym);
-      if (entry && entry.yesAsk != null || entry?.yesBid != null) {
+      if (entry && (entry.yesAsk != null || entry.yesBid != null)) {
         convictionPriceMap.set(sym, {
-          yesAsk: entry?.yesAsk ?? null,
-          yesBid: entry?.yesBid ?? null,
-          fetchedAt: entry?.at ?? Date.now(),
+          yesAsk: entry.yesAsk ?? null,
+          yesBid: entry.yesBid ?? null,
+          fetchedAt: entry.at ?? Date.now(),
         });
       }
     }),

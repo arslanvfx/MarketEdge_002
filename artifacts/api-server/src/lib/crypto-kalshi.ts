@@ -220,7 +220,7 @@ export async function fetchOrderbookPrices(
   }
 }
 
-export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Promise<number | null> {
+export async function fetchKalshiTarget(symbol: string, targetTime?: Date, forceRefresh = false): Promise<number | null> {
   const sym = symbol.toUpperCase();
   const series = KALSHI_SERIES[sym];
   if (!series) return null;
@@ -230,7 +230,10 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date): Prom
     const secIntoWindow = Math.floor(Date.now() / 1_000) % (15 * 60);
     const isNearBoundary = secIntoWindow < 90 || secIntoWindow > (15 * 60 - 90);
     const effectiveTTL = isNearBoundary ? 5_000 : KALSHI_TARGET_LIB_TTL;
-    if (hit && Date.now() - hit.at < effectiveTTL) {
+    // forceRefresh=true: skip TTL check but do NOT delete the existing entry.
+    // The old entry stays valid until the live fetch atomically overwrites it,
+    // preventing a brief null gap in the shared cache during the in-flight request.
+    if (!forceRefresh && hit && Date.now() - hit.at < effectiveTTL) {
       const ct = hit.closeTime;
       if (!ct || new Date(ct).getTime() > Date.now()) return hit.value;
     }
