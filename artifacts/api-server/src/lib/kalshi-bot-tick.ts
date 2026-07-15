@@ -1602,10 +1602,14 @@ async function _runBotTick(
         maxBetWindowToken.remaining++;
         logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (order aborted before fill)");
       }
-      // Record abort time so the loop-level cooldown can suppress the next
-      // re-entry attempt for 10 s while the 1 s conviction poller refreshes
-      // the cache with the current (out-of-zone) price.
-      convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
+      // Record abort time ONLY for settled-upward exits (price above cap).
+      // These indicate the market has moved decisively past the zone and the
+      // poller needs time to propagate the new price.  Below-floor dips may
+      // recover into zone — setting the cooldown there would block valid
+      // re-entries after a transient dip back through 88¢.
+      if (freshRefPrice != null && freshRefPrice > lockPriceCap) {
+        convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
+      }
       logger.warn(
         {
           sym, direction, windowKey,

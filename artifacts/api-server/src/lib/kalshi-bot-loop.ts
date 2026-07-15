@@ -62,6 +62,7 @@ import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition, persistBetRecord } from "./kalshi-bot-close";
 import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-tick";
+import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import {
   triggerWindowPipeline, runPipelineRecheck, registerPipelineCompleteCallback,
   type PipelineResult,
@@ -2273,13 +2274,27 @@ export async function runBotLoopTick(): Promise<void> {
   const runCoin = async (sym: string) => {
     const kalshiData = getKalshiCachedData(sym);
     const prediction  = getCachedPrediction(sym);
+    // In conviction mode: use the dedicated 1 s poller price (≤ 1.5 s fresh)
+    // for the zone-trigger check so stale-cache mismatches can't cause false
+    // positive entries.  Falls back to kalshiData.yesPrice only when the
+    // poller has no fresh data (e.g. first tick before poller has run once).
+    let yesPrice: number | null = kalshiData?.yesPrice ?? null;
+    if (S.config.decisionMode === "conviction") {
+      const pollerPrice = getConvictionLivePrice(sym);
+      if (pollerPrice != null) {
+        yesPrice =
+          pollerPrice.yesAsk != null && pollerPrice.yesBid != null
+            ? (pollerPrice.yesAsk + pollerPrice.yesBid) / 2
+            : pollerPrice.yesAsk ?? pollerPrice.yesBid ?? yesPrice;
+      }
+    }
     try {
       await runBotTickForCoin(
         sym,
-        kalshiData?.ticker   ?? null,
-        kalshiData?.value    ?? null,
-        kalshiData?.yesPrice ?? null,
-        prediction?.candles  ?? [],
+        kalshiData?.ticker ?? null,
+        kalshiData?.value  ?? null,
+        yesPrice,
+        prediction?.candles ?? [],
       );
     } catch (err) {
       logger.warn({ err, sym }, "[kalshi-bot] loop tick error (non-fatal)");

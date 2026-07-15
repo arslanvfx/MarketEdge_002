@@ -10,11 +10,13 @@
 // sees 99.8 ¢ and aborts — producing constant "price moved outside window"
 // log spam and never entering the position.
 //
-// This module runs an independent setInterval that forces a fresh Kalshi API
-// fetch for every conviction-eligible coin once per second.  It achieves this
-// by deleting each coin's cache entry before calling fetchKalshiTarget so the
-// 2 s TTL guard is bypassed.  The bot loop and tick continue to read from
-// getKalshiCachedData as before — they just always find data that is ≤ 1 s old.
+// This module:
+//  1. Runs setInterval(1 s) forcing a fresh Kalshi API fetch for every
+//     conviction-eligible coin.  It clears each cache entry before calling
+//     fetchKalshiTarget so the 2 s TTL guard is bypassed.
+//  2. Maintains a dedicated conviction price map with a 1.5 s TTL that the
+//     bot loop reads via getConvictionLivePrice(sym).  If the poller data is
+//     stale (>1.5 s) or absent, callers fall back to getKalshiCachedData.
 // ---------------------------------------------------------------------------
 
 import { kalshiTargetCache, fetchKalshiTarget, KALSHI_SERIES } from "./crypto-kalshi";
@@ -22,6 +24,18 @@ import { S } from "./kalshi-bot-state";
 import { logger } from "./logger";
 
 const POLL_INTERVAL_MS = 1_000;
+const LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
+
+export interface ConvictionLivePrice {
+  yesAsk: number | null;
+  yesBid: number | null;
+  fetchedAt: number;
+}
+
+// Dedicated per-symbol price map populated exclusively by this poller.
+// Separated from kalshiTargetCache so staleness can be enforced with a tighter
+// TTL independent of the shared cache's 2 s TTL.
+const convictionPriceMap = new Map<string, ConvictionLivePrice>();
 
 let pollerHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -29,11 +43,34 @@ async function pollOnce(): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
   await Promise.allSettled(
     syms.map(async (sym) => {
-      // Delete cache entry to bypass the TTL guard — we need a live fetch every tick.
+      // Delete the shared cache entry to bypass its 2 s TTL guard,
+      // forcing fetchKalshiTarget to hit the Kalshi API live.
       kalshiTargetCache.delete(sym);
       await fetchKalshiTarget(sym);
+      // Read back the freshly populated cache entry and mirror it into the
+      // dedicated conviction price map with its own 1.5 s TTL.
+      const entry = kalshiTargetCache.get(sym);
+      if (entry && entry.yesAsk != null || entry?.yesBid != null) {
+        convictionPriceMap.set(sym, {
+          yesAsk: entry?.yesAsk ?? null,
+          yesBid: entry?.yesBid ?? null,
+          fetchedAt: entry?.at ?? Date.now(),
+        });
+      }
     }),
   );
+}
+
+/**
+ * Returns poller-sourced YES ask/bid for `sym` if the data is ≤ 1.5 s old.
+ * Returns null when the poller has never run for this symbol or the data is stale.
+ * Callers must fall back to getKalshiCachedData when this returns null.
+ */
+export function getConvictionLivePrice(sym: string): ConvictionLivePrice | null {
+  const entry = convictionPriceMap.get(sym.toUpperCase());
+  if (!entry) return null;
+  if (Date.now() - entry.fetchedAt > LIVE_PRICE_TTL_MS) return null;
+  return entry;
 }
 
 /**
@@ -59,6 +96,7 @@ export function stopConvictionPoller(): void {
   if (pollerHandle === null) return;
   clearInterval(pollerHandle);
   pollerHandle = null;
+  convictionPriceMap.clear();
   logger.info("[conviction-poller] stopped");
 }
 
