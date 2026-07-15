@@ -192,6 +192,13 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
+// Keyed by `sym:windowKey` → timestamp (ms) of last live-gate "price moved
+// outside window" abort.  Prevents repeated entry attempts in the same second
+// while the conviction poller refreshes the cache after an abort.  Entries are
+// cleared on window transition (alongside convictionFiredThisWindow).
+// TTL: 10 s — long enough to outlast one poller cycle + bot-loop latency.
+export const convictionAbortCooldown = new Map<string, number>();
+export const CONVICTION_ABORT_COOLDOWN_MS = 10_000;
 // Counts emergency closes (out-of-zone fills) per `sym:windowKey` this window.
 // After MAX_EMERGENCY_CLOSES_PER_WINDOW the coin is locked out for the rest of
 // the window — prevents the buy → emergency-close → re-buy bleed loop

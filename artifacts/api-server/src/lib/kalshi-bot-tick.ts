@@ -44,6 +44,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
+  convictionAbortCooldown,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -1601,6 +1602,10 @@ async function _runBotTick(
         maxBetWindowToken.remaining++;
         logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (order aborted before fill)");
       }
+      // Record abort time so the loop-level cooldown can suppress the next
+      // re-entry attempt for 10 s while the 1 s conviction poller refreshes
+      // the cache with the current (out-of-zone) price.
+      convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
       logger.warn(
         {
           sym, direction, windowKey,

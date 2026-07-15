@@ -857,5 +857,11 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   if ("paperStartingBalance" in partial || "paperBalanceResetAt" in partial) {
     await loadPaperBalanceFromDB().catch(() => {});
   }
+  // Sync the conviction price poller whenever decisionMode may have changed.
+  // Lazy import avoids a circular dependency chain (poller → state → db → poller).
+  if ("decisionMode" in partial) {
+    const { syncConvictionPoller } = await import("./kalshi-conviction-poller");
+    syncConvictionPoller();
+  }
   return { config: snapshot, persisted };
 }

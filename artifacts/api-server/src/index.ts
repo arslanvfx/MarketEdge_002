@@ -483,6 +483,10 @@ app.listen(port, (err) => {
       await loadBotConfigFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] config load failed (non-fatal)"),
       );
+      // Start the conviction price poller if the persisted config uses conviction mode.
+      // This must run AFTER loadBotConfigFromDB so S.config.decisionMode is correct.
+      const { syncConvictionPoller } = await import("./lib/kalshi-conviction-poller");
+      syncConvictionPoller();
       await loadDailyPnlFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] daily P&L load failed (non-fatal)"),
       );

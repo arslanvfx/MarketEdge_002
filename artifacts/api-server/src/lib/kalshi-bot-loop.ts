@@ -43,6 +43,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken,
+  convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS,
   maxBetCandidateForWindow,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
@@ -505,6 +506,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
+    convictionAbortCooldown.clear();
     convictionEmergencyCloses.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
@@ -1269,6 +1271,18 @@ export async function runBotLoopTick(): Promise<void> {
       filteredByNewGuards.add(sym);
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "conviction: already entered this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
+    }
+    // Abort cooldown: after a live-gate "price moved outside window" abort, skip
+    // re-entry for CONVICTION_ABORT_COOLDOWN_MS (10 s) while the 1 s conviction
+    // poller refreshes the cache.  Prevents a second abort loop if the bot-loop
+    // tick fires before the poller has pushed a fresh price through.
+    if (isConviction) {
+      const abortedAt = convictionAbortCooldown.get(`${sym}:${windowKey}`);
+      if (abortedAt != null && Date.now() - abortedAt < CONVICTION_ABORT_COOLDOWN_MS) {
+        const remainingS = Math.ceil((CONVICTION_ABORT_COOLDOWN_MS - (Date.now() - abortedAt)) / 1_000);
+        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: abort cooldown (${remainingS}s remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+        continue;
+      }
     }
 
     // Conviction mode: minimal warmup (20s) — just enough for Kalshi to publish
