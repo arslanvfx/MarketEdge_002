@@ -26,7 +26,7 @@
 //     removes a throttle delay; it does not place orders itself.
 // ---------------------------------------------------------------------------
 
-import { kalshiTargetCache, fetchKalshiTarget, KALSHI_SERIES } from "./crypto-kalshi";
+import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERIES } from "./crypto-kalshi";
 // kalshiTargetCache is imported read-only here — the poller never deletes or
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
@@ -80,6 +80,38 @@ async function pollOnce(): Promise<void> {
           yesBid: entry.yesBid ?? null,
           fetchedAt: entry.at ?? nowMs,
         });
+      }
+
+      // ── Near-zone authenticated price enhancement ─────────────────────────
+      // When the public price is within 10 ¢ of the conviction zone, also
+      // fetch the authenticated orderbook and override convictionPriceMap with
+      // the fresh bid/ask.  This prevents Phase 3 from firing a BET_YES
+      // decision based on a stale public price (lagged 3–10 s behind the real
+      // book) while the live-price gate immediately aborts on the authenticated
+      // price.  The extra fetch only runs for coins near the zone — typically
+      // 1–2 at a time — so the added API call count is small.
+      const _pubEntry = convictionPriceMap.get(sym);
+      if (_pubEntry && entry?.ticker) {
+        const _pubYesAsk = _pubEntry.yesAsk;
+        const _pubNoAsk  = _pubEntry.yesBid != null ? 1 - _pubEntry.yesBid : null;
+        const NEAR_ZONE_BUFFER = 0.10;
+        const _nearZone =
+          (_pubYesAsk != null && _pubYesAsk >= lockPrice - NEAR_ZONE_BUFFER && _pubYesAsk <= lockPriceCap + NEAR_ZONE_BUFFER) ||
+          (_pubNoAsk  != null && _pubNoAsk  >= lockPrice - NEAR_ZONE_BUFFER && _pubNoAsk  <= lockPriceCap + NEAR_ZONE_BUFFER);
+        if (_nearZone) {
+          const _obPrices = await fetchOrderbookPrices(entry.ticker).catch(() => null);
+          if (_obPrices != null) {
+            convictionPriceMap.set(sym, {
+              yesAsk: _obPrices.yesAsk,
+              yesBid: _obPrices.yesBid,
+              fetchedAt: nowMs,
+            });
+            logger.debug(
+              { sym, pubYesAsk: _pubYesAsk, authYesAsk: _obPrices.yesAsk, authYesBid: _obPrices.yesBid },
+              "[conviction-poller] near-zone: authenticated orderbook prices fetched",
+            );
+          }
+        }
       }
 
       // ── Zone-entry detection ──────────────────────────────────────────────

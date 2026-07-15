@@ -1230,7 +1230,22 @@ export async function runBotLoopTick(): Promise<void> {
     // the market is illiquid or market makers haven't posted quotes yet.  Surface
     // this clearly in the UI instead of computing a bet that the completeness gate
     // would silently abort downstream.
-    if (kalshiData.yesPrice == null) {
+    //
+    // Conviction mode: mirror Phase-4 runCoin's price source exactly.
+    // Phase 4 uses getConvictionLivePrice(sym) → pollerPrice mid (yesAsk+yesBid)/2.
+    // After the near-zone enhancement in the poller, pollerPrice is upgraded to
+    // authenticated orderbook prices for coins within 10 ¢ of the zone — so
+    // Phase 3 and Phase 4 both evaluate the same fresh authenticated price, and
+    // the live-price gate is a confirmation rather than a surprise block.
+    const _convPollerPrice = isConviction ? getConvictionLivePrice(sym) : null;
+    const effectiveYesPrice: number | null = isConviction
+      ? (_convPollerPrice != null
+          ? (_convPollerPrice.yesAsk != null && _convPollerPrice.yesBid != null
+              ? (_convPollerPrice.yesAsk + _convPollerPrice.yesBid) / 2
+              : _convPollerPrice.yesAsk ?? _convPollerPrice.yesBid ?? kalshiData.yesPrice ?? null)
+          : (kalshiData.yesPrice ?? null))
+      : (kalshiData.yesPrice ?? null);
+    if (effectiveYesPrice == null) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no order book price — market illiquid", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -1349,7 +1364,7 @@ export async function runBotLoopTick(): Promise<void> {
       (S.config.requireMonitorReady ?? true)
     ) {
       const _peekDec = makeBotDecision(
-        sym, S.config, kalshiData.ticker, kalshiData.yesPrice ?? null,
+        sym, S.config, kalshiData.ticker, effectiveYesPrice,
         minutesElapsed, signalAcc, kalshiData.value,
       );
       if (
@@ -1476,7 +1491,7 @@ export async function runBotLoopTick(): Promise<void> {
 
     // `let` so the auto-tune shadow path and WM relief can temporarily substitute
     // an alt-floor decision for gate evaluation (see below).
-    let decision = makeBotDecision(sym, _decisionConfig, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
+    let decision = makeBotDecision(sym, _decisionConfig, kalshiData.ticker, effectiveYesPrice, minutesElapsed, signalAcc, kalshiData.value);
 
     // ── WM Caution Confidence Relief — threshold ease when WM is "caution" ───
     // When the window monitor is ready but says "caution" (choppy regime, not a
@@ -1499,7 +1514,7 @@ export async function runBotLoopTick(): Promise<void> {
       // cannot be promoted back to BET by applying relief against the base floor.
       const _reliefConfig = { ..._decisionConfig, minConfidence: _decisionConfig.minConfidence - WM_CAUTION_CONF_RELIEF };
       const _reliefDec = makeBotDecision(
-        sym, _reliefConfig, kalshiData.ticker, kalshiData.yesPrice ?? null,
+        sym, _reliefConfig, kalshiData.ticker, effectiveYesPrice,
         minutesElapsed, signalAcc, kalshiData.value,
       );
       if (_reliefDec.action !== "SKIP") {
@@ -1548,7 +1563,7 @@ export async function runBotLoopTick(): Promise<void> {
         sym,
         origFloorConfig,
         kalshiData.ticker,
-        kalshiData.yesPrice ?? null,
+        effectiveYesPrice,
         minutesElapsed,
         signalAcc,
         kalshiData.value,

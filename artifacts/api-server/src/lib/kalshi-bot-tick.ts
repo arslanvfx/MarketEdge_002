@@ -547,7 +547,13 @@ async function _runBotTick(
       return;
     }
   }
-  if (!kalshiTicker || kalshiTarget === null) return;
+  if (!kalshiTicker || kalshiTarget === null) {
+    logger.info(
+      { sym, windowKey, hasKalshiTicker: !!kalshiTicker, kalshiTarget },
+      "[kalshi-bot] tick: no ticker/target — skipping (market unpublished or cache race)",
+    );
+    return;
+  }
 
   // ── Entry proximity guard ──────────────────────────────────────────────────
   // Skip new entries when the live price is too close to the Kalshi strike.
