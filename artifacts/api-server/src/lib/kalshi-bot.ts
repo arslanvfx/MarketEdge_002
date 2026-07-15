@@ -5,6 +5,7 @@
 
 import { logger } from "./logger";
 import { isKalshiConfigured, getCachedKalshiBalance } from "./kalshi-trader";
+import { syncConvictionPoller } from "./kalshi-conviction-poller";
 import {
   DEFAULT_BOT_CONFIG, isInQuietHours, assertSetBotModeAllowed,
   type BotConfig,
@@ -161,6 +162,11 @@ export function setBotMode(mode: BotMode): void {
     S.config = { ...S.config, decisionMode: savedDecisionMode };
     logger.info({ mode, decisionMode: savedDecisionMode }, "[kalshi-bot] restored per-mode decisionMode");
   }
+  // Sync conviction poller after decisionMode is restored.  Without this, a
+  // mode switch from live→paper (or vice-versa) where the target mode has
+  // decisionMode="conviction" would run conviction zone-trigger checks against
+  // the 2 s shared cache instead of the 1 s poller price.
+  syncConvictionPoller();
 
   _persistModeToConfig().catch(() => {});
   loadDailyPnlFromDB().catch(() => {});
