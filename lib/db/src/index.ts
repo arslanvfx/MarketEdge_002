@@ -12,7 +12,11 @@ if (!process.env.DATABASE_URL) {
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 10,
+  // Keep pool small: Replit PostgreSQL kills idle connections at the protocol
+  // level. A large pool means many stale connections all attempting to reconnect
+  // simultaneously under load, overwhelming the auth handshake and causing a
+  // cascade of timeouts. 5 connections are enough for all concurrent bot ticks.
+  max: 5,
   min: 1,
   idleTimeoutMillis: 20000,
   // Short acquire timeout so failed attempts fail fast and retry logic kicks in
