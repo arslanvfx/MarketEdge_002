@@ -1536,11 +1536,9 @@ async function _runBotTick(
     // This matches the engine derivation in kalshi-bot-engine.ts exactly.
     const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
     const lockPrice    = gateTarget - 0.02;
-    // Symmetric ±2¢ zone around the target: target 93¢ → zone [91¢, 95¢].
-    // Below the floor: price can flip back, too risky.
-    // Above the cap: margin is too small and the entry window has passed.
-    // Hard ceiling — do NOT raise this; bets above 95¢ are outside the
-    // configured sweetspot and have unacceptably low return.
+    // Symmetric ±2¢ zone around the target (user requirement):
+    // target 90¢ → zone [88¢, 92¢]. Below the floor: price can flip, too
+    // risky. Above the cap: margin too small, not worth the entry.
     const lockPriceCap = gateTarget + 0.02;
     // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
     // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
