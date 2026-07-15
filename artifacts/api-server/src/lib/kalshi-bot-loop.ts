@@ -1230,22 +1230,7 @@ export async function runBotLoopTick(): Promise<void> {
     // the market is illiquid or market makers haven't posted quotes yet.  Surface
     // this clearly in the UI instead of computing a bet that the completeness gate
     // would silently abort downstream.
-    //
-    // Conviction mode: mirror Phase-4 runCoin's price source exactly.
-    // Phase 4 uses getConvictionLivePrice(sym) → pollerPrice mid (yesAsk+yesBid)/2.
-    // After the near-zone enhancement in the poller, pollerPrice is upgraded to
-    // authenticated orderbook prices for coins within 10 ¢ of the zone — so
-    // Phase 3 and Phase 4 both evaluate the same fresh authenticated price, and
-    // the live-price gate is a confirmation rather than a surprise block.
-    const _convPollerPrice = isConviction ? getConvictionLivePrice(sym) : null;
-    const effectiveYesPrice: number | null = isConviction
-      ? (_convPollerPrice != null
-          ? (_convPollerPrice.yesAsk != null && _convPollerPrice.yesBid != null
-              ? (_convPollerPrice.yesAsk + _convPollerPrice.yesBid) / 2
-              : _convPollerPrice.yesAsk ?? _convPollerPrice.yesBid ?? kalshiData.yesPrice ?? null)
-          : (kalshiData.yesPrice ?? null))
-      : (kalshiData.yesPrice ?? null);
-    if (effectiveYesPrice == null) {
+    if (kalshiData.yesPrice == null) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "no order book price — market illiquid", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -1364,7 +1349,7 @@ export async function runBotLoopTick(): Promise<void> {
       (S.config.requireMonitorReady ?? true)
     ) {
       const _peekDec = makeBotDecision(
-        sym, S.config, kalshiData.ticker, effectiveYesPrice,
+        sym, S.config, kalshiData.ticker, kalshiData.yesPrice ?? null,
         minutesElapsed, signalAcc, kalshiData.value,
       );
       if (
@@ -1491,7 +1476,7 @@ export async function runBotLoopTick(): Promise<void> {
 
     // `let` so the auto-tune shadow path and WM relief can temporarily substitute
     // an alt-floor decision for gate evaluation (see below).
-    let decision = makeBotDecision(sym, _decisionConfig, kalshiData.ticker, effectiveYesPrice, minutesElapsed, signalAcc, kalshiData.value);
+    let decision = makeBotDecision(sym, _decisionConfig, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
 
     // ── WM Caution Confidence Relief — threshold ease when WM is "caution" ───
     // When the window monitor is ready but says "caution" (choppy regime, not a
@@ -1514,7 +1499,7 @@ export async function runBotLoopTick(): Promise<void> {
       // cannot be promoted back to BET by applying relief against the base floor.
       const _reliefConfig = { ..._decisionConfig, minConfidence: _decisionConfig.minConfidence - WM_CAUTION_CONF_RELIEF };
       const _reliefDec = makeBotDecision(
-        sym, _reliefConfig, kalshiData.ticker, effectiveYesPrice,
+        sym, _reliefConfig, kalshiData.ticker, kalshiData.yesPrice ?? null,
         minutesElapsed, signalAcc, kalshiData.value,
       );
       if (_reliefDec.action !== "SKIP") {
@@ -1563,7 +1548,7 @@ export async function runBotLoopTick(): Promise<void> {
         sym,
         origFloorConfig,
         kalshiData.ticker,
-        effectiveYesPrice,
+        kalshiData.yesPrice ?? null,
         minutesElapsed,
         signalAcc,
         kalshiData.value,
@@ -2150,7 +2135,10 @@ export async function runBotLoopTick(): Promise<void> {
   // last in CRYPTO_COINS iteration order.
   // windowDirectionCounts reflects bets placed in PREVIOUS ticks this window;
   // `remaining` is how many more same-direction bets are still allowed.
-  if (!S.config.freeRunMode && S.config.enableDirectionCap && S.config.maxSameDirectionBets > 0) {
+  // Conviction mode: no directional cap — each coin fires independently the moment
+  // its yesPrice enters the lock zone.  Capping direction would prevent valid NO
+  // and YES bets from firing simultaneously when multiple coins are in zone.
+  if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && S.config.enableDirectionCap && S.config.maxSameDirectionBets > 0) {
     // Effective cap is raised by parole when direction_cap shadow accuracy qualifies.
     const effectiveDirCap = S.config.maxSameDirectionBets + paroleState.dirCapIncrease;
     for (const dir of ["yes", "no"] as const) {
@@ -2209,21 +2197,34 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   if (bets.length > 0) {
-    bets[0].selected = true;
-    const winner = bets[0];
-    const multiplierDesc =
-      winner.trendStability === "clean" ? "×1.2 (clean)" :
-      winner.trendStability === "choppy" ? "×1.0 (choppy)" :
-      winner.trendStability === null ? "×1.0 (pending)" : "×1.0";
-    logger.info({
-      symbol: winner.symbol,
-      action: winner.action,
-      confidence: winner.confidence,
-      score: winner.score.toFixed(2),
-      trendStability: winner.trendStability ?? "pending",
-      multiplier: multiplierDesc,
-      windowKey,
-    }, "[kalshi-bot] best-market selected");
+    if (S.config.decisionMode === "conviction") {
+      // Conviction: all qualifying coins fire in parallel — no single winner.
+      // Mark the max-bet candidate (pre-selected by stability score) as "selected"
+      // purely for UI display.  If none qualifies, fall back to bets[0].
+      const _maxSym   = maxBetCandidateForWindow.get(windowKey) ?? null;
+      const _maxEntry = _maxSym ? bets.find(e => e.symbol === _maxSym) : null;
+      (_maxEntry ?? bets[0]).selected = true;
+      logger.info(
+        { symbols: bets.map(e => `${e.symbol}(${e.action})`), maxBetCandidate: _maxSym ?? "none", windowKey },
+        "[kalshi-bot] conviction: dispatching all in-zone coins",
+      );
+    } else {
+      bets[0].selected = true;
+      const winner = bets[0];
+      const multiplierDesc =
+        winner.trendStability === "clean" ? "×1.2 (clean)" :
+        winner.trendStability === "choppy" ? "×1.0 (choppy)" :
+        winner.trendStability === null ? "×1.0 (pending)" : "×1.0";
+      logger.info({
+        symbol: winner.symbol,
+        action: winner.action,
+        confidence: winner.confidence,
+        score: winner.score.toFixed(2),
+        trendStability: winner.trendStability ?? "pending",
+        multiplier: multiplierDesc,
+        windowKey,
+      }, "[kalshi-bot] best-market selected");
+    }
   }
   // Stamp betPlacedThisWindow + placed bet details on every eval entry so the dashboard
   // shows accurate direction/confidence even after the coin switches to SKIP.

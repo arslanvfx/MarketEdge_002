@@ -245,7 +245,12 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
       { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
     );
     if (!resp.ok) {
-      if (!targetTime) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
+      // Do NOT nuke an existing ticker-bearing cache entry when forceRefresh
+      // fails (e.g. transient 429/500).  The conviction poller calls
+      // forceRefresh every 1 s; a single failed call must not clear the ticker
+      // that Phase 4 reads immediately after — otherwise runBotTickForCoin gets
+      // kalshiTicker=null and silently returns before reaching the live-price gate.
+      if (!targetTime && !forceRefresh) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
       return null;
     }
     const body = (await resp.json()) as {
@@ -395,7 +400,9 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
       return selected.floor_strike!;
     }
 
-    if (!targetTime) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
+    // Same guard: a forceRefresh that finds no market must not erase an existing
+    // valid cache entry — the market may have published on the previous tick.
+    if (!targetTime && !forceRefresh) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
     return null;
   } catch {
     return null;
