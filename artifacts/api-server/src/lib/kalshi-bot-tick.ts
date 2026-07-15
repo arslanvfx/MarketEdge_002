@@ -1536,10 +1536,12 @@ async function _runBotTick(
     // This matches the engine derivation in kalshi-bot-engine.ts exactly.
     const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
     const lockPrice    = gateTarget - 0.02;
-    // Symmetric ±2¢ zone around the target (user requirement):
-    // target 90¢ → zone [88¢, 92¢]. Below the floor: price can flip, too
-    // risky. Above the cap: margin too small, not worth the entry.
-    const lockPriceCap = gateTarget + 0.02;
+    // Asymmetric zone: floor is −2¢ below target (price can flip back, risky),
+    // cap is +7¢ above target.  At 95¢ ask the return is still +5.3 %; at 99¢
+    // it's +1 % — still positive and acceptable in conviction mode.  Using a
+    // tight +2¢ cap meant markets that shot straight from <91¢ to 96–98¢ were
+    // always blocked, missing every valid conviction window.
+    const lockPriceCap = gateTarget + 0.07;
     // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
     // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
     const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);

@@ -460,7 +460,7 @@ function _makeBotDecisionInner(
       yesAsk:        cvCached?.yesAsk ?? null,
       yesBid:        cvCached?.yesBid ?? null,
       lockPrice:     cvTarget - 0.02,
-      lockPriceCap:  cvTarget + 0.02,
+      lockPriceCap:  cvTarget + 0.07,
       minConfidence: config.minConfidence,
     });
     const cvAgreementTarget: BotDecisionAction | null =
