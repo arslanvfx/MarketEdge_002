@@ -946,11 +946,11 @@ export async function runBotLoopTick(): Promise<void> {
     return;
   }
 
-  // Phase 3: best-market selection.
-  // Speculatively evaluate all eligible coins with makeBotDecision to rank
-  // candidates. Coins that already have an open position (managed above in
-  // Phase 2) will skip entry in _runBotTick so only genuinely idle symbols
-  // compete for a new position. Other coins follow for SKIP record deduplication.
+  // Phase 3: coin evaluation.
+  // Evaluate all eligible coins with makeBotDecision. Every coin that returns
+  // BET_YES/BET_NO fires independently in Phase 4 — there is no single-winner
+  // selection. Coins that already have an open position (managed above in Phase 2)
+  // will skip entry in _runBotTick so only genuinely idle symbols place new bets.
   const windowKey = currentWindowKey();
   const evalResults: WindowCoinEvaluation[] = [];
 
@@ -2202,33 +2202,23 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   if (bets.length > 0) {
+    // All qualifying coins are marked selected and fire independently in Phase 4.
+    // For conviction: the max-bet candidate (pre-selected by stability score)
+    // is additionally identified for max-bet size purposes.
     if (S.config.decisionMode === "conviction") {
-      // Conviction: all qualifying coins fire in parallel — no single winner.
-      // Mark the max-bet candidate (pre-selected by stability score) as "selected"
-      // purely for UI display.  If none qualifies, fall back to bets[0].
       const _maxSym   = maxBetCandidateForWindow.get(windowKey) ?? null;
       const _maxEntry = _maxSym ? bets.find(e => e.symbol === _maxSym) : null;
       (_maxEntry ?? bets[0]).selected = true;
       logger.info(
         { symbols: bets.map(e => `${e.symbol}(${e.action})`), maxBetCandidate: _maxSym ?? "none", windowKey },
-        "[kalshi-bot] conviction: dispatching all in-zone coins",
+        "[kalshi-bot] dispatching all qualifying coins",
       );
     } else {
-      bets[0].selected = true;
-      const winner = bets[0];
-      const multiplierDesc =
-        winner.trendStability === "clean" ? "×1.2 (clean)" :
-        winner.trendStability === "choppy" ? "×1.0 (choppy)" :
-        winner.trendStability === null ? "×1.0 (pending)" : "×1.0";
-      logger.info({
-        symbol: winner.symbol,
-        action: winner.action,
-        confidence: winner.confidence,
-        score: winner.score.toFixed(2),
-        trendStability: winner.trendStability ?? "pending",
-        multiplier: multiplierDesc,
-        windowKey,
-      }, "[kalshi-bot] best-market selected");
+      for (const e of bets) { e.selected = true; }
+      logger.info(
+        { symbols: bets.map(e => `${e.symbol}(${e.action})`), windowKey },
+        "[kalshi-bot] dispatching all qualifying coins",
+      );
     }
   }
   // Stamp betPlacedThisWindow + placed bet details on every eval entry so the dashboard
@@ -2371,15 +2361,10 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
-  if (_isConvictionMode || _isMLLeadMode) {
-    // ml_lead: like conviction, every coin with ML direction + return ≥ 1.5x
-    // bets independently — no single-winner selection. Run in parallel.
-    await Promise.allSettled(betSymbols.map(runCoin));
-  } else {
-    for (const sym of betSymbols) {
-      await runCoin(sym);
-    }
-  }
+  // All modes: every qualifying coin fires independently in parallel.
+  // There is no single "best-market" winner — each coin places its own bet
+  // if it passes all gates (ML direction, return floor, per-coin cap, etc.).
+  await Promise.allSettled(betSymbols.map(runCoin));
 
   // Then manage existing positions (skips) in parallel.
   await Promise.allSettled(skipSymbols.map(runCoin));
