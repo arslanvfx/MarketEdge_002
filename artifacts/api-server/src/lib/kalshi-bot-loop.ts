@@ -1286,13 +1286,15 @@ export async function runBotLoopTick(): Promise<void> {
       }
     }
 
-    // Conviction mode: minimal warmup (20s) — just enough for Kalshi to publish
+    // Conviction mode: minimal warmup (5s) — just enough for Kalshi to publish
     // the market after window open.  We intentionally ignore windowEntryBufferSeconds
     // here because that value was tuned for signal-based modes (momentum override
     // fires blind without a warm target cache).  Conviction is purely reactive to
     // yesPrice; the null-price guard below handles any not-yet-published market.
+    // The minWindowEntryMinutes gate in tick.ts independently enforces any
+    // user-configured timing restriction from bot config — that gate is not bypassed.
     if (isConviction) {
-      const CONVICTION_WARMUP_S = 20;
+      const CONVICTION_WARMUP_S = 5;
       if (clockElapsedS < CONVICTION_WARMUP_S) {
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: warmup (${Math.ceil(CONVICTION_WARMUP_S - clockElapsedS)}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
