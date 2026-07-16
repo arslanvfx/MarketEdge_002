@@ -1312,7 +1312,7 @@ export async function runBotLoopTick(): Promise<void> {
     // CONVICTION MODE: this cap does NOT apply. Each coin bets independently based on
     // its own yesPrice crossing 90¢. Max-bet slots are governed separately by
     // convictionStabilityMaxBetsPerWindow via maxBetWindowToken.
-    if (!isConviction && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
+    if (!isConviction && !isMLLead && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${S.config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -2282,8 +2282,9 @@ export async function runBotLoopTick(): Promise<void> {
   // blocked by momentum override / directional-cap are excluded from execution.
   const betSymbols  = bets.map(e => e.symbol);
   const _isConvictionMode = S.config.decisionMode === "conviction";
+  const _isMLLeadMode = S.config.decisionMode === "ml_lead";
   const skipSymbols = skips
-    .filter(e => (_isConvictionMode || e.trendStability !== "reversing") && !filteredByNewGuards.has(e.symbol))
+    .filter(e => (_isConvictionMode || _isMLLeadMode || e.trendStability !== "reversing") && !filteredByNewGuards.has(e.symbol))
     .map(e => e.symbol);
 
   // Snapshot pre-launch open-position state for all candidates.
@@ -2370,7 +2371,9 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
-  if (_isConvictionMode) {
+  if (_isConvictionMode || _isMLLeadMode) {
+    // ml_lead: like conviction, every coin with ML direction + return ≥ 1.5x
+    // bets independently — no single-winner selection. Run in parallel.
     await Promise.allSettled(betSymbols.map(runCoin));
   } else {
     for (const sym of betSymbols) {
