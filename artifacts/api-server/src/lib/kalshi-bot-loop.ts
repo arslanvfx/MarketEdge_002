@@ -1457,7 +1457,7 @@ export async function runBotLoopTick(): Promise<void> {
     // post-decision threshold check and ensures the engine reasoning string
     // correctly reflects the raised floor. Exempt when freeRunMode.
     let _streakPenaltyPp = 0;
-    if (!S.config.freeRunMode) {
+    if (!S.config.freeRunMode && !isConviction) {
       const _seEntry = activeCoinStreakState().get(sym);
       const _seConLosses = _seEntry?.consecutiveLosses ?? 0;
       const _sePen1 = S.config.coinStreakPenalty1LossPp ?? 6;
@@ -1579,7 +1579,7 @@ export async function runBotLoopTick(): Promise<void> {
         && windowKey <= _streakEntry.pauseUntilWindowKey;
       // freeRunMode bypasses streak pauses so "Reset all" + "Free Run" give
       // immediate unrestricted access to all coins.
-      if (_isStreakPaused && !S.config.freeRunMode) {
+      if (_isStreakPaused && !S.config.freeRunMode && !isConviction) {
         if (decision.action !== "SKIP") {
           const _shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
           void recordShadowBet(
@@ -1621,7 +1621,7 @@ export async function runBotLoopTick(): Promise<void> {
     // bet. checkAllParoles() clears pausedCoins early when shadow accuracy
     // reaches ≥60% over ≥3 evaluated bets (blockedBy="auto_tune_pause").
     // freeRunMode bypasses this gate so the user can un-pause all coins instantly.
-    if (!S.config.freeRunMode && pausedCoins.has(sym)) {
+    if (!S.config.freeRunMode && !isConviction && pausedCoins.has(sym)) {
       const remaining = pausedCoins.get(sym) ?? 0;
       if (decision.action !== "SKIP") {
         const _pauseDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
