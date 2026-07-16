@@ -448,6 +448,94 @@ export function computeMLGateDecision(inp: CorePairInputs): CorePairResult {
   return result;
 }
 
+/**
+ * ML-Lead decision mode: ML is the sole required direction signal.
+ * Claude is ignored entirely — not checked, not read.
+ * Stat is optional: when available it applies a ±STAT_BOOST modifier;
+ * when null the composite is just mlConf.
+ *
+ * Formula:
+ *   direction  = mlAbove
+ *   statMod    = statAbove !== null
+ *                  ? (statAbove === mlAbove ? +STAT_BOOST : −STAT_PENALTY)
+ *                  : 0
+ *   composite  = round(mlConf) + statMod
+ *   BET when composite ≥ minConfidence, after min-return and EV gates.
+ */
+export function computeMLLeadDecision(inp: CorePairInputs): CorePairResult {
+  const skip = (reason: string, ev: number | null = null): CorePairResult => ({
+    action: "SKIP", confidence: 0, reasoning: reason,
+    signalsAgreeing: 0, signalsTotal: 0, ev,
+  });
+
+  if (!inp.kalshiTicker) {
+    return skip("No active Kalshi market for this symbol");
+  }
+
+  const ev = computeEV(inp.yesPrice, inp.signalAccuracyPct);
+
+  if (inp.mlAbove === null) {
+    return skip("ML Lead: waiting for ML signal — ML must produce a direction before betting", ev);
+  }
+
+  const mlDir  = inp.mlAbove;
+  const mlConf = inp.mlConfidence ?? 0;
+  const direction = mlDir;
+
+  let statMod   = 0;
+  let statLabel = "Stat: pending (±0)";
+  if (inp.statAbove !== null) {
+    const statAgrees = inp.statAbove === mlDir;
+    statMod   = statAgrees ? STAT_BOOST : -STAT_PENALTY;
+    statLabel = statAgrees
+      ? `Stat: agrees (+${STAT_BOOST})`
+      : `Stat: disagrees (−${STAT_PENALTY})`;
+  }
+
+  const confidence = Math.round(mlConf) + statMod;
+  const signalsAgreeing = 1 + (inp.statAbove !== null && inp.statAbove === mlDir ? 1 : 0);
+  const signalsTotal    = 1 + (inp.statAbove !== null ? 1 : 0);
+
+  const pathReason =
+    `ML Lead: ML ${mlDir ? "YES" : "NO"} ${Math.round(mlConf)}% + ${statLabel} → composite ${confidence}%`;
+
+  if (confidence < inp.minConfidence) {
+    return {
+      action: "SKIP", confidence,
+      reasoning: `Composite ${confidence}% below minimum ${inp.minConfidence}% — ${pathReason}`,
+      signalsAgreeing, signalsTotal, ev,
+    };
+  }
+
+  const action: BotDecisionAction = direction ? "BET_YES" : "BET_NO";
+
+  const gate = checkMinReturnGate(action, inp.yesPrice, inp.minReturnMultiple);
+  if (gate.blocked) {
+    return {
+      action: "SKIP", confidence,
+      reasoning: `${gate.reason} — was ${action} (${pathReason})`,
+      signalsAgreeing, signalsTotal, ev,
+    };
+  }
+
+  const dirEV = computeEVForDirection(action, inp.yesPrice, confidence);
+  const evFloor = action === "BET_NO" ? -0.15 : -0.05;
+  if (dirEV !== null && dirEV < evFloor) {
+    return {
+      action: "SKIP", confidence,
+      reasoning: `Negative EV (${dirEV.toFixed(3)}) at yes=${inp.yesPrice?.toFixed(2)} composite=${confidence}% (floor ${evFloor})`,
+      signalsAgreeing, signalsTotal, ev: dirEV,
+    };
+  }
+
+  const evDesc = ev !== null ? ` EV=${ev.toFixed(3)}` : "";
+  return {
+    action, confidence, ev,
+    signalsAgreeing, signalsTotal,
+    reasoning: `${pathReason}${evDesc} → ${action}`,
+  };
+}
+
 function computeMLGateDecisionUngated(inp: CorePairInputs): CorePairResult {
   const skip = (reason: string, ev: number | null = null): CorePairResult => ({
     action: "SKIP", confidence: 0, reasoning: reason,
@@ -934,7 +1022,7 @@ export function checkMomentumOverride(
 // without pulling in the ./crypto or DB modules.
 // ---------------------------------------------------------------------------
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
+export type DecisionMode = "classic" | "ml_gate" | "ml_lead" | "consensus" | "unanimous" | "conviction";
 
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)

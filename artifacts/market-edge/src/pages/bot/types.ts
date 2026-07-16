@@ -1,6 +1,6 @@
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
+export type DecisionMode = "classic" | "ml_gate" | "ml_lead" | "consensus" | "unanimous" | "conviction";
 
 export interface BotConfig {
   betSize: number;
