@@ -348,7 +348,10 @@ async function _runPipeline(
     const prevAnyWasNull =
       prevResult == null ||
       prevResult.statAbove === null ||
-      prevResult.claudeAbove === null ||
+      // In ml_lead mode claudeAbove is always null — exclude it from the "was
+      // something missing?" check so the callback fires only on the first pass,
+      // not on every subsequent re-check for the full window.
+      (!mlLeadMode && prevResult.claudeAbove === null) ||
       prevResult.mlAbove === null;
     if (!isRecheck || prevAnyWasNull) {
       try {

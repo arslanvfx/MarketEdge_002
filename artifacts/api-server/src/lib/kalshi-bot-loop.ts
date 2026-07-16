@@ -1256,6 +1256,7 @@ export async function runBotLoopTick(): Promise<void> {
     // The pipeline sets the lock on first completion but we deliberately
     // re-evaluate each tick so a 90¢ cross at T+8 is caught within 5 seconds.
     const isConviction = S.config.decisionMode === "conviction";
+    const isMLLead = S.config.decisionMode === "ml_lead";
     if (pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`) && !openPositions.has(sym)) {
       if (!isConviction) {
         filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
@@ -1374,7 +1375,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Skipped when _wmBypassActive (unanimous high-confidence signals above).
     // Skipped in conviction mode: conviction is purely reactive to yesPrice; it uses
     // no WM signals, so waiting for candle accumulation only blocks early entries.
-    if (!isConviction && !_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
+    if (!isConviction && !isMLLead && !_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0,
         reason: `window monitor not ready (${minutesElapsed.toFixed(1)}m elapsed — needs ≥2m)`,
         windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -1387,7 +1388,9 @@ export async function runBotLoopTick(): Promise<void> {
     // When requireMonitorReady=true: hard block (full-window, not per-tick defer).
     // When requireMonitorReady=false: advisory log only, entry proceeds.
     // Skipped in conviction mode: WM signals are irrelevant to price-reactive entry.
-    if (!isConviction) {
+    // Skipped in ml_lead mode: Claude (WM's companion) is not a signal; direction
+    // is decided by ML alone so WM readiness/stay_away is advisory at most.
+    if (!isConviction && !isMLLead) {
       const _stayAway = applyStayAwayGateDecision(
         sym,
         getWindowBetSignal(sym),
