@@ -742,18 +742,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
-  // Collect explicit user overrides separately so they can be re-applied
-  // AFTER mode defaults.  Priority (highest wins): request body > saved preset
-  // > built-in defaults.  Fields set here first would be silently overwritten
-  // by Object.assign(partial, builtIn) below without this pattern.
-  const explicitOverrides: Partial<BotConfig> = {};
-  if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 200) explicitOverrides.betSize = betSize;
-  if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) explicitOverrides.dailyLossLimit = dailyLossLimit;
+  if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 200) partial.betSize = betSize;
+  if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;
   if (typeof signalThreshold === "number" && [2, 3, 4].includes(signalThreshold)) {
-    explicitOverrides.signalThreshold = signalThreshold;
+    partial.signalThreshold = signalThreshold;
   }
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
-    explicitOverrides.minConfidence = minConfidence;
+    partial.minConfidence = minConfidence;
   }
   if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
     // When switching modes: apply built-in mode defaults as a baseline, then
@@ -770,10 +765,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     }
     partial.decisionMode = decisionMode;
   }
-  // Re-apply explicit user overrides on top of any mode defaults — this
-  // ensures betSize/maxBetSize/etc. the user explicitly set are not silently
-  // clobbered by the built-in conviction/classic/ml_gate defaults above.
-  Object.assign(partial, explicitOverrides);
   if (
     midExitSensitivity === "conservative" ||
     midExitSensitivity === "balanced" ||
