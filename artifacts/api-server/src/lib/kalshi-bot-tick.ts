@@ -1862,12 +1862,37 @@ async function _runBotTick(
       // that went through — it can be less than the requested contractCount.
       // If we don't update contractCount here, we record the wrong position size
       // (e.g. sent 21, got 2, but store 21 / $19.95 instead of 2 / $1.91).
+      const requestedContractCount = contractCount;
       if (result.filledCount > 0 && result.filledCount < contractCount) {
         logger.warn(
           { sym, direction, requested: contractCount, filled: result.filledCount, fillPrice },
           "[kalshi-bot] IOC partial fill — updating contractCount to actual fill",
         );
         contractCount = result.filledCount;
+      }
+
+      // ── MINIMUM FILL GUARD ───────────────────────────────────────────────────
+      // Thin Kalshi books (common for NO conviction bets at 91-95¢) can result
+      // in IOC fills worth only a few cents.  Positions this small clutter the
+      // Kalshi UI, fail DB writes (fractional → integer), and aren't worth
+      // tracking.  If the actual fill is < $1.00 AND is less than what was
+      // requested, abandon it — engage the fill cooldown so the coin doesn't
+      // retry this window, and let the tiny fill expire on Kalshi.
+      const MIN_FILL_DOLLAR = 1.00;
+      const filledDollarValue = contractCount * expectedFillCost;
+      if (contractCount < requestedContractCount && filledDollarValue < MIN_FILL_DOLLAR) {
+        logger.warn(
+          {
+            sym, direction,
+            requested: requestedContractCount,
+            filled: contractCount,
+            filledDollarValue: +filledDollarValue.toFixed(4),
+            threshold: MIN_FILL_DOLLAR,
+          },
+          "[kalshi-bot] IOC fill below $1 minimum — abandoning position (thin book), engaging fill cooldown",
+        );
+        windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
+        return;
       }
 
       // ── CONVICTION ZONE FILL VERIFICATION (hard guarantee) ──────────────────

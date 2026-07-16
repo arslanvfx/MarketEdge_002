@@ -215,6 +215,13 @@ async function runStartupMigrations(): Promise<void> {
       ALTER TABLE kalshi_bot_bets
         ADD COLUMN IF NOT EXISTS is_max_bet BOOLEAN DEFAULT FALSE
     `);
+    // contract_count was originally INTEGER but Kalshi returns fractional fills
+    // (e.g. 2.42, 15.28) from IOC partial orders.  Widen to NUMERIC so those
+    // fills are recorded correctly.  Existing integer rows cast cleanly.
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ALTER COLUMN contract_count TYPE NUMERIC(10,4)
+    `);
   } finally {
     client.release();
   }
