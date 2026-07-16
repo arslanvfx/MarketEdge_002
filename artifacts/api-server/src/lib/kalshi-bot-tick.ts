@@ -501,7 +501,7 @@ async function _runBotTick(
   // CONVICTION MODE: global cap bypassed — each coin bets independently on price cross;
   // max-bet slots are governed by convictionStabilityMaxBetsPerWindow.
   const globalTotalNow = windowTotalBets.get(`${windowKey}:${S.botMode}`) ?? 0;
-  if (S.config.decisionMode !== "conviction" && S.config.decisionMode !== "ml_lead" && S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
+  if (S.config.decisionMode !== "conviction" && S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, globalTotalNow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] global cap reached at entry — skipping");
     return;
   }
@@ -618,32 +618,28 @@ async function _runBotTick(
   }
 
   // ── All-signals gate (HARD RULE — non-conviction modes only) ─────────────
-  // The bot must NEVER enter a bet unless the required model signals are ready.
-  // Signals are read LIVE from the predictor layer (the same caches the Crypto
-  // Predictor page displays), not from the stored pipeline snapshot.
+  // The bot must NEVER enter a bet unless ALL THREE model signals — stat,
+  // Claude, and ML — are non-null.  Signals are read LIVE from the predictor
+  // layer (the same caches the Crypto Predictor page displays), not from the
+  // stored pipeline snapshot, so the very next tick after the predictor
+  // produces the missing signal can proceed without waiting for a re-check.
   //
-  // CONVICTION MODE — price alone is the signal.  All model gates are bypassed.
+  // There is no time-based fallback — we would rather miss the window entry
+  // than bet with incomplete signal data.  (Open-position management is
+  // unaffected: this gate only blocks NEW entries, and _runBotTick for open
+  // positions is handled in Phase 2 before this point.)
   //
-  // ML LEAD MODE — only ML is required; stat and claude are optional modifiers.
-  // Entry fires the moment ML has a direction, even if Claude hasn't returned.
-  //
-  // ALL OTHER MODES — all three (stat, Claude, ML) must be non-null before
-  // any bet fires.  There is no time-based fallback.
+  // CONVICTION MODE — price alone is the signal.  All model gates are bypassed
+  // entirely.  The engine fires purely on yesPrice vs lockPrice.
   if (S.config.decisionMode !== "conviction") {
     const live = getLatestCoinSignals(sym);
-    const mlLeadMode = S.config.decisionMode === "ml_lead";
-    const missingSignal = mlLeadMode
-      ? live.mlAbove === null
-      : live.statAbove === null || live.claudeAbove === null || live.mlAbove === null;
-    if (missingSignal) {
+    if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
       logger.info(
         {
           sym, windowKey, secondsElapsed,
           statAbove: live.statAbove, claudeAbove: live.claudeAbove, mlAbove: live.mlAbove,
         },
-        mlLeadMode
-          ? "[kalshi-bot] ML Lead: waiting for ML signal before entry (stat/claude optional)"
-          : "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
+        "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
       );
       return;
     }

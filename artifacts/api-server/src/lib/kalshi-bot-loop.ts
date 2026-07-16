@@ -946,11 +946,11 @@ export async function runBotLoopTick(): Promise<void> {
     return;
   }
 
-  // Phase 3: coin evaluation.
-  // Evaluate all eligible coins with makeBotDecision. Every coin that returns
-  // BET_YES/BET_NO fires independently in Phase 4 — there is no single-winner
-  // selection. Coins that already have an open position (managed above in Phase 2)
-  // will skip entry in _runBotTick so only genuinely idle symbols place new bets.
+  // Phase 3: best-market selection.
+  // Speculatively evaluate all eligible coins with makeBotDecision to rank
+  // candidates. Coins that already have an open position (managed above in
+  // Phase 2) will skip entry in _runBotTick so only genuinely idle symbols
+  // compete for a new position. Other coins follow for SKIP record deduplication.
   const windowKey = currentWindowKey();
   const evalResults: WindowCoinEvaluation[] = [];
 
@@ -1256,16 +1256,13 @@ export async function runBotLoopTick(): Promise<void> {
     // The pipeline sets the lock on first completion but we deliberately
     // re-evaluate each tick so a 90¢ cross at T+8 is caught within 5 seconds.
     const isConviction = S.config.decisionMode === "conviction";
-    const isMLLead = S.config.decisionMode === "ml_lead";
     if (pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`) && !openPositions.has(sym)) {
-      if (!isConviction && !isMLLead) {
+      if (!isConviction) {
         filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "pipeline-triggered entry already evaluated this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
       }
-      // conviction / ml_lead mode: fall through — tick loop re-evaluates every tick
-      // ml_lead: market prices shift during the window; a return-too-low SKIP at minute
-      // 1 may flip to ≥1.5x by minute 5 as the YES price moves.
+      // conviction mode: fall through — tick loop re-evaluates every 5s
     }
     // Conviction once-per-window guard: after a conviction entry has been attempted
     // (regardless of FOK fill outcome), block any further entry for this coin this
@@ -1312,7 +1309,7 @@ export async function runBotLoopTick(): Promise<void> {
     // CONVICTION MODE: this cap does NOT apply. Each coin bets independently based on
     // its own yesPrice crossing 90¢. Max-bet slots are governed separately by
     // convictionStabilityMaxBetsPerWindow via maxBetWindowToken.
-    if (!isConviction && !isMLLead && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
+    if (!isConviction && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${S.config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -1377,7 +1374,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Skipped when _wmBypassActive (unanimous high-confidence signals above).
     // Skipped in conviction mode: conviction is purely reactive to yesPrice; it uses
     // no WM signals, so waiting for candle accumulation only blocks early entries.
-    if (!isConviction && !isMLLead && !_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
+    if (!isConviction && !_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0,
         reason: `window monitor not ready (${minutesElapsed.toFixed(1)}m elapsed — needs ≥2m)`,
         windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -1390,9 +1387,7 @@ export async function runBotLoopTick(): Promise<void> {
     // When requireMonitorReady=true: hard block (full-window, not per-tick defer).
     // When requireMonitorReady=false: advisory log only, entry proceeds.
     // Skipped in conviction mode: WM signals are irrelevant to price-reactive entry.
-    // Skipped in ml_lead mode: Claude (WM's companion) is not a signal; direction
-    // is decided by ML alone so WM readiness/stay_away is advisory at most.
-    if (!isConviction && !isMLLead) {
+    if (!isConviction) {
       const _stayAway = applyStayAwayGateDecision(
         sym,
         getWindowBetSignal(sym),
@@ -2202,23 +2197,33 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   if (bets.length > 0) {
-    // All qualifying coins are marked selected and fire independently in Phase 4.
-    // For conviction: the max-bet candidate (pre-selected by stability score)
-    // is additionally identified for max-bet size purposes.
     if (S.config.decisionMode === "conviction") {
+      // Conviction: all qualifying coins fire in parallel — no single winner.
+      // Mark the max-bet candidate (pre-selected by stability score) as "selected"
+      // purely for UI display.  If none qualifies, fall back to bets[0].
       const _maxSym   = maxBetCandidateForWindow.get(windowKey) ?? null;
       const _maxEntry = _maxSym ? bets.find(e => e.symbol === _maxSym) : null;
       (_maxEntry ?? bets[0]).selected = true;
       logger.info(
         { symbols: bets.map(e => `${e.symbol}(${e.action})`), maxBetCandidate: _maxSym ?? "none", windowKey },
-        "[kalshi-bot] dispatching all qualifying coins",
+        "[kalshi-bot] conviction: dispatching all in-zone coins",
       );
     } else {
-      for (const e of bets) { e.selected = true; }
-      logger.info(
-        { symbols: bets.map(e => `${e.symbol}(${e.action})`), windowKey },
-        "[kalshi-bot] dispatching all qualifying coins",
-      );
+      bets[0].selected = true;
+      const winner = bets[0];
+      const multiplierDesc =
+        winner.trendStability === "clean" ? "×1.2 (clean)" :
+        winner.trendStability === "choppy" ? "×1.0 (choppy)" :
+        winner.trendStability === null ? "×1.0 (pending)" : "×1.0";
+      logger.info({
+        symbol: winner.symbol,
+        action: winner.action,
+        confidence: winner.confidence,
+        score: winner.score.toFixed(2),
+        trendStability: winner.trendStability ?? "pending",
+        multiplier: multiplierDesc,
+        windowKey,
+      }, "[kalshi-bot] best-market selected");
     }
   }
   // Stamp betPlacedThisWindow + placed bet details on every eval entry so the dashboard
@@ -2272,9 +2277,8 @@ export async function runBotLoopTick(): Promise<void> {
   // blocked by momentum override / directional-cap are excluded from execution.
   const betSymbols  = bets.map(e => e.symbol);
   const _isConvictionMode = S.config.decisionMode === "conviction";
-  const _isMLLeadMode = S.config.decisionMode === "ml_lead";
   const skipSymbols = skips
-    .filter(e => (_isConvictionMode || _isMLLeadMode || e.trendStability !== "reversing") && !filteredByNewGuards.has(e.symbol))
+    .filter(e => (_isConvictionMode || e.trendStability !== "reversing") && !filteredByNewGuards.has(e.symbol))
     .map(e => e.symbol);
 
   // Snapshot pre-launch open-position state for all candidates.
@@ -2361,10 +2365,13 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
 
-  // All modes: every qualifying coin fires independently in parallel.
-  // There is no single "best-market" winner — each coin places its own bet
-  // if it passes all gates (ML direction, return floor, per-coin cap, etc.).
-  await Promise.allSettled(betSymbols.map(runCoin));
+  if (_isConvictionMode) {
+    await Promise.allSettled(betSymbols.map(runCoin));
+  } else {
+    for (const sym of betSymbols) {
+      await runCoin(sym);
+    }
+  }
 
   // Then manage existing positions (skips) in parallel.
   await Promise.allSettled(skipSymbols.map(runCoin));

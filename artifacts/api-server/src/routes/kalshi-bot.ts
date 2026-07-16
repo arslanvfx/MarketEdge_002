@@ -108,35 +108,6 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 3,
   },
-  // ML Lead: ML is the sole direction signal; stat is an optional ±4pp modifier.
-  // Claude is ignored entirely — entry fires the moment ML has a direction.
-  // Same timing as ml_gate (pipeline fires immediately on ML ready, no delay).
-  // Slightly lower minConfidence than ml_gate since no Claude confirmation floor.
-  ml_lead: {
-    decisionMode: "ml_lead",
-    minConfidence: 55,
-    minReturnMultiple: 1.5,
-    betDelayMinutes: 0,
-    maxEntryMinutes: 8,
-    minRemainingMinutes: 3,
-    windowEntryBufferSeconds: 120,
-    requireMonitorReady: true,
-    enableDynamicSizing: true,
-    betSize: 1,
-    maxBetSize: 3,
-    maxBetsPerWindow: 6,
-    profitLockPct: 97,
-    enableMidExit: false,
-    mlVetoMinConfidence: 65,
-    regimePenalty: 12,
-    enableDirectionCap: true,
-    maxSameDirectionBets: 3,
-    enableMomentumFilter: true,
-    consensusMinCents: 25,
-    momentumLookbackCandles: 6,
-    phase2ThresholdPp: 30,
-    minHoldMinutes: 3,
-  },
   consensus: {
     decisionMode: "consensus",
     minConfidence: 58,
@@ -779,7 +750,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "ml_lead" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
     // When switching modes: apply built-in mode defaults as a baseline, then
     // layer the saved user preset on top (if one exists), then apply any
     // explicit overrides from this request on top of that.

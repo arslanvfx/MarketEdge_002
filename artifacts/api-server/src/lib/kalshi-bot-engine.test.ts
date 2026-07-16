@@ -27,7 +27,6 @@ import assert from "node:assert/strict";
 import {
   computeCorePairDecision,
   computeMLGateDecision,
-  computeMLLeadDecision,
   computeConvictionDecision,
   CLAUDE_BOOST,
   CLAUDE_PENALTY,
@@ -1771,86 +1770,4 @@ test("lockPrice migration: fully migrated config → no-op", () => {
   assert.equal(res.changed, false);
   assert.equal(res.migrated, false);
   assert.equal(cfg.kalshiLockPrice, 0.90);
-});
-
-// ---------------------------------------------------------------------------
-// ML_LEAD — Claude null must never block a bet
-// ---------------------------------------------------------------------------
-
-test("ml_lead: mlAbove=null → SKIP with waiting-for-ML message", () => {
-  const r = computeMLLeadDecision(inp({
-    mlAbove: null,
-    claudeAbove: true, claudeConfidence: 70,
-    statAbove: true,   statConfidence: 62,
-  }));
-  assert.equal(r.action, "SKIP");
-  assert.match(r.reasoning, /waiting for ML/i);
-});
-
-test("ml_lead: mlAbove=true, claudeAbove=null, statAbove=null → BET_YES", () => {
-  const r = computeMLLeadDecision(inp({
-    mlAbove: true, mlConfidence: 65,
-    claudeAbove: null,
-    statAbove: null,
-    minConfidence: 60,
-  }));
-  assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 65);
-});
-
-test("ml_lead: mlAbove=false, claudeAbove=null, statAbove=null → BET_NO", () => {
-  const r = computeMLLeadDecision(inp({
-    mlAbove: false, mlConfidence: 65,
-    claudeAbove: null,
-    statAbove: null,
-    minConfidence: 60,
-  }));
-  assert.equal(r.action, "BET_NO");
-  assert.equal(r.confidence, 65);
-});
-
-test("ml_lead: stat agrees → composite = mlConf + STAT_BOOST", () => {
-  const r = computeMLLeadDecision(inp({
-    mlAbove: true, mlConfidence: 65,
-    claudeAbove: null,
-    statAbove: true,
-    minConfidence: 60,
-  }));
-  assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 65 + STAT_BOOST);
-});
-
-test("ml_lead: stat disagrees → composite = mlConf − STAT_PENALTY", () => {
-  const r = computeMLLeadDecision(inp({
-    mlAbove: true, mlConfidence: 65,
-    claudeAbove: null,
-    statAbove: false,
-    minConfidence: 60,
-  }));
-  assert.equal(r.action, "BET_YES");
-  assert.equal(r.confidence, 65 - STAT_PENALTY);
-});
-
-test("ml_lead: stat disagrees and drives composite below minConfidence → SKIP", () => {
-  const r = computeMLLeadDecision(inp({
-    mlAbove: true, mlConfidence: 62,
-    claudeAbove: null,
-    statAbove: false,
-    minConfidence: 60,
-  }));
-  assert.equal(r.action, "SKIP");
-  assert.equal(r.confidence, 62 - STAT_PENALTY);
-  assert.match(r.reasoning, /below minimum/i);
-});
-
-test("ml_lead: mlConf alone below minConfidence (no stat) → SKIP", () => {
-  const r = computeMLLeadDecision(inp({
-    mlAbove: true, mlConfidence: 55,
-    claudeAbove: null,
-    statAbove: null,
-    minConfidence: 60,
-  }));
-  assert.equal(r.action, "SKIP");
-  assert.equal(r.confidence, 55);
-  assert.match(r.reasoning, /below minimum/i);
 });

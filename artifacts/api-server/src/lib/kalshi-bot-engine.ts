@@ -27,7 +27,6 @@ import { getKalshiCachedData } from "./crypto-kalshi";
 import {
   computeCorePairDecision,
   computeMLGateDecision,
-  computeMLLeadDecision,
   computeConvictionDecision,
   ML_WEIGHT,
   CLAUDE_WEIGHT,
@@ -237,17 +236,11 @@ function _makeBotDecisionInner(
   // mid-window.  Bypass ALL three null-checks for conviction.
   {
     const convictionMode = config.decisionMode === "conviction";
-    // ml_lead: only ML is required; stat and claude are optional modifiers
-    const mlLeadMode     = config.decisionMode === "ml_lead";
-    // conviction: bypass all null-checks (pure price reactive, no models needed)
-    // ml_lead:    bypass Claude + Stat null-checks; only block on ML missing
-    // all others: require all three (Stat, Claude, ML) before betting
-    const claudeMissing = !convictionMode && !mlLeadMode && claudeAbove === null;
-    const statMissing   = !convictionMode && !mlLeadMode && statAbove === null;
-    const mlMissing     = !convictionMode && mlAbove === null; // ml_lead still requires ML
-    if (claudeMissing || statMissing || mlMissing) {
+    const claudeMissing  = !convictionMode && claudeAbove === null;
+    const statMlMissing  = !convictionMode && (statAbove === null || mlAbove === null);
+    if (statMlMissing || claudeMissing) {
       const missing = (
-        [statMissing && "Stat", claudeMissing && "Claude", mlMissing && "ML"] as Array<string | false>
+        [statMlMissing && statAbove === null && "Stat", claudeMissing && "Claude", statMlMissing && mlAbove === null && "ML"] as Array<string | false>
       ).filter(Boolean).join("+");
       const pendingSnapshot: SignalSnapshot = {
         statAbove, claudeAbove, mlAbove,
@@ -259,13 +252,10 @@ function _makeBotDecisionInner(
         warmupActive: true,
         roiPct: null,
       };
-      const waitingFor = mlLeadMode
-        ? "ML (ml_lead mode — stat and claude are optional)"
-        : `${missing} — all three models (Stat, Claude, ML) must complete before betting`;
       return {
         action: "SKIP",
         confidence: 0,
-        reasoning: `Pipeline: waiting for ${waitingFor} (${minutesElapsed.toFixed(1)} min elapsed)`,
+        reasoning: `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`,
         signals: pendingSnapshot,
       };
     }
@@ -454,38 +444,6 @@ function _makeBotDecisionInner(
   }
 
 
-  // ── Decision Mode: ml_lead ────────────────────────────────────────────────
-  // ML is the sole direction signal; stat is an optional ±STAT_BOOST modifier.
-  // Claude is not consulted at all — the pipeline gate only blocks when ML is null.
-  if (decisionMode === "ml_lead") {
-    const coreResult = computeMLLeadDecision({
-      statAbove, claudeAbove,
-      mlAbove,
-      mlConfidence,
-      wmDriftAbove, wmRec, wmReady,
-      yesPrice, signalAccuracyPct, minutesElapsed,
-      statConfidence: liveStatConf,
-      claudeConfidence,
-      kalshiTicker,
-      minConfidence: config.minConfidence,
-      minReturnMultiple: config.minReturnMultiple,
-      unanimousMinModelConfidence: config.unanimousMinModelConfidence,
-    });
-
-    const coreSnap = buildSnapshot(
-      coreResult.ev,
-      coreResult.signalsAgreeing,
-      coreResult.signalsTotal,
-      coreResult.action !== "SKIP" ? coreResult.action : null,
-    );
-    return {
-      action: coreResult.action,
-      confidence: coreResult.confidence,
-      reasoning: coreResult.reasoning,
-      signals: coreSnap,
-    };
-  }
-
   // ── Decision Mode: conviction ─────────────────────────────────────────────
   // Delegates to the pure computeConvictionDecision in kalshi-bot-engine-core.
   // See that function's JSDoc for the full zone map and invariant documentation.
@@ -517,27 +475,6 @@ function _makeBotDecisionInner(
       reasoning:  cvResult.reasoning,
       signals: buildSnapshot(null, cvResult.signalsAgreeing, cvResult.signalsTotal, cvAgreementTarget),
     };
-  }
-
-  // ── Exhaustiveness guard ──────────────────────────────────────────────────
-  // TypeScript's control-flow analysis narrows decisionMode here:
-  //   • "unanimous", "ml_gate", "ml_lead", "conviction" each have a block
-  //     above that ALWAYS returns, so they are excluded from the type.
-  //   • "consensus" is still present because its block falls through when
-  //     fewer than 2 votes exist (intentional warm-up behaviour).
-  // After all of the above, only "classic" | "consensus" remain.
-  // The default arm below assigns to `never`, which is a compile-time error
-  // if a new DecisionMode member is added without a corresponding handler.
-  switch (decisionMode) {
-    case "classic":
-    case "consensus":
-      break; // proceed to computeCorePairDecision
-    default: {
-      // This branch is unreachable at runtime; it exists purely so TypeScript
-      // will flag any future unhandled DecisionMode at compile time.
-      const _never: never = decisionMode;
-      throw new Error(`[bot] Unhandled decisionMode="${_never as unknown as string}" — this is a bug`);
-    }
   }
 
   // ── Classic path (also used by ml_primary) ────────────────────────────────

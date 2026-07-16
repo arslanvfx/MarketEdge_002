@@ -298,7 +298,6 @@ function makeReport(overrides: Partial<PerformanceReport> = {}): PerformanceRepo
     bySymbol: {},
     byHourBand: {},
     byHourBandDow: {},
-    byDecisionMode: {},
     byDirection: {
       yes: { wins: 0, losses: 0, betCount: 0, winRate: null },
       no: { wins: 0, losses: 0, betCount: 0, winRate: null },
@@ -914,103 +913,4 @@ test(`threshold boundary: two bad bands at 149 and 150 bets — only the 150-bet
   assert.ok(r1, "rule1 should fire for the 14-16 band (meets both thresholds)");
   assert.ok(r1.triggerReason.includes("14-16"),
     "trigger reason must cite 14-16, not the under-threshold 18-20 band");
-});
-
-// ---------------------------------------------------------------------------
-// byDecisionMode
-// ---------------------------------------------------------------------------
-
-test("byDecisionMode: all known modes pre-seeded with zero bets", () => {
-  const report = computePerformanceReport([], NOW);
-  assert.ok("ml_lead" in report.byDecisionMode, "ml_lead must be pre-seeded");
-  assert.ok("ml_gate" in report.byDecisionMode, "ml_gate must be pre-seeded");
-  assert.ok("classic" in report.byDecisionMode, "classic must be pre-seeded");
-  assert.equal(report.byDecisionMode["ml_lead"].bets, 0);
-  assert.equal(report.byDecisionMode["ml_lead"].winRate, null);
-});
-
-test("byDecisionMode: null decisionMode falls back to classic", () => {
-  const bets = [
-    makeBet({ outcome: "win", decisionMode: null }),
-    makeBet({ outcome: "loss", decisionMode: null }),
-  ];
-  const report = computePerformanceReport(bets, NOW);
-  assert.equal(report.byDecisionMode["classic"].bets, 2);
-  assert.equal(report.byDecisionMode["classic"].wins, 1);
-  assert.equal(report.byDecisionMode["classic"].losses, 1);
-  assert.equal(report.byDecisionMode["classic"].winRate, 0.5);
-});
-
-test("byDecisionMode: ml_lead bets tracked independently from ml_gate and classic", () => {
-  const bets = [
-    makeBet({ outcome: "win",  decisionMode: "ml_lead" }),
-    makeBet({ outcome: "win",  decisionMode: "ml_lead" }),
-    makeBet({ outcome: "loss", decisionMode: "ml_lead" }),
-    makeBet({ outcome: "win",  decisionMode: "ml_gate" }),
-    makeBet({ outcome: "loss", decisionMode: "ml_gate" }),
-    makeBet({ outcome: "loss", decisionMode: "classic" }),
-  ];
-  const report = computePerformanceReport(bets, NOW);
-
-  const ml = report.byDecisionMode["ml_lead"];
-  assert.equal(ml.bets, 3, "ml_lead should have 3 bets");
-  assert.equal(ml.wins, 2, "ml_lead should have 2 wins");
-  assert.equal(ml.losses, 1, "ml_lead should have 1 loss");
-  assert.ok(Math.abs((ml.winRate ?? 0) - 2 / 3) < 1e-9, "ml_lead win rate should be 2/3");
-
-  const gate = report.byDecisionMode["ml_gate"];
-  assert.equal(gate.bets, 2);
-  assert.equal(gate.winRate, 0.5);
-
-  const classic = report.byDecisionMode["classic"];
-  assert.equal(classic.bets, 1);
-  assert.equal(classic.winRate, 0);
-});
-
-test("byDecisionMode: avgConfidence populated from signals", () => {
-  const bets = [
-    makeBet({ outcome: "win",  decisionMode: "ml_lead", signals: { effectiveConfidence: 70 } }),
-    makeBet({ outcome: "loss", decisionMode: "ml_lead", signals: { effectiveConfidence: 60 } }),
-    makeBet({ outcome: "win",  decisionMode: "classic", signals: { effectiveConfidence: 55 } }),
-  ];
-  const report = computePerformanceReport(bets, NOW);
-  assert.equal(report.byDecisionMode["ml_lead"].avgConfidence, 65,
-    "ml_lead avgConfidence should be mean of 70 and 60");
-  assert.equal(report.byDecisionMode["classic"].avgConfidence, 55,
-    "classic avgConfidence should be 55");
-});
-
-test("byDecisionMode: pnl accumulated correctly per mode", () => {
-  const bets = [
-    makeBet({ outcome: "win",  decisionMode: "ml_lead", pnl: "2.00" }),
-    makeBet({ outcome: "loss", decisionMode: "ml_lead", pnl: "-1.50" }),
-    makeBet({ outcome: "win",  decisionMode: "classic", pnl: "3.00" }),
-  ];
-  const report = computePerformanceReport(bets, NOW);
-  assert.ok(Math.abs(report.byDecisionMode["ml_lead"].pnl - 0.5) < 1e-9,
-    "ml_lead P&L should be 2.00 - 1.50 = 0.50");
-  assert.ok(Math.abs(report.byDecisionMode["classic"].pnl - 3.0) < 1e-9,
-    "classic P&L should be 3.00");
-});
-
-test("byDecisionMode: push outcomes excluded from mode stats", () => {
-  const bets = [
-    makeBet({ outcome: "win",  decisionMode: "ml_lead" }),
-    makeBet({ outcome: "push", decisionMode: "ml_lead" }),
-    makeBet({ outcome: null,   decisionMode: "ml_lead" }),
-  ];
-  const report = computePerformanceReport(bets, NOW);
-  assert.equal(report.byDecisionMode["ml_lead"].bets, 1, "only settled bets count");
-  assert.equal(report.byDecisionMode["ml_lead"].winRate, 1.0);
-});
-
-test("byDecisionMode: unknown mode dynamically added", () => {
-  const bets = [
-    makeBet({ outcome: "win", decisionMode: "experimental" }),
-    makeBet({ outcome: "win", decisionMode: "experimental" }),
-  ];
-  const report = computePerformanceReport(bets, NOW);
-  assert.ok("experimental" in report.byDecisionMode, "unknown mode should be dynamically added");
-  assert.equal(report.byDecisionMode["experimental"].bets, 2);
-  assert.equal(report.byDecisionMode["experimental"].winRate, 1.0);
 });

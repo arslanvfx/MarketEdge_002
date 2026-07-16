@@ -577,7 +577,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     {([
                       { id: "classic",          label: "Classic",          desc: "Stat → Claude → ML cascade; ML boosts if it agrees" },
                       { id: "ml_gate",          label: "ML Gate",          desc: "ML leads direction; Claude is a required co-decider — disagree → SKIP" },
-                      { id: "ml_lead",          label: "ML Lead",          desc: "ML is the sole direction signal; stat adds a ±4pp modifier; Claude is ignored entirely" },
                       { id: "consensus",        label: "Consensus",        desc: "≥2 of [Stat, Claude, ML] must agree on the same side" },
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
 
