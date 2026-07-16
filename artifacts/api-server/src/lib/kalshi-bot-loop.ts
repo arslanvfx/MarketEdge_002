@@ -1258,12 +1258,14 @@ export async function runBotLoopTick(): Promise<void> {
     const isConviction = S.config.decisionMode === "conviction";
     const isMLLead = S.config.decisionMode === "ml_lead";
     if (pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`) && !openPositions.has(sym)) {
-      if (!isConviction) {
+      if (!isConviction && !isMLLead) {
         filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "pipeline-triggered entry already evaluated this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
       }
-      // conviction mode: fall through — tick loop re-evaluates every 5s
+      // conviction / ml_lead mode: fall through — tick loop re-evaluates every tick
+      // ml_lead: market prices shift during the window; a return-too-low SKIP at minute
+      // 1 may flip to ≥1.5x by minute 5 as the YES price moves.
     }
     // Conviction once-per-window guard: after a conviction entry has been attempted
     // (regardless of FOK fill outcome), block any further entry for this coin this
