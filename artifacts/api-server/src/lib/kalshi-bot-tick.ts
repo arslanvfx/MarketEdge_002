@@ -1355,6 +1355,31 @@ async function _runBotTick(
     return;
   }
   const betAmount = contractCount * expectedFillCost; // expected dollars risked
+
+  // ── MINIMUM BET AMOUNT GUARD (pre-gate) ──────────────────────────────────
+  // If the computed betAmount is below 80% of the configured minimum betSize
+  // the fill would be useless (e.g. $0.01).  Clear the window lock so the
+  // bot retries on the next tick with fresh prices.  No FOK cooldown engaged
+  // here — the price may improve, unlike the contractCount<1 case where the
+  // budget genuinely can't buy a contract at all.
+  const _minBetFloor = (S.config.betSize ?? 1) * 0.8;
+  if (betAmount < _minBetFloor) {
+    logger.warn(
+      {
+        sym,
+        direction,
+        betAmount: betAmount.toFixed(4),
+        betSize: S.config.betSize,
+        minBetFloor: _minBetFloor.toFixed(4),
+        contractCount,
+        expectedFillCost: expectedFillCost.toFixed(4),
+      },
+      "[kalshi-bot] SKIP — sub-minimum bet amount; retrying next tick",
+    );
+    convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+    return;
+  }
+
   // Conviction daily spend gate: block entry if today's total spend would exceed the configured cap.
   if ((S.config.convictionMaxDailySpend ?? 0) > 0) {
     const spendCap = S.config.convictionMaxDailySpend!;
@@ -1763,6 +1788,27 @@ async function _runBotTick(
       );
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
+      return;
+    }
+    // ── MINIMUM BET AMOUNT GUARD (post-gate) ─────────────────────────────────
+    // Fresh prices from the authenticated orderbook may shrink contractCount
+    // enough that postGateCost falls below the configured minimum — even if
+    // the pre-gate cost looked fine.  Clear the window lock so the bot
+    // retries on the next tick; no FOK cooldown (same reasoning as pre-gate).
+    if (postGateCost < _minBetFloor) {
+      logger.warn(
+        {
+          sym,
+          direction,
+          postGateCost: postGateCost.toFixed(4),
+          betSize: S.config.betSize,
+          minBetFloor: _minBetFloor.toFixed(4),
+          contractCount,
+          expectedFillCost: expectedFillCost.toFixed(4),
+        },
+        "[kalshi-bot] SKIP — post-gate cost below minimum; retrying next tick",
+      );
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       return;
     }
   }
