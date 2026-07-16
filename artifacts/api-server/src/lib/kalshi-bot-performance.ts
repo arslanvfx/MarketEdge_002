@@ -14,6 +14,7 @@ export interface SettledBetRecord {
   signals: Record<string, unknown> | null;
   outcome: string | null;
   isMaxBet?: boolean | null;
+  decisionMode?: string | null;
 }
 
 export interface MaxBetStats {
@@ -69,6 +70,16 @@ export interface AgreementLevelStats {
   losses: number;
   betCount: number;
   winRate: number | null;
+}
+
+export interface DecisionModeStats {
+  mode: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  avgConfidence: number | null;
 }
 
 export interface DayOfWeekStats {
@@ -130,6 +141,7 @@ export interface PerformanceReport {
   byDirection: { yes: DirectionStats; no: DirectionStats };
   byConfidenceBand: Record<string, ConfidenceBandStats>;
   byAgreementLevel: Record<string, AgreementLevelStats>;
+  byDecisionMode: Record<string, DecisionModeStats>;
   byDayOfWeek: Record<number, DayOfWeekStats>;
   byHourOfDay: Record<number, HourOfDayStats>;
   byHourBandDow: Record<string, Record<number, HourBandDowStats>>;
@@ -410,6 +422,41 @@ export function computePerformanceReport(
   });
   const optimalConfidenceThreshold = optimalBand ? optimalBand.lo : null;
 
+  // Per-decision-mode stats — tracks ML Lead bets separately from classic/ml_gate/etc.
+  const ALL_DECISION_MODES = ["classic", "ml_gate", "ml_lead", "consensus", "unanimous", "conviction"] as const;
+  const byDecisionMode: Record<string, DecisionModeStats> = {};
+  for (const m of ALL_DECISION_MODES) {
+    byDecisionMode[m] = { mode: m, bets: 0, wins: 0, losses: 0, pnl: 0, winRate: null, avgConfidence: null };
+  }
+  const dmConfSum: Record<string, number> = {};
+  const dmConfCount: Record<string, number> = {};
+  for (const m of ALL_DECISION_MODES) {
+    dmConfSum[m] = 0;
+    dmConfCount[m] = 0;
+  }
+  for (const b of settled) {
+    const dm = (b.decisionMode ?? "classic") as string;
+    if (!byDecisionMode[dm]) {
+      byDecisionMode[dm] = { mode: dm, bets: 0, wins: 0, losses: 0, pnl: 0, winRate: null, avgConfidence: null };
+      dmConfSum[dm] = 0;
+      dmConfCount[dm] = 0;
+    }
+    const entry = byDecisionMode[dm];
+    entry.bets++;
+    entry.pnl += parseFloat(String(b.pnl ?? "0"));
+    if (b.outcome === "win") entry.wins++;
+    else entry.losses++;
+    const conf = extractEffectiveConfidence(b.signals);
+    if (conf !== null) { dmConfSum[dm] += conf; dmConfCount[dm]++; }
+  }
+  for (const dm of Object.keys(byDecisionMode)) {
+    const entry = byDecisionMode[dm];
+    entry.winRate = entry.bets > 0 ? entry.wins / entry.bets : null;
+    entry.avgConfidence = dmConfCount[dm] > 0
+      ? Math.round(dmConfSum[dm] / dmConfCount[dm] * 10) / 10
+      : null;
+  }
+
   // Signal agreement breakdown: how many signals agreed when the bet was placed
   const byAgreementLevel: Record<string, AgreementLevelStats> = {};
   for (const b of settled) {
@@ -560,6 +607,7 @@ export function computePerformanceReport(
     byDirection,
     byConfidenceBand,
     byAgreementLevel,
+    byDecisionMode,
     byDayOfWeek,
     byHourOfDay,
     byHourBandDow,

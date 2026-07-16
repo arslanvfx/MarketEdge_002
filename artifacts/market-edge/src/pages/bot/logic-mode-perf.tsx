@@ -21,6 +21,7 @@ export function LogicModePerf({ logicPerfData, backtestData, btPerfTab, setBtPer
           const MODE_META: Record<string, { label: string; desc: string; color: string; accent: string }> = {
             classic:   { label: "Classic",   desc: "Stat → Claude → ML cascade", color: "border-sky-500/40 bg-sky-950/10",      accent: "text-sky-400" },
             ml_gate:   { label: "ML Gate",   desc: "ML veto on disagreement",    color: "border-violet-500/40 bg-violet-950/10", accent: "text-violet-400" },
+            ml_lead:   { label: "ML Lead",   desc: "ML model leads direction",   color: "border-rose-500/40 bg-rose-950/10",    accent: "text-rose-400" },
             consensus: { label: "Consensus", desc: "2/3 majority vote",          color: "border-amber-500/40 bg-amber-950/10",  accent: "text-amber-400" },
             unanimous: { label: "Unanimous", desc: "All 3 signals must agree",   color: "border-emerald-500/40 bg-emerald-950/10", accent: "text-emerald-400" },
           };

@@ -286,6 +286,16 @@ export interface AgreementLevelStats {
   wins: number; losses: number; betCount: number; winRate: number | null;
 }
 
+export interface DecisionModeStats {
+  mode: string;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  avgConfidence: number | null;
+}
+
 export interface DayOfWeekStats {
   day: number; dayName: string;
   wins: number; losses: number; betCount: number; winRate: number | null;
@@ -318,6 +328,7 @@ export interface PerformanceReport {
   byDirection: { yes: DirectionStats; no: DirectionStats };
   byConfidenceBand: Record<string, ConfidenceBandStats>;
   byAgreementLevel: Record<string, AgreementLevelStats>;
+  byDecisionMode: Record<string, DecisionModeStats>;
   byDayOfWeek: Record<string, DayOfWeekStats>;
   byHourOfDay: Record<string, HourOfDayStats>;
   optimalConfidenceThreshold: number | null;

@@ -356,6 +356,7 @@ export async function runAutoTuneJob(): Promise<void> {
         signals: kalshiBotBetsTable.signals,
         outcome: kalshiBotBetsTable.outcome,
         isMaxBet: kalshiBotBetsTable.isMaxBet,
+        decisionMode: kalshiBotBetsTable.decisionMode,
       })
       .from(kalshiBotBetsTable)
       .where(
@@ -380,6 +381,7 @@ export async function runAutoTuneJob(): Promise<void> {
       signals: (r.signals as Record<string, unknown>) ?? null,
       outcome: r.outcome,
       isMaxBet: r.isMaxBet ?? false,
+      decisionMode: r.decisionMode ?? null,
     }));
 
     // Separate all-time max-bet query (no limit) so the max-bet stats panel is
