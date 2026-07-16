@@ -519,6 +519,27 @@ function _makeBotDecisionInner(
     };
   }
 
+  // ── Exhaustiveness guard ──────────────────────────────────────────────────
+  // TypeScript's control-flow analysis narrows decisionMode here:
+  //   • "unanimous", "ml_gate", "ml_lead", "conviction" each have a block
+  //     above that ALWAYS returns, so they are excluded from the type.
+  //   • "consensus" is still present because its block falls through when
+  //     fewer than 2 votes exist (intentional warm-up behaviour).
+  // After all of the above, only "classic" | "consensus" remain.
+  // The default arm below assigns to `never`, which is a compile-time error
+  // if a new DecisionMode member is added without a corresponding handler.
+  switch (decisionMode) {
+    case "classic":
+    case "consensus":
+      break; // proceed to computeCorePairDecision
+    default: {
+      // This branch is unreachable at runtime; it exists purely so TypeScript
+      // will flag any future unhandled DecisionMode at compile time.
+      const _never: never = decisionMode;
+      throw new Error(`[bot] Unhandled decisionMode="${_never as unknown as string}" — this is a bug`);
+    }
+  }
+
   // ── Classic path (also used by ml_primary) ────────────────────────────────
   // unanimousMinModelConfidence is ml_gate-only; do not pass it here so the
   // classic unanimous bypass behaviour remains unchanged.
