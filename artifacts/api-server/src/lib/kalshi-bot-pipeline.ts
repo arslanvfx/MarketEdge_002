@@ -26,6 +26,7 @@ import {
   getKalshiCachedData, fetchKalshiTarget,
   getLatestCoinSignals,
 } from "./crypto";
+import { S } from "./kalshi-bot-state";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -328,20 +329,21 @@ async function _runPipeline(
     `[pipeline] ${isRecheck ? "re-check" : "initial"} complete`,
   );
 
-  // Fire the completion callback exactly once per window, the first time ALL
-  // THREE model signals (stat, Claude, ML) are non-null.  This triggers a
-  // targeted one-shot entry evaluation in the bot loop without waiting for
-  // the next 15s polling tick.
+  // Fire the completion callback once per window when all REQUIRED model signals
+  // are non-null.  This triggers a targeted one-shot entry evaluation in the
+  // bot loop without waiting for the next 15s polling tick.
   //
-  // HARD RULE: the bot must never enter a bet with a missing signal.  If any
-  // of statAbove / claudeAbove / mlAbove is still null, we log and wait — the
-  // re-check loop keeps polling and this trigger re-evaluates on every pass
-  // until the predictor has produced all three.
+  // ML LEAD MODE — only ML is required; stat and claude are optional modifiers.
+  // The callback fires as soon as mlAbove is populated, even if claudeAbove
+  // is still null.  Bets do not wait for Claude.
+  //
+  // ALL OTHER NON-CONVICTION MODES — stat, Claude, and ML must all be non-null.
   //
   // Guard: prevAnyWasNull ensures the callback fires AT MOST ONCE per window.
-  // If a previous pass already had all three signals (and therefore fired),
-  // later re-checks do not fire it again.
-  const allSignalsReady = statAbove !== null && claudeAbove !== null && mlAbove !== null;
+  const mlLeadMode = S.config.decisionMode === "ml_lead";
+  const allSignalsReady = mlLeadMode
+    ? mlAbove !== null
+    : statAbove !== null && claudeAbove !== null && mlAbove !== null;
   if (_pipelineCompleteCallback && allSignalsReady) {
     const prevAnyWasNull =
       prevResult == null ||
