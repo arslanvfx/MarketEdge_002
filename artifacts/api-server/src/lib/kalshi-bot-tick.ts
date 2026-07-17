@@ -2182,16 +2182,40 @@ async function _runBotTick(
         const convFillPrice = direction === "yes"
           ? result.avgPrice
           : 1 - result.avgPrice;
-        if (convFillPrice < _lp || convFillPrice > _lpCap) {
+
+        // Emergency-close floor: fills at or above this value are kept as open
+        // positions and monitored by the stop-loss (convictionStopLossFloor).
+        // Only fills that are genuinely catastrophic (below the floor) trigger
+        // an immediate close.  Default 0.75 — a fill at e.g. 88¢ is kept even
+        // though it is below the conviction zone (91¢); the stop-loss will exit
+        // if the live price later drops to the stop floor.
+        const ecFloor = S.config.convictionEmergencyCloseFloor ?? 0.75;
+
+        if (convFillPrice >= ecFloor && convFillPrice < _lp) {
+          // Fill is below zone but above the emergency-close floor — acceptable
+          // slippage.  Warn and fall through to normal open-position recording;
+          // the per-tick stop-loss will handle any further deterioration.
+          logger.warn(
+            {
+              sym, direction, windowKey,
+              convFillPrice: +convFillPrice.toFixed(4),
+              avgPrice: +result.avgPrice.toFixed(4),
+              lockPrice: _lp, ecFloor,
+              contractCount, ticker: kalshiTicker,
+            },
+            "[kalshi-bot] conviction fill below zone but above stop floor — keeping position, stop-loss armed",
+          );
+          // Fall through → position recorded as open below.
+        } else if (convFillPrice < ecFloor || convFillPrice > _lpCap) {
           logger.error(
             {
               sym, direction, windowKey,
               convFillPrice: +convFillPrice.toFixed(4),
               avgPrice: +result.avgPrice.toFixed(4),
-              lockPrice: _lp, lockPriceCap: _lpCap,
+              lockPrice: _lp, lockPriceCap: _lpCap, ecFloor,
               contractCount, ticker: kalshiTicker,
             },
-            "[kalshi-bot] CONVICTION FILL OUTSIDE ZONE — emergency close",
+            "[kalshi-bot] CONVICTION FILL OUTSIDE EMERGENCY FLOOR — immediate close",
           );
           let emergencyExitAvgPrice: number | null = null;
           try {

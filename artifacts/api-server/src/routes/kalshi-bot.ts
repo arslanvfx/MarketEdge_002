@@ -637,6 +637,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionEarlyBypassThreshold,
     convictionStopLossFloor,
     convictionStopLossActivationMinute,
+    convictionEmergencyCloseFloor,
     convictionDailyLossLimit,
     convictionMinEntryMinutes,
     convictionMaxDailySpend,
@@ -720,6 +721,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     priceBufferPct?: number;
     convictionStopLossFloor?: number;
     convictionStopLossActivationMinute?: number;
+    convictionEmergencyCloseFloor?: number;
     convictionDailyLossLimit?: number;
     convictionMinEntryMinutes?: number;
     convictionMaxDailySpend?: number;
@@ -910,6 +912,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   // 0 = arm immediately; 1–13 = arm after N minutes (last 15-N minutes of window)
   if (typeof convictionStopLossActivationMinute === "number" && convictionStopLossActivationMinute >= 0 && convictionStopLossActivationMinute <= 13) {
     partial.convictionStopLossActivationMinute = convictionStopLossActivationMinute;
+  }
+  // 0.50–0.90: fills above this are kept (stop-loss monitors them); fills below → immediate close
+  if (typeof convictionEmergencyCloseFloor === "number" && convictionEmergencyCloseFloor >= 0.50 && convictionEmergencyCloseFloor <= 0.90) {
+    partial.convictionEmergencyCloseFloor = convictionEmergencyCloseFloor;
   }
   if (typeof convictionDailyLossLimit === "number" && convictionDailyLossLimit > 0) {
     partial.convictionDailyLossLimit = convictionDailyLossLimit;
