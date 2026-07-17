@@ -65,12 +65,28 @@ async function pollOnce(): Promise<void> {
     .toISOString()
     .slice(0, 16);
 
+  // Pin each fetch to the CURRENT window's market by passing its close time.
+  // Without targetTime, fetchKalshiTarget picks whichever market is nearest
+  // to the next 15-min boundary.  Kalshi pre-publishes the next window ~10 min
+  // early, so ~5 min into each window the selector silently switches to it.
+  // The freshly-published market has no market-maker quotes yet and returns
+  // sentinel prices (yesAsk=0.001, yesBid=null or the reverse).  Those flow
+  // into computeConvictionDecision as extreme prices (≥0.92 / ≤0.08), bypass
+  // the lockPriceCap guard, and classify every coin as BET_YES or BET_NO —
+  // causing constant dispatch + constant live-price-gate blocks = zero fills.
+  // Passing windowCloseTime constrains the selector to markets closing within
+  // 8 min of the CURRENT window's end, matching the bot-tick expectedTicker fix.
+  const windowCloseTime = new Date(
+    Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) + 15 * 60_000,
+  );
+
   await Promise.allSettled(
     syms.map(async (sym) => {
       // forceRefresh=true bypasses the TTL check without deleting the existing
       // cache entry.  The old entry stays readable to other callers until the
       // live fetch atomically overwrites it — no transient null gap.
-      await fetchKalshiTarget(sym, undefined, true);
+      // windowCloseTime pins to the current window — prevents next-window drift.
+      await fetchKalshiTarget(sym, windowCloseTime, true);
       // Read the freshly overwritten cache entry and mirror into the dedicated
       // conviction price map with its own 1.5 s TTL.
       const entry = kalshiTargetCache.get(sym);
