@@ -1742,12 +1742,19 @@ async function _runBotTick(
         ? freshYesAsk
         : freshYesBid != null ? 1 - freshYesBid : null;
     // Strict zone enforcement: gate passes ONLY when price is within
-    // [lockPrice, lockPriceCap] with no tolerance.  Kalshi prices are
-    // integer-cent resolution (0.88, 0.89 … 0.92) so 0 is safe.
-    // Example with target 0.90 → zone [0.88, 0.92]:
-    //   88 ¢  passes  (0.88 >= 0.88 && 0.88 <= 0.92) ✓
-    //   87 ¢  blocked (0.87 < 0.88) ✗
-    //   93 ¢  blocked (0.93 > 0.92) ✗
+    // [lockPrice, lockPriceCap] with no tolerance.
+    //
+    // NOTE (2026-07-17): Kalshi now quotes SUB-CENT prices (observed
+    // yesBid=0.045 → NO ask 0.955) but ORDER prices are still integer-cent.
+    // A NO fill ≤ cap requires a YES-sell limit of ceil((1−cap)·100)/100
+    // (e.g. 0.05 for cap 0.95), which cannot fill against a sub-cent bid like
+    // 0.045.  So any tolerance here (e.g. passing 0.955) would let the gate
+    // approve orders that are physically unfillable on the cent grid → FOK
+    // kill → retry exhaustion → windowFailedFills lockout for the rest of the
+    // window.  Strict 0 keeps this gate coherent with the order-limit clamp
+    // below: gate passes ⟺ a fill inside the zone is actually achievable.
+    // (Guard 3 above uses ±0.005 only as a pre-filter on the poller price;
+    // this gate is the authoritative check.)
     const GATE_BUFFER = 0;
     const inWindow =
       freshRefPrice != null &&
