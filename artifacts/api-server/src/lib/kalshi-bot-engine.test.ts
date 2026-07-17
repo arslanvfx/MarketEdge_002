@@ -1559,9 +1559,13 @@ test("mlGate: min-return gate blocks deep ITM YES bet", () => {
 // ---------------------------------------------------------------------------
 
 // cvInp defaults match production conviction config: trigger=88%, cap=92%
+// yesBid defaults to yesPrice to model a tight spread (realistic mid ≈ bid).
+// Tests that need yesBid=null (one-sided book) must pass it explicitly.
 function cvInp(overrides: Partial<ConvictionInputs> = {}): ConvictionInputs {
+  const yesPrice = overrides.yesPrice ?? 0.85;
   return {
-    yesPrice:      0.85,   // default: below lock threshold
+    yesPrice,
+    yesBid:        yesPrice,  // tight-spread default: bid mirrors mid
     lockPrice:     0.88,
     lockPriceCap:  0.92,
     minConfidence: 70,
@@ -1630,6 +1634,22 @@ test("conviction: yesPrice below NO cap (0.05) → BET_NO (extreme price bypasse
 test("conviction: yesPrice at 0.01 → BET_NO (extreme price bypasses cap)", () => {
   const r = computeConvictionDecision(cvInp({ yesPrice: 0.01, minConfidence: 0 }));
   assert.equal(r.action, "BET_NO");
+});
+
+// ── NO direction — yesBid=null (one-sided book) ───────────────────────────────
+
+test("conviction: yesPrice in NO zone but yesBid=null → SKIP (no counterparty)", () => {
+  // When yesBid is null there is no YES buyer → no NO counterparty → noTrigger=null
+  // The engine must SKIP, not dispatch BET_NO using the mid-price fallback.
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.09, yesBid: null, minConfidence: 0 }));
+  assert.equal(r.action, "SKIP");
+  assert.match(r.reasoning, /no-bid|null/);
+});
+
+test("conviction: yesPrice at extreme (0.01) but yesBid=null → SKIP", () => {
+  // Extreme-price bypass does not override the yesBid=null guard
+  const r = computeConvictionDecision(cvInp({ yesPrice: 0.01, yesBid: null, minConfidence: 0 }));
+  assert.equal(r.action, "SKIP");
 });
 
 // ── SKIP (not yet at threshold) ───────────────────────────────────────────────
