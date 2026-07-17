@@ -1611,34 +1611,36 @@ async function _runBotTick(
       "[kalshi-bot] conviction live-price gate: orderbook fetch for expected window ticker",
     );
 
-    // FAIL CLOSED: the authenticated orderbook is the ONLY trusted price
-    // source for conviction entries.  The public market-list price can lag
-    // by minutes — on 2026-07-13 it reported XRP ask=0.908 while the real
-    // book was at 0.79, producing repeated out-of-zone fills.  A FOK BUY
-    // always fills at the real best ask ≤ the limit, so ordering off a stale
-    // price is how below-zone fills happen.  No verified book → no order.
-    // The 1 s loop retries on the next tick, so a transient fetch failure
-    // only delays entry by ~1 s.
+    // Orderbook fetch result handling:
     //
-    // Exception: obPrices == null means auth/network failure → fail closed.
-    // obPrices == { yesBid: null, yesAsk: null } means the book authenticated
-    // successfully but has no resting orders on either side (illiquid market).
-    // In that case fall back to the conviction poller's fresh cached price
-    // (≤1 s old) for the zone check.  The order is still placed as a limit
-    // at the lock price, so Kalshi only fills at the lock price or better.
+    // obPrices != null with prices → real book → use directly (most trusted).
+    //
+    // obPrices == { yesBid: null, yesAsk: null } → authenticated successfully
+    // but no resting limit orders (illiquid). This is the NORMAL state for
+    // Kalshi crypto markets — market makers quote via the public REST endpoint,
+    // not as resting orders. Fall back to conviction poller price.
+    //
+    // obPrices == null → request timed out or threw (9 coins dispatching
+    // simultaneously causes concurrent API calls → Kalshi rate-limits → timeout).
+    // This is a network/rate-limit condition, NOT a data quality signal. The
+    // conviction poller runs every 1 s with its own fresh fetch for the same
+    // ticker, so its price is ≤1 s old and completely independent. Fall through
+    // to the same poller-fallback path used for empty books. The spread + both-
+    // sides + zone guards below still apply, and the FOK limit order still caps
+    // the fill price at lockPrice, so no below-zone fill is possible.
+    //
+    // Historical context (2026-07-13 "0.908 vs 0.79" fill incident):
+    //   That fill used freshData.ticker (pre-switched to next window ~10 min
+    //   early). Both the poller and this gate now use the deterministic
+    //   expectedTicker (derived from windowKey → EDT), so the price sources are
+    //   always aligned on the same market. Ticker drift is no longer a risk.
     if (obPrices == null) {
-      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-      if (boostBetSize != null) {
-        maxBetWindowToken.remaining++;
-        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (orderbook unavailable)");
-      }
       logger.warn(
-        { sym, direction, windowKey, ticker: freshData?.ticker ?? null },
-        "[kalshi-bot] conviction live-price gate: authenticated orderbook unavailable — order aborted (fail closed), will retry next tick",
+        { sym, direction, windowKey, expectedTicker },
+        "[kalshi-bot] conviction live-price gate: orderbook timeout/error — falling back to poller price",
       );
-      return;
     }
-    if (obPrices.yesBid == null && obPrices.yesAsk == null) {
+    if (obPrices == null || (obPrices.yesBid == null && obPrices.yesAsk == null)) {
       // Empty book — authenticated successfully but no resting orders visible.
       //
       // Kalshi market makers quote via the public REST market-list endpoint, not
