@@ -1920,7 +1920,10 @@ async function _runBotTick(
       // Strict zone: only allow 1¢ spread above the YES-side floor.
       // Zone [91¢,96¢] NO = [4¢,9¢] YES → floor = 1−lockPrice = 9¢ → threshold = 10¢.
       // Any YES ask above 10¢ means the FOK NO fill could land below 91¢ — outside zone.
-      const yesAskBounceThreshold = (1 - lockPrice) + 0.01; // 1¢ spread allowance only
+      // Round to 2 decimal places to avoid IEEE 754 drift: (1 − 0.91) evaluates to
+      // 0.08999... in double precision, making the raw threshold 0.09999... instead of
+      // 0.10, causing a false abort when freshYesAsk is exactly 0.10.
+      const yesAskBounceThreshold = Math.round(((1 - lockPrice) + 0.01) * 100) / 100;
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
@@ -1946,16 +1949,22 @@ async function _runBotTick(
     // there is no minimum fill price.  If a resting sell order sits at 86¢
     // and we set limit=88¢, the exchange fills at 86¢.
     //
-    // Hard guarantee: require freshYesBid ≥ lockPrice (≥ 88¢).
+    // Hard guarantee when resting orders are present: require freshYesBid ≥ lockPrice.
     // If the bid is already ≥ 88¢, buyers are paying ≥ 88¢ — that means
     // there can be no resting sell orders below 88¢ (a crossed market is
     // impossible on Kalshi).  So a fill below the zone floor becomes
     // physically impossible, regardless of any race between gate and fill.
     //
-    // Example (target 0.90 → lockPrice 0.88):
+    // EXCEPTION (usedPollerFallback = true): the authenticated book is empty
+    // — there are no resting sell orders at all.  We place FOK at exactly
+    // freshYesAsk, so the fill price is guaranteed to be freshYesAsk or no
+    // fill.  The bid-floor check is irrelevant here; the ask check above
+    // already confirmed freshYesAsk is in [lockPrice, lockPriceCap].
+    //
+    // Example (target 0.90 → lockPrice 0.88, book has resting orders):
     //   freshYesBid = 0.87 → 0.87 < 0.88 → abort ✓  (book has depth below zone)
     //   freshYesBid = 0.88 → 0.88 ≥ 0.88 → proceed ✓ (entire book in zone)
-    if (direction === "yes" && freshYesBid != null) {
+    if (direction === "yes" && freshYesBid != null && !usedPollerFallback) {
       const yesBidDropThreshold = lockPrice; // hard floor: bid must be in zone
       if (freshYesBid < yesBidDropThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);

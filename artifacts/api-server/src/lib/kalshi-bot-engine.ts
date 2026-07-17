@@ -467,6 +467,7 @@ function _makeBotDecisionInner(
       yesPrice,
       yesAsk:        cvCached?.yesAsk ?? null,
       yesBid:        cvCached?.yesBid ?? null,
+      noAsk:         cvCached?.noAsk ?? null,
       lockPrice:     cvZone.lockPrice,
       lockPriceCap:  cvZone.lockPriceCap,
       minConfidence: config.minConfidence,

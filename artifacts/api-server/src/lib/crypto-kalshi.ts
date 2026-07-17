@@ -28,6 +28,7 @@ export const kalshiTargetCache = new Map<string, {
   yesPrice?: number | null;
   yesAsk?: number | null;
   yesBid?: number | null;
+  noAsk?: number | null;
 }>();
 // 2s so the conviction bot tick (which runs every 2 s) always reads prices that
 // are at most one tick stale, ensuring brief 88–92¢ crossings aren't missed.
@@ -101,6 +102,7 @@ export function getKalshiCachedData(symbol: string): {
   yesPrice?: number | null;
   yesAsk?: number | null;
   yesBid?: number | null;
+  noAsk?: number | null;
   closeTime?: string;
 } | null {
   return kalshiTargetCache.get(symbol.toUpperCase()) ?? null;
@@ -385,6 +387,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
         yesPrice,
         yesAsk,
         yesBid,
+        noAsk,
       });
 
       // ── Authenticated orderbook fallback ──────────────────────────────────

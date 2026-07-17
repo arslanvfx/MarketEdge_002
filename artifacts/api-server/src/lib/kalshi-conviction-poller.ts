@@ -41,6 +41,7 @@ const LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
 export interface ConvictionLivePrice {
   yesAsk: number | null;
   yesBid: number | null;
+  noAsk:  number | null;
   fetchedAt: number;
 }
 
@@ -90,10 +91,11 @@ async function pollOnce(): Promise<void> {
       // Read the freshly overwritten cache entry and mirror into the dedicated
       // conviction price map with its own 1.5 s TTL.
       const entry = kalshiTargetCache.get(sym);
-      if (entry && (entry.yesAsk != null || entry.yesBid != null)) {
+      if (entry && (entry.yesAsk != null || entry.yesBid != null || entry.noAsk != null)) {
         convictionPriceMap.set(sym, {
           yesAsk: entry.yesAsk ?? null,
           yesBid: entry.yesBid ?? null,
+          noAsk:  entry.noAsk  ?? null,
           fetchedAt: entry.at ?? nowMs,
         });
       }
@@ -113,8 +115,11 @@ async function pollOnce(): Promise<void> {
         return;
       }
 
-      const { yesAsk, yesBid } = convictionPriceMap.get(sym) ?? { yesAsk: null, yesBid: null };
-      const noAsk = yesBid != null ? 1 - yesBid : null;
+      const { yesAsk, yesBid, noAsk: cachedNoAsk } = convictionPriceMap.get(sym) ?? { yesAsk: null, yesBid: null, noAsk: null };
+      // Prefer noAsk (from no_ask_dollars) directly — the Kalshi API updates
+      // no_ask_dollars and yes_bid_dollars independently; noAsk is faster to
+      // reflect real-time NO pricing than the 1−yesBid complement.
+      const noAsk = cachedNoAsk ?? (yesBid != null ? 1 - yesBid : null);
 
       const yesInZone = yesAsk != null && yesAsk >= lockPrice && yesAsk <= lockPriceCap;
       const noInZone  = noAsk  != null && noAsk  >= lockPrice && noAsk  <= lockPriceCap;

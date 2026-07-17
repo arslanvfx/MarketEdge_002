@@ -1,6 +1,6 @@
 ---
-name: Conviction zone enforcement — fail-closed gate + post-fill emergency close
-description: How conviction fills are guaranteed to land in zone. Fail-closed fresh orderbook is layer 0; NO cross-check applies to ALL FOK paths (both poller-fallback and real-book).
+name: Conviction zone enforcement — fail-closed gate + cross-check bugs fixed
+description: Three cross-check bugs blocked valid YES/NO conviction bets; architecture of the live-price gate and cross-checks.
 ---
 
 ## Zone definition (current)
@@ -18,31 +18,46 @@ description: How conviction fills are guaranteed to land in zone. Fail-closed fr
 3. Kalshi FOK BUY fills at any ask ≤ limit (no floor); pre-order checks only shrink the
    race window, never eliminate it.
 
-## Current layered design (kalshi-bot-tick.ts conviction block)
-- **Layer 0 — fail closed**: freshYesAsk/freshYesBid come ONLY from the authenticated
-  orderbook (`orderbook_fp` parser in crypto-kalshi.ts, legacy fallback + warn). If the
-  orderbook fetch fails → ABORT the order, release the window lock, retry next 1s tick.
-  Never fall back to public/cached prices for order placement.
-- **Main zone gate**: fresh ref price must be in [lockPrice, lockPriceCap], GATE_BUFFER=0.
-  - YES: freshYesAsk in zone
-  - NO: (1 - freshYesBid) in zone
-- **Cross-checks — applies to ALL FOK paths** (both poller-fallback and real-book):
-  - NO side: `freshYesAsk > (1−lockPrice)+0.01` → abort (prevents stale YES bid giving
-    false in-zone signal while real YES ask is out of zone). Threshold = 10¢ for lockPrice=0.91.
-  - YES side: `freshYesBid < lockPrice` → abort (hard floor: bid must be in zone).
-  - **NOTE**: Previously these were skipped for `usedPollerFallback=true` (GTC path).
-    GTC has been removed; all conviction orders now use FOK, so cross-check applies universally.
-- **Order limit = exact verified bid/ask**, clamped inside the zone.
-- **Layer 3 — post-fill emergency close (RE-ENABLED)**: after fill, `convFillPrice = avgPrice`
-  (YES) or `1 − avgPrice` (NO); outside [lockPrice, lockPriceCap] → immediate sell, position
-  never recorded. **Strike counter**: `convictionEmergencyCloses` Map (state.ts) caps
-  emergency closes at 2 per coin/window; after 2 strikes the coin is locked out for the
-  window. Cleared on window transition in loop.ts.
+## Three cross-check bugs fixed (July 2026)
 
-**Why cross-check applies to all FOK paths:**
-- FOK BUY YES at limit 95¢ fills at any YES ask ≤ 95¢ (no floor).
-- If YES ask has drifted to 88¢ since the poller sample, fill lands at 88¢ (out of zone).
-- The cross-check threshold (freshYesBid < lockPrice for YES; freshYesAsk > 10¢ for NO)
-  protects against this race window.
-- The poller spread gate (≤4¢ YES / ≤6¢ NO) applied at the live-price gate provides
-  additional confidence that market maker quotes are tight before placing the FOK.
+### Bug 1 — NO zone miss: `noAsk` computed as `1-yesBid` (stale)
+The Kalshi API updates `no_ask_dollars` and `yes_bid_dollars` independently. During rapid
+moves (e.g. ETH NO jumping from 71¢→92¢), `no_ask_dollars` updates first while
+`yes_bid_dollars` stays at the old value. Computing `noTrigger = 1 - yesBid` misses zone
+entry even when `no_ask_dollars` is clearly in zone.
+
+**Fix**: store `noAsk` directly from `no_ask_dollars` in both `kalshiTargetCache` and
+`convictionPriceMap`. `ConvictionInputs` gains a `noAsk` field; `computeConvictionDecision`
+prefers `noAsk` over `1 - yesBid` as the primary NO trigger.
+
+### Bug 2 — YES cross-check too strict when `usedPollerFallback=true`
+Cross-check aborts when `freshYesBid < lockPrice`. When the book is empty and we use the
+poller-fallback path, the FOK order is placed at exactly `freshYesAsk` — the fill is
+guaranteed to be `freshYesAsk` or no fill. The bid position is irrelevant; only the ask
+matters. The bid check was blocking SOL/ZEC with ask=0.921 (in zone) and bid=0.90 (1¢ below
+floor due to normal spread straddling the zone boundary).
+
+**Fix**: guard with `&& !usedPollerFallback`. When book has resting orders the bid check
+still applies (a low bid means sub-zone asks could exist and fill the FOK at below-zone prices).
+
+### Bug 3 — NO cross-check float bug: threshold computed as 0.09999... instead of 0.10
+`(1 - 0.91) + 0.01` evaluates to `0.09999...` in IEEE 754 double precision (because
+`1 - 0.91 = 0.08999...`). The constant `0.10` in double is `0.10000...0555`, which is
+greater than `0.09999...`, so BNB with `freshYesAsk=0.10` was falsely aborted.
+
+**Fix**: `Math.round(((1 - lockPrice) + 0.01) * 100) / 100` — rounds to 2 decimal places.
+
+## Current layered design (kalshi-bot-tick.ts conviction block)
+- **Layer 0 — fail closed**: freshYesAsk/freshYesBid come ONLY from authenticated orderbook
+  (`orderbook_fp` parser) or poller fallback (empty book only). Fetch failure → ABORT.
+- **Main zone gate**: fresh ref price must be in [lockPrice, lockPriceCap].
+  - YES: freshYesAsk in zone
+  - NO: (1 - freshYesBid) in zone  (the poller zone check at this point uses noAsk directly)
+- **Cross-checks**:
+  - NO side: `freshYesAsk > round((1−lockPrice)+0.01)` → abort. Threshold = 10¢ for 0.91.
+  - YES side: `freshYesBid < lockPrice && !usedPollerFallback` → abort.
+- **Order limit = exact verified ask/bid**, clamped inside the zone. No crossing buffer.
+- **Layer 3 — post-fill emergency close**: `convFillPrice` outside [lockPrice, lockPriceCap]
+  → immediate sell. `convictionStopLossFloor=0.75` keeps fills [75¢,91¢) as stop-loss.
+  `convictionEmergencyCloses` Map caps closes at 2/coin/window. `windowFailedFills` Set
+  prevents rebuy bleed after FOK exhaustion.

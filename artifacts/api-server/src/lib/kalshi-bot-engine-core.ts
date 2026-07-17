@@ -202,10 +202,15 @@ export interface ConvictionInputs {
   // yesAsk = what you actually PAY per YES contract (= 1 − no_bid).
   // yesBid = what you actually PAY per NO contract, expressed as (1 − yesBid)
   //          i.e. yesBid is what you receive selling YES = what NO costs you.
+  // noAsk  = what you actually PAY per NO contract (= no_ask_dollars from API).
+  //          Preferred over 1−yesBid for NO zone detection: the Kalshi API
+  //          updates no_ask_dollars and yes_bid_dollars independently; during
+  //          rapid moves noAsk updates faster and reflects the real NO cost.
   // When both are present they are used for the lock-trigger check instead of
   // the mid (yesPrice), preventing fills at prices outside the intended window.
   yesAsk?:        number | null;
   yesBid?:        number | null;
+  noAsk?:         number | null;
   lockPrice?:     number;   // default 0.88 — minimum % to trigger entry
   lockPriceCap?:  number;   // default 0.92 — maximum % allowed; above this is too late
   minConfidence:  number;
@@ -244,9 +249,13 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   //   yesAsk=0.80, yesBid=0.96 → mid=(0.80+0.96)/2=0.88 → triggers at lockPrice=0.88
   //   but you actually fill at 0.80 (8¢ outside the intended window).
   const yesTrigger = inp.yesAsk ?? yesPrice;            // cost of YES entry (ask fallback → mid)
-  const noTrigger  = inp.yesBid != null                 // cost of NO entry (= 1 − YES bid)
-    ? (1 - inp.yesBid)
-    : null;                                             // null = no YES bid = NO unpriced/untradeable
+  // NO entry cost: prefer noAsk (direct from no_ask_dollars) over 1−yesBid.
+  // The Kalshi API updates no_ask_dollars and yes_bid_dollars independently;
+  // during rapid price moves, noAsk reflects the real NO ask faster than the
+  // complement of yes_bid_dollars.  Fall back to 1−yesBid when noAsk absent.
+  const noTrigger  = inp.noAsk != null
+    ? inp.noAsk
+    : (inp.yesBid != null ? (1 - inp.yesBid) : null);  // null = NO unpriced/untradeable
 
   const isYesLocked = yesTrigger >= lockPrice;
   const isNoLocked  = noTrigger != null && noTrigger >= lockPrice;
