@@ -193,6 +193,10 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
 // Keyed by sym — cleared on window change by the position-expiry logic.
 const pipelineRecheckAt = new Map<string, number>();
 
+// Conviction diagnostic throttle: logs Phase-3 price + decision once per
+// 60s per coin so every window has at least one visible data point.
+const convictionDiagLastLogAt = new Map<string, number>();
+
 // ---------------------------------------------------------------------------
 // Per-coin conviction win rates — refreshed at most once per hour
 // ---------------------------------------------------------------------------
@@ -1496,6 +1500,30 @@ export async function runBotLoopTick(): Promise<void> {
     // `let` so the auto-tune shadow path and WM relief can temporarily substitute
     // an alt-floor decision for gate evaluation (see below).
     let decision = makeBotDecision(sym, _decisionConfig, kalshiData.ticker, kalshiData.yesPrice ?? null, minutesElapsed, signalAcc, kalshiData.value);
+
+    // Conviction diagnostic: log once per 60 s per coin (or every BET action)
+    // so we always have at least one visible INFO entry showing what Phase 3 sees.
+    if (isConviction) {
+      const cvCachedDiag = getKalshiCachedData(sym);
+      const _diagKey = `${sym}:${windowKey}`;
+      const _diagNow = Date.now();
+      const _sinceLastLog = _diagNow - (convictionDiagLastLogAt.get(_diagKey) ?? 0);
+      if (decision.action !== "SKIP" || _sinceLastLog >= 60_000) {
+        convictionDiagLastLogAt.set(_diagKey, _diagNow);
+        logger.info(
+          {
+            sym, windowKey,
+            yesPrice: kalshiData.yesPrice != null ? +kalshiData.yesPrice.toFixed(4) : null,
+            yesAsk:   cvCachedDiag?.yesAsk  != null ? +cvCachedDiag.yesAsk.toFixed(4)  : null,
+            noAsk:    cvCachedDiag?.noAsk   != null ? +cvCachedDiag.noAsk.toFixed(4)   : null,
+            action:   decision.action,
+            reason:   decision.reasoning?.slice(0, 80),
+            clockElapsedS: Math.round(clockElapsedS),
+          },
+          "[conviction-diag] Phase-3 price check",
+        );
+      }
+    }
 
     // ── WM Caution Confidence Relief — threshold ease when WM is "caution" ───
     // When the window monitor is ready but says "caution" (choppy regime, not a
