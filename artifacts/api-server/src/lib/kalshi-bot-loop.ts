@@ -1300,11 +1300,21 @@ export async function runBotLoopTick(): Promise<void> {
         continue;
       }
       // Minimum entry wait: block dispatch until N minutes have elapsed.
-      // This gives the market time to settle before we commit.
+      // Bypassed when extreme-price bypass is enabled and the live YES price
+      // is at a configured extreme — mirrors the tick.ts gate exactly.
       const convMinEntryMin = S.config.convictionMinEntryMinutes ?? 0;
       if (convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
-        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: min entry wait (${convMinEntryMin}min — ${(clockElapsedS / 60).toFixed(1)}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
-        continue;
+        const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
+        const _bypassThreshold = S.config.convictionEarlyBypassThreshold ?? 0.92;
+        const _pollerPrice = getConvictionLivePrice(sym);
+        const _liveYes = _pollerPrice?.yesAsk ?? _pollerPrice?.yesBid ?? null;
+        const _isExtreme = _bypassEnabled &&
+          _liveYes !== null &&
+          (_liveYes >= _bypassThreshold || _liveYes <= +(1 - _bypassThreshold).toFixed(4));
+        if (!_isExtreme) {
+          evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: min entry wait (${convMinEntryMin}min — ${(clockElapsedS / 60).toFixed(1)}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+          continue;
+        }
       }
     }
     if (S.config.maxEntryMinutes > 0 && clockElapsedS > S.config.maxEntryMinutes * 60) {

@@ -1520,14 +1520,30 @@ async function _runBotTick(
   // slot just to immediately return.  The same guard also fires in the Phase-3
   // loop dispatch — this is the belt-and-suspenders catch for any code path that
   // calls runBotTick directly (e.g. pipeline completion trigger).
+  //
+  // Honors the same extreme-price bypass as minWindowEntryMinutes: if the price
+  // is at a configured extreme (default ≥92¢ or ≤8¢) the wait is skipped so
+  // the bot can catch outsized moves even in the opening minutes of a window.
   if (S.config.decisionMode === "conviction") {
     const _convMinEntry = S.config.convictionMinEntryMinutes ?? 0;
     if (_convMinEntry > 0 && secondsElapsedNow < _convMinEntry * 60) {
-      logger.info(
-        { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), convictionMinEntryMinutes: _convMinEntry },
-        "[kalshi-bot] conviction: min entry time not yet reached — skipping",
-      );
-      return;
+      const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
+      const _bypassThreshold = S.config.convictionEarlyBypassThreshold ?? 0.92;
+      const _isExtreme = _bypassEnabled &&
+        yesPrice !== null &&
+        (yesPrice >= _bypassThreshold || yesPrice <= +(1 - _bypassThreshold).toFixed(4));
+      if (_isExtreme) {
+        logger.debug(
+          { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), yesPrice, _bypassThreshold },
+          "[kalshi-bot] conviction: min entry wait bypassed — extreme price crossed threshold",
+        );
+      } else {
+        logger.info(
+          { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), convictionMinEntryMinutes: _convMinEntry },
+          "[kalshi-bot] conviction: min entry time not yet reached — skipping",
+        );
+        return;
+      }
     }
   }
 
