@@ -2195,8 +2195,43 @@ async function _runBotTick(
           return;
         }
 
-        // GTC filled — use the fill data from getOrder (more accurate than the
-        // placement response for GTC orders which may report 0 fills at placement).
+        // GTC filled — cancel the order BEFORE recording the position.
+        // Unlike IOC (which auto-cancels any unfilled remainder), a GTC leaves
+        // any unmatched quantity resting in the book.  If we don't cancel here,
+        // the remainder can fill later asynchronously → actual exchange position
+        // exceeds our recorded position → exit logic closes the wrong size.
+        //
+        // We cancel regardless of partial vs full fill:
+        //   • Full fill: cancel is a no-op (exchange returns 404/false).
+        //   • Partial fill: cancels the remaining quantity.
+        //
+        // If the cancel throws, fail closed — do NOT record the position.
+        // The order is in an unknown partial state; human intervention needed.
+        try {
+          const remainderCancelled = await cancelOrder(gtcOrderId);
+          if (!remainderCancelled) {
+            // 404 = order already fully gone (fully filled or expired).
+            // This is the normal full-fill path — proceed.
+            logger.debug(
+              { sym, gtcOrderId },
+              "[kalshi-bot] conviction GTC remainder cancel: 404 — order already gone (fully filled or expired), proceeding",
+            );
+          } else {
+            logger.info(
+              { sym, gtcOrderId, filledCount: gtcFilledCount, contractCount },
+              "[kalshi-bot] conviction GTC remainder cancel: confirmed — any unfilled quantity cleared",
+            );
+          }
+        } catch (remainderCancelErr) {
+          // Cancel threw — order may still be resting with partial remainder.
+          // Fail closed: keep conviction lock, do not record the position.
+          logger.error(
+            { sym, err: String(remainderCancelErr), gtcOrderId, filledCount: gtcFilledCount },
+            "[kalshi-bot] conviction GTC remainder cancel FAILED — KEEPING LOCK; reconcile manually before next entry",
+          );
+          return;
+        }
+
         result = {
           filledCount: gtcFilledCount,
           avgPrice: orderStatus?.avgPrice ?? gtcResult.avgPrice,
