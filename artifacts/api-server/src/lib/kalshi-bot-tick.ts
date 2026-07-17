@@ -2117,9 +2117,18 @@ async function _runBotTick(
           action: "buy" as const,
           count: contractCount,
           type: "limit" as const,
-          limitPrice: orderLimitPrice ?? yesPrice ?? undefined,
+          // Use the zone-capped price only.  Fail closed if it is null rather
+          // than falling back to a raw yesPrice that may be outside the zone.
+          limitPrice: orderLimitPrice ?? undefined,
           timeInForce: "gtc" as const,
         };
+        if (gtcOrderParams.limitPrice == null) {
+          logger.error(
+            { sym, direction, windowKey, ticker: kalshiTicker },
+            "[kalshi-bot] conviction GTC: orderLimitPrice is null — cannot place zone-safe GTC; KEEPING LOCK",
+          );
+          return;
+        }
         logger.info(
           { sym, direction, windowKey, ticker: kalshiTicker, limitPrice: gtcOrderParams.limitPrice, contractCount },
           "[kalshi-bot] conviction entry: empty-book path → placing GTC maker order",
@@ -2173,21 +2182,16 @@ async function _runBotTick(
         }
 
         // getOrder null = HTTP 404 only (order not in Kalshi's active order list).
-        // For a GTC placed 2 s ago, 404 means the exchange cancelled/rejected it
-        // (price out of range, market expired, etc.) — filled orders remain visible
-        // with status "executed", NOT 404.  Attempt cancel as belt-and-suspenders,
-        // then release lock for retry.
+        // 404 is an UNKNOWN TERMINAL STATE: the order could have been filled and
+        // already cleared by the exchange, OR it was cancelled/rejected.
+        // We cannot tell which — therefore we KEEP the conviction lock to prevent
+        // a duplicate entry.  The lock clears automatically on window transition.
+        // A human can reconcile the order state via the Kalshi dashboard.
         if (orderStatus === null) {
-          try {
-            await cancelOrder(gtcOrderId); // no-op if already gone; ignore result
-          } catch {
-            // ignore — we already know the order is 404; cancel is belt-and-suspenders
-          }
-          logger.warn(
+          logger.error(
             { sym, direction, windowKey, gtcOrderId },
-            "[kalshi-bot] conviction GTC: getOrder 404 — order gone from exchange (cancelled/rejected, not filled); releasing lock for retry",
+            "[kalshi-bot] conviction GTC: getOrder 404 — order state UNKNOWN (may be filled or cancelled); KEEPING LOCK; reconcile manually",
           );
-          releaseLockForRetry("getOrder-404");
           return;
         }
 
