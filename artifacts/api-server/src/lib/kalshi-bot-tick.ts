@@ -32,6 +32,7 @@ import {
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
 import { triggerWindowPipeline } from "./kalshi-bot-pipeline";
+import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
@@ -1546,16 +1547,36 @@ async function _runBotTick(
     // target 90¢ → zone [88¢, 92¢]. Below the floor: price can flip, too
     // risky. Above the cap: margin too small, not worth the entry.
     const lockPriceCap = gateTarget + 0.02;
-    // Passing windowCloseTime forces fetchKalshiTarget to skip the in-memory
-    // cache (see crypto-kalshi.ts:184) and hit the Kalshi API live.
-    const windowCloseTime = new Date(new Date(windowKey).getTime() + 15 * 60_000);
-    await fetchKalshiTarget(sym, windowCloseTime).catch(() => null);
+    // Compute the current window's ticker deterministically from windowKey rather
+    // than reading it from kalshiTargetCache.  The cache can switch to the NEXT
+    // window's market ~10 min into the current window once Kalshi pre-publishes
+    // upcoming markets, causing the orderbook fetch to target the wrong ticker.
+    //
+    // Kalshi 15-min ticker format (observed): KX${SYM}15M-${YY}${MON}${DD}${HHMM}-${MM}
+    //   • YY MON DD — date in EDT (UTC-4)
+    //   • HHMM      — window start time in EDT
+    //   • MM         — start-minute of the window (0, 15, 30, or 45)
+    // Example: windowKey "2026-07-17T00:15" → EDT 20:15 July 16 → "KXBTC15M-26JUL162015-15"
+    const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    const windowOpenUtc  = new Date(windowKey + ":00Z");
+    const windowOpenEdt  = new Date(windowOpenUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
+    const tyy  = String(windowOpenEdt.getUTCFullYear()).slice(-2);
+    const tmon = MONTHS[windowOpenEdt.getUTCMonth()];
+    const tdd  = String(windowOpenEdt.getUTCDate()).padStart(2, '0');
+    const thh  = String(windowOpenEdt.getUTCHours()).padStart(2, '0');
+    const tmm  = String(windowOpenEdt.getUTCMinutes()).padStart(2, '0');
+    const expectedTicker = `KX${sym}15M-${tyy}${tmon}${tdd}${thh}${tmm}-${tmm}`;
+
     const freshData = getKalshiCachedData(sym);
     // Authenticated orderbook prices are the only trusted source — they show
     // the real best-bid/ask while the public market list can lag by minutes.
-    const obPrices = freshData?.ticker
-      ? await fetchOrderbookPrices(freshData.ticker).catch(() => null)
-      : null;
+    // Always use the deterministically-computed ticker for the current window,
+    // NOT freshData.ticker which may point to the already-published next window.
+    const obPrices = await fetchOrderbookPrices(expectedTicker).catch(() => null);
+    logger.debug(
+      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker },
+      "[kalshi-bot] conviction live-price gate: orderbook fetch for expected window ticker",
+    );
 
     // FAIL CLOSED: the authenticated orderbook is the ONLY trusted price
     // source for conviction entries.  The public market-list price can lag
@@ -1585,12 +1606,18 @@ async function _runBotTick(
       return;
     }
     if (obPrices.yesBid == null && obPrices.yesAsk == null) {
-      // Empty book — fall back to fresh cached price from conviction poller.
-      freshYesAsk = freshData?.yesAsk ?? null;
-      freshYesBid = freshData?.yesBid ?? null;
+      // Empty book — fall back to the conviction poller's dedicated price map
+      // (≤1.5 s old, same source that triggered this dispatch) rather than the
+      // freshData from fetchKalshiTarget which may have been fetched at a
+      // slightly different moment and can return a stale or different-window
+      // price.  The FOK limit price at lockPrice already caps what we pay, so
+      // if the real ask has moved above the limit the order simply won't fill.
+      const pollerPrice = getConvictionLivePrice(sym);
+      freshYesAsk = pollerPrice?.yesAsk ?? freshData?.yesAsk ?? null;
+      freshYesBid = pollerPrice?.yesBid ?? freshData?.yesBid ?? null;
       logger.info(
-        { sym, direction, windowKey, freshYesAsk, freshYesBid },
-        "[kalshi-bot] conviction live-price gate: empty book — using cached price for zone check",
+        { sym, direction, windowKey, freshYesAsk, freshYesBid, usedPollerPrice: pollerPrice != null },
+        "[kalshi-bot] conviction live-price gate: empty book — using poller price for zone check",
       );
     } else {
       freshYesAsk = obPrices.yesAsk;
