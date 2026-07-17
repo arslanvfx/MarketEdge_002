@@ -1638,31 +1638,98 @@ async function _runBotTick(
       return;
     }
     if (obPrices.yesBid == null && obPrices.yesAsk == null) {
-      // Empty book — authenticated successfully but no resting orders on either side.
+      // Empty book — authenticated successfully but no resting orders visible.
       //
-      // FAIL CLOSED.  Using the public-API poller price as a fallback and placing
-      // a FOK BUY at a limit derived from that price is NOT safe:
+      // Kalshi market makers quote via the public REST market-list endpoint, not
+      // as resting limit orders in the authenticated orderbook.  The empty book
+      // is therefore the NORMAL state for these thin markets throughout the window.
       //
-      //   A FOK BUY YES with limit=0.93 fills at the BEST AVAILABLE ASK ≤ 0.93.
-      //   If the real market ask is 0.70 (below zone), the FOK fills at 0.70 —
-      //   immediately triggering the emergency close at a loss.  The poller can lag
-      //   by several minutes and regularly reports prices that diverge from the real
-      //   Kalshi matching engine (observed: poller 0.908 vs real fill at 0.79).
+      // Fall back to the conviction poller's fresh price, but only if it passes a
+      // strict three-layer guard:
       //
-      // We cannot bound the floor of a BUY FOK fill price — any limit above the
-      // actual ask fills at the actual ask, regardless of our intended zone.
-      // Only the authenticated orderbook gives us a real-time bid/ask we can trust.
-      // If it's empty, the market has no visible liquidity and we must stay out.
-      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-      if (boostBetSize != null) {
-        maxBetWindowToken.remaining++;
-        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book)");
+      //   1. BOTH bid AND ask must be present — a one-sided quote is incomplete
+      //      and suggests a stale or partially-updated market-list response.
+      //
+      //   2. TIGHT SPREAD: YES direction max 4 ¢, NO direction max 6 ¢ (YES price
+      //      is only 5–9 ¢ so the absolute spread is naturally wider in cent terms).
+      //      A wide spread is the clearest sign of a stale or stuck market-maker quote.
+      //
+      //   3. ZONE CHECK: the relevant ref price must lie within [lockPrice,
+      //      lockPriceCap].  Belt-and-suspenders before the cross-checks below.
+      //
+      // Historical context on the "0.908 vs 0.79" fill incident:
+      //   That fill happened because fetchOrderbookPrices was using freshData.ticker
+      //   (which had already pre-switched to the NEXT window's market ~10 min early)
+      //   while the conviction poller was still priced on the current window.  The
+      //   deterministic expectedTicker derivation (windowKey → EDT) now completely
+      //   prevents that ticker drift.  Both the poller fetch and the orderbook fetch
+      //   target the same current-window ticker, so a large divergence would require
+      //   the public market-list API itself to be severely stale — detectable by the
+      //   spread gate.
+      const pollerSnap   = getConvictionLivePrice(sym);
+      const pYesAsk      = pollerSnap?.yesAsk ?? null;
+      const pYesBid      = pollerSnap?.yesBid ?? null;
+
+      // Guard 1: both sides present
+      if (pYesAsk == null || pYesBid == null) {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book + one-sided poller)");
+        }
+        logger.warn(
+          { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid },
+          "[kalshi-bot] conviction live-price gate: empty book — one-sided poller quote, fail closed",
+        );
+        return;
       }
-      logger.warn(
-        { sym, direction, windowKey, expectedTicker },
-        "[kalshi-bot] conviction live-price gate: empty orderbook — fail closed (no safe fill-price floor without real book), will retry next tick",
+
+      // Guard 2: tight spread (stale quotes have wide spreads)
+      const spread = pYesAsk - pYesBid;
+      // YES conviction: price ~91–95 ¢ → 4 ¢ max spread
+      // NO  conviction: YES price ~5–9 ¢ → 6 ¢ max spread (YES price is tiny)
+      const maxSpread = direction === "yes" ? 0.04 : 0.06;
+      if (spread > maxSpread || spread < 0) {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book + wide spread)");
+        }
+        logger.warn(
+          { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid, spread: spread.toFixed(3), maxSpread },
+          "[kalshi-bot] conviction live-price gate: empty book — spread too wide (stale quote?), fail closed",
+        );
+        return;
+      }
+
+      // Guard 3: zone check on the relevant ref price
+      const pollerRefPrice =
+        direction === "yes"
+          ? pYesAsk
+          : 1 - pYesBid;
+      if (pollerRefPrice < lockPrice - 0.005 || pollerRefPrice > lockPriceCap + 0.005) {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book, poller out of zone)");
+        }
+        logger.info(
+          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap },
+          "[kalshi-bot] conviction live-price gate: empty book — poller price out of zone, releasing lock for retry",
+        );
+        return;
+      }
+
+      // All three guards passed — proceed with the poller prices.
+      // The cross-checks below (freshYesBid ≥ lockPrice for YES,
+      // freshYesAsk ≤ threshold for NO) provide a fourth layer of verification
+      // before the order is submitted.
+      freshYesAsk = pYesAsk;
+      freshYesBid = pYesBid;
+      logger.info(
+        { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid, spread: spread.toFixed(3), pollerRefPrice, lockPrice, lockPriceCap },
+        "[kalshi-bot] conviction live-price gate: empty book — tight spread + in-zone poller, proceeding to cross-checks",
       );
-      return;
     } else {
       freshYesAsk = obPrices.yesAsk;
       freshYesBid = obPrices.yesBid;
