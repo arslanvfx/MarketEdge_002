@@ -415,9 +415,10 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     side: bookSide, // BookSide: "bid" | "ask"
     count: String(params.count), // FixedPointCount string
     price, // required in v2 (YES-side)
-    // Kalshi v2 API only accepts abbreviated TIF strings.
-    // Map legacy long-form values defensively.
-    time_in_force: (params.timeInForce === "good_till_cancelled" ? "gtc" : (params.timeInForce ?? "fill_or_kill")),
+    // Kalshi TIF mapping — Kalshi API has drifted between "gtc" and "good_till_cancelled".
+    // Current observed behavior: "gtc" → 400 (oneof tag failure); "good_till_cancelled" → accepted.
+    // Map internal "gtc" to the wire value Kalshi currently accepts.
+    time_in_force: (params.timeInForce === "gtc" ? "good_till_cancelled" : (params.timeInForce ?? "fill_or_kill")),
     self_trade_prevention_type: "taker_at_cross",
   };
 
