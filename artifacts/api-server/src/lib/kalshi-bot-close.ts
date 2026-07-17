@@ -309,6 +309,12 @@ export async function closePosition(
       existingId: pos.id,
       cryptoPriceAtExit,
     });
+    if (isExpiry) {
+      logger.info(
+        { sym: pos.symbol, windowKey: pos.windowKey, direction: pos.direction, pnl: pnl.toFixed(4) },
+        "[kalshi-bot] closePosition: window_expired — bet persisted to DB",
+      );
+    }
   } catch (err) {
     logger.warn({ err, sym: pos.symbol }, "[kalshi-bot] closePosition: DB persist error (non-fatal) — position cleared from memory regardless");
   }
@@ -395,21 +401,60 @@ export async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> 
   try {
     const id = args.existingId ?? args.insertId ?? `${args.symbol}:${args.windowKey}:${Date.now()}`;
     if (args.existingId) {
-      // Update existing record (exit/expiry)
+      // Exit / expiry update. Use a race-safe upsert (INSERT … ON CONFLICT DO UPDATE)
+      // instead of a plain UPDATE so the bet is never silently lost when the window
+      // expires before the entry INSERT has committed to the DB.
+      //
+      // Normal path (row already exists): updates only the exit-side fields,
+      // leaving the original entry data (signals, entryPrice, decisionMode, etc.)
+      // intact.
+      //
+      // Race path (row doesn't exist yet because the entry INSERT is still in-flight
+      // or failed entirely): inserts a complete entry+exit record so the bet still
+      // appears in history and is counted in stats.
+      const exitedAt = new Date();
       await db
-        .update(kalshiBotBetsTable)
-        .set({
+        .insert(kalshiBotBetsTable)
+        .values({
+          id,
+          symbol: args.symbol,
+          windowKey: args.windowKey,
+          ticker: args.ticker ?? undefined,
+          direction: args.direction ?? undefined,
+          action: args.action,
+          mode: args.mode ?? S.botMode,
+          signals: args.signals as Record<string, unknown>,
+          entryPrice: args.entryPrice != null ? String(args.entryPrice) : undefined,
+          kalshiTarget: String(args.kalshiTarget),
+          contractCount: args.contractCount,
+          betAmount: args.betAmount != null ? String(args.betAmount) : undefined,
           exitPrice: args.exitPrice != null ? String(args.exitPrice) : undefined,
           pnl: args.pnl != null ? String(args.pnl) : undefined,
           exitReason: args.exitReason,
-          action: args.action,
           phase2Activated: args.phase2Activated,
           phase2RecoveredAmount:
             args.phase2RecoveredAmount != null ? String(args.phase2RecoveredAmount) : undefined,
           cryptoPriceAtExit: args.cryptoPriceAtExit != null ? String(args.cryptoPriceAtExit) : undefined,
-          exitedAt: new Date(),
+          source: args.source ?? "bot",
+          decisionMode: args.decisionMode ?? null,
+          exitedAt,
+          createdAt: exitedAt,
         })
-        .where(eq(kalshiBotBetsTable.id, id));
+        .onConflictDoUpdate({
+          target: kalshiBotBetsTable.id,
+          set: {
+            exitPrice: args.exitPrice != null ? String(args.exitPrice) : undefined,
+            pnl: args.pnl != null ? String(args.pnl) : undefined,
+            exitReason: args.exitReason,
+            action: args.action,
+            phase2Activated: args.phase2Activated,
+            phase2RecoveredAmount:
+              args.phase2RecoveredAmount != null ? String(args.phase2RecoveredAmount) : undefined,
+            cryptoPriceAtExit:
+              args.cryptoPriceAtExit != null ? String(args.cryptoPriceAtExit) : undefined,
+            exitedAt,
+          },
+        });
     } else {
       // Insert new record (bet entry, skip, warmup)
       await db.insert(kalshiBotBetsTable).values({
