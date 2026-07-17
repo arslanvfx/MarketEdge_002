@@ -23,7 +23,7 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
-  fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
+  fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder, cancelOrder, getOrder,
 } from "./kalshi-trader";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
@@ -1647,6 +1647,10 @@ async function _runBotTick(
     //   early). Both the poller and this gate now use the deterministic
     //   expectedTicker (derived from windowKey → EDT), so the price sources are
     //   always aligned on the same market. Ticker drift is no longer a risk.
+    // True when the poller fallback path was taken (empty book or OB timeout).
+    // The order placement block uses this to choose GTC (maker) instead of IOC.
+    let usedPollerFallback = false;
+
     if (obPrices == null) {
       logger.warn(
         { sym, direction, windowKey, expectedTicker },
@@ -1742,9 +1746,13 @@ async function _runBotTick(
       // before the order is submitted.
       freshYesAsk = pYesAsk;
       freshYesBid = pYesBid;
+      // Flag that the live order must use GTC (maker) instead of IOC (taker).
+      // IOC routes to market makers who fill at any price ≤ limit; GTC rests in
+      // the book so the exchange fills at OUR price — below-zone fills impossible.
+      usedPollerFallback = true;
       logger.info(
         { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid, spread: spread.toFixed(3), pollerRefPrice, lockPrice, lockPriceCap },
-        "[kalshi-bot] conviction live-price gate: empty book — tight spread + in-zone poller, proceeding to cross-checks",
+        "[kalshi-bot] conviction live-price gate: empty book — tight spread + in-zone poller, will use GTC maker order",
       );
     } else {
       freshYesAsk = obPrices.yesAsk;
@@ -2068,65 +2076,170 @@ async function _runBotTick(
 
   if (entryMode === "live") {
     try {
-      const result = await placeOrderWithRetry(
-        {
+      // ── ORDER TIME-IN-FORCE SELECTION ────────────────────────────────────────
+      // Empty-book path (usedPollerFallback=true): use GTC (maker order).
+      //   The bot's GTC rests in the book as a resting bid. Kalshi market
+      //   makers must TAKE the order at OUR price — they cannot fill below the
+      //   limit. This makes below-zone fills physically impossible by exchange
+      //   mechanics, eliminating the entire class of 83¢/88¢ fills.
+      //
+      // Real-book path (usedPollerFallback=false): use IOC (taker).
+      //   Authenticated depth data confirms resting ask prices, so IOC fills
+      //   against those known orders. The cross-checks above guarantee in-zone.
+      //
+      // GTC cancel-on-timeout: if not filled within 2 s, cancel the order and
+      // release the once-per-window lock so the next tick can retry. Do NOT
+      // increment windowZeroFillAttempts — a GTC timeout is a deliberate retry,
+      // not a failed fill; the limit was never crossed at a bad price.
+      let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
+
+      if (usedPollerFallback) {
+        // ── GTC MAKER PATH (empty book / OB timeout) ────────────────────────
+        const gtcOrderParams = {
           ticker: kalshiTicker,
           side: direction,
-          action: "buy",
+          action: "buy" as const,
           count: contractCount,
-          type: "market",
-          // Use the crossing-buffered price (ask + 3c, capped at return floor)
-          // so minor ask drift between prefetch and order arrival still fills.
-          // Falls back to midpoint mode when no live price is cached.
-          ...(orderLimitPrice != null
-            ? { limitPrice: orderLimitPrice }
-            : {
-                yesPrice: yesPrice ?? undefined,
-                minReturnMultiple: S.config.minReturnMultiple,
-              }),
-        },
-      );
-      if (result.filledCount === 0) {
-        // IOC returned 0 fills — the Kalshi book had no resting contracts at our
-        // limit price right now. Allow up to 2 attempts (spaced by ~30s bot ticks)
-        // before blocking the coin for the rest of the window. This gives the book
-        // time to build liquidity (especially early in a window) without hammering
-        // an empty book every tick.
-        const failWk = currentWindowKey();
-        const attemptKey = `${sym}:${failWk}:${S.botMode}`;
-        const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
-        const attempts = prev + 1;
-        windowZeroFillAttempts.set(attemptKey, attempts);
-        const MAX_ZERO_FILL_ATTEMPTS = 2;
-        if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
-          logger.warn(
-            { sym, ticker: kalshiTicker, direction, attempts },
-            "[kalshi-bot] IOC returned 0 fills after max attempts — blocking for rest of window",
-          );
-          windowFailedFills.add(attemptKey);
-        } else {
-          logger.warn(
-            { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS },
-            "[kalshi-bot] IOC returned 0 fills — book empty, will retry next tick",
-          );
-        }
-        return;
-      }
-      fillPrice = result.avgPrice ?? yesPrice;
-      orderId = result.orderId;
-
-      // ── IOC PARTIAL FILL CORRECTION ─────────────────────────────────────────
-      // placeOrderWithRetry uses IOC: fills what the book has right now and
-      // cancels the rest.  result.filledCount is the ACTUAL number of contracts
-      // that went through — it can be less than the requested contractCount.
-      // If we don't update contractCount here, we record the wrong position size
-      // (e.g. sent 21, got 2, but store 21 / $19.95 instead of 2 / $1.91).
-      if (result.filledCount > 0 && result.filledCount < contractCount) {
-        logger.warn(
-          { sym, direction, requested: contractCount, filled: result.filledCount, fillPrice },
-          "[kalshi-bot] IOC partial fill — updating contractCount to actual fill",
+          type: "limit" as const,
+          limitPrice: orderLimitPrice ?? yesPrice ?? undefined,
+          timeInForce: "gtc" as const,
+        };
+        logger.info(
+          { sym, direction, windowKey, ticker: kalshiTicker, limitPrice: gtcOrderParams.limitPrice, contractCount },
+          "[kalshi-bot] conviction entry: empty-book path → placing GTC maker order",
         );
-        contractCount = result.filledCount;
+        const gtcResult = await placeOrder(gtcOrderParams);
+        const gtcOrderId = gtcResult.orderId;
+
+        // If the exchange didn't return an orderId, fail closed and release the lock.
+        if (gtcOrderId == null) {
+          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          if (boostBetSize != null) {
+            maxBetWindowToken.remaining++;
+            logger.info({ sym }, "[kalshi-bot] conviction GTC: no orderId returned — max-bet token restored");
+          }
+          logger.warn(
+            { sym, direction, windowKey, ticker: kalshiTicker },
+            "[kalshi-bot] conviction GTC: placeOrder returned no orderId — lock released, will retry",
+          );
+          return;
+        }
+
+        // Wait 2 s for a market maker to take the resting GTC.
+        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+
+        // Check actual fill status.
+        const orderStatus = await getOrder(gtcOrderId, direction).catch(() => null);
+        const gtcFilledCount = orderStatus?.filledCount ?? 0;
+
+        if (gtcFilledCount === 0) {
+          // No fill in 2 s — cancel the GTC and release the lock so the next
+          // tick can retry. Do NOT penalise windowZeroFillAttempts (this is
+          // normal for thin markets; the bot will try again next tick at the
+          // same price rather than escalating or blocking).
+          try {
+            await cancelOrder(gtcOrderId);
+            logger.info(
+              { sym, direction, windowKey, ticker: kalshiTicker, limitPrice: gtcOrderParams.limitPrice },
+              "[kalshi-bot] conviction GTC: no fill in 2 s — order cancelled, lock released for retry",
+            );
+          } catch (cancelErr) {
+            logger.warn(
+              { sym, err: String(cancelErr) },
+              "[kalshi-bot] conviction GTC cancel failed — order may still be resting",
+            );
+          }
+          // Release the once-per-window lock so the next tick can retry.
+          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          if (boostBetSize != null) {
+            maxBetWindowToken.remaining++;
+            logger.info({ sym }, "[kalshi-bot] conviction GTC timeout: max-bet token restored");
+          }
+          return;
+        }
+
+        // GTC filled — use the fill data from getOrder (more accurate than the
+        // placement response for GTC orders which may report 0 fills at placement).
+        result = {
+          filledCount: gtcFilledCount,
+          avgPrice: orderStatus?.avgPrice ?? gtcResult.avgPrice,
+          orderId: gtcOrderId,
+        };
+
+        // GTC partial fill correction (same logic as IOC below).
+        if (gtcFilledCount > 0 && gtcFilledCount < contractCount) {
+          logger.warn(
+            { sym, direction, requested: contractCount, filled: gtcFilledCount },
+            "[kalshi-bot] conviction GTC partial fill — updating contractCount to actual fill",
+          );
+          contractCount = gtcFilledCount;
+        }
+
+        logger.info(
+          { sym, direction, windowKey, ticker: kalshiTicker, filledCount: gtcFilledCount, avgPrice: result.avgPrice },
+          "[kalshi-bot] conviction GTC: filled at maker price — proceeding to post-fill zone check",
+        );
+      } else {
+        // ── IOC TAKER PATH (real book with depth data) ──────────────────────
+        const iocResult = await placeOrderWithRetry(
+          {
+            ticker: kalshiTicker,
+            side: direction,
+            action: "buy",
+            count: contractCount,
+            type: "market",
+            // Use the crossing-buffered price (ask + 3c, capped at return floor)
+            // so minor ask drift between prefetch and order arrival still fills.
+            // Falls back to midpoint mode when no live price is cached.
+            ...(orderLimitPrice != null
+              ? { limitPrice: orderLimitPrice }
+              : {
+                  yesPrice: yesPrice ?? undefined,
+                  minReturnMultiple: S.config.minReturnMultiple,
+                }),
+          },
+        );
+        if (iocResult.filledCount === 0) {
+          // IOC returned 0 fills — the Kalshi book had no resting contracts at our
+          // limit price right now. Allow up to 2 attempts (spaced by ~30s bot ticks)
+          // before blocking the coin for the rest of the window. This gives the book
+          // time to build liquidity (especially early in a window) without hammering
+          // an empty book every tick.
+          const failWk = currentWindowKey();
+          const attemptKey = `${sym}:${failWk}:${S.botMode}`;
+          const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
+          const attempts = prev + 1;
+          windowZeroFillAttempts.set(attemptKey, attempts);
+          const MAX_ZERO_FILL_ATTEMPTS = 2;
+          if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
+            logger.warn(
+              { sym, ticker: kalshiTicker, direction, attempts },
+              "[kalshi-bot] IOC returned 0 fills after max attempts — blocking for rest of window",
+            );
+            windowFailedFills.add(attemptKey);
+          } else {
+            logger.warn(
+              { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS },
+              "[kalshi-bot] IOC returned 0 fills — book empty, will retry next tick",
+            );
+          }
+          return;
+        }
+        result = iocResult;
+
+        // ── IOC PARTIAL FILL CORRECTION ───────────────────────────────────────
+        // placeOrderWithRetry uses IOC: fills what the book has right now and
+        // cancels the rest.  result.filledCount is the ACTUAL number of contracts
+        // that went through — it can be less than the requested contractCount.
+        // If we don't update contractCount here, we record the wrong position size
+        // (e.g. sent 21, got 2, but store 21 / $19.95 instead of 2 / $1.91).
+        if (iocResult.filledCount > 0 && iocResult.filledCount < contractCount) {
+          logger.warn(
+            { sym, direction, requested: contractCount, filled: iocResult.filledCount, fillPrice },
+            "[kalshi-bot] IOC partial fill — updating contractCount to actual fill",
+          );
+          contractCount = iocResult.filledCount;
+        }
       }
 
       // Post-fill zone check (Layer 3 — hard guarantee).
