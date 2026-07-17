@@ -2029,6 +2029,60 @@ async function _runBotTick(
             _ecPnl = _ecDelta * contractCount;
           }
           const _ecBetAmount = expectedFillCost * contractCount;
+
+          // ── Mirror closePosition() in-memory state updates ───────────────────
+          // closePosition() is not called directly here because it would place
+          // a second sell order.  Instead we replicate its state mutations so
+          // that the dashboard's "Today's P&L", circuit breaker, per-coin loss
+          // caps, and streak counters are all updated immediately.
+          if (entryMode === S.botMode) {
+            S.dailyPnl += _ecPnl;
+            if (_ecPnl < 0) S.dailyLossCount++;
+            // Mid-window exit: apply circuit breaker as an independent event.
+            S.cbState = applyBetOutcome(
+              S.cbState,
+              _ecPnl >= 0,
+              S.config.maxConsecutiveLosses,
+              S.config.circuitBreakerPauseWindows,
+            );
+            if (_ecPnl < 0) {
+              logger.info(
+                { sym, cbState: S.cbState, pnl: +_ecPnl.toFixed(4) },
+                "[kalshi-bot] conviction emergency-close loss — dailyPnl and circuit breaker updated",
+              );
+            }
+          }
+          // Per-coin daily loss (mode-specific map, same as closePosition).
+          {
+            const _ecModeMap = coinDailyLossForMode(entryMode);
+            _ecModeMap.set(
+              sym,
+              applyDailyLossUpdate(_ecModeMap, sym, _ecPnl, entryMode, entryMode).get(sym) ??
+                (_ecModeMap.get(sym) ?? 0),
+            );
+          }
+          // Per-coin streak (mid-window exit: apply immediately, same as closePosition).
+          {
+            const _ecStreakMap  = coinStreakStateForMode(entryMode);
+            const _ecStreakStore = streakStoreForMode(entryMode);
+            const _ecPrev = _ecStreakMap.get(sym) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
+            const _ecNext = applyStreakUpdate(
+              _ecPrev, _ecPnl,
+              S.config.coinStreakLossLimit ?? 3,
+              S.config.coinStreakPauseWindows ?? 2,
+              Date.now(),
+            );
+            _ecStreakMap.set(sym, _ecNext);
+            persistCoinStreakState(_ecStreakMap, _ecStreakStore).catch(() => {});
+          }
+          // Account balance.
+          if (entryMode === "live") {
+            getBalance().then(b => { S.accountBalance = b.availableBalance; }).catch(() => {});
+          } else {
+            S.accountBalance = (S.accountBalance ?? S.config.paperStartingBalance ?? 100) + _ecPnl;
+          }
+          // ─────────────────────────────────────────────────────────────────────
+
           // Step 1: insert entry record (same shape as a normal bet open).
           persistBetRecord({
             insertId: _ecId,
