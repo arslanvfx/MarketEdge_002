@@ -2118,11 +2118,10 @@ async function _runBotTick(
           action: "buy",
           count: contractCount,
           type: "market",
-          // Conviction entries must use FOK so the whole order fills at once.
-          // FOK triggers reactive market-maker fills on Kalshi even when the
-          // authenticated orderbook appears empty.  IOC would silently partial-
-          // fill or return 0 fills without triggering MM response.
-          timeInForce: "fill_or_kill",
+          // Conviction entries use FOK (triggers reactive MM fills on Kalshi even
+          // when the authenticated book is empty).  All other modes use IOC so
+          // partial fills are accepted without needing all contracts simultaneously.
+          timeInForce: S.config.decisionMode === "conviction" ? "fill_or_kill" : "immediate_or_cancel",
           // Use the zone-capped/crossing-buffered limit price when available.
           // Falls back to midpoint mode (yesPrice + minReturnMultiple) only when
           // neither the poller nor the authenticated book supplied a price.
@@ -2152,11 +2151,17 @@ async function _runBotTick(
             "[kalshi-bot] FOK returned 0 fills after max attempts — blocking for rest of window",
           );
           windowFailedFills.add(attemptKey);
+          // Conviction lock intentionally left set — coin is blocked for rest of window.
         } else {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS, usedPollerFallback },
             "[kalshi-bot] FOK returned 0 fills — book empty, will retry next tick",
           );
+          // Release conviction lock so the next tick can retry this coin.
+          // Without this, the coin stays locked for the whole window after one 0-fill.
+          if (S.config.decisionMode === "conviction") {
+            convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          }
         }
         return;
       }
@@ -2414,6 +2419,12 @@ async function _runBotTick(
       invalidateBalanceCache();
     } catch (err) {
       logger.error({ err, sym }, "[kalshi-bot] order placement failed");
+      // Release conviction lock so the next tick can retry if the error is transient
+      // (e.g. network timeout, 429 rate-limit).  Permanent failures (e.g. invalid
+      // ticker, account suspended) will keep throwing and the window will expire.
+      if (S.config.decisionMode === "conviction") {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      }
       return;
     }
   }
