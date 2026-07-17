@@ -2007,11 +2007,19 @@ async function _runBotTick(
               "[kalshi-bot] conviction emergency-close limit reached — coin locked out for rest of window",
             );
           }
-          // Persist the emergency close to the DB so it appears in transaction
-          // history.  Both prices are YES-side (Kalshi always returns avgPrice
-          // in YES terms for buy and sell orders).
-          // pnl formula mirrors closePosition (mid-window exit path).
-          const _ecEntryYes = fillPrice;   // updated at line 1900 to result.avgPrice
+          // Persist the emergency close as a closed trade so it appears in
+          // transaction history and P&L analytics.
+          //
+          // persistBetRecord with `existingId` is the only path that writes
+          // exitedAt / exitPrice / pnl (the UPDATE branch). Without a prior
+          // entry row there is nothing to UPDATE, so we do two sequential
+          // calls: (1) INSERT the entry row, then (2) UPDATE it with exit
+          // fields. This mirrors the normal bet → closePosition pattern.
+          //
+          // Both prices are YES-side (Kalshi returns avgPrice in YES terms for
+          // both buy and sell orders). pnl formula matches closePosition().
+          const _ecId       = `${sym}:${windowKey}:ec:${Date.now()}`;
+          const _ecEntryYes = fillPrice;   // result.avgPrice ?? yesPrice (set at fill block above)
           const _ecExitYes  = emergencyExitAvgPrice;
           let _ecPnl = 0;
           if (_ecEntryYes != null && _ecExitYes != null) {
@@ -2021,24 +2029,40 @@ async function _runBotTick(
             _ecPnl = _ecDelta * contractCount;
           }
           const _ecBetAmount = expectedFillCost * contractCount;
+          // Step 1: insert entry record (same shape as a normal bet open).
           persistBetRecord({
-            insertId: `${sym}:${windowKey}:ec:${Date.now()}`,
+            insertId: _ecId,
             symbol: sym,
             windowKey,
             ticker: kalshiTicker,
             direction,
-            action: "exit",
+            action: "bet",
             signals: decision.signals,
             entryPrice: _ecEntryYes ?? undefined,
-            exitPrice: _ecExitYes ?? undefined,
             kalshiTarget: kalshiTarget ?? 0,
             contractCount,
             betAmount: _ecBetAmount,
-            pnl: _ecPnl,
-            exitReason: "conviction_emergency_close",
             decisionMode: "conviction",
             mode: entryMode,
-          }).catch(err => logger.warn({ err, sym }, "[kalshi-bot] conviction emergency-close: DB persist failed (non-fatal)"));
+          }).then(() =>
+            // Step 2: update same row with exit fields (sets exitedAt, pnl, etc.).
+            persistBetRecord({
+              existingId: _ecId,
+              symbol: sym,
+              windowKey,
+              ticker: kalshiTicker,
+              direction,
+              action: "exit",
+              exitPrice: _ecExitYes ?? undefined,
+              pnl: _ecPnl,
+              exitReason: "conviction_emergency_close",
+              kalshiTarget: kalshiTarget ?? 0,
+              contractCount,
+              betAmount: _ecBetAmount,
+              decisionMode: null,
+              mode: entryMode,
+            })
+          ).catch(err => logger.warn({ err, sym }, "[kalshi-bot] conviction emergency-close: DB persist failed (non-fatal)"));
           return; // do NOT record as open position
         }
       }
