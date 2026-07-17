@@ -2035,16 +2035,14 @@ async function _runBotTick(
         contractCount = result.filledCount;
       }
 
-      // ── CONVICTION ZONE FILL VERIFICATION (hard guarantee) ──────────────────
-      // Pre-order checks (cross-checks above) minimise the race window, but
-      // cannot fully prevent it: the exchange always fills a BUY at the ask and
-      // a SELL at the bid at execution time — both can differ from the gate-check
-      // price.  This post-fill check is the final backstop:
-      //   • re-derive lockPrice / lockPriceCap from config (same formula as gate)
-      //   • compare the ACTUAL fill price returned by Kalshi to the zone
-      //   • if outside [lockPrice, lockPriceCap], immediately close the position
-      //     before it is ever recorded as open, then return
-      if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
+      // ── CONVICTION ZONE FILL VERIFICATION — REMOVED ─────────────────────────
+      // The post-fill zone check was immediately closing positions whenever the
+      // actual fill landed even 1¢ below the zone floor due to normal spread
+      // slippage between gate-check time and fill time.  Every close costs the
+      // full round-trip spread, losing real money on otherwise correct bets.
+      // The pre-order gates (live-price gate + cross-checks) are the sole guards.
+      // Positions that fill with slight slippage are held to settlement.
+      if (false && S.config.decisionMode === "conviction" && result.avgPrice != null) {
         const _gt   = S.config.kalshiLockPrice ?? 0.90;
         const { lockPrice: _lp, lockPriceCap: _lpCap } = deriveConvictionZone(_gt); // e.g. [0.90, 0.95] for target 0.92
         // Kalshi always returns avgPrice in YES-side terms.

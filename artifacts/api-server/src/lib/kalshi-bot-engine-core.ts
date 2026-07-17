@@ -228,26 +228,35 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   }
 
   // Use the actual orderbook ask/bid prices for the trigger check, not the mid.
-  // yesAsk = what you pay for YES (= 1 − no_bid).
-  // noAsk  = what you pay for NO  (= 1 − yesBid).
-  // Falling back to yesPrice (mid) only when ask/bid are unavailable.
   //
-  // Example of the mid-price bug this prevents:
+  // Price asymmetry — YES and NO entry prices come from DIFFERENT sides of the book:
+  //   YES entry: pay yesAsk (the ask side of YES).  Falls back to mid yesPrice when
+  //              yesAsk is unavailable — mid is a reasonable proxy for the ask.
+  //   NO  entry: pay noAsk = 1 − yesBid (the bid side of YES tells us what NO costs).
+  //              NEVER falls back to 1 − yesPrice: when yesBid is null there is no
+  //              YES buyer, meaning there is no counterparty for a NO buy order.
+  //              Using the mid as a fallback here produced false lock signals
+  //              (noTrigger ≈ 0.999 when yesPrice ≈ 0.001) that bypassed lockPriceCap
+  //              via isExtremePrice and created a constant dispatch-then-fail-closed
+  //              spam loop (60–100 wasted Kalshi API calls per minute).
+  //
+  // Example of the mid-price bug this prevents for YES:
   //   yesAsk=0.80, yesBid=0.96 → mid=(0.80+0.96)/2=0.88 → triggers at lockPrice=0.88
   //   but you actually fill at 0.80 (8¢ outside the intended window).
-  const yesTrigger = inp.yesAsk  ?? yesPrice;           // cost of YES entry
-  const noTrigger  = inp.yesBid != null
-    ? (1 - inp.yesBid)                                  // cost of NO entry = 1 − yesBid
-    : (1 - yesPrice);                                   // fallback: mid complement
+  const yesTrigger = inp.yesAsk ?? yesPrice;            // cost of YES entry (ask fallback → mid)
+  const noTrigger  = inp.yesBid != null                 // cost of NO entry (= 1 − YES bid)
+    ? (1 - inp.yesBid)
+    : null;                                             // null = no YES bid = NO unpriced/untradeable
 
   const isYesLocked = yesTrigger >= lockPrice;
-  const isNoLocked  = noTrigger  >= lockPrice;
+  const isNoLocked  = noTrigger != null && noTrigger >= lockPrice;
 
   if (!isYesLocked && !isNoLocked) {
+    const noTriggerDesc = noTrigger != null ? noTrigger.toFixed(2) : "null(no-bid)";
     return {
       action: "SKIP",
       confidence: 0,
-      reasoning: `conviction: ask prices not at lock threshold ${lockPrice.toFixed(2)} (yesAsk=${yesTrigger.toFixed(2)} noAsk=${noTrigger.toFixed(2)})`,
+      reasoning: `conviction: ask prices not at lock threshold ${lockPrice.toFixed(2)} (yesAsk=${yesTrigger.toFixed(2)} noAsk=${noTriggerDesc})`,
       signalsAgreeing: 0,
       signalsTotal: 0,
       ev: null,
@@ -264,11 +273,12 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
   // not apply; we bet immediately regardless of how far past 0.92 it is.
   const isExtremePrice = yesPrice >= 0.92 || yesPrice <= 0.08;
   const isTooDeepYes = !isExtremePrice && isYesLocked && yesTrigger > lockPriceCap;
-  const isTooDeepNo  = !isExtremePrice && isNoLocked  && noTrigger  > lockPriceCap;
+  // noTrigger is non-null whenever isNoLocked is true (isNoLocked guards noTrigger != null)
+  const isTooDeepNo  = !isExtremePrice && isNoLocked  && noTrigger! > lockPriceCap;
 
   if (isTooDeepYes || isTooDeepNo) {
     const side      = isYesLocked ? "YES" : "NO";
-    const askPrice  = isYesLocked ? yesTrigger : noTrigger;
+    const askPrice  = isYesLocked ? yesTrigger : noTrigger!;
     return {
       action: "SKIP",
       confidence: 0,
@@ -281,7 +291,10 @@ export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult
 
   const action: BotDecisionAction = isYesLocked ? "BET_YES" : "BET_NO";
   // Use actual ask price for confidence — this is what you're paying, not the mid.
-  const lockedPrice = isYesLocked ? yesTrigger : noTrigger;
+  // noTrigger is non-null here because isNoLocked (which guards noTrigger != null) must be
+  // true for BET_NO to reach this point (the !isYesLocked && !isNoLocked early return above
+  // ensures at least one is locked, and BET_NO means !isYesLocked, so isNoLocked must hold).
+  const lockedPrice = isYesLocked ? yesTrigger : noTrigger!;
   const confidence  = Math.min(Math.round(50 + lockedPrice * 50), 95);
 
   if (confidence < minConfidence) {
