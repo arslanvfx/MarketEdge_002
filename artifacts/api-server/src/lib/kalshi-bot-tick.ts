@@ -1585,6 +1585,11 @@ async function _runBotTick(
   // fresh values (avoids stale-cache sizing blowup: yesBid 0.93 → 57 contracts).
   let freshYesAsk: number | null = null;
   let freshYesBid: number | null = null;
+  // True when the poller fallback path was taken (empty book or OB timeout).
+  // Hoisted here so the order placement block (outside the conviction gate
+  // block below) can read it — declaration inside `if (decisionMode===conviction)`
+  // would be out of scope at the call site.
+  let usedPollerFallback = false;
   if (S.config.decisionMode === "conviction") {
     // Derive the asymmetric −2¢/+3¢ zone from the single slider value
     // (kalshiLockPrice) via deriveConvictionZone — single source of truth,
@@ -1647,10 +1652,6 @@ async function _runBotTick(
     //   early). Both the poller and this gate now use the deterministic
     //   expectedTicker (derived from windowKey → EDT), so the price sources are
     //   always aligned on the same market. Ticker drift is no longer a risk.
-    // True when the poller fallback path was taken (empty book or OB timeout).
-    // The order placement block uses this to choose GTC (maker) instead of IOC.
-    let usedPollerFallback = false;
-
     if (obPrices == null) {
       logger.warn(
         { sym, direction, windowKey, expectedTicker },
@@ -2129,32 +2130,58 @@ async function _runBotTick(
         await new Promise<void>((resolve) => setTimeout(resolve, 2000));
 
         // Check actual fill status.
+        // NOTE: getOrder returns null on 404 (order cleared by exchange) AND on
+        // network errors (.catch(()=>null)).  Both are AMBIGUOUS:
+        //   - 404 can mean the GTC was already filled and swept from the book,
+        //     or it was cancelled by someone else.
+        //   - network error means we simply don't know.
+        // Treating null as "unfilled" and releasing the lock risks:
+        //   a) Missing a real fill → untracked live open position
+        //   b) Releasing the lock → next tick submits a duplicate order
+        // Safest response: keep the conviction lock and return with an error
+        // log so the human can reconcile order state manually before the
+        // next window.
         const orderStatus = await getOrder(gtcOrderId, direction).catch(() => null);
-        const gtcFilledCount = orderStatus?.filledCount ?? 0;
+        if (orderStatus === null) {
+          logger.error(
+            { sym, direction, windowKey, ticker: kalshiTicker, gtcOrderId },
+            "[kalshi-bot] conviction GTC: getOrder returned null (404 or network error) — order state unknown; KEEPING LOCK to prevent duplicate entry; reconcile manually",
+          );
+          return;
+        }
+
+        const gtcFilledCount = orderStatus.filledCount;
 
         if (gtcFilledCount === 0) {
-          // No fill in 2 s — cancel the GTC and release the lock so the next
-          // tick can retry. Do NOT penalise windowZeroFillAttempts (this is
-          // normal for thin markets; the bot will try again next tick at the
-          // same price rather than escalating or blocking).
+          // No fill in 2 s — cancel the GTC and, only if cancel succeeds, release
+          // the once-per-window lock so the next tick can retry.
+          // If cancel FAILS, keep the lock: the GTC may still be resting and a
+          // duplicate order from the next tick would double our exposure.
+          let cancelSucceeded = false;
           try {
             await cancelOrder(gtcOrderId);
-            logger.info(
-              { sym, direction, windowKey, ticker: kalshiTicker, limitPrice: gtcOrderParams.limitPrice },
-              "[kalshi-bot] conviction GTC: no fill in 2 s — order cancelled, lock released for retry",
-            );
+            cancelSucceeded = true;
           } catch (cancelErr) {
-            logger.warn(
-              { sym, err: String(cancelErr) },
-              "[kalshi-bot] conviction GTC cancel failed — order may still be resting",
+            logger.error(
+              { sym, err: String(cancelErr), gtcOrderId },
+              "[kalshi-bot] conviction GTC cancel failed — KEEPING LOCK to prevent duplicate entry; reconcile manually",
             );
           }
-          // Release the once-per-window lock so the next tick can retry.
+          if (!cancelSucceeded) {
+            // Lock stays; return without retry until next window clears the lock.
+            return;
+          }
+          // Cancel confirmed — release lock and restore max-bet token so the
+          // next tick can retry at the same zone price.
           convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
           if (boostBetSize != null) {
             maxBetWindowToken.remaining++;
             logger.info({ sym }, "[kalshi-bot] conviction GTC timeout: max-bet token restored");
           }
+          logger.info(
+            { sym, direction, windowKey, ticker: kalshiTicker, limitPrice: gtcOrderParams.limitPrice },
+            "[kalshi-bot] conviction GTC: no fill in 2 s — order cancelled, lock released for retry",
+          );
           return;
         }
 
