@@ -63,12 +63,13 @@ export async function closePosition(
   isLateRecovery = false,
   options?: {
     // When true, a FOK exit that fails with "fill_or_kill_insufficient_resting_volume"
-    // is immediately retried as a GTC (resting) limit order at the same aggressive
-    // price rather than throwing and waiting for the next tick.  The position is
-    // treated as closed and the P&L is estimated at the GTC ask price (0.01 worst
-    // case); evalClosedBets will correct the record once Kalshi settles.
+    // is immediately retried as an IOC limit order at the most aggressive price (0.01)
+    // rather than throwing and waiting for the next tick.  IOC fills whatever the book
+    // has right now; an empty book returns 0 fills and the position is marked closed at
+    // 0.01 (worst-case placeholder); evalClosedBets corrects the record once Kalshi settles.
     // Use for stop-loss exits where we want out at any price, not just on a tick
     // where the book happens to have resting volume.
+    // NOTE: "gtc" is NOT supported by Kalshi v2 — it returns 400 (oneof failure).
     gtcFallback?: boolean;
   },
 ): Promise<void> {
@@ -94,35 +95,35 @@ export async function closePosition(
       const isFokDry = String((err as Error).message ?? err).includes("fill_or_kill_insufficient");
       if (isFokDry && options?.gtcFallback) {
         // FOK failed because the order book has no resting bids at any price.
-        // Place a GTC resting limit order at the most aggressive ask price (0.01)
-        // so it will fill if any buyer appears before the window closes.
-        // The position is removed from tracking immediately — evalClosedBets will
-        // correct the P&L once Kalshi settles the market.
+        // Retry as IOC at 0.01 (minimum price) — fills whatever is available right now.
+        // If nothing fills, position is marked closed at 0.01 placeholder and
+        // evalClosedBets will correct the P&L once Kalshi settles the market.
         logger.warn(
           { sym: pos.symbol, direction: pos.direction, contractCount: pos.contractCount },
-          "[kalshi-bot] stop-loss FOK failed (no resting bids) — placing GTC resting order at minimum price",
+          "[kalshi-bot] stop-loss FOK failed (no resting bids) — retrying as IOC at minimum price",
         );
         try {
           const side = pos.direction === "yes" ? ("yes" as const) : ("no" as const);
-          // No limitPrice / yesPrice → computeMarketableLimitPrice("ask", undefined) = 0.01
-          const gtcResult = await placeOrder({
+          // IOC at the most aggressive price (0.01 sell limit) fills whatever the book
+          // has right now and cancels the remainder.  0 fills = book truly empty;
+          // position is marked closed at 0.01 worst-case; evalClosedBets will correct.
+          // Kalshi v2 rejects "gtc"/"good_till_cancelled" with 400 — use IOC instead.
+          const iocResult = await placeOrder({
             ticker: pos.ticker,
             side,
             action: "sell",
             count: pos.contractCount,
             type: "limit",
-            timeInForce: "gtc",
+            timeInForce: "immediate_or_cancel",
           });
-          // Use confirmed fill price if the GTC happened to fill immediately; otherwise
-          // record 0.01 as a conservative placeholder (will be corrected by evalClosedBets).
-          fillPrice = gtcResult.avgPrice ?? 0.01;
+          fillPrice = iocResult.avgPrice ?? 0.01;
           logger.info(
-            { sym: pos.symbol, fillPrice, orderId: gtcResult.orderId },
-            "[kalshi-bot] GTC resting order placed — position marked closed",
+            { sym: pos.symbol, fillPrice, orderId: iocResult.orderId, filledCount: iocResult.filledCount },
+            "[kalshi-bot] IOC fallback exit placed — position marked closed",
           );
-        } catch (gtcErr) {
-          logger.error({ err: gtcErr, sym: pos.symbol }, "[kalshi-bot] GTC fallback also failed — position remains OPEN; will retry next tick");
-          throw gtcErr;
+        } catch (iocErr) {
+          logger.error({ err: iocErr, sym: pos.symbol }, "[kalshi-bot] IOC fallback also failed — position remains OPEN; will retry next tick");
+          throw iocErr;
         }
       } else {
         logger.error({ err, sym: pos.symbol }, "[kalshi-bot] exit order failed — position remains OPEN; will retry next tick");

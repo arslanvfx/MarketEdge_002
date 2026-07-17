@@ -1755,7 +1755,7 @@ async function _runBotTick(
       usedPollerFallback = true;
       logger.info(
         { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid, spread: spread.toFixed(3), pollerRefPrice, lockPrice, lockPriceCap },
-        "[kalshi-bot] conviction live-price gate: empty book — tight spread + in-zone poller, will use GTC maker order",
+        "[kalshi-bot] conviction live-price gate: empty book — tight spread + in-zone poller, will use FOK order",
       );
     } else {
       freshYesAsk = obPrices.yesAsk;
