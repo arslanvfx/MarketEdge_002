@@ -1,6 +1,6 @@
 ---
 name: Conviction zone enforcement — fail-closed gate + post-fill emergency close
-description: How conviction fills are guaranteed to land in zone. Fail-closed fresh orderbook is layer 0; NO cross-check applies to FOK only (not GTC).
+description: How conviction fills are guaranteed to land in zone. Fail-closed fresh orderbook is layer 0; NO cross-check applies to ALL FOK paths (both poller-fallback and real-book).
 ---
 
 ## Zone definition (current)
@@ -26,14 +26,12 @@ description: How conviction fills are guaranteed to land in zone. Fail-closed fr
 - **Main zone gate**: fresh ref price must be in [lockPrice, lockPriceCap], GATE_BUFFER=0.
   - YES: freshYesAsk in zone
   - NO: (1 - freshYesBid) in zone
-- **Cross-checks — FOK taker orders only** (`!usedPollerFallback`):
+- **Cross-checks — applies to ALL FOK paths** (both poller-fallback and real-book):
   - NO side: `freshYesAsk > (1−lockPrice)+0.01` → abort (prevents stale YES bid giving
     false in-zone signal while real YES ask is out of zone). Threshold = 10¢ for lockPrice=0.91.
   - YES side: `freshYesBid < lockPrice` → abort (hard floor: bid must be in zone).
-  - **IMPORTANT**: These checks are SKIPPED for GTC maker orders (`usedPollerFallback=true`).
-    For GTC, the limit price is set to exactly the YES bid (e.g. 8¢ YES = 92¢ NO).
-    A GTC sell-YES at 8¢ can ONLY fill at ≥8¢ — the YES ask is irrelevant. Applying
-    the cross-check to GTC incorrectly blocks all NO bets in wide-spread empty-book markets.
+  - **NOTE**: Previously these were skipped for `usedPollerFallback=true` (GTC path).
+    GTC has been removed; all conviction orders now use FOK, so cross-check applies universally.
 - **Order limit = exact verified bid/ask**, clamped inside the zone.
 - **Layer 3 — post-fill emergency close (RE-ENABLED)**: after fill, `convFillPrice = avgPrice`
   (YES) or `1 − avgPrice` (NO); outside [lockPrice, lockPriceCap] → immediate sell, position
@@ -41,10 +39,10 @@ description: How conviction fills are guaranteed to land in zone. Fail-closed fr
   emergency closes at 2 per coin/window; after 2 strikes the coin is locked out for the
   window. Cleared on window transition in loop.ts.
 
-**Why the cross-check bypass for GTC matters:**
-- Wide-spread markets (e.g. YES bid=7.9¢, YES ask=12¢, spread=5.1¢) are common in
-  low-liquidity coins.
-- pollerRefPrice = 1 - YES bid = 92.1¢ → correctly in zone for NO
-- YES ask = 12¢ → exceeds the 10¢ threshold → cross-check incorrectly aborts GTC
-- With GTC, orderLimitPrice = ceil(YES bid × 100)/100 = 8¢ → NO fill = 92¢ (in zone)
-- The YES ask at 12¢ literally cannot affect a sell order at 8¢
+**Why cross-check applies to all FOK paths:**
+- FOK BUY YES at limit 95¢ fills at any YES ask ≤ 95¢ (no floor).
+- If YES ask has drifted to 88¢ since the poller sample, fill lands at 88¢ (out of zone).
+- The cross-check threshold (freshYesBid < lockPrice for YES; freshYesAsk > 10¢ for NO)
+  protects against this race window.
+- The poller spread gate (≤4¢ YES / ≤6¢ NO) applied at the live-price gate provides
+  additional confidence that market maker quotes are tight before placing the FOK.
