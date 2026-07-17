@@ -26,16 +26,23 @@ is never auto-reverted on restart.
   orderbook fetch fails → ABORT the order, release the window lock, retry next 1s tick.
   Never fall back to public/cached prices for order placement.
 - **Main zone gate**: fresh ref price must be in [lockPrice, lockPriceCap], GATE_BUFFER=0.
-- **Cross-checks**: NO side `freshYesAsk > (1−lockPrice)+0.03` → abort; YES side
-  `freshYesBid < lockPrice` → abort (hard floor: bid must be ≥ 88¢ so no resting
-  sub-zone sells exist — crossed markets are impossible on Kalshi).
-- **Order limit = exact verified ask** (crossing buffer removed for conviction), still
-  clamped inside the zone.
-- **Layer 3 — post-fill emergency close**: after fill, `convFillPrice = avgPrice` (YES) or
-  `1 − avgPrice` (NO); outside [lockPrice−0.02, lockPrice+0.02] → immediate sell, position
+- **Cross-checks**: NO side `freshYesAsk > (1−lockPrice)+0.01` → abort; YES side
+  `freshYesBid < lockPrice` → abort (hard floor: bid must be in zone).
+- **Order limit = exact verified ask**, clamped inside the zone.
+- **Layer 3 — post-fill emergency close (RE-ENABLED)**: after fill, `convFillPrice = avgPrice`
+  (YES) or `1 − avgPrice` (NO); outside [lockPrice, lockPriceCap] → immediate sell, position
   never recorded. **Strike counter**: `convictionEmergencyCloses` Map (state.ts) caps
   emergency closes at 2 per coin/window; after 2 strikes the coin is locked out for the
   window (prevents re-buy loop). Cleared on window transition in loop.ts.
+
+**Why the emergency close was previously disabled and re-enabled:**
+- Was disabled because the old XRP bleed loop (4× close/re-buy in one window). The loop
+  was caused by the emergency close releasing `convictionFiredThisWindow` unconditionally.
+- Current code already fixed the loop: `MAX_EMERGENCY_CLOSES_PER_WINDOW = 2` limits closes,
+  and after 2 the window lock stays set. Re-enabling the check is now safe.
+- Root cause of the out-of-zone fills: Kalshi FOK BUY fills at any ask ≤ limit (no price
+  floor). Pre-order gates narrow the race window but cannot eliminate it. Post-fill check
+  is the only layer that acts on the ACTUAL exchange fill price.
 
 **Why:** only the post-fill check acts on the ACTUAL exchange price; everything earlier
 just narrows the race window. Fail-closed layer 0 removes the stale-price class entirely.
