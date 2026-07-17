@@ -2096,13 +2096,13 @@ async function _runBotTick(
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
       logger.info(
-        { sym, direction, windowKey, ticker: kalshiTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback },
+        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback },
         `[kalshi-bot] conviction entry: placing FOK order${usedPollerFallback ? " (poller-fallback path)" : ""}`,
       );
 
       const fokResult = await placeOrderWithRetry(
         {
-          ticker: kalshiTicker,
+          ticker: expectedTicker,
           side: direction,
           action: "buy",
           count: contractCount,
@@ -2337,7 +2337,7 @@ async function _runBotTick(
             insertId: _ecId,
             symbol: sym,
             windowKey,
-            ticker: kalshiTicker,
+            ticker: expectedTicker,
             direction,
             action: "bet",
             signals: decision.signals,
@@ -2353,7 +2353,7 @@ async function _runBotTick(
               existingId: _ecId,
               symbol: sym,
               windowKey,
-              ticker: kalshiTicker,
+              ticker: expectedTicker,
               direction,
               action: "exit",
               exitPrice: _ecExitYes ?? undefined,
@@ -2442,7 +2442,7 @@ async function _runBotTick(
     id,
     symbol: sym,
     windowKey,
-    ticker: kalshiTicker,
+    ticker: expectedTicker,
     direction,
     entryYesPrice: actualFillYesPrice,
     contractCount,
@@ -2491,7 +2491,7 @@ async function _runBotTick(
   await persistBetRecord({
     symbol: sym,
     windowKey,
-    ticker: kalshiTicker,
+    ticker: expectedTicker,
     direction,
     action: "bet",
     signals: enrichedSignals,
