@@ -1590,6 +1590,26 @@ async function _runBotTick(
   // block below) can read it — declaration inside `if (decisionMode===conviction)`
   // would be out of scope at the call site.
   let usedPollerFallback = false;
+  // Deterministic ticker for the current window, derived from windowKey rather
+  // than kalshiTargetCache (which can drift to the next window ticker ~10 min
+  // before close).  Hoisted outside the conviction gate block so the position-
+  // recording section (lines ~2440, ~2490) can use it for all modes.
+  //
+  // Kalshi 15-min ticker format (observed): KX${SYM}15M-${YY}${MON}${DD}${HHMM}-${MM}
+  //   • YY MON DD — date in EDT (UTC-4)
+  //   • HHMM      — window start time in EDT
+  //   • MM         — start-minute of the window (0, 15, 30, or 45)
+  // Example: windowKey "2026-07-17T00:15" → EDT 20:15 July 16 → "KXBTC15M-26JUL162015-15"
+  const _MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const _windowOpenUtc  = new Date(windowKey + ":00Z");
+  const _windowOpenEdt  = new Date(_windowOpenUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
+  const _tyy  = String(_windowOpenEdt.getUTCFullYear()).slice(-2);
+  const _tmon = _MONTHS[_windowOpenEdt.getUTCMonth()];
+  const _tdd  = String(_windowOpenEdt.getUTCDate()).padStart(2, '0');
+  const _thh  = String(_windowOpenEdt.getUTCHours()).padStart(2, '0');
+  const _tmm  = String(_windowOpenEdt.getUTCMinutes()).padStart(2, '0');
+  const expectedTicker = `KX${sym}15M-${_tyy}${_tmon}${_tdd}${_thh}${_tmm}-${_tmm}`;
+
   if (S.config.decisionMode === "conviction") {
     // Derive the asymmetric −2¢/+3¢ zone from the single slider value
     // (kalshiLockPrice) via deriveConvictionZone — single source of truth,
@@ -1598,25 +1618,7 @@ async function _runBotTick(
     // risky. Above the cap: margin too small, not worth the entry.
     const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
     const { lockPrice, lockPriceCap } = deriveConvictionZone(gateTarget);
-    // Compute the current window's ticker deterministically from windowKey rather
-    // than reading it from kalshiTargetCache.  The cache can switch to the NEXT
-    // window's market ~10 min into the current window once Kalshi pre-publishes
-    // upcoming markets, causing the orderbook fetch to target the wrong ticker.
-    //
-    // Kalshi 15-min ticker format (observed): KX${SYM}15M-${YY}${MON}${DD}${HHMM}-${MM}
-    //   • YY MON DD — date in EDT (UTC-4)
-    //   • HHMM      — window start time in EDT
-    //   • MM         — start-minute of the window (0, 15, 30, or 45)
-    // Example: windowKey "2026-07-17T00:15" → EDT 20:15 July 16 → "KXBTC15M-26JUL162015-15"
-    const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-    const windowOpenUtc  = new Date(windowKey + ":00Z");
-    const windowOpenEdt  = new Date(windowOpenUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
-    const tyy  = String(windowOpenEdt.getUTCFullYear()).slice(-2);
-    const tmon = MONTHS[windowOpenEdt.getUTCMonth()];
-    const tdd  = String(windowOpenEdt.getUTCDate()).padStart(2, '0');
-    const thh  = String(windowOpenEdt.getUTCHours()).padStart(2, '0');
-    const tmm  = String(windowOpenEdt.getUTCMinutes()).padStart(2, '0');
-    const expectedTicker = `KX${sym}15M-${tyy}${tmon}${tdd}${thh}${tmm}-${tmm}`;
+    // expectedTicker already computed above (hoisted). Re-used here for OB fetch.
 
     const freshData = getKalshiCachedData(sym);
     // Authenticated orderbook prices are the only trusted source — they show
