@@ -1912,11 +1912,18 @@ async function _runBotTick(
     //   allow up to 0.11 + 0.10 = 0.21 (21¢) for normal bid-ask spread
     //   freshYesAsk = 0.24 → 0.24 > 0.21 → abort ✓
     //   freshYesAsk = 0.14 → 0.14 ≤ 0.21 → proceed ✓
-    if (direction === "no" && freshYesAsk != null) {
+    // NO cross-check: applies to FOK taker orders only.
+    // For GTC maker orders (usedPollerFallback=true) the limit price is set to
+    // exactly freshYesBid (8¢ YES = 92¢ NO).  A GTC sell-YES order at 8¢ can
+    // ONLY fill at ≥8¢ — the YES ask at 12¢ is the other side of the book and
+    // cannot affect our fill price.  Applying the cross-check here incorrectly
+    // blocks all GTC entries in wide-spread empty-book markets.
+    // For FOK taker orders the check still applies: a FOK buy-NO fills at the
+    // cheapest YES ask ≤ limit, so a high YES ask IS a fill-price risk.
+    if (direction === "no" && freshYesAsk != null && !usedPollerFallback) {
       // Strict zone: only allow 1¢ spread above the YES-side floor.
-      // Zone [90¢,95¢] NO = [5¢,10¢] YES → floor = 1−lockPrice = 10¢ → threshold = 11¢.
-      // Any YES ask above 11¢ means the NO fill will land below 89¢ — outside zone.
-      // Was +0.03 (→ 13¢): allowed ETH/XRP/BTC NO fills at 87–89¢ (1-2¢ below floor).
+      // Zone [91¢,96¢] NO = [4¢,9¢] YES → floor = 1−lockPrice = 9¢ → threshold = 10¢.
+      // Any YES ask above 10¢ means the FOK NO fill could land below 91¢ — outside zone.
       const yesAskBounceThreshold = (1 - lockPrice) + 0.01; // 1¢ spread allowance only
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
