@@ -507,7 +507,7 @@ export default function BotDashboard() {
 
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto bg-background">
+    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto bg-background">
       <BotHeader
         status={status}
         openPosList={openPosList}

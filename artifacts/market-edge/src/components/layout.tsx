@@ -248,7 +248,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </div>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col min-w-0 h-[100dvh] overflow-hidden">
+      <main className="flex-1 flex flex-col min-w-0 md:h-[100dvh] md:overflow-hidden">
         {children}
       </main>
     </div>
