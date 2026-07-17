@@ -180,16 +180,25 @@ export async function fetchOrderbookPrices(
     //   best YES bid = last yes_dollars price
     //   best YES ask = 1 − last no_dollars price (best NO bid complement)
     const fp = body.orderbook_fp;
-    if (fp && (fp.yes_dollars?.length || fp.no_dollars?.length)) {
+    if (fp) {
       const yesArr = fp.yes_dollars ?? [];
       const noArr  = fp.no_dollars  ?? [];
+      if (yesArr.length === 0 && noArr.length === 0) {
+        // Kalshi authenticated the request and confirmed the book — it is
+        // simply illiquid at this moment (no resting limit orders on either
+        // side).  Return { yesBid: null, yesAsk: null } so the caller can
+        // distinguish "auth/network failure" (null) from "authenticated empty
+        // book" and fall back to the freshly-cached conviction-poller price.
+        logger.warn({ ticker }, "[kalshi] fetchOrderbookPrices: orderbook_fp authenticated but both sides empty — falling back to cached price");
+        return { yesBid: null, yesAsk: null };
+      }
       const bestYesBid = yesArr.length > 0 ? Number(yesArr[yesArr.length - 1][0]) : null;
       const bestNoBid  = noArr.length  > 0 ? Number(noArr[noArr.length - 1][0])  : null;
       const yesBid = bestYesBid != null && Number.isFinite(bestYesBid) ? bestYesBid : null;
       const yesAsk = bestNoBid  != null && Number.isFinite(bestNoBid)  ? 1 - bestNoBid : null;
       if (yesBid == null && yesAsk == null) {
-        logger.warn({ ticker }, "[kalshi] fetchOrderbookPrices: orderbook_fp present but empty book");
-        return null;
+        logger.warn({ ticker }, "[kalshi] fetchOrderbookPrices: orderbook_fp present but all entries non-finite");
+        return { yesBid: null, yesAsk: null };
       }
       return { yesBid, yesAsk };
     }

@@ -1565,6 +1565,13 @@ async function _runBotTick(
     // price is how below-zone fills happen.  No verified book → no order.
     // The 1 s loop retries on the next tick, so a transient fetch failure
     // only delays entry by ~1 s.
+    //
+    // Exception: obPrices == null means auth/network failure → fail closed.
+    // obPrices == { yesBid: null, yesAsk: null } means the book authenticated
+    // successfully but has no resting orders on either side (illiquid market).
+    // In that case fall back to the conviction poller's fresh cached price
+    // (≤1 s old) for the zone check.  The order is still placed as a limit
+    // at the lock price, so Kalshi only fills at the lock price or better.
     if (obPrices == null) {
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       if (boostBetSize != null) {
@@ -1577,8 +1584,18 @@ async function _runBotTick(
       );
       return;
     }
-    freshYesAsk = obPrices.yesAsk;
-    freshYesBid = obPrices.yesBid;
+    if (obPrices.yesBid == null && obPrices.yesAsk == null) {
+      // Empty book — fall back to fresh cached price from conviction poller.
+      freshYesAsk = freshData?.yesAsk ?? null;
+      freshYesBid = freshData?.yesBid ?? null;
+      logger.info(
+        { sym, direction, windowKey, freshYesAsk, freshYesBid },
+        "[kalshi-bot] conviction live-price gate: empty book — using cached price for zone check",
+      );
+    } else {
+      freshYesAsk = obPrices.yesAsk;
+      freshYesBid = obPrices.yesBid;
+    }
 
     // YES direction: use the fresh YES ask.
     // NO  direction: NO ask = 1 − YES bid (the price paid per NO contract).
