@@ -1515,35 +1515,19 @@ async function _runBotTick(
   // ─────────────────────────────────────────────────────────────────────────
 
   // ── CONVICTION MIN ENTRY WAIT ──────────────────────────────────────────────
-  // Skip if the user configured a minimum wait before the first bet of the window.
-  // This check runs BEFORE the once-per-window lock so we don't consume the lock
-  // slot just to immediately return.  The same guard also fires in the Phase-3
-  // loop dispatch — this is the belt-and-suspenders catch for any code path that
-  // calls runBotTick directly (e.g. pipeline completion trigger).
-  //
-  // Honors the same extreme-price bypass as minWindowEntryMinutes: if the price
-  // is at a configured extreme (default ≥92¢ or ≤8¢) the wait is skipped so
-  // the bot can catch outsized moves even in the opening minutes of a window.
+  // Hard floor: block entry until N minutes have elapsed in this window.
+  // This is intentionally NOT bypassed by extreme prices — conviction mode
+  // continuously polls, so price will be in-zone again after the floor expires.
+  // The moment the floor clears and the price is in zone, the next tick fires.
+  // The same guard also fires in the Phase-3 loop dispatch as belt-and-suspenders.
   if (S.config.decisionMode === "conviction") {
     const _convMinEntry = S.config.convictionMinEntryMinutes ?? 0;
     if (_convMinEntry > 0 && secondsElapsedNow < _convMinEntry * 60) {
-      const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
-      const _bypassThreshold = S.config.convictionEarlyBypassThreshold ?? 0.92;
-      const _isExtreme = _bypassEnabled &&
-        yesPrice !== null &&
-        (yesPrice >= _bypassThreshold || yesPrice <= +(1 - _bypassThreshold).toFixed(4));
-      if (_isExtreme) {
-        logger.debug(
-          { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), yesPrice, _bypassThreshold },
-          "[kalshi-bot] conviction: min entry wait bypassed — extreme price crossed threshold",
-        );
-      } else {
-        logger.info(
-          { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), convictionMinEntryMinutes: _convMinEntry },
-          "[kalshi-bot] conviction: min entry time not yet reached — skipping",
-        );
-        return;
-      }
+      logger.info(
+        { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), convictionMinEntryMinutes: _convMinEntry },
+        "[kalshi-bot] conviction: min entry time not yet reached — skipping",
+      );
+      return;
     }
   }
 
