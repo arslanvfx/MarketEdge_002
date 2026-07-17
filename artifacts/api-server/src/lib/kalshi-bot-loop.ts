@@ -1299,6 +1299,13 @@ export async function runBotLoopTick(): Promise<void> {
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: warmup (${Math.ceil(CONVICTION_WARMUP_S - clockElapsedS)}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
       }
+      // Minimum entry wait: block dispatch until N minutes have elapsed.
+      // This gives the market time to settle before we commit.
+      const convMinEntryMin = S.config.convictionMinEntryMinutes ?? 0;
+      if (convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
+        evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: min entry wait (${convMinEntryMin}min — ${(clockElapsedS / 60).toFixed(1)}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+        continue;
+      }
     }
     if (S.config.maxEntryMinutes > 0 && clockElapsedS > S.config.maxEntryMinutes * 60) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `past entry ceiling (>${S.config.maxEntryMinutes}min elapsed, clock=${Math.floor(clockElapsedS)}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });

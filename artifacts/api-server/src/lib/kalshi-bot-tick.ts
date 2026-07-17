@@ -1514,6 +1514,23 @@ async function _runBotTick(
   }
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ── CONVICTION MIN ENTRY WAIT ──────────────────────────────────────────────
+  // Skip if the user configured a minimum wait before the first bet of the window.
+  // This check runs BEFORE the once-per-window lock so we don't consume the lock
+  // slot just to immediately return.  The same guard also fires in the Phase-3
+  // loop dispatch — this is the belt-and-suspenders catch for any code path that
+  // calls runBotTick directly (e.g. pipeline completion trigger).
+  if (S.config.decisionMode === "conviction") {
+    const _convMinEntry = S.config.convictionMinEntryMinutes ?? 0;
+    if (_convMinEntry > 0 && secondsElapsedNow < _convMinEntry * 60) {
+      logger.info(
+        { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), convictionMinEntryMinutes: _convMinEntry },
+        "[kalshi-bot] conviction: min entry time not yet reached — skipping",
+      );
+      return;
+    }
+  }
+
   // Conviction once-per-window lock: mark synchronously before any await so that
   // a concurrent tick (e.g. the 5s scheduler vs the pipeline-completion trigger)
   // cannot also read the guard as "not fired" and place a duplicate bet.
@@ -1606,19 +1623,30 @@ async function _runBotTick(
       return;
     }
     if (obPrices.yesBid == null && obPrices.yesAsk == null) {
-      // Empty book — fall back to the conviction poller's dedicated price map
-      // (≤1.5 s old, same source that triggered this dispatch) rather than the
-      // freshData from fetchKalshiTarget which may have been fetched at a
-      // slightly different moment and can return a stale or different-window
-      // price.  The FOK limit price at lockPrice already caps what we pay, so
-      // if the real ask has moved above the limit the order simply won't fill.
-      const pollerPrice = getConvictionLivePrice(sym);
-      freshYesAsk = pollerPrice?.yesAsk ?? freshData?.yesAsk ?? null;
-      freshYesBid = pollerPrice?.yesBid ?? freshData?.yesBid ?? null;
-      logger.info(
-        { sym, direction, windowKey, freshYesAsk, freshYesBid, usedPollerPrice: pollerPrice != null },
-        "[kalshi-bot] conviction live-price gate: empty book — using poller price for zone check",
+      // Empty book — FAIL CLOSED. Do NOT fall back to the poller price.
+      //
+      // Root cause of the XRP NO @ 88¢ fill (2026-07-17): the poller fetches
+      // Kalshi prices every 1 s but can point at the NEXT window's market
+      // (Kalshi pre-publishes upcoming windows ~10 min before they start).
+      // A zone check that passes on the next-window price then places a FOK
+      // on the CURRENT window's market, which fills at the current book's
+      // real ask — potentially outside the zone.  Using the wrong-window
+      // price as a fallback is exactly what produced the 88¢ fill when the
+      // gate expected 91¢+.
+      //
+      // An empty authenticated book just means the window just opened and
+      // no market makers have posted yet.  The 1 s conviction loop retries
+      // immediately on the next tick — zero meaningful delay for users.
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book, fail closed)");
+      }
+      logger.warn(
+        { sym, direction, windowKey, expectedTicker },
+        "[kalshi-bot] conviction live-price gate: empty orderbook — fail closed (no fallback), will retry next tick",
       );
+      return;
     } else {
       freshYesAsk = obPrices.yesAsk;
       freshYesBid = obPrices.yesBid;
@@ -1944,15 +1972,15 @@ async function _runBotTick(
             },
             "[kalshi-bot] CONVICTION FILL OUTSIDE ZONE — emergency close",
           );
+          let emergencyExitAvgPrice: number | null = null;
           try {
             // Immediately sell what we just bought to eliminate the exposure.
-            if (direction === "yes") {
-              await sellYes(kalshiTicker, contractCount);
-            } else {
-              await sellNo(kalshiTicker, contractCount);
-            }
+            const exitResult = direction === "yes"
+              ? await sellYes(kalshiTicker, contractCount)
+              : await sellNo(kalshiTicker, contractCount);
+            emergencyExitAvgPrice = exitResult.avgPrice ?? null;
             logger.warn(
-              { sym, direction, convFillPrice: +convFillPrice.toFixed(4), contractCount },
+              { sym, direction, convFillPrice: +convFillPrice.toFixed(4), contractCount, exitAvgPrice: emergencyExitAvgPrice },
               "[kalshi-bot] conviction emergency close: position closed",
             );
           } catch (closeErr) {
@@ -1979,6 +2007,38 @@ async function _runBotTick(
               "[kalshi-bot] conviction emergency-close limit reached — coin locked out for rest of window",
             );
           }
+          // Persist the emergency close to the DB so it appears in transaction
+          // history.  Both prices are YES-side (Kalshi always returns avgPrice
+          // in YES terms for buy and sell orders).
+          // pnl formula mirrors closePosition (mid-window exit path).
+          const _ecEntryYes = fillPrice;   // updated at line 1900 to result.avgPrice
+          const _ecExitYes  = emergencyExitAvgPrice;
+          let _ecPnl = 0;
+          if (_ecEntryYes != null && _ecExitYes != null) {
+            const _ecDelta = direction === "yes"
+              ? _ecExitYes - _ecEntryYes
+              : _ecEntryYes - _ecExitYes;
+            _ecPnl = _ecDelta * contractCount;
+          }
+          const _ecBetAmount = expectedFillCost * contractCount;
+          persistBetRecord({
+            insertId: `${sym}:${windowKey}:ec:${Date.now()}`,
+            symbol: sym,
+            windowKey,
+            ticker: kalshiTicker,
+            direction,
+            action: "exit",
+            signals: decision.signals,
+            entryPrice: _ecEntryYes ?? undefined,
+            exitPrice: _ecExitYes ?? undefined,
+            kalshiTarget: kalshiTarget ?? 0,
+            contractCount,
+            betAmount: _ecBetAmount,
+            pnl: _ecPnl,
+            exitReason: "conviction_emergency_close",
+            decisionMode: "conviction",
+            mode: entryMode,
+          }).catch(err => logger.warn({ err, sym }, "[kalshi-bot] conviction emergency-close: DB persist failed (non-fatal)"));
           return; // do NOT record as open position
         }
       }

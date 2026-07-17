@@ -77,6 +77,7 @@ export interface BotConfig {
   convictionDailyLossLimit?: number;
   convictionMaxDailySpend?: number;
   convictionStopLossActivationMinute?: number;
+  convictionMinEntryMinutes?: number;
   scalePhase?: number;
   phaseStartedAt?: string | null;
   convictionBoostBetSize?: number;

@@ -713,6 +713,37 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </label>
                     )}
 
+                    {/* Min Entry Wait */}
+                    {(() => {
+                      const minEntry = merged.convictionMinEntryMinutes ?? 0;
+                      return (
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-2">
+                            Min Entry Wait —{" "}
+                            {minEntry === 0
+                              ? <span className="text-muted-foreground/50">No minimum</span>
+                              : <span className="text-amber-400 font-mono">Wait {minEntry} min before first bet</span>}
+                          </span>
+                          <div className="flex items-center gap-3">
+                            <input type="range" min={0} max={12} step={1}
+                              className="flex-1 accent-amber-500"
+                              value={minEntry}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionMinEntryMinutes: parseInt(e.target.value, 10) }))} />
+                            <span className="text-xs font-mono w-20 text-right">
+                              {minEntry === 0
+                                ? <span className="text-muted-foreground/50">Off</span>
+                                : <span className="text-amber-400">min {minEntry}</span>}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/70">
+                            {minEntry === 0
+                              ? "Bot starts watching for price crossing immediately when window opens."
+                              : `Bot waits ${minEntry} minute${minEntry !== 1 ? 's' : ''} after window open before placing any conviction bet. Useful to let the market settle before committing.`}
+                          </span>
+                        </label>
+                      );
+                    })()}
+
                     {/* Stop-loss floor */}
                     {(() => {
                       const floor = merged.convictionStopLossFloor ?? 0;

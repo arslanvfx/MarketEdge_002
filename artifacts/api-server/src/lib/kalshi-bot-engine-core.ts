@@ -963,6 +963,7 @@ export interface BotConfig {
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.30 = sell when contract drops to 30¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately (legacy)
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
+  convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
   scalePhase?: number;             // scaling phase tracker: 1=test ($3/$6), 2=build ($7/$15), 3=full ($10/$25); default 1
   phaseStartedAt?: string | null;  // ISO timestamp when current phase began; null = track from all-time live bets
@@ -1338,6 +1339,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionStopLossFloor: 0,
   convictionStopLossActivationMinute: 12,
   convictionDailyLossLimit: 50,
+  convictionMinEntryMinutes: 0,
   scalePhase: 1,
   phaseStartedAt: null,
   convictionMaxDailySpend: undefined,
