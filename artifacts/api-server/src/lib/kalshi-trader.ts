@@ -539,18 +539,16 @@ export interface PlaceOrderRetryOptions {
 }
 
 /**
- * Place an immediate_or_cancel (IOC) entry order.
+ * Place an entry order, defaulting to immediate_or_cancel (IOC) unless the
+ * caller explicitly supplies a timeInForce.
  *
  * IOC fills whatever resting contracts the book has at our limit price
  * right now and cancels the remainder — so a partial fill is perfectly fine.
  * The position is tracked by actual fill count, not the requested count.
  *
- * Why IOC instead of FOK:
- *   - FOK requires ALL requested contracts to be available simultaneously;
- *     a thin book causes a 409 that forces a multi-second retry loop.
- *   - IOC fills immediately with whatever the book offers — 3 out of 5
- *     contracts is a successful entry, not a failure. This is far faster
- *     and more reliable for time-sensitive 15-minute windows.
+ * Conviction entries pass timeInForce: "fill_or_kill" so the whole order must
+ * fill at once — this triggers reactive market-maker fills on Kalshi even when
+ * the authenticated orderbook appears empty.
  *
  * Exits (buyYes/buyNo/sellYes/sellNo) still use FOK via placeOrder directly
  * so we never leave a partial position stranded on the exchange.
@@ -560,7 +558,9 @@ export async function placeOrderWithRetry(
   _opts: PlaceOrderRetryOptions = {}, // kept for interface compat; no longer used
   placeFn: (p: PlaceOrderParams) => Promise<PlaceOrderResult> = placeOrder,
 ): Promise<PlaceOrderResult> {
-  return placeFn({ ...params, timeInForce: "immediate_or_cancel" });
+  // Respect caller-provided timeInForce; fall back to IOC for callers that
+  // don't specify (preserves existing behaviour for non-conviction entry paths).
+  return placeFn({ ...params, timeInForce: params.timeInForce ?? "immediate_or_cancel" });
 }
 
 // ---------------------------------------------------------------------------

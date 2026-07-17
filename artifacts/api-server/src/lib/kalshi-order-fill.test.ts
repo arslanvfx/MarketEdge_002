@@ -125,14 +125,24 @@ test("IOC: zero fill (empty book) → filledCount 0, no retry attempted", async 
   assert.equal(calls, 1, "no retry — caller handles 0-fill by skipping the window");
 });
 
-test("IOC: overrides any timeInForce already set on params", async () => {
+test("IOC: defaults to immediate_or_cancel when caller does not specify timeInForce", async () => {
   let received: string | undefined;
   await placeOrderWithRetry(
-    { ...baseParams, timeInForce: "fill_or_kill" }, // caller tried to set FOK
+    { ...baseParams }, // no timeInForce specified
     {},
     async (p) => { received = p.timeInForce; return FILLED; },
   );
-  assert.equal(received, "immediate_or_cancel", "placeOrderWithRetry always uses IOC");
+  assert.equal(received, "immediate_or_cancel", "placeOrderWithRetry defaults to IOC");
+});
+
+test("FOK: respects caller-provided timeInForce: fill_or_kill (used by conviction path)", async () => {
+  let received: string | undefined;
+  await placeOrderWithRetry(
+    { ...baseParams, timeInForce: "fill_or_kill" },
+    {},
+    async (p) => { received = p.timeInForce; return FILLED; },
+  );
+  assert.equal(received, "fill_or_kill", "conviction path must send FOK on-wire");
 });
 
 test("CRITICAL: any error from the exchange is re-thrown immediately", async () => {

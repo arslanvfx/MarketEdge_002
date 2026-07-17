@@ -2116,6 +2116,11 @@ async function _runBotTick(
           action: "buy",
           count: contractCount,
           type: "market",
+          // Conviction entries must use FOK so the whole order fills at once.
+          // FOK triggers reactive market-maker fills on Kalshi even when the
+          // authenticated orderbook appears empty.  IOC would silently partial-
+          // fill or return 0 fills without triggering MM response.
+          timeInForce: "fill_or_kill",
           // Use the zone-capped/crossing-buffered limit price when available.
           // Falls back to midpoint mode (yesPrice + minReturnMultiple) only when
           // neither the poller nor the authenticated book supplied a price.
