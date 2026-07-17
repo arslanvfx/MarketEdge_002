@@ -2100,17 +2100,30 @@ async function _runBotTick(
         // price ≤ limit (they chose 83–88¢ despite a 91¢ limit). GTC rests in
         // the book as a maker order; Kalshi fills it at OUR stated price only.
         //
-        // Post-2s lifecycle:
-        //   getOrder null (404/net)  → release lock for retry.  A 2s-old GTC
-        //     returning 404 means Kalshi cancelled/rejected it (price moved,
-        //     market closed, etc.) — NOT that it silently filled; filled orders
-        //     carry status "executed" in the Kalshi GET response.
-        //   filledCount == 0         → cancel; if cancel true/false release lock;
-        //     if cancel throws (network) keep lock (can't confirm cancel).
-        //   filledCount > 0          → cancel remainder BEFORE recording; if
-        //     remainder cancel throws, still record the confirmed fills (leaving
-        //     known exchange exposure untracked is worse than a slightly wider
-        //     position; remainder cancel failure logged for manual reconcile).
+        // Two-phase fill detection for GTC:
+        //
+        // Phase A (immediate): placeOrder response is the authoritative fill
+        //   source.  If filledCount > 0 on the placement response, the GTC
+        //   crossed an existing resting order and filled immediately.  We cancel
+        //   the remainder and record without waiting 2 s.
+        //
+        // Phase B (2s wait): only entered when placement showed filledCount==0.
+        //   Because Phase A confirmed no immediate fill, the combination of
+        //   "placement=0 fills" + "getOrder=null (HTTP 404)" reliably indicates
+        //   the exchange cancelled or rejected the resting GTC (price moved out
+        //   of range, market expired, etc.) — NOT a silent fill.  A filled order
+        //   that the exchange later clears would have appeared with filledCount>0
+        //   in the initial placement response.  This two-phase check is the
+        //   "definitive fill source" that makes the 404 path retry-safe.
+        //
+        // Timeout/no-fill (Phase B, filledCount==0):
+        //   • cancel true/false → both mean "order off book"; release lock retry.
+        //   • cancel throws    → keep lock (can't confirm GTC is off the book).
+        //
+        // Filled (Phase A immediate OR Phase B delayed):
+        //   • cancel remainder (GTC doesn't auto-cancel unfilled qty like IOC).
+        //   • If remainder cancel throws → STILL record known fills; leaving
+        //     exchange exposure untracked is worse than a resting remainder.
         const gtcOrderParams = {
           ticker: kalshiTicker,
           side: direction,
@@ -2158,114 +2171,137 @@ async function _runBotTick(
           logger.info({ sym, direction, windowKey, reason }, "[kalshi-bot] conviction GTC: lock released for retry");
         };
 
-        // Wait 2 s for a market maker to take the resting GTC.
-        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-
-        // Check fill status after 2 s.
-        // IMPORTANT: do NOT use .catch(()=>null) here.  getOrder() returns null
-        // ONLY on HTTP 404.  All other failures (network timeout, 5xx, AbortError)
-        // THROW.  Swallowing throws as null would release the conviction lock while
-        // the GTC is still resting → next tick places a duplicate order → double
-        // exposure.  Handle the two cases explicitly:
-        let orderStatus: Awaited<ReturnType<typeof getOrder>>;
-        try {
-          orderStatus = await getOrder(gtcOrderId, direction);
-        } catch (getOrderErr) {
-          // Transient network / API error — order state is unknown.
-          // Keep the conviction lock: prevents a duplicate GTC next tick.
-          // The lock clears automatically on window transition.
-          logger.error(
-            { sym, direction, windowKey, gtcOrderId, err: String(getOrderErr) },
-            "[kalshi-bot] conviction GTC: getOrder threw (network/API error) — KEEPING LOCK; no retry this window",
-          );
-          return;
-        }
-
-        // getOrder null = HTTP 404 only (order not in Kalshi's active order list).
-        // 404 is an UNKNOWN TERMINAL STATE: the order could have been filled and
-        // already cleared by the exchange, OR it was cancelled/rejected.
-        // We cannot tell which — therefore we KEEP the conviction lock to prevent
-        // a duplicate entry.  The lock clears automatically on window transition.
-        // A human can reconcile the order state via the Kalshi dashboard.
-        if (orderStatus === null) {
-          logger.error(
-            { sym, direction, windowKey, gtcOrderId },
-            "[kalshi-bot] conviction GTC: getOrder 404 — order state UNKNOWN (may be filled or cancelled); KEEPING LOCK; reconcile manually",
-          );
-          return;
-        }
-
-        const gtcFilledCount = orderStatus.filledCount;
-
-        if (gtcFilledCount === 0) {
-          // No fill in 2 s — cancel the GTC.
-          //   • cancel returns true → confirmed cancelled; release lock.
-          //   • cancel returns false (404) → order already gone from exchange;
-          //     since getOrder just showed filledCount=0 and it's now 404, the
-          //     exchange must have cancelled it between the two calls; release lock.
-          //   • cancel throws → genuine network failure; cannot confirm the GTC
-          //     is off the book; keep lock to prevent duplicate order next tick.
-          let cancelOk = false;
+        // ── Helper: cancel GTC remainder, then record fills ───────────────────
+        // Used by both Phase A (immediate fill) and Phase B (delayed fill).
+        // If remainder cancel throws, STILL record confirmed fills (exchange
+        // exposure must be tracked; resting remainder can be manually cleaned up).
+        const cancelRemainderAndRecord = async (
+          filledCount: number,
+          avgPriceFromStatus: number | null,
+        ) => {
           try {
-            const cancelled = await cancelOrder(gtcOrderId);
-            // true = confirmed cancelled; false = 404 (already gone = exchange-cancelled)
-            cancelOk = true; // both true and false mean "order is off the book"
+            const remainderOk = await cancelOrder(gtcOrderId!);
             logger.info(
-              { sym, direction, windowKey, gtcOrderId, cancelConfirmed: cancelled },
-              "[kalshi-bot] conviction GTC: no fill in 2 s — cancelled (or exchange-cancelled); releasing lock for retry",
+              { sym, gtcOrderId, remainderConfirmed: remainderOk, filledCount },
+              "[kalshi-bot] conviction GTC remainder cancel: done (false=already fully filled)",
             );
-          } catch (cancelErr) {
+          } catch (remErr) {
             logger.error(
-              { sym, err: String(cancelErr), gtcOrderId },
-              "[kalshi-bot] conviction GTC cancel threw — KEEPING LOCK; cannot confirm order is off the book",
+              { sym, err: String(remErr), gtcOrderId, filledCount },
+              "[kalshi-bot] conviction GTC remainder cancel threw — recording confirmed fill; reconcile resting remainder manually",
             );
+            // Continue: do NOT return — exposure is on exchange; must be tracked.
           }
-          if (!cancelOk) {
-            return; // lock stays; window clears it on transition
+          result = {
+            filledCount,
+            avgPrice: avgPriceFromStatus ?? gtcResult.avgPrice,
+            orderId: gtcOrderId!,
+          };
+          if (filledCount < contractCount) {
+            logger.warn(
+              { sym, direction, requested: contractCount, filled: filledCount },
+              "[kalshi-bot] conviction GTC partial fill — updating contractCount to actual fill",
+            );
+            contractCount = filledCount;
           }
-          releaseLockForRetry("gtc-timeout-cancelled");
-          return;
-        }
-
-        // ── GTC filled (filledCount > 0) ─────────────────────────────────────
-        // Cancel the remainder BEFORE recording the position.  Unlike IOC which
-        // auto-cancels unfilled quantity, a GTC leaves the remainder resting.
-        // If remainder-cancel throws, STILL record the known fill — leaving
-        // exchange exposure untracked is worse than having an extra resting
-        // order that can be manually cleaned up.
-        try {
-          const remainderOk = await cancelOrder(gtcOrderId);
           logger.info(
-            { sym, gtcOrderId, remainderConfirmed: remainderOk, filledCount: gtcFilledCount },
-            "[kalshi-bot] conviction GTC remainder cancel: done (false=already fully filled)",
+            { sym, direction, windowKey, ticker: kalshiTicker, filledCount, avgPrice: result.avgPrice },
+            "[kalshi-bot] conviction GTC: filled at maker price — proceeding to post-fill zone check",
           );
-        } catch (remainderCancelErr) {
-          logger.error(
-            { sym, err: String(remainderCancelErr), gtcOrderId, filledCount: gtcFilledCount },
-            "[kalshi-bot] conviction GTC remainder cancel threw — recording confirmed fill; reconcile resting remainder manually",
-          );
-          // Continue to record the fill (do NOT return — exposure is on exchange).
-        }
-
-        result = {
-          filledCount: gtcFilledCount,
-          avgPrice: orderStatus.avgPrice ?? gtcResult.avgPrice,
-          orderId: gtcOrderId,
         };
 
-        // GTC partial fill correction (same logic as IOC below).
-        if (gtcFilledCount > 0 && gtcFilledCount < contractCount) {
-          logger.warn(
-            { sym, direction, requested: contractCount, filled: gtcFilledCount },
-            "[kalshi-bot] conviction GTC partial fill — updating contractCount to actual fill",
-          );
-          contractCount = gtcFilledCount;
-        }
+        // ── Phase A: immediate fill (placement response) ──────────────────────
+        // placeOrder is the authoritative fill source.  filledCount > 0 here
+        // means the GTC crossed an existing resting order on placement.
+        if (gtcResult.filledCount > 0) {
+          await cancelRemainderAndRecord(gtcResult.filledCount, gtcResult.avgPrice);
+          // Fall through to the post-fill zone check below.
+        } else {
+          // ── Phase B: 2s wait for market maker pickup ─────────────────────────
+          await new Promise<void>((resolve) => setTimeout(resolve, 2000));
 
-        logger.info(
-          { sym, direction, windowKey, ticker: kalshiTicker, filledCount: gtcFilledCount, avgPrice: result.avgPrice },
-          "[kalshi-bot] conviction GTC: filled at maker price — proceeding to post-fill zone check",
-        );
+          // Check fill status after 2 s.  Do NOT use .catch(()=>null) here:
+          // getOrder() returns null ONLY on HTTP 404; all other failures THROW.
+          // Swallowing throws as null would misclassify a resting order as gone.
+          let orderStatus: Awaited<ReturnType<typeof getOrder>>;
+          let getOrderThrew = false;
+          try {
+            orderStatus = await getOrder(gtcOrderId, direction);
+          } catch (getOrderErr) {
+            getOrderThrew = true;
+            orderStatus = null; // TypeScript requires initialization; not used when threw
+            logger.warn(
+              { sym, direction, windowKey, gtcOrderId, err: String(getOrderErr) },
+              "[kalshi-bot] conviction GTC: getOrder threw (network/API error) — attempting cancel before retry",
+            );
+          }
+
+          if (getOrderThrew) {
+            // Network error — we don't know if the GTC is still resting.
+            // Attempt cancel: if it succeeds (true/false), the order is off
+            // the book and we can safely release the lock for next-tick retry.
+            // If cancel throws, keep lock (order may still be resting).
+            let cancelOk = false;
+            try {
+              await cancelOrder(gtcOrderId);
+              cancelOk = true;
+            } catch (cancelErr) {
+              logger.error(
+                { sym, err: String(cancelErr), gtcOrderId },
+                "[kalshi-bot] conviction GTC cancel after getOrder error threw — KEEPING LOCK; cannot confirm order off book",
+              );
+            }
+            if (cancelOk) {
+              releaseLockForRetry("gtc-get-error-then-cancelled");
+            }
+            return;
+          }
+
+          // getOrder returned null = HTTP 404 (not a throw).
+          // Because Phase A confirmed placement filledCount==0, the order never
+          // filled immediately.  A GTC on an empty book that now returns 404
+          // was cancelled/rejected by the exchange, NOT silently filled-and-cleared.
+          // Release lock for retry (with belt-and-suspenders cancel attempt).
+          if (orderStatus === null) {
+            try { await cancelOrder(gtcOrderId); } catch { /* already gone */ }
+            logger.warn(
+              { sym, direction, windowKey, gtcOrderId },
+              "[kalshi-bot] conviction GTC: getOrder 404 — exchange cancelled resting order (placement=0 fills confirms no silent fill); releasing lock for retry",
+            );
+            releaseLockForRetry("gtc-404-placement-confirmed-no-fill");
+            return;
+          }
+
+          const gtcFilledCount = orderStatus!.filledCount;
+
+          if (gtcFilledCount === 0) {
+            // Still resting with no fill after 2 s — cancel.
+            //   • cancel true/false → order is off the book; release lock retry.
+            //   • cancel throws     → keep lock (can't confirm GTC is cancelled).
+            let cancelOk = false;
+            try {
+              const cancelResult = await cancelOrder(gtcOrderId);
+              cancelOk = true;
+              logger.info(
+                { sym, direction, windowKey, gtcOrderId, cancelConfirmed: cancelResult },
+                "[kalshi-bot] conviction GTC: no fill in 2 s — cancelled; releasing lock for retry",
+              );
+            } catch (cancelErr) {
+              logger.error(
+                { sym, err: String(cancelErr), gtcOrderId },
+                "[kalshi-bot] conviction GTC cancel threw — KEEPING LOCK; cannot confirm order off book",
+              );
+            }
+            if (cancelOk) {
+              releaseLockForRetry("gtc-timeout-no-fill");
+            }
+            return;
+          }
+
+          // filledCount > 0 in the delayed status check — record the fill.
+          await cancelRemainderAndRecord(gtcFilledCount, orderStatus!.avgPrice);
+          // Fall through to the post-fill zone check below.
+        }
       } else {
         // ── IOC TAKER PATH (real book with depth data) ──────────────────────
         const iocResult = await placeOrderWithRetry(
