@@ -1640,68 +1640,29 @@ async function _runBotTick(
     if (obPrices.yesBid == null && obPrices.yesAsk == null) {
       // Empty book — authenticated successfully but no resting orders on either side.
       //
-      // This is NOT the same as a network/auth failure (obPrices == null).  It means
-      // the market exists and Kalshi accepted our credentials, but market makers
-      // haven't posted limit orders yet (common throughout the window, not just at open).
+      // FAIL CLOSED.  Using the public-API poller price as a fallback and placing
+      // a FOK BUY at a limit derived from that price is NOT safe:
       //
-      // Old behaviour: fail-closed and retry next tick.  This caused ZERO bets for
-      // entire windows because the authenticated book is consistently empty across all
-      // coins — market makers post via the public API, not as resting book orders.
+      //   A FOK BUY YES with limit=0.93 fills at the BEST AVAILABLE ASK ≤ 0.93.
+      //   If the real market ask is 0.70 (below zone), the FOK fills at 0.70 —
+      //   immediately triggering the emergency close at a loss.  The poller can lag
+      //   by several minutes and regularly reports prices that diverge from the real
+      //   Kalshi matching engine (observed: poller 0.908 vs real fill at 0.79).
       //
-      // Fix: fall back to the conviction poller's fresh price (≤1 s old) for zone
-      // re-verification and then proceed with the FOK at the lock price.
-      //
-      // Why this is safe (unlike the XRP 88¢ fill):
-      //   • The XRP fill happened because the poller was pointing at the NEXT window's
-      //     market (Kalshi pre-publishes ~10 min early).  We now compute expectedTicker
-      //     deterministically from windowKey, completely bypassing the cache drift.
-      //   • A FOK at the lock price (e.g. 93¢ YES) only fills if a real counterparty
-      //     exists at or below that price.  If the price has moved out of zone since
-      //     the zone check, nobody accepts our limit and the FOK is rejected safely.
-      //   • We still re-verify zone membership here with the poller price before
-      //     submitting — belt-and-suspenders.
-      const pollerSnap = getConvictionLivePrice(sym);
-      const pollerYesAsk = pollerSnap?.yesAsk ?? null;
-      const pollerYesBid = pollerSnap?.yesBid ?? null;
-      if (pollerYesAsk == null && pollerYesBid == null) {
-        // Poller also has no price — nothing to verify against, stay out.
-        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-        if (boostBetSize != null) {
-          maxBetWindowToken.remaining++;
-          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book + no poller price)");
-        }
-        logger.warn(
-          { sym, direction, windowKey, expectedTicker },
-          "[kalshi-bot] conviction live-price gate: empty orderbook and no poller price — fail closed, will retry next tick",
-        );
-        return;
+      // We cannot bound the floor of a BUY FOK fill price — any limit above the
+      // actual ask fills at the actual ask, regardless of our intended zone.
+      // Only the authenticated orderbook gives us a real-time bid/ask we can trust.
+      // If it's empty, the market has no visible liquidity and we must stay out.
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book)");
       }
-      // Re-verify zone using poller price before proceeding.
-      const pollerRefPrice =
-        direction === "yes"
-          ? pollerYesAsk
-          : pollerYesBid != null ? 1 - pollerYesBid : null;
-      if (pollerRefPrice == null || pollerRefPrice < lockPrice - 0.005 || pollerRefPrice > lockPriceCap + 0.005) {
-        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-        if (boostBetSize != null) {
-          maxBetWindowToken.remaining++;
-          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book, poller out of zone)");
-        }
-        logger.info(
-          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap },
-          "[kalshi-bot] conviction live-price gate: empty book — poller price out of zone, releasing lock for retry",
-        );
-        return;
-      }
-      // Poller price is in zone — proceed.  Leave freshYesAsk/freshYesBid null;
-      // the order will be placed as a limit at the configured lock price.
-      // FOK handles the fill-or-reject safely.
-      freshYesAsk = pollerYesAsk;
-      freshYesBid = pollerYesBid;
-      logger.info(
-        { sym, direction, windowKey, expectedTicker, pollerRefPrice, lockPrice, lockPriceCap },
-        "[kalshi-bot] conviction live-price gate: empty book — using poller price, proceeding with FOK at lock price",
+      logger.warn(
+        { sym, direction, windowKey, expectedTicker },
+        "[kalshi-bot] conviction live-price gate: empty orderbook — fail closed (no safe fill-price floor without real book), will retry next tick",
       );
+      return;
     } else {
       freshYesAsk = obPrices.yesAsk;
       freshYesBid = obPrices.yesBid;
