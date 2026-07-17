@@ -2153,18 +2153,41 @@ async function _runBotTick(
         await new Promise<void>((resolve) => setTimeout(resolve, 2000));
 
         // Check fill status after 2 s.
-        const orderStatus = await getOrder(gtcOrderId, direction).catch(() => null);
+        // IMPORTANT: do NOT use .catch(()=>null) here.  getOrder() returns null
+        // ONLY on HTTP 404.  All other failures (network timeout, 5xx, AbortError)
+        // THROW.  Swallowing throws as null would release the conviction lock while
+        // the GTC is still resting → next tick places a duplicate order → double
+        // exposure.  Handle the two cases explicitly:
+        let orderStatus: Awaited<ReturnType<typeof getOrder>>;
+        try {
+          orderStatus = await getOrder(gtcOrderId, direction);
+        } catch (getOrderErr) {
+          // Transient network / API error — order state is unknown.
+          // Keep the conviction lock: prevents a duplicate GTC next tick.
+          // The lock clears automatically on window transition.
+          logger.error(
+            { sym, direction, windowKey, gtcOrderId, err: String(getOrderErr) },
+            "[kalshi-bot] conviction GTC: getOrder threw (network/API error) — KEEPING LOCK; no retry this window",
+          );
+          return;
+        }
 
-        // getOrder null = 404 (order not in Kalshi's active order list) or net
-        // error.  For a GTC placed 2 s ago, 404 means the exchange cancelled/
-        // rejected it (price out of range, market expired, etc.) — filled orders
-        // remain visible with status "executed", not 404. Release lock; retry.
+        // getOrder null = HTTP 404 only (order not in Kalshi's active order list).
+        // For a GTC placed 2 s ago, 404 means the exchange cancelled/rejected it
+        // (price out of range, market expired, etc.) — filled orders remain visible
+        // with status "executed", NOT 404.  Attempt cancel as belt-and-suspenders,
+        // then release lock for retry.
         if (orderStatus === null) {
+          try {
+            await cancelOrder(gtcOrderId); // no-op if already gone; ignore result
+          } catch {
+            // ignore — we already know the order is 404; cancel is belt-and-suspenders
+          }
           logger.warn(
             { sym, direction, windowKey, gtcOrderId },
-            "[kalshi-bot] conviction GTC: getOrder 404/error — order gone from exchange (likely cancelled, not filled); releasing lock for retry",
+            "[kalshi-bot] conviction GTC: getOrder 404 — order gone from exchange (cancelled/rejected, not filled); releasing lock for retry",
           );
-          releaseLockForRetry("getOrder-null");
+          releaseLockForRetry("getOrder-404");
           return;
         }
 
