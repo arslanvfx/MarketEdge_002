@@ -1738,6 +1738,23 @@ async function _runBotTick(
       freshYesBid = obPrices.yesBid;
     }
 
+    // NO orders require freshYesAsk for the cross-check.  If it is null (one-sided
+    // book — bids present but no YES asks), we cannot confirm the spread is tight
+    // and cannot detect a YES-ask bounce.  Fail closed: the 1 s poller will retry.
+    // This is what prevented the 79–82¢ NO fills from the missing freshYesAsk bypass.
+    if (direction === "no" && freshYesAsk == null) {
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (NO order, freshYesAsk null)");
+      }
+      logger.warn(
+        { sym, direction, windowKey, expectedTicker, freshYesBid },
+        "[kalshi-bot] conviction live-price gate: NO order aborted — freshYesAsk null (one-sided book), cannot confirm zone",
+      );
+      return;
+    }
+
     // YES direction: use the fresh YES ask.
     // NO  direction: NO ask = 1 − YES bid (the price paid per NO contract).
     const freshRefPrice =
@@ -1814,7 +1831,11 @@ async function _runBotTick(
     //   freshYesAsk = 0.24 → 0.24 > 0.21 → abort ✓
     //   freshYesAsk = 0.14 → 0.14 ≤ 0.21 → proceed ✓
     if (direction === "no" && freshYesAsk != null) {
-      const yesAskBounceThreshold = (1 - lockPrice) + 0.03; // target + 3¢ spread allowance (was 10¢ — too wide, allowed 17¢ YES = 83¢ NO)
+      // Strict zone: only allow 1¢ spread above the YES-side floor.
+      // Zone [90¢,95¢] NO = [5¢,10¢] YES → floor = 1−lockPrice = 10¢ → threshold = 11¢.
+      // Any YES ask above 11¢ means the NO fill will land below 89¢ — outside zone.
+      // Was +0.03 (→ 13¢): allowed ETH/XRP/BTC NO fills at 87–89¢ (1-2¢ below floor).
+      const yesAskBounceThreshold = (1 - lockPrice) + 0.01; // 1¢ spread allowance only
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
