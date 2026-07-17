@@ -116,9 +116,19 @@ export function getKalshiCachedData(symbol: string): {
 // is stale or missing price fields.
 // ---------------------------------------------------------------------------
 
+export type OrderbookPrices = {
+  yesAsk: number | null;
+  yesBid: number | null;
+  /** YES bids [price_dollars, quantity], ascending price (best bid = last).  Empty when unavailable. */
+  yesDepth: Array<[number, number]>;
+  /** NO bids [price_dollars, quantity], ascending price (best bid = last).  Empty when unavailable.
+   *  YES ask at price P corresponds to the NO bid at (1-P). */
+  noDepth: Array<[number, number]>;
+};
+
 export async function fetchOrderbookPrices(
   ticker: string,
-): Promise<{ yesAsk: number | null; yesBid: number | null } | null> {
+): Promise<OrderbookPrices | null> {
   const keyId = process.env["KALSHI_API_KEY_ID"] ?? null;
   const rawKey = process.env["KALSHI_PRIVATE_KEY"] ?? null;
   if (!keyId || !rawKey) return null;
@@ -183,6 +193,15 @@ export async function fetchOrderbookPrices(
     if (fp) {
       const yesArr = fp.yes_dollars ?? [];
       const noArr  = fp.no_dollars  ?? [];
+
+      // Parse depth arrays: [string_price, string_qty] → [number, number]
+      const yesDepth: Array<[number, number]> = yesArr
+        .map(([p, q]) => [Number(p), Number(q)] as [number, number])
+        .filter(([p, q]) => Number.isFinite(p) && Number.isFinite(q));
+      const noDepth: Array<[number, number]> = noArr
+        .map(([p, q]) => [Number(p), Number(q)] as [number, number])
+        .filter(([p, q]) => Number.isFinite(p) && Number.isFinite(q));
+
       if (yesArr.length === 0 && noArr.length === 0) {
         // Kalshi authenticated the request and confirmed the book — it is
         // simply illiquid at this moment (no resting limit orders on either
@@ -190,20 +209,21 @@ export async function fetchOrderbookPrices(
         // distinguish "auth/network failure" (null) from "authenticated empty
         // book" and fall back to the freshly-cached conviction-poller price.
         logger.warn({ ticker }, "[kalshi] fetchOrderbookPrices: orderbook_fp authenticated but both sides empty — falling back to cached price");
-        return { yesBid: null, yesAsk: null };
+        return { yesBid: null, yesAsk: null, yesDepth: [], noDepth: [] };
       }
-      const bestYesBid = yesArr.length > 0 ? Number(yesArr[yesArr.length - 1][0]) : null;
-      const bestNoBid  = noArr.length  > 0 ? Number(noArr[noArr.length - 1][0])  : null;
+      const bestYesBid = yesDepth.length > 0 ? yesDepth[yesDepth.length - 1][0] : null;
+      const bestNoBid  = noDepth.length  > 0 ? noDepth[noDepth.length - 1][0]   : null;
       const yesBid = bestYesBid != null && Number.isFinite(bestYesBid) ? bestYesBid : null;
       const yesAsk = bestNoBid  != null && Number.isFinite(bestNoBid)  ? 1 - bestNoBid : null;
       if (yesBid == null && yesAsk == null) {
         logger.warn({ ticker }, "[kalshi] fetchOrderbookPrices: orderbook_fp present but all entries non-finite");
-        return { yesBid: null, yesAsk: null };
+        return { yesBid: null, yesAsk: null, yesDepth: [], noDepth: [] };
       }
-      return { yesBid, yesAsk };
+      return { yesBid, yesAsk, yesDepth, noDepth };
     }
 
     // ── Legacy format: orderbook (integer cents 0-100) ──────────────────────
+    // Depth arrays not available from legacy format — only best bid/ask parsed.
     const ob = body.orderbook;
     const yesBids = ob?.yes ?? [];
     const noBids  = ob?.no  ?? [];
@@ -219,6 +239,8 @@ export async function fetchOrderbookPrices(
     return {
       yesBid: bestYesBidCents != null ? bestYesBidCents / 100 : null,
       yesAsk: bestNoBidCents  != null ? (100 - bestNoBidCents) / 100 : null,
+      yesDepth: [],
+      noDepth: [],
     };
   } catch (err) {
     logger.warn(

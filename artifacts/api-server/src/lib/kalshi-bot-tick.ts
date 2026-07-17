@@ -1749,6 +1749,66 @@ async function _runBotTick(
     } else {
       freshYesAsk = obPrices.yesAsk;
       freshYesBid = obPrices.yesBid;
+
+      // ── Pre-order depth check ─────────────────────────────────────────────
+      // A FOK BUY fills at the cheapest available ask ≤ the limit, regardless
+      // of zone.  If the book has only 1-2 contracts at in-zone prices and 20
+      // at 70¢, all 15 contracts fill at a blended ~71¢ — far below zone.
+      //
+      // Fix: count contracts available in [lockPrice, lockPriceCap] BEFORE
+      // placing.  If the book cannot fill our whole order within zone, abort.
+      // The 1-second poller retries automatically on the next tick.
+      //
+      // Mapping:
+      //   YES BUY  → needs YES asks in [lockPrice, lockPriceCap]
+      //              YES ask at price P = NO bid at (1-P)
+      //              → scan noDepth for prices in [1-lockPriceCap, 1-lockPrice]
+      //   NO  BUY  → needs NO asks in [lockPrice, lockPriceCap]
+      //              NO ask at price P = YES bid at (1-P)
+      //              → scan yesDepth for prices in [1-lockPriceCap, 1-lockPrice]
+      //
+      // Only applies when depth arrays are available (orderbook_fp format).
+      const hasDepthData = obPrices.yesDepth.length > 0 || obPrices.noDepth.length > 0;
+      if (hasDepthData) {
+        const depthFloor = 1 - lockPriceCap;   // e.g. 0.04 for zone [0.91, 0.96]
+        const depthCap   = 1 - lockPrice;      // e.g. 0.09 for zone [0.91, 0.96]
+        const depthArr   = direction === "yes" ? obPrices.noDepth : obPrices.yesDepth;
+
+        const inZoneContracts = depthArr
+          .filter(([price]) => price >= depthFloor && price <= depthCap)
+          .reduce((sum, [, qty]) => sum + qty, 0);
+
+        // Estimate needed contracts using the current ask price.
+        // This mirrors the actual sizing formula (betSize / expectedFillCost).
+        const betSizeEst = boostBetSize ?? S.config.maxBetSize ?? S.config.betSize ?? 20;
+        const fillCostEst =
+          direction === "yes"
+            ? (freshYesAsk ?? lockPrice)
+            : (freshYesBid != null ? 1 - freshYesBid : lockPrice);
+        const neededContracts = Math.ceil(betSizeEst / Math.max(fillCostEst, lockPrice));
+
+        if (inZoneContracts < neededContracts) {
+          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+          if (boostBetSize != null) {
+            maxBetWindowToken.remaining++;
+            logger.info({ sym }, "[kalshi-bot] conviction depth gate: max-bet token restored (thin in-zone book)");
+          }
+          logger.warn(
+            {
+              sym, direction, windowKey,
+              inZoneContracts, neededContracts,
+              depthFloor: depthFloor.toFixed(3), depthCap: depthCap.toFixed(3),
+              lockPrice, lockPriceCap,
+            },
+            "[kalshi-bot] conviction depth gate: insufficient in-zone liquidity — aborting to prevent out-of-zone fill; retrying next tick",
+          );
+          return;
+        }
+        logger.debug(
+          { sym, direction, windowKey, inZoneContracts, neededContracts },
+          "[kalshi-bot] conviction depth gate: sufficient in-zone liquidity",
+        );
+      }
     }
 
     // NO orders require freshYesAsk for the cross-check.  If it is null (one-sided
