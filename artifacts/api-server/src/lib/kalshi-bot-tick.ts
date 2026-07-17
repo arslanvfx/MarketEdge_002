@@ -2159,12 +2159,22 @@ async function _runBotTick(
           // duplicate order from the next tick would double our exposure.
           let cancelSucceeded = false;
           try {
-            await cancelOrder(gtcOrderId);
-            cancelSucceeded = true;
+            // cancelOrder returns true (cancelled), false (404 — order already
+            // gone from the book, state ambiguous: may have just been filled or
+            // may have expired).  Treat false the same as a throw — keep lock.
+            const cancelled = await cancelOrder(gtcOrderId);
+            if (cancelled) {
+              cancelSucceeded = true;
+            } else {
+              logger.error(
+                { sym, gtcOrderId, direction, windowKey },
+                "[kalshi-bot] conviction GTC cancel returned false (order already gone — may be filled) — KEEPING LOCK; reconcile manually",
+              );
+            }
           } catch (cancelErr) {
             logger.error(
               { sym, err: String(cancelErr), gtcOrderId },
-              "[kalshi-bot] conviction GTC cancel failed — KEEPING LOCK to prevent duplicate entry; reconcile manually",
+              "[kalshi-bot] conviction GTC cancel threw — KEEPING LOCK to prevent duplicate entry; reconcile manually",
             );
           }
           if (!cancelSucceeded) {
@@ -2268,6 +2278,12 @@ async function _runBotTick(
           contractCount = iocResult.filledCount;
         }
       }
+
+      // ── FILL ACCOUNTING (both GTC and IOC paths) ───────────────────────────
+      // Must happen AFTER the branch so both paths feed the same downstream
+      // accounting (post-fill zone check, emergency close, position recording).
+      fillPrice = result.avgPrice ?? yesPrice;
+      orderId   = result.orderId;
 
       // Post-fill zone check (Layer 3 — hard guarantee).
       // Kalshi FOK BUY fills at any ask ≤ limit (no floor), so price "improvement"
