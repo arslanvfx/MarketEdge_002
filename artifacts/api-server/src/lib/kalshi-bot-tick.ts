@@ -522,18 +522,26 @@ async function _runBotTick(
       // When enabled, the threshold is user-adjustable (default 0.92).
       const bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
       const bypassThreshold = S.config.convictionEarlyBypassThreshold ?? 0.92;
-      const isExtreme = bypassEnabled &&
-        yesPrice !== null &&
-        (yesPrice >= bypassThreshold || yesPrice <= +(1 - bypassThreshold).toFixed(4));
+      // For NO bets the actual fill cost is 1 − yesBid (the NO ask), NOT yesAsk.
+      // At a 2¢ spread: YES ask=6¢, YES bid=4¢ → yesPrice=6¢, but NO ask=96¢.
+      // Checking only yesPrice ≤ (1−threshold) uses the wrong side of the spread
+      // and silently fails even when NO is clearly past the bypass threshold.
+      // Read yesBid from the in-memory cache (no I/O) and check the actual NO ask.
+      const _bypassKd    = getKalshiCachedData(sym);
+      const _noActualAsk = _bypassKd?.yesBid != null ? 1 - _bypassKd.yesBid : null;
+      const isExtreme = bypassEnabled && (
+        (yesPrice !== null && (yesPrice >= bypassThreshold || yesPrice <= +(1 - bypassThreshold).toFixed(4))) ||
+        (_noActualAsk !== null && _noActualAsk >= bypassThreshold)
+      );
       if (!isExtreme) {
         logger.debug(
-          { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice, bypassEnabled, bypassThreshold },
+          { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice, noActualAsk: _noActualAsk, bypassEnabled, bypassThreshold },
           "[kalshi-bot] early-window lockout — timer active",
         );
         return;
       }
       logger.debug(
-        { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice, bypassThreshold },
+        { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice, noActualAsk: _noActualAsk, bypassThreshold },
         "[kalshi-bot] early-window lockout bypassed — extreme price crossed threshold",
       );
     }
@@ -1530,12 +1538,17 @@ async function _runBotTick(
     if (_convMinEntry > 0 && secondsElapsedNow < _convMinEntry * 60) {
       const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
       const _bypassThreshold = S.config.convictionEarlyBypassThreshold ?? 0.92;
-      const _isExtreme = _bypassEnabled &&
-        yesPrice !== null &&
-        (yesPrice >= _bypassThreshold || yesPrice <= +(1 - _bypassThreshold).toFixed(4));
+      // Same spread-side fix as the minWindowEntryMinutes bypass above:
+      // use the actual NO ask (1 − yesBid) not yesAsk for the NO direction check.
+      const _bypassKd2    = getKalshiCachedData(sym);
+      const _noActualAsk2 = _bypassKd2?.yesBid != null ? 1 - _bypassKd2.yesBid : null;
+      const _isExtreme = _bypassEnabled && (
+        (yesPrice !== null && (yesPrice >= _bypassThreshold || yesPrice <= +(1 - _bypassThreshold).toFixed(4))) ||
+        (_noActualAsk2 !== null && _noActualAsk2 >= _bypassThreshold)
+      );
       if (_isExtreme) {
         logger.debug(
-          { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), yesPrice, _bypassThreshold },
+          { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), yesPrice, noActualAsk: _noActualAsk2, _bypassThreshold },
           "[kalshi-bot] conviction: min entry wait bypassed — extreme price crossed threshold",
         );
       } else {
