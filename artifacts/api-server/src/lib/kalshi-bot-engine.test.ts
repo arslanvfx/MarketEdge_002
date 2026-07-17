@@ -51,6 +51,9 @@ import {
   applyBetOutcome,
   tickCircuitBreakerWindow,
   applyLockPrice090Migration,
+  applyLockPrice093Bootstrap,
+  applyLockPrice092Bootstrap,
+  deriveConvictionZone,
   type BotConfig,
   type CorePairInputs,
   type CircuitBreakerState,
@@ -1770,4 +1773,80 @@ test("lockPrice migration: fully migrated config → no-op", () => {
   assert.equal(res.changed, false);
   assert.equal(res.migrated, false);
   assert.equal(cfg.kalshiLockPrice, 0.90);
+});
+
+// ---------------------------------------------------------------------------
+// deriveConvictionZone — single source of truth for the asymmetric −2¢/+3¢
+// conviction entry zone (user spec 2026-07-17: sweet spot 92¢ → [90¢, 95¢])
+// ---------------------------------------------------------------------------
+
+test("deriveConvictionZone: target 0.92 → asymmetric zone [0.90, 0.95]", () => {
+  const z = deriveConvictionZone(0.92);
+  assert.equal(z.lockPrice, 0.90);
+  assert.equal(z.lockPriceCap, 0.95);
+});
+
+test("deriveConvictionZone: 89¢ is BELOW the floor (never fill at 89 or less)", () => {
+  const z = deriveConvictionZone(0.92);
+  assert.ok(0.89 < z.lockPrice);
+  assert.ok(0.90 >= z.lockPrice); // 90¢ is the first fillable cent
+});
+
+test("deriveConvictionZone: 95¢ fillable, anything above is not", () => {
+  const z = deriveConvictionZone(0.92);
+  assert.ok(0.95 <= z.lockPriceCap);
+  assert.ok(0.955 > z.lockPriceCap);
+  assert.ok(0.96 > z.lockPriceCap);
+});
+
+test("deriveConvictionZone: no floating-point drift on cent boundaries", () => {
+  // 0.92 - 0.02 = 0.9000000000000001 in raw IEEE754 — the helper must round.
+  const z = deriveConvictionZone(0.92);
+  assert.equal(z.lockPrice, 0.9);
+  assert.equal(z.lockPriceCap, 0.95);
+});
+
+// ---------------------------------------------------------------------------
+// applyLockPrice092Bootstrap — one-time 0.93 → 0.92 target bootstrap
+// ---------------------------------------------------------------------------
+
+test("092 bootstrap: value at 0.93 → bumped to 0.92 with flag", () => {
+  const cfg = migCfg({ kalshiLockPrice: 0.93, lockPrice092Bootstrap: undefined });
+  const res = applyLockPrice092Bootstrap(cfg);
+  assert.equal(res.changed, true);
+  assert.equal(res.bumped, true);
+  assert.equal(cfg.kalshiLockPrice, 0.92);
+  assert.equal(cfg.lockPrice092Bootstrap, true);
+});
+
+test("092 bootstrap: custom value (0.94) → flag set, value untouched", () => {
+  const cfg = migCfg({ kalshiLockPrice: 0.94, lockPrice092Bootstrap: undefined });
+  const res = applyLockPrice092Bootstrap(cfg);
+  assert.equal(res.changed, true);
+  assert.equal(res.bumped, false);
+  assert.equal(cfg.kalshiLockPrice, 0.94);
+  assert.equal(cfg.lockPrice092Bootstrap, true);
+});
+
+test("092 bootstrap: flag already set → no-op even at 0.93", () => {
+  const cfg = migCfg({ kalshiLockPrice: 0.93, lockPrice092Bootstrap: true });
+  const res = applyLockPrice092Bootstrap(cfg);
+  assert.equal(res.changed, false);
+  assert.equal(res.bumped, false);
+  assert.equal(cfg.kalshiLockPrice, 0.93);
+});
+
+test("092 bootstrap: user later sets 0.93 after flag → preserved on restart", () => {
+  const cfg = migCfg({ kalshiLockPrice: 0.93, lockPrice092Bootstrap: true });
+  applyLockPrice092Bootstrap(cfg);
+  assert.equal(cfg.kalshiLockPrice, 0.93);
+});
+
+test("092 bootstrap: fresh-install chain 0.90 → 0.93 → 0.92", () => {
+  const cfg = migCfg({ kalshiLockPrice: 0.90, lockPrice093Bootstrap: undefined, lockPrice092Bootstrap: undefined });
+  applyLockPrice093Bootstrap(cfg);
+  assert.equal(cfg.kalshiLockPrice, 0.93);
+  const res = applyLockPrice092Bootstrap(cfg);
+  assert.equal(res.bumped, true);
+  assert.equal(cfg.kalshiLockPrice, 0.92);
 });

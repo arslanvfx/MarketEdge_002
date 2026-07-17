@@ -12,7 +12,7 @@ import {
   DEFAULT_BOT_CONFIG, BET_PROFILES, computeDynamicBetSize, makeBotDecision,
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
-  applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, buildStreakSnapshot, restoreStreakState,
+  applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, buildStreakSnapshot, restoreStreakState,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -124,6 +124,16 @@ export async function loadBotConfigFromDB(): Promise<void> {
         _persistModeToConfig().catch(() => {});
       } else if (bootstrap.changed) {
         // Flag was set for the first time but value was already custom — still persist the flag.
+        _persistModeToConfig().catch(() => {});
+      }
+
+      // One-time bootstrap: 0.93 → 0.92 target (asymmetric zone [90¢, 95¢]).
+      // Runs after the 093 bootstrap so a fresh install chains 0.90 → 0.93 → 0.92.
+      const bootstrap092 = applyLockPrice092Bootstrap(S.config);
+      if (bootstrap092.bumped) {
+        logger.info({ kalshiLockPrice: S.config.kalshiLockPrice }, "[kalshi-bot] bootstrap: kalshiLockPrice 0.93 → 0.92 (zone [90¢, 95¢]) — persisting");
+        _persistModeToConfig().catch(() => {});
+      } else if (bootstrap092.changed) {
         _persistModeToConfig().catch(() => {});
       }
 

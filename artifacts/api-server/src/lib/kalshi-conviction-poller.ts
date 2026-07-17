@@ -32,6 +32,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
 import { S, convictionAbortCooldown, convictionFiredThisWindow } from "./kalshi-bot-state";
+import { deriveConvictionZone } from "./kalshi-bot-engine";
 import { logger } from "./logger";
 
 const POLL_INTERVAL_MS = 1_000;
@@ -56,8 +57,7 @@ async function pollOnce(): Promise<void> {
   // Derive the conviction zone once per poll from the current config.
   // Matches the derivation in kalshi-bot-tick.ts exactly.
   const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
-  const lockPrice    = gateTarget - 0.02;
-  const lockPriceCap = gateTarget + 0.02;
+  const { lockPrice, lockPriceCap } = deriveConvictionZone(gateTarget);
 
   // Current 15-min window key — used to form the cooldown Map key.
   const nowMs     = Date.now();

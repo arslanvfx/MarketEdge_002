@@ -58,6 +58,8 @@ import {
   applyStartupModeRestore,
   applyLockPrice090Migration,
   applyLockPrice093Bootstrap,
+  applyLockPrice092Bootstrap,
+  deriveConvictionZone,
   DEFAULT_BOT_CONFIG,
   computeDynamicBetSize,
   computeKellyMultiplier,
@@ -114,6 +116,9 @@ export {
   // One-time conviction lock-price migration (pure, DB-free, unit-testable).
   applyLockPrice090Migration,
   applyLockPrice093Bootstrap,
+  applyLockPrice092Bootstrap,
+  // Conviction zone derivation — single source of truth for [floor, cap].
+  deriveConvictionZone,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,
@@ -448,10 +453,11 @@ function _makeBotDecisionInner(
   // Delegates to the pure computeConvictionDecision in kalshi-bot-engine-core.
   // See that function's JSDoc for the full zone map and invariant documentation.
   if (decisionMode === "conviction") {
-    // The slider sets a single target (e.g. 0.90).  We auto-apply ±2 ¢ so the
-    // entry window is always [target−0.02, target+0.02].
-    // Slider at 90¢ → window [88¢–92¢]; slider at 91¢ → window [89¢–93¢].
+    // The slider sets a single target (e.g. 0.92).  The asymmetric −2¢/+3¢
+    // zone is derived by deriveConvictionZone (single source of truth):
+    // target 92¢ → window [90¢–95¢].
     const cvTarget  = config.kalshiLockPrice ?? 0.90;
+    const cvZone    = deriveConvictionZone(cvTarget);
     // Pull the live orderbook ask/bid from the Kalshi cache so the conviction
     // trigger uses what you actually PAY (the ask), not the mid-price.
     // Without this, a wide NO spread can push the mid to the lock threshold
@@ -461,8 +467,8 @@ function _makeBotDecisionInner(
       yesPrice,
       yesAsk:        cvCached?.yesAsk ?? null,
       yesBid:        cvCached?.yesBid ?? null,
-      lockPrice:     cvTarget - 0.02,
-      lockPriceCap:  cvTarget + 0.02,
+      lockPrice:     cvZone.lockPrice,
+      lockPriceCap:  cvZone.lockPriceCap,
       minConfidence: config.minConfidence,
     });
     const cvAgreementTarget: BotDecisionAction | null =

@@ -13,6 +13,7 @@ import {
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
+  deriveConvictionZone,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -568,12 +569,13 @@ async function _runBotTick(
   // defeats the purpose of conviction mode.  This mirrors the same bypass used
   // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
-    // Derive the same ±2 ¢ window used by the engine so the bypass is in sync.
+    // Derive the same zone floor used by the engine so the bypass is in sync.
     const convTarget = S.config.kalshiLockPrice ?? 0.90;
+    const convZoneFloor = deriveConvictionZone(convTarget).lockPrice;
     const proximityIsConvictionExtreme =
       S.config.decisionMode === "conviction" &&
       yesPrice !== null &&
-      (yesPrice >= convTarget - 0.02 || yesPrice <= 1 - (convTarget - 0.02));
+      (yesPrice >= convZoneFloor || yesPrice <= 1 - convZoneFloor);
 
     if (proximityIsConvictionExtreme) {
       logger.debug(
@@ -1571,14 +1573,13 @@ async function _runBotTick(
   let freshYesAsk: number | null = null;
   let freshYesBid: number | null = null;
   if (S.config.decisionMode === "conviction") {
-    // Derive the ±2 ¢ window from the single slider value (kalshiLockPrice).
-    // This matches the engine derivation in kalshi-bot-engine.ts exactly.
-    const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
-    const lockPrice    = gateTarget - 0.02;
-    // Symmetric ±2¢ zone around the target (user requirement):
-    // target 90¢ → zone [88¢, 92¢]. Below the floor: price can flip, too
+    // Derive the asymmetric −2¢/+3¢ zone from the single slider value
+    // (kalshiLockPrice) via deriveConvictionZone — single source of truth,
+    // shared with the engine, the conviction poller, and the post-fill check.
+    // Target 92¢ → zone [90¢, 95¢]. Below the floor: price can flip, too
     // risky. Above the cap: margin too small, not worth the entry.
-    const lockPriceCap = gateTarget + 0.02;
+    const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
+    const { lockPrice, lockPriceCap } = deriveConvictionZone(gateTarget);
     // Compute the current window's ticker deterministically from windowKey rather
     // than reading it from kalshiTargetCache.  The cache can switch to the NEXT
     // window's market ~10 min into the current window once Kalshi pre-publishes
@@ -2043,8 +2044,7 @@ async function _runBotTick(
       //     before it is ever recorded as open, then return
       if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
         const _gt   = S.config.kalshiLockPrice ?? 0.90;
-        const _lp   = +(_gt - 0.02).toFixed(4); // e.g. 0.88 for target 0.90
-        const _lpCap = +(_gt + 0.02).toFixed(4); // e.g. 0.92 for target 0.90
+        const { lockPrice: _lp, lockPriceCap: _lpCap } = deriveConvictionZone(_gt); // e.g. [0.90, 0.95] for target 0.92
         // Kalshi always returns avgPrice in YES-side terms.
         // For YES bets: fill price IS avgPrice.
         // For NO  bets: fill price = 1 − avgPrice (what we paid per NO contract).

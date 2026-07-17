@@ -955,10 +955,11 @@ export interface BotConfig {
   convictionEarlyBypassEnabled?: boolean;   // when true (default), minWindowEntryMinutes is bypassed when yesPrice crosses the extreme threshold; false = timer always respected
   convictionEarlyBypassThreshold?: number;  // YES price threshold for the early bypass (default 0.92); only active when convictionEarlyBypassEnabled=true
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
-  kalshiLockPrice?: number;           // conviction only: entry target (default 0.90; ±2¢ zone derived around it → [88¢, 92¢])
+  kalshiLockPrice?: number;           // conviction only: entry target (current 0.92; asymmetric −2¢/+3¢ zone via deriveConvictionZone → [90¢, 95¢])
   lockPrice091Migrated?: boolean;     // legacy one-time migration marker: 0.90 → 0.91 target bump (superseded)
   lockPrice090Migrated?: boolean;     // one-time startup migration marker: 0.91 → 0.90 target (zone [88¢, 92¢])
-  lockPrice093Bootstrap?: boolean;    // one-time startup bootstrap: nudge the old 0.90 default → 0.93 user preference
+  lockPrice093Bootstrap?: boolean;    // one-time startup bootstrap: nudge the old 0.90 default → 0.93 user preference (superseded by 092)
+  lockPrice092Bootstrap?: boolean;    // one-time startup bootstrap: 0.93 → 0.92 target (asymmetric zone [90¢, 95¢])
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.30 = sell when contract drops to 30¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately (legacy)
@@ -1445,6 +1446,47 @@ export function applyLockPrice093Bootstrap(
   const bumped = config.kalshiLockPrice === 0.90;
   if (bumped) config.kalshiLockPrice = 0.93;
   config.lockPrice093Bootstrap = true;
+  return { changed: true, bumped };
+}
+
+/**
+ * deriveConvictionZone — single source of truth for the conviction entry zone.
+ *
+ * The user's spec (2026-07-17): sweet spot 92¢, fills allowed ONLY in
+ * [90¢, 95¢] — never at 89¢ or below ("too risky, price can flip") and never
+ * above 95¢ ("margin too small").  That is an ASYMMETRIC zone around the
+ * target: floor = target − 2¢, cap = target + 3¢.
+ *
+ * Every zone consumer (engine decision, tick live-price gate, conviction
+ * poller, emergency-close check) MUST derive its bounds through this helper
+ * so the layers can never drift apart again.
+ */
+export function deriveConvictionZone(target: number): {
+  lockPrice: number;
+  lockPriceCap: number;
+} {
+  return {
+    lockPrice:    +(target - 0.02).toFixed(4),
+    lockPriceCap: +(target + 0.03).toFixed(4),
+  };
+}
+
+/**
+ * applyLockPrice092Bootstrap — one-time startup bootstrap that moves the
+ * conviction target from 0.93 to the user's updated preference of 0.92
+ * (asymmetric zone [90¢, 95¢] via deriveConvictionZone).
+ *
+ * Only fires once (guarded by lockPrice092Bootstrap flag).  Only changes the
+ * value when it is exactly 0.93 (the previous bootstrap value) so a user who
+ * has deliberately set a different value is never silently overridden.
+ */
+export function applyLockPrice092Bootstrap(
+  config: BotConfig,
+): { changed: boolean; bumped: boolean } {
+  if (config.lockPrice092Bootstrap) return { changed: false, bumped: false };
+  const bumped = config.kalshiLockPrice === 0.93;
+  if (bumped) config.kalshiLockPrice = 0.92;
+  config.lockPrice092Bootstrap = true;
   return { changed: true, bumped };
 }
 
