@@ -2206,7 +2206,11 @@ async function _runBotTick(
             "[kalshi-bot] conviction fill below zone but above stop floor — keeping position, stop-loss armed",
           );
           // Fall through → position recorded as open below.
-        } else if (convFillPrice < ecFloor || convFillPrice > _lpCap) {
+        } else if (convFillPrice < ecFloor) {
+          // Fills ABOVE lockPriceCap are intentionally allowed through — paying
+          // 97¢ on a YES that pays $1 is still a winning position; selling
+          // immediately would guarantee a loss.  Only truly bad fills (below
+          // the emergency floor) are closed right away.
           logger.error(
             {
               sym, direction, windowKey,
@@ -2215,7 +2219,7 @@ async function _runBotTick(
               lockPrice: _lp, lockPriceCap: _lpCap, ecFloor,
               contractCount, ticker: kalshiTicker,
             },
-            "[kalshi-bot] CONVICTION FILL OUTSIDE EMERGENCY FLOOR — immediate close",
+            "[kalshi-bot] CONVICTION FILL BELOW EMERGENCY FLOOR — immediate close",
           );
           let emergencyExitAvgPrice: number | null = null;
           try {
