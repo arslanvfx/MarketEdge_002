@@ -1247,6 +1247,13 @@ async function _runBotTick(
             { sym, reason: traj.reason, velocity: traj.velocity.toFixed(2), currentMarginPct: traj.currentMarginPct.toFixed(3), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1), direction },
             "[kalshi-bot] trajectory gate — BLOCKED: max bet skipped (price momentum too close to target)",
           );
+          // Clear the pre-selection so the next loop tick can pick a different
+          // stable candidate.  Without this, all other stable coins see
+          // preSelected !== sym → return null (regular size), and the token is
+          // permanently wasted on the one blocked coin for the entire window.
+          if (maxBetCandidateForWindow.get(windowKey) === sym) {
+            maxBetCandidateForWindow.delete(windowKey);
+          }
           return null;
         }
         logger.info(
@@ -1896,27 +1903,22 @@ async function _runBotTick(
     // (Guard 3 above uses ±0.005 only as a pre-filter on the poller price;
     // this gate is the authoritative check.)
     const GATE_BUFFER = 0;
-    const inWindow =
-      freshRefPrice != null &&
-      freshRefPrice >= lockPrice - GATE_BUFFER &&
-      freshRefPrice <= lockPriceCap + GATE_BUFFER;
-    if (!inWindow) {
-      // Release the lock so a future tick can re-evaluate if price recovers.
+    // Split zone check into two independent conditions:
+    //   belowFloor — price reversed back through the entry floor (dangerous: abort)
+    //   aboveCap   — price moved further PAST the cap in our direction (good: continue)
+    // Previously both were treated as "!inWindow → abort", which meant every
+    // NO bet at 97–99¢ was killed even though the market had moved MORE in our
+    // favor and the FOK at the capped limit was still achievable.
+    const belowFloor = freshRefPrice == null || freshRefPrice < lockPrice - GATE_BUFFER;
+    const aboveCap   = freshRefPrice != null && freshRefPrice > lockPriceCap + GATE_BUFFER;
+
+    if (belowFloor) {
+      // Price reversed back through the entry floor — abort and clear lock so
+      // a future tick can re-evaluate if price recovers into the zone.
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-      // Restore the max-bet token if this coin had already claimed it — the
-      // order never executed, so the slot must be returned for the next
-      // qualifying coin this window.
       if (boostBetSize != null) {
         maxBetWindowToken.remaining++;
-        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (order aborted before fill)");
-      }
-      // Record abort time ONLY for settled-upward exits (price above cap).
-      // These indicate the market has moved decisively past the zone and the
-      // poller needs time to propagate the new price.  Below-floor dips may
-      // recover into zone — setting the cooldown there would block valid
-      // re-entries after a transient dip back through 88¢.
-      if (freshRefPrice != null && freshRefPrice > lockPriceCap) {
-        convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
+        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (price reversed below floor)");
       }
       logger.warn(
         {
@@ -1925,9 +1927,25 @@ async function _runBotTick(
           lockPrice, lockPriceCap, gateBuffer: GATE_BUFFER,
           freshYesAsk, freshYesBid,
         },
-        "[kalshi-bot] conviction live-price gate: price moved outside window — order aborted",
+        "[kalshi-bot] conviction live-price gate: price reversed below floor — order aborted",
       );
       return;
+    }
+
+    if (aboveCap) {
+      // Price has moved PAST the cap further in our direction — this is a
+      // better outcome than being in-window.  Proceed to place the FOK at
+      // orderLimitPrice, which is already clamped to lockPriceCap by the sizing
+      // logic (lines below).  Do NOT abort and do NOT set the abort cooldown —
+      // the market is moving in our favour and the FOK will fill or 0-fill.
+      logger.info(
+        {
+          sym, direction, windowKey,
+          freshRefPrice: +freshRefPrice.toFixed(4),
+          lockPrice, lockPriceCap,
+        },
+        "[kalshi-bot] conviction live-price gate: price past cap — proceeding with zone-capped FOK",
+      );
     }
 
     // ── NO cross-check (stale-bid guard) ─────────────────────────────────────
@@ -2222,7 +2240,11 @@ async function _runBotTick(
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
-        const MAX_ZERO_FILL_ATTEMPTS = 2;
+        // In conviction mode the book is thin and FOK 0-fills are normal for
+        // the first minute of a window (market makers haven't posted quotes yet).
+        // Allow up to 10 attempts (~50 s at 5 s ticks) before giving up so the
+        // bot keeps trying as liquidity builds, instead of blocking after just 10 s.
+        const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 10 : 2;
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, usedPollerFallback },
