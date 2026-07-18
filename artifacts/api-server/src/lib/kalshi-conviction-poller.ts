@@ -43,6 +43,9 @@ export interface ConvictionLivePrice {
   yesBid: number | null;
   noAsk:  number | null;
   fetchedAt: number;
+  /** The Kalshi market ticker this snapshot was fetched from (e.g. KXXRP15M-26JUL180045-45).
+   *  The bot-tick cross-checks this against expectedTicker to reject drift to the next window. */
+  ticker: string | undefined;
 }
 
 // Dedicated per-symbol price map populated exclusively by this poller.
@@ -97,6 +100,7 @@ async function pollOnce(): Promise<void> {
           yesBid: entry.yesBid ?? null,
           noAsk:  entry.noAsk  ?? null,
           fetchedAt: entry.at ?? nowMs,
+          ticker: entry.ticker,
         });
       }
 

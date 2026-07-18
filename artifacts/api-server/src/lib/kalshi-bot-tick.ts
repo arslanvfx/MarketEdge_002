@@ -1700,6 +1700,21 @@ async function _runBotTick(
       const pYesAsk      = pollerSnap?.yesAsk ?? null;
       const pYesBid      = pollerSnap?.yesBid ?? null;
 
+      // Guard 0: ticker cross-check — reject poller data that was fetched from
+      // the wrong window's market.  Kalshi pre-publishes the next window ~10 min
+      // early; if fetchKalshiTarget drifted to the new market, its ticker won't
+      // match expectedTicker and its price (e.g. 95 ¢ fresh-window YES) would
+      // be completely unrelated to the current window's real ask (e.g. 82 ¢).
+      // Treat a ticker mismatch exactly like an OB timeout: skip the tick so
+      // the next 1-second tick can retry with a hopefully-corrected poller.
+      if (pollerSnap?.ticker != null && pollerSnap.ticker !== expectedTicker) {
+        logger.warn(
+          { sym, direction, windowKey, expectedTicker, pollerTicker: pollerSnap.ticker },
+          "[kalshi-bot] conviction live-price gate: poller ticker mismatch — skipping tick, will retry next second",
+        );
+        return;
+      }
+
       // Guard 1: both sides present
       if (pYesAsk == null || pYesBid == null) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
