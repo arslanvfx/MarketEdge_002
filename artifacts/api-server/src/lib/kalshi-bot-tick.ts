@@ -1366,11 +1366,15 @@ async function _runBotTick(
       targetBetSize = scheduled;
     }
   }
-  if ((S.config.extremeCautionEnabled ?? false) && (S.config.extremeCautionBetOverride ?? 0) > 0) {
+  if (
+    S.config.decisionMode === "conviction" &&
+    (S.config.extremeCautionEnabled ?? false) &&
+    (S.config.extremeCautionBetOverride ?? 0) > 0
+  ) {
     const override = Math.min(S.config.extremeCautionBetOverride!, effectiveMaxBet);
     logger.info(
       { sym, override: +override.toFixed(2), prev: +targetBetSize.toFixed(2) },
-      "[kalshi-bot] extreme caution: overriding bet size",
+      "[kalshi-bot] extreme caution: overriding bet size (conviction mode)",
     );
     targetBetSize = override;
   }
@@ -2014,6 +2018,36 @@ async function _runBotTick(
             "[kalshi-bot] extreme caution: YES bid-below-floor abort recorded — YES re-entry blocked for rest of window",
           );
         }
+        return;
+      }
+    }
+
+    // ── YES cross-check (NO-ask complement — Extreme Caution only) ──────────
+    // Complementary guard for YES entries when Extreme Caution is enabled.
+    // The derived NO ask (1 − freshYesBid) must be ≤ (1 − lockPrice + 0.005).
+    // If it exceeds that ceiling, the complementary side of the book is pricing
+    // YES back below the zone floor — a strong signal the price has bounced out.
+    // This check also covers the poller-fallback path where the authenticated
+    // bid-floor check above is skipped (!usedPollerFallback guard).
+    if (direction === "yes" && (S.config.extremeCautionEnabled ?? false) && freshYesBid != null) {
+      const freshNoAsk = 1 - freshYesBid;
+      const noAskCeiling = Math.round((1 - lockPrice + 0.005) * 1000) / 1000;
+      if (freshNoAsk > noAskCeiling) {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+        }
+        extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
+        logger.warn(
+          {
+            sym, windowKey, direction,
+            freshNoAsk: +freshNoAsk.toFixed(4),
+            noAskCeiling: +noAskCeiling.toFixed(4),
+            freshYesBid: +freshYesBid.toFixed(4),
+            lockPrice,
+          },
+          "[kalshi-bot] extreme caution: YES entry aborted — NO ask (complement) above zone ceiling; YES re-entry blocked for rest of window",
+        );
         return;
       }
     }

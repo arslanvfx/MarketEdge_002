@@ -1078,104 +1078,105 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </label>
                     </div>
 
-                    {/* ── Time-Based Bet Schedule ───────────────────────────── */}
-                    <div className="flex flex-col gap-2 mt-2 border-t border-sky-500/15 pt-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-medium text-sky-300 flex items-center gap-1.5">
-                          <Clock className="w-3 h-3" />
-                          Time-Based Bet Schedule
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setConfigDraft(d => ({ ...d, timeBetScheduleEnabled: !(merged.timeBetScheduleEnabled ?? false) }))}
-                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.timeBetScheduleEnabled ?? false)
-                            ? "bg-sky-500/15 text-sky-400 border-sky-500/30 hover:bg-sky-500/25"
-                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
-                        >
-                          {(merged.timeBetScheduleEnabled ?? false) ? "On" : "Off"}
-                        </button>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Override bet size based on elapsed window time. The bracket with the highest minute threshold ≤ current elapsed minutes wins. Falls through to normal sizing when no bracket matches. Extreme Caution bet override takes priority over this when both are on.
-                      </span>
-                      {(() => {
-                        const schedule = (configDraft.timeBetSchedule !== undefined ? configDraft.timeBetSchedule : merged.timeBetSchedule) ?? [];
-                        return (
-                          <div className="flex flex-col gap-1.5 mt-0.5">
-                            {schedule.length === 0 && (
-                              <span className="text-[10px] text-muted-foreground/50 italic">No brackets yet — add one below.</span>
-                            )}
-                            {schedule.map((bracket, i) => (
-                              <div key={i} className="flex items-center gap-2 bg-muted/20 border border-sky-500/15 rounded-md px-2 py-1.5">
-                                <span className="text-[10px] text-sky-400/70 shrink-0">≥ min</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  max={14}
-                                  step={1}
-                                  value={bracket.minutesElapsed}
-                                  className="w-12 bg-background border border-sky-500/30 rounded px-1.5 py-0.5 text-xs text-foreground text-center"
-                                  onChange={e => {
-                                    const v = parseInt(e.target.value, 10);
-                                    if (Number.isNaN(v)) return;
-                                    setConfigDraft(d => {
-                                      const cur = d.timeBetSchedule !== undefined ? d.timeBetSchedule : (merged.timeBetSchedule ?? []);
-                                      return { ...d, timeBetSchedule: cur.map((b, j) => j === i ? { ...b, minutesElapsed: Math.min(14, Math.max(0, v)) } : b) };
-                                    });
-                                  }}
-                                />
-                                <span className="text-[10px] text-muted-foreground/50">→</span>
-                                <span className="text-[10px] text-sky-400/70 shrink-0">$</span>
-                                <input
-                                  type="number"
-                                  min={0.5}
-                                  max={100}
-                                  step={0.5}
-                                  value={bracket.betAmount}
-                                  className="w-16 bg-background border border-sky-500/30 rounded px-1.5 py-0.5 text-xs text-foreground"
-                                  onChange={e => {
-                                    const v = parseFloat(e.target.value);
-                                    if (Number.isNaN(v)) return;
-                                    setConfigDraft(d => {
-                                      const cur = d.timeBetSchedule !== undefined ? d.timeBetSchedule : (merged.timeBetSchedule ?? []);
-                                      return { ...d, timeBetSchedule: cur.map((b, j) => j === i ? { ...b, betAmount: v } : b) };
-                                    });
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => setConfigDraft(d => {
-                                    const cur = d.timeBetSchedule !== undefined ? d.timeBetSchedule : (merged.timeBetSchedule ?? []);
-                                    return { ...d, timeBetSchedule: cur.filter((_, j) => j !== i) };
-                                  })}
-                                  className="ml-auto text-red-400/50 hover:text-red-400 transition-colors"
-                                  title="Remove bracket"
-                                >
-                                  <X className="w-3 h-3" />
-                                </button>
-                              </div>
-                            ))}
+                  </div>
+                )}
+
+                {/* Time-Based Bet Schedule — visible for all modes */}
+                <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-border/60 bg-muted/20 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-sky-300 flex items-center gap-1.5">
+                      <Clock className="w-3 h-3" />
+                      Time-Based Bet Schedule
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setConfigDraft(d => ({ ...d, timeBetScheduleEnabled: !(merged.timeBetScheduleEnabled ?? false) }))}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.timeBetScheduleEnabled ?? false)
+                        ? "bg-sky-500/15 text-sky-400 border-sky-500/30 hover:bg-sky-500/25"
+                        : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
+                    >
+                      {(merged.timeBetScheduleEnabled ?? false) ? "On" : "Off"}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/60 -mt-1">
+                    Override bet size based on how far into the window the entry fires. The bracket with the highest minute threshold ≤ current elapsed minutes wins. Falls through to normal sizing when no bracket matches. In conviction mode, the Extreme Caution bet override takes priority over this.
+                  </p>
+                  {(() => {
+                    const schedule = (configDraft.timeBetSchedule !== undefined ? configDraft.timeBetSchedule : merged.timeBetSchedule) ?? [];
+                    return (
+                      <div className="flex flex-col gap-1.5">
+                        {schedule.length === 0 && (
+                          <span className="text-[10px] text-muted-foreground/50 italic">No brackets yet — add one below.</span>
+                        )}
+                        {schedule.map((bracket, i) => (
+                          <div key={i} className="flex items-center gap-2 bg-muted/20 border border-sky-500/15 rounded-md px-2 py-1.5">
+                            <span className="text-[10px] text-sky-400/70 shrink-0">≥ min</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={14}
+                              step={1}
+                              value={bracket.minutesElapsed}
+                              className="w-12 bg-background border border-sky-500/30 rounded px-1.5 py-0.5 text-xs text-foreground text-center"
+                              onChange={e => {
+                                const v = parseInt(e.target.value, 10);
+                                if (Number.isNaN(v)) return;
+                                setConfigDraft(d => {
+                                  const cur = d.timeBetSchedule !== undefined ? d.timeBetSchedule : (merged.timeBetSchedule ?? []);
+                                  return { ...d, timeBetSchedule: cur.map((b, j) => j === i ? { ...b, minutesElapsed: Math.min(14, Math.max(0, v)) } : b) };
+                                });
+                              }}
+                            />
+                            <span className="text-[10px] text-muted-foreground/50">→</span>
+                            <span className="text-[10px] text-sky-400/70 shrink-0">$</span>
+                            <input
+                              type="number"
+                              min={0.5}
+                              max={100}
+                              step={0.5}
+                              value={bracket.betAmount}
+                              className="w-16 bg-background border border-sky-500/30 rounded px-1.5 py-0.5 text-xs text-foreground"
+                              onChange={e => {
+                                const v = parseFloat(e.target.value);
+                                if (Number.isNaN(v)) return;
+                                setConfigDraft(d => {
+                                  const cur = d.timeBetSchedule !== undefined ? d.timeBetSchedule : (merged.timeBetSchedule ?? []);
+                                  return { ...d, timeBetSchedule: cur.map((b, j) => j === i ? { ...b, betAmount: v } : b) };
+                                });
+                              }}
+                            />
                             <button
                               type="button"
                               onClick={() => setConfigDraft(d => {
                                 const cur = d.timeBetSchedule !== undefined ? d.timeBetSchedule : (merged.timeBetSchedule ?? []);
-                                const usedMins = cur.map(b => b.minutesElapsed);
-                                const nextMin = usedMins.length > 0 ? Math.min(14, Math.max(...usedMins) + 1) : 0;
-                                return { ...d, timeBetSchedule: [...cur, { minutesElapsed: nextMin, betAmount: merged.betSize ?? 0.5 }] };
+                                return { ...d, timeBetSchedule: cur.filter((_, j) => j !== i) };
                               })}
-                              className="self-start text-[10px] text-sky-400/70 hover:text-sky-400 border border-sky-500/30 hover:border-sky-400/60 rounded px-2 py-1 transition-colors"
+                              className="ml-auto text-red-400/50 hover:text-red-400 transition-colors"
+                              title="Remove bracket"
                             >
-                              + Add bracket
+                              <X className="w-3 h-3" />
                             </button>
-                            <span className="text-[10px] text-muted-foreground/50">
-                              Example: bracket at min 0 → $1, min 8 → $2 means first 8 min bets $1, after minute 8 bets $2.
-                            </span>
                           </div>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                )}
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => {
+                            const cur = d.timeBetSchedule !== undefined ? d.timeBetSchedule : (merged.timeBetSchedule ?? []);
+                            const usedMins = cur.map(b => b.minutesElapsed);
+                            const nextMin = usedMins.length > 0 ? Math.min(14, Math.max(...usedMins) + 1) : 0;
+                            return { ...d, timeBetSchedule: [...cur, { minutesElapsed: nextMin, betAmount: merged.betSize ?? 0.5 }] };
+                          })}
+                          className="self-start text-[10px] text-sky-400/70 hover:text-sky-400 border border-sky-500/30 hover:border-sky-400/60 rounded px-2 py-1 transition-colors"
+                        >
+                          + Add bracket
+                        </button>
+                        <span className="text-[10px] text-muted-foreground/50">
+                          Example: bracket at min 0 → $1, min 8 → $2 means first 8 min bets $1, after minute 8 bets $2.
+                        </span>
+                      </div>
+                    );
+                  })()}
+                </div>
 
                 {/* Trajectory Gate toggles — visible for all modes */}
                 <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-border/60 bg-muted/20 p-3">
