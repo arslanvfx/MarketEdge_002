@@ -57,7 +57,9 @@ greater than `0.09999...`, so BNB with `freshYesAsk=0.10` was falsely aborted.
   - NO side: `freshYesAsk > round((1−lockPrice)+0.01)` → abort. Threshold = 10¢ for 0.91.
   - YES side: `freshYesBid < lockPrice && !usedPollerFallback` → abort.
 - **Order limit = exact verified ask/bid**, clamped inside the zone. No crossing buffer.
-- **Layer 3 — post-fill emergency close**: `convFillPrice` outside [lockPrice, lockPriceCap]
-  → immediate sell. `convictionStopLossFloor=0.75` keeps fills [75¢,91¢) as stop-loss.
-  `convictionEmergencyCloses` Map caps closes at 2/coin/window. `windowFailedFills` Set
-  prevents rebuy bleed after FOK exhaustion.
+- **Layer 3 — NO emergency close**: fills below lockPrice are logged as warnings but the
+  position is HELD to window close. Emergency close was removed July 2026 because Kalshi
+  FOK "price-improves" NO fills to cheaper NO cost (e.g. 87¢ instead of 91¢) — fill below
+  lockPrice simply means cheaper entry, not a losing position. Emergency close + re-enable
+  caused repeated buy→sell cycles burning spread every tick.
+- `windowFailedFills` Set still prevents rebuy bleed after FOK exhaustion.

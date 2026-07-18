@@ -2209,13 +2209,13 @@ async function _runBotTick(
           ? result.avgPrice
           : 1 - result.avgPrice;
 
-        // Policy: any fill BELOW lockPrice triggers an immediate emergency close —
-        // the zone gate should have prevented this, but FOK can still fill below
-        // the limit in edge cases.  Fills ABOVE lockPriceCap are intentionally
-        // kept: paying 97¢ on a YES that pays $1.00 is still profitable; closing
-        // immediately would guarantee a loss.
+        // Post-fill zone check: log if fill landed below lockPrice (FOK can
+        // price-improve to a cheaper NO cost, e.g. 87¢ instead of 91¢), but
+        // DO NOT emergency-close. Selling immediately crystalizes a spread loss
+        // and re-enables entry so the loop repeats — far worse than holding.
+        // A lower NO fill price still wins if YES closes below target.
         if (convFillPrice < _lp) {
-          logger.error(
+          logger.warn(
             {
               sym, direction, windowKey,
               convFillPrice: +convFillPrice.toFixed(4),
@@ -2223,156 +2223,9 @@ async function _runBotTick(
               lockPrice: _lp, lockPriceCap: _lpCap,
               contractCount, ticker: expectedTicker,
             },
-            "[kalshi-bot] CONVICTION FILL BELOW LOCK PRICE — emergency close",
+            "[kalshi-bot] conviction fill below lockPrice — holding position to window close (no emergency close)",
           );
-          let emergencyExitAvgPrice: number | null = null;
-          try {
-            // Use expectedTicker (deterministically derived from windowKey) so
-            // the close always targets the same market that was entered, even
-            // if kalshiTicker drifted to a different window in the cache.
-            const exitResult = direction === "yes"
-              ? await sellYes(expectedTicker, contractCount)
-              : await sellNo(expectedTicker, contractCount);
-            emergencyExitAvgPrice = exitResult.avgPrice ?? null;
-            logger.warn(
-              { sym, direction, convFillPrice: +convFillPrice.toFixed(4), contractCount, exitAvgPrice: emergencyExitAvgPrice },
-              "[kalshi-bot] conviction emergency close: position closed",
-            );
-          } catch (closeErr) {
-            logger.error(
-              { sym, err: String(closeErr) },
-              "[kalshi-bot] conviction emergency close FAILED — position may be stranded",
-            );
-          }
-          // Strike counter: each out-of-zone fill costs real money (spread paid
-          // on the round trip).  Allow up to 2 emergency closes per coin per
-          // window; after that keep the once-per-window lock in place so the
-          // coin cannot re-enter until the next window.  Prevents the
-          // buy → close → re-buy bleed loop (XRP 4× in one window, 2026-07-13).
-          const ecKey = `${sym}:${windowKey}`;
-          const ecCount = (convictionEmergencyCloses.get(ecKey) ?? 0) + 1;
-          convictionEmergencyCloses.set(ecKey, ecCount);
-          const MAX_EMERGENCY_CLOSES_PER_WINDOW = 2;
-          if (ecCount < MAX_EMERGENCY_CLOSES_PER_WINDOW) {
-            // Release the lock so the next tick can retry if price re-enters zone.
-            convictionFiredThisWindow.delete(ecKey);
-          } else {
-            logger.warn(
-              { sym, windowKey, emergencyCloses: ecCount },
-              "[kalshi-bot] conviction emergency-close limit reached — coin locked out for rest of window",
-            );
-          }
-          // Persist the emergency close as a closed trade so it appears in
-          // transaction history and P&L analytics.
-          //
-          // persistBetRecord with `existingId` is the only path that writes
-          // exitedAt / exitPrice / pnl (the UPDATE branch). Without a prior
-          // entry row there is nothing to UPDATE, so we do two sequential
-          // calls: (1) INSERT the entry row, then (2) UPDATE it with exit
-          // fields. This mirrors the normal bet → closePosition pattern.
-          //
-          // Both prices are YES-side (Kalshi returns avgPrice in YES terms for
-          // both buy and sell orders). pnl formula matches closePosition().
-          const _ecId       = `${sym}:${windowKey}:ec:${Date.now()}`;
-          const _ecEntryYes = fillPrice;   // result.avgPrice ?? yesPrice (set at fill block above)
-          const _ecExitYes  = emergencyExitAvgPrice;
-          let _ecPnl = 0;
-          if (_ecEntryYes != null && _ecExitYes != null) {
-            const _ecDelta = direction === "yes"
-              ? _ecExitYes - _ecEntryYes
-              : _ecEntryYes - _ecExitYes;
-            _ecPnl = _ecDelta * contractCount;
-          }
-          const _ecBetAmount = expectedFillCost * contractCount;
-
-          // ── Mirror closePosition() in-memory state updates ───────────────────
-          // closePosition() is not called directly here because it would place
-          // a second sell order.  Instead we replicate its state mutations so
-          // that the dashboard's "Today's P&L", circuit breaker, per-coin loss
-          // caps, and streak counters are all updated immediately.
-          if (entryMode === S.botMode) {
-            S.dailyPnl += _ecPnl;
-            if (_ecPnl < 0) S.dailyLossCount++;
-            // Mid-window exit: apply circuit breaker as an independent event.
-            S.cbState = applyBetOutcome(
-              S.cbState,
-              _ecPnl >= 0,
-              S.config.maxConsecutiveLosses,
-              S.config.circuitBreakerPauseWindows,
-            );
-            if (_ecPnl < 0) {
-              logger.info(
-                { sym, cbState: S.cbState, pnl: +_ecPnl.toFixed(4) },
-                "[kalshi-bot] conviction emergency-close loss — dailyPnl and circuit breaker updated",
-              );
-            }
-          }
-          // Per-coin daily loss (mode-specific map, same as closePosition).
-          {
-            const _ecModeMap = coinDailyLossForMode(entryMode);
-            _ecModeMap.set(
-              sym,
-              applyDailyLossUpdate(_ecModeMap, sym, _ecPnl, entryMode, entryMode).get(sym) ??
-                (_ecModeMap.get(sym) ?? 0),
-            );
-          }
-          // Per-coin streak (mid-window exit: apply immediately, same as closePosition).
-          {
-            const _ecStreakMap  = coinStreakStateForMode(entryMode);
-            const _ecStreakStore = streakStoreForMode(entryMode);
-            const _ecPrev = _ecStreakMap.get(sym) ?? { consecutiveLosses: 0, pauseUntilWindowKey: null };
-            const _ecNext = applyStreakUpdate(
-              _ecPrev, _ecPnl,
-              S.config.coinStreakLossLimit ?? 3,
-              S.config.coinStreakPauseWindows ?? 2,
-              Date.now(),
-            );
-            _ecStreakMap.set(sym, _ecNext);
-            persistCoinStreakState(_ecStreakMap, _ecStreakStore).catch(() => {});
-          }
-          // Account balance.
-          if (entryMode === "live") {
-            getBalance().then(b => { S.accountBalance = b.availableBalance; }).catch(() => {});
-          } else {
-            S.accountBalance = (S.accountBalance ?? S.config.paperStartingBalance ?? 100) + _ecPnl;
-          }
-          // ─────────────────────────────────────────────────────────────────────
-
-          // Step 1: insert entry record (same shape as a normal bet open).
-          persistBetRecord({
-            insertId: _ecId,
-            symbol: sym,
-            windowKey,
-            ticker: expectedTicker,
-            direction,
-            action: "bet",
-            signals: decision.signals,
-            entryPrice: _ecEntryYes ?? undefined,
-            kalshiTarget: kalshiTarget ?? 0,
-            contractCount,
-            betAmount: _ecBetAmount,
-            decisionMode: "conviction",
-            mode: entryMode,
-          }).then(() =>
-            // Step 2: update same row with exit fields (sets exitedAt, pnl, etc.).
-            persistBetRecord({
-              existingId: _ecId,
-              symbol: sym,
-              windowKey,
-              ticker: expectedTicker,
-              direction,
-              action: "exit",
-              exitPrice: _ecExitYes ?? undefined,
-              pnl: _ecPnl,
-              exitReason: "conviction_emergency_close",
-              kalshiTarget: kalshiTarget ?? 0,
-              contractCount,
-              betAmount: _ecBetAmount,
-              decisionMode: null,
-              mode: entryMode,
-            })
-          ).catch(err => logger.warn({ err, sym }, "[kalshi-bot] conviction emergency-close: DB persist failed (non-fatal)"));
-          return; // do NOT record as open position
+          // Fall through: position is recorded as open below and held until settlement.
         }
       }
 
