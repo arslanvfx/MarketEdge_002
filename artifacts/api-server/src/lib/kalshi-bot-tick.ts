@@ -1597,17 +1597,22 @@ async function _runBotTick(
   //
   // Kalshi 15-min ticker format (observed): KX${SYM}15M-${YY}${MON}${DD}${HHMM}-${MM}
   //   • YY MON DD — date in EDT (UTC-4)
-  //   • HHMM      — window start time in EDT
-  //   • MM         — start-minute of the window (0, 15, 30, or 45)
-  // Example: windowKey "2026-07-17T00:15" → EDT 20:15 July 16 → "KXBTC15M-26JUL162015-15"
+  //   • HHMM      — window CLOSE time in EDT (= open + 15 min), NOT the open time
+  //   • MM         — close-minute of the window (15, 30, 45, or 0)
+  // Example: windowKey "2026-07-18T00:15" → close 00:30 UTC → EDT 20:30 July 17 → "KXBTC15M-26JUL172030-30"
+  //
+  // IMPORTANT: Kalshi tickers embed the CLOSE time, confirmed by pipeline observations
+  // (fetchKalshiTarget matches on close_time; windowKey "2026-07-18T00:15" returned
+  // "KXNEAR15M-26JUL172030-30" = 20:30 EDT = 00:30 UTC = window close time).
+  // Using the open time gives market_not_found 404 on every order attempt.
   const _MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  const _windowOpenUtc  = new Date(windowKey + ":00Z");
-  const _windowOpenEdt  = new Date(_windowOpenUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
-  const _tyy  = String(_windowOpenEdt.getUTCFullYear()).slice(-2);
-  const _tmon = _MONTHS[_windowOpenEdt.getUTCMonth()];
-  const _tdd  = String(_windowOpenEdt.getUTCDate()).padStart(2, '0');
-  const _thh  = String(_windowOpenEdt.getUTCHours()).padStart(2, '0');
-  const _tmm  = String(_windowOpenEdt.getUTCMinutes()).padStart(2, '0');
+  const _windowCloseUtc = new Date(new Date(windowKey + ":00Z").getTime() + 15 * 60 * 1000); // close = open + 15 min
+  const _windowCloseEdt = new Date(_windowCloseUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
+  const _tyy  = String(_windowCloseEdt.getUTCFullYear()).slice(-2);
+  const _tmon = _MONTHS[_windowCloseEdt.getUTCMonth()];
+  const _tdd  = String(_windowCloseEdt.getUTCDate()).padStart(2, '0');
+  const _thh  = String(_windowCloseEdt.getUTCHours()).padStart(2, '0');
+  const _tmm  = String(_windowCloseEdt.getUTCMinutes()).padStart(2, '0');
   const expectedTicker = `KX${sym}15M-${_tyy}${_tmon}${_tdd}${_thh}${_tmm}-${_tmm}`;
 
   if (S.config.decisionMode === "conviction") {
