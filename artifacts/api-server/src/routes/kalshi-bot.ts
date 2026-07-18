@@ -37,7 +37,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
-import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache } from "../lib/kalshi-bot-state";
+import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -456,6 +456,25 @@ function pipelineStatusHandler(_req: any, res: any) {
       };
     });
 
+    // ── Extreme caution abort tracking ───────────────────────────────────────
+    // Per-coin: true when a YES entry was aborted this window due to the zone
+    // floor check firing (extremeCautionEnabled=true).  Cleared on window
+    // transition automatically.
+    const extremeCautionAborted = allTrackedSyms.filter(
+      sym => extremeCautionAbortedThisWindow.has(`${sym}:${clockWindowKey}`)
+    );
+
+    // ── Active time-bet schedule bracket ─────────────────────────────────────
+    // The highest-matching bracket for the current elapsed window minutes, if
+    // timeBetScheduleEnabled=true and at least one bracket matches.
+    const elapsedSecNow = (nowMs - Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000)) / 1000;
+    const elapsedMinNow = elapsedSecNow / 60;
+    let activeScheduleBracket: { minutesElapsed: number; betAmount: number } | null = null;
+    if ((botState.config.timeBetScheduleEnabled ?? false) && (botState.config.timeBetSchedule?.length ?? 0) > 0) {
+      const sortedBrackets = [...(botState.config.timeBetSchedule ?? [])].sort((a, b) => b.minutesElapsed - a.minutesElapsed);
+      activeScheduleBracket = sortedBrackets.find(b => elapsedMinNow >= b.minutesElapsed) ?? null;
+    }
+
     // ── Adaptive filter state — exposed for pipeline-status UI ───────────────
     // directionalPenaltyYesPp / directionalPenaltyNoPp already computed above
     // (before botSteps map). Per-coin streak penalty for UI display:
@@ -484,6 +503,8 @@ function pipelineStatusHandler(_req: any, res: any) {
       decisionMode,
       coinStability: Object.fromEntries(coinStabilityCache),
       coinTrajectory: Object.fromEntries(coinTrajectoryCache),
+      extremeCautionAborted,
+      activeScheduleBracket,
       boosts: { mlWeight: ML_WEIGHT, claudeWeight: CLAUDE_WEIGHT, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
       adaptiveFilters: {
         directionalPenaltyYesPp,

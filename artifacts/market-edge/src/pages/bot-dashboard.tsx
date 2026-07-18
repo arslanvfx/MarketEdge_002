@@ -302,6 +302,8 @@ export default function BotDashboard() {
     decisionMode?: string;
     coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
     coinTrajectory?: Record<string, import("./bot/types").TrajectoryGateResult>;
+    extremeCautionAborted?: string[];
+    activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
   }>({
     queryKey: ["bot-pipeline-status"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
@@ -636,6 +638,8 @@ export default function BotDashboard() {
               dangerBandPct: status?.config?.maxBetTrajectoryDangerBandPct,
             }}
             maxBetMinWindowEntryMinutes={status?.config?.maxBetMinWindowEntryMinutes}
+            extremeCautionAborted={pipelineStatusData.extremeCautionAborted}
+            activeScheduleBracket={pipelineStatusData.activeScheduleBracket}
           />
         )}
         {pipelineStatusData?.decisionMode !== "conviction" && (

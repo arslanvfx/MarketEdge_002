@@ -24,6 +24,8 @@ interface CoinSignalBoardProps {
   stabilityConfig?: StabilityThresholds | null;
   trajectoryConfig?: TrajectoryThresholds | null;
   maxBetMinWindowEntryMinutes?: number | null;
+  extremeCautionAborted?: string[];
+  activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
 }
 
 function Dir({ above, confidence }: { above: boolean | null; confidence: number | null }) {
@@ -69,7 +71,7 @@ function MetricPill({ value, ok }: { value: string; ok: boolean }) {
 
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC"];
 
-export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, coinTrajectory, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes }: CoinSignalBoardProps) {
+export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, coinTrajectory, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes, extremeCautionAborted, activeScheduleBracket }: CoinSignalBoardProps) {
   const isConviction = decisionMode === "conviction";
   const pinnedStrikes = useRef<Record<string, number>>({});
   for (const [sym, val] of Object.entries(kalshiTargets)) {
@@ -90,6 +92,8 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
         stabilityConfig={stabilityConfig}
         trajectoryConfig={trajectoryConfig}
         maxBetMinWindowEntryMinutes={maxBetMinWindowEntryMinutes}
+        extremeCautionAborted={extremeCautionAborted}
+        activeScheduleBracket={activeScheduleBracket}
       />
     );
   }
@@ -158,6 +162,8 @@ interface MarketConditionsBoardProps {
   stabilityConfig?: StabilityThresholds | null;
   trajectoryConfig?: TrajectoryThresholds | null;
   maxBetMinWindowEntryMinutes?: number | null;
+  extremeCautionAborted?: string[];
+  activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
 }
 
 function useNow(intervalMs: number): number {
@@ -169,7 +175,7 @@ function useNow(intervalMs: number): number {
   return now;
 }
 
-function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, coinTrajectory, windowKey, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes }: MarketConditionsBoardProps) {
+function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, coinTrajectory, windowKey, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes, extremeCautionAborted, activeScheduleBracket }: MarketConditionsBoardProps) {
   const minER      = stabilityConfig?.minER     ?? 0.30;
   const maxOsc     = stabilityConfig?.maxOsc    ?? 8;
   const maxVolPct  = stabilityConfig?.maxVolPct ?? 3.0;
@@ -238,6 +244,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
               const isStale = stab !== null && windowKey != null && stab.windowKey !== windowKey;
               const isStable = stab?.stable === true;
               const hasData = stab !== null && !isStale;
+              const isAborted = (extremeCautionAborted ?? []).includes(sym);
 
               return (
                 <tr key={sym} className={`border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors${isStale ? " opacity-40" : ""}`}>
@@ -245,19 +252,29 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                   <td className="px-3 py-2.5 font-mono text-foreground/60 text-[11px]">{fmtStrike(strike)}</td>
 
                   <td className="px-3 py-2.5">
-                    {isStale ? (
-                      <span className="text-muted-foreground/40 text-xs font-mono">stale</span>
-                    ) : !hasData ? (
-                      <span className="text-muted-foreground/40 text-xs font-mono">—</span>
-                    ) : isStable ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
-                        <Zap className="w-2.5 h-2.5" />Stable
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                        <Activity className="w-2.5 h-2.5" />Volatile
-                      </span>
-                    )}
+                    <div className="flex flex-col gap-0.5">
+                      {isStale ? (
+                        <span className="text-muted-foreground/40 text-xs font-mono">stale</span>
+                      ) : !hasData ? (
+                        <span className="text-muted-foreground/40 text-xs font-mono">—</span>
+                      ) : isStable ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
+                          <Zap className="w-2.5 h-2.5" />Stable
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                          <Activity className="w-2.5 h-2.5" />Volatile
+                        </span>
+                      )}
+                      {isAborted && (
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/25"
+                          title="Extreme Caution: YES re-entry blocked this window — YES bid fell below zone floor after fill"
+                        >
+                          ⚠ YES blocked
+                        </span>
+                      )}
+                    </div>
                   </td>
 
                   <td className="px-3 py-2.5">
@@ -281,21 +298,32 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                   </td>
 
                   <td className="px-3 py-2.5">
-                    {!hasData ? (
-                      <span className="text-muted-foreground/40 text-xs">—</span>
-                    ) : isStable && gateActive ? (
-                      <span
-                        className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300"
-                        title={`Max-bet gate active — clears in ${gateMinsLeft}m (maxBetMinWindowEntryMinutes=${maxBetMinWindowEntryMinutes})`}
-                      >
-                        <Clock className="w-2.5 h-2.5 shrink-0" />
-                        Max bet in {gateMinsLeft}m
-                      </span>
-                    ) : isStable ? (
-                      <span className="text-[10px] font-semibold text-emerald-400">Max</span>
-                    ) : (
-                      <span className="text-[10px] font-semibold text-amber-400">Regular</span>
-                    )}
+                    <div className="flex flex-col gap-0.5">
+                      {!hasData ? (
+                        <span className="text-muted-foreground/40 text-xs">—</span>
+                      ) : isStable && gateActive ? (
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300"
+                          title={`Max-bet gate active — clears in ${gateMinsLeft}m (maxBetMinWindowEntryMinutes=${maxBetMinWindowEntryMinutes})`}
+                        >
+                          <Clock className="w-2.5 h-2.5 shrink-0" />
+                          Max bet in {gateMinsLeft}m
+                        </span>
+                      ) : isStable ? (
+                        <span className="text-[10px] font-semibold text-emerald-400">Max</span>
+                      ) : (
+                        <span className="text-[10px] font-semibold text-amber-400">Regular</span>
+                      )}
+                      {activeScheduleBracket != null && (
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-mono text-violet-300/80"
+                          title={`Time-bet schedule active: bracket ≥${activeScheduleBracket.minutesElapsed}m overrides bet size to $${activeScheduleBracket.betAmount.toFixed(2)}`}
+                        >
+                          <Clock className="w-2.5 h-2.5 shrink-0" />
+                          ≥{activeScheduleBracket.minutesElapsed}m → ${activeScheduleBracket.betAmount.toFixed(2)}
+                        </span>
+                      )}
+                    </div>
                   </td>
 
                   <td className="px-3 py-2.5">
