@@ -1360,12 +1360,20 @@ async function _runBotTick(
   // apply (conviction mode only).  Normal sizing is the final fallback.
   // Both features are no-ops when disabled (enabled flag false / empty
   // schedule / override 0).
+  //
+  // IMPORTANT: use nowMs/windowStartMs (anchored to the official window
+  // boundary) rather than winCtx.secondsElapsed (prefetch-relative, 20-40 s
+  // behind) so bracket thresholds are evaluated against true elapsed time.
+  const nowMs = Date.now();
+  const windowStartMs = new Date(windowKey + ":00Z").getTime();
+  const secondsElapsedNow = isNaN(windowStartMs) ? 0 : (nowMs - windowStartMs) / 1000;
+  const secondsRemainingNow = 15 * 60 - secondsElapsedNow;
   let betScheduleApplied = false;
   if ((S.config.timeBetScheduleEnabled ?? false) && (S.config.timeBetSchedule?.length ?? 0) > 0) {
-    const elapsedMin = secondsElapsed / 60;
+    const elapsedMin = secondsElapsedNow / 60;
     const match = selectTimeBetBracket(S.config.timeBetSchedule ?? [], elapsedMin);
     if (match != null) {
-      const scheduled = Math.min(match.betAmount, effectiveMaxBet);
+      const scheduled = match.betAmount;
       logger.info(
         { sym, elapsedMin: +elapsedMin.toFixed(1), bracketMin: match.minutesElapsed, scheduled: +scheduled.toFixed(2), prev: +targetBetSize.toFixed(2) },
         "[kalshi-bot] time-bet schedule: overriding bet size",
@@ -1437,7 +1445,11 @@ async function _runBotTick(
   // trade entirely before touching Kalshi.  This protects against misconfigured
   // betSize values, unexpected rounding, or any future code change that could
   // inflate contractCount.  A tolerance of $0.01 covers floating-point dust.
-  const maxBetCap = effectiveMaxBet;
+  // When the time-bet schedule applied a larger amount, honour that amount as
+  // the cap so the safety check doesn't false-positive on intentional overrides.
+  const maxBetCap = betScheduleApplied
+    ? Math.max(effectiveMaxBet, targetBetSize)
+    : effectiveMaxBet;
   if (checkMaxBetSizeGuard(betAmount, maxBetCap)) {
     logger.error(
       {
@@ -1508,16 +1520,8 @@ async function _runBotTick(
   // engine, balance API, FOK retry latency).  A tick that starts with "3 min
   // remaining" can easily try to place an order with <1 min remaining.
   //
-  // This re-check uses fresh Date.now() so it is ALWAYS accurate regardless of
-  // tick latency.  When allowLateEntries=true the floor is fully removed —
-  // the bot is designed to catch the price crossing near settlement and any
-  // time floor defeats that purpose.  For all other modes the floor stays at
-  // 3 minutes (non-negotiable safety margin against fill latency eating into
-  // settlement time).
-  const nowMs = Date.now();
-  const windowStartMs = new Date(windowKey + ":00Z").getTime();
-  const secondsElapsedNow = isNaN(windowStartMs) ? 0 : (nowMs - windowStartMs) / 1000;
-  const secondsRemainingNow = 15 * 60 - secondsElapsedNow;
+  // secondsElapsedNow / secondsRemainingNow / nowMs / windowStartMs are declared
+  // earlier (before the time-bet schedule block) so they are also available here.
   if (!S.config.allowLateEntries) {
     const hardFloorS = (S.config.minRemainingMinutes ?? 0) * 60;
     if (hardFloorS > 0 && secondsRemainingNow < hardFloorS) {
