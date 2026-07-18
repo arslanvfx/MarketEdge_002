@@ -1350,9 +1350,12 @@ async function _runBotTick(
   }
 
   // ── TIME-BASED BET SCHEDULE + EXTREME CAUTION BET OVERRIDE ───────────────
-  // Priority (highest wins): extremeCautionBetOverride > timeBetSchedule > normal size.
-  // Both features are always checked regardless of mode — they are no-ops when
-  // disabled (enabled flag false / empty schedule / override 0).
+  // Priority: timeBetSchedule wins when a bracket matches; only when no
+  // bracket matches (or schedule is disabled) does extremeCautionBetOverride
+  // apply (conviction mode only).  Normal sizing is the final fallback.
+  // Both features are no-ops when disabled (enabled flag false / empty
+  // schedule / override 0).
+  let betScheduleApplied = false;
   if ((S.config.timeBetScheduleEnabled ?? false) && (S.config.timeBetSchedule?.length ?? 0) > 0) {
     const elapsedMin = secondsElapsedNow / 60;
     const brackets = [...(S.config.timeBetSchedule ?? [])].sort((a, b) => b.minutesElapsed - a.minutesElapsed);
@@ -1364,9 +1367,11 @@ async function _runBotTick(
         "[kalshi-bot] time-bet schedule: overriding bet size",
       );
       targetBetSize = scheduled;
+      betScheduleApplied = true;
     }
   }
   if (
+    !betScheduleApplied &&
     S.config.decisionMode === "conviction" &&
     (S.config.extremeCautionEnabled ?? false) &&
     (S.config.extremeCautionBetOverride ?? 0) > 0
@@ -1374,7 +1379,7 @@ async function _runBotTick(
     const override = Math.min(S.config.extremeCautionBetOverride!, effectiveMaxBet);
     logger.info(
       { sym, override: +override.toFixed(2), prev: +targetBetSize.toFixed(2) },
-      "[kalshi-bot] extreme caution: overriding bet size (conviction mode)",
+      "[kalshi-bot] extreme caution: overriding bet size (conviction mode, no schedule bracket matched)",
     );
     targetBetSize = override;
   }
@@ -1946,11 +1951,7 @@ async function _runBotTick(
       // Round to 2 decimal places to avoid IEEE 754 drift: (1 − 0.91) evaluates to
       // 0.08999... in double precision, making the raw threshold 0.09999... instead of
       // 0.10, causing a false abort when freshYesAsk is exactly 0.10.
-      // Extreme Caution: use zero tolerance — any YES ask above the target (1−lockPrice)
-      // is blocked; the normal +1¢ spread allowance is removed.
-      const yesAskBounceThreshold = (S.config.extremeCautionEnabled ?? false)
-        ? Math.round((1 - lockPrice) * 100) / 100
-        : Math.round(((1 - lockPrice) + 0.01) * 100) / 100;
+      const yesAskBounceThreshold = Math.round(((1 - lockPrice) + 0.01) * 100) / 100;
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {

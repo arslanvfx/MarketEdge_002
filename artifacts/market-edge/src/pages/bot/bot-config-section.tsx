@@ -1065,7 +1065,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           min={0}
                           max={100}
                           step={0.5}
-                          className="bg-background border border-orange-500/30 rounded-md px-3 py-1.5 text-sm text-foreground w-32"
+                          disabled={!(merged.extremeCautionEnabled ?? false)}
+                          className={`border rounded-md px-3 py-1.5 text-sm w-32 transition-opacity ${(merged.extremeCautionEnabled ?? false)
+                            ? "bg-background border-orange-500/30 text-foreground"
+                            : "bg-muted/30 border-border text-muted-foreground opacity-50 cursor-not-allowed"}`}
                           value={merged.extremeCautionBetOverride ?? 0}
                           onChange={e => {
                             const v = parseFloat(e.target.value);
@@ -1073,7 +1076,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           }}
                         />
                         <span className="text-[10px] text-muted-foreground/60">
-                          When &gt; 0, every conviction bet uses this fixed $ amount. 0 = no override (normal sizing applies).
+                          When &gt; 0, every conviction bet uses this fixed $ amount (only when no time bracket matches). 0 = no override.
                         </span>
                       </label>
                     </div>
