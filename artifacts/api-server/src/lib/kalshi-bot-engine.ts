@@ -65,6 +65,11 @@ import {
   computeKellyMultiplier,
   buildStreakSnapshot,
   restoreStreakState,
+  checkExtremeCautionEarlyGuard,
+  computeNoAskBounceThreshold,
+  computeExtremeCautionNoAskCeiling,
+  selectTimeBetBracket,
+  evaluateYesBidFloorAbort,
   type BetProfile,
   type BetProfileConfig,
   type DecisionMode,
@@ -130,6 +135,13 @@ export {
   // unit tests can verify expiry logic without touching the DB.
   buildStreakSnapshot,
   restoreStreakState,
+  // Extreme Caution gate pure helpers — extracted so tick.ts can call them
+  // and unit tests can verify each guard condition without bot I/O.
+  checkExtremeCautionEarlyGuard,
+  computeNoAskBounceThreshold,
+  computeExtremeCautionNoAskCeiling,
+  selectTimeBetBracket,
+  evaluateYesBidFloorAbort,
   type BetProfile,
   type BetProfileConfig,
   type DecisionMode,

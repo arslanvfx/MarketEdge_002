@@ -14,6 +14,11 @@ import {
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   deriveConvictionZone,
+  checkExtremeCautionEarlyGuard,
+  computeNoAskBounceThreshold,
+  computeExtremeCautionNoAskCeiling,
+  selectTimeBetBracket,
+  evaluateYesBidFloorAbort,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -1358,8 +1363,7 @@ async function _runBotTick(
   let betScheduleApplied = false;
   if ((S.config.timeBetScheduleEnabled ?? false) && (S.config.timeBetSchedule?.length ?? 0) > 0) {
     const elapsedMin = secondsElapsedNow / 60;
-    const brackets = [...(S.config.timeBetSchedule ?? [])].sort((a, b) => b.minutesElapsed - a.minutesElapsed);
-    const match = brackets.find(b => elapsedMin >= b.minutesElapsed);
+    const match = selectTimeBetBracket(S.config.timeBetSchedule ?? [], elapsedMin);
     if (match != null) {
       const scheduled = Math.min(match.betAmount, effectiveMaxBet);
       logger.info(
@@ -1604,12 +1608,14 @@ async function _runBotTick(
   // entry attempts for this coin+window.  The abort populates the set in the
   // YES cross-check gate below; this early check prevents the retry loop from
   // re-attempting the order before the set is populated on the same tick.
-  if (
-    S.config.decisionMode === "conviction" &&
-    (S.config.extremeCautionEnabled ?? false) &&
-    direction === "yes" &&
-    extremeCautionAbortedThisWindow.has(`${sym}:${windowKey}`)
-  ) {
+  if (checkExtremeCautionEarlyGuard(
+    S.config.decisionMode ?? "classic",
+    S.config.extremeCautionEnabled ?? false,
+    direction,
+    extremeCautionAbortedThisWindow,
+    sym,
+    windowKey,
+  )) {
     logger.info(
       { sym, windowKey },
       "[kalshi-bot] extreme caution: YES entry blocked — bid was below zone floor earlier this window",
@@ -1951,7 +1957,7 @@ async function _runBotTick(
       // Round to 2 decimal places to avoid IEEE 754 drift: (1 − 0.91) evaluates to
       // 0.08999... in double precision, making the raw threshold 0.09999... instead of
       // 0.10, causing a false abort when freshYesAsk is exactly 0.10.
-      const yesAskBounceThreshold = Math.round(((1 - lockPrice) + 0.01) * 100) / 100;
+      const yesAskBounceThreshold = computeNoAskBounceThreshold(lockPrice, S.config.extremeCautionEnabled ?? false);
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
@@ -1992,9 +1998,14 @@ async function _runBotTick(
     // Example (target 0.90 → lockPrice 0.88, book has resting orders):
     //   freshYesBid = 0.87 → 0.87 < 0.88 → abort ✓  (book has depth below zone)
     //   freshYesBid = 0.88 → 0.88 ≥ 0.88 → proceed ✓ (entire book in zone)
-    if (direction === "yes" && freshYesBid != null && !usedPollerFallback) {
-      const yesBidDropThreshold = lockPrice; // hard floor: bid must be in zone
-      if (freshYesBid < yesBidDropThreshold) {
+    if (direction === "yes" && freshYesBid != null) {
+      const bidAbort = evaluateYesBidFloorAbort(
+        freshYesBid,
+        lockPrice,
+        usedPollerFallback,
+        S.config.extremeCautionEnabled ?? false,
+      );
+      if (bidAbort.abort) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
           maxBetWindowToken.remaining++;
@@ -2005,17 +2016,15 @@ async function _runBotTick(
             sym, direction, windowKey,
             freshYesBid: +freshYesBid.toFixed(4),
             freshYesAsk: freshYesAsk != null ? +freshYesAsk.toFixed(4) : null,
-            yesBidDropThreshold: +yesBidDropThreshold.toFixed(4),
+            yesBidDropThreshold: +lockPrice.toFixed(4),
             lockPrice, lockPriceCap,
           },
           "[kalshi-bot] conviction live-price gate: YES cross-check — bid below zone floor; order aborted (no sub-zone fills possible when bid >= lockPrice)",
         );
-        // Extreme Caution: record this abort so the early-entry guard can block
-        // all further YES attempts for this coin+window on subsequent ticks.
-        if (S.config.extremeCautionEnabled ?? false) {
+        if (bidAbort.populateECSet) {
           extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
           logger.info(
-            { sym, windowKey, freshYesBid: +freshYesBid!.toFixed(4), yesBidDropThreshold: +lockPrice.toFixed(4) },
+            { sym, windowKey, freshYesBid: +freshYesBid.toFixed(4), yesBidDropThreshold: +lockPrice.toFixed(4) },
             "[kalshi-bot] extreme caution: YES bid-below-floor abort recorded — YES re-entry blocked for rest of window",
           );
         }
@@ -2032,7 +2041,7 @@ async function _runBotTick(
     // bid-floor check above is skipped (!usedPollerFallback guard).
     if (direction === "yes" && (S.config.extremeCautionEnabled ?? false) && freshYesBid != null) {
       const freshNoAsk = 1 - freshYesBid;
-      const noAskCeiling = Math.round((1 - lockPrice + 0.005) * 1000) / 1000;
+      const noAskCeiling = computeExtremeCautionNoAskCeiling(lockPrice);
       if (freshNoAsk > noAskCeiling) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {

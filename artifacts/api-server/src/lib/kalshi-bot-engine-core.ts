@@ -1722,6 +1722,127 @@ export function restoreStreakState(
   return { state: out, clearedSyms };
 }
 
+// ── Extreme Caution gate — pure helpers ──────────────────────────────────────
+//
+// These functions are extracted from _runBotTick so they can be unit-tested
+// without the bot's I/O dependencies.  Each helper encodes exactly one guard
+// condition; the caller composes them as needed.
+
+/**
+ * Returns true when the Extreme Caution EARLY guard should BLOCK a YES entry.
+ *
+ * All four conditions must hold simultaneously:
+ *   1. decisionMode === "conviction"
+ *   2. extremeCautionEnabled is true
+ *   3. direction is "yes"
+ *   4. abortedThisWindow contains the `${sym}:${windowKey}` key
+ *
+ * If any condition is false the guard does not fire and the bet proceeds
+ * to the live-price gate.  Tests should verify each condition independently.
+ */
+export function checkExtremeCautionEarlyGuard(
+  decisionMode: string,
+  extremeCautionEnabled: boolean,
+  direction: string,
+  abortedThisWindow: Set<string>,
+  sym: string,
+  windowKey: string,
+): boolean {
+  return (
+    decisionMode === "conviction" &&
+    extremeCautionEnabled &&
+    direction === "yes" &&
+    abortedThisWindow.has(`${sym}:${windowKey}`)
+  );
+}
+
+/**
+ * Computes the YES-ask bounce threshold used in the NO cross-check gate.
+ *
+ * A FOK buy-NO fills at the cheapest YES ask ≤ the limit price.  If
+ * freshYesAsk exceeds this ceiling, the YES ask has bounced above the
+ * conviction zone and the NO order must be aborted.
+ *
+ * Threshold is bifurcated by extremeCautionEnabled:
+ *   extremeCautionEnabled = true  → exact (1 − lockPrice), no tolerance
+ *   extremeCautionEnabled = false → (1 − lockPrice) + 0.01  (1¢ spread room)
+ *
+ * The tighter threshold (EC on) guards against YES-ask bounce in markets
+ * where price has already shown instability that triggered a bid-floor abort.
+ * Rounded to 2 decimal places to avoid IEEE 754 drift.
+ */
+export function computeNoAskBounceThreshold(lockPrice: number, extremeCautionEnabled: boolean): number {
+  if (extremeCautionEnabled) {
+    return Math.round((1 - lockPrice) * 100) / 100;
+  }
+  return Math.round(((1 - lockPrice) + 0.01) * 100) / 100;
+}
+
+/**
+ * Pure predicate for the YES cross-check bid-floor abort.
+ *
+ * Encodes the conditions under which:
+ *   1. The conviction live-price gate must abort the YES order (abort=true)
+ *   2. The abort must be recorded in extremeCautionAbortedThisWindow (populateECSet=true)
+ *
+ * The caller is responsible for all side-effects (Set.add, Set.delete, return).
+ * Both tick.ts and tests use this function so they both validate the same logic.
+ *
+ * Conditions:
+ *   - usedPollerFallback=true  → no abort (poller path; ask check already confirmed zone)
+ *   - freshYesBid ≥ lockPrice  → no abort (bid is in zone; sub-zone fills are impossible)
+ *   - freshYesBid < lockPrice  → abort; populateECSet = extremeCautionEnabled
+ */
+export function evaluateYesBidFloorAbort(
+  freshYesBid: number,
+  lockPrice: number,
+  usedPollerFallback: boolean,
+  extremeCautionEnabled: boolean,
+): { abort: boolean; populateECSet: boolean } {
+  if (usedPollerFallback) return { abort: false, populateECSet: false };
+  if (freshYesBid >= lockPrice) return { abort: false, populateECSet: false };
+  return { abort: true, populateECSet: extremeCautionEnabled };
+}
+
+/**
+ * Computes the NO-ask ceiling used in the YES Extreme Caution complement check.
+ *
+ * When Extreme Caution is enabled and direction is YES, the derived NO ask
+ * (1 − freshYesBid) must not exceed this ceiling.  Exceeding it means the
+ * complementary side of the book is pricing YES back below the zone floor —
+ * a strong signal the price has bounced out.
+ *
+ * Formula: Math.round((1 − lockPrice + 0.005) × 1000) / 1000
+ * (0.5¢ tolerance; tighter than the NO gate's 1¢; rounded to 3 decimals.)
+ *
+ * Only applied when extremeCautionEnabled is true (caller's responsibility).
+ */
+export function computeExtremeCautionNoAskCeiling(lockPrice: number): number {
+  return Math.round((1 - lockPrice + 0.005) * 1000) / 1000;
+}
+
+/**
+ * Selects the matching time-bet schedule bracket for the given elapsed time.
+ *
+ * Brackets are sorted descending by minutesElapsed; the first bracket whose
+ * minutesElapsed ≤ elapsedMin is selected (highest matching bracket wins).
+ * Returns null when no bracket matches (elapsedMin is before all brackets).
+ *
+ * Example schedule [{minutesElapsed:3, betAmount:2}, {minutesElapsed:7, betAmount:1}]:
+ *   elapsedMin=1  → null (too early)
+ *   elapsedMin=3  → {minutesElapsed:3, betAmount:2}
+ *   elapsedMin=5  → {minutesElapsed:3, betAmount:2}  (highest ≤ 5)
+ *   elapsedMin=7  → {minutesElapsed:7, betAmount:1}  (highest ≤ 7)
+ *   elapsedMin=14 → {minutesElapsed:7, betAmount:1}
+ */
+export function selectTimeBetBracket(
+  schedule: Array<{ minutesElapsed: number; betAmount: number }>,
+  elapsedMin: number,
+): { minutesElapsed: number; betAmount: number } | null {
+  const sorted = [...schedule].sort((a, b) => b.minutesElapsed - a.minutesElapsed);
+  return sorted.find(b => elapsedMin >= b.minutesElapsed) ?? null;
+}
+
 // ── Signal divergence early-exit cutout ──────────────────────────────────────
 // Fires when ≥2 of 3 signals (stat, Claude, ML) that were supporting the bet
 // at entry have since flipped to oppose it.  Only triggers during the first
