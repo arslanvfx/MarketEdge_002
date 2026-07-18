@@ -659,6 +659,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMaxBetProbability,
     convictionStabilityMaxBetsPerWindow,
     maxBetMinWindowEntryMinutes,
+    extremeCautionEnabled,
+    extremeCautionBetOverride,
+    timeBetScheduleEnabled,
+    timeBetSchedule,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -743,6 +747,10 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionStabilityMaxBetProbability?: number;
     convictionStabilityMaxBetsPerWindow?: number;
     maxBetMinWindowEntryMinutes?: number;
+    extremeCautionEnabled?: boolean;
+    extremeCautionBetOverride?: number | null;
+    timeBetScheduleEnabled?: boolean;
+    timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -1010,6 +1018,31 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionEarlyBypassThreshold === "number" && convictionEarlyBypassThreshold >= 0.80 && convictionEarlyBypassThreshold <= 0.99) {
     partial.convictionEarlyBypassThreshold = +convictionEarlyBypassThreshold.toFixed(2);
+  }
+  // Extreme Caution mode
+  if (typeof extremeCautionEnabled === "boolean") partial.extremeCautionEnabled = extremeCautionEnabled;
+  if (extremeCautionBetOverride === null || extremeCautionBetOverride === undefined) {
+    if ("extremeCautionBetOverride" in req.body) partial.extremeCautionBetOverride = null;
+  } else if (typeof extremeCautionBetOverride === "number" && extremeCautionBetOverride >= 0 && extremeCautionBetOverride <= 100) {
+    partial.extremeCautionBetOverride = extremeCautionBetOverride > 0 ? +extremeCautionBetOverride.toFixed(2) : null;
+  }
+  // Time-Based Bet Schedule
+  if (typeof timeBetScheduleEnabled === "boolean") partial.timeBetScheduleEnabled = timeBetScheduleEnabled;
+  if (Array.isArray(timeBetSchedule)) {
+    const validatedSchedule: Array<{ minutesElapsed: number; betAmount: number }> = [];
+    for (const entry of timeBetSchedule) {
+      if (
+        entry && typeof entry === "object" &&
+        typeof entry.minutesElapsed === "number" && entry.minutesElapsed >= 0 && entry.minutesElapsed <= 14 &&
+        typeof entry.betAmount === "number" && entry.betAmount >= 0.5 && entry.betAmount <= 100
+      ) {
+        validatedSchedule.push({
+          minutesElapsed: Math.round(entry.minutesElapsed * 10) / 10,
+          betAmount: +entry.betAmount.toFixed(2),
+        });
+      }
+    }
+    partial.timeBetSchedule = validatedSchedule;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

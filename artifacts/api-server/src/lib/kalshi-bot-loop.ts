@@ -54,7 +54,7 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  WINDOW_ENTRY_BUFFER_S, coinStabilityCache, coinTrajectoryCache,
+  WINDOW_ENTRY_BUFFER_S, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState, type CoinStabilityResult,
 } from "./kalshi-bot-state";
@@ -511,6 +511,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
     convictionFiredThisWindow.clear();
+    extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();
     convictionEmergencyCloses.clear();
     coinStabilityCache.clear();

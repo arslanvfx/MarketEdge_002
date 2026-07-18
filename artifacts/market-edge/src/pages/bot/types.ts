@@ -104,6 +104,10 @@ export interface BotConfig {
   maxBetTrajectoryFinalMinutes?: number;
   maxBetTrajectoryBlockOnCross?: boolean;
   maxBetTrajectoryMinVelocityATR?: number;
+  extremeCautionEnabled?: boolean;
+  extremeCautionBetOverride?: number | null;
+  timeBetScheduleEnabled?: boolean;
+  timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
 }
 
 export interface TrajectoryGateResult {

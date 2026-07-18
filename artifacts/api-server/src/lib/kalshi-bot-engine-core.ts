@@ -1221,6 +1221,25 @@ export interface BotConfig {
   maxBetTrajectoryTimeWeightEnabled?: boolean;
   regularBetTrajectoryDangerBandPct?: number;
   regularBetTrajectoryDangerBandATR?: number;
+
+  // ── Extreme Caution mode (conviction only) ────────────────────────────────
+  // When enabled: (1) if a YES conviction bet was aborted this window because
+  // the YES bid was below the zone floor, all further YES entries for that
+  // coin+window are blocked — no re-tries after a bid-below-floor abort; and
+  // (2) the NO cross-check uses zero tolerance (no +1¢ spread allowance).
+  // Optional betOverride: when > 0, uses this $ amount instead of the normal
+  // bet size for ALL conviction entries while extreme caution is active.
+  extremeCautionEnabled?: boolean;         // master toggle (default false)
+  extremeCautionBetOverride?: number | null; // $ override; 0/null/undefined = use normal sizing
+
+  // ── Time-Based Bet Schedule ───────────────────────────────────────────────
+  // When enabled, the bet size is overridden by the first matching bracket
+  // where minutesElapsed ≤ current window-elapsed minutes.  Brackets are
+  // evaluated highest-to-lowest so the most specific match wins.  Falls
+  // through to normal sizing when no bracket matches.  Overridden by
+  // extremeCautionBetOverride when both features are enabled.
+  timeBetScheduleEnabled?: boolean;
+  timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
 }
 
 // ---------------------------------------------------------------------------

@@ -194,6 +194,11 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
+// Tracks `sym:windowKey` pairs where a YES conviction bet was aborted because the
+// YES bid was below the zone floor.  When extremeCautionEnabled=true, any subsequent
+// YES entry attempt for that coin+window is blocked immediately.  Cleared on window
+// transition alongside convictionFiredThisWindow.
+export const extremeCautionAbortedThisWindow = new Set<string>();
 // Keyed by `sym:windowKey` → timestamp (ms) of last live-gate "price moved
 // outside window" abort.  Prevents repeated entry attempts in the same second
 // while the conviction poller refreshes the cache after an abort.  Entries are

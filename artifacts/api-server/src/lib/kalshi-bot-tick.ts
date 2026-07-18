@@ -58,7 +58,7 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  tickInFlight, getEffectiveDailyLossLimit,
+  tickInFlight, getEffectiveDailyLossLimit, extremeCautionAbortedThisWindow,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
@@ -1319,7 +1319,7 @@ async function _runBotTick(
     return perCoinMaxBet != null && perCoinMaxBet < baseMax ? perCoinMaxBet : baseMax;
   })();
   // Priority: conviction boost → regime boost → confidence-scaled dynamic sizing.
-  const targetBetSize = boostBetSize != null
+  let targetBetSize = boostBetSize != null
     ? Math.min(boostBetSize, effectiveMaxBet)
     : regimeQualified
       ? Math.min(S.config.maxBetSize ?? 2, effectiveMaxBet)
@@ -1348,6 +1348,34 @@ async function _runBotTick(
       "[kalshi-bot] per-coin maxBetSize override applied",
     );
   }
+
+  // ── TIME-BASED BET SCHEDULE + EXTREME CAUTION BET OVERRIDE ───────────────
+  // Priority (highest wins): extremeCautionBetOverride > timeBetSchedule > normal size.
+  // Both features are always checked regardless of mode — they are no-ops when
+  // disabled (enabled flag false / empty schedule / override 0).
+  if ((S.config.timeBetScheduleEnabled ?? false) && (S.config.timeBetSchedule?.length ?? 0) > 0) {
+    const elapsedMin = secondsElapsedNow / 60;
+    const brackets = [...(S.config.timeBetSchedule ?? [])].sort((a, b) => b.minutesElapsed - a.minutesElapsed);
+    const match = brackets.find(b => elapsedMin >= b.minutesElapsed);
+    if (match != null) {
+      const scheduled = Math.min(match.betAmount, effectiveMaxBet);
+      logger.info(
+        { sym, elapsedMin: +elapsedMin.toFixed(1), bracketMin: match.minutesElapsed, scheduled: +scheduled.toFixed(2), prev: +targetBetSize.toFixed(2) },
+        "[kalshi-bot] time-bet schedule: overriding bet size",
+      );
+      targetBetSize = scheduled;
+    }
+  }
+  if ((S.config.extremeCautionEnabled ?? false) && (S.config.extremeCautionBetOverride ?? 0) > 0) {
+    const override = Math.min(S.config.extremeCautionBetOverride!, effectiveMaxBet);
+    logger.info(
+      { sym, override: +override.toFixed(2), prev: +targetBetSize.toFixed(2) },
+      "[kalshi-bot] extreme caution: overriding bet size",
+    );
+    targetBetSize = override;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   let contractCount = Math.floor(targetBetSize / expectedFillCost);
   // If budget can't buy even one contract at the live ask, skip this entry and
   // engage the FOK-cooldown so this coin doesn't retry the same window.
@@ -1559,6 +1587,25 @@ async function _runBotTick(
         return;
       }
     }
+  }
+
+  // ── EXTREME CAUTION: block YES re-entry after bid-below-floor abort ───────
+  // When extreme caution is enabled and a YES conviction bet was aborted this
+  // window because the YES bid was below the zone floor, block any further YES
+  // entry attempts for this coin+window.  The abort populates the set in the
+  // YES cross-check gate below; this early check prevents the retry loop from
+  // re-attempting the order before the set is populated on the same tick.
+  if (
+    S.config.decisionMode === "conviction" &&
+    (S.config.extremeCautionEnabled ?? false) &&
+    direction === "yes" &&
+    extremeCautionAbortedThisWindow.has(`${sym}:${windowKey}`)
+  ) {
+    logger.info(
+      { sym, windowKey },
+      "[kalshi-bot] extreme caution: YES entry blocked — bid was below zone floor earlier this window",
+    );
+    return;
   }
 
   // Conviction once-per-window lock: mark synchronously before any await so that
@@ -1895,7 +1942,11 @@ async function _runBotTick(
       // Round to 2 decimal places to avoid IEEE 754 drift: (1 − 0.91) evaluates to
       // 0.08999... in double precision, making the raw threshold 0.09999... instead of
       // 0.10, causing a false abort when freshYesAsk is exactly 0.10.
-      const yesAskBounceThreshold = Math.round(((1 - lockPrice) + 0.01) * 100) / 100;
+      // Extreme Caution: use zero tolerance — any YES ask above the target (1−lockPrice)
+      // is blocked; the normal +1¢ spread allowance is removed.
+      const yesAskBounceThreshold = (S.config.extremeCautionEnabled ?? false)
+        ? Math.round((1 - lockPrice) * 100) / 100
+        : Math.round(((1 - lockPrice) + 0.01) * 100) / 100;
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
@@ -1954,6 +2005,15 @@ async function _runBotTick(
           },
           "[kalshi-bot] conviction live-price gate: YES cross-check — bid below zone floor; order aborted (no sub-zone fills possible when bid >= lockPrice)",
         );
+        // Extreme Caution: record this abort so the early-entry guard can block
+        // all further YES attempts for this coin+window on subsequent ticks.
+        if (S.config.extremeCautionEnabled ?? false) {
+          extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
+          logger.info(
+            { sym, windowKey, freshYesBid: +freshYesBid!.toFixed(4), yesBidDropThreshold: +lockPrice.toFixed(4) },
+            "[kalshi-bot] extreme caution: YES bid-below-floor abort recorded — YES re-entry blocked for rest of window",
+          );
+        }
         return;
       }
     }
