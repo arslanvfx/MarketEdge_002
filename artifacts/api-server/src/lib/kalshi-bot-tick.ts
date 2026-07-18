@@ -1362,7 +1362,7 @@ async function _runBotTick(
   // schedule / override 0).
   let betScheduleApplied = false;
   if ((S.config.timeBetScheduleEnabled ?? false) && (S.config.timeBetSchedule?.length ?? 0) > 0) {
-    const elapsedMin = secondsElapsedNow / 60;
+    const elapsedMin = secondsElapsed / 60;
     const match = selectTimeBetBracket(S.config.timeBetSchedule ?? [], elapsedMin);
     if (match != null) {
       const scheduled = Math.min(match.betAmount, effectiveMaxBet);
