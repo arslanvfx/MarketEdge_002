@@ -60,6 +60,7 @@ import {
   applyLockPrice093Bootstrap,
   applyLockPrice092Bootstrap,
   deriveConvictionZone,
+  computeAdverseMomentumGate,
   DEFAULT_BOT_CONFIG,
   computeDynamicBetSize,
   computeKellyMultiplier,
