@@ -189,6 +189,11 @@ export const windowBetDetails = new Map<string, { direction: "yes" | "no"; confi
 export const windowDirectionCounts = new Map<"yes" | "no", number>();
 export const windowFailedFills = new Set<string>();
 export const windowZeroFillAttempts = new Map<string, number>();
+// Per-window randomizer de-duplication: tracks which dollar amounts the
+// randomizer has already picked for each coin in the current window.
+// Key = sym, value = Set of dollar amounts already used.
+// Cleared on window transition so each new window starts with a fresh pool.
+export const windowRandomizerUsedValues = new Map<string, Set<number>>();
 // Tracks which `sym:windowKey` pairs have already attempted a conviction-mode
 // entry this window.  Prevents repeated bets when the Kalshi YES price oscillates
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window

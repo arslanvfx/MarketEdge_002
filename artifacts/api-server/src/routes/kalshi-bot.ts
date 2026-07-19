@@ -779,7 +779,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
-  if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 200) partial.betSize = betSize;
+  if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 500) partial.betSize = betSize;
   if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;
   if (typeof signalThreshold === "number" && [2, 3, 4].includes(signalThreshold)) {
     partial.signalThreshold = signalThreshold;
@@ -883,7 +883,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.paperStatsResetAt = typeof paperStatsResetAt === "string" ? paperStatsResetAt : null;
   }
   // Live-mode safety guards
-  if (typeof maxBetSize === "number" && maxBetSize >= 0.5 && maxBetSize <= 100) partial.maxBetSize = maxBetSize;
+  if (typeof maxBetSize === "number" && maxBetSize >= 0.5 && maxBetSize <= 500) partial.maxBetSize = maxBetSize;
   if (typeof minAccountBalance === "number" && minAccountBalance >= 0 && minAccountBalance <= 1000) partial.minAccountBalance = minAccountBalance;
   if (typeof maxTotalExposure === "number" && maxTotalExposure >= 0 && maxTotalExposure <= 500) partial.maxTotalExposure = maxTotalExposure;
   if (typeof maxDailyLossPerCoin === "number" && maxDailyLossPerCoin >= 0 && maxDailyLossPerCoin <= 100) partial.maxDailyLossPerCoin = maxDailyLossPerCoin;
@@ -1048,7 +1048,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof extremeCautionEnabled === "boolean") partial.extremeCautionEnabled = extremeCautionEnabled;
   if (extremeCautionBetOverride === null || extremeCautionBetOverride === undefined) {
     if ("extremeCautionBetOverride" in req.body) partial.extremeCautionBetOverride = null;
-  } else if (typeof extremeCautionBetOverride === "number" && extremeCautionBetOverride >= 0 && extremeCautionBetOverride <= 100) {
+  } else if (typeof extremeCautionBetOverride === "number" && extremeCautionBetOverride >= 0 && extremeCautionBetOverride <= 500) {
     partial.extremeCautionBetOverride = extremeCautionBetOverride > 0 ? +extremeCautionBetOverride.toFixed(2) : null;
   }
   // Time-Based Bet Schedule
@@ -1059,7 +1059,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       if (
         entry && typeof entry === "object" &&
         typeof entry.minutesElapsed === "number" && entry.minutesElapsed >= 0 && entry.minutesElapsed <= 14 &&
-        typeof entry.betAmount === "number" && entry.betAmount >= 0.5 && entry.betAmount <= 100
+        typeof entry.betAmount === "number" && entry.betAmount >= 0.5 && entry.betAmount <= 500
       ) {
         validatedSchedule.push({
           minutesElapsed: Math.round(entry.minutesElapsed * 10) / 10,
@@ -1074,7 +1074,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (Array.isArray(betRandomizerValues)) {
     const validatedValues: number[] = [];
     for (const v of betRandomizerValues) {
-      if (typeof v === "number" && v >= 0.5 && v <= 100 && Number.isFinite(v)) {
+      if (typeof v === "number" && v >= 0.5 && v <= 500 && Number.isFinite(v)) {
         validatedValues.push(+v.toFixed(2));
       }
     }

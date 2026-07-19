@@ -43,7 +43,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken,
-  convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS,
+  convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
   maxBetCandidateForWindow,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
@@ -510,6 +510,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowDirectionCounts.clear();
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
+    windowRandomizerUsedValues.clear();
     convictionFiredThisWindow.clear();
     extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();

@@ -243,7 +243,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-xs text-muted-foreground">
                     {(merged.enableDynamicSizing ?? false) ? "Min Bet ($) — at min confidence" : "Bet Size ($)"}
                   </span>
-                  <input type="number" min={0.5} max={200} step={0.5}
+                  <input type="number" min={0.5} max={500} step={0.5}
                     className={`bg-background border rounded-md px-3 py-1.5 text-sm text-foreground ${(merged.betSize ?? 1) > (merged.maxBetSize ?? 2) ? "border-red-500" : "border-border"}`}
                     value={merged.betSize ?? 1}
                     onChange={e => {
@@ -265,7 +265,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     <span className="text-amber-400">⚠</span>
                     {(merged.enableDynamicSizing ?? false) ? "Max Bet ($) — at highest confidence" : "Max Allowed Bet ($)"}
                   </span>
-                  <input type="number" min={0.5} max={100} step={0.5}
+                  <input type="number" min={0.5} max={500} step={0.5}
                     className="bg-background border border-amber-500/40 rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={merged.maxBetSize ?? 2}
                     onChange={e => {

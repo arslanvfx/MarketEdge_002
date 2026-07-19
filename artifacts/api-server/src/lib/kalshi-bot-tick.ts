@@ -50,6 +50,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
+  windowRandomizerUsedValues,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
   convictionAbortCooldown,
   type CoinStabilityResult, type TrajectoryGateResult,
@@ -1412,6 +1413,11 @@ async function _runBotTick(
   // is the only hard cap that still applies after randomization.
   // betRandomizerApplied is tracked so the downstream maxBetCap guard widens
   // to honour the randomized amount (same pattern as betScheduleApplied).
+  //
+  // Per-window deduplication: each distinct dollar value can only be picked
+  // once per coin per window.  Available pool = full list minus already-used
+  // values this window.  If every value has been used, falls back to normal
+  // sizing rather than repeating a high amount.
   let betRandomizerApplied = false;
   if (
     (S.config.betRandomizerEnabled ?? false) &&
@@ -1419,14 +1425,30 @@ async function _runBotTick(
     S.config.betRandomizerValues.length >= 2
   ) {
     const vals = S.config.betRandomizerValues;
-    const picked = vals[Math.floor(Math.random() * vals.length)]!;
-    const clamped = perCoinMaxBet != null && picked > perCoinMaxBet ? perCoinMaxBet : picked;
-    logger.info(
-      { sym, picked: +picked.toFixed(2), clamped: +clamped.toFixed(2), values: vals, prev: +targetBetSize.toFixed(2) },
-      `[kalshi-bot] bet randomizer: picked $${picked.toFixed(2)} from [${vals.join(", ")}]`,
-    );
-    targetBetSize = clamped;
-    betRandomizerApplied = true;
+    const usedSet = windowRandomizerUsedValues.get(sym) ?? new Set<number>();
+    const available = vals.filter(v => !usedSet.has(v));
+    if (available.length > 0) {
+      const picked = available[Math.floor(Math.random() * available.length)]!;
+      const clamped = perCoinMaxBet != null && picked > perCoinMaxBet ? perCoinMaxBet : picked;
+      usedSet.add(picked);
+      windowRandomizerUsedValues.set(sym, usedSet);
+      logger.info(
+        {
+          sym, picked: +picked.toFixed(2), clamped: +clamped.toFixed(2),
+          available: available.map(v => +v.toFixed(2)),
+          usedThisWindow: [...usedSet].map(v => +v.toFixed(2)),
+          prev: +targetBetSize.toFixed(2),
+        },
+        `[kalshi-bot] bet randomizer: picked $${picked.toFixed(2)} from [${available.join(", ")}]`,
+      );
+      targetBetSize = clamped;
+      betRandomizerApplied = true;
+    } else {
+      logger.info(
+        { sym, values: vals, usedThisWindow: [...usedSet].map(v => +v.toFixed(2)) },
+        "[kalshi-bot] bet randomizer: all values used this window — falling back to normal sizing",
+      );
+    }
   }
   // ─────────────────────────────────────────────────────────────────────────
 
