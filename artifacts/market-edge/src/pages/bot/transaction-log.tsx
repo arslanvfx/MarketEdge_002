@@ -105,6 +105,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const isShadow = r.action === "shadow";
                 const isSkip = r.action === "skip";
                 const isOpen = r.action === "bet";
+                const isEmergencyClose = r.exitReason === "conviction_catastrophic_fill";
                 const isPendingEval = !isOpen && !isShadow && !isSkip && r.outcome == null;
                 const isWin = r.outcome === "win";
                 const isLoss = r.outcome === "loss";
@@ -125,13 +126,15 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     ? "border-orange-500/20 bg-orange-950/5"
                     : isOpen
                       ? "border-sky-500/30 bg-sky-950/10"
-                      : isWin
-                        ? "border-emerald-500/30 bg-emerald-950/10"
-                        : isLoss
-                          ? "border-red-500/30 bg-red-950/10"
-                          : isPendingEval
-                            ? "border-amber-500/20 bg-amber-950/5"
-                            : "border-border bg-card/60";
+                      : isEmergencyClose
+                        ? "border-amber-500/40 bg-amber-950/15"
+                        : isWin
+                          ? "border-emerald-500/30 bg-emerald-950/10"
+                          : isLoss
+                            ? "border-red-500/30 bg-red-950/10"
+                            : isPendingEval
+                              ? "border-amber-500/20 bg-amber-950/5"
+                              : "border-border bg-card/60";
 
                 return (
                   <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
@@ -196,6 +199,24 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 animate-pulse">
                           <Activity className="w-3 h-3" /> ACTIVE
                         </span>
+                      ) : isEmergencyClose ? (
+                        <>
+                          <span
+                            className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-300"
+                            title="Fill price deviated catastrophically from the conviction zone — position was unwound immediately"
+                          >
+                            <AlertTriangle className="w-3 h-3 shrink-0" /> Emergency Close
+                          </span>
+                          {isWin ? (
+                            <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
+                              <Trophy className="w-3 h-3" /> WIN
+                            </span>
+                          ) : isLoss ? (
+                            <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-300">
+                              <XCircle className="w-3 h-3" /> LOSS
+                            </span>
+                          ) : null}
+                        </>
                       ) : isWin ? (
                         <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
                           <Trophy className="w-3 h-3" /> WIN
@@ -350,11 +371,36 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           </span>
                         ) : null;
                       })()}
-                      {r.exitReason && (
+                      {r.exitReason && !isEmergencyClose && (
                         <span className="truncate max-w-[220px]" title={r.exitReason}>
                           · {r.exitReason.replace(/_/g, " ")}
                         </span>
                       )}
+                      {isEmergencyClose && ep != null && (() => {
+                        const decisionYesPrice = sigs?.yesPrice as number | null ?? null;
+                        const fillCost = r.direction === "no" ? 1 - ep : ep;
+                        const expectedCost = decisionYesPrice != null
+                          ? (r.direction === "no" ? 1 - decisionYesPrice : decisionYesPrice)
+                          : null;
+                        const deviationCents = expectedCost != null
+                          ? Math.abs(expectedCost - fillCost) * 100
+                          : null;
+                        return (
+                          <span
+                            className="flex items-center gap-1 text-amber-400/80 font-medium"
+                            title="Fill price deviated catastrophically from the conviction zone — position was unwound immediately"
+                          >
+                            <AlertTriangle className="w-3 h-3 shrink-0" />
+                            Filled {Math.round(fillCost * 100)}¢
+                            {expectedCost != null && (
+                              <span className="text-muted-foreground font-normal">
+                                vs zone ~{Math.round(expectedCost * 100)}¢
+                                {deviationCents != null && ` (${deviationCents.toFixed(0)}¢ off)`}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })()}
                       {r.phase2Activated && (
                         <span className="text-amber-400 font-medium">· Phase 2</span>
                       )}
