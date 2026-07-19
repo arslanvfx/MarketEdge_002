@@ -1240,6 +1240,15 @@ export interface BotConfig {
   // extremeCautionBetOverride when both features are enabled.
   timeBetScheduleEnabled?: boolean;
   timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
+
+  // ── Bet Amount Randomizer ─────────────────────────────────────────────────
+  // When enabled, each bet independently picks a random dollar amount from
+  // betRandomizerValues.  Overrides all other sizing (betSize, maxBetSize,
+  // conviction boost, stat regime boost, time-schedule, extreme caution), but
+  // is still clamped by the per-coin maxBetSize in coinOverrides (if set).
+  // Requires ≥ 2 values in betRandomizerValues to activate.
+  betRandomizerEnabled?: boolean;
+  betRandomizerValues?: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,6 +1444,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   proximityEarlyPctOverrides: {},
   proximityLatePctOverrides: {},
   coinOverrides: {},
+  betRandomizerEnabled: false,
+  betRandomizerValues: [],
 };
 
 /**

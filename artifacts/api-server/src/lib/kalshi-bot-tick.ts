@@ -1404,6 +1404,28 @@ async function _runBotTick(
   }
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ── BET AMOUNT RANDOMIZER ─────────────────────────────────────────────────
+  // When enabled and ≥ 2 values are configured, override targetBetSize with a
+  // randomly-chosen value from the list.  This runs AFTER all other sizing
+  // paths (conviction boost, regime, dynamic, time-schedule, extreme caution)
+  // so it overrides all of them.  The per-coin maxBetSize (from coinOverrides)
+  // is the only hard cap that still applies after randomization.
+  if (
+    (S.config.betRandomizerEnabled ?? false) &&
+    Array.isArray(S.config.betRandomizerValues) &&
+    S.config.betRandomizerValues.length >= 2
+  ) {
+    const vals = S.config.betRandomizerValues;
+    const picked = vals[Math.floor(Math.random() * vals.length)]!;
+    const clamped = perCoinMaxBet != null && picked > perCoinMaxBet ? perCoinMaxBet : picked;
+    logger.info(
+      { sym, picked: +picked.toFixed(2), clamped: +clamped.toFixed(2), values: vals, prev: +targetBetSize.toFixed(2) },
+      `[kalshi-bot] bet randomizer: picked $${picked.toFixed(2)} from [${vals.join(", ")}]`,
+    );
+    targetBetSize = clamped;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   let contractCount = Math.floor(targetBetSize / expectedFillCost);
   // If budget can't buy even one contract at the live ask, skip this entry and
   // engage the FOK-cooldown so this coin doesn't retry the same window.

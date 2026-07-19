@@ -108,6 +108,8 @@ export interface BotConfig {
   extremeCautionBetOverride?: number | null;
   timeBetScheduleEnabled?: boolean;
   timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
+  betRandomizerEnabled?: boolean;
+  betRandomizerValues?: number[];
 }
 
 export interface TrajectoryGateResult {

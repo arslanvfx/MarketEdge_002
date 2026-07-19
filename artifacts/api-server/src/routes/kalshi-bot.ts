@@ -684,6 +684,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     extremeCautionBetOverride,
     timeBetScheduleEnabled,
     timeBetSchedule,
+    betRandomizerEnabled,
+    betRandomizerValues,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -772,6 +774,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     extremeCautionBetOverride?: number | null;
     timeBetScheduleEnabled?: boolean;
     timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
+    betRandomizerEnabled?: boolean;
+    betRandomizerValues?: number[];
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -1064,6 +1068,17 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       }
     }
     partial.timeBetSchedule = validatedSchedule;
+  }
+  // Bet Amount Randomizer
+  if (typeof betRandomizerEnabled === "boolean") partial.betRandomizerEnabled = betRandomizerEnabled;
+  if (Array.isArray(betRandomizerValues)) {
+    const validatedValues: number[] = [];
+    for (const v of betRandomizerValues) {
+      if (typeof v === "number" && v >= 0.5 && v <= 100 && Number.isFinite(v)) {
+        validatedValues.push(+v.toFixed(2));
+      }
+    }
+    partial.betRandomizerValues = validatedValues;
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

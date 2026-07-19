@@ -1181,6 +1181,85 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   })()}
                 </div>
 
+                {/* Bet Amount Randomizer */}
+                <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-border/60 bg-muted/20 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                      <DollarSign className="w-3 h-3 text-amber-400" />
+                      Bet Amount Randomizer
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setConfigDraft(d => ({ ...d, betRandomizerEnabled: !(merged.betRandomizerEnabled ?? false) }))}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.betRandomizerEnabled ?? false)
+                        ? "bg-amber-500/15 text-amber-400 border-amber-500/30 hover:bg-amber-500/25"
+                        : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
+                    >
+                      {(merged.betRandomizerEnabled ?? false) ? "On" : "Off"}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/60 -mt-1">
+                    Each bet independently picks a random dollar amount from the list below. Overrides all other bet sizing (bet size, max bet size, conviction boost, time schedule). Per-coin max bet limits in Bot Config still apply as a ceiling.
+                  </p>
+                  {(merged.betRandomizerEnabled ?? false) && (configDraft.betRandomizerValues !== undefined ? configDraft.betRandomizerValues : (merged.betRandomizerValues ?? [])).length < 2 && (
+                    <p className="text-[10px] text-amber-400 font-medium -mt-1">
+                      ⚠ Add at least 2 values to activate the randomizer.
+                    </p>
+                  )}
+                  {(() => {
+                    const values = (configDraft.betRandomizerValues !== undefined ? configDraft.betRandomizerValues : merged.betRandomizerValues) ?? [];
+                    return (
+                      <div className="flex flex-col gap-1.5">
+                        {values.length === 0 && (
+                          <span className="text-[10px] text-muted-foreground/50 italic">No values yet — add some below.</span>
+                        )}
+                        {values.map((val, i) => (
+                          <div key={i} className="flex items-center gap-2 bg-muted/20 border border-amber-500/15 rounded-md px-2 py-1.5">
+                            <span className="text-[10px] text-amber-400/70 shrink-0">$</span>
+                            <input
+                              type="number"
+                              min={0.5}
+                              max={100}
+                              step={0.5}
+                              value={val}
+                              className="w-20 bg-background border border-amber-500/30 rounded px-1.5 py-0.5 text-xs text-foreground"
+                              onChange={e => {
+                                const v = parseFloat(e.target.value);
+                                if (Number.isNaN(v)) return;
+                                setConfigDraft(d => {
+                                  const cur = d.betRandomizerValues !== undefined ? d.betRandomizerValues : (merged.betRandomizerValues ?? []);
+                                  return { ...d, betRandomizerValues: cur.map((x, j) => j === i ? Math.max(0.5, Math.min(100, v)) : x) };
+                                });
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setConfigDraft(d => {
+                                const cur = d.betRandomizerValues !== undefined ? d.betRandomizerValues : (merged.betRandomizerValues ?? []);
+                                return { ...d, betRandomizerValues: cur.filter((_, j) => j !== i) };
+                              })}
+                              className="ml-auto text-red-400/50 hover:text-red-400 transition-colors"
+                              title="Remove value"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => {
+                            const cur = d.betRandomizerValues !== undefined ? d.betRandomizerValues : (merged.betRandomizerValues ?? []);
+                            return { ...d, betRandomizerValues: [...cur, merged.betSize ?? 1] };
+                          })}
+                          className="self-start text-[10px] text-amber-400/70 hover:text-amber-400 border border-amber-500/30 hover:border-amber-400/60 rounded px-2 py-1 transition-colors"
+                        >
+                          + Add value
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
+
                 {/* Trajectory Gate toggles — visible for all modes */}
                 <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-border/60 bg-muted/20 p-3">
                   <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
