@@ -333,12 +333,31 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                       <div className="flex flex-col gap-0.5">
                         <span
                           className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border bg-slate-500/10 text-slate-400 border-slate-500/20"
-                          title={`Gate activates in final ${(+traj.minutesRemaining).toFixed(1)} min (${(+traj.minutesRemaining - (traj.minutesRemaining > 0 ? traj.minutesRemaining : 0)).toFixed(0)} min away)`}
+                          title={`Freefall gate activates in final ${(+traj.minutesRemaining).toFixed(1)} min`}
                         >
                           ⏳ Watching
                         </span>
                         <span className="text-[10px] text-muted-foreground/50 font-mono tabular-nums">
                           {(+traj.minutesRemaining).toFixed(1)} min left
+                        </span>
+                      </div>
+                    ) : traj.reason === "adverse_momentum_to_cross" ? (
+                      <div className="flex flex-col gap-0.5">
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border bg-amber-500/15 text-amber-400 border-amber-500/25"
+                          title="Adverse momentum gate: price trending toward strike fast enough to cross before window closes"
+                        >
+                          ⚡ Momentum ↓
+                        </span>
+                        <span
+                          className="text-[10px] text-muted-foreground/70 font-mono tabular-nums"
+                          title={[
+                            `vel: ${traj.velocity >= 0 ? "+" : ""}${(+traj.velocity).toFixed(2)}/min (toward strike)`,
+                            `proj close: ${(+traj.projectedMarginPct).toFixed(3)}% vs strike`,
+                            `${(+traj.minutesRemaining).toFixed(1)} min left`,
+                          ].join(" · ")}
+                        >
+                          {traj.velocity >= 0 ? "+" : ""}{(+traj.velocity).toFixed(1)}/m · {(+traj.minutesRemaining).toFixed(1)}m left
                         </span>
                       </div>
                     ) : (

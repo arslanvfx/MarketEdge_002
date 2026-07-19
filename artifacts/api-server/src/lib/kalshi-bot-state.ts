@@ -240,7 +240,7 @@ export const coinStabilityCache = new Map<string, CoinStabilityResult>();
 export interface TrajectoryGateResult {
   symbol: string;
   blocked: boolean;
-  reason: "projected_cross" | "gate_inactive" | "insufficient_data" | null;
+  reason: "projected_cross" | "gate_inactive" | "insufficient_data" | "adverse_momentum_to_cross" | null;
   velocity: number;                // $/min — positive = rising, negative = falling
   projectedPrice: number;          // estimated underlying price at window close
   currentMarginPct: number;        // (livePrice - target) / target * 100

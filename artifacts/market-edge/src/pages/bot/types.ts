@@ -111,12 +111,15 @@ export interface BotConfig {
   betRandomizerEnabled?: boolean;
   betRandomizerValues?: number[];
   convictionCatastrophicFillThresholdCents?: number;
+  convictionMomentumGateEnabled?: boolean;
+  convictionMomentumLookbackMinutes?: number;
+  convictionMomentumSafetyFactor?: number;
 }
 
 export interface TrajectoryGateResult {
   symbol: string;
   blocked: boolean;
-  reason: "projected_cross" | "gate_inactive" | "insufficient_data" | null;
+  reason: "projected_cross" | "gate_inactive" | "insufficient_data" | "adverse_momentum_to_cross" | null;
   velocity: number;
   projectedPrice: number;
   currentMarginPct: number;

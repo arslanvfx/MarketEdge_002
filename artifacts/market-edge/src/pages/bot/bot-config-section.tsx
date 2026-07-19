@@ -878,6 +878,66 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       );
                     })()}
 
+                    {/* Adverse Momentum Gate */}
+                    <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-amber-300 flex items-center gap-1.5">
+                          <TrendingDown className="w-3 h-3" />
+                          Adverse Momentum Gate
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, convictionMomentumGateEnabled: !(merged.convictionMomentumGateEnabled ?? false) }))}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.convictionMomentumGateEnabled ?? false)
+                            ? "bg-amber-500/15 text-amber-400 border-amber-500/30 hover:bg-amber-500/25"
+                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
+                        >
+                          {(merged.convictionMomentumGateEnabled ?? false) ? "On" : "Off"}
+                        </button>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                        Active throughout the window. Blocks entry when the crypto price is trending toward the strike fast enough to cross it before close. Uses time-to-cross math rather than full-window projection — only stops freefall, not gentle drift.
+                      </span>
+                      {(merged.convictionMomentumGateEnabled ?? false) && (<>
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground">Velocity Lookback (min)</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={10}
+                            step={1}
+                            className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground w-24"
+                            value={merged.convictionMomentumLookbackMinutes ?? 3}
+                            onChange={e => {
+                              const v = parseInt(e.target.value, 10);
+                              setConfigDraft(d => ({ ...d, convictionMomentumLookbackMinutes: Number.isNaN(v) || v < 1 ? 1 : v }));
+                            }}
+                          />
+                          <span className="text-[10px] text-muted-foreground/60">Number of 1-min candles to compute velocity over. Default: 3.</span>
+                        </label>
+                        <label className="flex flex-col gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            Safety Factor <span className="font-mono text-amber-300">{(merged.convictionMomentumSafetyFactor ?? 0.6).toFixed(1)}</span>
+                          </span>
+                          <input
+                            type="range"
+                            min={0.1}
+                            max={1.0}
+                            step={0.1}
+                            className="w-full accent-amber-400"
+                            value={merged.convictionMomentumSafetyFactor ?? 0.6}
+                            onChange={e => {
+                              const v = parseFloat(e.target.value);
+                              setConfigDraft(d => ({ ...d, convictionMomentumSafetyFactor: v }));
+                            }}
+                          />
+                          <span className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                            Block when time-to-cross &lt; remaining × factor. Higher = more sensitive. At 0.6 (default): block if momentum would cross in less than 60% of remaining time. At 1.0: block any adverse momentum that could plausibly reach the strike.
+                          </span>
+                        </label>
+                      </>)}
+                    </div>
+
                     {/* Stability Gate */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
                       <div className="flex items-center justify-between">

@@ -1222,6 +1222,10 @@ export interface BotConfig {
   maxBetTrajectoryTimeWeightEnabled?: boolean;
   regularBetTrajectoryDangerBandPct?: number;
   regularBetTrajectoryDangerBandATR?: number;
+  // Conviction adverse momentum gate — active throughout the window (not just final N minutes)
+  convictionMomentumGateEnabled?: boolean;    // master toggle (default false)
+  convictionMomentumLookbackMinutes?: number; // velocity lookback in 1-min candles (default 3)
+  convictionMomentumSafetyFactor?: number;    // block if time-to-cross < remaining × factor (default 0.6)
 
   // ── Extreme Caution mode (conviction only) ────────────────────────────────
   // When enabled: (1) if a YES conviction bet was aborted this window because
@@ -1421,6 +1425,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryFinalMinutes: 5,
   maxBetTrajectoryBlockOnCross: true,
   maxBetTrajectoryMinVelocityATR: 0,
+  convictionMomentumGateEnabled: false,
+  convictionMomentumLookbackMinutes: 3,
+  convictionMomentumSafetyFactor: 0.6,
   minHoldMinutes: 4,
   enableMidExit: false,
   enableTimeStop: false,
