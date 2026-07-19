@@ -1870,3 +1870,77 @@ test("092 bootstrap: fresh-install chain 0.90 → 0.93 → 0.92", () => {
   assert.equal(res.bumped, true);
   assert.equal(cfg.kalshiLockPrice, 0.92);
 });
+
+// ---------------------------------------------------------------------------
+// CONVICTION CATASTROPHIC FILL THRESHOLD
+// Validates the pure threshold math used in the post-fill zone check
+// (kalshi-bot-tick.ts). The check computes fillDeviation and compares it to
+// convictionCatastrophicFillThresholdCents / 100.
+// ---------------------------------------------------------------------------
+
+/** Replicates the post-fill zone deviation check from kalshi-bot-tick.ts. */
+function catastrophicFillCheck(
+  fillAvgPrice: number,
+  direction: "yes" | "no",
+  target: number,
+  thresholdCents = 15,
+): { catastrophic: boolean; deviationCents: number } {
+  const { lockPrice, lockPriceCap } = deriveConvictionZone(target);
+  const convFillPrice = direction === "yes" ? fillAvgPrice : 1 - fillAvgPrice;
+  const fillDeviation = direction === "yes"
+    ? lockPrice - convFillPrice
+    : convFillPrice - lockPriceCap;
+  const threshold = thresholdCents / 100;
+  return {
+    catastrophic: fillDeviation > threshold,
+    deviationCents: +(fillDeviation * 100).toFixed(2),
+  };
+}
+
+test("catastrophic fill: YES at 11¢ with lockPrice=0.88 → 77¢ deviation → catastrophic", () => {
+  // target=0.90 → lockPrice=0.88, lockPriceCap=0.93
+  // avgPrice returned by Kalshi = 0.11 (YES fill)
+  // deviation = 0.88 - 0.11 = 0.77 → 77¢ >> 15¢ threshold
+  const r = catastrophicFillCheck(0.11, "yes", 0.90);
+  assert.equal(r.catastrophic, true);
+  assert.ok(r.deviationCents > 15, `Expected deviation > 15¢, got ${r.deviationCents}¢`);
+});
+
+test("catastrophic fill: YES at 85¢ with lockPrice=0.88 → 3¢ deviation → minor (hold)", () => {
+  // deviation = 0.88 - 0.85 = 0.03 → 3¢ < 15¢ threshold
+  const r = catastrophicFillCheck(0.85, "yes", 0.90);
+  assert.equal(r.catastrophic, false);
+  assert.ok(r.deviationCents <= 15, `Expected deviation ≤ 15¢, got ${r.deviationCents}¢`);
+});
+
+test("catastrophic fill: YES at 90¢ (in zone) → 0 deviation → not catastrophic", () => {
+  // fill is inside zone, deviation is negative → 0 deviation scenario
+  const r = catastrophicFillCheck(0.90, "yes", 0.90);
+  assert.equal(r.catastrophic, false);
+  assert.ok(r.deviationCents <= 0);
+});
+
+test("catastrophic fill: YES at exactly lockPrice (0.88) → 0¢ deviation → not catastrophic", () => {
+  const r = catastrophicFillCheck(0.88, "yes", 0.90);
+  assert.equal(r.catastrophic, false);
+});
+
+test("catastrophic fill: threshold=0 means any below-floor fill is catastrophic", () => {
+  // Even 1¢ below floor triggers catastrophic when threshold=0
+  const r = catastrophicFillCheck(0.87, "yes", 0.90, 0);
+  assert.equal(r.catastrophic, true);
+});
+
+test("catastrophic fill: threshold=100 means nothing is catastrophic (always hold)", () => {
+  // 77¢ deviation is still < 100¢ threshold
+  const r = catastrophicFillCheck(0.11, "yes", 0.90, 100);
+  assert.equal(r.catastrophic, false);
+});
+
+test("catastrophic fill: NO direction — avgPrice 0.06 (fill 94¢ NO cost) above cap=0.93 by 1¢ → minor", () => {
+  // NO direction: convFillPrice = 1 - avgPrice = 1 - 0.06 = 0.94
+  // fillDeviation = convFillPrice - lockPriceCap = 0.94 - 0.93 = 0.01 → 1¢ < 15¢ → minor
+  const r = catastrophicFillCheck(0.06, "no", 0.90);
+  assert.equal(r.catastrophic, false);
+  assert.ok(Math.abs(r.deviationCents - 1) < 0.1, `Expected ~1¢, got ${r.deviationCents}¢`);
+});

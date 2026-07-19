@@ -987,6 +987,7 @@ export interface BotConfig {
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
+  convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
   scalePhase?: number;             // scaling phase tracker: 1=test ($3/$6), 2=build ($7/$15), 3=full ($10/$25); default 1
@@ -1392,6 +1393,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionStopLossActivationMinute: 0,
   convictionEmergencyCloseFloor: 0.75,
   convictionDailyLossLimit: 50,
+  convictionCatastrophicFillThresholdCents: 15,
   convictionMinEntryMinutes: 0,
   scalePhase: 1,
   phaseStartedAt: null,

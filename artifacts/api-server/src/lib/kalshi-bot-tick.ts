@@ -2365,23 +2365,107 @@ async function _runBotTick(
           ? result.avgPrice
           : 1 - result.avgPrice;
 
-        // Post-fill zone check: log if fill landed below lockPrice (FOK can
-        // price-improve to a cheaper NO cost, e.g. 87¢ instead of 91¢), but
-        // DO NOT emergency-close. Selling immediately crystalizes a spread loss
-        // and re-enables entry so the loop repeats — far worse than holding.
-        // A lower NO fill price still wins if YES closes below target.
-        if (convFillPrice < _lp) {
-          logger.warn(
-            {
-              sym, direction, windowKey,
-              convFillPrice: +convFillPrice.toFixed(4),
-              avgPrice: +result.avgPrice.toFixed(4),
-              lockPrice: _lp, lockPriceCap: _lpCap,
-              contractCount, ticker: expectedTicker,
-            },
-            "[kalshi-bot] conviction fill below lockPrice — holding position to window close (no emergency close)",
-          );
-          // Fall through: position is recorded as open below and held until settlement.
+        // Deviation from the zone boundary:
+        //   YES bets: positive when fill < lockPrice (below floor)
+        //   NO  bets: positive when fill > lockPriceCap (above cap)
+        const fillDeviation = direction === "yes"
+          ? _lp - convFillPrice
+          : convFillPrice - _lpCap;
+
+        if (fillDeviation > 0) {
+          const thresholdCents = (S.config.convictionCatastrophicFillThresholdCents ?? 15) / 100;
+          const deviationCents = fillDeviation * 100;
+
+          if (fillDeviation > thresholdCents) {
+            // CATASTROPHIC deviation — the FOK was price-improved to a fill far outside
+            // the conviction zone (e.g. YES filled at 11¢ when lockPrice = 88¢).
+            // This happens when a resting sell order at a very different price appears
+            // between the pre-order gate and the actual exchange match.
+            // Action: unwind immediately. Do NOT hold — the position was never valid.
+            logger.error(
+              {
+                sym, direction, windowKey,
+                convFillPrice: +convFillPrice.toFixed(4),
+                avgPrice: +result.avgPrice.toFixed(4),
+                lockPrice: _lp, lockPriceCap: _lpCap,
+                deviationCents: +deviationCents.toFixed(1),
+                thresholdCents: thresholdCents * 100,
+                contractCount, ticker: expectedTicker,
+              },
+              "[kalshi-bot] conviction fill: CATASTROPHIC deviation — emergency closing position immediately",
+            );
+            // Attempt market sell to unwind. Failure is logged but non-fatal:
+            // the bet is still recorded as closed so evalClosedBets can reconcile.
+            let emergencyExitPrice: number | null = null;
+            if (expectedTicker != null) {
+              try {
+                const closeResult = direction === "yes"
+                  ? await sellYes(expectedTicker, contractCount)
+                  : await sellNo(expectedTicker, contractCount);
+                emergencyExitPrice = closeResult.avgPrice ?? null;
+                logger.info(
+                  { sym, direction, emergencyExitPrice, contractCount },
+                  "[kalshi-bot] conviction catastrophic fill: emergency sell placed",
+                );
+              } catch (closeErr) {
+                logger.error(
+                  { err: closeErr, sym, direction },
+                  "[kalshi-bot] conviction catastrophic fill: emergency sell failed — recording as closed anyway",
+                );
+              }
+            }
+            // Increment emergency-close counter — loop guard blocks re-entry after 2.
+            const closeCount = (convictionEmergencyCloses.get(`${sym}:${windowKey}`) ?? 0) + 1;
+            convictionEmergencyCloses.set(`${sym}:${windowKey}`, closeCount);
+            // Estimate P&L from sell price. evalClosedBets will correct once Kalshi settles.
+            const emergencyBetAmount = direction === "yes"
+              ? contractCount * convFillPrice
+              : contractCount * (1 - convFillPrice);
+            const emergencyExitYes = emergencyExitPrice ?? convFillPrice;
+            const emergencyPnl = direction === "yes"
+              ? (emergencyExitYes - convFillPrice) * contractCount
+              : (convFillPrice - emergencyExitYes) * contractCount;
+            persistBetRecord({
+              insertId: `${sym}:${windowKey}:${Date.now()}`,
+              symbol: sym,
+              windowKey,
+              ticker: expectedTicker,
+              direction,
+              action: "conviction_catastrophic_close",
+              signals: decision.signals,
+              entryPrice: convFillPrice,
+              exitPrice: emergencyExitPrice ?? convFillPrice,
+              kalshiTarget: kalshiTarget ?? 0,
+              contractCount,
+              betAmount: emergencyBetAmount,
+              pnl: emergencyPnl,
+              exitReason: "conviction_catastrophic_fill",
+              mode: S.botMode,
+              decisionMode: S.config.decisionMode,
+              entryYesPrice: result.avgPrice,
+            }).catch((dbErr: unknown) => {
+              logger.warn({ err: dbErr, sym }, "[kalshi-bot] conviction catastrophic fill: DB persist error (non-fatal)");
+            });
+            return; // Do NOT record the position as open — it has been unwound.
+          } else {
+            // Minor below-floor deviation (e.g. 86¢ fill when lockPrice = 88¢).
+            // Selling immediately crystalizes a spread loss and re-enables entry
+            // so the loop may repeat; holding is far better when deviation is small.
+            // A lower NO fill price still wins if YES closes below target.
+            logger.warn(
+              {
+                sym, direction, windowKey,
+                convFillPrice: +convFillPrice.toFixed(4),
+                avgPrice: +result.avgPrice.toFixed(4),
+                lockPrice: _lp, lockPriceCap: _lpCap,
+                deviationCents: +deviationCents.toFixed(1),
+                thresholdCents: thresholdCents * 100,
+                contractCount, ticker: expectedTicker,
+              },
+              "[kalshi-bot] conviction fill: minor below-floor deviation — holding position to settlement",
+            );
+            // Fall through: position is recorded as open and held until settlement.
+          }
         }
       }
 
