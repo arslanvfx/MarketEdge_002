@@ -14,6 +14,7 @@ import {
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   deriveConvictionZone,
+  computeAdverseMomentumGate,
   checkExtremeCautionEarlyGuard,
   computeNoAskBounceThreshold,
   computeExtremeCautionNoAskCeiling,
@@ -83,7 +84,7 @@ const entryTimingWritten = new Set<string>();
 // to — or crosses — the Kalshi target, the max bet is blocked.
 // Pure function: no I/O, no side-effects.
 // ---------------------------------------------------------------------------
-function computeTrajectoryGate(
+export function computeTrajectoryGate(
   sym: string,
   candles: Array<{ c: number; h: number; l: number; t: number }>,
   livePrice: number,
@@ -136,53 +137,39 @@ function computeTrajectoryGate(
   const adverseVelocity = signedVelocity <= 0;
 
   // ── Adverse momentum gate (active throughout window) ──────────────────────
-  // Blocks when: adverse velocity AND time-to-cross < minutesRemaining × safetyFactor.
-  // Unlike the freefall gate below, this is NOT restricted to the final N minutes —
-  // it fires at any point during the window to catch mid-window momentum shifts.
-  // Uses a conviction-specific lookback so it can be tuned independently.
-  //
-  // Math:  time-to-cross = (price − target) / |velocity|
-  //        block if time-to-cross < minutesRemaining × safetyFactor
-  //
-  // Example: BTC 1% above target, falling 0.3%/min, 8 min remaining:
-  //   time-to-cross = 1/0.3 = 3.3 min < 8 × 0.6 = 4.8 → BLOCKED
-  // Gentle drift: 0.05%/min → time-to-cross = 20 min > 4.8 → SAFE
+  // Delegates to computeAdverseMomentumGate (pure, exported, unit-tested).
+  // Uses a conviction-specific lookback so it can be tuned independently of
+  // the freefall gate's lookback.  Unlike the freefall gate this runs at any
+  // point in the window, not just the final N minutes.
   const amEnabled = config.convictionMomentumGateEnabled ?? false;
-  if (amEnabled && adverseVelocity && minutesRemaining > 0) {
-    // Recompute velocity with the conviction-specific lookback if different.
+  if (amEnabled && minutesRemaining > 0) {
     const amLookbackMin = Math.max(1, config.convictionMomentumLookbackMinutes ?? lookbackMin);
     const amActual = Math.min(amLookbackMin, candles.length - 1);
     const amVelocity = amActual === actualLookback
       ? velocity
       : (livePrice - candles[candles.length - 1 - amActual].c) / amActual;
-    const amAdverse = direction === "yes" ? amVelocity <= 0 : amVelocity >= 0;
 
-    if (amAdverse) {
-      // currentMarginDollars: how far the underlying price is from the target
-      // in the favorable direction (positive = currently winning side).
-      const currentMarginDollars = direction === "yes"
-        ? livePrice - kalshiTarget
-        : kalshiTarget - livePrice;
+    const amResult = computeAdverseMomentumGate({
+      livePrice,
+      kalshiTarget,
+      direction,
+      velocityPerMin: amVelocity,
+      minutesRemaining,
+      safetyFactor: config.convictionMomentumSafetyFactor ?? 0.6,
+      enabled: true,
+    });
 
-      if (currentMarginDollars > 0) {
-        const absVel = Math.abs(amVelocity);
-        const timeToCrossMin = absVel > 0 ? currentMarginDollars / absVel : Infinity;
-        const safetyFactor = config.convictionMomentumSafetyFactor ?? 0.6;
-        const threshold = minutesRemaining * safetyFactor;
-
-        if (timeToCrossMin < threshold) {
-          const amProjPrice = livePrice + amVelocity * minutesRemaining;
-          const amProjMarginPct = ((amProjPrice - kalshiTarget) / kalshiTarget) * 100;
-          return {
-            symbol: sym, blocked: true, reason: "adverse_momentum_to_cross",
-            velocity: amVelocity, projectedPrice: amProjPrice,
-            currentMarginPct, projectedMarginPct: amProjMarginPct,
-            minutesRemaining, direction, computedAt: Date.now(),
-            atrPct, effectiveCurrentMarginMinPct: 0, effectiveDangerBandPct: 0,
-            timeWeight: 1, adverseVelocity: true,
-          };
-        }
-      }
+    if (amResult.blocked) {
+      const amProjPrice = livePrice + amVelocity * minutesRemaining;
+      const amProjMarginPct = ((amProjPrice - kalshiTarget) / kalshiTarget) * 100;
+      return {
+        symbol: sym, blocked: true, reason: "adverse_momentum_to_cross",
+        velocity: amVelocity, projectedPrice: amProjPrice,
+        currentMarginPct, projectedMarginPct: amProjMarginPct,
+        minutesRemaining, direction, computedAt: Date.now(),
+        atrPct, effectiveCurrentMarginMinPct: 0, effectiveDangerBandPct: 0,
+        timeWeight: 1, adverseVelocity: true,
+      };
     }
   }
 

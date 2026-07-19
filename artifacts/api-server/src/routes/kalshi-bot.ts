@@ -686,6 +686,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     timeBetSchedule,
     betRandomizerEnabled,
     betRandomizerValues,
+    convictionMomentumGateEnabled,
+    convictionMomentumLookbackMinutes,
+    convictionMomentumSafetyFactor,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -776,6 +779,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
     betRandomizerEnabled?: boolean;
     betRandomizerValues?: number[];
+    convictionMomentumGateEnabled?: boolean;
+    convictionMomentumLookbackMinutes?: number;
+    convictionMomentumSafetyFactor?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -1079,6 +1085,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       }
     }
     partial.betRandomizerValues = validatedValues;
+  }
+  if (typeof convictionMomentumGateEnabled === "boolean") {
+    partial.convictionMomentumGateEnabled = convictionMomentumGateEnabled;
+  }
+  if (typeof convictionMomentumLookbackMinutes === "number" && convictionMomentumLookbackMinutes >= 1 && convictionMomentumLookbackMinutes <= 10) {
+    partial.convictionMomentumLookbackMinutes = Math.round(convictionMomentumLookbackMinutes);
+  }
+  if (typeof convictionMomentumSafetyFactor === "number" && convictionMomentumSafetyFactor >= 0.1 && convictionMomentumSafetyFactor <= 1.0) {
+    partial.convictionMomentumSafetyFactor = +convictionMomentumSafetyFactor.toFixed(1);
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

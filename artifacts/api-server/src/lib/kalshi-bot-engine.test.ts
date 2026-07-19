@@ -58,6 +58,7 @@ import {
   type CorePairInputs,
   type CircuitBreakerState,
   type ConvictionInputs,
+  computeAdverseMomentumGate,
 } from "./kalshi-bot-engine-core.ts";
 
 const DEFAULT_MIN_CONFIDENCE = 60;
@@ -1953,70 +1954,52 @@ test("catastrophic fill: NO direction — avgPrice 0.06 (fill 94¢ NO cost) abov
 //       block if time-to-cross < minutesRemaining * safetyFactor
 // ---------------------------------------------------------------------------
 
-/** Replicates the adverse momentum gate decision from computeTrajectoryGate. */
-function adverseMomentumCheck(opts: {
-  livePrice: number;
-  kalshiTarget: number;
-  direction: "yes" | "no";
-  velocityPerMin: number;   // $/min, positive = rising
-  minutesRemaining: number;
-  safetyFactor?: number;
-  enabled?: boolean;
-}): { blocked: boolean; timeToCrossMin: number } {
-  const { livePrice, kalshiTarget, direction, velocityPerMin, minutesRemaining, safetyFactor = 0.6, enabled = true } = opts;
-  if (!enabled) return { blocked: false, timeToCrossMin: Infinity };
-  const adverseVelocity = direction === "yes" ? velocityPerMin <= 0 : velocityPerMin >= 0;
-  if (!adverseVelocity || minutesRemaining <= 0) return { blocked: false, timeToCrossMin: Infinity };
-  const currentMarginDollars = direction === "yes" ? livePrice - kalshiTarget : kalshiTarget - livePrice;
-  if (currentMarginDollars <= 0) return { blocked: false, timeToCrossMin: Infinity };
-  const absVel = Math.abs(velocityPerMin);
-  const timeToCrossMin = absVel > 0 ? currentMarginDollars / absVel : Infinity;
-  const threshold = minutesRemaining * safetyFactor;
-  return { blocked: timeToCrossMin < threshold, timeToCrossMin };
-}
+// Tests call computeAdverseMomentumGate directly — the same pure function used
+// by computeTrajectoryGate in kalshi-bot-tick.ts.  This means any logic change
+// in the gate is reflected immediately in both production and tests.
 
 test("adverse momentum: YES freefall — $1000 margin, −300$/min, 8 min → BLOCKED (3.3 < 4.8)", () => {
   // time-to-cross = 1000/300 = 3.33 min; threshold = 8*0.6 = 4.8; 3.33 < 4.8 → BLOCKED
-  const r = adverseMomentumCheck({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -300, minutesRemaining: 8 });
+  const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -300, minutesRemaining: 8 });
   assert.equal(r.blocked, true);
   assert.ok(Math.abs(r.timeToCrossMin - 3.33) < 0.1, `Expected ~3.33, got ${r.timeToCrossMin.toFixed(2)}`);
 });
 
 test("adverse momentum: YES gentle drift — $1000 margin, −50$/min, 8 min → SAFE (20 > 4.8)", () => {
   // time-to-cross = 1000/50 = 20 min; threshold = 4.8; 20 > 4.8 → SAFE
-  const r = adverseMomentumCheck({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -50, minutesRemaining: 8 });
+  const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -50, minutesRemaining: 8 });
   assert.equal(r.blocked, false);
   assert.ok(r.timeToCrossMin > 15, `Expected > 15, got ${r.timeToCrossMin.toFixed(2)}`);
 });
 
 test("adverse momentum: YES exactly at threshold — 100$/min adverse, $480 margin, 8 min → SAFE (4.8 not < 4.8)", () => {
   // time-to-cross = 480/100 = 4.8; threshold = 8*0.6 = 4.8; 4.8 < 4.8 is false → SAFE
-  const r = adverseMomentumCheck({ livePrice: 100480, kalshiTarget: 100000, direction: "yes", velocityPerMin: -100, minutesRemaining: 8 });
+  const r = computeAdverseMomentumGate({ livePrice: 100480, kalshiTarget: 100000, direction: "yes", velocityPerMin: -100, minutesRemaining: 8 });
   assert.equal(r.blocked, false);
   assert.ok(Math.abs(r.timeToCrossMin - 4.8) < 0.01, `Expected 4.8, got ${r.timeToCrossMin.toFixed(3)}`);
 });
 
 test("adverse momentum: YES favorable velocity → SAFE (not adverse)", () => {
   // price rising → adverseVelocity = false → gate silent
-  const r = adverseMomentumCheck({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: 300, minutesRemaining: 8 });
+  const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: 300, minutesRemaining: 8 });
   assert.equal(r.blocked, false);
 });
 
 test("adverse momentum: gate disabled → SAFE even on fast freefall", () => {
-  const r = adverseMomentumCheck({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -300, minutesRemaining: 8, enabled: false });
+  const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -300, minutesRemaining: 8, enabled: false });
   assert.equal(r.blocked, false);
 });
 
 test("adverse momentum: NO direction freefall — target $100k, live $99k, rising +300$/min, 8 min → BLOCKED", () => {
   // NO wins below target. margin = target - live = 100000 - 99000 = 1000.
   // adverse when rising: velocityPerMin = +300 → time-to-cross = 1000/300 = 3.33 < 4.8 → BLOCKED
-  const r = adverseMomentumCheck({ livePrice: 99000, kalshiTarget: 100000, direction: "no", velocityPerMin: 300, minutesRemaining: 8 });
+  const r = computeAdverseMomentumGate({ livePrice: 99000, kalshiTarget: 100000, direction: "no", velocityPerMin: 300, minutesRemaining: 8 });
   assert.equal(r.blocked, true);
   assert.ok(Math.abs(r.timeToCrossMin - 3.33) < 0.1, `Expected ~3.33, got ${r.timeToCrossMin.toFixed(2)}`);
 });
 
 test("adverse momentum: zero velocity → SAFE (timeToCross = Infinity)", () => {
-  const r = adverseMomentumCheck({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: 0, minutesRemaining: 8 });
+  const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: 0, minutesRemaining: 8 });
   assert.equal(r.blocked, false);
   assert.equal(r.timeToCrossMin, Infinity);
 });

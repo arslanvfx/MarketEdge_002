@@ -1535,6 +1535,42 @@ export function deriveConvictionZone(target: number): {
 }
 
 /**
+ * computeAdverseMomentumGate — pure, export for testing.
+ *
+ * Decides whether the adverse momentum gate should block a conviction entry.
+ * Math: time-to-cross = currentMarginDollars / |velocity|
+ *       block if time-to-cross < minutesRemaining × safetyFactor
+ *
+ * Returns { blocked, timeToCrossMin }.
+ *  - blocked=false when: gate disabled, velocity is NOT adverse, margin ≤ 0,
+ *    velocity=0, or time-to-cross ≥ threshold.
+ *  - blocked=true when adverse momentum is steep enough to cross the strike
+ *    before window close (adjusted by safetyFactor).
+ */
+export function computeAdverseMomentumGate(opts: {
+  livePrice: number;
+  kalshiTarget: number;
+  direction: "yes" | "no";
+  velocityPerMin: number;   // $/min, positive = rising
+  minutesRemaining: number;
+  safetyFactor?: number;    // default 0.6
+  enabled?: boolean;        // default true
+}): { blocked: boolean; timeToCrossMin: number } {
+  const { livePrice, kalshiTarget, direction, velocityPerMin, minutesRemaining, safetyFactor = 0.6, enabled = true } = opts;
+  if (!enabled) return { blocked: false, timeToCrossMin: Infinity };
+  // Adverse = price moving TOWARD the strike
+  const adverseVelocity = direction === "yes" ? velocityPerMin <= 0 : velocityPerMin >= 0;
+  if (!adverseVelocity || minutesRemaining <= 0) return { blocked: false, timeToCrossMin: Infinity };
+  // currentMarginDollars: distance from the live price to the strike in the favorable direction
+  const currentMarginDollars = direction === "yes" ? livePrice - kalshiTarget : kalshiTarget - livePrice;
+  if (currentMarginDollars <= 0) return { blocked: false, timeToCrossMin: Infinity };
+  const absVel = Math.abs(velocityPerMin);
+  const timeToCrossMin = absVel > 0 ? currentMarginDollars / absVel : Infinity;
+  const threshold = minutesRemaining * safetyFactor;
+  return { blocked: timeToCrossMin < threshold, timeToCrossMin };
+}
+
+/**
  * applyLockPrice092Bootstrap — one-time startup bootstrap that moves the
  * conviction target from 0.93 to the user's updated preference of 0.92
  * (asymmetric zone [90¢, 95¢] via deriveConvictionZone).
