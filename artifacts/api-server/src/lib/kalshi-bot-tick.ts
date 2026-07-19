@@ -1410,6 +1410,9 @@ async function _runBotTick(
   // paths (conviction boost, regime, dynamic, time-schedule, extreme caution)
   // so it overrides all of them.  The per-coin maxBetSize (from coinOverrides)
   // is the only hard cap that still applies after randomization.
+  // betRandomizerApplied is tracked so the downstream maxBetCap guard widens
+  // to honour the randomized amount (same pattern as betScheduleApplied).
+  let betRandomizerApplied = false;
   if (
     (S.config.betRandomizerEnabled ?? false) &&
     Array.isArray(S.config.betRandomizerValues) &&
@@ -1423,6 +1426,7 @@ async function _runBotTick(
       `[kalshi-bot] bet randomizer: picked $${picked.toFixed(2)} from [${vals.join(", ")}]`,
     );
     targetBetSize = clamped;
+    betRandomizerApplied = true;
   }
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -1474,9 +1478,10 @@ async function _runBotTick(
   // trade entirely before touching Kalshi.  This protects against misconfigured
   // betSize values, unexpected rounding, or any future code change that could
   // inflate contractCount.  A tolerance of $0.01 covers floating-point dust.
-  // When the time-bet schedule applied a larger amount, honour that amount as
-  // the cap so the safety check doesn't false-positive on intentional overrides.
-  const maxBetCap = betScheduleApplied
+  // When the time-bet schedule or bet randomizer applied a larger amount,
+  // honour that amount as the cap so the safety check doesn't false-positive
+  // on intentional overrides.
+  const maxBetCap = (betScheduleApplied || betRandomizerApplied)
     ? Math.max(effectiveMaxBet, targetBetSize)
     : effectiveMaxBet;
   if (checkMaxBetSizeGuard(betAmount, maxBetCap)) {
