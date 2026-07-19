@@ -1415,31 +1415,43 @@ async function _runBotTick(
   // to honour the randomized amount (same pattern as betScheduleApplied).
   //
   // Per-window deduplication: each distinct dollar value can only be picked
-  // once per coin per window.  Available pool = full list minus already-used
+  // once per coin per window.  Available pool = full list minus already-confirmed
   // values this window.  If every value has been used, falls back to normal
   // sizing rather than repeating a high amount.
+  //
+  // IMPORTANT: the picked value is NOT recorded as used here.  In conviction
+  // mode _runBotTick fires every second per coin; the conviction gate (live
+  // price, bid-floor, zone check) blocks the order on most ticks.  Recording
+  // at the sizing step would exhaust all slots on failed-gate ticks before the
+  // real FOK ever lands.  The value is recorded only after the bet is confirmed
+  // placed (see windowRandomizerUsedValues.set call after windowBetCounts.set).
   let betRandomizerApplied = false;
+  // Carries the tentative pick down to the post-fill confirmation block.
+  let randomizerPickedForWindow: number | null = null;
   if (
     (S.config.betRandomizerEnabled ?? false) &&
     Array.isArray(S.config.betRandomizerValues) &&
     S.config.betRandomizerValues.length >= 2
   ) {
     const vals = S.config.betRandomizerValues;
-    const usedSet = windowRandomizerUsedValues.get(sym) ?? new Set<number>();
+    // Ensure the coin's Set is in the Map (even when empty) so the filter is
+    // consistent across ticks within the same window before any fill lands.
+    if (!windowRandomizerUsedValues.has(sym)) windowRandomizerUsedValues.set(sym, new Set());
+    const usedSet = windowRandomizerUsedValues.get(sym)!;
     const available = vals.filter(v => !usedSet.has(v));
     if (available.length > 0) {
       const picked = available[Math.floor(Math.random() * available.length)]!;
       const clamped = perCoinMaxBet != null && picked > perCoinMaxBet ? perCoinMaxBet : picked;
-      usedSet.add(picked);
-      windowRandomizerUsedValues.set(sym, usedSet);
+      // Stash for post-fill recording — do NOT add to usedSet yet.
+      randomizerPickedForWindow = picked;
       logger.info(
         {
           sym, picked: +picked.toFixed(2), clamped: +clamped.toFixed(2),
           available: available.map(v => +v.toFixed(2)),
-          usedThisWindow: [...usedSet].map(v => +v.toFixed(2)),
+          alreadyUsedThisWindow: [...usedSet].map(v => +v.toFixed(2)),
           prev: +targetBetSize.toFixed(2),
         },
-        `[kalshi-bot] bet randomizer: picked $${picked.toFixed(2)} from [${available.join(", ")}]`,
+        `[kalshi-bot] bet randomizer: tentatively selected $${picked.toFixed(2)} from [${available.join(", ")}] (will record on confirmed fill)`,
       );
       targetBetSize = clamped;
       betRandomizerApplied = true;
@@ -2525,6 +2537,18 @@ async function _runBotTick(
   lastDecisionWindowKey.set(sym, windowKey);
   // Increment the per-window bet counter so subsequent ticks respect maxBetsPerWindow.
   windowBetCounts.set(windowBetKey, betsThisWindow + 1);
+  // Record the randomizer pick as used NOW that the bet is confirmed placed.
+  // Must happen here (not at sizing time) so that conviction-mode ticks that are
+  // blocked by the live-price / bid-floor gate don't consume slots prematurely.
+  if (randomizerPickedForWindow != null) {
+    const _rUsed = windowRandomizerUsedValues.get(sym) ?? new Set<number>();
+    _rUsed.add(randomizerPickedForWindow);
+    windowRandomizerUsedValues.set(sym, _rUsed);
+    logger.info(
+      { sym, recorded: +randomizerPickedForWindow.toFixed(2), usedThisWindow: [..._rUsed].map(v => +v.toFixed(2)) },
+      "[kalshi-bot] bet randomizer: value recorded as used after confirmed fill",
+    );
+  }
   // Track gross daily spend so convictionMaxDailySpend gate can block future entries.
   S.dailySpendAmount += actualBetAmount;
   // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
