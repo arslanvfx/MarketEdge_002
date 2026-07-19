@@ -2381,7 +2381,8 @@ async function _runBotTick(
             // the conviction zone (e.g. YES filled at 11¢ when lockPrice = 88¢).
             // This happens when a resting sell order at a very different price appears
             // between the pre-order gate and the actual exchange match.
-            // Action: unwind immediately. Do NOT hold — the position was never valid.
+            // Action: unwind immediately via closePosition (handles P&L, balance,
+            // and DB persistence atomically with the same retry logic used everywhere).
             logger.error(
               {
                 sym, direction, windowKey,
@@ -2394,59 +2395,95 @@ async function _runBotTick(
               },
               "[kalshi-bot] conviction fill: CATASTROPHIC deviation — emergency closing position immediately",
             );
-            // Attempt market sell to unwind. Failure is logged but non-fatal:
-            // the bet is still recorded as closed so evalClosedBets can reconcile.
-            let emergencyExitPrice: number | null = null;
-            if (expectedTicker != null) {
-              try {
-                const closeResult = direction === "yes"
-                  ? await sellYes(expectedTicker, contractCount)
-                  : await sellNo(expectedTicker, contractCount);
-                emergencyExitPrice = closeResult.avgPrice ?? null;
-                logger.info(
-                  { sym, direction, emergencyExitPrice, contractCount },
-                  "[kalshi-bot] conviction catastrophic fill: emergency sell placed",
-                );
-              } catch (closeErr) {
-                logger.error(
-                  { err: closeErr, sym, direction },
-                  "[kalshi-bot] conviction catastrophic fill: emergency sell failed — recording as closed anyway",
-                );
-              }
-            }
             // Increment emergency-close counter — loop guard blocks re-entry after 2.
             const closeCount = (convictionEmergencyCloses.get(`${sym}:${windowKey}`) ?? 0) + 1;
             convictionEmergencyCloses.set(`${sym}:${windowKey}`, closeCount);
-            // Estimate P&L from sell price. evalClosedBets will correct once Kalshi settles.
-            const emergencyBetAmount = direction === "yes"
-              ? contractCount * convFillPrice
-              : contractCount * (1 - convFillPrice);
-            const emergencyExitYes = emergencyExitPrice ?? convFillPrice;
-            const emergencyPnl = direction === "yes"
-              ? (emergencyExitYes - convFillPrice) * contractCount
-              : (convFillPrice - emergencyExitYes) * contractCount;
-            persistBetRecord({
-              insertId: `${sym}:${windowKey}:${Date.now()}`,
+
+            // Build a temporary OpenPosition so closePosition can handle the sell,
+            // P&L calculation, balance refresh, and DB persistence uniformly.
+            // Kalshi always returns avgPrice in YES-side terms.
+            // convFillPrice = cost per contract for the direction placed:
+            //   YES → convFillPrice = result.avgPrice  (paid per YES contract)
+            //   NO  → convFillPrice = 1 - result.avgPrice  (paid per NO contract)
+            const catastrophicId = `${sym}:${windowKey}:${Date.now()}`;
+            const _catSigs = decision.signals as {
+              statAbove?: boolean | null;
+              claudeAbove?: boolean | null;
+              mlAbove?: boolean | null;
+            };
+            const catastrophicPos: OpenPosition = {
+              id: catastrophicId,
               symbol: sym,
               windowKey,
-              ticker: expectedTicker,
+              ticker: expectedTicker ?? "",
               direction,
-              action: "conviction_catastrophic_close",
-              signals: decision.signals,
-              entryPrice: convFillPrice,
-              exitPrice: emergencyExitPrice ?? convFillPrice,
-              kalshiTarget: kalshiTarget ?? 0,
+              entryYesPrice: result.avgPrice, // always YES-side (Kalshi convention)
               contractCount,
-              betAmount: emergencyBetAmount,
-              pnl: emergencyPnl,
-              exitReason: "conviction_catastrophic_fill",
-              mode: S.botMode,
-              decisionMode: S.config.decisionMode,
-              entryYesPrice: result.avgPrice,
-            }).catch((dbErr: unknown) => {
-              logger.warn({ err: dbErr, sym }, "[kalshi-bot] conviction catastrophic fill: DB persist error (non-fatal)");
-            });
-            return; // Do NOT record the position as open — it has been unwound.
+              // betAmount: cost per contract × contracts (convFillPrice = cost for either dir)
+              betAmount: contractCount * convFillPrice,
+              kalshiTarget: kalshiTarget ?? 0,
+              openedAt: Date.now(),
+              cryptoPriceAtEntry: getCachedPrediction(sym)?.price ?? null,
+              exitState: makeInitialExitState(result.avgPrice),
+              entryDecision: decision,
+              phase2Activated: false,
+              entryMode,
+              entrySignals: {
+                statAbove: _catSigs.statAbove ?? null,
+                claudeAbove: _catSigs.claudeAbove ?? null,
+                mlAbove: _catSigs.mlAbove ?? null,
+              },
+            };
+            try {
+              // closePosition: places sell order, computes P&L, updates balance +
+              // daily counters, and upserts the DB record (INSERT … ON CONFLICT DO
+              // UPDATE).  It handles the case where no prior entry INSERT exists
+              // by creating a combined entry+exit row.  gtcFallback retries as IOC
+              // on empty-book FOK failures so one thin-book tick doesn't strand us.
+              await closePosition(
+                catastrophicPos,
+                yesPrice,    // current market YES price — fallback for P&L if sell has no avgPrice
+                kalshiTarget,
+                "conviction_catastrophic_fill",
+                false,
+                { gtcFallback: true },
+              );
+              logger.info(
+                { sym, direction, contractCount },
+                "[kalshi-bot] conviction catastrophic fill: position unwound via closePosition",
+              );
+              return; // Fully closed — do NOT record as open.
+            } catch (closeErr) {
+              // closePosition threw (sell failed, exchange unavailable, etc.).
+              // Record the position as open so Phase 2 / exit guard can retry the
+              // close on the very next tick instead of leaving it stranded.
+              logger.error(
+                { err: closeErr, sym, direction },
+                "[kalshi-bot] conviction catastrophic fill: closePosition failed — tracking as open for retry next tick",
+              );
+              openPositions.set(sym, catastrophicPos);
+              // Persist an entry record so the position appears in history and
+              // evalClosedBets can reconcile the P&L once Kalshi settles.
+              persistBetRecord({
+                insertId: catastrophicId,
+                symbol: sym,
+                windowKey,
+                ticker: expectedTicker,
+                direction,
+                action: "conviction_catastrophic_open",
+                signals: decision.signals,
+                entryPrice: catastrophicPos.entryYesPrice,
+                kalshiTarget: kalshiTarget ?? 0,
+                contractCount,
+                betAmount: catastrophicPos.betAmount,
+                mode: S.botMode,
+                decisionMode: S.config.decisionMode,
+                entryYesPrice: result.avgPrice,
+              }).catch((dbErr: unknown) => {
+                logger.warn({ err: dbErr, sym }, "[kalshi-bot] conviction catastrophic fill: entry persist error (non-fatal)");
+              });
+              return; // Tracked as open; Phase 2 will close it.
+            }
           } else {
             // Minor below-floor deviation (e.g. 86¢ fill when lockPrice = 88¢).
             // Selling immediately crystalizes a spread loss and re-enables entry
