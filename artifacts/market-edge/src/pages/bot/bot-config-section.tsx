@@ -845,6 +845,39 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </span>
                     </label>
 
+                    {/* Catastrophic fill threshold */}
+                    {(() => {
+                      const raw = merged.convictionCatastrophicFillThresholdCents ?? 15;
+                      return (
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                            <AlertTriangle className="w-3 h-3 text-red-400" />
+                            Catastrophic Fill Threshold (¢)
+                            {raw === 0 && (
+                              <span className="text-muted-foreground/50 text-[10px]">— emergency close disabled</span>
+                            )}
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={50}
+                            step={1}
+                            className="bg-background border border-red-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                            value={raw}
+                            onChange={e => {
+                              const v = parseInt(e.target.value, 10);
+                              setConfigDraft(d => ({ ...d, convictionCatastrophicFillThresholdCents: Number.isNaN(v) || v < 0 ? 0 : v }));
+                            }}
+                          />
+                          <span className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                            {raw === 0
+                              ? "Emergency close is disabled — all fills are held to settlement regardless of price."
+                              : `Fills more than ${raw}¢ below the zone floor trigger an immediate emergency close instead of holding to settlement. Default: 15¢.`}
+                          </span>
+                        </label>
+                      );
+                    })()}
+
                     {/* Stability Gate */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
                       <div className="flex items-center justify-between">

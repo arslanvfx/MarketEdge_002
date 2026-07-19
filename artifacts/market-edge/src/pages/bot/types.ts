@@ -110,6 +110,7 @@ export interface BotConfig {
   timeBetSchedule?: Array<{ minutesElapsed: number; betAmount: number }>;
   betRandomizerEnabled?: boolean;
   betRandomizerValues?: number[];
+  convictionCatastrophicFillThresholdCents?: number;
 }
 
 export interface TrajectoryGateResult {
