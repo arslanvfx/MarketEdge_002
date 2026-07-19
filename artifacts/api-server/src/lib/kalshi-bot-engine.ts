@@ -124,6 +124,8 @@ export {
   applyLockPrice092Bootstrap,
   // Conviction zone derivation — single source of truth for [floor, cap].
   deriveConvictionZone,
+  // Adverse momentum gate math — pure, exported for unit tests and callers.
+  computeAdverseMomentumGate,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,
