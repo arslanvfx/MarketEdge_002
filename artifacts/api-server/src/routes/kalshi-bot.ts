@@ -193,7 +193,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     statMLStopLossPct: 20,
     statMLMaxEntryMinute: 8,
     statMLHighConfBoostEnabled: true,
-    statMLMinReturnMultiple: 1.5,
+    statMLMinReturnMultiple: 0,
   },
   conviction: {
     decisionMode: "conviction",
@@ -273,7 +273,7 @@ export async function seedStatMLPresetIfNeeded(): Promise<void> {
       statMLStopLossPct: 20,
       statMLMaxEntryMinute: 8,
       statMLHighConfBoostEnabled: true,
-      statMLMinReturnMultiple: 1.5,
+      statMLMinReturnMultiple: 0,
       statMLOrderbookGateEnabled: false,
       statMLOrderbookMinPressure: 0.60,
     };
@@ -1079,7 +1079,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.statMLMaxEntryMinute = statMLMaxEntryMinute;
   }
   if (typeof statMLHighConfBoostEnabled === "boolean") partial.statMLHighConfBoostEnabled = statMLHighConfBoostEnabled;
-  if (typeof statMLMinReturnMultiple === "number" && statMLMinReturnMultiple >= 1.0 && statMLMinReturnMultiple <= 3.0) {
+  if (typeof statMLMinReturnMultiple === "number" && statMLMinReturnMultiple >= 0 && statMLMinReturnMultiple <= 3.0) {
     partial.statMLMinReturnMultiple = statMLMinReturnMultiple;
   }
   if (typeof statMLOrderbookGateEnabled === "boolean") partial.statMLOrderbookGateEnabled = statMLOrderbookGateEnabled;

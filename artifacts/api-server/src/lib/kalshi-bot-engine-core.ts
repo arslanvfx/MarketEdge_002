@@ -740,7 +740,7 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
   // Min-return gate — use live YES-ask for accurate entry-cost economics.
   // yesAsk is the actual market ask (what we pay); yesPrice is the midpoint.
   // Prefer yesAsk; fall back to yesPrice when ask is unavailable.
-  const minReturn = inp.statMLMinReturnMultiple ?? 1.5;
+  const minReturn = inp.statMLMinReturnMultiple ?? 0;
   const returnPrice = inp.yesAsk ?? inp.yesPrice;
   const gate = checkMinReturnGate(direction ? "BET_YES" : "BET_NO", returnPrice, minReturn);
   if (gate.blocked) {
@@ -1657,7 +1657,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   statMLStopLossPct: 20,
   statMLMaxEntryMinute: 8,
   statMLHighConfBoostEnabled: true,
-  statMLMinReturnMultiple: 1.5,
+  statMLMinReturnMultiple: 0,
   statMLOrderbookGateEnabled: false,
   statMLOrderbookMinPressure: 0.60,
 };

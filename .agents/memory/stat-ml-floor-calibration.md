@@ -6,7 +6,9 @@ description: Correct floor values for statMLMinMLConf and statMLMinStatConf; why
 ## Rule
 - `statMLMinMLConf` = **57** (not 67, not 62)
 - `statMLMinStatConf` = **53**
+- `statMLMinReturnMultiple` = **0** (disabled — for research, bet volume > ROI filtering)
 - Inline fallback `?? 57` in `computeStatMLDecision`, `DEFAULT_BOT_CONFIG`, and `BUILT_IN_MODE_DEFAULTS` in routes must all match the DB value.
+- Route validator for `statMLMinReturnMultiple` accepts `>= 0` (was `>= 1.0`); 0 = disabled per `checkMinReturnGate` (≤1 = off).
 
 **Why:** ML model is a logistic regression calibrated to [50–65%] range. Average ML confidence per coin is 61–67%. Setting the floor at 67 puts it above the model's practical ceiling — zero bets ever pass. 62 was still too high on weak-signal days. 57 matches the lower quartile of ML output and unlocks bets when stat+ML genuinely agree.
 
