@@ -1468,9 +1468,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         )}
                         {savedPreset ? (
                           <p className="text-[9px] text-emerald-400/70">
-                            ✓ Saved preset for <span className="font-medium">{dm}</span> — overrides built-in defaults on mode switch.
+                            ✓ Saved preset for <span className="font-medium">{dm}</span> — auto-restores on mode switch.
                             {typeof savedPreset.minConfidence === "number" && ` Conf: ${savedPreset.minConfidence}%.`}
                             {typeof savedPreset.betSize === "number" && ` Bet: $${savedPreset.betSize}.`}
+                            {typeof savedPreset.savedAt === "string" && (
+                              <span className="text-muted-foreground/50">
+                                {" "}· saved {new Date(savedPreset.savedAt as string).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            )}
                           </p>
                         ) : (
                           <p className="text-[9px] text-muted-foreground/40">

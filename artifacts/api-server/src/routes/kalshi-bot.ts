@@ -40,6 +40,7 @@ import { getKalshiCachedData } from "../lib/crypto-kalshi";
 import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
+import { logger } from "../lib/logger";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -185,11 +186,13 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   },
 };
 
-async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<BotConfig>>>> {
+type ModePresetEntry = Partial<BotConfig> & { savedAt?: string };
+
+async function readModePresets(): Promise<Partial<Record<DecisionMode, ModePresetEntry>>> {
   try {
     const rows = await db.select().from(botConfigTable).where(eq(botConfigTable.id, PRESET_ROW_ID)).limit(1);
     if (rows.length > 0) {
-      const cfg = rows[0].config as { presets?: Partial<Record<DecisionMode, Partial<BotConfig>>> } | null;
+      const cfg = rows[0].config as { presets?: Partial<Record<DecisionMode, ModePresetEntry>> } | null;
       return cfg?.presets ?? {};
     }
   } catch { /* non-fatal */ }
@@ -198,14 +201,30 @@ async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<B
 
 async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): Promise<void> {
   const existing = await readModePresets();
-  const updated = { ...existing, [mode]: config };
-  await db
-    .insert(botConfigTable)
-    .values({ id: PRESET_ROW_ID, config: { presets: updated } as Record<string, unknown>, updatedAt: new Date() })
-    .onConflictDoUpdate({
-      target: botConfigTable.id,
-      set: { config: { presets: updated } as Record<string, unknown>, updatedAt: new Date() },
-    });
+  const entry: ModePresetEntry = { ...config, savedAt: new Date().toISOString() };
+  const updated = { ...existing, [mode]: entry };
+  await db.execute(sql`
+    INSERT INTO bot_config (id, config, updated_at)
+    VALUES (${PRESET_ROW_ID}, ${JSON.stringify({ presets: updated })}::jsonb, NOW())
+    ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+  `);
+}
+
+// Seed the conviction preset from the live in-memory config if none exists yet.
+// Called once at server startup to lock in the current tuned settings.
+export async function seedConvictionPresetIfNeeded(): Promise<void> {
+  try {
+    const presets = await readModePresets();
+    if (!presets.conviction) {
+      const current = getBotState().config;
+      if (current.decisionMode === "conviction") {
+        await writeModePreset("conviction", current as unknown as Partial<BotConfig>);
+        logger.info("[kalshi-bot] seeded conviction preset from live config");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] seedConvictionPresetIfNeeded failed (non-fatal)");
+  }
 }
 
 // ── Opening-call store ────────────────────────────────────────────────────────
@@ -794,6 +813,18 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.minConfidence = minConfidence;
   }
   if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
+    const currentMode = getBotState().config.decisionMode;
+
+    // Auto-save the departing mode's full config as its preset before switching.
+    // This ensures switching away and back never loses any tuned settings.
+    if (currentMode && currentMode !== decisionMode) {
+      try {
+        await writeModePreset(currentMode as DecisionMode, getBotState().config as unknown as Partial<BotConfig>);
+      } catch (err) {
+        logger.warn({ err }, "[kalshi-bot] auto-save departing mode preset failed (non-fatal)");
+      }
+    }
+
     // When switching modes: apply built-in mode defaults as a baseline, then
     // layer the saved user preset on top (if one exists), then apply any
     // explicit overrides from this request on top of that.
@@ -804,7 +835,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     const presets = await readModePresets();
     const modePreset = presets[decisionMode as DecisionMode];
     if (modePreset) {
-      Object.assign(partial, modePreset);
+      const { savedAt: _savedAt, ...presetConfig } = modePreset;
+      Object.assign(partial, presetConfig);
     }
     partial.decisionMode = decisionMode;
   }

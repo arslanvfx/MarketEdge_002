@@ -508,6 +508,12 @@ app.listen(port, (err) => {
       await fixLiveExpiredPnlHistorical().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] historical P&L fix failed (non-fatal)"),
       );
+      // Seed the conviction preset from the live config if none has been saved yet.
+      // Must run AFTER loadBotConfigFromDB so the in-memory config is correct.
+      const { seedConvictionPresetIfNeeded } = await import("./routes/kalshi-bot");
+      await seedConvictionPresetIfNeeded().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] conviction preset seed failed (non-fatal)"),
+      );
 
       // Re-evaluate all historical expired bets against Kalshi's authoritative
       // settlement result (RTI).  Corrects any bets that were mis-evaluated
