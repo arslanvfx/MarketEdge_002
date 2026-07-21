@@ -1412,14 +1412,23 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       )}
                       {/* Save current config as preset for this mode */}
-                      <button
-                        type="button"
-                        disabled={savingPreset}
-                        onClick={savePreset}
-                        className="text-[10px] px-2.5 py-1 rounded-lg border border-border bg-background/60 text-muted-foreground hover:text-foreground hover:border-border/80 transition-colors disabled:opacity-50"
-                      >
-                        {savingPreset ? "Saving…" : `Save as preset`}
-                      </button>
+                      {(() => {
+                        const dm = merged.decisionMode ?? "classic";
+                        const savedAt = (presetsData?.presets?.[dm] as Record<string, unknown> | undefined)?.savedAt as string | undefined;
+                        const savedLabel = savedAt
+                          ? `Saved ✓ ${new Date(savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                          : "Save as preset";
+                        return (
+                          <button
+                            type="button"
+                            disabled={savingPreset}
+                            onClick={savePreset}
+                            className={`text-[10px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${savedAt && !savingPreset ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20" : "border-border bg-background/60 text-muted-foreground hover:text-foreground hover:border-border/80"}`}
+                          >
+                            {savingPreset ? "Saving…" : savedLabel}
+                          </button>
+                        );
+                      })()}
                     </div>
                   </div>
 

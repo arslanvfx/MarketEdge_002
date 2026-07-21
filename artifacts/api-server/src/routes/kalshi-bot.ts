@@ -215,13 +215,15 @@ async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): 
 export async function seedConvictionPresetIfNeeded(): Promise<void> {
   try {
     const presets = await readModePresets();
-    if (!presets.conviction) {
-      const current = getBotState().config;
-      if (current.decisionMode === "conviction") {
-        await writeModePreset("conviction", current as unknown as Partial<BotConfig>);
-        logger.info("[kalshi-bot] seeded conviction preset from live config");
-      }
-    }
+    if (presets.conviction) return; // already seeded — nothing to do
+    // Seed conviction preset unconditionally from the current live config.
+    // Force decisionMode to "conviction" so the preset is always usable when
+    // switching to conviction, even if the server happened to start in a
+    // different mode (e.g. after a paper→live toggle).
+    const current = getBotState().config;
+    const seed: Partial<BotConfig> = { ...(current as unknown as Partial<BotConfig>), decisionMode: "conviction" };
+    await writeModePreset("conviction", seed);
+    logger.info("[kalshi-bot] seeded conviction preset from live config");
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] seedConvictionPresetIfNeeded failed (non-fatal)");
   }
