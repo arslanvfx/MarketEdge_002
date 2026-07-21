@@ -372,8 +372,17 @@ async function _firePipelineEntryForCoin(sym: string, windowKey: string): Promis
       return;
     }
     await runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []);
+    // If the tick resulted in a SKIP (no position opened), release the lock so the
+    // per-tick Phase-3 loop can retry when signals improve within this window.
+    // The lock only needs to persist while a position is actually open or being placed.
+    if (!openPositions.has(sym)) {
+      pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
+      logger.info({ sym, windowKey }, "[pipeline] completion tick: no bet placed — releasing lock for per-tick retry");
+    }
   } catch (err) {
     logger.warn({ err, sym, windowKey }, "[pipeline] completion-triggered tick error (non-fatal)");
+    // On error, also release the lock so Phase-3 can retry rather than being permanently blocked
+    pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
   }
 }
 

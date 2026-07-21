@@ -668,7 +668,7 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
   if (inp.mlAbove   === null) return skip("stat_ml: waiting for ML signal");
 
   const minStatConf  = inp.statMLMinStatConf        ?? 53;
-  const minMLConf    = inp.statMLMinMLConf           ?? 67;
+  const minMLConf    = inp.statMLMinMLConf           ?? 62;
   const requireAgree = inp.statMLRequireBothAgree    ?? true;
   const highBoost    = inp.statMLHighConfBoostEnabled ?? true;
 
@@ -1651,7 +1651,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   betRandomizerValues: [],
   // Stat + ML mode defaults
   statMLMinStatConf: 53,
-  statMLMinMLConf: 67,
+  statMLMinMLConf: 62,
   statMLRequireBothAgree: true,
   statMLStopLossEnabled: false,
   statMLStopLossPct: 20,
