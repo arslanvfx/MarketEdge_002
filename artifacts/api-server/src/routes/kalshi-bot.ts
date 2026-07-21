@@ -781,6 +781,17 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled,
     convictionMomentumLookbackMinutes,
     convictionMomentumSafetyFactor,
+    // stat_ml mode fields
+    statMLMinStatConf,
+    statMLMinMLConf,
+    statMLRequireBothAgree,
+    statMLStopLossEnabled,
+    statMLStopLossPct,
+    statMLMaxEntryMinute,
+    statMLHighConfBoostEnabled,
+    statMLMinReturnMultiple,
+    statMLOrderbookGateEnabled,
+    statMLOrderbookMinPressure,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -874,6 +885,17 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled?: boolean;
     convictionMomentumLookbackMinutes?: number;
     convictionMomentumSafetyFactor?: number;
+    // stat_ml mode fields
+    statMLMinStatConf?: number;
+    statMLMinMLConf?: number;
+    statMLRequireBothAgree?: boolean;
+    statMLStopLossEnabled?: boolean;
+    statMLStopLossPct?: number;
+    statMLMaxEntryMinute?: number;
+    statMLHighConfBoostEnabled?: boolean;
+    statMLMinReturnMultiple?: number;
+    statMLOrderbookGateEnabled?: boolean;
+    statMLOrderbookMinPressure?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -885,7 +907,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction" || decisionMode === "stat_ml") {
     const currentMode = getBotState().config.decisionMode;
 
     // Auto-save the departing mode's full config as its preset before switching.
@@ -1039,6 +1061,29 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof betDelayMinutes === "number" && betDelayMinutes >= 0 && betDelayMinutes <= 13) {
     partial.betDelayMinutes = betDelayMinutes;
+  }
+  // ── stat_ml mode config fields ────────────────────────────────────────────
+  if (typeof statMLMinStatConf === "number" && statMLMinStatConf >= 50 && statMLMinStatConf <= 65) {
+    partial.statMLMinStatConf = statMLMinStatConf;
+  }
+  if (typeof statMLMinMLConf === "number" && statMLMinMLConf >= 60 && statMLMinMLConf <= 80) {
+    partial.statMLMinMLConf = statMLMinMLConf;
+  }
+  if (typeof statMLRequireBothAgree === "boolean") partial.statMLRequireBothAgree = statMLRequireBothAgree;
+  if (typeof statMLStopLossEnabled === "boolean") partial.statMLStopLossEnabled = statMLStopLossEnabled;
+  if (typeof statMLStopLossPct === "number" && statMLStopLossPct >= 5 && statMLStopLossPct <= 50) {
+    partial.statMLStopLossPct = statMLStopLossPct;
+  }
+  if (typeof statMLMaxEntryMinute === "number" && statMLMaxEntryMinute >= 2 && statMLMaxEntryMinute <= 12) {
+    partial.statMLMaxEntryMinute = statMLMaxEntryMinute;
+  }
+  if (typeof statMLHighConfBoostEnabled === "boolean") partial.statMLHighConfBoostEnabled = statMLHighConfBoostEnabled;
+  if (typeof statMLMinReturnMultiple === "number" && statMLMinReturnMultiple >= 1.0 && statMLMinReturnMultiple <= 3.0) {
+    partial.statMLMinReturnMultiple = statMLMinReturnMultiple;
+  }
+  if (typeof statMLOrderbookGateEnabled === "boolean") partial.statMLOrderbookGateEnabled = statMLOrderbookGateEnabled;
+  if (typeof statMLOrderbookMinPressure === "number" && statMLOrderbookMinPressure >= 0.50 && statMLOrderbookMinPressure <= 0.80) {
+    partial.statMLOrderbookMinPressure = statMLOrderbookMinPressure;
   }
   if (typeof minNoEntryMinutes === "number" && minNoEntryMinutes >= 0 && minNoEntryMinutes <= 13) {
     partial.minNoEntryMinutes = minNoEntryMinutes;
