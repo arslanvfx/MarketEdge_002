@@ -157,6 +157,43 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 2,
   },
+  // Stat + ML: two-signal mode; no Claude required; early-window entries possible.
+  // Empirically superior on days without strong trend reversals (68.4% WR vs 60.4% with Claude).
+  // betDelayMinutes=0 + windowEntryBufferSeconds=60 means the bot can enter in minute 1
+  // the moment Stat+ML both produce a direction (no waiting for Claude's 30–120s call).
+  // statMLMaxEntryMinute=8 leaves ≥7 min for the position to resolve before the window closes.
+  stat_ml: {
+    decisionMode: "stat_ml",
+    minConfidence: 55,
+    minReturnMultiple: 1.5,
+    betDelayMinutes: 0,
+    maxEntryMinutes: 0,
+    minRemainingMinutes: 3,
+    windowEntryBufferSeconds: 60,
+    requireMonitorReady: true,
+    enableDynamicSizing: true,
+    betSize: 1,
+    maxBetSize: 3,
+    maxBetsPerWindow: 6,
+    profitLockPct: 0,
+    enableMidExit: false,
+    regimePenalty: 0,
+    enableDirectionCap: true,
+    maxSameDirectionBets: 4,
+    enableMomentumFilter: true,
+    consensusMinCents: 25,
+    momentumLookbackCandles: 6,
+    phase2ThresholdPp: 30,
+    minHoldMinutes: 3,
+    statMLMinStatConf: 53,
+    statMLMinMLConf: 55,
+    statMLRequireBothAgree: true,
+    statMLStopLossEnabled: false,
+    statMLStopLossPct: 30,
+    statMLMaxEntryMinute: 8,
+    statMLHighConfBoostEnabled: true,
+    statMLMinReturnMultiple: 1.5,
+  },
   conviction: {
     decisionMode: "conviction",
     minConfidence: 50,

@@ -28,6 +28,7 @@ import {
   computeCorePairDecision,
   computeMLGateDecision,
   computeConvictionDecision,
+  computeStatMLDecision,
   ML_WEIGHT,
   CLAUDE_WEIGHT,
   ML_BOOST,
@@ -79,6 +80,7 @@ import {
   type CorePairInputs,
   type CorePairResult,
   type ConvictionInputs,
+  type StatMLInputs,
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
@@ -89,6 +91,7 @@ export {
   computeCorePairDecision,
   computeConvictionDecision,
   computeMLGateDecision,
+  computeStatMLDecision,
   ML_WEIGHT,
   CLAUDE_WEIGHT,
   ML_BOOST,
@@ -153,6 +156,7 @@ export {
   type CorePairInputs,
   type CorePairResult,
   type ConvictionInputs,
+  type StatMLInputs,
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
@@ -254,9 +258,13 @@ function _makeBotDecisionInner(
   // be treated as "no opinion" (not a blocker) or the engine can never fire —
   // this is exactly what killed 6-coin windows where stat/ML cached data expired
   // mid-window.  Bypass ALL three null-checks for conviction.
+  //
+  // EXCEPTION — stat_ml mode: only Stat + ML are required; Claude is never
+  // waited on. The pipeline fires as soon as both Stat and ML are non-null.
   {
     const convictionMode = config.decisionMode === "conviction";
-    const claudeMissing  = !convictionMode && claudeAbove === null;
+    const statMLMode     = config.decisionMode === "stat_ml";
+    const claudeMissing  = !convictionMode && !statMLMode && claudeAbove === null;
     const statMlMissing  = !convictionMode && (statAbove === null || mlAbove === null);
     if (statMlMissing || claudeMissing) {
       const missing = (
@@ -272,10 +280,13 @@ function _makeBotDecisionInner(
         warmupActive: true,
         roiPct: null,
       };
+      const waitMsg = statMLMode
+        ? `stat_ml: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — Stat+ML required`
+        : `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`;
       return {
         action: "SKIP",
         confidence: 0,
-        reasoning: `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`,
+        reasoning: waitMsg,
         signals: pendingSnapshot,
       };
     }
@@ -300,6 +311,39 @@ function _makeBotDecisionInner(
 
   const decisionMode: DecisionMode = config.decisionMode ?? "classic";
   const profile = BET_PROFILES[config.betProfile ?? "normal"];
+
+  // ── Decision Mode: stat_ml ────────────────────────────────────────────────
+  // Two-signal mode: Stat + ML only. Claude's direction is available as context
+  // but is never a blocker. The pipeline fires early (before Claude finishes)
+  // when both Stat and ML are ready — enabling minute 0-1 entries.
+  if (decisionMode === "stat_ml") {
+    const smResult = computeStatMLDecision({
+      statAbove, mlAbove,
+      statConfidence: liveStatConf,
+      mlConfidence,
+      yesPrice,
+      kalshiTicker,
+      minConfidence: config.minConfidence,
+      statMLMinStatConf:        config.statMLMinStatConf,
+      statMLMinMLConf:          config.statMLMinMLConf,
+      statMLRequireBothAgree:   config.statMLRequireBothAgree,
+      statMLHighConfBoostEnabled: config.statMLHighConfBoostEnabled,
+      statMLMinReturnMultiple:  config.statMLMinReturnMultiple,
+    } as StatMLInputs);
+
+    const smSnap = buildSnapshot(
+      smResult.ev,
+      smResult.signalsAgreeing,
+      smResult.signalsTotal,
+      smResult.action !== "SKIP" ? smResult.action : null,
+    );
+    return {
+      action: smResult.action,
+      confidence: smResult.confidence,
+      reasoning: smResult.reasoning,
+      signals: smSnap,
+    };
+  }
 
   // ── Decision Mode: consensus ──────────────────────────────────────────────
   // Require at least 2 out of [Stat, Claude, ML] to agree on the same direction.
@@ -573,7 +617,7 @@ export function makeBotDecision(
     // Always record roiPct so it shows in bet signals even on SKIPs below.
     inner.signals = { ...inner.signals, roiPct: parseFloat(roi.toFixed(2)) };
 
-    if (roi < MIN_ROI_PCT && config.decisionMode !== "conviction") {
+    if (roi < MIN_ROI_PCT && config.decisionMode !== "conviction" && config.decisionMode !== "stat_ml") {
       return {
         action: "SKIP",
         confidence: inner.confidence,

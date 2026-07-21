@@ -581,6 +581,119 @@ function computeMLGateDecisionUngated(inp: CorePairInputs): CorePairResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Stat + ML mode — no Claude dependency
+// ---------------------------------------------------------------------------
+//
+// Direction: require BOTH Stat and ML to have opinions.
+//   If both agree          → bet that direction.
+//   If they disagree AND statMLRequireBothAgree=true → SKIP.
+//   If they disagree AND statMLRequireBothAgree=false → follow whichever has
+//     higher confidence (tie goes to Stat).
+//
+// Confidence: average(statConf, mlConf) + optional high-conf boost (+5pp when
+//   both signals ≥ 65 %, subject to statMLHighConfBoostEnabled).
+//
+// Gates applied inside this function:
+//   1. Both signals must be non-null.
+//   2. Direction resolution (agree / disagree logic above).
+//   3. Per-signal confidence floors (statMLMinStatConf / statMLMinMLConf).
+//   4. Composite confidence ≥ minConfidence.
+//   5. Min-return gate (statMLMinReturnMultiple, default 1.5×).
+
+export interface StatMLInputs {
+  statAbove: boolean | null;
+  mlAbove: boolean | null;
+  statConfidence: number | null;
+  mlConfidence: number | null;
+  yesPrice: number | null;
+  kalshiTicker: string | null;
+  minConfidence: number;
+  // mode-specific overrides (all optional — defaults used when absent)
+  statMLMinStatConf?: number;          // stat ≥ this % to contribute (default 53)
+  statMLMinMLConf?: number;            // ML  ≥ this % to contribute (default 55)
+  statMLRequireBothAgree?: boolean;    // when true: stat≠ml → SKIP (default true)
+  statMLHighConfBoostEnabled?: boolean;// +5pp when both confs ≥ 65 (default true)
+  statMLMinReturnMultiple?: number;    // return floor (default 1.5)
+}
+
+export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
+  const skip = (reason: string): CorePairResult => ({
+    action: "SKIP", confidence: 0, reasoning: reason,
+    signalsAgreeing: 0, signalsTotal: 2, ev: null,
+  });
+
+  if (!inp.kalshiTicker) return skip("stat_ml: no active Kalshi market for this symbol");
+
+  if (inp.statAbove === null) return skip("stat_ml: waiting for Stat signal");
+  if (inp.mlAbove   === null) return skip("stat_ml: waiting for ML signal");
+
+  const minStatConf  = inp.statMLMinStatConf        ?? 53;
+  const minMLConf    = inp.statMLMinMLConf           ?? 55;
+  const requireAgree = inp.statMLRequireBothAgree    ?? true;
+  const highBoost    = inp.statMLHighConfBoostEnabled ?? true;
+
+  const statConf = inp.statConfidence ?? 0;
+  const mlConf   = inp.mlConfidence   ?? 0;
+
+  // Per-signal floors
+  if (statConf < minStatConf) {
+    return skip(`stat_ml: Stat confidence ${Math.round(statConf)}% below floor ${minStatConf}%`);
+  }
+  if (mlConf < minMLConf) {
+    return skip(`stat_ml: ML confidence ${Math.round(mlConf)}% below floor ${minMLConf}%`);
+  }
+
+  const statDir = inp.statAbove;
+  const mlDir   = inp.mlAbove;
+  const agree   = statDir === mlDir;
+
+  let direction: boolean;
+  if (agree) {
+    direction = statDir;
+  } else if (requireAgree) {
+    return {
+      action: "SKIP", confidence: 0,
+      reasoning: `stat_ml: disagree — Stat=${statDir ? "YES" : "NO"} (${Math.round(statConf)}%) ML=${mlDir ? "YES" : "NO"} (${Math.round(mlConf)}%) requireBothAgree=true`,
+      signalsAgreeing: 0, signalsTotal: 2, ev: null,
+    };
+  } else {
+    // Follow higher-confidence signal; tie → Stat
+    direction = statConf >= mlConf ? statDir : mlDir;
+  }
+
+  const avgConf = (statConf + mlConf) / 2;
+  const boost   = highBoost && statConf >= 65 && mlConf >= 65 ? 5 : 0;
+  const confidence = Math.round(Math.min(avgConf + boost, 100));
+
+  if (confidence < inp.minConfidence) {
+    return {
+      action: "SKIP", confidence,
+      reasoning: `stat_ml: composite ${confidence}% below minimum ${inp.minConfidence}% (Stat=${Math.round(statConf)}% ML=${Math.round(mlConf)}%${boost ? " +5 high-conf boost" : ""})`,
+      signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
+    };
+  }
+
+  // Min-return gate
+  const minReturn = inp.statMLMinReturnMultiple ?? 1.5;
+  const gate = checkMinReturnGate(direction ? "BET_YES" : "BET_NO", inp.yesPrice, minReturn);
+  if (gate.blocked) {
+    return {
+      action: "SKIP", confidence,
+      reasoning: `stat_ml: ${gate.reason}`,
+      signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
+    };
+  }
+
+  const action: BotDecisionAction = direction ? "BET_YES" : "BET_NO";
+  const agreeLabel = agree ? "agree" : `disagree (following ${statConf >= mlConf ? "Stat" : "ML"})`;
+  return {
+    action, confidence, ev: null,
+    signalsAgreeing: agree ? 2 : 1, signalsTotal: 2,
+    reasoning: `stat_ml: Stat=${statDir ? "YES" : "NO"} ${Math.round(statConf)}% ML=${mlDir ? "YES" : "NO"} ${Math.round(mlConf)}% → ${agreeLabel} → ${action} (${confidence}%${boost ? " +boost" : ""})`,
+  };
+}
+
 /**
  * Minimum-return (payout multiple) gate — pure and shared across every decision
  * mode (classic, ml_gate, consensus, unanimous). A Kalshi contract costing
@@ -956,7 +1069,7 @@ export function checkMomentumOverride(
 // without pulling in the ./crypto or DB modules.
 // ---------------------------------------------------------------------------
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction" | "stat_ml";
 
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
@@ -1254,6 +1367,19 @@ export interface BotConfig {
   // Requires ≥ 2 values in betRandomizerValues to activate.
   betRandomizerEnabled?: boolean;
   betRandomizerValues?: number[];
+
+  // ── Stat + ML mode (stat_ml) ──────────────────────────────────────────────
+  // Two-signal mode: Stat + ML only; Claude is never required.
+  // The pipeline fires as soon as Stat+ML are both non-null; no waiting for
+  // Claude's extended-thinking call (which takes 30-120 s).
+  statMLMinStatConf?: number;           // Stat ≥ this % to pass the per-signal floor (default 53)
+  statMLMinMLConf?: number;             // ML  ≥ this % to pass the per-signal floor (default 55)
+  statMLRequireBothAgree?: boolean;     // when true: Stat≠ML → SKIP (default true)
+  statMLStopLossEnabled?: boolean;      // mid-window stop-loss (default false)
+  statMLStopLossPct?: number;           // % of entry cost to trigger stop-loss (default 30 = exit if position drops 30%)
+  statMLMaxEntryMinute?: number;        // no new entries after this many minutes elapsed (default 8); 0 = disabled
+  statMLHighConfBoostEnabled?: boolean; // +5pp confidence when both signals ≥65% (default true)
+  statMLMinReturnMultiple?: number;     // payout floor for stat_ml mode (default 1.5)
 }
 
 // ---------------------------------------------------------------------------
@@ -1455,6 +1581,15 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinOverrides: {},
   betRandomizerEnabled: false,
   betRandomizerValues: [],
+  // Stat + ML mode defaults
+  statMLMinStatConf: 53,
+  statMLMinMLConf: 55,
+  statMLRequireBothAgree: true,
+  statMLStopLossEnabled: false,
+  statMLStopLossPct: 30,
+  statMLMaxEntryMinute: 8,
+  statMLHighConfBoostEnabled: true,
+  statMLMinReturnMultiple: 1.5,
 };
 
 /**

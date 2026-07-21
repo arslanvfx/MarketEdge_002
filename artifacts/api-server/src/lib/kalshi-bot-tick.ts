@@ -556,6 +556,12 @@ async function _runBotTick(
   // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
+  // stat_ml-specific entry ceiling: no new entries after statMLMaxEntryMinute minutes.
+  // This is separate from maxEntryMinutes so it can be set without changing other modes.
+  if (S.config.decisionMode === "stat_ml") {
+    const smMaxMin = S.config.statMLMaxEntryMinute ?? 8;
+    if (smMaxMin > 0 && secondsElapsed > smMaxMin * 60) return;
+  }
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
   // Only bypassed at true market extremes (≥92¢ or ≤8¢) regardless of mode.
   // Conviction mode respects minWindowEntryMinutes just like any other mode —

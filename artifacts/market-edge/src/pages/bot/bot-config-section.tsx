@@ -156,6 +156,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
     }
   }
   const isConviction = (merged.decisionMode ?? "classic") === "conviction";
+  const isStatMLMode = (merged.decisionMode ?? "classic") === "stat_ml";
   return (
     <>
         {/* ── Config Settings ── */}
@@ -581,6 +582,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
 
                       { id: "conviction",      label: "Conviction",      desc: "Fires when Kalshi's YES price hits 90¢ (BET YES) or drops to 10¢ (BET NO) — the market itself declaring 90%+ certainty in either direction." },
+                      { id: "stat_ml",         label: "Stat + ML",        desc: "Two-signal mode: Stat model + ML agree on direction — no Claude wait. Fires as early as minute 0. Fastest entry, lower AI cost." },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
                       const needsML = m.id === "ml_gate" || m.id === "unanimous";
@@ -1174,6 +1176,167 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </label>
                     </div>
 
+                  </div>
+                )}
+
+                {/* Stat + ML Settings */}
+                {isStatMLMode && (
+                  <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-3">
+                    <span className="text-xs font-medium text-cyan-400 flex items-center gap-1.5">
+                      <Zap className="w-3 h-3" />
+                      Stat + ML Settings
+                    </span>
+                    <span className="text-[11px] text-muted-foreground/80 leading-relaxed">
+                      Two-signal mode: only the Stat model and ML are required to fire an entry — Claude is never waited on.
+                      Entries can fire as early as minute 0, the moment both signals have a direction.
+                      Both models must agree on the same side (configurable below).
+                    </span>
+
+                    {/* Stat Confidence Floor */}
+                    {(() => {
+                      const val = merged.statMLMinStatConf ?? 53;
+                      return (
+                        <label className="flex flex-col gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            Stat Confidence Floor — <span className="text-cyan-400 font-mono">{val}%</span>
+                          </span>
+                          <input type="range" min={50} max={75} step={1}
+                            className="accent-cyan-500"
+                            value={val}
+                            onChange={e => setConfigDraft(d => ({ ...d, statMLMinStatConf: parseInt(e.target.value, 10) }))} />
+                          <span className="text-[10px] text-muted-foreground/60">
+                            Stat model must report at least this confidence. Default: 53%.
+                          </span>
+                        </label>
+                      );
+                    })()}
+
+                    {/* ML Confidence Floor */}
+                    {(() => {
+                      const val = merged.statMLMinMLConf ?? 55;
+                      return (
+                        <label className="flex flex-col gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            ML Confidence Floor — <span className="text-cyan-400 font-mono">{val}%</span>
+                          </span>
+                          <input type="range" min={50} max={75} step={1}
+                            className="accent-cyan-500"
+                            value={val}
+                            onChange={e => setConfigDraft(d => ({ ...d, statMLMinMLConf: parseInt(e.target.value, 10) }))} />
+                          <span className="text-[10px] text-muted-foreground/60">
+                            ML model must report at least this confidence. Default: 55%.
+                          </span>
+                        </label>
+                      );
+                    })()}
+
+                    {/* Require Both Agree */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-xs text-muted-foreground">Require Both Agree</span>
+                        <span className="text-[10px] text-muted-foreground/60">
+                          Both Stat and ML must predict the same side. Off = either alone can bet.
+                        </span>
+                      </div>
+                      <button type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, statMLRequireBothAgree: !(merged.statMLRequireBothAgree ?? true) }))}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.statMLRequireBothAgree ?? true)
+                          ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/25"
+                          : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}>
+                        {(merged.statMLRequireBothAgree ?? true) ? "Both must agree" : "Either can bet"}
+                      </button>
+                    </div>
+
+                    {/* High-Conf Boost */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-xs text-muted-foreground">High-Confidence Boost</span>
+                        <span className="text-[10px] text-muted-foreground/60">
+                          When Stat ≥ 62% or ML ≥ 65%, confidence scores are boosted by +5pp.
+                        </span>
+                      </div>
+                      <button type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, statMLHighConfBoostEnabled: !(merged.statMLHighConfBoostEnabled ?? true) }))}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.statMLHighConfBoostEnabled ?? true)
+                          ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/25"
+                          : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}>
+                        {(merged.statMLHighConfBoostEnabled ?? true) ? "Enabled" : "Disabled"}
+                      </button>
+                    </div>
+
+                    {/* Max Entry Minute */}
+                    {(() => {
+                      const val = merged.statMLMaxEntryMinute ?? 8;
+                      return (
+                        <label className="flex flex-col gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            Max Entry Minute — <span className="text-cyan-400 font-mono">{val === 0 ? "no limit" : `T+${val} min`}</span>
+                          </span>
+                          <input type="range" min={0} max={13} step={1}
+                            className="accent-cyan-500"
+                            value={val}
+                            onChange={e => setConfigDraft(d => ({ ...d, statMLMaxEntryMinute: parseInt(e.target.value, 10) }))} />
+                          <span className="text-[10px] text-muted-foreground/60">
+                            Block new entries after this minute. 0 = no limit. Default: 8.
+                          </span>
+                        </label>
+                      );
+                    })()}
+
+                    {/* Min Return Multiple */}
+                    {(() => {
+                      const val = merged.statMLMinReturnMultiple ?? 1.5;
+                      return (
+                        <label className="flex flex-col gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            Min Return Multiple — <span className="text-cyan-400 font-mono">{val.toFixed(1)}×</span>
+                          </span>
+                          <input type="range" min={1.0} max={3.0} step={0.1}
+                            className="accent-cyan-500"
+                            value={val}
+                            onChange={e => setConfigDraft(d => ({ ...d, statMLMinReturnMultiple: parseFloat(e.target.value) }))} />
+                          <span className="text-[10px] text-muted-foreground/60">
+                            Skip bets where the risk-adjusted return is below this multiple. Default: 1.5×.
+                          </span>
+                        </label>
+                      );
+                    })()}
+
+                    {/* Stop Loss */}
+                    <div className="flex flex-col gap-1.5 border-t border-cyan-500/10 pt-2 mt-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-muted-foreground">Stop Loss</span>
+                        <button type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, statMLStopLossEnabled: !(merged.statMLStopLossEnabled ?? false) }))}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.statMLStopLossEnabled ?? false)
+                            ? "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
+                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}>
+                          {(merged.statMLStopLossEnabled ?? false) ? "Enabled" : "Disabled"}
+                        </button>
+                      </div>
+                      {(merged.statMLStopLossEnabled ?? false) && (() => {
+                        const pct = merged.statMLStopLossPct ?? 30;
+                        return (
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">
+                              Stop Threshold — <span className="text-red-400 font-mono">{pct}% loss</span>
+                            </span>
+                            <input type="range" min={10} max={70} step={5}
+                              className="accent-red-500"
+                              value={pct}
+                              onChange={e => setConfigDraft(d => ({ ...d, statMLStopLossPct: parseInt(e.target.value, 10) }))} />
+                            <span className="text-[10px] text-muted-foreground/60">
+                              Exit when position value drops by this % from entry cost. Default: 30%.
+                            </span>
+                          </label>
+                        );
+                      })()}
+                      {!(merged.statMLStopLossEnabled ?? false) && (
+                        <span className="text-[10px] text-muted-foreground/50">
+                          Disabled — positions held to window close regardless of mid-window loss.
+                        </span>
+                      )}
+                    </div>
                   </div>
                 )}
 

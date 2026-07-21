@@ -1,6 +1,6 @@
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction" | "stat_ml";
 
 export interface BotConfig {
   betSize: number;
@@ -114,6 +114,14 @@ export interface BotConfig {
   convictionMomentumGateEnabled?: boolean;
   convictionMomentumLookbackMinutes?: number;
   convictionMomentumSafetyFactor?: number;
+  statMLMinStatConf?: number;
+  statMLMinMLConf?: number;
+  statMLRequireBothAgree?: boolean;
+  statMLStopLossEnabled?: boolean;
+  statMLStopLossPct?: number;
+  statMLMaxEntryMinute?: number;
+  statMLHighConfBoostEnabled?: boolean;
+  statMLMinReturnMultiple?: number;
 }
 
 export interface TrajectoryGateResult {
