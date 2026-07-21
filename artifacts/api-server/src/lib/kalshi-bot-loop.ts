@@ -708,9 +708,9 @@ export async function runBotLoopTick(): Promise<void> {
       const stopLossPct = (S.config.statMLStopLossPct ?? 20) / 100;
       for (const [sym, pos] of Array.from(openPositions.entries())) {
         // Stop-loss scoped to positions that were entered in stat_ml mode.
-        // Checking pos.entryMode avoids affecting positions opened under a
-        // different mode when the operator switches modes mid-session.
-        if (pos.entryMode !== "stat_ml") continue;
+        // entryDecisionMode is set at position open time (not the current mode)
+        // so a mid-session mode switch cannot affect positions from other modes.
+        if (pos.entryDecisionMode !== "stat_ml") continue;
         const kd = getKalshiCachedData(sym);
         const yp = kd?.yesPrice ?? null;
         if (yp === null) continue;

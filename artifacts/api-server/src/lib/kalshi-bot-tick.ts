@@ -2652,6 +2652,7 @@ async function _runBotTick(
     entryDecision: decision,
     phase2Activated: false,
     entryMode,
+    entryDecisionMode: S.config.decisionMode,
     entrySignals: {
       statAbove: _entrySigs.statAbove ?? null,
       claudeAbove: _entrySigs.claudeAbove ?? null,

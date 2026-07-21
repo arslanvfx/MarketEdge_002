@@ -1315,18 +1315,18 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       {(merged.statMLStopLossEnabled ?? false) && (() => {
-                        const pct = merged.statMLStopLossPct ?? 30;
+                        const pct = merged.statMLStopLossPct ?? 20;
                         return (
                           <label className="flex flex-col gap-1.5">
                             <span className="text-xs text-muted-foreground">
                               Stop Threshold — <span className="text-red-400 font-mono">{pct}% loss</span>
                             </span>
-                            <input type="range" min={10} max={70} step={5}
+                            <input type="range" min={5} max={50} step={5}
                               className="accent-red-500"
                               value={pct}
                               onChange={e => setConfigDraft(d => ({ ...d, statMLStopLossPct: parseInt(e.target.value, 10) }))} />
                             <span className="text-[10px] text-muted-foreground/60">
-                              Exit when position value drops by this % from entry cost. Default: 30%.
+                              Exit when position value drops by this % from entry cost. Default: 20%.
                             </span>
                           </label>
                         );
