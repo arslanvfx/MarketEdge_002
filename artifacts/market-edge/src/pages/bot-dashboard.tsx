@@ -412,6 +412,9 @@ export default function BotDashboard() {
     try {
       const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
       setConfigDraft({});
+      // Immediately refresh bot-status so the UI reflects the new config
+      // (decisionMode, statML fields, etc.) without waiting for the next poll.
+      void qc.invalidateQueries({ queryKey: ["bot-status"] });
       setPersistMsg(result.persisted ? "saved" : "failed");
       setTimeout(() => setPersistMsg(null), 3000);
     } catch (err) {
