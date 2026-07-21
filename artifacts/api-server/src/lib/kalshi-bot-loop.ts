@@ -704,9 +704,13 @@ export async function runBotLoopTick(): Promise<void> {
     // the held contract drops 20% relative to the entry fill price).
     //   YES position: entry cost = entryYesPrice; current value = yesPrice
     //   NO  position: entry cost = 1-entryYesPrice; current value = 1-yesPrice
-    if (S.config.decisionMode === "stat_ml" && (S.config.statMLStopLossEnabled ?? false)) {
+    if ((S.config.statMLStopLossEnabled ?? false)) {
       const stopLossPct = (S.config.statMLStopLossPct ?? 20) / 100;
       for (const [sym, pos] of Array.from(openPositions.entries())) {
+        // Stop-loss scoped to positions that were entered in stat_ml mode.
+        // Checking pos.entryMode avoids affecting positions opened under a
+        // different mode when the operator switches modes mid-session.
+        if (pos.entryMode !== "stat_ml") continue;
         const kd = getKalshiCachedData(sym);
         const yp = kd?.yesPrice ?? null;
         if (yp === null) continue;

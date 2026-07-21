@@ -681,16 +681,24 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
     };
   }
 
-  // Orderbook pressure gate (optional) — skip if YES bid volume share is too low
+  // Orderbook pressure gate (optional; direction-aware).
+  // YES bets need high YES-side pressure (buyers > sellers for YES).
+  // NO  bets need high NO-side pressure = 1 − YES pressure.
+  // Low pressure on the relevant side signals a thin/unfavourable book.
   if (inp.statMLOrderbookGateEnabled) {
-    const minPressure = inp.statMLOrderbookMinPressure ?? 0.60;
-    const pressure    = inp.orderbookPressure ?? null;
-    if (pressure !== null && pressure < minPressure) {
-      return {
-        action: "SKIP", confidence,
-        reasoning: `stat_ml: orderbook pressure ${pressure.toFixed(3)} below minimum ${minPressure} (spread too wide; not entering)`,
-        signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
-      };
+    const minPressure   = inp.statMLOrderbookMinPressure ?? 0.60;
+    const yesPressure   = inp.orderbookPressure ?? null;
+    if (yesPressure !== null) {
+      // For YES bets check YES pressure; for NO bets check NO pressure (complement)
+      const sidePressure = direction ? yesPressure : (1 - yesPressure);
+      if (sidePressure < minPressure) {
+        const side = direction ? "YES" : "NO";
+        return {
+          action: "SKIP", confidence,
+          reasoning: `stat_ml: ${side}-side orderbook pressure ${sidePressure.toFixed(3)} below minimum ${minPressure} (insufficient ${side} liquidity)`,
+          signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
+        };
+      }
     }
   }
 

@@ -363,7 +363,9 @@ function _makeBotDecisionInner(
       statMLAgreement: statAbove !== null && mlAbove !== null ? statAbove === mlAbove : null,
       statMLEarlyFire: claudeAbove === null, // true when we fired before Claude was ready
       statMLEntryMinute: Math.floor(minutesElapsed),
-      statMLOrderbookPressure: obPressure,
+      // Only expose pressure when the gate was actually evaluated (gate enabled).
+      // When gate is disabled obPressure is irrelevant and should read as null.
+      statMLOrderbookPressure: config.statMLOrderbookGateEnabled ? obPressure : null,
     };
     return {
       action: smResult.action,
