@@ -106,6 +106,24 @@ export function backtestModeApproval(
     return statAbove === aboveExpected && claudeAbove === aboveExpected && mlAbove === aboveExpected;
   }
 
+  // ── stat_ml ───────────────────────────────────────────────────────────────
+  // Mirrors computeStatMLDecision (kalshi-bot-engine-core.ts):
+  //   1. Both stat and ML signals must be present.
+  //   2. Both must meet their confidence floors (53% stat, 57% ML).
+  //   3. Both must agree on direction (requireBothAgree = true default).
+  //   4. Direction must match the actual bet direction.
+  // Price-dependent gates (min-return, orderbook) are omitted — historical
+  // entry prices are not reliable enough to replay those checks accurately.
+  if (mode === "stat_ml") {
+    if (statAbove === null || mlAbove === null) return false; // Gate 1: both required
+    const sc = statConf ?? 0;
+    const mc = mlConf  ?? 0;
+    if (sc < 53) return false; // Gate 2: stat floor
+    if (mc < 57) return false; // Gate 2: ML floor
+    if (statAbove !== mlAbove) return false; // Gate 3: must agree
+    return statAbove === aboveExpected; // Gate 4: direction must match
+  }
+
   // Unknown mode — approve by default so new modes don't silently disappear.
   return true;
 }

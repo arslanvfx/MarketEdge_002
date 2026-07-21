@@ -282,7 +282,7 @@ export async function getBotLogicPerformance(filterMode?: BotMode, resetAt?: str
       modeMap.set(mode, entry);
     }
 
-    const ALL_MODES: DecisionMode[] = ["classic", "ml_gate", "consensus", "unanimous"];
+    const ALL_MODES: DecisionMode[] = ["classic", "ml_gate", "consensus", "unanimous", "stat_ml"];
     const result: LogicModeStats[] = [];
 
     const toStats = (e: { bets: number; wins: number; losses: number; pnl: number; confSum: number; confCount: number }, m: string): LogicModeStats => ({
@@ -454,7 +454,7 @@ export async function getBacktestModes(): Promise<BacktestModeStats[]> {
           AND ${kalshiBotBetsTable.archivedAt} IS NULL`,
       );
 
-    const ALL_MODES = ["classic", "ml_gate", "consensus", "unanimous"] as const;
+    const ALL_MODES = ["classic", "ml_gate", "consensus", "unanimous", "stat_ml"] as const;
     const modeAcc = new Map<string, { bets: number; wins: number; losses: number; pnl: number }>(
       ALL_MODES.map(m => [m, { bets: 0, wins: 0, losses: 0, pnl: 0 }]),
     );

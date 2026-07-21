@@ -23,6 +23,7 @@ export function LogicModePerf({ logicPerfData, backtestData, btPerfTab, setBtPer
             ml_gate:   { label: "ML Gate",   desc: "ML veto on disagreement",    color: "border-violet-500/40 bg-violet-950/10", accent: "text-violet-400" },
             consensus: { label: "Consensus", desc: "2/3 majority vote",          color: "border-amber-500/40 bg-amber-950/10",  accent: "text-amber-400" },
             unanimous: { label: "Unanimous", desc: "All 3 signals must agree",   color: "border-emerald-500/40 bg-emerald-950/10", accent: "text-emerald-400" },
+            stat_ml:   { label: "Stat + ML", desc: "Stat ≥53% & ML ≥57% agree", color: "border-teal-500/40 bg-teal-950/10",    accent: "text-teal-400" },
           };
 
           const btModes = backtestData?.modes ?? [];
@@ -142,7 +143,7 @@ export function LogicModePerf({ logicPerfData, backtestData, btPerfTab, setBtPer
                 </div>
               </div>
               <div className="p-5">
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                   {btPerfTab === "live"
                     ? modes.map(m => renderModeCard(m, false))
                     : btModes.map(m => renderModeCard(m, true))
