@@ -1,3 +1,4 @@
+- [stat_ml ML floor calibration](stat-ml-floor-calibration.md) — statMLMinMLConf ships at 62 (not 67); ML tops out ~63% in practice; backtest optimal is ML≥62/Stat≥53
 - [Tick TDZ variable ordering](tick-tdz-variable-ordering.md) — variables used inside _runBotTick must be declared BEFORE their use site; `secondsElapsedNow` declared at line ~1519, any call site earlier crashes every tick silently (non-fatal handler swallows ReferenceError)
 - [Kalshi ticker window drift](kalshi-ticker-window-drift.md) — Kalshi pre-publishes next window ~10min early; fetchKalshiTarget switches tickers prematurely; conviction gate must compute ticker deterministically from windowKey (EDT UTC-4 format KX${SYM}15M-YYMONDD-HHMM-MM)
 - [Conviction zone enforcement](conviction-no-gate-crosscheck.md) — post-fill emergency close RE-ENABLED (was if(false)); Kalshi FOK price-improves below zone; loop guard MAX=2/window prevents rebuy bleed; Layer 3 is the ONLY check on actual fill price

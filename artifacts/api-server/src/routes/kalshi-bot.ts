@@ -187,7 +187,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 3,
     statMLMinStatConf: 53,
-    statMLMinMLConf: 67,
+    statMLMinMLConf: 62,
     statMLRequireBothAgree: true,
     statMLStopLossEnabled: false,
     statMLStopLossPct: 20,
@@ -899,7 +899,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     statMLOrderbookMinPressure?: number;
   };
 
-  logger.info({ decisionMode, bodyKeys: Object.keys(req.body) }, "[kalshi-bot] POST /crypto/bot/config received");
   const partial: Parameters<typeof updateBotConfig>[0] = {};
   if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 500) partial.betSize = betSize;
   if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;

@@ -418,9 +418,7 @@ export default function BotDashboard() {
   async function saveConfig() {
     setSaving(true);
     try {
-      console.log("[saveConfig] sending configDraft:", JSON.stringify(configDraft));
-      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean; error?: string };
-      console.log("[saveConfig] result:", JSON.stringify(result));
+      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
       setConfigDraft({});
       // Immediately refresh bot-status so the UI reflects the new config
       // (decisionMode, statML fields, etc.) without waiting for the next poll.
@@ -430,7 +428,7 @@ export default function BotDashboard() {
     } catch (err) {
       setPersistMsg("failed");
       setTimeout(() => setPersistMsg(null), 4000);
-      console.error("[saveConfig] threw:", err);
+      console.error("[saveConfig] failed:", err);
     } finally {
       setSaving(false);
     }
