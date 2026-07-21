@@ -186,7 +186,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     momentumLookbackCandles: 6,
     phase2ThresholdPp: 30,
     minHoldMinutes: 3,
-    statMLMinStatConf: 53,
+    statMLMinStatConf: 50,
     statMLMinMLConf: 57,
     statMLRequireBothAgree: true,
     statMLStopLossEnabled: false,
@@ -266,8 +266,8 @@ export async function seedStatMLPresetIfNeeded(): Promise<void> {
       betSize: 1,
       maxBetSize: 3,
       maxBetsPerWindow: 6,
-      statMLMinStatConf: 53,
-      statMLMinMLConf: 67,
+      statMLMinStatConf: 50,
+      statMLMinMLConf: 57,
       statMLRequireBothAgree: true,
       statMLStopLossEnabled: false,
       statMLStopLossPct: 20,
@@ -1020,7 +1020,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof maxBetSize === "number" && maxBetSize >= 0.5 && maxBetSize <= 500) partial.maxBetSize = maxBetSize;
   if (typeof minAccountBalance === "number" && minAccountBalance >= 0 && minAccountBalance <= 1000) partial.minAccountBalance = minAccountBalance;
   if (typeof maxTotalExposure === "number" && maxTotalExposure >= 0 && maxTotalExposure <= 500) partial.maxTotalExposure = maxTotalExposure;
-  if (typeof maxDailyLossPerCoin === "number" && maxDailyLossPerCoin >= 0 && maxDailyLossPerCoin <= 100) partial.maxDailyLossPerCoin = maxDailyLossPerCoin;
+  if (typeof maxDailyLossPerCoin === "number" && maxDailyLossPerCoin >= 0 && maxDailyLossPerCoin <= 10000) partial.maxDailyLossPerCoin = maxDailyLossPerCoin;
   if (typeof coinStreakLossLimit === "number" && coinStreakLossLimit >= 0 && coinStreakLossLimit <= 10) partial.coinStreakLossLimit = coinStreakLossLimit;
   if (typeof coinStreakPauseWindows === "number" && coinStreakPauseWindows >= 1 && coinStreakPauseWindows <= 10) partial.coinStreakPauseWindows = coinStreakPauseWindows;
   if (typeof maxSlippageCents === "number" && maxSlippageCents >= 0 && maxSlippageCents <= 50) partial.maxSlippageCents = maxSlippageCents;

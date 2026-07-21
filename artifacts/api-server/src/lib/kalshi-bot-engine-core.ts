@@ -667,7 +667,7 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
   if (inp.statAbove === null) return skip("stat_ml: waiting for Stat signal");
   if (inp.mlAbove   === null) return skip("stat_ml: waiting for ML signal");
 
-  const minStatConf  = inp.statMLMinStatConf        ?? 53;
+  const minStatConf  = inp.statMLMinStatConf        ?? 50;
   const minMLConf    = inp.statMLMinMLConf           ?? 57;
   const requireAgree = inp.statMLRequireBothAgree    ?? true;
   const highBoost    = inp.statMLHighConfBoostEnabled ?? true;
@@ -1575,7 +1575,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Live-mode safety guards — conservative defaults for first live sessions.
   minAccountBalance: 5.00,
   maxTotalExposure: 5.00,
-  maxDailyLossPerCoin: 3.00,
+  maxDailyLossPerCoin: 300,
   coinStreakLossLimit: 3,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 10,
@@ -1650,7 +1650,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   betRandomizerEnabled: false,
   betRandomizerValues: [],
   // Stat + ML mode defaults
-  statMLMinStatConf: 53,
+  statMLMinStatConf: 50,
   statMLMinMLConf: 57,
   statMLRequireBothAgree: true,
   statMLStopLossEnabled: false,

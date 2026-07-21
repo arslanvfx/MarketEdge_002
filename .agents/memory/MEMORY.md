@@ -1,3 +1,4 @@
+- [stat_ml max-entry-minute silent block](stat-ml-max-entry-minute.md) — statMLMaxEntryMinute ?? 8 silently killed all bets after mid-window restarts; default now ?? 0; always patch DB too
 - [stat_ml ML floor calibration](stat-ml-floor-calibration.md) — statMLMinMLConf=57 (not 67/62); ML calibrated to [50-65%]; 67 above ceiling, 62 too high on weak-signal days; patch all 3 locations + DB
 - [Pipeline lock released on SKIP](pipeline-lock-skip-release.md) — after runBotTickForCoin, if no position opened, delete pipelineEntryFiredThisWindow key or Phase-3 retries are permanently blocked for the window
 - [Tick TDZ variable ordering](tick-tdz-variable-ordering.md) — variables used inside _runBotTick must be declared BEFORE their use site; `secondsElapsedNow` declared at line ~1519, any call site earlier crashes every tick silently (non-fatal handler swallows ReferenceError)
