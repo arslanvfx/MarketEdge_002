@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { FlaskConical, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Info } from "lucide-react";
-import type { StatMLFloorAnalysis, StatMLFloorCell, StatMLCoinResult } from "./types";
+import type { StatMLFloorAnalysis, StatMLFloorCell, StatMLCoinResult, SignalAccuracyBreakdown } from "./types";
 
 const FLOORS = [50, 53, 55, 58, 60, 62] as const;
 
@@ -84,6 +84,62 @@ function HeatGrid({ cells, bestCell, currentStatFloor, currentMLFloor, compact }
   );
 }
 
+function accuracyColor(pct: number): string {
+  if (pct >= 60) return "text-emerald-400";
+  if (pct >= 45) return "text-amber-400";
+  return "text-red-400";
+}
+
+function SignalAccuracyTable({ data }: { data: SignalAccuracyBreakdown }) {
+  const total = data.bothRight + data.statOnly + data.mlOnly + data.bothWrong;
+
+  function Cell({ count, label, highlight }: { count: number; label: string; highlight?: boolean }) {
+    const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+    return (
+      <div className={`flex flex-col items-center justify-center rounded p-2 gap-0.5 ${highlight ? "bg-emerald-500/15 ring-1 ring-emerald-500/30" : "bg-muted/15"}`}>
+        <span className={`text-sm font-bold ${accuracyColor(pct)}`}>{count}</span>
+        <span className="text-[8px] text-muted-foreground/60">{pct}%</span>
+        <span className="text-[8px] text-muted-foreground/50 text-center leading-tight">{label}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="text-[10px] text-muted-foreground/70 font-semibold uppercase tracking-wide">
+        Signal accuracy — who called it right?
+      </div>
+      <div className="grid grid-cols-2 gap-1.5 max-w-[240px]">
+        <Cell count={data.bothRight} label="Stat✓  ML✓" highlight={data.bothRight === Math.max(data.bothRight, data.statOnly, data.mlOnly, data.bothWrong)} />
+        <Cell count={data.statOnly} label="Stat✓  ML✗" />
+        <Cell count={data.mlOnly}   label="Stat✗  ML✓" />
+        <Cell count={data.bothWrong} label="Stat✗  ML✗" />
+      </div>
+      {(data.bothAgreeWinRate !== null || data.bothDisagreeWinRate !== null) && (
+        <div className="flex gap-4 text-[9px] text-muted-foreground/70 pt-0.5">
+          {data.bothAgreeWinRate !== null && (
+            <span>
+              Signals agree:{" "}
+              <span className={`font-semibold ${accuracyColor(Math.round(data.bothAgreeWinRate * 100))}`}>
+                {Math.round(data.bothAgreeWinRate * 100)}% WR
+              </span>
+            </span>
+          )}
+          {data.bothDisagreeWinRate !== null && (
+            <span>
+              Disagree:{" "}
+              <span className={`font-semibold ${accuracyColor(Math.round(data.bothDisagreeWinRate * 100))}`}>
+                {Math.round(data.bothDisagreeWinRate * 100)}% WR
+              </span>
+            </span>
+          )}
+        </div>
+      )}
+      <div className="text-[8px] text-muted-foreground/40">{total} bets</div>
+    </div>
+  );
+}
+
 interface CoinRowProps {
   coin: StatMLCoinResult;
   currentStatFloor?: number | null;
@@ -137,6 +193,9 @@ function CoinRow({ coin, currentStatFloor, currentMLFloor }: CoinRowProps) {
             currentMLFloor={currentMLFloor}
             compact
           />
+          {coin.signalAccuracy && (
+            <SignalAccuracyTable data={coin.signalAccuracy} />
+          )}
         </div>
       )}
     </div>

@@ -906,6 +906,24 @@ export interface StatMLFloorCell {
   coverage: number;
 }
 
+/** 2×2 signal-accuracy breakdown for a coin's settled stat_ml bets */
+export interface SignalAccuracyBreakdown {
+  /** Total bets included in this breakdown (≥10 required to emit) */
+  totalBets: number;
+  /** Both Stat and ML predicted the correct direction */
+  bothRight: number;
+  /** Stat correct, ML wrong */
+  statOnly: number;
+  /** ML correct, Stat wrong */
+  mlOnly: number;
+  /** Both predicted the wrong direction */
+  bothWrong: number;
+  /** Win rate when both signals agree with each other (direction-aligned bets) */
+  bothAgreeWinRate: number | null;
+  /** Win rate when both signals disagree with each other */
+  bothDisagreeWinRate: number | null;
+}
+
 export interface StatMLCoinResult {
   symbol: string;
   totalBets: number;
@@ -914,6 +932,8 @@ export interface StatMLCoinResult {
   recommendedStatFloor: number | null;
   recommendedMLFloor: number | null;
   cells: StatMLFloorCell[];
+  /** Signal accuracy 2×2 breakdown — only present when totalBets ≥ 10 */
+  signalAccuracy?: SignalAccuracyBreakdown;
 }
 
 export interface StatMLFloorAnalysis {
@@ -1104,6 +1124,47 @@ export async function getStatMLFloorAnalysis(
     for (const [symbol, coinRows] of coinMap.entries()) {
       const cells = buildGrid(coinRows);
       const bc = bestCell(cells);
+
+      let signalAccuracy: SignalAccuracyBreakdown | undefined;
+      if (coinRows.length >= 10) {
+        let bothRight = 0, statOnly = 0, mlOnly = 0, bothWrong = 0;
+        let bothAgreeWins = 0, bothAgreeBets = 0;
+        let bothDisagreeWins = 0, bothDisagreeBets = 0;
+
+        for (const r of coinRows) {
+          if (r.statAbove === null || r.mlAbove === null) continue;
+          // actualAbove: did price end up above strike?
+          // YES bet wins → price above; NO bet wins → price below
+          const actualAbove = r.aboveExpected ? r.isWin : r.isLoss;
+          const statRight = (r.statAbove === actualAbove);
+          const mlRight   = (r.mlAbove   === actualAbove);
+          if      (statRight && mlRight)   bothRight++;
+          else if (statRight && !mlRight)  statOnly++;
+          else if (!statRight && mlRight)  mlOnly++;
+          else                             bothWrong++;
+
+          // Agreement: do stat + ML agree on direction?
+          const signalsAgree = r.statAbove === r.mlAbove;
+          if (signalsAgree) {
+            bothAgreeBets++;
+            if (r.isWin) bothAgreeWins++;
+          } else {
+            bothDisagreeBets++;
+            if (r.isWin) bothDisagreeWins++;
+          }
+        }
+
+        signalAccuracy = {
+          totalBets: coinRows.length,
+          bothRight,
+          statOnly,
+          mlOnly,
+          bothWrong,
+          bothAgreeWinRate:    bothAgreeBets    > 0 ? bothAgreeWins    / bothAgreeBets    : null,
+          bothDisagreeWinRate: bothDisagreeBets > 0 ? bothDisagreeWins / bothDisagreeBets : null,
+        };
+      }
+
       byCoin.push({
         symbol,
         totalBets: coinRows.length,
@@ -1111,6 +1172,7 @@ export async function getStatMLFloorAnalysis(
         recommendedStatFloor: bc?.statFloor ?? null,
         recommendedMLFloor:   bc?.mlFloor   ?? null,
         cells,
+        signalAccuracy,
       });
     }
     byCoin.sort((a, b) => b.totalBets - a.totalBets);

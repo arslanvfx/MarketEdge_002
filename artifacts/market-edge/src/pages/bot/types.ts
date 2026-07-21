@@ -468,6 +468,16 @@ export interface StatMLFloorCell {
   coverage: number;
 }
 
+export interface SignalAccuracyBreakdown {
+  totalBets: number;
+  bothRight: number;
+  statOnly: number;
+  mlOnly: number;
+  bothWrong: number;
+  bothAgreeWinRate: number | null;
+  bothDisagreeWinRate: number | null;
+}
+
 export interface StatMLCoinResult {
   symbol: string;
   totalBets: number;
@@ -475,6 +485,7 @@ export interface StatMLCoinResult {
   recommendedStatFloor: number | null;
   recommendedMLFloor: number | null;
   cells: StatMLFloorCell[];
+  signalAccuracy?: SignalAccuracyBreakdown;
 }
 
 export interface StatMLFloorAnalysis {
