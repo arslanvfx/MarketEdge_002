@@ -898,6 +898,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     statMLOrderbookMinPressure?: number;
   };
 
+  logger.info({ decisionMode, bodyKeys: Object.keys(req.body) }, "[kalshi-bot] POST /crypto/bot/config received");
   const partial: Parameters<typeof updateBotConfig>[0] = {};
   if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 500) partial.betSize = betSize;
   if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;
