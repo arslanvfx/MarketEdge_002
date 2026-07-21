@@ -1353,22 +1353,21 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/60">
-                        Skip entry if the bid/ask spread is too wide (low market depth). Pressure = 1 − spread; default threshold ≥ 0.90 (spread ≤ 10¢).
+                        Skip entry if YES bid volume share is too low. Pressure = YES bid qty / (YES bid + NO bid qty). Default threshold ≥ 60%.
                       </span>
                       {(merged.statMLOrderbookGateEnabled ?? false) && (() => {
-                        const val = merged.statMLOrderbookMinPressure ?? 0.90;
+                        const val = merged.statMLOrderbookMinPressure ?? 0.60;
                         return (
                           <label className="flex flex-col gap-1.5">
                             <span className="text-xs text-muted-foreground">
-                              Min Pressure — <span className="text-violet-400 font-mono">{val.toFixed(2)}</span>
-                              <span className="text-muted-foreground/60 ml-1">(≈ max spread {Math.round((1 - val) * 100)}¢)</span>
+                              Min YES Pressure — <span className="text-violet-400 font-mono">{Math.round(val * 100)}%</span>
                             </span>
-                            <input type="range" min={0.80} max={0.99} step={0.01}
+                            <input type="range" min={0.50} max={0.80} step={0.01}
                               className="accent-violet-500"
                               value={val}
                               onChange={e => setConfigDraft(d => ({ ...d, statMLOrderbookMinPressure: parseFloat(e.target.value) }))} />
                             <span className="text-[10px] text-muted-foreground/60">
-                              0.80 = permissive (≤20¢ spread ok) · 0.99 = strict (≤1¢ spread only). Default: 0.90.
+                              50% = neutral (equal YES/NO depth) · 80% = strong YES bias required. Default: 60%.
                             </span>
                           </label>
                         );

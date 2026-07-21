@@ -333,11 +333,13 @@ function _makeBotDecisionInner(
     const totalVol  = yesBidVol + noBidVol;
     const obPressure: number | null = totalVol > 0 ? yesBidVol / totalVol : null;
 
+    const kd = getKalshiCachedData(sym);
     const smResult = computeStatMLDecision({
       statAbove, mlAbove,
       statConfidence: liveStatConf,
       mlConfidence,
       yesPrice,
+      yesAsk:   kd?.yesAsk  ?? null,
       kalshiTicker,
       minConfidence: config.minConfidence,
       statMLMinStatConf:          config.statMLMinStatConf,

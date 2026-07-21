@@ -611,13 +611,14 @@ export interface StatMLInputs {
   minConfidence: number;
   // mode-specific overrides (all optional — defaults used when absent)
   statMLMinStatConf?: number;             // stat ≥ this % to contribute (default 53)
-  statMLMinMLConf?: number;              // ML  ≥ this % to contribute (default 55)
+  statMLMinMLConf?: number;              // ML  ≥ this % to contribute (default 67)
   statMLRequireBothAgree?: boolean;      // when true: stat≠ml → SKIP (default true)
-  statMLHighConfBoostEnabled?: boolean;  // +5pp when Stat ≥ 62% OR ML ≥ 65% (default true)
+  statMLHighConfBoostEnabled?: boolean;  // +5pp when Stat ≥ 58% AND ML ≥ 73% (default true)
   statMLMinReturnMultiple?: number;      // return floor (default 1.5)
   statMLOrderbookGateEnabled?: boolean;  // skip if orderbook pressure below threshold (default false)
-  statMLOrderbookMinPressure?: number;   // 0-1; pressure = 1 - (yesAsk - yesBid); skip if below (default 0.90)
-  orderbookPressure?: number | null;     // computed by caller: 1 - spread (null = unknown/gate disabled)
+  statMLOrderbookMinPressure?: number;   // 0-1; pressure = YES bid vol / total vol; skip if below (default 0.60)
+  orderbookPressure?: number | null;     // computed by caller (null = unknown/gate disabled)
+  yesAsk?: number | null;               // live YES-ask from orderbook (preferred over yesPrice for return gate)
 }
 
 export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
@@ -632,7 +633,7 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
   if (inp.mlAbove   === null) return skip("stat_ml: waiting for ML signal");
 
   const minStatConf  = inp.statMLMinStatConf        ?? 53;
-  const minMLConf    = inp.statMLMinMLConf           ?? 55;
+  const minMLConf    = inp.statMLMinMLConf           ?? 67;
   const requireAgree = inp.statMLRequireBothAgree    ?? true;
   const highBoost    = inp.statMLHighConfBoostEnabled ?? true;
 
@@ -680,9 +681,9 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
     };
   }
 
-  // Orderbook pressure gate (optional) — skip if the market is too wide
+  // Orderbook pressure gate (optional) — skip if YES bid volume share is too low
   if (inp.statMLOrderbookGateEnabled) {
-    const minPressure = inp.statMLOrderbookMinPressure ?? 0.90;
+    const minPressure = inp.statMLOrderbookMinPressure ?? 0.60;
     const pressure    = inp.orderbookPressure ?? null;
     if (pressure !== null && pressure < minPressure) {
       return {
@@ -693,9 +694,12 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
     }
   }
 
-  // Min-return gate
+  // Min-return gate — use live YES-ask for accurate entry-cost economics.
+  // yesAsk is the actual market ask (what we pay); yesPrice is the midpoint.
+  // Prefer yesAsk; fall back to yesPrice when ask is unavailable.
   const minReturn = inp.statMLMinReturnMultiple ?? 1.5;
-  const gate = checkMinReturnGate(direction ? "BET_YES" : "BET_NO", inp.yesPrice, minReturn);
+  const returnPrice = inp.yesAsk ?? inp.yesPrice;
+  const gate = checkMinReturnGate(direction ? "BET_YES" : "BET_NO", returnPrice, minReturn);
   if (gate.blocked) {
     return {
       action: "SKIP", confidence,
@@ -1392,10 +1396,10 @@ export interface BotConfig {
   // The pipeline fires as soon as Stat+ML are both non-null; no waiting for
   // Claude's extended-thinking call (which takes 30-120 s).
   statMLMinStatConf?: number;             // Stat ≥ this % to pass the per-signal floor (default 53)
-  statMLMinMLConf?: number;              // ML  ≥ this % to pass the per-signal floor (default 55)
+  statMLMinMLConf?: number;              // ML  ≥ this % to pass the per-signal floor (default 67)
   statMLRequireBothAgree?: boolean;      // when true: Stat≠ML → SKIP (default true)
   statMLStopLossEnabled?: boolean;       // mid-window stop-loss (default false)
-  statMLStopLossPct?: number;            // % of entry cost to trigger stop-loss (default 30 = exit if position drops 30%)
+  statMLStopLossPct?: number;            // % of entry cost to trigger stop-loss (default 20 = exit if position drops 20%)
   statMLMaxEntryMinute?: number;         // no new entries after this many minutes elapsed (default 8); 0 = disabled
   statMLHighConfBoostEnabled?: boolean;  // +5pp confidence when Stat ≥ 62% OR ML ≥ 65% (default true)
   statMLMinReturnMultiple?: number;      // payout floor for stat_ml mode (default 1.5)

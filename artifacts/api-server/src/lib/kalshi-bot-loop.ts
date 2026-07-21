@@ -700,12 +700,12 @@ export async function runBotLoopTick(): Promise<void> {
     // ── Stat+ML stop-loss ────────────────────────────────────────────────────
     // Monitors open positions for the stat_ml decision mode when
     // statMLStopLossEnabled=true.  Exits when the position has lost more than
-    // statMLStopLossPct % of its entry cost (e.g. 30 = sell when value of
-    // the held contract drops 30% relative to the entry fill price).
+    // statMLStopLossPct % of its entry cost (e.g. 20 = sell when value of
+    // the held contract drops 20% relative to the entry fill price).
     //   YES position: entry cost = entryYesPrice; current value = yesPrice
     //   NO  position: entry cost = 1-entryYesPrice; current value = 1-yesPrice
     if (S.config.decisionMode === "stat_ml" && (S.config.statMLStopLossEnabled ?? false)) {
-      const stopLossPct = (S.config.statMLStopLossPct ?? 30) / 100;
+      const stopLossPct = (S.config.statMLStopLossPct ?? 20) / 100;
       for (const [sym, pos] of Array.from(openPositions.entries())) {
         const kd = getKalshiCachedData(sym);
         const yp = kd?.yesPrice ?? null;

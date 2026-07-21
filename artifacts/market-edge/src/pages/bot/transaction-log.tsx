@@ -358,7 +358,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     {r.decisionMode === "stat_ml" && (() => {
                       const statConf  = sigs?.statConfidence  as number | null ?? sigs?.statConf  as number | null ?? null;
                       const mlConf    = sigs?.mlConfidence    as number | null ?? sigs?.mlConf    as number | null ?? null;
-                      const agreement = sigs?.statMLAgreement as string | null ?? null;
+                      const agreement = sigs?.statMLAgreement as boolean | null ?? null;
                       const earlyFire = sigs?.statMLEarlyFire as boolean | null ?? null;
                       const entryMin  = sigs?.statMLEntryMinute as number | null ?? null;
                       const obPress   = sigs?.statMLOrderbookPressure as number | null ?? null;
@@ -378,10 +378,10 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                               ML {mlConf != null ? `${Math.round(mlConf)}%` : ""}
                             </span>
                           )}
-                          {/* Agreement badge */}
-                          {agreement != null && (
-                            <span className={`px-1.5 py-0.5 rounded font-semibold ${agreement === "agree" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
-                              {agreement === "agree" ? "Agreed" : "Disagree"}
+                          {/* Agreement badge — statMLAgreement is boolean */}
+                          {agreement !== null && (
+                            <span className={`px-1.5 py-0.5 rounded font-semibold ${agreement === true ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
+                              {agreement === true ? "Agreed" : "Disagree"}
                             </span>
                           )}
                           {/* Entry minute badge */}
