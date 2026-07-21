@@ -781,7 +781,9 @@ async function _runBotTick(
   // is calling BELOW — exactly the bug observed when ML briefly outputted YES
   // at window-open before settling to NO, while Claude's opening call was BELOW.
   //
-  if (S.config.decisionMode !== "conviction") {
+  // stat_ml explicitly does NOT use Claude for decisioning; Claude may be null
+  // or disagree and that is expected — skip this gate entirely for stat_ml.
+  if (S.config.decisionMode !== "conviction" && S.config.decisionMode !== "stat_ml") {
     const dirSigs = decision.signals as { claudeAbove?: boolean | null };
     if (decision.action === "BET_YES" && dirSigs.claudeAbove === false) {
       logger.info(
