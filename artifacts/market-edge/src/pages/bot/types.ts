@@ -457,3 +457,34 @@ export interface CoinGuardState {
   maxDailyLossPerCoin: number;
 }
 
+export interface StatMLFloorCell {
+  statFloor: number;
+  mlFloor: number;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  coverage: number;
+}
+
+export interface StatMLCoinResult {
+  symbol: string;
+  totalBets: number;
+  bestCell: StatMLFloorCell | null;
+  recommendedStatFloor: number | null;
+  recommendedMLFloor: number | null;
+  cells: StatMLFloorCell[];
+}
+
+export interface StatMLFloorAnalysis {
+  eligibleBets: number;
+  totalBets: number;
+  grid: StatMLFloorCell[];
+  byCoin: StatMLCoinResult[];
+  globalBestCell: StatMLFloorCell | null;
+  computedAt: string;
+  /** Look-back in days used for the analysis (from the ?days= query param) */
+  sinceDays?: number;
+}
+

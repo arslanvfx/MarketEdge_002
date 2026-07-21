@@ -29,6 +29,7 @@ import {
   getWindowConditions,
   resetWindowConditions,
   reEvaluateSettledBets,
+  getStatMLFloorAnalysis,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -1429,6 +1430,23 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
   try {
     const modes = await getBacktestModes();
     res.json({ modes });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/stat-ml-floor-analysis?days=30
+// Sweeps the full 6×6 (statFloor × mlFloor) grid over settled bets that have
+// Stat+ML signals, projecting what win rate / coverage each combo would produce.
+// Also returns per-coin breakdowns and a globally recommended floor pair.
+// ?days=30 — look-back in days (default 30; pass 0 for all-time)
+router.get("/crypto/bot/stat-ml-floor-analysis", async (req, res) => {
+  try {
+    const rawDays = parseInt(String(req.query.days ?? "30"), 10);
+    const sinceDays = isNaN(rawDays) || rawDays < 0 ? 30 : rawDays;
+    const result = await getStatMLFloorAnalysis(sinceDays);
+    res.json({ ...result, sinceDays });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

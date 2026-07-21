@@ -6,6 +6,8 @@ import { db, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { desc, sql } from "drizzle-orm";
 export { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
 import { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
+export { backtestStatMLFloorApproval } from "./kalshi-bot-backtest-core.js";
+import { backtestStatMLFloorApproval } from "./kalshi-bot-backtest-core.js";
 
 type BotMode = "paper" | "live";
 type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
@@ -871,5 +873,257 @@ export async function getPhaseStatus(phase: number, phaseStartedAt: string | nul
       nextBetSize: nextPreset?.betSize ?? null,
       nextMaxBetSize: nextPreset?.maxBetSize ?? null,
     };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// stat_ml floor-grid analysis
+// ---------------------------------------------------------------------------
+//
+// Sweeps a grid of (statFloor × mlFloor) pairs over all settled bets that have
+// Stat + ML signal data, projecting what win rate and coverage each floor
+// combination would produce.  Also breaks results down per-coin so the caller
+// can recommend per-coin overrides.
+//
+// Floor candidates: [50, 53, 55, 58, 60, 62] for both signals (36 combos).
+// Each combination uses:
+//   • requireBothAgree = true  (conservative default)
+//   • minConfidence    = 60    (composite gate, mirrors stat_ml default)
+// ---------------------------------------------------------------------------
+
+export const STAT_ML_FLOOR_CANDIDATES = [50, 53, 55, 58, 60, 62] as const;
+export type StatMLFloor = typeof STAT_ML_FLOOR_CANDIDATES[number];
+
+export interface StatMLFloorCell {
+  statFloor: number;
+  mlFloor: number;
+  bets: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  winRate: number | null;
+  /** fraction of total eligible bets that this combo would have taken */
+  coverage: number;
+}
+
+export interface StatMLCoinResult {
+  symbol: string;
+  totalBets: number;
+  bestCell: StatMLFloorCell | null;
+  /** Floor combo (≥5 bets) with the highest win rate */
+  recommendedStatFloor: number | null;
+  recommendedMLFloor: number | null;
+  cells: StatMLFloorCell[];
+}
+
+export interface StatMLFloorAnalysis {
+  /** All settled bets that have BOTH statAbove+mlAbove signals */
+  eligibleBets: number;
+  /** All settled bets regardless of signal availability */
+  totalBets: number;
+  /** Full 6×6 grid covering ALL eligible bets regardless of symbol */
+  grid: StatMLFloorCell[];
+  /** Per-coin breakdowns */
+  byCoin: StatMLCoinResult[];
+  /** Grid cell with highest WR across all coins (≥5 bets) */
+  globalBestCell: StatMLFloorCell | null;
+  computedAt: string;
+}
+
+function buildGrid(
+  rows: Array<{
+    aboveExpected: boolean;
+    statAbove: boolean | null;
+    mlAbove: boolean | null;
+    statConf: number | null;
+    mlConf: number | null;
+    isWin: boolean;
+    isLoss: boolean;
+    pnl: number;
+  }>,
+): StatMLFloorCell[] {
+  const cells: StatMLFloorCell[] = [];
+  const eligible = rows.length;
+
+  for (const sf of STAT_ML_FLOOR_CANDIDATES) {
+    for (const mf of STAT_ML_FLOOR_CANDIDATES) {
+      let bets = 0, wins = 0, losses = 0, pnl = 0;
+      for (const r of rows) {
+        const approved = backtestStatMLFloorApproval(
+          r.aboveExpected, r.statAbove, r.mlAbove, r.statConf, r.mlConf,
+          sf, mf,
+          true,  // requireBothAgree
+          60,    // minConfidence
+        );
+        if (approved) {
+          bets++;
+          pnl += r.pnl;
+          if (r.isWin)  wins++;
+          if (r.isLoss) losses++;
+        }
+      }
+      cells.push({
+        statFloor: sf,
+        mlFloor: mf,
+        bets,
+        wins,
+        losses,
+        pnl,
+        winRate: bets > 0 ? wins / bets : null,
+        coverage: eligible > 0 ? bets / eligible : 0,
+      });
+    }
+  }
+  return cells;
+}
+
+function bestCell(cells: StatMLFloorCell[], minBets = 5): StatMLFloorCell | null {
+  let best: StatMLFloorCell | null = null;
+  for (const c of cells) {
+    if (c.bets < minBets) continue;
+    if (c.winRate == null) continue;
+    if (best == null || c.winRate > best.winRate!) {
+      best = c;
+    }
+  }
+  return best;
+}
+
+// ── Methodology note ──────────────────────────────────────────────────────────
+// This function uses settled bet history rather than the `analyzeCoinAt`
+// window-replay harness for three reasons specific to stat_ml:
+//
+//   1. ML signals are NOT reconstructible from candles.  `analyzeCoinAt` re-runs
+//      the statistical model against historical 1-min data, but the ML model's
+//      output depends on its trained weights at the moment of prediction —
+//      weights that evolve online and are not snapshotted per-window.  There is
+//      no reliable way to recompute what the ML model would have predicted for
+//      a 30-day-old window.
+//
+//   2. The stored signals snapshot IS the ground truth.  At bet placement time
+//      the live values of statAbove / mlAbove / statConfidence / mlConfidence
+//      are serialised into the signals JSONB column.  These are the EXACT values
+//      the live engine saw — replaying them avoids both reconstruction error and
+//      look-ahead bias.
+//
+//   3. Consistency with getBacktestModes().  Every other decision-mode backtest
+//      in this codebase uses the same settled-bet approach; this function follows
+//      the same pattern for direct comparability.
+//
+// Limitation: only bets that were PLACED are present in the dataset.  Windows
+// where the bot chose SKIP or was blocked by guards do not contribute outcomes.
+// This means coverage metrics are relative to placed bets, not total windows.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function getStatMLFloorAnalysis(
+  /** Look-back window in days. Default 30 (matches task spec). Pass 0 for all-time. */
+  sinceDays = 30,
+): Promise<StatMLFloorAnalysis> {
+  const now = new Date().toISOString();
+  const empty: StatMLFloorAnalysis = {
+    eligibleBets: 0, totalBets: 0, grid: [], byCoin: [],
+    globalBestCell: null, computedAt: now,
+  };
+
+  try {
+    // Build time-range clause
+    const cutoff = sinceDays > 0
+      ? new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString()
+      : null;
+    const timeClause = cutoff
+      ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${cutoff}`
+      : sql``;
+
+    const rows = await db
+      .select({
+        direction:  kalshiBotBetsTable.direction,
+        pnl:        sql<string>`COALESCE(${kalshiBotBetsTable.pnl}::text, '0')`,
+        outcome:    kalshiBotBetsTable.outcome,
+        signals:    kalshiBotBetsTable.signals,
+        symbol:     kalshiBotBetsTable.symbol,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')
+          AND ${kalshiBotBetsTable.archivedAt} IS NULL${timeClause}`,
+      );
+
+    const totalBets = rows.length;
+
+    type Row = {
+      aboveExpected: boolean;
+      statAbove: boolean | null;
+      mlAbove: boolean | null;
+      statConf: number | null;
+      mlConf: number | null;
+      isWin: boolean;
+      isLoss: boolean;
+      pnl: number;
+      symbol: string;
+    };
+
+    // Only bets with BOTH stat + ML signals can be replayed
+    const eligible: Row[] = [];
+
+    for (const r of rows) {
+      const dir = r.direction as string | null;
+      if (!dir) continue;
+      const sigs = r.signals as Record<string, unknown> | null;
+      const statAbove = typeof sigs?.statAbove === "boolean" ? sigs.statAbove : null;
+      const mlAbove   = typeof sigs?.mlAbove   === "boolean" ? sigs.mlAbove   : null;
+      if (statAbove === null || mlAbove === null) continue;
+
+      const statConf = typeof sigs?.statConfidence === "number" ? sigs.statConfidence : null;
+      const mlConf   = typeof sigs?.mlConfidence   === "number" ? sigs.mlConfidence   : null;
+
+      const p      = parseFloat(r.pnl ?? "0");
+      const isWin  = r.outcome ? r.outcome === "win"  : p > 0;
+      const isLoss = r.outcome ? r.outcome === "loss" : p < 0;
+
+      eligible.push({
+        aboveExpected: dir === "yes",
+        statAbove, mlAbove, statConf, mlConf,
+        isWin, isLoss, pnl: p,
+        symbol: (r.symbol as string) ?? "UNKNOWN",
+      });
+    }
+
+    // Build global grid
+    const grid = buildGrid(eligible);
+    const globalBestCell = bestCell(grid);
+
+    // Per-coin breakdown
+    const coinMap = new Map<string, Row[]>();
+    for (const r of eligible) {
+      const list = coinMap.get(r.symbol) ?? [];
+      list.push(r);
+      coinMap.set(r.symbol, list);
+    }
+
+    const byCoin: StatMLCoinResult[] = [];
+    for (const [symbol, coinRows] of coinMap.entries()) {
+      const cells = buildGrid(coinRows);
+      const bc = bestCell(cells);
+      byCoin.push({
+        symbol,
+        totalBets: coinRows.length,
+        bestCell: bc,
+        recommendedStatFloor: bc?.statFloor ?? null,
+        recommendedMLFloor:   bc?.mlFloor   ?? null,
+        cells,
+      });
+    }
+    byCoin.sort((a, b) => b.totalBets - a.totalBets);
+
+    return {
+      eligibleBets: eligible.length,
+      totalBets,
+      grid,
+      byCoin,
+      globalBestCell,
+      computedAt: now,
+    };
+  } catch {
+    return empty;
   }
 }

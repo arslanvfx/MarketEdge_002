@@ -109,3 +109,63 @@ export function backtestModeApproval(
   // Unknown mode — approve by default so new modes don't silently disappear.
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// stat_ml floor-grid backtest helper
+// ---------------------------------------------------------------------------
+//
+// Mirrors the core of computeStatMLDecision (kalshi-bot-engine-core.ts) but
+// omits price-dependent gates (min-return, orderbook) since historical entry
+// prices are not reliable enough to replay those checks accurately.
+//
+// Used by getStatMLFloorAnalysis to sweep (statFloor × mlFloor) grid over
+// all settled bets and find the per-coin combination that maximises win rate.
+//
+// Returns: "bet_yes" | "bet_no" | "skip"
+//   - "bet_yes" / "bet_no" — the mode would have taken the bet in that direction
+//   - "skip"               — the mode would have passed on this window
+
+export function backtestStatMLFloorApproval(
+  aboveExpected: boolean,   // true = actual bet was BET_YES
+  statAbove: boolean | null,
+  mlAbove: boolean | null,
+  statConf: number | null,
+  mlConf: number | null,
+  statFloor: number,        // minimum stat confidence (e.g. 53)
+  mlFloor: number,          // minimum ML confidence (e.g. 67)
+  requireBothAgree = true,  // mirrors statMLRequireBothAgree default
+  minConfidence = 60,       // composite gate
+): boolean {
+  // Gate 1: both signals must be present
+  if (statAbove === null || mlAbove === null) return false;
+
+  const sc = statConf ?? 0;
+  const mc = mlConf  ?? 0;
+
+  // Gate 2: per-signal confidence floors
+  if (sc < statFloor) return false;
+  if (mc < mlFloor)   return false;
+
+  // Gate 3: direction resolution
+  const agree = statAbove === mlAbove;
+  let direction: boolean;
+  if (agree) {
+    direction = statAbove;
+  } else if (requireBothAgree) {
+    return false; // disagree → SKIP
+  } else {
+    // Follow higher-confidence signal; tie → Stat
+    direction = sc >= mc ? statAbove : mlAbove;
+  }
+
+  // Direction must match the actual bet
+  if (direction !== aboveExpected) return false;
+
+  // Gate 4: composite confidence
+  // High-conf boost mirrors: +5pp when stat ≥ 58 AND ml ≥ 73
+  const boost = sc >= 58 && mc >= 73 ? 5 : 0;
+  const composite = Math.round(Math.min(mc * 0.65 + sc * 0.35 + boost, 100));
+  if (composite < minConfidence) return false;
+
+  return true;
+}

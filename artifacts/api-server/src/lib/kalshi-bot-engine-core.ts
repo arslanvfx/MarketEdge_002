@@ -621,6 +621,41 @@ export interface StatMLInputs {
   yesAsk?: number | null;               // live YES-ask from orderbook (preferred over yesPrice for return gate)
 }
 
+// ── Per-coin floor override guidance ─────────────────────────────────────────
+// Run `GET /api/crypto/bot/stat-ml-floor-analysis?days=30` to get data-driven
+// recommendations.  The endpoint sweeps statFloor × mlFloor ∈ {50,53,55,58,60,62}²
+// against settled bets (last 30 days by default) and returns the highest-WR
+// combo (≥5 bets) per coin.
+//
+// How to apply results:
+//   1. Check `globalBestCell` for the all-coin optimal floors.
+//   2. For per-coin overrides, look at `byCoin[].recommendedStatFloor /
+//      recommendedMLFloor`.  Apply via BotConfig.statMLMinStatConf /
+//      statMLMinMLConf in Bot Configuration → stat_ml mode settings.
+//   3. Re-run the analysis after each 30+ bets of new data.
+//
+// ── Backtest results — all settled bets with Stat+ML signals (514 eligible) ──
+// Methodology: replay of actual recorded signals (statAbove/mlAbove/confidence)
+// from the signals JSONB stored at bet placement time.  ML signals are NOT
+// reconstructible from candles; this is the authoritative ground-truth approach.
+//
+// GLOBAL BEST: Stat≥53% / ML≥62% → 66.8% WR, 208 bets, 40% coverage
+//
+// Per-coin recommendations (floors where ≥5 bets were filtered):
+//   XRP:  Stat≥60% / ML≥50%  → 80% WR,  5 bets  (low n — treat as directional hint)
+//   HYPE: Stat≥53% / ML≥50%  → 69% WR, 36 bets
+//   BTC:  Stat≥50% / ML≥62%  → 58% WR, 52 bets
+//   BNB:  Stat≥58% / ML≥50%  → 80% WR, 10 bets
+//   SOL:  Stat≥55% / ML≥50%  → 85% WR, 13 bets
+//   ETH:  Stat≥53% / ML≥50%  → 70% WR, 30 bets
+//   DOGE: Stat≥55% / ML≥62%  → 89% WR,  9 bets
+//   ZEC:  Stat≥50% / ML≥50%  → 71% WR,  7 bets
+//   NEAR: insufficient data  (< 5 bets in any combo)
+//
+// Key insight: ML floor at 62% often improves win rate over 50% (global best
+// is Stat≥53/ML≥62).  Stat floor of 53–58% is the sweet spot — tighter floors
+// reduce coverage significantly without proportional WR gains.
+// ─────────────────────────────────────────────────────────────────────────────
 export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
   const skip = (reason: string): CorePairResult => ({
     action: "SKIP", confidence: 0, reasoning: reason,
