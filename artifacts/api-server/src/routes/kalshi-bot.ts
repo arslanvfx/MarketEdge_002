@@ -187,7 +187,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 3,
     statMLMinStatConf: 53,
-    statMLMinMLConf: 62,
+    statMLMinMLConf: 57,
     statMLRequireBothAgree: true,
     statMLStopLossEnabled: false,
     statMLStopLossPct: 20,
