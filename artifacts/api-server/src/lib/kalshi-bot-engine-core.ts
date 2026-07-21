@@ -668,8 +668,8 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
   // Weighted blend: ML leads (0.65) + Stat (0.35) — ML has more recent signals
   // and tends to be more calibrated mid-window; Stat provides the directional anchor.
   const weightedConf = mlConf * 0.65 + statConf * 0.35;
-  // High-confidence boost: +5pp when either Stat ≥ 62% OR ML ≥ 65%.
-  const boost = highBoost && (statConf >= 62 || mlConf >= 65) ? 5 : 0;
+  // High-confidence boost: +5pp when BOTH Stat ≥ 58% AND ML ≥ 73%.
+  const boost = highBoost && statConf >= 58 && mlConf >= 73 ? 5 : 0;
   const confidence = Math.round(Math.min(weightedConf + boost, 100));
 
   if (confidence < inp.minConfidence) {
@@ -1604,15 +1604,15 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   betRandomizerValues: [],
   // Stat + ML mode defaults
   statMLMinStatConf: 53,
-  statMLMinMLConf: 55,
+  statMLMinMLConf: 67,
   statMLRequireBothAgree: true,
   statMLStopLossEnabled: false,
-  statMLStopLossPct: 30,
+  statMLStopLossPct: 20,
   statMLMaxEntryMinute: 8,
   statMLHighConfBoostEnabled: true,
   statMLMinReturnMultiple: 1.5,
   statMLOrderbookGateEnabled: false,
-  statMLOrderbookMinPressure: 0.90,
+  statMLOrderbookMinPressure: 0.60,
 };
 
 /**

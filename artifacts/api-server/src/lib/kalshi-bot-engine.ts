@@ -22,7 +22,7 @@ import {
   type WindowBetSignal,
 } from "./crypto";
 import { getLatestCoinSignals } from "./crypto-signals";
-import { getKalshiCachedData } from "./crypto-kalshi";
+import { getKalshiCachedData, getOrderbookDepth } from "./crypto-kalshi";
 
 import {
   computeCorePairDecision,
@@ -322,14 +322,16 @@ function _makeBotDecisionInner(
   // but is never a blocker. The pipeline fires early (before Claude finishes)
   // when both Stat and ML are ready — enabling minute 0-1 entries.
   if (decisionMode === "stat_ml") {
-    // Compute orderbook pressure: 1 - spread (0-1 dollar format).
-    // Pressure is close to 1 for tight books, lower for wide books.
-    const kd = getKalshiCachedData(sym);
-    const yesAsk = kd?.yesAsk ?? null;
-    const yesBid = kd?.yesBid ?? null;
-    const obPressure = (yesAsk !== null && yesBid !== null && yesAsk > 0 && yesAsk <= 1)
-      ? Math.max(0, 1 - (yesAsk - Math.max(0, yesBid)))
-      : null;
+    // Orderbook pressure = YES bid volume / (YES bid vol + NO bid vol).
+    // "Bid-side pressure" measures how much liquidity is on the YES side vs
+    // NO side. High YES pressure (>0.5) means more buyers than sellers.
+    // Fetched synchronously from orderbookDepthCache (updated by conviction
+    // poller and fetchOrderbookPrices calls; stale threshold = 60 s).
+    const obDepth   = kalshiTicker ? getOrderbookDepth(kalshiTicker) : null;
+    const yesBidVol = obDepth ? obDepth.yesDepth.reduce((s, [, q]) => s + q, 0) : 0;
+    const noBidVol  = obDepth ? obDepth.noDepth.reduce((s, [, q]) => s + q, 0) : 0;
+    const totalVol  = yesBidVol + noBidVol;
+    const obPressure: number | null = totalVol > 0 ? yesBidVol / totalVol : null;
 
     const smResult = computeStatMLDecision({
       statAbove, mlAbove,

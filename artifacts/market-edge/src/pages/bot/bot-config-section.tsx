@@ -1200,7 +1200,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <span className="text-xs text-muted-foreground">
                             Stat Confidence Floor — <span className="text-cyan-400 font-mono">{val}%</span>
                           </span>
-                          <input type="range" min={50} max={75} step={1}
+                          <input type="range" min={50} max={65} step={1}
                             className="accent-cyan-500"
                             value={val}
                             onChange={e => setConfigDraft(d => ({ ...d, statMLMinStatConf: parseInt(e.target.value, 10) }))} />
@@ -1213,18 +1213,18 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
                     {/* ML Confidence Floor */}
                     {(() => {
-                      const val = merged.statMLMinMLConf ?? 55;
+                      const val = merged.statMLMinMLConf ?? 67;
                       return (
                         <label className="flex flex-col gap-1.5">
                           <span className="text-xs text-muted-foreground">
                             ML Confidence Floor — <span className="text-cyan-400 font-mono">{val}%</span>
                           </span>
-                          <input type="range" min={50} max={75} step={1}
+                          <input type="range" min={60} max={80} step={1}
                             className="accent-cyan-500"
                             value={val}
                             onChange={e => setConfigDraft(d => ({ ...d, statMLMinMLConf: parseInt(e.target.value, 10) }))} />
                           <span className="text-[10px] text-muted-foreground/60">
-                            ML model must report at least this confidence. Default: 55%.
+                            ML model must report at least this confidence. Default: 67%.
                           </span>
                         </label>
                       );
@@ -1252,7 +1252,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       <div className="flex flex-col gap-0.5">
                         <span className="text-xs text-muted-foreground">High-Confidence Boost</span>
                         <span className="text-[10px] text-muted-foreground/60">
-                          When Stat ≥ 62% or ML ≥ 65%, confidence scores are boosted by +5pp.
+                          When both Stat ≥ 58% AND ML ≥ 73%, confidence scores are boosted by +5pp.
                         </span>
                       </div>
                       <button type="button"
@@ -1272,12 +1272,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <span className="text-xs text-muted-foreground">
                             Max Entry Minute — <span className="text-cyan-400 font-mono">{val === 0 ? "no limit" : `T+${val} min`}</span>
                           </span>
-                          <input type="range" min={0} max={13} step={1}
+                          <input type="range" min={2} max={12} step={1}
                             className="accent-cyan-500"
                             value={val}
                             onChange={e => setConfigDraft(d => ({ ...d, statMLMaxEntryMinute: parseInt(e.target.value, 10) }))} />
                           <span className="text-[10px] text-muted-foreground/60">
-                            Block new entries after this minute. 0 = no limit. Default: 8.
+                            Block new entries after this minute. Default: 8.
                           </span>
                         </label>
                       );

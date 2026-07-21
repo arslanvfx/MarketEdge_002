@@ -44,6 +44,8 @@ export interface PipelineResult {
   mlConfidence: number | null;
   claudeCallMs: number;
   isRecheck: boolean;
+  /** stat_ml early-fire: true when the callback fired before Claude returned (claudeAbove was null). */
+  statMLEarlyFire?: boolean;
 }
 
 export type PipelinePhase =
@@ -332,13 +334,23 @@ async function _runPipeline(
     claudeCallMs, isRecheck,
   };
 
+  // Determine mode BEFORE storing result so statMLEarlyFire can be embedded.
+  const currentMode = _decisionModeGetter?.() ?? "classic";
+  const isStatML = currentMode === "stat_ml";
+
+  // statMLEarlyFire: set when stat_ml fires the callback while claudeAbove is
+  // still null.  Stored in the result for downstream diagnostics and history.
+  if (isStatML && claudeAbove === null) {
+    (result as PipelineResult).statMLEarlyFire = true;
+  }
+
   // Capture the previous result BEFORE overwriting — used below to detect the
   // null→non-null stat transition on re-checks.
   const prevResult = pipelineResults.get(`${sym}:${windowKey}`);
   pipelineResults.set(`${sym}:${windowKey}`, result);
 
   logger.info(
-    { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck },
+    { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck, statMLEarlyFire: result.statMLEarlyFire },
     `[pipeline] ${isRecheck ? "re-check" : "initial"} complete`,
   );
 
@@ -354,8 +366,7 @@ async function _runPipeline(
   // we log and wait — the re-check loop keeps polling.
   //
   // Guard: prevAnyWasNull ensures the callback fires AT MOST ONCE per window.
-  const currentMode = _decisionModeGetter?.() ?? "classic";
-  const isStatML = currentMode === "stat_ml";
+  // Note: currentMode and isStatML are computed above (before result is stored).
 
   // Determine "ready" based on which signals are required for the active mode.
   const allSignalsReady = isStatML

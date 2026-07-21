@@ -18,6 +18,33 @@ export const KALSHI_SERIES: Record<string, string> = {
   ZEC:  "KXZEC15M",
 };
 
+// Per-ticker cache for authenticated orderbook depth (bid/ask volume by side).
+// Updated by fetchOrderbookPrices; read synchronously by the engine for
+// stat_ml orderbook pressure = YES bid volume / (YES bid + NO bid volume).
+const orderbookDepthCache = new Map<string, {
+  yesDepth: Array<[number, number]>;
+  noDepth: Array<[number, number]>;
+  at: number;
+}>();
+
+/**
+ * Return the most recent authenticated orderbook depth for the given ticker,
+ * or null if unavailable or stale (older than 60 s).
+ * yesDepth: YES bid resting orders as [price, qty] pairs (ascending price).
+ * noDepth:  NO bid resting orders as [price, qty] pairs (ascending price).
+ *
+ * Orderbook pressure = YES bid qty / (YES bid qty + NO bid qty).
+ */
+export function getOrderbookDepth(ticker: string): {
+  yesDepth: Array<[number, number]>;
+  noDepth: Array<[number, number]>;
+} | null {
+  const entry = orderbookDepthCache.get(ticker);
+  if (!entry) return null;
+  if (Date.now() - entry.at > 60_000) return null; // stale after 60 s
+  return { yesDepth: entry.yesDepth, noDepth: entry.noDepth };
+}
+
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
 // Stores the event ticker so window transitions can be detected by callers.
 export const kalshiTargetCache = new Map<string, {
@@ -221,6 +248,8 @@ export async function fetchOrderbookPrices(
         logger.warn({ ticker }, "[kalshi] fetchOrderbookPrices: orderbook_fp present but all entries non-finite");
         return { yesBid: null, yesAsk: null, yesDepth: [], noDepth: [] };
       }
+      // Cache depth so the engine can compute orderbook pressure synchronously.
+      orderbookDepthCache.set(ticker, { yesDepth, noDepth, at: Date.now() });
       return { yesBid, yesAsk, yesDepth, noDepth };
     }
 
