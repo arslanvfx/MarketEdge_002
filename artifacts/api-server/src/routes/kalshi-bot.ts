@@ -249,6 +249,40 @@ async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): 
 
 // Seed the conviction preset from the live in-memory config if none exists yet.
 // Called once at server startup to lock in the current tuned settings.
+export async function seedStatMLPresetIfNeeded(): Promise<void> {
+  try {
+    const presets = await readModePresets();
+    if (presets.stat_ml) return; // already seeded
+    const seed: Partial<BotConfig> = {
+      ...(getBotState().config as unknown as Partial<BotConfig>),
+      decisionMode: "stat_ml",
+      minConfidence: 55,
+      minReturnMultiple: 1.5,
+      betDelayMinutes: 0,
+      windowEntryBufferSeconds: 60,
+      requireMonitorReady: true,
+      enableDynamicSizing: true,
+      betSize: 1,
+      maxBetSize: 3,
+      maxBetsPerWindow: 6,
+      statMLMinStatConf: 53,
+      statMLMinMLConf: 55,
+      statMLRequireBothAgree: true,
+      statMLStopLossEnabled: false,
+      statMLStopLossPct: 30,
+      statMLMaxEntryMinute: 8,
+      statMLHighConfBoostEnabled: true,
+      statMLMinReturnMultiple: 1.5,
+      statMLOrderbookGateEnabled: false,
+      statMLOrderbookMinPressure: 0.90,
+    };
+    await writeModePreset("stat_ml", seed);
+    logger.info("[kalshi-bot] seeded stat_ml preset");
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] seedStatMLPresetIfNeeded failed (non-fatal)");
+  }
+}
+
 export async function seedConvictionPresetIfNeeded(): Promise<void> {
   try {
     const presets = await readModePresets();

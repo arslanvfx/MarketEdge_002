@@ -724,7 +724,7 @@ export async function runBotLoopTick(): Promise<void> {
         );
         openPositions.delete(sym);
         try {
-          await closePosition(pos, yp, kd?.value ?? null, "stat_ml_stop_loss", false, { gtcFallback: true });
+          await closePosition(pos, yp, kd?.value ?? null, "stop_loss", false, { gtcFallback: true });
         } catch (err) {
           logger.error({ err, sym }, "[kalshi-bot] stat_ml stop-loss exit failed — restoring position");
           openPositions.set(sym, pos);

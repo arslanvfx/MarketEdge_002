@@ -1337,6 +1337,43 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </span>
                       )}
                     </div>
+
+                    {/* Orderbook Pressure Gate */}
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-muted-foreground">Orderbook Pressure Gate</span>
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, statMLOrderbookGateEnabled: !(merged.statMLOrderbookGateEnabled ?? false) }))}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.statMLOrderbookGateEnabled ?? false)
+                            ? "bg-violet-500/15 text-violet-400 border-violet-500/30 hover:bg-violet-500/25"
+                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
+                        >
+                          {(merged.statMLOrderbookGateEnabled ?? false) ? "Enabled" : "Disabled"}
+                        </button>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/60">
+                        Skip entry if the bid/ask spread is too wide (low market depth). Pressure = 1 − spread; default threshold ≥ 0.90 (spread ≤ 10¢).
+                      </span>
+                      {(merged.statMLOrderbookGateEnabled ?? false) && (() => {
+                        const val = merged.statMLOrderbookMinPressure ?? 0.90;
+                        return (
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">
+                              Min Pressure — <span className="text-violet-400 font-mono">{val.toFixed(2)}</span>
+                              <span className="text-muted-foreground/60 ml-1">(≈ max spread {Math.round((1 - val) * 100)}¢)</span>
+                            </span>
+                            <input type="range" min={0.80} max={0.99} step={0.01}
+                              className="accent-violet-500"
+                              value={val}
+                              onChange={e => setConfigDraft(d => ({ ...d, statMLOrderbookMinPressure: parseFloat(e.target.value) }))} />
+                            <span className="text-[10px] text-muted-foreground/60">
+                              0.80 = permissive (≤20¢ spread ok) · 0.99 = strict (≤1¢ spread only). Default: 0.90.
+                            </span>
+                          </label>
+                        );
+                      })()}
+                    </div>
                   </div>
                 )}
 

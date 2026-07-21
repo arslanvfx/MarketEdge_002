@@ -510,9 +510,12 @@ app.listen(port, (err) => {
       );
       // Seed the conviction preset from the live config if none has been saved yet.
       // Must run AFTER loadBotConfigFromDB so the in-memory config is correct.
-      const { seedConvictionPresetIfNeeded } = await import("./routes/kalshi-bot");
+      const { seedConvictionPresetIfNeeded, seedStatMLPresetIfNeeded } = await import("./routes/kalshi-bot");
       await seedConvictionPresetIfNeeded().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] conviction preset seed failed (non-fatal)"),
+      );
+      await seedStatMLPresetIfNeeded().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] stat_ml preset seed failed (non-fatal)"),
       );
 
       // Re-evaluate all historical expired bets against Kalshi's authoritative

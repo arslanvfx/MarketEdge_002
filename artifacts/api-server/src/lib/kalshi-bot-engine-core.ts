@@ -610,11 +610,14 @@ export interface StatMLInputs {
   kalshiTicker: string | null;
   minConfidence: number;
   // mode-specific overrides (all optional — defaults used when absent)
-  statMLMinStatConf?: number;          // stat ≥ this % to contribute (default 53)
-  statMLMinMLConf?: number;            // ML  ≥ this % to contribute (default 55)
-  statMLRequireBothAgree?: boolean;    // when true: stat≠ml → SKIP (default true)
-  statMLHighConfBoostEnabled?: boolean;// +5pp when both confs ≥ 65 (default true)
-  statMLMinReturnMultiple?: number;    // return floor (default 1.5)
+  statMLMinStatConf?: number;             // stat ≥ this % to contribute (default 53)
+  statMLMinMLConf?: number;              // ML  ≥ this % to contribute (default 55)
+  statMLRequireBothAgree?: boolean;      // when true: stat≠ml → SKIP (default true)
+  statMLHighConfBoostEnabled?: boolean;  // +5pp when Stat ≥ 62% OR ML ≥ 65% (default true)
+  statMLMinReturnMultiple?: number;      // return floor (default 1.5)
+  statMLOrderbookGateEnabled?: boolean;  // skip if orderbook pressure below threshold (default false)
+  statMLOrderbookMinPressure?: number;   // 0-1; pressure = 1 - (yesAsk - yesBid); skip if below (default 0.90)
+  orderbookPressure?: number | null;     // computed by caller: 1 - spread (null = unknown/gate disabled)
 }
 
 export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
@@ -662,9 +665,12 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
     direction = statConf >= mlConf ? statDir : mlDir;
   }
 
-  const avgConf = (statConf + mlConf) / 2;
-  const boost   = highBoost && statConf >= 65 && mlConf >= 65 ? 5 : 0;
-  const confidence = Math.round(Math.min(avgConf + boost, 100));
+  // Weighted blend: ML leads (0.65) + Stat (0.35) — ML has more recent signals
+  // and tends to be more calibrated mid-window; Stat provides the directional anchor.
+  const weightedConf = mlConf * 0.65 + statConf * 0.35;
+  // High-confidence boost: +5pp when either Stat ≥ 62% OR ML ≥ 65%.
+  const boost = highBoost && (statConf >= 62 || mlConf >= 65) ? 5 : 0;
+  const confidence = Math.round(Math.min(weightedConf + boost, 100));
 
   if (confidence < inp.minConfidence) {
     return {
@@ -672,6 +678,19 @@ export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
       reasoning: `stat_ml: composite ${confidence}% below minimum ${inp.minConfidence}% (Stat=${Math.round(statConf)}% ML=${Math.round(mlConf)}%${boost ? " +5 high-conf boost" : ""})`,
       signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
     };
+  }
+
+  // Orderbook pressure gate (optional) — skip if the market is too wide
+  if (inp.statMLOrderbookGateEnabled) {
+    const minPressure = inp.statMLOrderbookMinPressure ?? 0.90;
+    const pressure    = inp.orderbookPressure ?? null;
+    if (pressure !== null && pressure < minPressure) {
+      return {
+        action: "SKIP", confidence,
+        reasoning: `stat_ml: orderbook pressure ${pressure.toFixed(3)} below minimum ${minPressure} (spread too wide; not entering)`,
+        signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
+      };
+    }
   }
 
   // Min-return gate
@@ -1372,14 +1391,16 @@ export interface BotConfig {
   // Two-signal mode: Stat + ML only; Claude is never required.
   // The pipeline fires as soon as Stat+ML are both non-null; no waiting for
   // Claude's extended-thinking call (which takes 30-120 s).
-  statMLMinStatConf?: number;           // Stat ≥ this % to pass the per-signal floor (default 53)
-  statMLMinMLConf?: number;             // ML  ≥ this % to pass the per-signal floor (default 55)
-  statMLRequireBothAgree?: boolean;     // when true: Stat≠ML → SKIP (default true)
-  statMLStopLossEnabled?: boolean;      // mid-window stop-loss (default false)
-  statMLStopLossPct?: number;           // % of entry cost to trigger stop-loss (default 30 = exit if position drops 30%)
-  statMLMaxEntryMinute?: number;        // no new entries after this many minutes elapsed (default 8); 0 = disabled
-  statMLHighConfBoostEnabled?: boolean; // +5pp confidence when both signals ≥65% (default true)
-  statMLMinReturnMultiple?: number;     // payout floor for stat_ml mode (default 1.5)
+  statMLMinStatConf?: number;             // Stat ≥ this % to pass the per-signal floor (default 53)
+  statMLMinMLConf?: number;              // ML  ≥ this % to pass the per-signal floor (default 55)
+  statMLRequireBothAgree?: boolean;      // when true: Stat≠ML → SKIP (default true)
+  statMLStopLossEnabled?: boolean;       // mid-window stop-loss (default false)
+  statMLStopLossPct?: number;            // % of entry cost to trigger stop-loss (default 30 = exit if position drops 30%)
+  statMLMaxEntryMinute?: number;         // no new entries after this many minutes elapsed (default 8); 0 = disabled
+  statMLHighConfBoostEnabled?: boolean;  // +5pp confidence when Stat ≥ 62% OR ML ≥ 65% (default true)
+  statMLMinReturnMultiple?: number;      // payout floor for stat_ml mode (default 1.5)
+  statMLOrderbookGateEnabled?: boolean;  // when true: skip if orderbook pressure below minPressure (default false)
+  statMLOrderbookMinPressure?: number;   // 0-1 fraction; pressure = 1 - (yesAsk-yesBid); skip if below this (default 0.90 ≈ spread ≤ 10¢)
 }
 
 // ---------------------------------------------------------------------------
@@ -1590,6 +1611,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   statMLMaxEntryMinute: 8,
   statMLHighConfBoostEnabled: true,
   statMLMinReturnMultiple: 1.5,
+  statMLOrderbookGateEnabled: false,
+  statMLOrderbookMinPressure: 0.90,
 };
 
 /**

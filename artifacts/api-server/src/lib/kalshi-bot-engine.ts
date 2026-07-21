@@ -180,6 +180,11 @@ export interface SignalSnapshot {
   mlConfidence: number | null;
   warmupActive: boolean;
   roiPct: number | null;       // net return % on the chosen side; null when yesPrice unknown
+  // stat_ml-specific enrichments (undefined for other modes)
+  statMLAgreement?: boolean | null;   // whether Stat+ML agreed on direction
+  statMLEarlyFire?: boolean;          // true when Claude was not yet ready at bet time
+  statMLEntryMinute?: number;         // minutesElapsed at entry (snapshot minute)
+  statMLOrderbookPressure?: number | null; // computed pressure: 1 - (yesAsk - yesBid)
 }
 
 export interface BotDecision {
@@ -317,6 +322,15 @@ function _makeBotDecisionInner(
   // but is never a blocker. The pipeline fires early (before Claude finishes)
   // when both Stat and ML are ready — enabling minute 0-1 entries.
   if (decisionMode === "stat_ml") {
+    // Compute orderbook pressure: 1 - spread (0-1 dollar format).
+    // Pressure is close to 1 for tight books, lower for wide books.
+    const kd = getKalshiCachedData(sym);
+    const yesAsk = kd?.yesAsk ?? null;
+    const yesBid = kd?.yesBid ?? null;
+    const obPressure = (yesAsk !== null && yesBid !== null && yesAsk > 0 && yesAsk <= 1)
+      ? Math.max(0, 1 - (yesAsk - Math.max(0, yesBid)))
+      : null;
+
     const smResult = computeStatMLDecision({
       statAbove, mlAbove,
       statConfidence: liveStatConf,
@@ -324,19 +338,29 @@ function _makeBotDecisionInner(
       yesPrice,
       kalshiTicker,
       minConfidence: config.minConfidence,
-      statMLMinStatConf:        config.statMLMinStatConf,
-      statMLMinMLConf:          config.statMLMinMLConf,
-      statMLRequireBothAgree:   config.statMLRequireBothAgree,
+      statMLMinStatConf:          config.statMLMinStatConf,
+      statMLMinMLConf:            config.statMLMinMLConf,
+      statMLRequireBothAgree:     config.statMLRequireBothAgree,
       statMLHighConfBoostEnabled: config.statMLHighConfBoostEnabled,
-      statMLMinReturnMultiple:  config.statMLMinReturnMultiple,
+      statMLMinReturnMultiple:    config.statMLMinReturnMultiple,
+      statMLOrderbookGateEnabled: config.statMLOrderbookGateEnabled,
+      statMLOrderbookMinPressure: config.statMLOrderbookMinPressure,
+      orderbookPressure:          obPressure,
     } as StatMLInputs);
 
-    const smSnap = buildSnapshot(
-      smResult.ev,
-      smResult.signalsAgreeing,
-      smResult.signalsTotal,
-      smResult.action !== "SKIP" ? smResult.action : null,
-    );
+    const smSnap: SignalSnapshot = {
+      ...buildSnapshot(
+        smResult.ev,
+        smResult.signalsAgreeing,
+        smResult.signalsTotal,
+        smResult.action !== "SKIP" ? smResult.action : null,
+      ),
+      // stat_ml-specific enrichments for diagnostics and analytics
+      statMLAgreement: statAbove !== null && mlAbove !== null ? statAbove === mlAbove : null,
+      statMLEarlyFire: claudeAbove === null, // true when we fired before Claude was ready
+      statMLEntryMinute: Math.floor(minutesElapsed),
+      statMLOrderbookPressure: obPressure,
+    };
     return {
       action: smResult.action,
       confidence: smResult.confidence,
@@ -617,7 +641,7 @@ export function makeBotDecision(
     // Always record roiPct so it shows in bet signals even on SKIPs below.
     inner.signals = { ...inner.signals, roiPct: parseFloat(roi.toFixed(2)) };
 
-    if (roi < MIN_ROI_PCT && config.decisionMode !== "conviction" && config.decisionMode !== "stat_ml") {
+    if (roi < MIN_ROI_PCT && config.decisionMode !== "conviction") {
       return {
         action: "SKIP",
         confidence: inner.confidence,

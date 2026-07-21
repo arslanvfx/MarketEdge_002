@@ -122,6 +122,8 @@ export interface BotConfig {
   statMLMaxEntryMinute?: number;
   statMLHighConfBoostEnabled?: boolean;
   statMLMinReturnMultiple?: number;
+  statMLOrderbookGateEnabled?: boolean;
+  statMLOrderbookMinPressure?: number;
 }
 
 export interface TrajectoryGateResult {

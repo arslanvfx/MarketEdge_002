@@ -693,15 +693,24 @@ async function _runBotTick(
   //
   // CONVICTION MODE — price alone is the signal.  All model gates are bypassed
   // entirely.  The engine fires purely on yesPrice vs lockPrice.
+  // STAT_ML MODE — only Stat+ML are required; Claude is never waited on.
+  // All other modes: block until all three signals (Stat, Claude, ML) are non-null.
   if (S.config.decisionMode !== "conviction") {
     const live = getLatestCoinSignals(sym);
-    if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
+    const isStatML = S.config.decisionMode === "stat_ml";
+    const missingRequired = isStatML
+      ? (live.statAbove === null || live.mlAbove === null)
+      : (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null);
+    if (missingRequired) {
       logger.info(
         {
           sym, windowKey, secondsElapsed,
           statAbove: live.statAbove, claudeAbove: live.claudeAbove, mlAbove: live.mlAbove,
+          mode: S.config.decisionMode,
         },
-        "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
+        isStatML
+          ? "[kalshi-bot] stat_ml: waiting for Stat+ML signals — no bet until both are ready"
+          : "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
       );
       return;
     }
