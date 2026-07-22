@@ -12,7 +12,7 @@ import {
   DEFAULT_BOT_CONFIG, BET_PROFILES, computeDynamicBetSize, makeBotDecision,
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
-  applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, buildStreakSnapshot, restoreStreakState,
+  applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, buildStreakSnapshot, restoreStreakState,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -134,6 +134,18 @@ export async function loadBotConfigFromDB(): Promise<void> {
         logger.info({ kalshiLockPrice: S.config.kalshiLockPrice }, "[kalshi-bot] bootstrap: kalshiLockPrice 0.93 → 0.92 (zone [90¢, 95¢]) — persisting");
         _persistModeToConfig().catch(() => {});
       } else if (bootstrap092.changed) {
+        _persistModeToConfig().catch(() => {});
+      }
+
+      // One-time migration: widen entry zone to 82¢–91¢.
+      // If kalshiLockPrice ≥ 0.88 (old high-target semantics), resets to 0.82 (new floor).
+      // Always bootstraps kalshiLockPriceCap to 0.91 if not set yet.
+      const migration082 = applyLockPrice082Migration(S.config);
+      if (migration082.changed) {
+        logger.info(
+          { kalshiLockPrice: S.config.kalshiLockPrice, kalshiLockPriceCap: S.config.kalshiLockPriceCap, migrated: migration082.migrated },
+          "[kalshi-bot] migration: zone widened to 82¢–91¢ (independent floor + cap) — persisting",
+        );
         _persistModeToConfig().catch(() => {});
       }
 

@@ -623,8 +623,10 @@ async function _runBotTick(
   // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
     // Derive the same zone floor used by the engine so the bypass is in sync.
-    const convTarget = S.config.kalshiLockPrice ?? 0.90;
-    const convZoneFloor = deriveConvictionZone(convTarget).lockPrice;
+    const convZoneFloor = deriveConvictionZone(
+      S.config.kalshiLockPrice    ?? 0.82,
+      S.config.kalshiLockPriceCap ?? 0.91,
+    ).lockPrice;
     const proximityIsConvictionExtreme =
       S.config.decisionMode === "conviction" &&
       yesPrice !== null &&
@@ -1794,8 +1796,10 @@ async function _runBotTick(
     // shared with the engine, the conviction poller, and the post-fill check.
     // Target 92¢ → zone [90¢, 95¢]. Below the floor: price can flip, too
     // risky. Above the cap: margin too small, not worth the entry.
-    const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
-    const { lockPrice, lockPriceCap } = deriveConvictionZone(gateTarget);
+    const { lockPrice, lockPriceCap } = deriveConvictionZone(
+      S.config.kalshiLockPrice    ?? 0.82,
+      S.config.kalshiLockPriceCap ?? 0.91,
+    );
     // expectedTicker already computed above (hoisted). Re-used here for OB fetch.
 
     const freshData = getKalshiCachedData(sym);
@@ -2395,8 +2399,10 @@ async function _runBotTick(
       // Loop guard: convictionEmergencyCloses caps closes at 2 per coin/window;
       // after 2 the once-per-window lock stays set so re-entry cannot happen.
       if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
-        const _gt   = S.config.kalshiLockPrice ?? 0.90;
-        const { lockPrice: _lp, lockPriceCap: _lpCap } = deriveConvictionZone(_gt); // e.g. [0.90, 0.95] for target 0.92
+        const { lockPrice: _lp, lockPriceCap: _lpCap } = deriveConvictionZone(
+          S.config.kalshiLockPrice    ?? 0.82,
+          S.config.kalshiLockPriceCap ?? 0.91,
+        );
         // Kalshi always returns avgPrice in YES-side terms.
         // For YES bets: fill price IS avgPrice.
         // For NO  bets: fill price = 1 − avgPrice (what we paid per NO contract).

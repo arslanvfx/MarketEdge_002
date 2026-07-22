@@ -13,6 +13,7 @@ import {
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
+  computeStrikeProximityGate,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -1192,6 +1193,12 @@ export async function runBotLoopTick(): Promise<void> {
         const _maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
         const _maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
         const _minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
+        const _spLivePrice  = getCachedPrediction(sym)?.price ?? null;
+        const _spKalshiData = getKalshiCachedData(sym);
+        const _spStrike     = _spKalshiData?.value ?? null;
+        const _strikeGapPct = (_spLivePrice && _spStrike && _spStrike > 0)
+          ? Math.abs(_spLivePrice - _spStrike) / _spStrike * 100
+          : null;
         coinStabilityCache.set(sym, {
           // spikeFlag excluded: conviction fires because price hit 90¢ (often a spike);
           // blocking max bets on that spike is self-defeating.  See kalshi-bot-tick.ts.
@@ -1205,6 +1212,7 @@ export async function runBotLoopTick(): Promise<void> {
           mlConf: _mlConf,
           windowKey,
           computedAt: Date.now(),
+          strikeGapPct: _strikeGapPct,
         } satisfies CoinStabilityResult);
       }
     }
@@ -2134,6 +2142,38 @@ export async function runBotLoopTick(): Promise<void> {
     const finalReason = reversingCaution
       ? `[reversing-caution] ${reason.slice(0, 60)}`
       : reason;
+
+    // ── Strike proximity gate (conviction only) ──────────────────────────────
+    // Before any FOK fires, verify the live crypto price is far enough from the
+    // Kalshi strike. At 82¢ (entry floor) a coin can sit just fractions above
+    // the strike — a single adverse candle can flip the outcome. Gate is
+    // FAIL-OPEN: if livePrice or kalshiStrike unavailable, bet proceeds normally.
+    if (isConviction && decision.action !== "SKIP" && originalDecision.action !== "SKIP") {
+      const _proxLivePrice = getCachedPrediction(sym)?.price ?? null;
+      const _proxStrike    = kalshiData?.value ?? null;
+      const _proxAtrPct    = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
+      const _prox = computeStrikeProximityGate({
+        livePrice:       _proxLivePrice,
+        kalshiStrike:    _proxStrike,
+        direction:       decision.action === "BET_YES" ? "yes" : "no",
+        thresholdPct:    S.config.strikeProximityMinPct ?? 0.30,
+        atrPct:          _proxAtrPct,
+        atrScaleEnabled: S.config.strikeProximityAtrScale ?? true,
+      });
+      if (_prox.blocked) {
+        logger.info(
+          { sym, gapPct: _prox.gapPct, effectiveThreshold: _prox.effectiveThreshold, action: decision.action },
+          "[conviction-diag] strike-proximity gate blocked — price too close to strike",
+        );
+        filteredByNewGuards.add(sym);
+        evalResults.push({
+          symbol: sym, action: "SKIP", confidence: effectiveConfidence, score: 0,
+          reason: `strike-proximity blocked — gap ${_prox.gapPct?.toFixed(3)}% < threshold ${_prox.effectiveThreshold.toFixed(3)}%`,
+          windowKey, selected: false, evaluatedAt: now, trendStability: stability, regime,
+        });
+        continue;
+      }
+    }
 
     // Auto-tune shadow bet: `_autoTuneShadowDecision` is set only when the
     // auto-tune temp raise is the reason for SKIP.  `decision` was overridden to

@@ -644,34 +644,47 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </span>
                     <PhaseTracker onConfigSaved={saveConfig} />
                     {(() => {
-                      const target   = merged.kalshiLockPrice ?? 0.90;
-                      const lo       = target - 0.02;
-                      const hi       = target + 0.02;
-                      const loYes    = Math.round(lo * 100);
-                      const hiYes    = Math.round(hi * 100);
-                      const loNo     = Math.round((1 - hi) * 100);
-                      const hiNo     = Math.round((1 - lo) * 100);
+                      const floor = merged.kalshiLockPrice    ?? 0.82;
+                      const cap   = merged.kalshiLockPriceCap ?? 0.91;
+                      const floorYes = Math.round(floor * 100);
+                      const capYes   = Math.round(cap   * 100);
+                      const floorNo  = Math.round((1 - cap)   * 100);
+                      const capNo    = Math.round((1 - floor) * 100);
                       return (
-                        <label className="flex flex-col gap-1.5 mt-1">
-                          <span className="text-xs text-muted-foreground">
-                            Kalshi Price Target — {(target * 100).toFixed(0)}¢ &nbsp;
-                            <span className="text-violet-400/80">(entry window {loYes}¢–{hiYes}¢)</span>
-                          </span>
-                          <div className="flex items-center gap-3">
-                            <input type="range" min={0.82} max={0.97} step={0.01}
-                              className="flex-1 accent-violet-500"
-                              value={target}
-                              onChange={e => setConfigDraft(d => ({ ...d, kalshiLockPrice: parseFloat(e.target.value) }))} />
-                            <span className="text-xs font-mono text-violet-400 w-20 text-right">
-                              {loYes}–{hiYes}¢ YES<br />
-                              <span className="text-violet-400/60">{loNo}–{hiNo}¢ NO</span>
+                        <div className="flex flex-col gap-2.5 mt-1">
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">
+                              Entry Floor — <span className="font-mono text-violet-400">{floorYes}¢</span>
+                              <span className="text-muted-foreground/60 ml-1.5">YES ≥ {floorYes}¢ triggers BET YES · YES ≤ {capNo}¢ triggers BET NO</span>
                             </span>
-                          </div>
-                          <span className="text-[10px] text-muted-foreground/70">
-                            ±2¢ buffer applied automatically. BET YES when Kalshi YES is {loYes}¢–{hiYes}¢ · BET NO when YES is {loNo}¢–{hiNo}¢.
-                            Higher target = fewer bets, higher certainty. Max payout at {loYes}¢ entry: {(1 / lo).toFixed(2)}×.
-                          </span>
-                        </label>
+                            <div className="flex items-center gap-3">
+                              <input type="range" min={0.50} max={0.97} step={0.01}
+                                className="flex-1 accent-violet-500"
+                                value={floor}
+                                onChange={e => setConfigDraft(d => ({ ...d, kalshiLockPrice: parseFloat(e.target.value) }))} />
+                              <span className="text-xs font-mono text-violet-400 w-12 text-right">{floorYes}¢</span>
+                            </div>
+                            <span className="text-[10px] text-muted-foreground/70">
+                              Minimum Kalshi YES price to fire a BET YES. Lower = more bets, lower certainty. Max YES payout: {(1 / floor).toFixed(2)}×.
+                            </span>
+                          </label>
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">
+                              Entry Cap — <span className="font-mono text-violet-400">{capYes}¢</span>
+                              <span className="text-muted-foreground/60 ml-1.5">YES &gt; {capYes}¢ → window missed (SKIP)</span>
+                            </span>
+                            <div className="flex items-center gap-3">
+                              <input type="range" min={0.51} max={0.97} step={0.01}
+                                className="flex-1 accent-violet-400"
+                                value={cap}
+                                onChange={e => setConfigDraft(d => ({ ...d, kalshiLockPriceCap: parseFloat(e.target.value) }))} />
+                              <span className="text-xs font-mono text-violet-400 w-12 text-right">{capYes}¢</span>
+                            </div>
+                            <span className="text-[10px] text-muted-foreground/70">
+                              Maximum allowed Kalshi YES price. Above this the margin is too thin — bet is skipped. Entry zone: <span className="text-violet-400/80">{floorYes}¢–{capYes}¢ YES</span> · <span className="text-violet-400/60">{floorNo}¢–{capNo}¢ NO</span>.
+                            </span>
+                          </label>
+                        </div>
                       );
                     })()}
 
@@ -877,6 +890,51 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </label>
                       );
                     })()}
+
+                    {/* Strike Proximity Guard */}
+                    <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
+                      <span className="text-[11px] font-medium text-sky-300 flex items-center gap-1.5">
+                        <Activity className="w-3 h-3" />
+                        Strike Proximity Guard
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                        Blocks a FOK when the live crypto price is within <span className="text-sky-400 font-mono">{((merged.strikeProximityMinPct ?? 0.30)).toFixed(2)}%</span> of the Kalshi strike — too close means a single adverse candle can flip the outcome. Fail-open: passes when price data is unavailable.
+                        {(merged.strikeProximityAtrScale ?? true) && <span className="text-sky-400/70"> Threshold is ATR-scaled (wider for volatile coins).</span>}
+                      </span>
+                      <label className="flex flex-col gap-1.5">
+                        <span className="text-xs text-muted-foreground">
+                          Min Gap% <span className="font-mono text-sky-400">{(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}%</span>
+                        </span>
+                        <input
+                          type="number"
+                          min={0.10}
+                          max={2.00}
+                          step={0.05}
+                          className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground w-28"
+                          value={merged.strikeProximityMinPct ?? 0.30}
+                          onChange={e => {
+                            const v = parseFloat(e.target.value);
+                            if (!Number.isNaN(v) && v >= 0.10 && v <= 2.00) {
+                              setConfigDraft(d => ({ ...d, strikeProximityMinPct: v }));
+                            }
+                          }}
+                        />
+                        <span className="text-[10px] text-muted-foreground/60">|livePrice − strike| / strike × 100. Default: 0.30%. Range: 0.10–2.00%.</span>
+                      </label>
+                      <div className="flex items-center justify-between mt-0.5">
+                        <span className="text-xs text-muted-foreground">ATR Scale</span>
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, strikeProximityAtrScale: !(merged.strikeProximityAtrScale ?? true) }))}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.strikeProximityAtrScale ?? true)
+                            ? "bg-sky-500/15 text-sky-400 border-sky-500/30 hover:bg-sky-500/25"
+                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
+                        >
+                          {(merged.strikeProximityAtrScale ?? true) ? "On" : "Off"}
+                        </button>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/60 leading-relaxed">When on: threshold × max(1, volPct/0.20). High-volatility coins require a wider gap. Baseline 0.20% = typical BTC quiet session.</span>
+                    </div>
 
                     {/* Adverse Momentum Gate */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">

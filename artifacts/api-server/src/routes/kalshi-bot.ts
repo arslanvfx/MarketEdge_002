@@ -160,7 +160,10 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     decisionMode: "conviction",
     minConfidence: 50,
     minReturnMultiple: 1.00,
-    kalshiLockPrice: 0.90,
+    kalshiLockPrice: 0.82,
+    kalshiLockPriceCap: 0.91,
+    strikeProximityMinPct: 0.30,
+    strikeProximityAtrScale: true,
     betDelayMinutes: 0,
     maxEntryMinutes: 0,
     minRemainingMinutes: 1,
@@ -704,6 +707,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     betDelayMinutes?: number;
     minNoEntryMinutes?: number;
     kalshiLockPrice?: number;
+    kalshiLockPriceCap?: number;
+    strikeProximityMinPct?: number;
+    strikeProximityAtrScale?: boolean;
     minWindowEntryMinutes?: number;
     convictionEarlyBypassEnabled?: boolean;
     convictionEarlyBypassThreshold?: number;
@@ -944,6 +950,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) {
     partial.kalshiLockPrice = kalshiLockPrice;
   }
+  if (typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97) {
+    partial.kalshiLockPriceCap = kalshiLockPriceCap;
+  }
+  if (typeof strikeProximityMinPct === "number" && strikeProximityMinPct >= 0.10 && strikeProximityMinPct <= 2.00) {
+    partial.strikeProximityMinPct = strikeProximityMinPct;
+  }
+  if (typeof strikeProximityAtrScale === "boolean") {
+    partial.strikeProximityAtrScale = strikeProximityAtrScale;
+  }
   // 0 = disabled; valid range 0–0.85
   if (typeof convictionStopLossFloor === "number" && convictionStopLossFloor >= 0 && convictionStopLossFloor <= 0.85) {
     partial.convictionStopLossFloor = convictionStopLossFloor;
@@ -1029,7 +1044,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   // preConvictionThreshold must be < kalshiLockPrice (or the current config lock price
   // if not being changed simultaneously) to form a valid pre-entry band.
-  const effectiveLockPrice = typeof kalshiLockPrice === "number" ? kalshiLockPrice : (getBotState().config.kalshiLockPrice ?? 0.90);
+  const effectiveLockPrice = typeof kalshiLockPrice === "number" ? kalshiLockPrice : (getBotState().config.kalshiLockPrice ?? 0.82);
   if (typeof preConvictionThreshold === "number" && preConvictionThreshold >= 0.50 && preConvictionThreshold < effectiveLockPrice) {
     partial.preConvictionThreshold = preConvictionThreshold;
   }

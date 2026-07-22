@@ -211,15 +211,15 @@ export interface ConvictionInputs {
   yesAsk?:        number | null;
   yesBid?:        number | null;
   noAsk?:         number | null;
-  lockPrice?:     number;   // default 0.88 — minimum % to trigger entry
-  lockPriceCap?:  number;   // default 0.92 — maximum % allowed; above this is too late
+  lockPrice?:     number;   // default 0.82 — minimum % to trigger entry (floor)
+  lockPriceCap?:  number;   // default 0.91 — maximum % allowed; above this is too late
   minConfidence:  number;
 }
 
 export function computeConvictionDecision(inp: ConvictionInputs): CorePairResult {
   const { yesPrice, minConfidence } = inp;
-  const lockPrice    = inp.lockPrice    ?? 0.88;
-  const lockPriceCap = inp.lockPriceCap ?? 0.92;
+  const lockPrice    = inp.lockPrice    ?? 0.82;
+  const lockPriceCap = inp.lockPriceCap ?? 0.91;
 
   if (yesPrice == null) {
     return {
@@ -977,12 +977,15 @@ export interface BotConfig {
   convictionEarlyBypassEnabled?: boolean;   // when true (default), minWindowEntryMinutes is bypassed when yesPrice crosses the extreme threshold; false = timer always respected
   convictionEarlyBypassThreshold?: number;  // YES price threshold for the early bypass (default 0.92); only active when convictionEarlyBypassEnabled=true
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
-  kalshiLockPrice?: number;           // conviction only: entry target (current 0.92; asymmetric −2¢/+3¢ zone via deriveConvictionZone → [90¢, 95¢])
+  kalshiLockPrice?: number;           // conviction only: entry floor (default 0.82; BET fires when Kalshi YES ≥ this value)
   lockPrice091Migrated?: boolean;     // legacy one-time migration marker: 0.90 → 0.91 target bump (superseded)
   lockPrice090Migrated?: boolean;     // one-time startup migration marker: 0.91 → 0.90 target (zone [88¢, 92¢])
   lockPrice093Bootstrap?: boolean;    // one-time startup bootstrap: nudge the old 0.90 default → 0.93 user preference (superseded by 092)
   lockPrice092Bootstrap?: boolean;    // one-time startup bootstrap: 0.93 → 0.92 target (asymmetric zone [90¢, 95¢])
-  kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.92; above this the window is missed → SKIP)
+  lockPrice082Migrated?: boolean;     // one-time startup migration: ≥88¢ lockPrice → 0.82 floor + set kalshiLockPriceCap=0.91
+  kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.91; above this the window is missed → SKIP)
+  strikeProximityMinPct?: number;     // conviction only: minimum |cryptoPrice−kalshiStrike|/strike % required before any FOK fires (default 0.30); fail-open when price/strike unavailable
+  strikeProximityAtrScale?: boolean;  // when true, effectiveThreshold = strikeProximityMinPct × max(1, atrPct/0.20); scales guard wider for more volatile coins (default true)
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.75 = sell when contract drops to 75¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
@@ -1425,6 +1428,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryFinalMinutes: 5,
   maxBetTrajectoryBlockOnCross: true,
   maxBetTrajectoryMinVelocityATR: 0,
+  strikeProximityMinPct: 0.30,
+  strikeProximityAtrScale: true,
   convictionMomentumGateEnabled: false,
   convictionMomentumLookbackMinutes: 3,
   convictionMomentumSafetyFactor: 0.6,
@@ -1515,19 +1520,32 @@ export function applyLockPrice093Bootstrap(
 /**
  * deriveConvictionZone — single source of truth for the conviction entry zone.
  *
- * The user's spec (2026-07-17): sweet spot 92¢, fills allowed ONLY in
- * [90¢, 95¢] — never at 89¢ or below ("too risky, price can flip") and never
- * above 95¢ ("margin too small").  That is an ASYMMETRIC zone around the
- * target: floor = target − 2¢, cap = target + 3¢.
+ * Two calling conventions:
+ *
+ *   1. Legacy single-target (no cap): floor = target − 2¢, cap = target + 3¢.
+ *      Used by unit tests and any caller that only has a single target value.
+ *
+ *   2. Independent floor + cap (capOverride provided): the caller passes the
+ *      floor directly as `target` and the cap as `capOverride`.  Both are used
+ *      verbatim — no formula applied.  This is the new default since the entry
+ *      zone widened to 82¢–91¢ (floor and cap are independently configurable).
  *
  * Every zone consumer (engine decision, tick live-price gate, conviction
  * poller, emergency-close check) MUST derive its bounds through this helper
  * so the layers can never drift apart again.
  */
-export function deriveConvictionZone(target: number): {
+export function deriveConvictionZone(target: number, capOverride?: number): {
   lockPrice: number;
   lockPriceCap: number;
 } {
+  if (capOverride != null) {
+    // Independent-fields mode: target IS the floor; capOverride IS the cap.
+    return {
+      lockPrice:    +target.toFixed(4),
+      lockPriceCap: +capOverride.toFixed(4),
+    };
+  }
+  // Legacy single-target formula: floor = target−2¢, cap = target+3¢.
   return {
     lockPrice:    +(target - 0.02).toFixed(4),
     lockPriceCap: +(target + 0.03).toFixed(4),
@@ -1587,6 +1605,78 @@ export function applyLockPrice092Bootstrap(
   if (bumped) config.kalshiLockPrice = 0.92;
   config.lockPrice092Bootstrap = true;
   return { changed: true, bumped };
+}
+
+/**
+ * applyLockPrice082Migration — one-time startup migration that widens the
+ * conviction entry zone to 82¢–91¢ (independent floor + cap fields).
+ *
+ * Pure config transform (mutates the passed config in place) so it can be
+ * unit-tested without a DB. Called once per startup by loadBotConfigFromDB.
+ *
+ * Semantics:
+ *   1. If kalshiLockPrice >= 0.88 (old "target" semantics), reset to 0.82
+ *      (new floor semantics) — this converts the old high-target config to the
+ *      new wider entry zone.
+ *   2. If kalshiLockPriceCap is not set, bootstrap it to 0.91 (the cap).
+ *   3. Mark the migration as done so it never fires again.
+ */
+export function applyLockPrice082Migration(
+  config: BotConfig,
+): { changed: boolean; migrated: boolean } {
+  if (config.lockPrice082Migrated) return { changed: false, migrated: false };
+  const migrated = config.kalshiLockPrice != null && config.kalshiLockPrice >= 0.88;
+  if (migrated) config.kalshiLockPrice = 0.82;
+  if (config.kalshiLockPriceCap == null) config.kalshiLockPriceCap = 0.91;
+  config.lockPrice082Migrated = true;
+  return { changed: true, migrated };
+}
+
+/**
+ * computeStrikeProximityGate — pure, exported for testing.
+ *
+ * Before a conviction FOK fires, verify the live crypto price is far enough
+ * from the Kalshi strike.  At 82¢ (the new entry floor) a coin can be just
+ * a fraction of a percent above the strike — a single adverse candle can flip
+ * the outcome.  This gate enforces a minimum distance.
+ *
+ * Gate is FAIL-OPEN: if livePrice or kalshiStrike is unavailable (null/zero)
+ * the gate passes so the bot never silently blocks entries due to missing data.
+ *
+ * ATR scaling (when atrScaleEnabled=true):
+ *   effectiveThreshold = thresholdPct × max(1, atrPct / 0.20)
+ *   — coins with higher volatility (atrPct > 0.20%) need a wider gap to be safe.
+ *   — reference baseline 0.20% is ≈ BTC quiet-session volatility.
+ */
+export interface StrikeProximityResult {
+  blocked: boolean;
+  gapPct: number | null;           // null when livePrice or kalshiStrike unavailable (gate passes)
+  effectiveThreshold: number;      // threshold used for this evaluation (may be ATR-scaled)
+}
+
+export function computeStrikeProximityGate(opts: {
+  livePrice: number | null;
+  kalshiStrike: number | null;
+  direction: "yes" | "no";
+  thresholdPct: number;
+  atrPct?: number | null;
+  atrScaleEnabled?: boolean;
+}): StrikeProximityResult {
+  const { livePrice, kalshiStrike, thresholdPct, atrPct, atrScaleEnabled = true } = opts;
+
+  // Fail-open: unavailable data must never block a bet silently.
+  if (!livePrice || !kalshiStrike || kalshiStrike <= 0) {
+    return { blocked: false, gapPct: null, effectiveThreshold: thresholdPct };
+  }
+
+  const gapPct = Math.abs(livePrice - kalshiStrike) / kalshiStrike * 100;
+
+  const atrMultiplier = atrScaleEnabled && atrPct != null && atrPct > 0
+    ? Math.max(1, atrPct / 0.20)
+    : 1;
+  const effectiveThreshold = thresholdPct * atrMultiplier;
+
+  return { blocked: gapPct < effectiveThreshold, gapPct, effectiveThreshold };
 }
 
 /**

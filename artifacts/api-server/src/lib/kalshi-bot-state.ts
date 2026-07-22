@@ -234,6 +234,7 @@ export interface CoinStabilityResult {
   mlConf: number | null;
   windowKey: string;
   computedAt: number;
+  strikeGapPct: number | null;  // |livePrice − kalshiStrike| / kalshiStrike × 100; null when unavailable
 }
 export const coinStabilityCache = new Map<string, CoinStabilityResult>();
 

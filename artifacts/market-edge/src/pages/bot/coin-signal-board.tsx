@@ -8,6 +8,8 @@ interface StabilityThresholds {
   maxOsc?: number;
   maxVolPct?: number;
   minMLConf?: number;
+  strikeProximityMinPct?: number;   // minimum gap% before conviction FOK fires (for Gap column indicator)
+  strikeProximityAtrScale?: boolean; // when true, effective threshold is ATR-scaled (for Gap column tooltip)
 }
 
 interface TrajectoryThresholds {
@@ -176,11 +178,13 @@ function useNow(intervalMs: number): number {
 }
 
 function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, coinTrajectory, windowKey, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes, extremeCautionAborted, activeScheduleBracket }: MarketConditionsBoardProps) {
-  const minER      = stabilityConfig?.minER     ?? 0.30;
-  const maxOsc     = stabilityConfig?.maxOsc    ?? 8;
-  const maxVolPct  = stabilityConfig?.maxVolPct ?? 3.0;
-  const minMLConf  = stabilityConfig?.minMLConf ?? 52;
-  const dangerBand = trajectoryConfig?.dangerBandPct ?? 0.15;
+  const minER                 = stabilityConfig?.minER                 ?? 0.30;
+  const maxOsc                = stabilityConfig?.maxOsc                ?? 8;
+  const maxVolPct             = stabilityConfig?.maxVolPct             ?? 3.0;
+  const minMLConf             = stabilityConfig?.minMLConf             ?? 52;
+  const proximityMinPct       = stabilityConfig?.strikeProximityMinPct ?? 0.30;
+  const proximityAtrScale     = stabilityConfig?.strikeProximityAtrScale ?? true;
+  const dangerBand            = trajectoryConfig?.dangerBandPct         ?? 0.15;
 
   const now = useNow(10_000);
   const maxBetGateS = (maxBetMinWindowEntryMinutes ?? 0) * 60;
@@ -232,6 +236,9 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
               <th className="text-left px-3 py-2 font-medium">Bet Size</th>
               <th className="text-left px-3 py-2 font-medium" title="Trajectory gate: ATR-adaptive thresholds per coin — actual danger band = max(fixed floor, ATR% × multiplier)">
                 <span className="inline-flex items-center gap-1"><TrendingUp className="w-3 h-3" />Trajectory</span>
+              </th>
+              <th className="text-left px-3 py-2 font-medium" title="Strike proximity gate: |livePrice−strike|/strike×100 — must exceed configured threshold before a FOK fires; ATR-scaled when enabled">
+                Gap%
               </th>
             </tr>
           </thead>
@@ -387,6 +394,31 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                         </span>
                       </div>
                     )}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    {(() => {
+                      const gapPct = stab?.strikeGapPct ?? null;
+                      if (gapPct == null) return <span className="text-muted-foreground/40 font-mono">—</span>;
+                      const atrMultiplier = (proximityAtrScale && stab?.volPct != null && stab.volPct > 0)
+                        ? Math.max(1, stab.volPct / 0.20)
+                        : 1;
+                      const effectiveThreshold = proximityMinPct * atrMultiplier;
+                      const ok = gapPct >= effectiveThreshold;
+                      const tooltipParts = [
+                        `gap: ${gapPct.toFixed(3)}%`,
+                        `threshold: ${effectiveThreshold.toFixed(3)}%`,
+                        proximityAtrScale && atrMultiplier > 1 ? `ATR-scaled (×${atrMultiplier.toFixed(1)})` : `base ${proximityMinPct.toFixed(2)}%`,
+                      ];
+                      return (
+                        <span
+                          className={`font-mono text-[11px] tabular-nums ${ok ? "text-emerald-400" : "text-red-400"}`}
+                          title={tooltipParts.join(" · ")}
+                        >
+                          {gapPct.toFixed(2)}%
+                          {!ok && <span className="ml-0.5 text-[9px]">⚠</span>}
+                        </span>
+                      );
+                    })()}
                   </td>
                 </tr>
               );

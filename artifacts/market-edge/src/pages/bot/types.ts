@@ -114,6 +114,10 @@ export interface BotConfig {
   convictionMomentumGateEnabled?: boolean;
   convictionMomentumLookbackMinutes?: number;
   convictionMomentumSafetyFactor?: number;
+  kalshiLockPriceCap?: number;
+  strikeProximityMinPct?: number;
+  strikeProximityAtrScale?: boolean;
+  lockPrice082Migrated?: boolean;
 }
 
 export interface TrajectoryGateResult {
@@ -381,6 +385,7 @@ export interface CoinStabilityResult {
   mlConf: number | null;
   windowKey: string;
   computedAt: number;
+  strikeGapPct?: number | null;  // |livePrice − kalshiStrike| / kalshiStrike × 100; null when unavailable
 }
 
 export interface BotStepSignal {

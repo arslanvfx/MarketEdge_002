@@ -53,7 +53,9 @@ import {
   applyLockPrice090Migration,
   applyLockPrice093Bootstrap,
   applyLockPrice092Bootstrap,
+  applyLockPrice082Migration,
   deriveConvictionZone,
+  computeStrikeProximityGate,
   type BotConfig,
   type CorePairInputs,
   type CircuitBreakerState,
@@ -2002,4 +2004,83 @@ test("adverse momentum: zero velocity → SAFE (timeToCross = Infinity)", () => 
   const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: 0, minutesRemaining: 8 });
   assert.equal(r.blocked, false);
   assert.equal(r.timeToCrossMin, Infinity);
+});
+
+// ── computeStrikeProximityGate tests ────────────────────────────────────────
+
+test("strike proximity: YES gap above threshold → PASS", () => {
+  // livePrice $101k, strike $100k → gap = 1000/100000*100 = 1.00%; threshold 0.30%
+  const r = computeStrikeProximityGate({ livePrice: 101000, kalshiStrike: 100000, direction: "yes", thresholdPct: 0.30, atrScaleEnabled: false });
+  assert.equal(r.blocked, false);
+  assert.ok(r.gapPct != null && Math.abs(r.gapPct - 1.00) < 0.001, `Expected gap ~1.00, got ${r.gapPct}`);
+  assert.equal(r.effectiveThreshold, 0.30);
+});
+
+test("strike proximity: YES gap below threshold → BLOCKED", () => {
+  // livePrice $100100, strike $100000 → gap = 100/100000*100 = 0.10%; threshold 0.30%
+  const r = computeStrikeProximityGate({ livePrice: 100100, kalshiStrike: 100000, direction: "yes", thresholdPct: 0.30, atrScaleEnabled: false });
+  assert.equal(r.blocked, true);
+  assert.ok(r.gapPct != null && Math.abs(r.gapPct - 0.10) < 0.001, `Expected gap ~0.10, got ${r.gapPct}`);
+});
+
+test("strike proximity: NO direction — gap computed correctly (absolute)", () => {
+  // NO: livePrice $99500, strike $100000 → gap = 500/100000*100 = 0.50% → passes 0.30%
+  const r = computeStrikeProximityGate({ livePrice: 99500, kalshiStrike: 100000, direction: "no", thresholdPct: 0.30, atrScaleEnabled: false });
+  assert.equal(r.blocked, false);
+  assert.ok(r.gapPct != null && Math.abs(r.gapPct - 0.50) < 0.001, `Expected gap ~0.50, got ${r.gapPct}`);
+});
+
+test("strike proximity: ATR scaling widens threshold — marginal gap blocked by scaled threshold", () => {
+  // gap = 0.40%, base threshold 0.30%, atrPct = 0.40% → multiplier = max(1, 0.40/0.20) = 2 → effective = 0.60% → BLOCKED
+  const r = computeStrikeProximityGate({ livePrice: 100400, kalshiStrike: 100000, direction: "yes", thresholdPct: 0.30, atrPct: 0.40, atrScaleEnabled: true });
+  assert.equal(r.blocked, true);
+  assert.ok(Math.abs(r.effectiveThreshold - 0.60) < 0.001, `Expected effectiveThreshold ~0.60, got ${r.effectiveThreshold}`);
+});
+
+test("strike proximity: ATR scaling disabled — base threshold used even with high ATR", () => {
+  // gap = 0.40%, base threshold 0.30% — PASS because atrScaleEnabled=false ignores atrPct
+  const r = computeStrikeProximityGate({ livePrice: 100400, kalshiStrike: 100000, direction: "yes", thresholdPct: 0.30, atrPct: 0.40, atrScaleEnabled: false });
+  assert.equal(r.blocked, false);
+  assert.equal(r.effectiveThreshold, 0.30);
+});
+
+test("strike proximity: null livePrice → fail-open (gate passes)", () => {
+  const r = computeStrikeProximityGate({ livePrice: null, kalshiStrike: 100000, direction: "yes", thresholdPct: 0.30 });
+  assert.equal(r.blocked, false);
+  assert.equal(r.gapPct, null);
+});
+
+test("strike proximity: null kalshiStrike → fail-open (gate passes)", () => {
+  const r = computeStrikeProximityGate({ livePrice: 101000, kalshiStrike: null, direction: "yes", thresholdPct: 0.30 });
+  assert.equal(r.blocked, false);
+  assert.equal(r.gapPct, null);
+});
+
+// ── applyLockPrice082Migration tests ─────────────────────────────────────────
+
+test("lockPrice082Migration: config with kalshiLockPrice=0.90 → migrated to 0.82, cap set to 0.91", () => {
+  const config: Partial<BotConfig> = { kalshiLockPrice: 0.90 };
+  const result = applyLockPrice082Migration(config as BotConfig);
+  assert.equal(result.changed, true);
+  assert.equal(result.migrated, true);
+  assert.equal(config.kalshiLockPrice, 0.82);
+  assert.equal(config.kalshiLockPriceCap, 0.91);
+  assert.equal(config.lockPrice082Migrated, true);
+});
+
+test("lockPrice082Migration: already migrated → no-op", () => {
+  const config: Partial<BotConfig> = { kalshiLockPrice: 0.82, kalshiLockPriceCap: 0.91, lockPrice082Migrated: true };
+  const result = applyLockPrice082Migration(config as BotConfig);
+  assert.equal(result.changed, false);
+  assert.equal(result.migrated, false);
+  assert.equal(config.kalshiLockPrice, 0.82); // unchanged
+});
+
+test("lockPrice082Migration: config with kalshiLockPrice=0.82 (already low) → not migrated, but cap+flag set", () => {
+  const config: Partial<BotConfig> = { kalshiLockPrice: 0.82 };
+  const result = applyLockPrice082Migration(config as BotConfig);
+  assert.equal(result.changed, true);
+  assert.equal(result.migrated, false); // was already below 0.88
+  assert.equal(config.kalshiLockPrice, 0.82); // unchanged
+  assert.equal(config.kalshiLockPriceCap, 0.91);
 });
