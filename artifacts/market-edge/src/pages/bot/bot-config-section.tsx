@@ -421,6 +421,16 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-[10px] text-muted-foreground/60">Max total $ across all open positions at once</span>
                 </label>
 
+                {/* Max Daily Loss Per Coin — always visible (applies in all modes) */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Daily Loss / Coin ($)</span>
+                  <input type="number" min={0} max={100} step={0.5}
+                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxDailyLossPerCoin ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxDailyLossPerCoin: parseFloat(e.target.value) }))} />
+                  <span className="text-[10px] text-muted-foreground/60">Per-coin daily loss cap (0 = disabled)</span>
+                </label>
+
                 {!isConviction && (<>
                 {/* Min Account Balance */}
                 <label className="flex flex-col gap-1.5">
@@ -430,16 +440,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     value={merged.minAccountBalance ?? 5}
                     onChange={e => setConfigDraft(d => ({ ...d, minAccountBalance: parseFloat(e.target.value) }))} />
                   <span className="text-[10px] text-muted-foreground/60">Abort live bet if Kalshi balance drops below this</span>
-                </label>
-
-                {/* Max Daily Loss Per Coin */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Daily Loss / Coin ($)</span>
-                  <input type="number" min={0} max={100} step={0.5}
-                    className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.maxDailyLossPerCoin ?? 3}
-                    onChange={e => setConfigDraft(d => ({ ...d, maxDailyLossPerCoin: parseFloat(e.target.value) }))} />
-                  <span className="text-[10px] text-muted-foreground/60">Per-coin daily loss cap (0 = disabled)</span>
                 </label>
 
                 {/* Streak Loss Limit */}
