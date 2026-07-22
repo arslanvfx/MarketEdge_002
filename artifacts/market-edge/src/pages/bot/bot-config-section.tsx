@@ -706,6 +706,47 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </button>
                     </div>
 
+                    {/* Freefall Gate sensitivity controls — only when gate is On */}
+                    {(merged.convictionMomentumGateEnabled ?? true) && (
+                      <div className="flex flex-col gap-2 mt-2 pl-3 border-l border-rose-500/20">
+                        <label className="flex flex-col gap-1.5" title="How aggressively the gate blocks entries. Higher = blocks more conservatively (catches slower freefalls but may block legitimate entries with moderate drift).">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-muted-foreground">Freefall Sensitivity</span>
+                            <span className="text-xs font-mono text-rose-300">{(merged.convictionMomentumSafetyFactor ?? 0.6).toFixed(2)}</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.3}
+                            max={0.9}
+                            step={0.05}
+                            value={merged.convictionMomentumSafetyFactor ?? 0.6}
+                            onChange={e => setConfigDraft(d => ({ ...d, convictionMomentumSafetyFactor: parseFloat(e.target.value) }))}
+                            className="w-full accent-rose-400"
+                            title="Higher values block entry more aggressively — a factor of 0.9 blocks any entry where price could plausibly cross the strike within 90% of remaining window time. Lower values (0.3) only block obvious fast freefalls."
+                          />
+                          <div className="flex justify-between text-[10px] text-muted-foreground/50">
+                            <span>0.3 — only fast freefalls</span>
+                            <span>0.9 — very conservative</span>
+                          </div>
+                        </label>
+                        <label className="flex flex-col gap-1.5" title="How many minutes of price history the gate uses to measure velocity. Longer lookbacks smooth out noise but react slower to sudden drops.">
+                          <span className="text-xs text-muted-foreground">Velocity Lookback</span>
+                          <select
+                            className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                            value={merged.convictionMomentumLookbackMinutes ?? 3}
+                            onChange={e => setConfigDraft(d => ({ ...d, convictionMomentumLookbackMinutes: parseInt(e.target.value) }))}
+                            title="Number of 1-minute candles used to compute the drop velocity. 1 min = hair-trigger (reacts fast, noisy). 5 min = smooth but slow to respond."
+                          >
+                            <option value={1}>1 min — fastest, noisiest</option>
+                            <option value={2}>2 min</option>
+                            <option value={3}>3 min — default</option>
+                            <option value={4}>4 min</option>
+                            <option value={5}>5 min — slowest, smoothest</option>
+                          </select>
+                        </label>
+                      </div>
+                    )}
+
                     {/* Allow Late Entries */}
                     <div className="flex items-center justify-between mt-1">
                       <div className="flex flex-col gap-0.5">
