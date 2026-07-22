@@ -412,7 +412,10 @@ export default function BotDashboard() {
     try {
       const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
       setConfigDraft({});
-      await qc.invalidateQueries({ queryKey: ["bot-status"] });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bot-status"] }),
+        qc.invalidateQueries({ queryKey: ["bot-coin-guard-state"] }),
+      ]);
       setPersistMsg(result.persisted ? "saved" : "failed");
       setTimeout(() => setPersistMsg(null), 3000);
     } catch (err) {
