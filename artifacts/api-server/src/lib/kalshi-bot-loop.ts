@@ -1252,7 +1252,10 @@ export async function runBotLoopTick(): Promise<void> {
     // Empty-book cooldown: if this coin's IOC order returned 0 fills on both attempts
     // this window, skip it — the book is genuinely empty. Cleared on window transition.
     // (First 0-fill does NOT block; bot retries once more ~30s later before giving up.)
-    if (windowFailedFills.has(`${sym}:${windowKey}:${S.botMode}`)) {
+    // Conviction mode is exempt: it retries every tick indefinitely. The book can
+    // become liquid at any point in the window, and blocking kills valid entries.
+    const isConvictionForCooldown = S.config.decisionMode === "conviction";
+    if (!isConvictionForCooldown && windowFailedFills.has(`${sym}:${windowKey}:${S.botMode}`)) {
       filteredByNewGuards.add(sym);
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "empty-book cooldown — IOC returned 0 fills earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
