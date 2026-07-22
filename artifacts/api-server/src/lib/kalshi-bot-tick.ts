@@ -557,13 +557,12 @@ async function _runBotTick(
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
-  // Conviction mode is fully exempt — it is a reactive mode designed to catch the price
-  // crossing the moment it happens; a time lockout defeats the entire purpose.
-  // The separate maxBetMinWindowEntryMinutes gate still controls max-bet eligibility.
+  // Only bypassed at true market extremes (≥92¢ or ≤8¢) regardless of mode.
+  // Conviction mode respects minWindowEntryMinutes just like any other mode —
+  // the separate maxBetMinWindowEntryMinutes gate controls when max bets are eligible.
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
-    const isConvictionMode = S.config.decisionMode === "conviction";
-    if (!isConvictionMode && minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
+    if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
       // Bypass: configurable — disabled means the timer is ALWAYS respected.
       // When enabled, the threshold is user-adjustable (default 0.92).
       const bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
