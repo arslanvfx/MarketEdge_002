@@ -2037,19 +2037,23 @@ async function _runBotTick(
     }
 
     if (aboveCap) {
-      // Price has moved PAST the cap further in our direction — this is a
-      // better outcome than being in-window.  Proceed to place the FOK at
-      // orderLimitPrice, which is already clamped to lockPriceCap by the sizing
-      // logic (lines below).  Do NOT abort and do NOT set the abort cooldown —
-      // the market is moving in our favour and the FOK will fill or 0-fill.
-      logger.info(
+      // Price has moved PAST the cap — entry window missed, strict enforcement.
+      // Abort and release the once-per-window lock so a future tick can
+      // re-evaluate if price pulls back into [lockPrice, lockPriceCap].
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (price past cap)");
+      }
+      logger.warn(
         {
           sym, direction, windowKey,
           freshRefPrice: +freshRefPrice.toFixed(4),
           lockPrice, lockPriceCap,
         },
-        "[kalshi-bot] conviction live-price gate: price past cap — proceeding with zone-capped FOK",
+        "[kalshi-bot] conviction live-price gate: price past cap — order aborted",
       );
+      return;
     }
 
     // ── NO cross-check (stale-bid guard) ─────────────────────────────────────
