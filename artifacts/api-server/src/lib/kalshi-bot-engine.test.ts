@@ -57,6 +57,7 @@ import {
   deriveConvictionZone,
   computeStrikeProximityGate,
   checkConvictionOneSidedBook,
+  shouldSuppressConvictionStopLoss,
   type BotConfig,
   type CorePairInputs,
   type CircuitBreakerState,
@@ -2138,6 +2139,64 @@ test("strike proximity (tick re-check): YES direction tiny gap also blocked", ()
   });
   assert.equal(r.blocked, true);
   assert.ok(r.gapPct != null && r.gapPct < 0.15);
+});
+
+// ── shouldSuppressConvictionStopLoss tests ────────────────────────────────────
+// Reproduces the Jul-22 DOGE and BTC cases where the stop-loss exited winning
+// positions because Kalshi temporarily mispriced the market.
+
+test("stop-loss suppression: NO bet — livePrice below strike → suppress (DOGE Jul-22)", () => {
+  // DOGE at $0.0700, strike $0.072927 → crypto says NO wins → suppress
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.0700, kalshiStrike: 0.072927,
+  });
+  assert.equal(result, true, "Stop-loss should be suppressed when NO bet crypto is below strike");
+});
+
+test("stop-loss suppression: NO bet — livePrice above strike → allow stop-loss (genuine loss)", () => {
+  // DOGE at $0.080, strike $0.072927 → crypto above strike → NO genuinely losing
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.080, kalshiStrike: 0.072927,
+  });
+  assert.equal(result, false, "Stop-loss should fire when crypto is above strike for a NO bet");
+});
+
+test("stop-loss suppression: YES bet — livePrice above strike → suppress", () => {
+  // BTC at $66100, strike $65983 → crypto above strike → YES winning → suppress
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "yes", livePrice: 66100, kalshiStrike: 65983,
+  });
+  assert.equal(result, true, "Stop-loss should be suppressed when YES bet crypto is above strike");
+});
+
+test("stop-loss suppression: YES bet — livePrice below strike → allow stop-loss (genuine loss)", () => {
+  // BTC at $65800, strike $65983 → crypto below strike → YES genuinely losing
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "yes", livePrice: 65800, kalshiStrike: 65983,
+  });
+  assert.equal(result, false, "Stop-loss should fire when crypto is below strike for a YES bet");
+});
+
+test("stop-loss suppression: null livePrice → fail-closed (allow stop-loss)", () => {
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: null, kalshiStrike: 0.072927,
+  });
+  assert.equal(result, false, "Should not suppress when livePrice is unavailable");
+});
+
+test("stop-loss suppression: null kalshiStrike → fail-closed (allow stop-loss)", () => {
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.0700, kalshiStrike: null,
+  });
+  assert.equal(result, false, "Should not suppress when kalshiStrike is unavailable");
+});
+
+test("stop-loss suppression: livePrice exactly at strike → allow stop-loss (at boundary, not winning)", () => {
+  // Price exactly at strike = outcome is 50/50, not a confirmed win — fire stop-loss
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.072927, kalshiStrike: 0.072927,
+  });
+  assert.equal(result, false, "Should not suppress when livePrice equals strike (not strictly below)");
 });
 
 // ── applyLockPrice082Migration tests ─────────────────────────────────────────

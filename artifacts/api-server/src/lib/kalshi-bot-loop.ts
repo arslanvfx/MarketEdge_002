@@ -15,6 +15,7 @@ import {
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
+  shouldSuppressConvictionStopLoss,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -703,6 +704,29 @@ export async function runBotLoopTick(): Promise<void> {
         // Skip if already near-zero (no point selling worthless contracts).
         if (contractValue <= NEAR_ZERO_FLOOR) continue;
         if (contractValue > stopFloor) continue;
+
+        // Crypto-side confirmation: before exiting, check whether the
+        // underlying crypto price is already on the WINNING side of the
+        // Kalshi strike.  Market makers can temporarily misprice a contract
+        // mid-window (e.g. a NO bet where YES spikes to 90¢ while DOGE is
+        // 4% below the strike).  The stop-loss would exit a winning position.
+        // Suppress when crypto confirms the direction — fail-closed: if
+        // livePrice or kalshiStrike is unavailable, allow the stop-loss.
+        const _slLivePrice   = getCachedPrediction(sym)?.price ?? null;
+        const _slKalshiStrike = kd?.value ?? null;
+        if (shouldSuppressConvictionStopLoss({ direction: pos.direction, livePrice: _slLivePrice, kalshiStrike: _slKalshiStrike })) {
+          logger.warn(
+            {
+              sym, direction: pos.direction,
+              livePrice:     _slLivePrice,
+              kalshiStrike:  _slKalshiStrike,
+              contractValue: +contractValue.toFixed(4),
+              stopFloor,
+            },
+            "[kalshi-bot] conviction stop-loss SUPPRESSED — crypto confirms position is winning (Kalshi mispricing)",
+          );
+          continue;
+        }
 
         logger.warn(
           { sym, direction: pos.direction,

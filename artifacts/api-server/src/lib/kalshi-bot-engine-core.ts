@@ -1724,6 +1724,34 @@ export function computeStrikeProximityGate(opts: {
 }
 
 /**
+ * shouldSuppressConvictionStopLoss — pure, exported for testing.
+ *
+ * Returns true when the conviction stop-loss should be SUPPRESSED because the
+ * underlying crypto price confirms the position is on the WINNING side of the
+ * Kalshi strike.  Kalshi market makers can temporarily misprice a contract
+ * mid-window (e.g. YES spikes to 90¢ while the crypto is 4% below the
+ * strike), causing the stop-loss to exit a winning trade early.
+ *
+ * Suppression logic:
+ *   NO  bet: livePrice < kalshiStrike → crypto says NO wins  → suppress
+ *   YES bet: livePrice > kalshiStrike → crypto says YES wins → suppress
+ *
+ * Fail-CLOSED: returns false (allow stop-loss) when livePrice or kalshiStrike
+ * is unavailable.  We never suppress when we can't confirm the direction.
+ */
+export function shouldSuppressConvictionStopLoss(opts: {
+  direction: "yes" | "no";
+  livePrice: number | null;
+  kalshiStrike: number | null;
+}): boolean {
+  const { direction, livePrice, kalshiStrike } = opts;
+  if (livePrice == null || kalshiStrike == null || kalshiStrike <= 0) return false;
+  return direction === "no"
+    ? livePrice < kalshiStrike  // NO wins when crypto is below the strike
+    : livePrice > kalshiStrike; // YES wins when crypto is above the strike
+}
+
+/**
  * computeKellyMultiplier — per-position Kelly fraction for a YES or NO bet.
  *
  * Returns a value in [0, 1] that represents the fractional edge of the bet at
