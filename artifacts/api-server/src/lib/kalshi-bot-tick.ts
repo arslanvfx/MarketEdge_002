@@ -93,6 +93,7 @@ export function computeTrajectoryGate(
   clockElapsedS: number,
   config: import("./kalshi-bot-engine").BotConfig,
   _betType: "max" | "regular" = "max",
+  isConvictionMode: boolean = false,
 ): TrajectoryGateResult {
   const minutesRemaining = Math.max(0, (15 * 60 - clockElapsedS) / 60);
   const currentMarginPct = ((livePrice - kalshiTarget) / kalshiTarget) * 100;
@@ -136,12 +137,14 @@ export function computeTrajectoryGate(
   // adverseVelocity: price is moving TOWARD (or through) the strike
   const adverseVelocity = signedVelocity <= 0;
 
-  // ── Adverse momentum gate (active throughout window) ──────────────────────
+  // ── Adverse momentum gate (conviction mode only, active throughout window) ─
   // Delegates to computeAdverseMomentumGate (pure, exported, unit-tested).
   // Uses a conviction-specific lookback so it can be tuned independently of
   // the freefall gate's lookback.  Unlike the freefall gate this runs at any
   // point in the window, not just the final N minutes.
-  const amEnabled = config.convictionMomentumGateEnabled ?? false;
+  // Guard: only activates when called from a conviction-mode tick (isConvictionMode=true).
+  // Regular-trajectory calls always skip this block — config flag alone is not sufficient.
+  const amEnabled = isConvictionMode && (config.convictionMomentumGateEnabled ?? true);
   if (amEnabled && minutesRemaining > 0) {
     const amLookbackMin = Math.max(1, config.convictionMomentumLookbackMinutes ?? lookbackMin);
     const amActual = Math.min(amLookbackMin, candles.length - 1);
@@ -2267,7 +2270,7 @@ async function _runBotTick(
     const _convTrajLiveP  = candles[candles.length - 1].c;
     const _convTrajWkMs   = new Date(windowKey).getTime();
     const _convTrajClockS = isNaN(_convTrajWkMs) ? 0 : (Date.now() - _convTrajWkMs) / 1000;
-    const convTraj = computeTrajectoryGate(sym, candles, _convTrajLiveP, kalshiTarget, direction, _convTrajClockS, S.config, "regular");
+    const convTraj = computeTrajectoryGate(sym, candles, _convTrajLiveP, kalshiTarget, direction, _convTrajClockS, S.config, "regular", true);
     coinTrajectoryCache.set(sym, convTraj);
     if (convTraj.blocked) {
       logger.info(
