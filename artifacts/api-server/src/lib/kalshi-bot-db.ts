@@ -186,6 +186,12 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     // IMPORTANT: filter to the current S.botMode so paper and live have fully
     // independent daily loss limits. Paper losses must not eat into the live
     // daily budget and vice versa.
+    //
+    // Also honour the stats-reset timestamp: losses from before a stats reset
+    // must not count against today's daily limit or the circuit-breaker streak.
+    const statsResetAt = S.botMode === "live"
+      ? (S.config.liveStatsResetAt ?? null)
+      : (S.config.paperStatsResetAt ?? null);
     const rows = await db
       .select({ pnl: kalshiBotBetsTable.pnl })
       .from(kalshiBotBetsTable)
@@ -196,6 +202,7 @@ export async function loadDailyPnlFromDB(): Promise<void> {
           eq(kalshiBotBetsTable.mode, S.botMode),
           sql`DATE(${kalshiBotBetsTable.exitedAt} AT TIME ZONE 'UTC') = ${today}`,
           sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
+          statsResetAt ? sql`${kalshiBotBetsTable.exitedAt} >= ${statsResetAt}::timestamptz` : sql`true`,
         ),
       );
 
@@ -352,6 +359,9 @@ export async function loadDailyPnlFromDB(): Promise<void> {
 export async function loadCoinDailyLossFromDB(): Promise<void> {
   try {
     const today = todayUTC();
+    const statsResetAt = S.botMode === "live"
+      ? (S.config.liveStatsResetAt ?? null)
+      : (S.config.paperStatsResetAt ?? null);
     const rows = await db
       .select({
         symbol: kalshiBotBetsTable.symbol,
@@ -365,6 +375,7 @@ export async function loadCoinDailyLossFromDB(): Promise<void> {
           eq(kalshiBotBetsTable.mode, S.botMode),
           sql`DATE(${kalshiBotBetsTable.exitedAt} AT TIME ZONE 'UTC') = ${today}`,
           sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
+          statsResetAt ? sql`${kalshiBotBetsTable.exitedAt} >= ${statsResetAt}::timestamptz` : sql`true`,
         ),
       );
 
