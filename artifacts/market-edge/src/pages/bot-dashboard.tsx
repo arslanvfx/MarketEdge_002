@@ -116,6 +116,7 @@ export default function BotDashboard() {
   // user can browse paper history while live or vice versa.
   const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
   const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual" | "skips">("all");
+  const [reEvalState, setReEvalState] = useState<{ loading: boolean; msg: string | null; ok: boolean }>({ loading: false, msg: null, ok: false });
 
   // ── Close manual position state ──────────────────────────────────────────
   const [closingManualSym, setClosingManualSym] = useState<string | null>(null);
@@ -409,6 +410,32 @@ export default function BotDashboard() {
 
   async function togglePause() {
     await authPost("/crypto/bot/pause", { paused: !status?.paused });
+  }
+
+  async function runReEvalQuick() {
+    if (reEvalState.loading) return;
+    setReEvalState({ loading: true, msg: null, ok: false });
+    try {
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 16);
+      const data = await authPost(`/crypto/bot/re-evaluate-bets?since=${encodeURIComponent(since)}&limit=500`, {}) as { ok?: boolean; checked?: number; corrected?: number; error?: string };
+      if (data.ok) {
+        const msg = data.corrected
+          ? `Fixed ${data.corrected} bet${data.corrected > 1 ? "s" : ""} (checked ${data.checked})`
+          : `All ${data.checked} bets correct`;
+        setReEvalState({ loading: false, msg, ok: true });
+        if (data.corrected) {
+          void qc.invalidateQueries({ queryKey: ["bot-all-history"] });
+          void qc.invalidateQueries({ queryKey: ["bot-stats"] });
+          void qc.invalidateQueries({ queryKey: ["bot-performance-report"] });
+          void qc.invalidateQueries({ queryKey: ["gap-analytics"] });
+        }
+      } else {
+        setReEvalState({ loading: false, msg: data.error ?? "Unknown error", ok: false });
+      }
+    } catch {
+      setReEvalState({ loading: false, msg: "Request failed", ok: false });
+    }
+    setTimeout(() => setReEvalState(s => ({ ...s, msg: null })), 8000);
   }
 
   async function setMode(mode: "paper" | "live") {
@@ -752,6 +779,26 @@ export default function BotDashboard() {
           data={gapAnalyticsData}
           activeMode={activeMode}
         />
+
+        {/* ── Re-evaluate settled bets ── */}
+        <div className="flex items-center gap-3 px-1">
+          <button
+            onClick={runReEvalQuick}
+            disabled={reEvalState.loading}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:border-sky-500/40 hover:bg-sky-500/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {reEvalState.loading
+              ? <RefreshCw className="w-3 h-3 animate-spin" />
+              : <RotateCcw className="w-3 h-3" />}
+            Re-evaluate Settled Bets
+          </button>
+          {reEvalState.msg && (
+            <span className={`text-xs ${reEvalState.ok ? "text-emerald-400" : "text-amber-400"}`}>
+              {reEvalState.ok ? "✓ " : "⚠ "}{reEvalState.msg}
+            </span>
+          )}
+        </div>
+
         <TransactionLog
           pagedBets={pagedBets}
           histPage={clampedHistPage}

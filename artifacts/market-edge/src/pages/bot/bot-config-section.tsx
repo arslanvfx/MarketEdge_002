@@ -140,12 +140,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
     setReEvalState({ loading: true, msg: null });
     try {
       const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 16);
-      const res = await fetch(`${API_BASE}/crypto/bot/re-evaluate-bets?since=${encodeURIComponent(since)}&limit=200`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-      });
-      const data = await res.json() as { ok?: boolean; checked?: number; corrected?: number; error?: string };
+      const data = await authPost(`/crypto/bot/re-evaluate-bets?since=${encodeURIComponent(since)}&limit=500`, {}) as { ok?: boolean; checked?: number; corrected?: number; error?: string };
       if (data.ok) {
         setReEvalState({ loading: false, msg: data.corrected ? `✓ Fixed ${data.corrected} bet${data.corrected > 1 ? "s" : ""} (checked ${data.checked})` : `✓ All ${data.checked} bets correct` });
       } else {
