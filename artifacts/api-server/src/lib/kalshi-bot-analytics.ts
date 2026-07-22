@@ -892,12 +892,17 @@ export interface GapAnalyticsResult {
 }
 
 const GAP_BANDS_DEF = [
-  { band: "< 0.01%",    lower: 0,    upper: 0.01  },
-  { band: "0.01–0.02%", lower: 0.01, upper: 0.02  },
-  { band: "0.02–0.05%", lower: 0.02, upper: 0.05  },
-  { band: "0.05–0.1%",  lower: 0.05, upper: 0.1   },
-  { band: "0.1–0.5%",   lower: 0.1,  upper: 0.5   },
-  { band: "0.5%+",      lower: 0.5,  upper: Infinity },
+  { band: "< 0.01%",     lower: 0,    upper: 0.01  },
+  { band: "0.01–0.02%",  lower: 0.01, upper: 0.02  },
+  { band: "0.02–0.05%",  lower: 0.02, upper: 0.05  },
+  { band: "0.05–0.1%",   lower: 0.05, upper: 0.1   },
+  { band: "0.1–0.15%",   lower: 0.1,  upper: 0.15  },
+  { band: "0.15–0.2%",   lower: 0.15, upper: 0.2   },
+  { band: "0.2–0.25%",   lower: 0.2,  upper: 0.25  },
+  { band: "0.25–0.3%",   lower: 0.25, upper: 0.3   },
+  { band: "0.3–0.4%",    lower: 0.3,  upper: 0.4   },
+  { band: "0.4–0.5%",    lower: 0.4,  upper: 0.5   },
+  { band: "0.5%+",       lower: 0.5,  upper: Infinity },
 ] as const;
 
 export async function getBotGapAnalytics(filterMode?: BotMode, resetAt?: string | null): Promise<GapAnalyticsResult> {
