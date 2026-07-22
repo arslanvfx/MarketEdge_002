@@ -633,8 +633,9 @@ export default function BotDashboard() {
               maxOsc:                 status?.config?.convictionStabilityMaxOsc,
               maxVolPct:              status?.config?.convictionStabilityMaxVolPct,
               minMLConf:              status?.config?.convictionStabilityMinMLConf,
-              strikeProximityMinPct:  status?.config?.strikeProximityMinPct,
-              strikeProximityAtrScale: status?.config?.strikeProximityAtrScale,
+              strikeProximityMinPct:          status?.config?.strikeProximityMinPct,
+              strikeProximityAtrScale:        status?.config?.strikeProximityAtrScale,
+              strikeProximityMinPctOverrides: status?.config?.strikeProximityMinPctOverrides,
             }}
             trajectoryConfig={{
               dangerBandPct: status?.config?.maxBetTrajectoryDangerBandPct,

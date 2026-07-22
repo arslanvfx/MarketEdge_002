@@ -984,8 +984,9 @@ export interface BotConfig {
   lockPrice092Bootstrap?: boolean;    // one-time startup bootstrap: 0.93 → 0.92 target (asymmetric zone [90¢, 95¢])
   lockPrice082Migrated?: boolean;     // one-time startup migration: ≥88¢ lockPrice → 0.82 floor + set kalshiLockPriceCap=0.91
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.91; above this the window is missed → SKIP)
-  strikeProximityMinPct?: number;     // conviction only: minimum |cryptoPrice−kalshiStrike|/strike % required before any FOK fires (default 0.30); fail-open when price/strike unavailable
+  strikeProximityMinPct?: number;     // conviction only: global minimum |cryptoPrice−kalshiStrike|/strike % required before any FOK fires (default 0.30); fail-open when price/strike unavailable
   strikeProximityAtrScale?: boolean;  // when true, effectiveThreshold = strikeProximityMinPct × max(1, atrPct/0.20); scales guard wider for more volatile coins (default true)
+  strikeProximityMinPctOverrides?: Record<string, number>; // per-coin override of strikeProximityMinPct; takes priority over global when set; key = symbol (e.g. "BTC")
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.75 = sell when contract drops to 75¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
@@ -1430,6 +1431,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryMinVelocityATR: 0,
   strikeProximityMinPct: 0.30,
   strikeProximityAtrScale: true,
+  strikeProximityMinPctOverrides: {},
   convictionMomentumGateEnabled: false,
   convictionMomentumLookbackMinutes: 3,
   convictionMomentumSafetyFactor: 0.6,
@@ -1630,6 +1632,35 @@ export function applyLockPrice082Migration(
   if (config.kalshiLockPriceCap == null) config.kalshiLockPriceCap = 0.91;
   config.lockPrice082Migrated = true;
   return { changed: true, migrated };
+}
+
+/**
+ * Per-coin baseline suggestions for strikeProximityMinPct.
+ * Derived from typical 15-min ATR profiles and Kalshi orderbook depth.
+ * These are defaults the UI surfaces to the user — they are NOT applied automatically.
+ * Lower values = more bets allowed near the strike; calibrate per observed behavior.
+ */
+export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
+  BTC:  0.10,   // Deep Kalshi orderbook, tight crypto spreads, lowest intra-window ATR
+  ETH:  0.12,   // Very liquid, slightly higher 15-min ATR than BTC
+  XRP:  0.15,   // Liquid on Kalshi, moderate short-term vol
+  BNB:  0.15,   // Similar profile to XRP
+  SOL:  0.18,   // Higher intra-window ATR than BTC/ETH/XRP
+  DOGE: 0.20,   // Moderate-high vol, shallow Kalshi orderbook vs BTC
+  NEAR: 0.22,   // Lower Kalshi liquidity, wider tick spreads
+  HYPE: 0.25,   // Newer market, lower liquidity, spiky short-term moves
+  ZEC:  0.28,   // Lowest Kalshi liquidity among traded coins; wide spread at entry
+};
+
+/**
+ * Returns the effective strike-proximity threshold for a specific symbol.
+ * Per-coin override in strikeProximityMinPctOverrides takes priority over the
+ * global strikeProximityMinPct.  Falls back to 0.30% when neither is set.
+ */
+export function getEffectiveProximityThreshold(sym: string, config: BotConfig): number {
+  const override = config.strikeProximityMinPctOverrides?.[sym];
+  if (override != null && override > 0) return override;
+  return config.strikeProximityMinPct ?? 0.30;
 }
 
 /**

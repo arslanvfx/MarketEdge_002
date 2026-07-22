@@ -710,6 +710,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     kalshiLockPriceCap?: number;
     strikeProximityMinPct?: number;
     strikeProximityAtrScale?: boolean;
+    strikeProximityMinPctOverrides?: Record<string, number>;
     minWindowEntryMinutes?: number;
     convictionEarlyBypassEnabled?: boolean;
     convictionEarlyBypassThreshold?: number;
@@ -958,6 +959,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof strikeProximityAtrScale === "boolean") {
     partial.strikeProximityAtrScale = strikeProximityAtrScale;
+  }
+  if (strikeProximityMinPctOverrides != null && typeof strikeProximityMinPctOverrides === "object") {
+    const cleaned: Record<string, number> = {};
+    for (const [sym, val] of Object.entries(strikeProximityMinPctOverrides)) {
+      if (typeof val === "number" && val >= 0.05 && val <= 3.00) {
+        cleaned[sym.toUpperCase()] = val;
+      }
+    }
+    partial.strikeProximityMinPctOverrides = cleaned;
   }
   // 0 = disabled; valid range 0–0.85
   if (typeof convictionStopLossFloor === "number" && convictionStopLossFloor >= 0 && convictionStopLossFloor <= 0.85) {

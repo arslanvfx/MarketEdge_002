@@ -934,6 +934,85 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/60 leading-relaxed">When on: threshold × max(1, volPct/0.20). High-volatility coins require a wider gap. Baseline 0.20% = typical BTC quiet session.</span>
+
+                      {/* Per-coin threshold overrides */}
+                      {(() => {
+                        const COINS = ["BTC","ETH","XRP","BNB","SOL","DOGE","NEAR","HYPE","ZEC"];
+                        const SUGGESTED: Record<string,number> = { BTC:0.10, ETH:0.12, XRP:0.15, BNB:0.15, SOL:0.18, DOGE:0.20, NEAR:0.22, HYPE:0.25, ZEC:0.28 };
+                        const overrides: Record<string,number> = { ...(merged.strikeProximityMinPctOverrides ?? {}) };
+                        const globalFloor = merged.strikeProximityMinPct ?? 0.30;
+                        return (
+                          <div className="mt-2">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-[11px] font-medium text-sky-300/80">Per-coin thresholds</span>
+                              <button
+                                type="button"
+                                className="text-[10px] text-sky-400/70 hover:text-sky-400 underline"
+                                onClick={() => {
+                                  setConfigDraft(d => ({ ...d, strikeProximityMinPctOverrides: { ...SUGGESTED } }));
+                                }}
+                              >
+                                Apply suggested
+                              </button>
+                            </div>
+                            <span className="text-[9.5px] text-muted-foreground/50 block mb-2 leading-relaxed">
+                              Overrides the global threshold for each coin. Leave blank to use the global floor ({globalFloor.toFixed(2)}%). Suggested values are derived from each coin's typical 15-min ATR and Kalshi orderbook depth.
+                            </span>
+                            <div className="grid grid-cols-3 gap-x-3 gap-y-1.5">
+                              {COINS.map(sym => {
+                                const currentVal = overrides[sym];
+                                const suggested  = SUGGESTED[sym];
+                                return (
+                                  <div key={sym} className="flex flex-col gap-0.5">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10px] font-mono text-foreground/80">{sym}</span>
+                                      {currentVal != null ? (
+                                        <button
+                                          type="button"
+                                          className="text-[9px] text-muted-foreground/50 hover:text-red-400"
+                                          title="Clear override (use global)"
+                                          onClick={() => {
+                                            setConfigDraft(d => {
+                                              const next = { ...(d.strikeProximityMinPctOverrides ?? {}) };
+                                              delete next[sym];
+                                              return { ...d, strikeProximityMinPctOverrides: next };
+                                            });
+                                          }}
+                                        >×</button>
+                                      ) : (
+                                        <span className="text-[9px] text-muted-foreground/30">global</span>
+                                      )}
+                                    </div>
+                                    <input
+                                      type="number"
+                                      min={0.05}
+                                      max={3.00}
+                                      step={0.01}
+                                      placeholder={`${(suggested ?? globalFloor).toFixed(2)}`}
+                                      className={`w-full bg-background border rounded px-1.5 py-1 text-[11px] font-mono text-foreground ${currentVal != null ? "border-sky-500/30 text-sky-400" : "border-border/50 text-muted-foreground"}`}
+                                      value={currentVal != null ? currentVal : ""}
+                                      onChange={e => {
+                                        const raw = e.target.value.trim();
+                                        const v = parseFloat(raw);
+                                        setConfigDraft(d => {
+                                          const next = { ...(d.strikeProximityMinPctOverrides ?? {}) };
+                                          if (raw === "" || Number.isNaN(v)) {
+                                            delete next[sym];
+                                          } else if (v >= 0.05 && v <= 3.00) {
+                                            next[sym] = v;
+                                          }
+                                          return { ...d, strikeProximityMinPctOverrides: next };
+                                        });
+                                      }}
+                                    />
+                                    <span className="text-[9px] text-muted-foreground/40">sugg: {(suggested ?? globalFloor).toFixed(2)}%</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {/* Adverse Momentum Gate */}

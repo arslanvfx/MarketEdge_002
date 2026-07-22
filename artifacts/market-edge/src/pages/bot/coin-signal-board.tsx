@@ -8,8 +8,9 @@ interface StabilityThresholds {
   maxOsc?: number;
   maxVolPct?: number;
   minMLConf?: number;
-  strikeProximityMinPct?: number;   // minimum gap% before conviction FOK fires (for Gap column indicator)
-  strikeProximityAtrScale?: boolean; // when true, effective threshold is ATR-scaled (for Gap column tooltip)
+  strikeProximityMinPct?: number;                          // global minimum gap% before conviction FOK fires
+  strikeProximityAtrScale?: boolean;                       // when true, effective threshold is ATR-scaled
+  strikeProximityMinPctOverrides?: Record<string, number>; // per-coin overrides (priority over global)
 }
 
 interface TrajectoryThresholds {
@@ -184,6 +185,8 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
   const minMLConf             = stabilityConfig?.minMLConf             ?? 52;
   const proximityMinPct       = stabilityConfig?.strikeProximityMinPct ?? 0.30;
   const proximityAtrScale     = stabilityConfig?.strikeProximityAtrScale ?? true;
+  const proximityOverrides    = stabilityConfig?.strikeProximityMinPctOverrides ?? {};
+  const getProximityThreshold = (sym: string) => proximityOverrides[sym] ?? proximityMinPct;
   const dangerBand            = trajectoryConfig?.dangerBandPct         ?? 0.15;
 
   const now = useNow(10_000);
@@ -399,15 +402,18 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                     {(() => {
                       const gapPct = stab?.strikeGapPct ?? null;
                       if (gapPct == null) return <span className="text-muted-foreground/40 font-mono">—</span>;
+                      const coinThreshold = getProximityThreshold(sym);
+                      const hasOverride = proximityOverrides[sym] != null;
                       const atrMultiplier = (proximityAtrScale && stab?.volPct != null && stab.volPct > 0)
                         ? Math.max(1, stab.volPct / 0.20)
                         : 1;
-                      const effectiveThreshold = proximityMinPct * atrMultiplier;
+                      const effectiveThreshold = coinThreshold * atrMultiplier;
                       const ok = gapPct >= effectiveThreshold;
                       const tooltipParts = [
                         `gap: ${gapPct.toFixed(3)}%`,
                         `threshold: ${effectiveThreshold.toFixed(3)}%`,
-                        proximityAtrScale && atrMultiplier > 1 ? `ATR-scaled (×${atrMultiplier.toFixed(1)})` : `base ${proximityMinPct.toFixed(2)}%`,
+                        hasOverride ? `per-coin override ${coinThreshold.toFixed(2)}%` : `global ${proximityMinPct.toFixed(2)}%`,
+                        proximityAtrScale && atrMultiplier > 1 ? `ATR ×${atrMultiplier.toFixed(1)}` : "no ATR scale",
                       ];
                       return (
                         <span

@@ -117,6 +117,7 @@ export interface BotConfig {
   kalshiLockPriceCap?: number;
   strikeProximityMinPct?: number;
   strikeProximityAtrScale?: boolean;
+  strikeProximityMinPctOverrides?: Record<string, number>;
   lockPrice082Migrated?: boolean;
 }
 

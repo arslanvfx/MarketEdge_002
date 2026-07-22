@@ -14,6 +14,7 @@ import {
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   computeStrikeProximityGate,
+  getEffectiveProximityThreshold,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -2156,7 +2157,7 @@ export async function runBotLoopTick(): Promise<void> {
         livePrice:       _proxLivePrice,
         kalshiStrike:    _proxStrike,
         direction:       decision.action === "BET_YES" ? "yes" : "no",
-        thresholdPct:    S.config.strikeProximityMinPct ?? 0.30,
+        thresholdPct:    getEffectiveProximityThreshold(sym, S.config),
         atrPct:          _proxAtrPct,
         atrScaleEnabled: S.config.strikeProximityAtrScale ?? true,
       });

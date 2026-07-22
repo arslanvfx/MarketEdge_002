@@ -60,6 +60,8 @@ import {
   applyLockPrice093Bootstrap,
   applyLockPrice092Bootstrap,
   applyLockPrice082Migration,
+  getEffectiveProximityThreshold,
+  PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
   computeAdverseMomentumGate,
   computeStrikeProximityGate,
