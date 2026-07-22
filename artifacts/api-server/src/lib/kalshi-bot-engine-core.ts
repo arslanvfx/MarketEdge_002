@@ -1558,14 +1558,24 @@ export function deriveConvictionZone(target: number, capOverride?: number): {
  * computeAdverseMomentumGate — pure, export for testing.
  *
  * Decides whether the adverse momentum gate should block a conviction entry.
- * Math: time-to-cross = currentMarginDollars / |velocity|
- *       block if time-to-cross < minutesRemaining × safetyFactor
+ *
+ * Formula: block when the projected gap at window close is less than
+ *   safetyFactor × currentGap.
+ *
+ *   projectedGap = currentGap − |velocity| × minutesRemaining
+ *   blocked      = projectedGap < safetyFactor × currentGap
+ *
+ * Intuition: safetyFactor=0.6 blocks when the price will have eaten more than
+ * 40% of the remaining gap before close, or has already crossed the strike
+ * (projectedGap < 0 < threshold → always blocked once crossing is projected).
+ *
+ * timeToCrossMin is returned for diagnostics; the blocking decision does NOT
+ * use it (it uses the projected-gap formula above).
  *
  * Returns { blocked, timeToCrossMin }.
  *  - blocked=false when: gate disabled, velocity is NOT adverse, margin ≤ 0,
- *    velocity=0, or time-to-cross ≥ threshold.
- *  - blocked=true when adverse momentum is steep enough to cross the strike
- *    before window close (adjusted by safetyFactor).
+ *    or projected gap is still ≥ safetyFactor × currentGap.
+ *  - blocked=true when projected freefall will eat enough of the gap before close.
  */
 export function computeAdverseMomentumGate(opts: {
   livePrice: number;
@@ -1573,7 +1583,7 @@ export function computeAdverseMomentumGate(opts: {
   direction: "yes" | "no";
   velocityPerMin: number;   // $/min, positive = rising
   minutesRemaining: number;
-  safetyFactor?: number;    // default 0.6
+  safetyFactor?: number;    // default 0.6 — block when projected gap < factor × current gap
   enabled?: boolean;        // default true
 }): { blocked: boolean; timeToCrossMin: number } {
   const { livePrice, kalshiTarget, direction, velocityPerMin, minutesRemaining, safetyFactor = 0.6, enabled = true } = opts;
@@ -1585,9 +1595,12 @@ export function computeAdverseMomentumGate(opts: {
   const currentMarginDollars = direction === "yes" ? livePrice - kalshiTarget : kalshiTarget - livePrice;
   if (currentMarginDollars <= 0) return { blocked: false, timeToCrossMin: Infinity };
   const absVel = Math.abs(velocityPerMin);
+  // Diagnostic: how many minutes until the price would reach the strike at current velocity
   const timeToCrossMin = absVel > 0 ? currentMarginDollars / absVel : Infinity;
-  const threshold = minutesRemaining * safetyFactor;
-  return { blocked: timeToCrossMin < threshold, timeToCrossMin };
+  // Block when projected gap at close is less than safetyFactor × current gap.
+  // If velocity eats more than (1 − safetyFactor) of the gap before window close → block.
+  const projectedGap = currentMarginDollars - absVel * minutesRemaining;
+  return { blocked: projectedGap < safetyFactor * currentMarginDollars, timeToCrossMin };
 }
 
 /**

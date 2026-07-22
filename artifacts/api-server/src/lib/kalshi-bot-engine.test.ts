@@ -1959,25 +1959,26 @@ test("catastrophic fill: NO direction — avgPrice 0.06 (fill 94¢ NO cost) abov
 // by computeTrajectoryGate in kalshi-bot-tick.ts.  This means any logic change
 // in the gate is reflected immediately in both production and tests.
 
-test("adverse momentum: YES freefall — $1000 margin, −300$/min, 8 min → BLOCKED (3.3 < 4.8)", () => {
-  // time-to-cross = 1000/300 = 3.33 min; threshold = 8*0.6 = 4.8; 3.33 < 4.8 → BLOCKED
+test("adverse momentum: YES freefall — $1000 margin, −300$/min, 8 min → BLOCKED (projectedGap=−1400 < threshold=600)", () => {
+  // projectedGap = 1000 − 300×8 = −1400; threshold = 0.6×1000 = 600; −1400 < 600 → BLOCKED
   const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -300, minutesRemaining: 8 });
   assert.equal(r.blocked, true);
-  assert.ok(Math.abs(r.timeToCrossMin - 3.33) < 0.1, `Expected ~3.33, got ${r.timeToCrossMin.toFixed(2)}`);
+  assert.ok(Math.abs(r.timeToCrossMin - 3.33) < 0.1, `Expected timeToCross ~3.33, got ${r.timeToCrossMin.toFixed(2)}`);
 });
 
-test("adverse momentum: YES gentle drift — $1000 margin, −50$/min, 8 min → SAFE (20 > 4.8)", () => {
-  // time-to-cross = 1000/50 = 20 min; threshold = 4.8; 20 > 4.8 → SAFE
+test("adverse momentum: YES gentle drift — $1000 margin, −50$/min, 8 min → SAFE (projectedGap=600 = threshold=600)", () => {
+  // projectedGap = 1000 − 50×8 = 600; threshold = 0.6×1000 = 600; 600 < 600 is false → SAFE
   const r = computeAdverseMomentumGate({ livePrice: 101000, kalshiTarget: 100000, direction: "yes", velocityPerMin: -50, minutesRemaining: 8 });
   assert.equal(r.blocked, false);
-  assert.ok(r.timeToCrossMin > 15, `Expected > 15, got ${r.timeToCrossMin.toFixed(2)}`);
+  assert.ok(r.timeToCrossMin > 15, `Expected timeToCross > 15, got ${r.timeToCrossMin.toFixed(2)}`);
 });
 
-test("adverse momentum: YES exactly at threshold — 100$/min adverse, $480 margin, 8 min → SAFE (4.8 not < 4.8)", () => {
-  // time-to-cross = 480/100 = 4.8; threshold = 8*0.6 = 4.8; 4.8 < 4.8 is false → SAFE
+test("adverse momentum: YES crosses strike — $480 margin, −100$/min, 8 min → BLOCKED (projectedGap=−320 < threshold=288)", () => {
+  // projectedGap = 480 − 100×8 = −320; threshold = 0.6×480 = 288; −320 < 288 → BLOCKED
+  // (price fully crosses the strike before close — timeToCross = 4.8 min < 8 min remaining)
   const r = computeAdverseMomentumGate({ livePrice: 100480, kalshiTarget: 100000, direction: "yes", velocityPerMin: -100, minutesRemaining: 8 });
-  assert.equal(r.blocked, false);
-  assert.ok(Math.abs(r.timeToCrossMin - 4.8) < 0.01, `Expected 4.8, got ${r.timeToCrossMin.toFixed(3)}`);
+  assert.equal(r.blocked, true);
+  assert.ok(Math.abs(r.timeToCrossMin - 4.8) < 0.01, `Expected timeToCross ~4.8, got ${r.timeToCrossMin.toFixed(3)}`);
 });
 
 test("adverse momentum: YES favorable velocity → SAFE (not adverse)", () => {
@@ -1993,10 +1994,10 @@ test("adverse momentum: gate disabled → SAFE even on fast freefall", () => {
 
 test("adverse momentum: NO direction freefall — target $100k, live $99k, rising +300$/min, 8 min → BLOCKED", () => {
   // NO wins below target. margin = target - live = 100000 - 99000 = 1000.
-  // adverse when rising: velocityPerMin = +300 → time-to-cross = 1000/300 = 3.33 < 4.8 → BLOCKED
+  // projectedGap = 1000 − 300×8 = −1400; threshold = 0.6×1000 = 600; −1400 < 600 → BLOCKED
   const r = computeAdverseMomentumGate({ livePrice: 99000, kalshiTarget: 100000, direction: "no", velocityPerMin: 300, minutesRemaining: 8 });
   assert.equal(r.blocked, true);
-  assert.ok(Math.abs(r.timeToCrossMin - 3.33) < 0.1, `Expected ~3.33, got ${r.timeToCrossMin.toFixed(2)}`);
+  assert.ok(Math.abs(r.timeToCrossMin - 3.33) < 0.1, `Expected timeToCross ~3.33, got ${r.timeToCrossMin.toFixed(2)}`);
 });
 
 test("adverse momentum: zero velocity → SAFE (timeToCross = Infinity)", () => {
@@ -2005,31 +2006,31 @@ test("adverse momentum: zero velocity → SAFE (timeToCross = Infinity)", () => 
   assert.equal(r.timeToCrossMin, Infinity);
 });
 
-test("adverse momentum: HYPE scenario — $59.6751 live, $59.5480 strike, −0.04$/min, 4 min remaining → BLOCKED", () => {
-  // Replicates the real HYPE 3:11 PM bet that lost: price in free fall toward
-  // the strike with 4 minutes left.
-  // gap = 59.6751 − 59.5480 = 0.1271; time-to-cross = 0.1271 / 0.04 = 3.18 min
-  // threshold = 4 * 0.6 = 2.4; 3.18 > 2.4 → SAFE with default factor 0.6
-  // But at factor 0.8: threshold = 4 * 0.8 = 3.2; 3.18 < 3.2 → BLOCKED
-  // Using default factor 0.6: 3.18 > 2.4, SAFE — the gate uses safetyFactor
-  // so at aggressive rate (velocity −0.08$/min): 0.1271/0.08 = 1.59 < 2.4 → BLOCKED
+test("adverse momentum: HYPE 3:11 PM — $59.6751 live, $59.5480 strike, −0.04$/min, 4 min remaining → BLOCKED", () => {
+  // Replicates the real HYPE bet that lost. The price was falling toward the strike.
+  // gap = 59.6751 − 59.5480 = 0.1271
+  // projectedGap = 0.1271 − 0.04×4 = 0.1271 − 0.16 = −0.0329  (projected to CROSS)
+  // threshold   = 0.6 × 0.1271 = 0.07626
+  // −0.0329 < 0.07626 → BLOCKED ✓
   const r = computeAdverseMomentumGate({
     livePrice: 59.6751,
     kalshiTarget: 59.5480,
     direction: "yes",
-    velocityPerMin: -0.08,   // aggressive freefall — 2 candles of drop per minute
+    velocityPerMin: -0.04,
     minutesRemaining: 4,
     safetyFactor: 0.6,
     enabled: true,
   });
-  // time-to-cross = 0.1271 / 0.08 = 1.59 min; threshold = 4 * 0.6 = 2.4; 1.59 < 2.4 → BLOCKED
-  assert.equal(r.blocked, true, `Expected BLOCKED, timeToCross=${r.timeToCrossMin.toFixed(2)}`);
-  assert.ok(r.timeToCrossMin < 2.4, `Expected timeToCross < 2.4, got ${r.timeToCrossMin.toFixed(2)}`);
+  assert.equal(r.blocked, true, `Expected BLOCKED — projectedGap should be negative; timeToCross=${r.timeToCrossMin.toFixed(2)}`);
+  // timeToCross is diagnostic; 0.1271/0.04 = 3.18 min (< 4 min remaining — confirms it crosses)
+  assert.ok(Math.abs(r.timeToCrossMin - 3.18) < 0.05, `Expected timeToCross ~3.18, got ${r.timeToCrossMin.toFixed(3)}`);
 });
 
-test("adverse momentum: HYPE scenario gentle drift — same setup but slow fall → SAFE", () => {
-  // Same prices but only −0.01$/min drift — not a true freefall, gate stays open
-  // time-to-cross = 0.1271 / 0.01 = 12.71 min; threshold = 4 * 0.6 = 2.4; 12.71 > 2.4 → SAFE
+test("adverse momentum: HYPE 3:11 PM gentle drift — same prices, −0.01$/min → SAFE", () => {
+  // Same prices but only −0.01$/min — price stays above strike.
+  // projectedGap = 0.1271 − 0.01×4 = 0.1271 − 0.04 = 0.0871
+  // threshold   = 0.6 × 0.1271 = 0.07626
+  // 0.0871 > 0.07626 → SAFE ✓
   const r = computeAdverseMomentumGate({
     livePrice: 59.6751,
     kalshiTarget: 59.5480,
@@ -2039,7 +2040,7 @@ test("adverse momentum: HYPE scenario gentle drift — same setup but slow fall 
     safetyFactor: 0.6,
     enabled: true,
   });
-  assert.equal(r.blocked, false, `Expected SAFE, timeToCross=${r.timeToCrossMin.toFixed(2)}`);
+  assert.equal(r.blocked, false, `Expected SAFE — gentle drift keeps 87% of gap; timeToCross=${r.timeToCrossMin.toFixed(2)}`);
   assert.ok(r.timeToCrossMin > 10, `Expected timeToCross > 10, got ${r.timeToCrossMin.toFixed(2)}`);
 });
 
