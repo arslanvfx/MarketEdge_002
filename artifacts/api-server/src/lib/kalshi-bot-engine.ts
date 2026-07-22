@@ -134,6 +134,9 @@ export {
   computeAdverseMomentumGate,
   // Strike-proximity gate — pure, exported for unit tests and callers.
   computeStrikeProximityGate,
+  // Per-coin proximity threshold helper and calibrated suggestions.
+  getEffectiveProximityThreshold,
+  PROXIMITY_THRESHOLD_SUGGESTIONS,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
   DEFAULT_BOT_CONFIG,
