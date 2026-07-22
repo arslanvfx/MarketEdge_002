@@ -629,10 +629,12 @@ export default function BotDashboard() {
             coinStability={pipelineStatusData.coinStability}
             coinTrajectory={pipelineStatusData.coinTrajectory}
             stabilityConfig={{
-              minER:     status?.config?.convictionStabilityMinER,
-              maxOsc:    status?.config?.convictionStabilityMaxOsc,
-              maxVolPct: status?.config?.convictionStabilityMaxVolPct,
-              minMLConf: status?.config?.convictionStabilityMinMLConf,
+              minER:                  status?.config?.convictionStabilityMinER,
+              maxOsc:                 status?.config?.convictionStabilityMaxOsc,
+              maxVolPct:              status?.config?.convictionStabilityMaxVolPct,
+              minMLConf:              status?.config?.convictionStabilityMinMLConf,
+              strikeProximityMinPct:  status?.config?.strikeProximityMinPct,
+              strikeProximityAtrScale: status?.config?.strikeProximityAtrScale,
             }}
             trajectoryConfig={{
               dangerBandPct: status?.config?.maxBetTrajectoryDangerBandPct,
