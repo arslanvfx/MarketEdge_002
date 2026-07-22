@@ -115,7 +115,7 @@ export function GapAnalyticsPanel({ data, activeMode }: GapAnalyticsPanelProps) 
                 </div>
                 <div className="space-y-1.5">
                   {/* Column headers */}
-                  <div className="grid grid-cols-[80px_1fr_60px_40px_40px] gap-2 text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2">
+                  <div className="grid grid-cols-[96px_1fr_60px_40px_40px] gap-2 text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2">
                     <span>Gap</span>
                     <span>Win rate</span>
                     <span className="text-right">Bets</span>
@@ -125,11 +125,11 @@ export function GapAnalyticsPanel({ data, activeMode }: GapAnalyticsPanelProps) 
                   {displayBands.map((row) => (
                     <div
                       key={row.band}
-                      className={`grid grid-cols-[80px_1fr_60px_40px_40px] gap-2 items-center rounded-lg px-2 py-2 ${
+                      className={`grid grid-cols-[96px_1fr_60px_40px_40px] gap-2 items-center rounded-lg px-2 py-2 ${
                         row.bets === 0 ? "opacity-40" : ""
                       }`}
                     >
-                      <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded text-center ${bandColor(row.winRate, row.bets)}`}>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded text-center ${bandColor(row.winRate, row.bets)}`}>
                         {row.band}
                       </span>
                       <WinRateBar row={row} />
