@@ -44,8 +44,6 @@ export interface PipelineResult {
   mlConfidence: number | null;
   claudeCallMs: number;
   isRecheck: boolean;
-  /** stat_ml early-fire: true when the callback fired before Claude returned (claudeAbove was null). */
-  statMLEarlyFire?: boolean;
 }
 
 export type PipelinePhase =
@@ -75,10 +73,6 @@ const pipelinePhaseMap = new Map<string, PipelinePhase>();
 // Fire-and-forget; errors inside the callback are the caller's responsibility.
 let _pipelineCompleteCallback: ((sym: string, windowKey: string, result: PipelineResult) => void) | null = null;
 
-// Returns the current decision mode — registered by kalshi-bot-loop.ts so the
-// pipeline can check whether Claude is required without a circular import.
-let _decisionModeGetter: (() => string) | null = null;
-
 /**
  * Register a callback that fires once per coin per window when all three
  * models (Stat, Claude, ML) have returned directions.  Only one callback
@@ -89,16 +83,6 @@ export function registerPipelineCompleteCallback(
   fn: (sym: string, windowKey: string, result: PipelineResult) => void,
 ): void {
   _pipelineCompleteCallback = fn;
-}
-
-/**
- * Register a getter that returns the current bot decision mode.
- * Used by the pipeline to determine whether Claude is required (stat_ml
- * fires as soon as Stat+ML are ready; other modes wait for all three).
- * Must be registered by kalshi-bot-loop.ts before the first window.
- */
-export function registerDecisionModeGetter(fn: () => string): void {
-  _decisionModeGetter = fn;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,54 +318,41 @@ async function _runPipeline(
     claudeCallMs, isRecheck,
   };
 
-  // Determine mode BEFORE storing result so statMLEarlyFire can be embedded.
-  const currentMode = _decisionModeGetter?.() ?? "classic";
-  const isStatML = currentMode === "stat_ml";
-
-  // statMLEarlyFire: set when stat_ml fires the callback while claudeAbove is
-  // still null.  Stored in the result for downstream diagnostics and history.
-  if (isStatML && claudeAbove === null) {
-    (result as PipelineResult).statMLEarlyFire = true;
-  }
-
   // Capture the previous result BEFORE overwriting — used below to detect the
   // null→non-null stat transition on re-checks.
   const prevResult = pipelineResults.get(`${sym}:${windowKey}`);
   pipelineResults.set(`${sym}:${windowKey}`, result);
 
   logger.info(
-    { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck, statMLEarlyFire: result.statMLEarlyFire },
+    { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck },
     `[pipeline] ${isRecheck ? "re-check" : "initial"} complete`,
   );
 
-  // Fire the completion callback exactly once per window, the first time the
-  // required model signals are non-null.
+  // Fire the completion callback exactly once per window, the first time ALL
+  // THREE model signals (stat, Claude, ML) are non-null.  This triggers a
+  // targeted one-shot entry evaluation in the bot loop without waiting for
+  // the next 15s polling tick.
   //
-  // stat_ml mode: fires as soon as Stat+ML are both non-null (Claude not required).
-  // All other modes: fires when all THREE (Stat, Claude, ML) are non-null.
-  //
-  // HARD RULE: the bot must never enter a bet with a missing REQUIRED signal.
-  // For stat_ml, Claude being null is fine — it is never required.
-  // For other modes, if any of statAbove/claudeAbove/mlAbove is still null
-  // we log and wait — the re-check loop keeps polling.
+  // HARD RULE: the bot must never enter a bet with a missing signal.  If any
+  // of statAbove / claudeAbove / mlAbove is still null, we log and wait — the
+  // re-check loop keeps polling and this trigger re-evaluates on every pass
+  // until the predictor has produced all three.
   //
   // Guard: prevAnyWasNull ensures the callback fires AT MOST ONCE per window.
-  // Note: currentMode and isStatML are computed above (before result is stored).
-
-  // Determine "ready" based on which signals are required for the active mode.
-  const allSignalsReady = isStatML
-    ? (statAbove !== null && mlAbove !== null)
-    : (statAbove !== null && claudeAbove !== null && mlAbove !== null);
-
+  // If a previous pass already had all three signals (and therefore fired),
+  // later re-checks do not fire it again.
+  const allSignalsReady = statAbove !== null && claudeAbove !== null && mlAbove !== null;
   if (_pipelineCompleteCallback && allSignalsReady) {
-    const prevAnyWasNull = isStatML
-      ? (prevResult == null || prevResult.statAbove === null || prevResult.mlAbove === null)
-      : (prevResult == null || prevResult.statAbove === null || prevResult.claudeAbove === null || prevResult.mlAbove === null);
+    const prevAnyWasNull =
+      prevResult == null ||
+      prevResult.statAbove === null ||
+      prevResult.claudeAbove === null ||
+      prevResult.mlAbove === null;
     if (!isRecheck || prevAnyWasNull) {
       try {
         logger.info(
-          { sym, windowKey, isRecheck, prevAnyWasNull, mode: currentMode },
-          "[pipeline] completion trigger: required signals ready — firing entry callback",
+          { sym, windowKey, isRecheck, prevAnyWasNull },
+          "[pipeline] completion trigger: all three signals ready — firing entry callback",
         );
         _pipelineCompleteCallback(sym, windowKey, result);
       } catch {
@@ -390,10 +361,8 @@ async function _runPipeline(
     }
   } else if (_pipelineCompleteCallback && !allSignalsReady) {
     logger.info(
-      { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck, mode: currentMode },
-      isStatML
-        ? "[pipeline] stat_ml: waiting for Stat+ML signals — entry callback NOT fired (re-check loop will retry)"
-        : "[pipeline] waiting for all signals (Stat+Claude+ML) — entry callback NOT fired (re-check loop will retry)",
+      { sym, windowKey, statAbove, claudeAbove, mlAbove, isRecheck },
+      "[pipeline] waiting for all signals — entry callback NOT fired (re-check loop will retry)",
     );
   }
 

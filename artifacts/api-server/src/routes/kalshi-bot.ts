@@ -29,7 +29,6 @@ import {
   getWindowConditions,
   resetWindowConditions,
   reEvaluateSettledBets,
-  getStatMLFloorAnalysis,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -41,7 +40,6 @@ import { getKalshiCachedData } from "../lib/crypto-kalshi";
 import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
-import { logger } from "../lib/logger";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -158,43 +156,6 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     phase2ThresholdPp: 30,
     minHoldMinutes: 2,
   },
-  // Stat + ML: two-signal mode; no Claude required; early-window entries possible.
-  // Empirically superior on days without strong trend reversals (68.4% WR vs 60.4% with Claude).
-  // betDelayMinutes=0 + windowEntryBufferSeconds=60 means the bot can enter in minute 1
-  // the moment Stat+ML both produce a direction (no waiting for Claude's 30–120s call).
-  // statMLMaxEntryMinute=8 leaves ≥7 min for the position to resolve before the window closes.
-  stat_ml: {
-    decisionMode: "stat_ml",
-    minConfidence: 55,
-    minReturnMultiple: 1.5,
-    betDelayMinutes: 0,
-    maxEntryMinutes: 0,
-    minRemainingMinutes: 3,
-    windowEntryBufferSeconds: 60,
-    requireMonitorReady: true,
-    enableDynamicSizing: true,
-    betSize: 1,
-    maxBetSize: 3,
-    maxBetsPerWindow: 6,
-    profitLockPct: 0,
-    enableMidExit: false,
-    regimePenalty: 0,
-    enableDirectionCap: true,
-    maxSameDirectionBets: 4,
-    enableMomentumFilter: true,
-    consensusMinCents: 25,
-    momentumLookbackCandles: 6,
-    phase2ThresholdPp: 30,
-    minHoldMinutes: 3,
-    statMLMinStatConf: 50,
-    statMLMinMLConf: 57,
-    statMLRequireBothAgree: true,
-    statMLStopLossEnabled: false,
-    statMLStopLossPct: 20,
-    statMLMaxEntryMinute: 8,
-    statMLHighConfBoostEnabled: true,
-    statMLMinReturnMultiple: 0,
-  },
   conviction: {
     decisionMode: "conviction",
     minConfidence: 50,
@@ -224,13 +185,11 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   },
 };
 
-type ModePresetEntry = Partial<BotConfig> & { savedAt?: string };
-
-async function readModePresets(): Promise<Partial<Record<DecisionMode, ModePresetEntry>>> {
+async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<BotConfig>>>> {
   try {
     const rows = await db.select().from(botConfigTable).where(eq(botConfigTable.id, PRESET_ROW_ID)).limit(1);
     if (rows.length > 0) {
-      const cfg = rows[0].config as { presets?: Partial<Record<DecisionMode, ModePresetEntry>> } | null;
+      const cfg = rows[0].config as { presets?: Partial<Record<DecisionMode, Partial<BotConfig>>> } | null;
       return cfg?.presets ?? {};
     }
   } catch { /* non-fatal */ }
@@ -239,66 +198,14 @@ async function readModePresets(): Promise<Partial<Record<DecisionMode, ModePrese
 
 async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): Promise<void> {
   const existing = await readModePresets();
-  const entry: ModePresetEntry = { ...config, savedAt: new Date().toISOString() };
-  const updated = { ...existing, [mode]: entry };
-  await db.execute(sql`
-    INSERT INTO bot_config (id, config, updated_at)
-    VALUES (${PRESET_ROW_ID}, ${JSON.stringify({ presets: updated })}::jsonb, NOW())
-    ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-  `);
-}
-
-// Seed the conviction preset from the live in-memory config if none exists yet.
-// Called once at server startup to lock in the current tuned settings.
-export async function seedStatMLPresetIfNeeded(): Promise<void> {
-  try {
-    const presets = await readModePresets();
-    if (presets.stat_ml) return; // already seeded
-    const seed: Partial<BotConfig> = {
-      ...(getBotState().config as unknown as Partial<BotConfig>),
-      decisionMode: "stat_ml",
-      minConfidence: 55,
-      minReturnMultiple: 1.5,
-      betDelayMinutes: 0,
-      windowEntryBufferSeconds: 60,
-      requireMonitorReady: true,
-      enableDynamicSizing: true,
-      betSize: 1,
-      maxBetSize: 3,
-      maxBetsPerWindow: 6,
-      statMLMinStatConf: 50,
-      statMLMinMLConf: 57,
-      statMLRequireBothAgree: true,
-      statMLStopLossEnabled: false,
-      statMLStopLossPct: 20,
-      statMLMaxEntryMinute: 8,
-      statMLHighConfBoostEnabled: true,
-      statMLMinReturnMultiple: 0,
-      statMLOrderbookGateEnabled: false,
-      statMLOrderbookMinPressure: 0.60,
-    };
-    await writeModePreset("stat_ml", seed);
-    logger.info("[kalshi-bot] seeded stat_ml preset");
-  } catch (err) {
-    logger.warn({ err }, "[kalshi-bot] seedStatMLPresetIfNeeded failed (non-fatal)");
-  }
-}
-
-export async function seedConvictionPresetIfNeeded(): Promise<void> {
-  try {
-    const presets = await readModePresets();
-    if (presets.conviction) return; // already seeded — nothing to do
-    // Seed conviction preset unconditionally from the current live config.
-    // Force decisionMode to "conviction" so the preset is always usable when
-    // switching to conviction, even if the server happened to start in a
-    // different mode (e.g. after a paper→live toggle).
-    const current = getBotState().config;
-    const seed: Partial<BotConfig> = { ...(current as unknown as Partial<BotConfig>), decisionMode: "conviction" };
-    await writeModePreset("conviction", seed);
-    logger.info("[kalshi-bot] seeded conviction preset from live config");
-  } catch (err) {
-    logger.warn({ err }, "[kalshi-bot] seedConvictionPresetIfNeeded failed (non-fatal)");
-  }
+  const updated = { ...existing, [mode]: config };
+  await db
+    .insert(botConfigTable)
+    .values({ id: PRESET_ROW_ID, config: { presets: updated } as Record<string, unknown>, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: botConfigTable.id,
+      set: { config: { presets: updated } as Record<string, unknown>, updatedAt: new Date() },
+    });
 }
 
 // ── Opening-call store ────────────────────────────────────────────────────────
@@ -782,17 +689,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled,
     convictionMomentumLookbackMinutes,
     convictionMomentumSafetyFactor,
-    // stat_ml mode fields
-    statMLMinStatConf,
-    statMLMinMLConf,
-    statMLRequireBothAgree,
-    statMLStopLossEnabled,
-    statMLStopLossPct,
-    statMLMaxEntryMinute,
-    statMLHighConfBoostEnabled,
-    statMLMinReturnMultiple,
-    statMLOrderbookGateEnabled,
-    statMLOrderbookMinPressure,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -886,17 +782,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled?: boolean;
     convictionMomentumLookbackMinutes?: number;
     convictionMomentumSafetyFactor?: number;
-    // stat_ml mode fields
-    statMLMinStatConf?: number;
-    statMLMinMLConf?: number;
-    statMLRequireBothAgree?: boolean;
-    statMLStopLossEnabled?: boolean;
-    statMLStopLossPct?: number;
-    statMLMaxEntryMinute?: number;
-    statMLHighConfBoostEnabled?: boolean;
-    statMLMinReturnMultiple?: number;
-    statMLOrderbookGateEnabled?: boolean;
-    statMLOrderbookMinPressure?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -908,19 +793,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction" || decisionMode === "stat_ml") {
-    const currentMode = getBotState().config.decisionMode;
-
-    // Auto-save the departing mode's full config as its preset before switching.
-    // This ensures switching away and back never loses any tuned settings.
-    if (currentMode && currentMode !== decisionMode) {
-      try {
-        await writeModePreset(currentMode as DecisionMode, getBotState().config as unknown as Partial<BotConfig>);
-      } catch (err) {
-        logger.warn({ err }, "[kalshi-bot] auto-save departing mode preset failed (non-fatal)");
-      }
-    }
-
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
     // When switching modes: apply built-in mode defaults as a baseline, then
     // layer the saved user preset on top (if one exists), then apply any
     // explicit overrides from this request on top of that.
@@ -931,8 +804,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     const presets = await readModePresets();
     const modePreset = presets[decisionMode as DecisionMode];
     if (modePreset) {
-      const { savedAt: _savedAt, ...presetConfig } = modePreset;
-      Object.assign(partial, presetConfig);
+      Object.assign(partial, modePreset);
     }
     partial.decisionMode = decisionMode;
   }
@@ -1020,7 +892,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof maxBetSize === "number" && maxBetSize >= 0.5 && maxBetSize <= 500) partial.maxBetSize = maxBetSize;
   if (typeof minAccountBalance === "number" && minAccountBalance >= 0 && minAccountBalance <= 1000) partial.minAccountBalance = minAccountBalance;
   if (typeof maxTotalExposure === "number" && maxTotalExposure >= 0 && maxTotalExposure <= 500) partial.maxTotalExposure = maxTotalExposure;
-  if (typeof maxDailyLossPerCoin === "number" && maxDailyLossPerCoin >= 0 && maxDailyLossPerCoin <= 10000) partial.maxDailyLossPerCoin = maxDailyLossPerCoin;
+  if (typeof maxDailyLossPerCoin === "number" && maxDailyLossPerCoin >= 0 && maxDailyLossPerCoin <= 100) partial.maxDailyLossPerCoin = maxDailyLossPerCoin;
   if (typeof coinStreakLossLimit === "number" && coinStreakLossLimit >= 0 && coinStreakLossLimit <= 10) partial.coinStreakLossLimit = coinStreakLossLimit;
   if (typeof coinStreakPauseWindows === "number" && coinStreakPauseWindows >= 1 && coinStreakPauseWindows <= 10) partial.coinStreakPauseWindows = coinStreakPauseWindows;
   if (typeof maxSlippageCents === "number" && maxSlippageCents >= 0 && maxSlippageCents <= 50) partial.maxSlippageCents = maxSlippageCents;
@@ -1062,29 +934,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof betDelayMinutes === "number" && betDelayMinutes >= 0 && betDelayMinutes <= 13) {
     partial.betDelayMinutes = betDelayMinutes;
-  }
-  // ── stat_ml mode config fields ────────────────────────────────────────────
-  if (typeof statMLMinStatConf === "number" && statMLMinStatConf >= 50 && statMLMinStatConf <= 65) {
-    partial.statMLMinStatConf = statMLMinStatConf;
-  }
-  if (typeof statMLMinMLConf === "number" && statMLMinMLConf >= 60 && statMLMinMLConf <= 80) {
-    partial.statMLMinMLConf = statMLMinMLConf;
-  }
-  if (typeof statMLRequireBothAgree === "boolean") partial.statMLRequireBothAgree = statMLRequireBothAgree;
-  if (typeof statMLStopLossEnabled === "boolean") partial.statMLStopLossEnabled = statMLStopLossEnabled;
-  if (typeof statMLStopLossPct === "number" && statMLStopLossPct >= 5 && statMLStopLossPct <= 50) {
-    partial.statMLStopLossPct = statMLStopLossPct;
-  }
-  if (typeof statMLMaxEntryMinute === "number" && statMLMaxEntryMinute >= 2 && statMLMaxEntryMinute <= 12) {
-    partial.statMLMaxEntryMinute = statMLMaxEntryMinute;
-  }
-  if (typeof statMLHighConfBoostEnabled === "boolean") partial.statMLHighConfBoostEnabled = statMLHighConfBoostEnabled;
-  if (typeof statMLMinReturnMultiple === "number" && statMLMinReturnMultiple >= 0 && statMLMinReturnMultiple <= 3.0) {
-    partial.statMLMinReturnMultiple = statMLMinReturnMultiple;
-  }
-  if (typeof statMLOrderbookGateEnabled === "boolean") partial.statMLOrderbookGateEnabled = statMLOrderbookGateEnabled;
-  if (typeof statMLOrderbookMinPressure === "number" && statMLOrderbookMinPressure >= 0.50 && statMLOrderbookMinPressure <= 0.80) {
-    partial.statMLOrderbookMinPressure = statMLOrderbookMinPressure;
   }
   if (typeof minNoEntryMinutes === "number" && minNoEntryMinutes >= 0 && minNoEntryMinutes <= 13) {
     partial.minNoEntryMinutes = minNoEntryMinutes;
@@ -1429,23 +1278,6 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
   try {
     const modes = await getBacktestModes();
     res.json({ modes });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown error";
-    res.status(500).json({ error: msg });
-  }
-});
-
-// GET /crypto/bot/stat-ml-floor-analysis?days=30
-// Sweeps the full 6×6 (statFloor × mlFloor) grid over settled bets that have
-// Stat+ML signals, projecting what win rate / coverage each combo would produce.
-// Also returns per-coin breakdowns and a globally recommended floor pair.
-// ?days=30 — look-back in days (default 30; pass 0 for all-time)
-router.get("/crypto/bot/stat-ml-floor-analysis", async (req, res) => {
-  try {
-    const rawDays = parseInt(String(req.query.days ?? "30"), 10);
-    const sinceDays = isNaN(rawDays) || rawDays < 0 ? 30 : rawDays;
-    const result = await getStatMLFloorAnalysis(sinceDays);
-    res.json({ ...result, sinceDays });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

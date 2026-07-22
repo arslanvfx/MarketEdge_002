@@ -269,7 +269,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           ml_gate:          { label: "ML Gate",      cls: "bg-violet-500/10 text-violet-400/80" },
                           consensus:        { label: "Consensus",    cls: "bg-amber-500/10 text-amber-400/80" },
                           unanimous:        { label: "Unanimous",    cls: "bg-emerald-500/10 text-emerald-400/80" },
-                          stat_ml:          { label: "Stat+ML",      cls: "bg-cyan-500/10 text-cyan-400/80" },
+
                           conviction:       { label: "Conviction",   cls: "bg-yellow-500/20 text-yellow-300 font-bold" },
                         };
                         const { label, cls } = meta[dm] ?? { label: dm, cls: "bg-muted/30 text-muted-foreground" };
@@ -353,58 +353,6 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
                     </div>
-
-                    {/* stat_ml breakdown row */}
-                    {r.decisionMode === "stat_ml" && (() => {
-                      const statConf  = sigs?.statConfidence  as number | null ?? sigs?.statConf  as number | null ?? null;
-                      const mlConf    = sigs?.mlConfidence    as number | null ?? sigs?.mlConf    as number | null ?? null;
-                      const agreement = sigs?.statMLAgreement as boolean | null ?? null;
-                      const earlyFire = sigs?.statMLEarlyFire as boolean | null ?? null;
-                      const entryMin  = sigs?.statMLEntryMinute as number | null ?? null;
-                      const obPress   = sigs?.statMLOrderbookPressure as number | null ?? null;
-                      return (
-                        <div className="flex items-center gap-2 mb-2 flex-wrap text-[10px]">
-                          {/* Stat signal */}
-                          {statAbove !== null && (
-                            <span className={`flex items-center gap-0.5 font-semibold px-1.5 py-0.5 rounded ${statAbove ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
-                              {statAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
-                              S {statConf != null ? `${Math.round(statConf)}%` : ""}
-                            </span>
-                          )}
-                          {/* ML signal */}
-                          {mlAbove !== null && (
-                            <span className={`flex items-center gap-0.5 font-semibold px-1.5 py-0.5 rounded ${mlAbove ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
-                              {mlAbove ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
-                              ML {mlConf != null ? `${Math.round(mlConf)}%` : ""}
-                            </span>
-                          )}
-                          {/* Agreement badge — statMLAgreement is boolean */}
-                          {agreement !== null && (
-                            <span className={`px-1.5 py-0.5 rounded font-semibold ${agreement === true ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
-                              {agreement === true ? "Agreed" : "Disagree"}
-                            </span>
-                          )}
-                          {/* Entry minute badge */}
-                          {entryMin != null && (
-                            <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-muted/50 text-muted-foreground">
-                              <Timer className="w-2.5 h-2.5" /> T+{entryMin}m
-                            </span>
-                          )}
-                          {/* Early-fire badge */}
-                          {earlyFire === true && (
-                            <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400 font-semibold">
-                              <Zap className="w-2.5 h-2.5" /> Early Entry
-                            </span>
-                          )}
-                          {/* Orderbook pressure */}
-                          {obPress != null && (
-                            <span className={`px-1.5 py-0.5 rounded ${obPress >= 0.6 ? "bg-emerald-500/10 text-emerald-400/80" : "bg-muted/50 text-muted-foreground"}`}>
-                              OB {(obPress * 100).toFixed(0)}% YES
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })()}
 
                     {/* Footer row */}
                     <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">

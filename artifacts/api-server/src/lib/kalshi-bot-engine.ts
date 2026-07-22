@@ -22,13 +22,12 @@ import {
   type WindowBetSignal,
 } from "./crypto";
 import { getLatestCoinSignals } from "./crypto-signals";
-import { getKalshiCachedData, getOrderbookDepth } from "./crypto-kalshi";
+import { getKalshiCachedData } from "./crypto-kalshi";
 
 import {
   computeCorePairDecision,
   computeMLGateDecision,
   computeConvictionDecision,
-  computeStatMLDecision,
   ML_WEIGHT,
   CLAUDE_WEIGHT,
   ML_BOOST,
@@ -80,7 +79,6 @@ import {
   type CorePairInputs,
   type CorePairResult,
   type ConvictionInputs,
-  type StatMLInputs,
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
@@ -91,7 +89,6 @@ export {
   computeCorePairDecision,
   computeConvictionDecision,
   computeMLGateDecision,
-  computeStatMLDecision,
   ML_WEIGHT,
   CLAUDE_WEIGHT,
   ML_BOOST,
@@ -156,7 +153,6 @@ export {
   type CorePairInputs,
   type CorePairResult,
   type ConvictionInputs,
-  type StatMLInputs,
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
@@ -180,11 +176,6 @@ export interface SignalSnapshot {
   mlConfidence: number | null;
   warmupActive: boolean;
   roiPct: number | null;       // net return % on the chosen side; null when yesPrice unknown
-  // stat_ml-specific enrichments (undefined for other modes)
-  statMLAgreement?: boolean | null;   // whether Stat+ML agreed on direction
-  statMLEarlyFire?: boolean;          // true when Claude was not yet ready at bet time
-  statMLEntryMinute?: number;         // minutesElapsed at entry (snapshot minute)
-  statMLOrderbookPressure?: number | null; // computed pressure: 1 - (yesAsk - yesBid)
 }
 
 export interface BotDecision {
@@ -263,13 +254,9 @@ function _makeBotDecisionInner(
   // be treated as "no opinion" (not a blocker) or the engine can never fire —
   // this is exactly what killed 6-coin windows where stat/ML cached data expired
   // mid-window.  Bypass ALL three null-checks for conviction.
-  //
-  // EXCEPTION — stat_ml mode: only Stat + ML are required; Claude is never
-  // waited on. The pipeline fires as soon as both Stat and ML are non-null.
   {
     const convictionMode = config.decisionMode === "conviction";
-    const statMLMode     = config.decisionMode === "stat_ml";
-    const claudeMissing  = !convictionMode && !statMLMode && claudeAbove === null;
+    const claudeMissing  = !convictionMode && claudeAbove === null;
     const statMlMissing  = !convictionMode && (statAbove === null || mlAbove === null);
     if (statMlMissing || claudeMissing) {
       const missing = (
@@ -285,13 +272,10 @@ function _makeBotDecisionInner(
         warmupActive: true,
         roiPct: null,
       };
-      const waitMsg = statMLMode
-        ? `stat_ml: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — Stat+ML required`
-        : `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`;
       return {
         action: "SKIP",
         confidence: 0,
-        reasoning: waitMsg,
+        reasoning: `Pipeline: waiting for ${missing} (${minutesElapsed.toFixed(1)} min elapsed) — all three models (Stat, Claude, ML) must complete before betting`,
         signals: pendingSnapshot,
       };
     }
@@ -316,64 +300,6 @@ function _makeBotDecisionInner(
 
   const decisionMode: DecisionMode = config.decisionMode ?? "classic";
   const profile = BET_PROFILES[config.betProfile ?? "normal"];
-
-  // ── Decision Mode: stat_ml ────────────────────────────────────────────────
-  // Two-signal mode: Stat + ML only. Claude's direction is available as context
-  // but is never a blocker. The pipeline fires early (before Claude finishes)
-  // when both Stat and ML are ready — enabling minute 0-1 entries.
-  if (decisionMode === "stat_ml") {
-    // Orderbook pressure = YES bid volume / (YES bid vol + NO bid vol).
-    // "Bid-side pressure" measures how much liquidity is on the YES side vs
-    // NO side. High YES pressure (>0.5) means more buyers than sellers.
-    // Fetched synchronously from orderbookDepthCache (updated by conviction
-    // poller and fetchOrderbookPrices calls; stale threshold = 60 s).
-    const obDepth   = kalshiTicker ? getOrderbookDepth(kalshiTicker) : null;
-    const yesBidVol = obDepth ? obDepth.yesDepth.reduce((s, [, q]) => s + q, 0) : 0;
-    const noBidVol  = obDepth ? obDepth.noDepth.reduce((s, [, q]) => s + q, 0) : 0;
-    const totalVol  = yesBidVol + noBidVol;
-    const obPressure: number | null = totalVol > 0 ? yesBidVol / totalVol : null;
-
-    const kd = getKalshiCachedData(sym);
-    const smResult = computeStatMLDecision({
-      statAbove, mlAbove,
-      statConfidence: liveStatConf,
-      mlConfidence,
-      yesPrice,
-      yesAsk:   kd?.yesAsk  ?? null,
-      kalshiTicker,
-      minConfidence: config.minConfidence,
-      statMLMinStatConf:          config.statMLMinStatConf,
-      statMLMinMLConf:            config.statMLMinMLConf,
-      statMLRequireBothAgree:     config.statMLRequireBothAgree,
-      statMLHighConfBoostEnabled: config.statMLHighConfBoostEnabled,
-      statMLMinReturnMultiple:    config.statMLMinReturnMultiple,
-      statMLOrderbookGateEnabled: config.statMLOrderbookGateEnabled,
-      statMLOrderbookMinPressure: config.statMLOrderbookMinPressure,
-      orderbookPressure:          obPressure,
-    } as StatMLInputs);
-
-    const smSnap: SignalSnapshot = {
-      ...buildSnapshot(
-        smResult.ev,
-        smResult.signalsAgreeing,
-        smResult.signalsTotal,
-        smResult.action !== "SKIP" ? smResult.action : null,
-      ),
-      // stat_ml-specific enrichments for diagnostics and analytics
-      statMLAgreement: statAbove !== null && mlAbove !== null ? statAbove === mlAbove : null,
-      statMLEarlyFire: claudeAbove === null, // true when we fired before Claude was ready
-      statMLEntryMinute: Math.floor(minutesElapsed),
-      // Only expose pressure when the gate was actually evaluated (gate enabled).
-      // When gate is disabled obPressure is irrelevant and should read as null.
-      statMLOrderbookPressure: config.statMLOrderbookGateEnabled ? obPressure : null,
-    };
-    return {
-      action: smResult.action,
-      confidence: smResult.confidence,
-      reasoning: smResult.reasoning,
-      signals: smSnap,
-    };
-  }
 
   // ── Decision Mode: consensus ──────────────────────────────────────────────
   // Require at least 2 out of [Stat, Claude, ML] to agree on the same direction.

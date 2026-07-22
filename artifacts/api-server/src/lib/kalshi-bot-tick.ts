@@ -556,15 +556,6 @@ async function _runBotTick(
   // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
   // 0 = disabled (no ceiling — enter at any point).
   if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
-  // stat_ml-specific entry ceiling: no new entries after statMLMaxEntryMinute minutes.
-  // This is separate from maxEntryMinutes so it can be set without changing other modes.
-  if (S.config.decisionMode === "stat_ml") {
-    const smMaxMin = S.config.statMLMaxEntryMinute ?? 0;
-    if (smMaxMin > 0 && secondsElapsed > smMaxMin * 60) {
-      logger.debug({ sym, secondsElapsed, smMaxMin }, "[kalshi-bot] stat_ml max-entry-minute ceiling reached — skipping");
-      return;
-    }
-  }
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
   // Only bypassed at true market extremes (≥92¢ or ≤8¢) regardless of mode.
   // Conviction mode respects minWindowEntryMinutes just like any other mode —
@@ -696,24 +687,15 @@ async function _runBotTick(
   //
   // CONVICTION MODE — price alone is the signal.  All model gates are bypassed
   // entirely.  The engine fires purely on yesPrice vs lockPrice.
-  // STAT_ML MODE — only Stat+ML are required; Claude is never waited on.
-  // All other modes: block until all three signals (Stat, Claude, ML) are non-null.
   if (S.config.decisionMode !== "conviction") {
     const live = getLatestCoinSignals(sym);
-    const isStatML = S.config.decisionMode === "stat_ml";
-    const missingRequired = isStatML
-      ? (live.statAbove === null || live.mlAbove === null)
-      : (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null);
-    if (missingRequired) {
+    if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
       logger.info(
         {
           sym, windowKey, secondsElapsed,
           statAbove: live.statAbove, claudeAbove: live.claudeAbove, mlAbove: live.mlAbove,
-          mode: S.config.decisionMode,
         },
-        isStatML
-          ? "[kalshi-bot] stat_ml: waiting for Stat+ML signals — no bet until both are ready"
-          : "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
+        "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
       );
       return;
     }
@@ -784,9 +766,7 @@ async function _runBotTick(
   // is calling BELOW — exactly the bug observed when ML briefly outputted YES
   // at window-open before settling to NO, while Claude's opening call was BELOW.
   //
-  // stat_ml explicitly does NOT use Claude for decisioning; Claude may be null
-  // or disagree and that is expected — skip this gate entirely for stat_ml.
-  if (S.config.decisionMode !== "conviction" && S.config.decisionMode !== "stat_ml") {
+  if (S.config.decisionMode !== "conviction") {
     const dirSigs = decision.signals as { claudeAbove?: boolean | null };
     if (decision.action === "BET_YES" && dirSigs.claudeAbove === false) {
       logger.info(
@@ -1105,10 +1085,6 @@ async function _runBotTick(
   const _entryReturnFloor = S.config.minReturnMultiple ?? 1.45;
   const _entryMaxCost = 1 / _entryReturnFloor;
   const isConviction = S.config.decisionMode === "conviction";
-  // stat_ml bypasses the return floor gate when statMLMinReturnMultiple is ≤1
-  // (disabled), matching the intent of removing it for research bet volume.
-  const isStatMLNoROI = S.config.decisionMode === "stat_ml" && (S.config.statMLMinReturnMultiple ?? 0) <= 1;
-  const bypassReturnFloor = isConviction || isStatMLNoROI;
   // Declared `let` — the conviction live-price gate (below) refreshes the
   // underlying ask/bid and may recompute this value with fresh prices.
   let orderLimitPrice: number | null = (() => {
@@ -1116,12 +1092,12 @@ async function _runBotTick(
     if (direction === "yes") {
       if (liveYesAsk == null) return null;
       const raw = liveYesAsk + CROSSING_BUFFER;
-      const cap = bypassReturnFloor ? 0.99 : _entryMaxCost;
+      const cap = isConviction ? 0.99 : _entryMaxCost;
       return Math.floor(Math.min(raw, cap) * 100) / 100;
     } else {
       if (liveYesBid == null) return null;
       const raw = liveYesBid - CROSSING_BUFFER;
-      const floor = bypassReturnFloor ? 0.01 : (1 - _entryMaxCost);
+      const floor = isConviction ? 0.01 : (1 - _entryMaxCost);
       return Math.ceil(Math.max(raw, floor) * 100) / 100;
     }
   })();
@@ -1135,9 +1111,9 @@ async function _runBotTick(
   //   NO:  cost = 1−yes_bid; return = 1/cost. Same threshold.
   // 1/1.45 ≈ 0.6897 → nearest cent-aligned ceiling is 0.68 (return 1.471x).
   // We compare against the raw 1/1.45 float so a 0.69 cost (1.449x) is blocked.
-  // Bypassed in conviction mode and in stat_ml when ROI gate is disabled —
-  // the edge in those modes comes from model agreement, not payout multiple.
-  if (!bypassReturnFloor) {
+  // Bypassed in conviction mode — by design the return at 88-92¢ is ~1.09-1.14×;
+  // the high probability is the edge, not the payout multiple.
+  if (S.config.decisionMode !== "conviction") {
     const minReturnFloor = S.config.minReturnMultiple ?? 1.45;
     const maxAllowedCost = 1 / minReturnFloor;
     if (expectedFillCost > maxAllowedCost) {
@@ -2659,7 +2635,6 @@ async function _runBotTick(
     entryDecision: decision,
     phase2Activated: false,
     entryMode,
-    entryDecisionMode: S.config.decisionMode,
     entrySignals: {
       statAbove: _entrySigs.statAbove ?? null,
       claudeAbove: _entrySigs.claudeAbove ?? null,

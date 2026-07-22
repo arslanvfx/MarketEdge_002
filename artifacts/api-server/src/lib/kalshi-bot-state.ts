@@ -40,7 +40,6 @@ export interface OpenPosition {
   entryDecision: BotDecision;
   phase2Activated: boolean;
   entryMode: BotMode;
-  entryDecisionMode?: string;
   source?: "bot" | "manual";
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
 }

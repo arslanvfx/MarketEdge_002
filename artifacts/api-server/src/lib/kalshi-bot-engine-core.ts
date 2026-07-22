@@ -581,185 +581,6 @@ function computeMLGateDecisionUngated(inp: CorePairInputs): CorePairResult {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Stat + ML mode — no Claude dependency
-// ---------------------------------------------------------------------------
-//
-// Direction: require BOTH Stat and ML to have opinions.
-//   If both agree          → bet that direction.
-//   If they disagree AND statMLRequireBothAgree=true → SKIP.
-//   If they disagree AND statMLRequireBothAgree=false → follow whichever has
-//     higher confidence (tie goes to Stat).
-//
-// Confidence: average(statConf, mlConf) + optional high-conf boost (+5pp when
-//   both signals ≥ 65 %, subject to statMLHighConfBoostEnabled).
-//
-// Gates applied inside this function:
-//   1. Both signals must be non-null.
-//   2. Direction resolution (agree / disagree logic above).
-//   3. Per-signal confidence floors (statMLMinStatConf / statMLMinMLConf).
-//   4. Composite confidence ≥ minConfidence.
-//   5. Min-return gate (statMLMinReturnMultiple, default 1.5×).
-
-export interface StatMLInputs {
-  statAbove: boolean | null;
-  mlAbove: boolean | null;
-  statConfidence: number | null;
-  mlConfidence: number | null;
-  yesPrice: number | null;
-  kalshiTicker: string | null;
-  minConfidence: number;
-  // mode-specific overrides (all optional — defaults used when absent)
-  statMLMinStatConf?: number;             // stat ≥ this % to contribute (default 53)
-  statMLMinMLConf?: number;              // ML  ≥ this % to contribute (default 67)
-  statMLRequireBothAgree?: boolean;      // when true: stat≠ml → SKIP (default true)
-  statMLHighConfBoostEnabled?: boolean;  // +5pp when Stat ≥ 58% AND ML ≥ 73% (default true)
-  statMLMinReturnMultiple?: number;      // return floor (default 1.5)
-  statMLOrderbookGateEnabled?: boolean;  // skip if orderbook pressure below threshold (default false)
-  statMLOrderbookMinPressure?: number;   // 0-1; pressure = YES bid vol / total vol; skip if below (default 0.60)
-  orderbookPressure?: number | null;     // computed by caller (null = unknown/gate disabled)
-  yesAsk?: number | null;               // live YES-ask from orderbook (preferred over yesPrice for return gate)
-}
-
-// ── Per-coin floor override guidance ─────────────────────────────────────────
-// Run `GET /api/crypto/bot/stat-ml-floor-analysis?days=30` to get data-driven
-// recommendations.  The endpoint sweeps statFloor × mlFloor ∈ {50,53,55,58,60,62}²
-// against settled bets (last 30 days by default) and returns the highest-WR
-// combo (≥5 bets) per coin.
-//
-// How to apply results:
-//   1. Check `globalBestCell` for the all-coin optimal floors.
-//   2. For per-coin overrides, look at `byCoin[].recommendedStatFloor /
-//      recommendedMLFloor`.  Apply via BotConfig.statMLMinStatConf /
-//      statMLMinMLConf in Bot Configuration → stat_ml mode settings.
-//   3. Re-run the analysis after each 30+ bets of new data.
-//
-// ── Backtest results — all settled bets with Stat+ML signals (514 eligible) ──
-// Methodology: replay of actual recorded signals (statAbove/mlAbove/confidence)
-// from the signals JSONB stored at bet placement time.  ML signals are NOT
-// reconstructible from candles; this is the authoritative ground-truth approach.
-//
-// GLOBAL BEST: Stat≥53% / ML≥62% → 66.8% WR, 208 bets, 40% coverage
-//
-// Per-coin recommendations (floors where ≥5 bets were filtered):
-//   XRP:  Stat≥60% / ML≥50%  → 80% WR,  5 bets  (low n — treat as directional hint)
-//   HYPE: Stat≥53% / ML≥50%  → 69% WR, 36 bets
-//   BTC:  Stat≥50% / ML≥62%  → 58% WR, 52 bets
-//   BNB:  Stat≥58% / ML≥50%  → 80% WR, 10 bets
-//   SOL:  Stat≥55% / ML≥50%  → 85% WR, 13 bets
-//   ETH:  Stat≥53% / ML≥50%  → 70% WR, 30 bets
-//   DOGE: Stat≥55% / ML≥62%  → 89% WR,  9 bets
-//   ZEC:  Stat≥50% / ML≥50%  → 71% WR,  7 bets
-//   NEAR: insufficient data  (< 5 bets in any combo)
-//
-// Key insight: ML floor at 62% often improves win rate over 50% (global best
-// is Stat≥53/ML≥62).  Stat floor of 53–58% is the sweet spot — tighter floors
-// reduce coverage significantly without proportional WR gains.
-// ─────────────────────────────────────────────────────────────────────────────
-export function computeStatMLDecision(inp: StatMLInputs): CorePairResult {
-  const skip = (reason: string): CorePairResult => ({
-    action: "SKIP", confidence: 0, reasoning: reason,
-    signalsAgreeing: 0, signalsTotal: 2, ev: null,
-  });
-
-  if (!inp.kalshiTicker) return skip("stat_ml: no active Kalshi market for this symbol");
-
-  if (inp.statAbove === null) return skip("stat_ml: waiting for Stat signal");
-  if (inp.mlAbove   === null) return skip("stat_ml: waiting for ML signal");
-
-  const minStatConf  = inp.statMLMinStatConf        ?? 50;
-  const minMLConf    = inp.statMLMinMLConf           ?? 57;
-  const requireAgree = inp.statMLRequireBothAgree    ?? true;
-  const highBoost    = inp.statMLHighConfBoostEnabled ?? true;
-
-  const statConf = inp.statConfidence ?? 0;
-  const mlConf   = inp.mlConfidence   ?? 0;
-
-  // Per-signal floors
-  if (statConf < minStatConf) {
-    return skip(`stat_ml: Stat confidence ${Math.round(statConf)}% below floor ${minStatConf}%`);
-  }
-  if (mlConf < minMLConf) {
-    return skip(`stat_ml: ML confidence ${Math.round(mlConf)}% below floor ${minMLConf}%`);
-  }
-
-  const statDir = inp.statAbove;
-  const mlDir   = inp.mlAbove;
-  const agree   = statDir === mlDir;
-
-  let direction: boolean;
-  if (agree) {
-    direction = statDir;
-  } else if (requireAgree) {
-    return {
-      action: "SKIP", confidence: 0,
-      reasoning: `stat_ml: disagree — Stat=${statDir ? "YES" : "NO"} (${Math.round(statConf)}%) ML=${mlDir ? "YES" : "NO"} (${Math.round(mlConf)}%) requireBothAgree=true`,
-      signalsAgreeing: 0, signalsTotal: 2, ev: null,
-    };
-  } else {
-    // Follow higher-confidence signal; tie → Stat
-    direction = statConf >= mlConf ? statDir : mlDir;
-  }
-
-  // Weighted blend: ML leads (0.65) + Stat (0.35) — ML has more recent signals
-  // and tends to be more calibrated mid-window; Stat provides the directional anchor.
-  const weightedConf = mlConf * 0.65 + statConf * 0.35;
-  // High-confidence boost: +5pp when BOTH Stat ≥ 58% AND ML ≥ 73%.
-  const boost = highBoost && statConf >= 58 && mlConf >= 73 ? 5 : 0;
-  const confidence = Math.round(Math.min(weightedConf + boost, 100));
-
-  if (confidence < inp.minConfidence) {
-    return {
-      action: "SKIP", confidence,
-      reasoning: `stat_ml: composite ${confidence}% below minimum ${inp.minConfidence}% (Stat=${Math.round(statConf)}% ML=${Math.round(mlConf)}%${boost ? " +5 high-conf boost" : ""})`,
-      signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
-    };
-  }
-
-  // Orderbook pressure gate (optional; direction-aware).
-  // YES bets need high YES-side pressure (buyers > sellers for YES).
-  // NO  bets need high NO-side pressure = 1 − YES pressure.
-  // Low pressure on the relevant side signals a thin/unfavourable book.
-  if (inp.statMLOrderbookGateEnabled) {
-    const minPressure   = inp.statMLOrderbookMinPressure ?? 0.60;
-    const yesPressure   = inp.orderbookPressure ?? null;
-    if (yesPressure !== null) {
-      // For YES bets check YES pressure; for NO bets check NO pressure (complement)
-      const sidePressure = direction ? yesPressure : (1 - yesPressure);
-      if (sidePressure < minPressure) {
-        const side = direction ? "YES" : "NO";
-        return {
-          action: "SKIP", confidence,
-          reasoning: `stat_ml: ${side}-side orderbook pressure ${sidePressure.toFixed(3)} below minimum ${minPressure} (insufficient ${side} liquidity)`,
-          signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
-        };
-      }
-    }
-  }
-
-  // Min-return gate — use live YES-ask for accurate entry-cost economics.
-  // yesAsk is the actual market ask (what we pay); yesPrice is the midpoint.
-  // Prefer yesAsk; fall back to yesPrice when ask is unavailable.
-  const minReturn = inp.statMLMinReturnMultiple ?? 0;
-  const returnPrice = inp.yesAsk ?? inp.yesPrice;
-  const gate = checkMinReturnGate(direction ? "BET_YES" : "BET_NO", returnPrice, minReturn);
-  if (gate.blocked) {
-    return {
-      action: "SKIP", confidence,
-      reasoning: `stat_ml: ${gate.reason}`,
-      signalsAgreeing: agree ? 2 : 1, signalsTotal: 2, ev: null,
-    };
-  }
-
-  const action: BotDecisionAction = direction ? "BET_YES" : "BET_NO";
-  const agreeLabel = agree ? "agree" : `disagree (following ${statConf >= mlConf ? "Stat" : "ML"})`;
-  return {
-    action, confidence, ev: null,
-    signalsAgreeing: agree ? 2 : 1, signalsTotal: 2,
-    reasoning: `stat_ml: Stat=${statDir ? "YES" : "NO"} ${Math.round(statConf)}% ML=${mlDir ? "YES" : "NO"} ${Math.round(mlConf)}% → ${agreeLabel} → ${action} (${confidence}%${boost ? " +boost" : ""})`,
-  };
-}
-
 /**
  * Minimum-return (payout multiple) gate — pure and shared across every decision
  * mode (classic, ml_gate, consensus, unanimous). A Kalshi contract costing
@@ -1135,7 +956,7 @@ export function checkMomentumOverride(
 // without pulling in the ./crypto or DB modules.
 // ---------------------------------------------------------------------------
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction" | "stat_ml";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
 
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
@@ -1433,21 +1254,6 @@ export interface BotConfig {
   // Requires ≥ 2 values in betRandomizerValues to activate.
   betRandomizerEnabled?: boolean;
   betRandomizerValues?: number[];
-
-  // ── Stat + ML mode (stat_ml) ──────────────────────────────────────────────
-  // Two-signal mode: Stat + ML only; Claude is never required.
-  // The pipeline fires as soon as Stat+ML are both non-null; no waiting for
-  // Claude's extended-thinking call (which takes 30-120 s).
-  statMLMinStatConf?: number;             // Stat ≥ this % to pass the per-signal floor (default 53)
-  statMLMinMLConf?: number;              // ML  ≥ this % to pass the per-signal floor (default 67)
-  statMLRequireBothAgree?: boolean;      // when true: Stat≠ML → SKIP (default true)
-  statMLStopLossEnabled?: boolean;       // mid-window stop-loss (default false)
-  statMLStopLossPct?: number;            // % of entry cost to trigger stop-loss (default 20 = exit if position drops 20%)
-  statMLMaxEntryMinute?: number;         // no new entries after this many minutes elapsed (default 8); 0 = disabled
-  statMLHighConfBoostEnabled?: boolean;  // +5pp confidence when Stat ≥ 62% OR ML ≥ 65% (default true)
-  statMLMinReturnMultiple?: number;      // payout floor for stat_ml mode (default 1.5)
-  statMLOrderbookGateEnabled?: boolean;  // when true: skip if orderbook pressure below minPressure (default false)
-  statMLOrderbookMinPressure?: number;   // 0-1 fraction; pressure = 1 - (yesAsk-yesBid); skip if below this (default 0.90 ≈ spread ≤ 10¢)
 }
 
 // ---------------------------------------------------------------------------
@@ -1575,7 +1381,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // Live-mode safety guards — conservative defaults for first live sessions.
   minAccountBalance: 5.00,
   maxTotalExposure: 5.00,
-  maxDailyLossPerCoin: 300,
+  maxDailyLossPerCoin: 3.00,
   coinStreakLossLimit: 3,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 10,
@@ -1649,17 +1455,6 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinOverrides: {},
   betRandomizerEnabled: false,
   betRandomizerValues: [],
-  // Stat + ML mode defaults
-  statMLMinStatConf: 50,
-  statMLMinMLConf: 57,
-  statMLRequireBothAgree: true,
-  statMLStopLossEnabled: false,
-  statMLStopLossPct: 20,
-  statMLMaxEntryMinute: 8,
-  statMLHighConfBoostEnabled: true,
-  statMLMinReturnMultiple: 0,
-  statMLOrderbookGateEnabled: false,
-  statMLOrderbookMinPressure: 0.60,
 };
 
 /**

@@ -65,7 +65,6 @@ import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-ti
 import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import {
   triggerWindowPipeline, runPipelineRecheck, registerPipelineCompleteCallback,
-  registerDecisionModeGetter,
   type PipelineResult,
 } from "./kalshi-bot-pipeline";
 import {
@@ -248,10 +247,6 @@ const pipelineEntryFiredThisWindow = new Set<string>();
 // ---------------------------------------------------------------------------
 // Pipeline-completion entry trigger
 // ---------------------------------------------------------------------------
-// Register a decision-mode getter so the pipeline can determine whether
-// stat_ml mode is active (early-fire on Stat+ML, no Claude wait needed).
-registerDecisionModeGetter(() => getBotDecisionMode());
-
 // Registered once at module-load time.  When the initial pipeline finishes for
 // a coin, the pipeline fires this callback synchronously; we add the coin to
 // pipelineEntryFiredThisWindow (guards against double-fire) and schedule the
@@ -372,17 +367,8 @@ async function _firePipelineEntryForCoin(sym: string, windowKey: string): Promis
       return;
     }
     await runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []);
-    // If the tick resulted in a SKIP (no position opened), release the lock so the
-    // per-tick Phase-3 loop can retry when signals improve within this window.
-    // The lock only needs to persist while a position is actually open or being placed.
-    if (!openPositions.has(sym)) {
-      pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
-      logger.info({ sym, windowKey }, "[pipeline] completion tick: no bet placed — releasing lock for per-tick retry");
-    }
   } catch (err) {
     logger.warn({ err, sym, windowKey }, "[pipeline] completion-triggered tick error (non-fatal)");
-    // On error, also release the lock so Phase-3 can retry rather than being permanently blocked
-    pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
   }
 }
 
@@ -706,45 +692,6 @@ export async function runBotLoopTick(): Promise<void> {
     const windowKeyMs = new Date(newWindowKey).getTime();
     const clockMinutesElapsed = (Date.now() - windowKeyMs) / 60000;
     const stopLossArmed = stopActivationMin === 0 || clockMinutesElapsed >= stopActivationMin;
-    // ── Stat+ML stop-loss ────────────────────────────────────────────────────
-    // Monitors open positions for the stat_ml decision mode when
-    // statMLStopLossEnabled=true.  Exits when the position has lost more than
-    // statMLStopLossPct % of its entry cost (e.g. 20 = sell when value of
-    // the held contract drops 20% relative to the entry fill price).
-    //   YES position: entry cost = entryYesPrice; current value = yesPrice
-    //   NO  position: entry cost = 1-entryYesPrice; current value = 1-yesPrice
-    if ((S.config.statMLStopLossEnabled ?? false)) {
-      const stopLossPct = (S.config.statMLStopLossPct ?? 20) / 100;
-      for (const [sym, pos] of Array.from(openPositions.entries())) {
-        // Stop-loss scoped to positions that were entered in stat_ml mode.
-        // entryDecisionMode is set at position open time (not the current mode)
-        // so a mid-session mode switch cannot affect positions from other modes.
-        if (pos.entryDecisionMode !== "stat_ml") continue;
-        const kd = getKalshiCachedData(sym);
-        const yp = kd?.yesPrice ?? null;
-        if (yp === null) continue;
-        const entryCost    = pos.direction === "yes" ? pos.entryYesPrice : 1 - pos.entryYesPrice;
-        const currentValue = pos.direction === "yes" ? yp : (1 - yp);
-        if (entryCost <= 0) continue;
-        const lossFrac = (entryCost - currentValue) / entryCost;
-        if (lossFrac < stopLossPct) continue; // not yet triggered
-
-        logger.warn(
-          { sym, direction: pos.direction, entryCost: +entryCost.toFixed(4),
-            currentValue: +currentValue.toFixed(4), lossFrac: +(lossFrac * 100).toFixed(1),
-            stopLossPct: +(stopLossPct * 100).toFixed(0) },
-          "[kalshi-bot] stat_ml stop-loss triggered — selling position",
-        );
-        openPositions.delete(sym);
-        try {
-          await closePosition(pos, yp, kd?.value ?? null, "stop_loss", false, { gtcFallback: true });
-        } catch (err) {
-          logger.error({ err, sym }, "[kalshi-bot] stat_ml stop-loss exit failed — restoring position");
-          openPositions.set(sym, pos);
-        }
-      }
-    }
-
     if (S.config.decisionMode === "conviction" && stopFloor > 0 && stopLossArmed) {
       for (const [sym, pos] of Array.from(openPositions.entries())) {
         const kd = getKalshiCachedData(sym);

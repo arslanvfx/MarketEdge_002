@@ -40,8 +40,6 @@ export {
   getConvictionStabilityAnalysis,
   getPhaseStatus,
   SCALE_PHASE_PRESETS,
-  getStatMLFloorAnalysis,
-  STAT_ML_FLOOR_CANDIDATES,
 } from "./kalshi-bot-analytics";
 export type {
   TrendPoint,
@@ -53,9 +51,6 @@ export type {
   StabilityDimensionAnalysis,
   ConvictionStabilityAnalysis,
   PhaseStatus,
-  StatMLFloorCell,
-  StatMLCoinResult,
-  StatMLFloorAnalysis,
 } from "./kalshi-bot-analytics";
 
 // ---------------------------------------------------------------------------

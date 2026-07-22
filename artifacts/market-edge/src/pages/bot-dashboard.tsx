@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, BotStepEntry, ConvictionThresholdData, StatMLFloorAnalysis } from "./bot/types";
+import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, BotStepEntry, ConvictionThresholdData } from "./bot/types";
 import { API_BASE, fmt$, fmtPct, fmtCrypto, wkToEst, utcToEst, ET_LABEL } from "./bot/utils";
 import { ConditionsPanel, ClearPausesButton } from "./bot/conditions-panel";
 import { BotHeader } from "./bot/bot-header";
@@ -30,7 +30,6 @@ import { BotStepsPanel } from "./bot/bot-steps";
 import { CoinSignalBoard } from "./bot/coin-signal-board";
 import { KalshiLiveTickerPanel } from "./bot/kalshi-live-ticker-panel";
 import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
-import { StatMLFloorPanel } from "./bot/stat-ml-floor-panel";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -281,13 +280,6 @@ export default function BotDashboard() {
     refetchInterval: 10 * 60_000,
   });
 
-  const { data: statMLFloorData } = useQuery<StatMLFloorAnalysis>({
-    queryKey: ["bot-stat-ml-floor-analysis"],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/stat-ml-floor-analysis?days=30`).then(r => r.json()),
-    refetchInterval: 15 * 60_000,
-    staleTime: 10 * 60_000,
-  });
-
   const { data: convictionThresholdData } = useQuery<ConvictionThresholdData>({
     queryKey: ["bot-conviction-threshold", activeMode],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/conviction-threshold-analysis?mode=${activeMode}`).then(r => r.json()),
@@ -420,9 +412,6 @@ export default function BotDashboard() {
     try {
       const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
       setConfigDraft({});
-      // Immediately refresh bot-status so the UI reflects the new config
-      // (decisionMode, statML fields, etc.) without waiting for the next poll.
-      void qc.invalidateQueries({ queryKey: ["bot-status"] });
       setPersistMsg(result.persisted ? "saved" : "failed");
       setTimeout(() => setPersistMsg(null), 3000);
     } catch (err) {
@@ -698,14 +687,6 @@ export default function BotDashboard() {
           setBtPerfTab={setBtPerfTab}
           activeMode={activeMode}
         />
-        {(merged?.decisionMode === "stat_ml" || (statMLFloorData?.eligibleBets ?? 0) > 0) && (
-          <StatMLFloorPanel
-            data={statMLFloorData}
-            currentStatFloor={merged?.statMLMinStatConf}
-            currentMLFloor={merged?.statMLMinMLConf}
-            isStatMLMode={merged?.decisionMode === "stat_ml"}
-          />
-        )}
         {(merged?.decisionMode === "conviction" || (convictionThresholdData?.totalBets ?? 0) > 0) && (
           <ConvictionThresholdPanel
             data={convictionThresholdData}

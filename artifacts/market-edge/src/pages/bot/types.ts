@@ -1,6 +1,6 @@
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction" | "stat_ml";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
 
 export interface BotConfig {
   betSize: number;
@@ -114,16 +114,6 @@ export interface BotConfig {
   convictionMomentumGateEnabled?: boolean;
   convictionMomentumLookbackMinutes?: number;
   convictionMomentumSafetyFactor?: number;
-  statMLMinStatConf?: number;
-  statMLMinMLConf?: number;
-  statMLRequireBothAgree?: boolean;
-  statMLStopLossEnabled?: boolean;
-  statMLStopLossPct?: number;
-  statMLMaxEntryMinute?: number;
-  statMLHighConfBoostEnabled?: boolean;
-  statMLMinReturnMultiple?: number;
-  statMLOrderbookGateEnabled?: boolean;
-  statMLOrderbookMinPressure?: number;
 }
 
 export interface TrajectoryGateResult {
@@ -455,47 +445,5 @@ export interface CoinGuardEntry {
 export interface CoinGuardState {
   coins: CoinGuardEntry[];
   maxDailyLossPerCoin: number;
-}
-
-export interface StatMLFloorCell {
-  statFloor: number;
-  mlFloor: number;
-  bets: number;
-  wins: number;
-  losses: number;
-  pnl: number;
-  winRate: number | null;
-  coverage: number;
-}
-
-export interface SignalAccuracyBreakdown {
-  totalBets: number;
-  bothRight: number;
-  statOnly: number;
-  mlOnly: number;
-  bothWrong: number;
-  bothAgreeWinRate: number | null;
-  bothDisagreeWinRate: number | null;
-}
-
-export interface StatMLCoinResult {
-  symbol: string;
-  totalBets: number;
-  bestCell: StatMLFloorCell | null;
-  recommendedStatFloor: number | null;
-  recommendedMLFloor: number | null;
-  cells: StatMLFloorCell[];
-  signalAccuracy?: SignalAccuracyBreakdown;
-}
-
-export interface StatMLFloorAnalysis {
-  eligibleBets: number;
-  totalBets: number;
-  grid: StatMLFloorCell[];
-  byCoin: StatMLCoinResult[];
-  globalBestCell: StatMLFloorCell | null;
-  computedAt: string;
-  /** Look-back in days used for the analysis (from the ?days= query param) */
-  sinceDays?: number;
 }
 
