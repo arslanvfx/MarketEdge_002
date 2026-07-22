@@ -2095,6 +2095,51 @@ test("strike proximity: null kalshiStrike → fail-open (gate passes)", () => {
   assert.equal(r.gapPct, null);
 });
 
+// Tick-time proximity re-check scenarios (mirrors the conviction tick gate added
+// to kalshi-bot-tick.ts to catch stale-cache drift between loop evaluation and FOK).
+
+test("strike proximity (tick re-check): NEAR scenario — 0.0269% gap blocked by 0.15% threshold", () => {
+  // Reproduces the Jul-22 NEAR NO bet: livePrice $1.8690, strike $1.8685,
+  // gap = 0.0268% which is well below the 0.15% configured threshold.
+  const strike = 1.8685;
+  const livePrice = strike * (1 + 0.000269); // ~$1.86900
+  const r = computeStrikeProximityGate({
+    livePrice, kalshiStrike: strike, direction: "no", thresholdPct: 0.15, atrScaleEnabled: false,
+  });
+  assert.equal(r.blocked, true, `Expected blocked=true, gap=${r.gapPct?.toFixed(4)}%, threshold=0.15%`);
+  assert.ok(r.gapPct != null && r.gapPct < 0.15, `Gap ${r.gapPct} should be < 0.15`);
+});
+
+test("strike proximity (tick re-check): gap exactly at threshold → NOT blocked (boundary)", () => {
+  // Threshold = 0.15%; gap = 0.15% exactly → gate should PASS (not strictly less than)
+  const strike = 1.8685;
+  const livePrice = strike * (1 + 0.0015); // gap = 0.15% exactly
+  const r = computeStrikeProximityGate({
+    livePrice, kalshiStrike: strike, direction: "no", thresholdPct: 0.15, atrScaleEnabled: false,
+  });
+  assert.equal(r.blocked, false, `Expected blocked=false at exactly threshold`);
+});
+
+test("strike proximity (tick re-check): gap well above threshold → NOT blocked", () => {
+  // Gap = 0.50%, threshold = 0.15% → safe to bet
+  const strike = 1.8685;
+  const livePrice = strike * (1 + 0.005); // gap = 0.50%
+  const r = computeStrikeProximityGate({
+    livePrice, kalshiStrike: strike, direction: "no", thresholdPct: 0.15, atrScaleEnabled: false,
+  });
+  assert.equal(r.blocked, false);
+  assert.ok(r.gapPct != null && r.gapPct > 0.15, `Gap ${r.gapPct} should exceed threshold`);
+});
+
+test("strike proximity (tick re-check): YES direction tiny gap also blocked", () => {
+  // YES conviction at 90¢, BTC strike $65000, livePrice $65010 → 0.015% gap, threshold 0.15%
+  const r = computeStrikeProximityGate({
+    livePrice: 65010, kalshiStrike: 65000, direction: "yes", thresholdPct: 0.15, atrScaleEnabled: false,
+  });
+  assert.equal(r.blocked, true);
+  assert.ok(r.gapPct != null && r.gapPct < 0.15);
+});
+
 // ── applyLockPrice082Migration tests ─────────────────────────────────────────
 
 test("lockPrice082Migration: config with kalshiLockPrice=0.90 → migrated to 0.82, cap set to 0.91", () => {

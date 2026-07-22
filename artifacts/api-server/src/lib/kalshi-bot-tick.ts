@@ -21,6 +21,8 @@ import {
   selectTimeBetBracket,
   evaluateYesBidFloorAbort,
   checkConvictionOneSidedBook,
+  computeStrikeProximityGate,
+  getEffectiveProximityThreshold,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -2336,6 +2338,57 @@ async function _runBotTick(
     logger.info(
       { sym, velocity: traj.velocity.toFixed(2), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1) },
       "[kalshi-bot] trajectory gate (regular) — SAFE",
+    );
+  }
+
+  // ── Conviction strike-proximity re-check (tick-time) ──────────────────────
+  // The main-loop evaluation runs computeStrikeProximityGate once per loop
+  // tick using a potentially-stale cached crypto price.  Between that check
+  // and the FOK order below, the live price can drift much closer to the
+  // Kalshi strike than the configured threshold allows (e.g. NEAR at 0.03%
+  // when the threshold is 0.15%).  Re-check here with the freshest available
+  // price — the live-patched last candle close — immediately before the order
+  // fires so the gate is always evaluated against real-time data.
+  // Fail-open: if no candle/price data is available the check is skipped
+  // (same behaviour as the main-loop gate).
+  if (S.config.decisionMode === "conviction") {
+    const _proxLivePrice = candles.length > 0
+      ? candles[candles.length - 1].c
+      : (getCachedPrediction(sym)?.price ?? null);
+    const _proxAtrPct = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
+    const _prox = computeStrikeProximityGate({
+      livePrice:       _proxLivePrice,
+      kalshiStrike:    kalshiTarget,
+      direction,
+      thresholdPct:    getEffectiveProximityThreshold(sym, S.config),
+      atrPct:          _proxAtrPct,
+      atrScaleEnabled: S.config.strikeProximityAtrScale ?? true,
+    });
+    if (_prox.blocked) {
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction proximity re-check: max-bet token restored");
+      }
+      logger.warn(
+        {
+          sym, direction, windowKey,
+          gapPct:             _prox.gapPct?.toFixed(4),
+          effectiveThreshold: _prox.effectiveThreshold.toFixed(4),
+          livePrice:          _proxLivePrice,
+          kalshiStrike:       kalshiTarget,
+        },
+        "[kalshi-bot] conviction proximity re-check: price too close to strike — order aborted",
+      );
+      return;
+    }
+    logger.info(
+      {
+        sym, direction, windowKey,
+        gapPct:             _prox.gapPct?.toFixed(4) ?? "n/a",
+        effectiveThreshold: _prox.effectiveThreshold.toFixed(4),
+      },
+      "[kalshi-bot] conviction proximity re-check: gap OK — proceeding",
     );
   }
 
