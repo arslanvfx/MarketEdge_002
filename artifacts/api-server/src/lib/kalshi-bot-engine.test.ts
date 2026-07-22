@@ -56,6 +56,7 @@ import {
   applyLockPrice082Migration,
   deriveConvictionZone,
   computeStrikeProximityGate,
+  checkConvictionOneSidedBook,
   type BotConfig,
   type CorePairInputs,
   type CircuitBreakerState,
@@ -2121,4 +2122,92 @@ test("lockPrice082Migration: config with kalshiLockPrice=0.82 (already low) → 
   assert.equal(result.migrated, false); // was already below 0.88
   assert.equal(config.kalshiLockPrice, 0.82); // unchanged
   assert.equal(config.kalshiLockPriceCap, 0.91);
+});
+
+// ---------------------------------------------------------------------------
+// checkConvictionOneSidedBook
+// Covers the Kalshi one-sided orderbook fix: market makers often rest bids
+// but not asks (or vice-versa) for strongly in-the-money directions.
+// A YES bid of 0.999 or a YES ask of 0.001 should NOT trigger a "price
+// reversed" abort — the available side confirms the direction is in zone.
+// ---------------------------------------------------------------------------
+
+test("one-sided book YES: ask=null, bid ≥ lockPrice → oneSidedConfirmed=true, side=bid", () => {
+  // Production case: BTC/BNB YES — freshYesAsk=null, freshYesBid=0.999
+  const r = checkConvictionOneSidedBook("yes", null, 0.999, 0.82);
+  assert.equal(r.oneSidedConfirmed, true);
+  assert.equal(r.side, "bid");
+});
+
+test("one-sided book YES: ask=null, bid exactly at lockPrice → oneSidedConfirmed=true", () => {
+  const r = checkConvictionOneSidedBook("yes", null, 0.82, 0.82);
+  assert.equal(r.oneSidedConfirmed, true);
+  assert.equal(r.side, "bid");
+});
+
+test("one-sided book YES: ask=null, bid below lockPrice → oneSidedConfirmed=false (price may have reversed)", () => {
+  // bid=0.81 < lockPrice=0.82 → cannot confirm direction is safe
+  const r = checkConvictionOneSidedBook("yes", null, 0.81, 0.82);
+  assert.equal(r.oneSidedConfirmed, false);
+  assert.equal(r.side, null);
+});
+
+test("one-sided book YES: both null → oneSidedConfirmed=false (no side to confirm)", () => {
+  const r = checkConvictionOneSidedBook("yes", null, null, 0.82);
+  assert.equal(r.oneSidedConfirmed, false);
+  assert.equal(r.side, null);
+});
+
+test("one-sided book YES: ask present → normal two-sided book, oneSidedConfirmed=false", () => {
+  // When ask is present the primary ref price path applies — no bypass needed
+  const r = checkConvictionOneSidedBook("yes", 0.85, 0.84, 0.82);
+  assert.equal(r.oneSidedConfirmed, false);
+  assert.equal(r.side, null);
+});
+
+test("one-sided book NO: bid=null, ask ≤ (1−lockPrice) → oneSidedConfirmed=true, side=ask", () => {
+  // Production case: NEAR NO — freshYesAsk=0.001, freshYesBid=null
+  // (1−lockPrice) = 1−0.82 = 0.18; ask=0.001 ≤ 0.18 → NO price ≈ 0.999
+  const r = checkConvictionOneSidedBook("no", 0.001, null, 0.82);
+  assert.equal(r.oneSidedConfirmed, true);
+  assert.equal(r.side, "ask");
+});
+
+test("one-sided book NO: bid=null, ask exactly at (1−lockPrice) → oneSidedConfirmed=true", () => {
+  // ask=0.18, lockPrice=0.82 → 1−lockPrice=0.18, ask≤0.18 → confirmed
+  const r = checkConvictionOneSidedBook("no", 0.18, null, 0.82);
+  assert.equal(r.oneSidedConfirmed, true);
+  assert.equal(r.side, "ask");
+});
+
+test("one-sided book NO: bid=null, ask above (1−lockPrice) → oneSidedConfirmed=false (price may have reversed)", () => {
+  // ask=0.25, lockPrice=0.82 → 1−lockPrice=0.18; 0.25 > 0.18 → price reversed
+  const r = checkConvictionOneSidedBook("no", 0.25, null, 0.82);
+  assert.equal(r.oneSidedConfirmed, false);
+  assert.equal(r.side, null);
+});
+
+test("one-sided book NO: both null → oneSidedConfirmed=false (no side to confirm)", () => {
+  const r = checkConvictionOneSidedBook("no", null, null, 0.82);
+  assert.equal(r.oneSidedConfirmed, false);
+  assert.equal(r.side, null);
+});
+
+test("one-sided book NO: bid present → normal two-sided book, oneSidedConfirmed=false", () => {
+  // When bid is present the primary ref price (1−bid) applies — no bypass needed
+  const r = checkConvictionOneSidedBook("no", 0.07, 0.06, 0.82);
+  assert.equal(r.oneSidedConfirmed, false);
+  assert.equal(r.side, null);
+});
+
+test("one-sided book YES: ask=null, bid=0.999, higher lockPrice=0.92 → still confirmed (bid ≥ lockPrice)", () => {
+  const r = checkConvictionOneSidedBook("yes", null, 0.999, 0.92);
+  assert.equal(r.oneSidedConfirmed, true);
+  assert.equal(r.side, "bid");
+});
+
+test("one-sided book NO: bid=null, ask=0.05, lockPrice=0.88 → oneSidedConfirmed=true (1−0.88=0.12, 0.05≤0.12)", () => {
+  const r = checkConvictionOneSidedBook("no", 0.05, null, 0.88);
+  assert.equal(r.oneSidedConfirmed, true);
+  assert.equal(r.side, "ask");
 });

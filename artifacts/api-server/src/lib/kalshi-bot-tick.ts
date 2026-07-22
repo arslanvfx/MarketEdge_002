@@ -20,6 +20,7 @@ import {
   computeExtremeCautionNoAskCeiling,
   selectTimeBetBracket,
   evaluateYesBidFloorAbort,
+  checkConvictionOneSidedBook,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -2010,14 +2011,43 @@ async function _runBotTick(
     // (Guard 3 above uses ±0.005 only as a pre-filter on the poller price;
     // this gate is the authoritative check.)
     const GATE_BUFFER = 0;
+
+    // One-sided orderbook bypass:
+    // Kalshi market makers frequently rest bids but not asks (or vice-versa)
+    // when one direction is strongly in-the-money.  For example:
+    //   YES bet: freshYesAsk=null, freshYesBid=0.999 — no one selling YES,
+    //     but bid of 99.9¢ proves the price has NOT reversed below the floor.
+    //   NO bet:  freshYesBid=null, freshYesAsk=0.001 — NO price (1−ask) ≈ 1.
+    // When the primary ref price is null the belowFloor condition always fires
+    // (null < floor is treated as true), aborting every order even though the
+    // available side confirms the direction.  checkConvictionOneSidedBook
+    // detects this pattern; when confirmed we skip both the belowFloor and
+    // aboveCap aborts (we cannot determine above-cap from one side alone).
+    // The subsequent cross-checks (evaluateYesBidFloorAbort, NO-ask bounce)
+    // remain active for further validation.
+    const { oneSidedConfirmed, side: oneSidedSide } = checkConvictionOneSidedBook(
+      direction, freshYesAsk, freshYesBid, lockPrice,
+    );
+    if (oneSidedConfirmed) {
+      logger.info(
+        {
+          sym, direction, windowKey, oneSidedSide,
+          freshYesAsk, freshYesBid, lockPrice, lockPriceCap,
+        },
+        "[kalshi-bot] conviction live-price gate: one-sided book — direction confirmed by available side, proceeding",
+      );
+    }
+
     // Split zone check into two independent conditions:
     //   belowFloor — price reversed back through the entry floor (dangerous: abort)
     //   aboveCap   — price moved further PAST the cap in our direction (good: continue)
     // Previously both were treated as "!inWindow → abort", which meant every
     // NO bet at 97–99¢ was killed even though the market had moved MORE in our
     // favor and the FOK at the capped limit was still achievable.
-    const belowFloor = freshRefPrice == null || freshRefPrice < lockPrice - GATE_BUFFER;
-    const aboveCap   = freshRefPrice != null && freshRefPrice > lockPriceCap + GATE_BUFFER;
+    // When oneSidedConfirmed=true both conditions are bypassed — the available
+    // side already confirms the direction is safe.
+    const belowFloor = !oneSidedConfirmed && (freshRefPrice == null || freshRefPrice < lockPrice - GATE_BUFFER);
+    const aboveCap   = !oneSidedConfirmed && freshRefPrice != null && freshRefPrice > lockPriceCap + GATE_BUFFER;
 
     if (belowFloor) {
       // Price reversed back through the entry floor — abort and clear lock so

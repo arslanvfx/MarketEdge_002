@@ -1995,6 +1995,53 @@ export function evaluateYesBidFloorAbort(
 }
 
 /**
+ * Detects a one-sided Kalshi orderbook and confirms the conviction direction
+ * from the available side alone.
+ *
+ * Kalshi market makers frequently rest bids but NOT asks (or vice-versa) when
+ * one direction is strongly in-the-money.  For example:
+ *
+ *   YES bet  — freshYesAsk=null,  freshYesBid=0.999
+ *     → Nobody is selling YES (ask absent), but there IS a buyer at 99.9¢.
+ *     → In a non-crossed market, ask ≥ bid ≥ lockPrice → price has NOT
+ *       reversed below the conviction floor.  Safe to proceed.
+ *
+ *   NO bet   — freshYesBid=null,  freshYesAsk=0.001
+ *     → Nobody is bidding for YES (bid absent), YES ask is 0.1¢.
+ *     → NO price = 1 − 0.001 = 0.999 ≥ lockPrice → conviction zone confirmed.
+ *
+ * Returns { oneSidedConfirmed: true, side } when the available side confirms
+ * the direction.  Callers should skip the belowFloor / aboveCap zone abort
+ * when oneSidedConfirmed is true — we cannot safely determine above-cap from
+ * a single side, so both checks are waived and the subsequent cross-checks
+ * (evaluateYesBidFloorAbort, NO-ask bounce) handle the remaining validation.
+ */
+export function checkConvictionOneSidedBook(
+  direction: "yes" | "no",
+  freshYesAsk: number | null,
+  freshYesBid: number | null,
+  lockPrice: number,
+): { oneSidedConfirmed: boolean; side: "bid" | "ask" | null } {
+  if (
+    direction === "yes" &&
+    freshYesAsk == null &&
+    freshYesBid != null &&
+    freshYesBid >= lockPrice
+  ) {
+    return { oneSidedConfirmed: true, side: "bid" };
+  }
+  if (
+    direction === "no" &&
+    freshYesBid == null &&
+    freshYesAsk != null &&
+    freshYesAsk <= 1 - lockPrice
+  ) {
+    return { oneSidedConfirmed: true, side: "ask" };
+  }
+  return { oneSidedConfirmed: false, side: null };
+}
+
+/**
  * Computes the NO-ask ceiling used in the YES Extreme Caution complement check.
  *
  * When Extreme Caution is enabled and direction is YES, the derived NO ask
