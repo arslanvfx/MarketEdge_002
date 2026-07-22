@@ -2253,6 +2253,38 @@ async function _runBotTick(
     }
   }
 
+  // ── Conviction adverse-momentum gate ─────────────────────────────────────
+  // Runs ALWAYS in conviction mode (independent of regularBetTrajectoryEnabled).
+  // Blocks entry when the spot price is falling toward the Kalshi strike fast
+  // enough that it is projected to cross before window close — even if the
+  // Kalshi YES price is still inside the 82–91¢ conviction zone.
+  // Uses the same computeTrajectoryGate / computeAdverseMomentumGate logic
+  // but with convictionMomentumGateEnabled as the master toggle so it can be
+  // turned off in the bot config without touching regularBetTrajectoryEnabled.
+  if (S.config.decisionMode === "conviction" &&
+      (S.config.convictionMomentumGateEnabled ?? true) &&
+      kalshiTarget != null && candles.length >= 2) {
+    const _convTrajLiveP  = candles[candles.length - 1].c;
+    const _convTrajWkMs   = new Date(windowKey).getTime();
+    const _convTrajClockS = isNaN(_convTrajWkMs) ? 0 : (Date.now() - _convTrajWkMs) / 1000;
+    const convTraj = computeTrajectoryGate(sym, candles, _convTrajLiveP, kalshiTarget, direction, _convTrajClockS, S.config, "regular");
+    coinTrajectoryCache.set(sym, convTraj);
+    if (convTraj.blocked) {
+      logger.info(
+        {
+          sym, direction,
+          reason: convTraj.reason,
+          velocity: convTraj.velocity.toFixed(4),
+          currentMarginPct: convTraj.currentMarginPct.toFixed(4),
+          projectedMarginPct: convTraj.projectedMarginPct.toFixed(4),
+          minutesRemaining: convTraj.minutesRemaining.toFixed(2),
+        },
+        "[kalshi-bot] conviction: adverse momentum — projected to cross strike before close — BLOCKED",
+      );
+      return;
+    }
+  }
+
   // Trajectory gate — regular bets: block if price is trending dangerously into target.
   // Use live-patched last candle close — always fresher than predCache.price.
   if (S.config.regularBetTrajectoryEnabled && kalshiTarget != null && candles.length >= 2) {

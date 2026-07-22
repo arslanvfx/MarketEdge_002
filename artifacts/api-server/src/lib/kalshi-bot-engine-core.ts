@@ -1432,7 +1432,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   strikeProximityMinPct: 0.30,
   strikeProximityAtrScale: true,
   strikeProximityMinPctOverrides: {},
-  convictionMomentumGateEnabled: false,
+  convictionMomentumGateEnabled: true,
   convictionMomentumLookbackMinutes: 3,
   convictionMomentumSafetyFactor: 0.6,
   minHoldMinutes: 4,

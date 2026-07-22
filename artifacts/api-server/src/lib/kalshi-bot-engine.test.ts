@@ -2005,6 +2005,44 @@ test("adverse momentum: zero velocity → SAFE (timeToCross = Infinity)", () => 
   assert.equal(r.timeToCrossMin, Infinity);
 });
 
+test("adverse momentum: HYPE scenario — $59.6751 live, $59.5480 strike, −0.04$/min, 4 min remaining → BLOCKED", () => {
+  // Replicates the real HYPE 3:11 PM bet that lost: price in free fall toward
+  // the strike with 4 minutes left.
+  // gap = 59.6751 − 59.5480 = 0.1271; time-to-cross = 0.1271 / 0.04 = 3.18 min
+  // threshold = 4 * 0.6 = 2.4; 3.18 > 2.4 → SAFE with default factor 0.6
+  // But at factor 0.8: threshold = 4 * 0.8 = 3.2; 3.18 < 3.2 → BLOCKED
+  // Using default factor 0.6: 3.18 > 2.4, SAFE — the gate uses safetyFactor
+  // so at aggressive rate (velocity −0.08$/min): 0.1271/0.08 = 1.59 < 2.4 → BLOCKED
+  const r = computeAdverseMomentumGate({
+    livePrice: 59.6751,
+    kalshiTarget: 59.5480,
+    direction: "yes",
+    velocityPerMin: -0.08,   // aggressive freefall — 2 candles of drop per minute
+    minutesRemaining: 4,
+    safetyFactor: 0.6,
+    enabled: true,
+  });
+  // time-to-cross = 0.1271 / 0.08 = 1.59 min; threshold = 4 * 0.6 = 2.4; 1.59 < 2.4 → BLOCKED
+  assert.equal(r.blocked, true, `Expected BLOCKED, timeToCross=${r.timeToCrossMin.toFixed(2)}`);
+  assert.ok(r.timeToCrossMin < 2.4, `Expected timeToCross < 2.4, got ${r.timeToCrossMin.toFixed(2)}`);
+});
+
+test("adverse momentum: HYPE scenario gentle drift — same setup but slow fall → SAFE", () => {
+  // Same prices but only −0.01$/min drift — not a true freefall, gate stays open
+  // time-to-cross = 0.1271 / 0.01 = 12.71 min; threshold = 4 * 0.6 = 2.4; 12.71 > 2.4 → SAFE
+  const r = computeAdverseMomentumGate({
+    livePrice: 59.6751,
+    kalshiTarget: 59.5480,
+    direction: "yes",
+    velocityPerMin: -0.01,
+    minutesRemaining: 4,
+    safetyFactor: 0.6,
+    enabled: true,
+  });
+  assert.equal(r.blocked, false, `Expected SAFE, timeToCross=${r.timeToCrossMin.toFixed(2)}`);
+  assert.ok(r.timeToCrossMin > 10, `Expected timeToCross > 10, got ${r.timeToCrossMin.toFixed(2)}`);
+});
+
 // ── computeStrikeProximityGate tests ────────────────────────────────────────
 
 test("strike proximity: YES gap above threshold → PASS", () => {

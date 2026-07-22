@@ -683,6 +683,29 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       );
                     })()}
 
+                    {/* Freefall Gate */}
+                    <div className="flex items-center justify-between mt-1">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                          <TrendingDown className="w-3 h-3 text-rose-400" />
+                          Freefall Gate
+                        </span>
+                        <span className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                          Blocks entry when spot price is falling toward the strike fast enough to cross before window close.
+                          Checks velocity on every tick — not just the final minutes.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, convictionMomentumGateEnabled: !(merged.convictionMomentumGateEnabled ?? true) }))}
+                        className={`ml-4 shrink-0 rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.convictionMomentumGateEnabled ?? true)
+                          ? "bg-rose-500/15 border-rose-500/40 text-rose-300"
+                          : "bg-muted/30 border-border text-muted-foreground"}`}
+                      >
+                        {(merged.convictionMomentumGateEnabled ?? true) ? "On" : "Off"}
+                      </button>
+                    </div>
+
                     {/* Allow Late Entries */}
                     <div className="flex items-center justify-between mt-1">
                       <div className="flex flex-col gap-0.5">
