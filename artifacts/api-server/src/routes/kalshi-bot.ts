@@ -11,6 +11,7 @@ import {
   getBotAllHistory,
   getBotStats,
   getBotTrend,
+  getBotGapAnalytics,
   getWindowEvaluation,
   getPerformanceReport,
   getBotAutoTuneLog,
@@ -1227,6 +1228,21 @@ router.get("/crypto/bot/trend", async (req, res) => {
   try {
     const points = await getBotTrend(limit, mode, resetAt);
     res.json(points);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/gap-analytics?mode=paper|live
+// Returns win/loss breakdown by strike-proximity gap band (and per coin)
+router.get("/crypto/bot/gap-analytics", async (req, res) => {
+  const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
+  const cfg = getBotState().config;
+  const resetAt = mode === "live" ? (cfg.liveStatsResetAt ?? null) : mode === "paper" ? (cfg.paperStatsResetAt ?? null) : null;
+  try {
+    const data = await getBotGapAnalytics(mode, resetAt);
+    res.json(data);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

@@ -30,6 +30,8 @@ import { BotStepsPanel } from "./bot/bot-steps";
 import { CoinSignalBoard } from "./bot/coin-signal-board";
 import { KalshiLiveTickerPanel } from "./bot/kalshi-live-ticker-panel";
 import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
+import { GapAnalyticsPanel } from "./bot/gap-analytics-panel";
+import type { GapAnalyticsResult } from "./bot/types";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -245,6 +247,13 @@ export default function BotDashboard() {
     queryFn: () => fetch(`${API_BASE}/crypto/bot/entry-timing`).then(r => r.json()),
     refetchInterval: 15 * 60_000,
     staleTime: 5 * 60_000,
+  });
+
+  const { data: gapAnalyticsData } = useQuery<GapAnalyticsResult>({
+    queryKey: ["bot-gap-analytics", activeMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/gap-analytics?mode=${activeMode}`).then(r => r.json()),
+    refetchInterval: 5 * 60_000,
+    staleTime: 2 * 60_000,
   });
 
   const { data: autoTuneLogData } = useQuery<{ entries: AutoTuneLogEntry[] }>({
@@ -749,6 +758,10 @@ export default function BotDashboard() {
           setHistoryMode={setHistoryMode}
           histSourceFilter={histSourceFilter}
           setHistSourceFilter={setHistSourceFilter}
+          activeMode={activeMode}
+        />
+        <GapAnalyticsPanel
+          data={gapAnalyticsData}
           activeMode={activeMode}
         />
         <PerformanceInsights

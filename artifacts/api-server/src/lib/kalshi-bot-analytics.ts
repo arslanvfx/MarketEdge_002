@@ -868,3 +868,99 @@ export async function getPhaseStatus(phase: number, phaseStartedAt: string | nul
     };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Gap analytics — win/loss breakdown by strike-proximity gap band
+// Gap = |cryptoPriceAtEntry − kalshiTarget| / kalshiTarget × 100
+// ---------------------------------------------------------------------------
+
+export interface GapBandRow {
+  band: string;
+  lowerPct: number;
+  upperPct: number;   // 9999 for the open-ended top band
+  bets: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+}
+
+export interface GapAnalyticsResult {
+  bands: GapBandRow[];
+  byCoin: Record<string, GapBandRow[]>;
+  totalBets: number;
+  lastUpdated: string;
+}
+
+const GAP_BANDS_DEF = [
+  { band: "0–2%",   lower: 0,  upper: 2   },
+  { band: "2–5%",   lower: 2,  upper: 5   },
+  { band: "5–10%",  lower: 5,  upper: 10  },
+  { band: "10–20%", lower: 10, upper: 20  },
+  { band: "20%+",   lower: 20, upper: Infinity },
+] as const;
+
+export async function getBotGapAnalytics(filterMode?: BotMode, resetAt?: string | null): Promise<GapAnalyticsResult> {
+  try {
+    const modeClause  = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
+    const resetClause = resetAt    ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}` : sql``;
+
+    const rows = await db
+      .select({
+        symbol:             kalshiBotBetsTable.symbol,
+        outcome:            kalshiBotBetsTable.outcome,
+        cryptoPriceAtEntry: kalshiBotBetsTable.cryptoPriceAtEntry,
+        kalshiTarget:       kalshiBotBetsTable.kalshiTarget,
+      })
+      .from(kalshiBotBetsTable)
+      .where(sql`
+        ${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')
+        AND ${kalshiBotBetsTable.outcome} IN ('win', 'loss')
+        AND ${kalshiBotBetsTable.cryptoPriceAtEntry} IS NOT NULL
+        AND ${kalshiBotBetsTable.kalshiTarget} IS NOT NULL
+        AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}${resetClause}
+      `);
+
+    type Processed = { symbol: string; outcome: string; gapPct: number };
+    const processed: Processed[] = [];
+    for (const r of rows) {
+      const crypto = parseFloat(String(r.cryptoPriceAtEntry ?? "0"));
+      const target = parseFloat(String(r.kalshiTarget ?? "0"));
+      if (target > 0 && crypto > 0) {
+        processed.push({
+          symbol:  r.symbol,
+          outcome: r.outcome as string,
+          gapPct:  Math.abs(crypto - target) / target * 100,
+        });
+      }
+    }
+
+    function buildBands(src: Processed[]): GapBandRow[] {
+      return GAP_BANDS_DEF.map(({ band, lower, upper }) => {
+        const inBand = src.filter(r => r.gapPct >= lower && r.gapPct < upper);
+        const wins   = inBand.filter(r => r.outcome === "win").length;
+        const losses = inBand.filter(r => r.outcome === "loss").length;
+        const bets   = wins + losses;
+        return {
+          band,
+          lowerPct:  lower,
+          upperPct:  upper === Infinity ? 9999 : upper,
+          bets,
+          wins,
+          losses,
+          winRate: bets > 0 ? wins / bets : null,
+        };
+      });
+    }
+
+    const bands   = buildBands(processed);
+    const symbols = [...new Set(processed.map(r => r.symbol))].sort();
+    const byCoin: Record<string, GapBandRow[]> = {};
+    for (const sym of symbols) {
+      byCoin[sym] = buildBands(processed.filter(r => r.symbol === sym)).filter(b => b.bets > 0);
+    }
+
+    return { bands, byCoin, totalBets: processed.length, lastUpdated: new Date().toISOString() };
+  } catch {
+    return { bands: [], byCoin: {}, totalBets: 0, lastUpdated: new Date().toISOString() };
+  }
+}

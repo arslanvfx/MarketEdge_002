@@ -378,6 +378,23 @@ export interface CoinSignals {
   claudeEnabled: boolean;
 }
 
+export interface GapBandRow {
+  band: string;
+  lowerPct: number;
+  upperPct: number;
+  bets: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+}
+
+export interface GapAnalyticsResult {
+  bands: GapBandRow[];
+  byCoin: Record<string, GapBandRow[]>;
+  totalBets: number;
+  lastUpdated: string;
+}
+
 export interface CoinStabilityResult {
   stable: boolean;
   er: number;

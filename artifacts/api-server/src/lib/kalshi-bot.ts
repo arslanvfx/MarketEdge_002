@@ -40,7 +40,9 @@ export {
   getConvictionStabilityAnalysis,
   getPhaseStatus,
   SCALE_PHASE_PRESETS,
+  getBotGapAnalytics,
 } from "./kalshi-bot-analytics";
+export type { GapBandRow, GapAnalyticsResult } from "./kalshi-bot-analytics";
 export type {
   TrendPoint,
   CoinBotStats,

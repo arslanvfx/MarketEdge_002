@@ -407,6 +407,27 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       {isPendingEval && (
                         <span className="text-amber-400/70">· awaiting window close price</span>
                       )}
+                      {/* Strike-proximity gap — how far the crypto price was from the Kalshi strike when the bet was placed */}
+                      {!isSkip && !isShadow && (() => {
+                        const entryPx  = r.cryptoPriceAtEntry != null ? parseFloat(r.cryptoPriceAtEntry) : null;
+                        const strikePx = r.kalshiTarget != null ? parseFloat(r.kalshiTarget) : null;
+                        if (entryPx == null || strikePx == null || strikePx === 0) return null;
+                        const gapPct     = Math.abs(entryPx - strikePx) / strikePx * 100;
+                        const aboveStrike = entryPx >= strikePx;
+                        const gapColor   = gapPct < 2  ? "text-red-400/70"
+                                         : gapPct < 5  ? "text-amber-400/70"
+                                         : gapPct < 10 ? "text-sky-400/70"
+                                         : "text-emerald-400/70";
+                        return (
+                          <span
+                            className={`flex items-center gap-1 font-mono ${gapColor}`}
+                            title={`${fmtCrypto(entryPx)} was ${gapPct.toFixed(2)}% ${aboveStrike ? "above" : "below"} the ${fmtCrypto(strikePx)} strike at entry`}
+                          >
+                            <Crosshair className="w-3 h-3 shrink-0" />
+                            {gapPct.toFixed(1)}% gap
+                          </span>
+                        );
+                      })()}
                       {r.decisionMode === "conviction" && (() => {
                         const yp       = sigs?.yesPrice as number | null ?? null;
                         const agreeing = sigs?.signalsAgreeing as number | null ?? null;
