@@ -748,6 +748,10 @@ export default function BotDashboard() {
         )}
 
 
+        <GapAnalyticsPanel
+          data={gapAnalyticsData}
+          activeMode={activeMode}
+        />
         <TransactionLog
           pagedBets={pagedBets}
           histPage={clampedHistPage}
@@ -758,10 +762,6 @@ export default function BotDashboard() {
           setHistoryMode={setHistoryMode}
           histSourceFilter={histSourceFilter}
           setHistSourceFilter={setHistSourceFilter}
-          activeMode={activeMode}
-        />
-        <GapAnalyticsPanel
-          data={gapAnalyticsData}
           activeMode={activeMode}
         />
         <PerformanceInsights

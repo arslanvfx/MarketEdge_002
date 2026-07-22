@@ -414,17 +414,20 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         if (entryPx == null || strikePx == null || strikePx === 0) return null;
                         const gapPct     = Math.abs(entryPx - strikePx) / strikePx * 100;
                         const aboveStrike = entryPx >= strikePx;
-                        const gapColor   = gapPct < 2  ? "text-red-400/70"
-                                         : gapPct < 5  ? "text-amber-400/70"
-                                         : gapPct < 10 ? "text-sky-400/70"
-                                         : "text-emerald-400/70";
+                        const gapColor   = gapPct < 0.5 ? "text-red-400/70"
+                                         : gapPct < 1   ? "text-orange-400/70"
+                                         : gapPct < 2   ? "text-amber-400/70"
+                                         : gapPct < 5   ? "text-sky-400/70"
+                                         : gapPct < 10  ? "text-emerald-400/70"
+                                         : "text-emerald-300/90";
+                        const gapDisplay = gapPct < 10 ? gapPct.toFixed(2) : gapPct.toFixed(1);
                         return (
                           <span
                             className={`flex items-center gap-1 font-mono ${gapColor}`}
-                            title={`${fmtCrypto(entryPx)} was ${gapPct.toFixed(2)}% ${aboveStrike ? "above" : "below"} the ${fmtCrypto(strikePx)} strike at entry`}
+                            title={`${fmtCrypto(entryPx)} was ${gapPct.toFixed(3)}% ${aboveStrike ? "above" : "below"} the ${fmtCrypto(strikePx)} strike at entry`}
                           >
                             <Crosshair className="w-3 h-3 shrink-0" />
-                            {gapPct.toFixed(1)}% gap
+                            {gapDisplay}% gap
                           </span>
                         );
                       })()}
