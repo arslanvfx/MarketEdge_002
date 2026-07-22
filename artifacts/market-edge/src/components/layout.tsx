@@ -180,7 +180,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               })}
             </div>
             <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
-              {spendLevel === "off" ? "Crypto: stat + ML only, no Claude" :
+              {spendLevel === "off" ? "Claude disabled · signals only" :
                spendLevel === "eco" ? "Snap · live direction · BTC call (3K)" :
                spendLevel === "balanced" ? "All crypto features · 5K thinking" :
                "All crypto · 8K thinking · 2× self-consistency"}
@@ -207,7 +207,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               </span>
             </button>
             <p className="text-[9px] text-muted-foreground/50 text-center mt-1">
-              {stockAiEnabled ? "Research · signals · sentiment active" : "Stock: stat + ML only, no Claude"}
+              {stockAiEnabled ? "Research · signals · sentiment active" : "Claude disabled · signals only"}
             </p>
           </div>
         </div>

@@ -297,11 +297,6 @@ export async function getBotLogicPerformance(filterMode?: BotMode, resetAt?: str
       result.push(toStats(modeMap.get(m) ?? { bets: 0, wins: 0, losses: 0, pnl: 0, confSum: 0, confCount: 0 }, m));
     }
 
-    for (const [m, e] of modeMap.entries()) {
-      if (!(ALL_MODES as string[]).includes(m)) {
-        result.push(toStats(e, m));
-      }
-    }
 
     return result;
   } catch {
