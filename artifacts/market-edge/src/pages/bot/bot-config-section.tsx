@@ -1032,7 +1032,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                           title="Clear override (use global)"
                                           onClick={() => {
                                             setConfigDraft(d => {
-                                              const next = { ...(d.strikeProximityMinPctOverrides ?? {}) };
+                                              const next = {
+                                                ...(merged.strikeProximityMinPctOverrides ?? {}),
+                                                ...(d.strikeProximityMinPctOverrides ?? {}),
+                                              };
                                               delete next[sym];
                                               return { ...d, strikeProximityMinPctOverrides: next };
                                             });
@@ -1054,7 +1057,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                         const raw = e.target.value.trim();
                                         const v = parseFloat(raw);
                                         setConfigDraft(d => {
-                                          const next = { ...(d.strikeProximityMinPctOverrides ?? {}) };
+                                          const next = {
+                                            ...(merged.strikeProximityMinPctOverrides ?? {}),
+                                            ...(d.strikeProximityMinPctOverrides ?? {}),
+                                          };
                                           if (raw === "" || Number.isNaN(v)) {
                                             delete next[sym];
                                           } else if (v >= 0.05 && v <= 3.00) {
