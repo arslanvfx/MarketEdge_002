@@ -1958,8 +1958,24 @@ async function _runBotTick(
       // IOC routes to market makers who fill at any price ≤ limit; GTC rests in
       // the book so the exchange fills at OUR price — below-zone fills impossible.
       usedPollerFallback = true;
+
+      // Staleness observability: log how old the poller snapshot is so operators
+      // can detect cases where the API served stale prices with fresh timestamps
+      // (e.g. during Kalshi maintenance windows).  getConvictionLivePrice already
+      // enforces a 1.5 s TTL, so this is belt-and-suspenders visibility only.
+      const pollerAgeMs = Date.now() - (pollerSnap?.fetchedAt ?? 0);
+      if (pollerAgeMs > 2_000) {
+        // Older than 2 s despite passing the 1.5 s TTL gate — clock drift or
+        // scheduling jitter.  Log prominently but proceed; the post-fill zone
+        // check (Layer 3) will catch any resulting out-of-zone fill.
+        logger.warn(
+          { sym, direction, windowKey, pollerAgeMs },
+          "[kalshi-bot] conviction live-price gate: poller snapshot older than expected — proceed with caution, post-fill zone check active",
+        );
+      }
+
       logger.info(
-        { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid, spread: spread.toFixed(3), pollerRefPrice, lockPrice, lockPriceCap },
+        { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid, spread: spread.toFixed(3), pollerRefPrice, lockPrice, lockPriceCap, pollerAgeMs },
         "[kalshi-bot] conviction live-price gate: empty book — tight spread + in-zone poller, will use FOK order",
       );
     } else {
@@ -2534,141 +2550,147 @@ async function _runBotTick(
 
         // Deviation from the zone boundary:
         //   YES bets: positive when fill < lockPrice (below floor)
-        //   NO  bets: positive when fill > lockPriceCap (above cap)
+        //   NO  bets: positive when fill < lockPrice (below floor — FOK price
+        //             improvement fills at a lower NO price than our limit cap, which
+        //             can quietly land below the conviction zone floor), OR when fill >
+        //             lockPriceCap (above cap — overpaid for NO).
+        //
+        // Root-cause note (Jul 2026 BTC incident): FOK "buy NO at up to X¢" allows
+        // Kalshi to price-improve the fill to any lower NO price.  When the poller
+        // showed stale 84¢ NO but the real market had already moved to 73¢, the FOK
+        // limit was set at 84¢ and the fill came in at 73¢ — 8¢ below the 81¢ floor.
+        // The old deviation formula (convFillPrice − lockPriceCap) returned −0.12
+        // (negative, i.e. "no deviation") for this case, so no action was taken.
+        // Fix: check for below-floor fills on NO bets explicitly.
+        const noFillBelowFloor = direction === "no" && convFillPrice < _lp;
         const fillDeviation = direction === "yes"
-          ? _lp - convFillPrice
-          : convFillPrice - _lpCap;
+          ? _lp - convFillPrice           // YES: positive when fill < floor
+          : noFillBelowFloor
+            ? _lp - convFillPrice         // NO below floor: how far below lockPrice
+            : convFillPrice - _lpCap;     // NO above cap: how far above lockPriceCap
+        const fillSide = noFillBelowFloor
+          ? "below_floor"
+          : (direction === "no" ? "above_cap" : "below_floor");
 
         if (fillDeviation > 0) {
           const thresholdCents = (S.config.convictionCatastrophicFillThresholdCents ?? 15) / 100;
           const deviationCents = fillDeviation * 100;
 
+          // Any out-of-zone fill triggers an emergency close regardless of magnitude.
+          // Previously only deviations > thresholdCents triggered a close; smaller
+          // deviations were held to settlement.  But any below-floor fill means the
+          // conviction signal was invalidated between gate check and exchange match —
+          // holding is wrong.  thresholdCents still controls log severity (ERROR vs WARN).
+          const logFields = {
+            sym, direction, windowKey,
+            convFillPrice: +convFillPrice.toFixed(4),
+            avgPrice: +result.avgPrice.toFixed(4),
+            lockPrice: _lp, lockPriceCap: _lpCap,
+            deviationCents: +deviationCents.toFixed(1),
+            thresholdCents: thresholdCents * 100,
+            contractCount, ticker: expectedTicker,
+            fillSide,
+          };
           if (fillDeviation > thresholdCents) {
-            // CATASTROPHIC deviation — the FOK was price-improved to a fill far outside
-            // the conviction zone (e.g. YES filled at 11¢ when lockPrice = 88¢).
-            // This happens when a resting sell order at a very different price appears
-            // between the pre-order gate and the actual exchange match.
-            // Action: unwind immediately via closePosition (handles P&L, balance,
-            // and DB persistence atomically with the same retry logic used everywhere).
             logger.error(
-              {
-                sym, direction, windowKey,
-                convFillPrice: +convFillPrice.toFixed(4),
-                avgPrice: +result.avgPrice.toFixed(4),
-                lockPrice: _lp, lockPriceCap: _lpCap,
-                deviationCents: +deviationCents.toFixed(1),
-                thresholdCents: thresholdCents * 100,
-                contractCount, ticker: expectedTicker,
-              },
-              "[kalshi-bot] conviction fill: CATASTROPHIC deviation — emergency closing position immediately",
+              logFields,
+              "[kalshi-bot] conviction fill: CATASTROPHIC out-of-zone fill — emergency closing position immediately",
             );
-            // Increment emergency-close counter — loop guard blocks re-entry after 2.
-            const closeCount = (convictionEmergencyCloses.get(`${sym}:${windowKey}`) ?? 0) + 1;
-            convictionEmergencyCloses.set(`${sym}:${windowKey}`, closeCount);
+          } else {
+            logger.warn(
+              logFields,
+              "[kalshi-bot] conviction fill: out-of-zone fill (price improvement landed outside zone) — emergency closing position",
+            );
+          }
 
-            // Build a temporary OpenPosition so closePosition can handle the sell,
-            // P&L calculation, balance refresh, and DB persistence uniformly.
-            // Kalshi always returns avgPrice in YES-side terms.
-            // convFillPrice = cost per contract for the direction placed:
-            //   YES → convFillPrice = result.avgPrice  (paid per YES contract)
-            //   NO  → convFillPrice = 1 - result.avgPrice  (paid per NO contract)
-            const catastrophicId = `${sym}:${windowKey}:${Date.now()}`;
-            const _catSigs = decision.signals as {
-              statAbove?: boolean | null;
-              claudeAbove?: boolean | null;
-              mlAbove?: boolean | null;
-            };
-            const catastrophicPos: OpenPosition = {
-              id: catastrophicId,
+          // Increment emergency-close counter — loop guard blocks re-entry after 2.
+          const closeCount = (convictionEmergencyCloses.get(`${sym}:${windowKey}`) ?? 0) + 1;
+          convictionEmergencyCloses.set(`${sym}:${windowKey}`, closeCount);
+
+          // Build a temporary OpenPosition so closePosition can handle the sell,
+          // P&L calculation, balance refresh, and DB persistence uniformly.
+          // Kalshi always returns avgPrice in YES-side terms.
+          // convFillPrice = cost per contract for the direction placed:
+          //   YES → convFillPrice = result.avgPrice  (paid per YES contract)
+          //   NO  → convFillPrice = 1 - result.avgPrice  (paid per NO contract)
+          const catastrophicId = `${sym}:${windowKey}:${Date.now()}`;
+          const _catSigs = decision.signals as {
+            statAbove?: boolean | null;
+            claudeAbove?: boolean | null;
+            mlAbove?: boolean | null;
+          };
+          const catastrophicPos: OpenPosition = {
+            id: catastrophicId,
+            symbol: sym,
+            windowKey,
+            ticker: expectedTicker ?? "",
+            direction,
+            entryYesPrice: result.avgPrice, // always YES-side (Kalshi convention)
+            contractCount,
+            // betAmount: cost per contract × contracts (convFillPrice = cost for either dir)
+            betAmount: contractCount * convFillPrice,
+            kalshiTarget: kalshiTarget ?? 0,
+            openedAt: Date.now(),
+            cryptoPriceAtEntry: getCachedPrediction(sym)?.price ?? null,
+            exitState: makeInitialExitState(result.avgPrice),
+            entryDecision: decision,
+            phase2Activated: false,
+            entryMode,
+            entrySignals: {
+              statAbove: _catSigs.statAbove ?? null,
+              claudeAbove: _catSigs.claudeAbove ?? null,
+              mlAbove: _catSigs.mlAbove ?? null,
+            },
+          };
+          try {
+            // closePosition: places sell order, computes P&L, updates balance +
+            // daily counters, and upserts the DB record (INSERT … ON CONFLICT DO
+            // UPDATE).  It handles the case where no prior entry INSERT exists
+            // by creating a combined entry+exit row.  gtcFallback retries as IOC
+            // on empty-book FOK failures so one thin-book tick doesn't strand us.
+            await closePosition(
+              catastrophicPos,
+              yesPrice,    // current market YES price — fallback for P&L if sell has no avgPrice
+              kalshiTarget,
+              "conviction_catastrophic_fill",
+              false,
+              { gtcFallback: true },
+            );
+            logger.info(
+              { sym, direction, contractCount, fillSide, deviationCents: +deviationCents.toFixed(1) },
+              "[kalshi-bot] conviction out-of-zone fill: position unwound via closePosition",
+            );
+            return; // Fully closed — do NOT record as open.
+          } catch (closeErr) {
+            // closePosition threw (sell failed, exchange unavailable, etc.).
+            // Record the position as open so Phase 2 / exit guard can retry the
+            // close on the very next tick instead of leaving it stranded.
+            logger.error(
+              { err: closeErr, sym, direction },
+              "[kalshi-bot] conviction out-of-zone fill: closePosition failed — tracking as open for retry next tick",
+            );
+            openPositions.set(sym, catastrophicPos);
+            // Persist an entry record so the position appears in history and
+            // evalClosedBets can reconcile the P&L once Kalshi settles.
+            persistBetRecord({
+              insertId: catastrophicId,
               symbol: sym,
               windowKey,
-              ticker: expectedTicker ?? "",
+              ticker: expectedTicker,
               direction,
-              entryYesPrice: result.avgPrice, // always YES-side (Kalshi convention)
-              contractCount,
-              // betAmount: cost per contract × contracts (convFillPrice = cost for either dir)
-              betAmount: contractCount * convFillPrice,
+              action: "conviction_catastrophic_open",
+              signals: decision.signals,
+              entryPrice: catastrophicPos.entryYesPrice,
               kalshiTarget: kalshiTarget ?? 0,
-              openedAt: Date.now(),
-              cryptoPriceAtEntry: getCachedPrediction(sym)?.price ?? null,
-              exitState: makeInitialExitState(result.avgPrice),
-              entryDecision: decision,
-              phase2Activated: false,
-              entryMode,
-              entrySignals: {
-                statAbove: _catSigs.statAbove ?? null,
-                claudeAbove: _catSigs.claudeAbove ?? null,
-                mlAbove: _catSigs.mlAbove ?? null,
-              },
-            };
-            try {
-              // closePosition: places sell order, computes P&L, updates balance +
-              // daily counters, and upserts the DB record (INSERT … ON CONFLICT DO
-              // UPDATE).  It handles the case where no prior entry INSERT exists
-              // by creating a combined entry+exit row.  gtcFallback retries as IOC
-              // on empty-book FOK failures so one thin-book tick doesn't strand us.
-              await closePosition(
-                catastrophicPos,
-                yesPrice,    // current market YES price — fallback for P&L if sell has no avgPrice
-                kalshiTarget,
-                "conviction_catastrophic_fill",
-                false,
-                { gtcFallback: true },
-              );
-              logger.info(
-                { sym, direction, contractCount },
-                "[kalshi-bot] conviction catastrophic fill: position unwound via closePosition",
-              );
-              return; // Fully closed — do NOT record as open.
-            } catch (closeErr) {
-              // closePosition threw (sell failed, exchange unavailable, etc.).
-              // Record the position as open so Phase 2 / exit guard can retry the
-              // close on the very next tick instead of leaving it stranded.
-              logger.error(
-                { err: closeErr, sym, direction },
-                "[kalshi-bot] conviction catastrophic fill: closePosition failed — tracking as open for retry next tick",
-              );
-              openPositions.set(sym, catastrophicPos);
-              // Persist an entry record so the position appears in history and
-              // evalClosedBets can reconcile the P&L once Kalshi settles.
-              persistBetRecord({
-                insertId: catastrophicId,
-                symbol: sym,
-                windowKey,
-                ticker: expectedTicker,
-                direction,
-                action: "conviction_catastrophic_open",
-                signals: decision.signals,
-                entryPrice: catastrophicPos.entryYesPrice,
-                kalshiTarget: kalshiTarget ?? 0,
-                contractCount,
-                betAmount: catastrophicPos.betAmount,
-                mode: S.botMode,
-                decisionMode: S.config.decisionMode,
-                entryYesPrice: result.avgPrice,
-              }).catch((dbErr: unknown) => {
-                logger.warn({ err: dbErr, sym }, "[kalshi-bot] conviction catastrophic fill: entry persist error (non-fatal)");
-              });
-              return; // Tracked as open; Phase 2 will close it.
-            }
-          } else {
-            // Minor below-floor deviation (e.g. 86¢ fill when lockPrice = 88¢).
-            // Selling immediately crystalizes a spread loss and re-enables entry
-            // so the loop may repeat; holding is far better when deviation is small.
-            // A lower NO fill price still wins if YES closes below target.
-            logger.warn(
-              {
-                sym, direction, windowKey,
-                convFillPrice: +convFillPrice.toFixed(4),
-                avgPrice: +result.avgPrice.toFixed(4),
-                lockPrice: _lp, lockPriceCap: _lpCap,
-                deviationCents: +deviationCents.toFixed(1),
-                thresholdCents: thresholdCents * 100,
-                contractCount, ticker: expectedTicker,
-              },
-              "[kalshi-bot] conviction fill: minor below-floor deviation — holding position to settlement",
-            );
-            // Fall through: position is recorded as open and held until settlement.
+              contractCount,
+              betAmount: catastrophicPos.betAmount,
+              mode: S.botMode,
+              decisionMode: S.config.decisionMode,
+              entryYesPrice: result.avgPrice,
+            }).catch((dbErr: unknown) => {
+              logger.warn({ err: dbErr, sym }, "[kalshi-bot] conviction out-of-zone fill: entry persist error (non-fatal)");
+            });
+            return; // Tracked as open; Phase 2 will close it.
           }
         }
       }
