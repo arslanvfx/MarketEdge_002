@@ -992,6 +992,8 @@ export interface BotConfig {
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
+  convictionZoneFloorBuffer?: number; // conviction only: how far below kalshiLockPrice the pre-order gate still passes (default 0.01 = 1¢); absoluteMin = lockPrice − buffer; emergency close still uses strict lockPrice
+  convictionZoneCapBuffer?: number;   // conviction only: how far above kalshiLockPriceCap the pre-order gate still passes (default 0.04 = 4¢); absoluteMax = lockPriceCap + buffer; FOK limit set to absoluteMax; emergency close still uses strict lockPriceCap
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
   scalePhase?: number;             // scaling phase tracker: 1=test ($3/$6), 2=build ($7/$15), 3=full ($10/$25); default 1

@@ -1806,6 +1806,16 @@ async function _runBotTick(
       S.config.kalshiLockPrice    ?? 0.82,
       S.config.kalshiLockPriceCap ?? 0.91,
     );
+    // Absolute entry range: [absoluteMin, absoluteMax]
+    //   absoluteMin = lockPrice    − floorBuffer  (enter even if price is slightly below floor)
+    //   absoluteMax = lockPriceCap + capBuffer    (enter even if price is slightly above cap)
+    // Both are hard limits for the pre-order gate and FOK limit price.
+    // The post-fill emergency close always uses the strict [lockPrice, lockPriceCap] zone —
+    // the buffers are purely pre-order tolerances, not a relaxation of fill quality.
+    const _floorBuf = S.config.convictionZoneFloorBuffer ?? 0.01;
+    const _capBuf   = S.config.convictionZoneCapBuffer   ?? 0.04;
+    const absoluteMin = +( lockPrice    - _floorBuf ).toFixed(4);
+    const absoluteMax = +( lockPriceCap + _capBuf   ).toFixed(4);
     // expectedTicker already computed above (hoisted). Re-used here for OB fetch.
 
     const freshData = getKalshiCachedData(sym);
@@ -1935,15 +1945,15 @@ async function _runBotTick(
         direction === "yes"
           ? pYesAsk
           : 1 - pYesBid;
-      if (pollerRefPrice < lockPrice - 0.005 || pollerRefPrice > lockPriceCap + 0.005) {
+      if (pollerRefPrice < absoluteMin - 0.005 || pollerRefPrice > absoluteMax + 0.005) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         if (boostBetSize != null) {
           maxBetWindowToken.remaining++;
           logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book, poller out of zone)");
         }
         logger.info(
-          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap },
-          "[kalshi-bot] conviction live-price gate: empty book — poller price out of zone, releasing lock for retry",
+          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap, absoluteMin, absoluteMax },
+          "[kalshi-bot] conviction live-price gate: empty book — poller price out of absolute range, releasing lock for retry",
         );
         return;
       }
@@ -2014,21 +2024,23 @@ async function _runBotTick(
       direction === "yes"
         ? freshYesAsk
         : freshYesBid != null ? 1 - freshYesBid : null;
-    // Strict zone enforcement: gate passes ONLY when price is within
-    // [lockPrice, lockPriceCap] with no tolerance.
+    // Absolute range enforcement using the configured buffers.
+    // The pre-order gate uses [absoluteMin, absoluteMax] (computed from lockPrice/lockPriceCap
+    // + convictionZoneFloorBuffer/convictionZoneCapBuffer above).  This lets the operator
+    // widen the acceptable entry window beyond the strict core zone without changing
+    // the post-fill emergency close logic (which always uses [lockPrice, lockPriceCap]).
     //
     // NOTE (2026-07-17): Kalshi now quotes SUB-CENT prices (observed
     // yesBid=0.045 → NO ask 0.955) but ORDER prices are still integer-cent.
     // A NO fill ≤ cap requires a YES-sell limit of ceil((1−cap)·100)/100
     // (e.g. 0.05 for cap 0.95), which cannot fill against a sub-cent bid like
-    // 0.045.  So any tolerance here (e.g. passing 0.955) would let the gate
+    // 0.045.  So any tolerance here that exceeds 1 cent would let the gate
     // approve orders that are physically unfillable on the cent grid → FOK
     // kill → retry exhaustion → windowFailedFills lockout for the rest of the
-    // window.  Strict 0 keeps this gate coherent with the order-limit clamp
-    // below: gate passes ⟺ a fill inside the zone is actually achievable.
+    // window.  The buffers default to 1¢ (floor) and 4¢ (cap), which keeps this
+    // gate coherent with the order-limit clamp below.
     // (Guard 3 above uses ±0.005 only as a pre-filter on the poller price;
-    // this gate is the authoritative check.)
-    const GATE_BUFFER = 0;
+    // this gate is the authoritative check on absoluteMin/absoluteMax.)
 
     // One-sided orderbook bypass:
     // Kalshi market makers frequently rest bids but not asks (or vice-versa)
@@ -2044,28 +2056,28 @@ async function _runBotTick(
     // The subsequent cross-checks (evaluateYesBidFloorAbort, NO-ask bounce)
     // remain active for further validation.
     const { oneSidedConfirmed, side: oneSidedSide } = checkConvictionOneSidedBook(
-      direction, freshYesAsk, freshYesBid, lockPrice,
+      direction, freshYesAsk, freshYesBid, absoluteMin,
     );
     if (oneSidedConfirmed) {
       logger.info(
         {
           sym, direction, windowKey, oneSidedSide,
-          freshYesAsk, freshYesBid, lockPrice, lockPriceCap,
+          freshYesAsk, freshYesBid, lockPrice, lockPriceCap, absoluteMin, absoluteMax,
         },
         "[kalshi-bot] conviction live-price gate: one-sided book — direction confirmed by available side, proceeding",
       );
     }
 
-    // Split zone check into two independent conditions:
-    //   belowFloor — price reversed back through the entry floor (dangerous: abort)
-    //   aboveCap   — price moved further PAST the cap in our direction (good: continue)
-    // Previously both were treated as "!inWindow → abort", which meant every
-    // NO bet at 97–99¢ was killed even though the market had moved MORE in our
-    // favor and the FOK at the capped limit was still achievable.
+    // Split range check into two independent conditions:
+    //   belowFloor — price reversed back below absoluteMin (dangerous: abort)
+    //   aboveCap   — price moved past absoluteMax in our direction (abort)
+    // Uses absoluteMin/absoluteMax (which include the configured buffers) so that
+    // entries at e.g. 81¢ (floorBuffer=1¢ below lockPrice=82¢) or 89¢
+    // (capBuffer=4¢ above lockPriceCap=85¢) still pass the gate.
     // When oneSidedConfirmed=true both conditions are bypassed — the available
     // side already confirms the direction is safe.
-    const belowFloor = !oneSidedConfirmed && (freshRefPrice == null || freshRefPrice < lockPrice - GATE_BUFFER);
-    const aboveCap   = !oneSidedConfirmed && freshRefPrice != null && freshRefPrice > lockPriceCap + GATE_BUFFER;
+    const belowFloor = !oneSidedConfirmed && (freshRefPrice == null || freshRefPrice < absoluteMin);
+    const aboveCap   = !oneSidedConfirmed && freshRefPrice != null && freshRefPrice > absoluteMax;
 
     if (belowFloor) {
       // Price reversed back through the entry floor — abort and clear lock so
@@ -2079,10 +2091,10 @@ async function _runBotTick(
         {
           sym, direction, windowKey,
           freshRefPrice: freshRefPrice != null ? +freshRefPrice.toFixed(4) : null,
-          lockPrice, lockPriceCap, gateBuffer: GATE_BUFFER,
+          lockPrice, lockPriceCap, absoluteMin, absoluteMax,
           freshYesAsk, freshYesBid,
         },
-        "[kalshi-bot] conviction live-price gate: price reversed below floor — order aborted",
+        "[kalshi-bot] conviction live-price gate: price reversed below absoluteMin — order aborted",
       );
       return;
     }
@@ -2100,9 +2112,9 @@ async function _runBotTick(
         {
           sym, direction, windowKey,
           freshRefPrice: +freshRefPrice.toFixed(4),
-          lockPrice, lockPriceCap,
+          lockPrice, lockPriceCap, absoluteMin, absoluteMax,
         },
-        "[kalshi-bot] conviction live-price gate: price past cap — order aborted",
+        "[kalshi-bot] conviction live-price gate: price past absoluteMax — order aborted",
       );
       return;
     }
@@ -2254,12 +2266,16 @@ async function _runBotTick(
     // is exactly what the user does not want ("fill in the zone or not at all").
     if (direction === "yes" && freshYesAsk != null) {
       expectedFillCost = freshYesAsk;
-      orderLimitPrice = Math.floor(Math.min(freshYesAsk, lockPriceCap) * 100) / 100;
+      // Limit = live ask, capped at absoluteMax so we never pay beyond the
+      // operator's configured hard ceiling (lockPriceCap + capBuffer).
+      // The post-fill emergency close still uses the strict lockPriceCap — this
+      // limit just controls how much we're willing to pay at order time.
+      orderLimitPrice = Math.floor(Math.min(freshYesAsk, absoluteMax) * 100) / 100;
     } else if (direction === "no" && freshYesBid != null) {
       expectedFillCost = 1 - freshYesBid;
       // For NO orders the limit is expressed as a YES price.  Floor at
-      // (1 - lockPriceCap) so the NO fill price can never exceed lockPriceCap.
-      orderLimitPrice = Math.ceil(Math.max(freshYesBid, 1 - lockPriceCap) * 100) / 100;
+      // (1 - absoluteMax) so the implied NO fill price can never exceed absoluteMax.
+      orderLimitPrice = Math.ceil(Math.max(freshYesBid, 1 - absoluteMax) * 100) / 100;
     }
     const freshContractCount = Math.floor(targetBetSize / expectedFillCost);
     if (freshContractCount >= 1 && freshContractCount !== contractCount) {
