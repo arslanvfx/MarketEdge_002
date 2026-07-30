@@ -1051,6 +1051,86 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </div>
                       <span className="text-[10px] text-muted-foreground/60 leading-relaxed">When on: threshold × max(1, volPct/0.20). High-volatility coins require a wider gap. Baseline 0.20% = typical BTC quiet session.</span>
 
+                      {/* Conviction-specific proximity overrides */}
+                      <div className="flex flex-col gap-2 mt-2 pl-3 border-l border-sky-500/20">
+                        <span className="text-[10px] font-medium text-sky-300/80">Conviction-mode overrides</span>
+                        <label className="flex flex-col gap-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-muted-foreground">
+                              Conviction base threshold%
+                              <span className="text-muted-foreground/50 ml-1">
+                                (blank = inherit {(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}% global)
+                              </span>
+                            </span>
+                            <span className="text-[11px] font-mono text-sky-400">
+                              {merged.convictionStrikeProximityMinPct != null
+                                ? `${merged.convictionStrikeProximityMinPct.toFixed(2)}%`
+                                : "inherited"}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min={0.05}
+                              max={2.00}
+                              step={0.05}
+                              className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground w-24"
+                              value={merged.convictionStrikeProximityMinPct ?? ""}
+                              placeholder={(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}
+                              onChange={e => {
+                                const v = e.target.value === "" ? undefined : parseFloat(e.target.value);
+                                setConfigDraft(d => ({ ...d, convictionStrikeProximityMinPct: v }));
+                              }}
+                            />
+                            {merged.convictionStrikeProximityMinPct != null && (
+                              <button
+                                type="button"
+                                className="text-[10px] text-muted-foreground/60 hover:text-red-400"
+                                onClick={() => setConfigDraft(d => ({ ...d, convictionStrikeProximityMinPct: undefined }))}
+                              >Clear</button>
+                            )}
+                          </div>
+                          <span className="text-[9px] text-muted-foreground/60">
+                            Lower than the global floor lets conviction enter closer to the strike. Recommended: 0.15%. Leave blank to use the global value.
+                          </span>
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-muted-foreground">ATR multiplier cap</span>
+                            <span className="text-[11px] font-mono text-sky-400">
+                              {(merged.convictionProximityAtrMultiplierCap ?? 2.0).toFixed(1)}×
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="range"
+                              min={1.0}
+                              max={5.0}
+                              step={0.5}
+                              className="flex-1 accent-sky-500"
+                              value={merged.convictionProximityAtrMultiplierCap ?? 2.0}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionProximityAtrMultiplierCap: parseFloat(e.target.value) }))}
+                            />
+                            <span className="text-[11px] font-mono text-sky-400 w-10 text-right">
+                              {(merged.convictionProximityAtrMultiplierCap ?? 2.0).toFixed(1)}×
+                            </span>
+                          </div>
+                          <span className="text-[9px] text-muted-foreground/60">
+                            Caps ATR scaling so threshold never grows unboundedly. At 2× cap + 0.30% base: max effective = 0.60%. Default 2.0×.
+                            {(merged.strikeProximityAtrScale ?? true) && merged.convictionStrikeProximityMinPct != null && (
+                              <span className="text-sky-400/70 ml-1">
+                                → max effective = {(merged.convictionStrikeProximityMinPct * (merged.convictionProximityAtrMultiplierCap ?? 2.0)).toFixed(2)}%
+                              </span>
+                            )}
+                            {(merged.strikeProximityAtrScale ?? true) && merged.convictionStrikeProximityMinPct == null && (
+                              <span className="text-sky-400/70 ml-1">
+                                → max effective = {((merged.strikeProximityMinPct ?? 0.30) * (merged.convictionProximityAtrMultiplierCap ?? 2.0)).toFixed(2)}%
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      </div>
+
                       {/* Per-coin threshold overrides */}
                       {(() => {
                         const COINS = ["BTC","ETH","XRP","BNB","SOL","DOGE","NEAR","HYPE","ZEC"];

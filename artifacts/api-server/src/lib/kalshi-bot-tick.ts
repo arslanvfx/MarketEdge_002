@@ -2389,12 +2389,13 @@ async function _runBotTick(
       : (getCachedPrediction(sym)?.price ?? null);
     const _proxAtrPct = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
     const _prox = computeStrikeProximityGate({
-      livePrice:       _proxLivePrice,
-      kalshiStrike:    kalshiTarget,
+      livePrice:        _proxLivePrice,
+      kalshiStrike:     kalshiTarget,
       direction,
-      thresholdPct:    getEffectiveProximityThreshold(sym, S.config),
-      atrPct:          _proxAtrPct,
-      atrScaleEnabled: S.config.strikeProximityAtrScale ?? true,
+      thresholdPct:     getEffectiveProximityThreshold(sym, S.config, /* isConviction */ true),
+      atrPct:           _proxAtrPct,
+      atrScaleEnabled:  S.config.strikeProximityAtrScale ?? true,
+      atrMultiplierCap: S.config.convictionProximityAtrMultiplierCap ?? 2.0,
     });
     if (_prox.blocked) {
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);

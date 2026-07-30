@@ -2181,16 +2181,21 @@ export async function runBotLoopTick(): Promise<void> {
       const _proxStrike    = kalshiData?.value ?? null;
       const _proxAtrPct    = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
       const _prox = computeStrikeProximityGate({
-        livePrice:       _proxLivePrice,
-        kalshiStrike:    _proxStrike,
-        direction:       decision.action === "BET_YES" ? "yes" : "no",
-        thresholdPct:    getEffectiveProximityThreshold(sym, S.config),
-        atrPct:          _proxAtrPct,
-        atrScaleEnabled: S.config.strikeProximityAtrScale ?? true,
+        livePrice:        _proxLivePrice,
+        kalshiStrike:     _proxStrike,
+        direction:        decision.action === "BET_YES" ? "yes" : "no",
+        thresholdPct:     getEffectiveProximityThreshold(sym, S.config, /* isConviction */ true),
+        atrPct:           _proxAtrPct,
+        atrScaleEnabled:  S.config.strikeProximityAtrScale ?? true,
+        atrMultiplierCap: S.config.convictionProximityAtrMultiplierCap ?? 2.0,
       });
       if (_prox.blocked) {
-        logger.info(
-          { sym, gapPct: _prox.gapPct, effectiveThreshold: _prox.effectiveThreshold, action: decision.action },
+        logger.warn(
+          {
+            sym, gapPct: _prox.gapPct, effectiveThreshold: _prox.effectiveThreshold,
+            atrPct: _proxAtrPct, atrMultiplierCap: S.config.convictionProximityAtrMultiplierCap ?? 2.0,
+            action: decision.action,
+          },
           "[conviction-diag] strike-proximity gate blocked — price too close to strike",
         );
         filteredByNewGuards.add(sym);
