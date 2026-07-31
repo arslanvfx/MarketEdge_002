@@ -23,6 +23,7 @@ import {
   checkConvictionOneSidedBook,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
+  isConvictionFokFillable,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -2278,6 +2279,29 @@ async function _runBotTick(
       // implied NO fill price cannot land below lockPrice and trigger an
       // emergency close.
       orderLimitPrice = Math.ceil(Math.max(freshYesBid, 1 - lockPriceCap) * 100) / 100;
+    }
+    // ── FOK fillability check ────────────────────────────────────────────────
+    // The trigger buffers (absoluteMin/Max) can pass prices that the strict
+    // lockPriceCap-pinned limit above can never fill (e.g. ask 89¢ with cap
+    // 85¢ + capBuffer 4¢: trigger passes, limit pins to 0.85 < ask → FOK is a
+    // guaranteed kill).  Placing it would exhaust retries and charge
+    // windowFailedFills, locking the coin out for the rest of the window.
+    // Skip WITHOUT the failed-fill penalty and release the once-per-window
+    // lock so a later tick can enter if price pulls back into the strict zone.
+    if (!isConvictionFokFillable(direction, orderLimitPrice, freshYesAsk, freshYesBid)) {
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction gate: max-bet token restored (FOK unfillable at strict cap)");
+      }
+      logger.warn(
+        {
+          sym, direction, windowKey, orderLimitPrice,
+          freshYesAsk, freshYesBid, lockPrice, lockPriceCap,
+        },
+        "[kalshi-bot] conviction gate: strict-capped FOK limit cannot fill against live book — skipping without failed-fill penalty",
+      );
+      return;
     }
     const freshContractCount = Math.floor(targetBetSize / expectedFillCost);
     if (freshContractCount >= 1 && freshContractCount !== contractCount) {

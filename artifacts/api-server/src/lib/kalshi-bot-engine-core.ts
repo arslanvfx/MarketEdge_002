@@ -1676,12 +1676,50 @@ export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
  * global strikeProximityMinPct.  Falls back to 0.30% when neither is set.
  */
 export function getEffectiveProximityThreshold(sym: string, config: BotConfig, isConviction = false): number {
-  const override = config.strikeProximityMinPctOverrides?.[sym];
-  if (override != null && override > 0) return override;
+  // Priority order:
+  //   conviction mode:  convictionStrikeProximityMinPct → per-coin override → global
+  //   regular mode:     per-coin override → global
+  // The conviction-specific value MUST beat per-coin overrides — it is the
+  // operator's calibration knob for conviction entries.  When it was checked
+  // AFTER the per-coin overrides, any coin with an override silently ignored
+  // the conviction calibration (e.g. SOL NO at 83¢, inside the zone, blocked
+  // by its 0.19% override while convictionStrikeProximityMinPct was ignored).
   if (isConviction && config.convictionStrikeProximityMinPct != null) {
     return config.convictionStrikeProximityMinPct;
   }
+  const override = config.strikeProximityMinPctOverrides?.[sym];
+  if (override != null && override > 0) return override;
   return config.strikeProximityMinPct ?? 0.30;
+}
+
+/**
+ * isConvictionFokFillable — pure, exported for testing.
+ *
+ * The conviction pre-order trigger uses buffered bounds (absoluteMin/Max), but
+ * the FOK limit price is pinned to the STRICT zone (lockPriceCap).  When the
+ * live book is past the strict cap, the capped limit can never execute:
+ *   YES buy  FOK fills only when limit ≥ best ask
+ *   NO  (YES-sell) FOK fills only when limit ≤ best yes-bid
+ * Placing such an order is a guaranteed kill → retry exhaustion →
+ * windowFailedFills lockout for the rest of the window.  Callers must skip
+ * (WITHOUT charging windowFailedFills) when this returns false, so the coin
+ * can still enter later if price pulls back into the strict zone.
+ *
+ * Returns true when the side's fresh price is unavailable (nothing to check).
+ */
+export function isConvictionFokFillable(
+  direction: "yes" | "no",
+  orderLimitPrice: number,
+  freshYesAsk: number | null | undefined,
+  freshYesBid: number | null | undefined,
+): boolean {
+  const EPS = 1e-9;
+  if (direction === "yes") {
+    if (freshYesAsk == null) return true;
+    return orderLimitPrice >= freshYesAsk - EPS;
+  }
+  if (freshYesBid == null) return true;
+  return orderLimitPrice <= freshYesBid + EPS;
 }
 
 /**
