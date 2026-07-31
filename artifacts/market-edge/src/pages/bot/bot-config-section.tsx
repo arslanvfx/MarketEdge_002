@@ -639,36 +639,17 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </span>
                     <PhaseTracker onConfigSaved={saveConfig} />
                     {(() => {
-                      const floor    = merged.kalshiLockPrice           ?? 0.82;
-                      const cap      = merged.kalshiLockPriceCap        ?? 0.91;
-                      const floorBuf = merged.convictionZoneFloorBuffer ?? 0.01;
-                      const capBuf   = merged.convictionZoneCapBuffer   ?? 0.04;
-                      const absMin   = Math.max(0, floor - floorBuf);
-                      const absMax   = Math.min(0.99, cap + capBuf);
-                      const floorYes  = Math.round(floor  * 100);
-                      const capYes    = Math.round(cap    * 100);
-                      const absMinYes = Math.round(absMin * 100);
-                      const absMaxYes = Math.round(absMax * 100);
-                      const floorNo   = Math.round((1 - cap)   * 100);
-                      const capNo     = Math.round((1 - floor) * 100);
-                      const floorBufC = Math.round(floorBuf * 100);
-                      const capBufC   = Math.round(capBuf   * 100);
+                      const floor = merged.kalshiLockPrice    ?? 0.82;
+                      const cap   = merged.kalshiLockPriceCap ?? 0.91;
+                      const floorYes = Math.round(floor * 100);
+                      const capYes   = Math.round(cap   * 100);
+                      const floorNo  = Math.round((1 - cap)   * 100);
+                      const capNo    = Math.round((1 - floor) * 100);
                       return (
                         <div className="flex flex-col gap-2.5 mt-1">
-                          {/* Effective range badge */}
-                          <div className="flex items-center gap-2 rounded-lg bg-violet-500/10 border border-violet-500/25 px-3 py-1.5">
-                            <span className="text-[10px] text-violet-300/70">Effective entry range:</span>
-                            <span className="text-xs font-mono font-bold text-violet-300">
-                              {absMinYes}¢ – {absMaxYes}¢ YES
-                            </span>
-                            <span className="text-[10px] text-violet-300/50 ml-auto">
-                              core {floorYes}¢–{capYes}¢ + buffers
-                            </span>
-                          </div>
-
                           <label className="flex flex-col gap-1.5">
                             <span className="text-xs text-muted-foreground">
-                              Entry Floor (core) — <span className="font-mono text-violet-400">{floorYes}¢</span>
+                              Entry Floor — <span className="font-mono text-violet-400">{floorYes}¢</span>
                               <span className="text-muted-foreground/60 ml-1.5">YES ≥ {floorYes}¢ triggers BET YES · YES ≤ {capNo}¢ triggers BET NO</span>
                             </span>
                             <div className="flex items-center gap-3">
@@ -679,13 +660,13 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                               <span className="text-xs font-mono text-violet-400 w-12 text-right">{floorYes}¢</span>
                             </div>
                             <span className="text-[10px] text-muted-foreground/70">
-                              Core zone floor — emergency close fires on fills below this. Max YES payout: {(1 / floor).toFixed(2)}×.
+                              Minimum Kalshi YES price to fire a BET YES. Lower = more bets, lower certainty. Max YES payout: {(1 / floor).toFixed(2)}×.
                             </span>
                           </label>
                           <label className="flex flex-col gap-1.5">
                             <span className="text-xs text-muted-foreground">
-                              Entry Cap (core) — <span className="font-mono text-violet-400">{capYes}¢</span>
-                              <span className="text-muted-foreground/60 ml-1.5">emergency close fires on fills above {capYes}¢</span>
+                              Entry Cap — <span className="font-mono text-violet-400">{capYes}¢</span>
+                              <span className="text-muted-foreground/60 ml-1.5">YES &gt; {capYes}¢ → window missed (SKIP)</span>
                             </span>
                             <div className="flex items-center gap-3">
                               <input type="range" min={0.51} max={0.97} step={0.01}
@@ -695,47 +676,9 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                               <span className="text-xs font-mono text-violet-400 w-12 text-right">{capYes}¢</span>
                             </div>
                             <span className="text-[10px] text-muted-foreground/70">
-                              Core cap — post-fill emergency close uses this. Pre-order gate extends to <span className="text-violet-400">{absMaxYes}¢</span> (core + cap buffer).
-                              Entry zone: <span className="text-violet-400/80">{floorYes}¢–{capYes}¢ YES</span> · <span className="text-violet-400/60">{floorNo}¢–{capNo}¢ NO</span>.
+                              Maximum allowed Kalshi YES price. Above this the margin is too thin — bet is skipped. Entry zone: <span className="text-violet-400/80">{floorYes}¢–{capYes}¢ YES</span> · <span className="text-violet-400/60">{floorNo}¢–{capNo}¢ NO</span>.
                             </span>
                           </label>
-
-                          {/* Buffer controls */}
-                          <div className="flex flex-col gap-2 pl-3 border-l border-violet-500/20 mt-0.5">
-                            <span className="text-[10px] font-medium text-violet-300/80">Entry range buffers — extends pre-order gate beyond the core zone</span>
-                            <label className="flex flex-col gap-1">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] text-muted-foreground">Floor buffer <span className="text-muted-foreground/50">(absolute min = {absMinYes}¢)</span></span>
-                                <span className="text-[11px] font-mono text-violet-400">{floorBufC}¢ below core</span>
-                              </div>
-                              <div className="flex items-center gap-3">
-                                <input type="range" min={0} max={0.10} step={0.005}
-                                  className="flex-1 accent-violet-500"
-                                  value={floorBuf}
-                                  onChange={e => setConfigDraft(d => ({ ...d, convictionZoneFloorBuffer: parseFloat(e.target.value) }))} />
-                                <span className="text-[11px] font-mono text-violet-400 w-10 text-right">{floorBufC}¢</span>
-                              </div>
-                              <span className="text-[9px] text-muted-foreground/60">
-                                Enter even if price dips {floorBufC}¢ below core floor. 0 = strict floor. Default 1¢.
-                              </span>
-                            </label>
-                            <label className="flex flex-col gap-1">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] text-muted-foreground">Cap buffer <span className="text-muted-foreground/50">(absolute max = {absMaxYes}¢)</span></span>
-                                <span className="text-[11px] font-mono text-violet-400">{capBufC}¢ above core</span>
-                              </div>
-                              <div className="flex items-center gap-3">
-                                <input type="range" min={0} max={0.15} step={0.005}
-                                  className="flex-1 accent-violet-400"
-                                  value={capBuf}
-                                  onChange={e => setConfigDraft(d => ({ ...d, convictionZoneCapBuffer: parseFloat(e.target.value) }))} />
-                                <span className="text-[11px] font-mono text-violet-400 w-10 text-right">{capBufC}¢</span>
-                              </div>
-                              <span className="text-[9px] text-muted-foreground/60">
-                                Enter even if price rises {capBufC}¢ above core cap. FOK limit = {absMaxYes}¢. Default 4¢.
-                              </span>
-                            </label>
-                          </div>
                         </div>
                       );
                     })()}
@@ -1050,86 +993,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/60 leading-relaxed">When on: threshold × max(1, volPct/0.20). High-volatility coins require a wider gap. Baseline 0.20% = typical BTC quiet session.</span>
-
-                      {/* Conviction-specific proximity overrides */}
-                      <div className="flex flex-col gap-2 mt-2 pl-3 border-l border-sky-500/20">
-                        <span className="text-[10px] font-medium text-sky-300/80">Conviction-mode overrides</span>
-                        <label className="flex flex-col gap-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[11px] text-muted-foreground">
-                              Conviction base threshold%
-                              <span className="text-muted-foreground/50 ml-1">
-                                (blank = inherit {(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}% global)
-                              </span>
-                            </span>
-                            <span className="text-[11px] font-mono text-sky-400">
-                              {merged.convictionStrikeProximityMinPct != null
-                                ? `${merged.convictionStrikeProximityMinPct.toFixed(2)}%`
-                                : "inherited"}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="number"
-                              min={0.05}
-                              max={2.00}
-                              step={0.05}
-                              className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground w-24"
-                              value={merged.convictionStrikeProximityMinPct ?? ""}
-                              placeholder={(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}
-                              onChange={e => {
-                                const v = e.target.value === "" ? undefined : parseFloat(e.target.value);
-                                setConfigDraft(d => ({ ...d, convictionStrikeProximityMinPct: v }));
-                              }}
-                            />
-                            {merged.convictionStrikeProximityMinPct != null && (
-                              <button
-                                type="button"
-                                className="text-[10px] text-muted-foreground/60 hover:text-red-400"
-                                onClick={() => setConfigDraft(d => ({ ...d, convictionStrikeProximityMinPct: undefined }))}
-                              >Clear</button>
-                            )}
-                          </div>
-                          <span className="text-[9px] text-muted-foreground/60">
-                            Lower than the global floor lets conviction enter closer to the strike. Recommended: 0.15%. Leave blank to use the global value.
-                          </span>
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[11px] text-muted-foreground">ATR multiplier cap</span>
-                            <span className="text-[11px] font-mono text-sky-400">
-                              {(merged.convictionProximityAtrMultiplierCap ?? 2.0).toFixed(1)}×
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <input
-                              type="range"
-                              min={1.0}
-                              max={5.0}
-                              step={0.5}
-                              className="flex-1 accent-sky-500"
-                              value={merged.convictionProximityAtrMultiplierCap ?? 2.0}
-                              onChange={e => setConfigDraft(d => ({ ...d, convictionProximityAtrMultiplierCap: parseFloat(e.target.value) }))}
-                            />
-                            <span className="text-[11px] font-mono text-sky-400 w-10 text-right">
-                              {(merged.convictionProximityAtrMultiplierCap ?? 2.0).toFixed(1)}×
-                            </span>
-                          </div>
-                          <span className="text-[9px] text-muted-foreground/60">
-                            Caps ATR scaling so threshold never grows unboundedly. At 2× cap + 0.30% base: max effective = 0.60%. Default 2.0×.
-                            {(merged.strikeProximityAtrScale ?? true) && merged.convictionStrikeProximityMinPct != null && (
-                              <span className="text-sky-400/70 ml-1">
-                                → max effective = {(merged.convictionStrikeProximityMinPct * (merged.convictionProximityAtrMultiplierCap ?? 2.0)).toFixed(2)}%
-                              </span>
-                            )}
-                            {(merged.strikeProximityAtrScale ?? true) && merged.convictionStrikeProximityMinPct == null && (
-                              <span className="text-sky-400/70 ml-1">
-                                → max effective = {((merged.strikeProximityMinPct ?? 0.30) * (merged.convictionProximityAtrMultiplierCap ?? 2.0)).toFixed(2)}%
-                              </span>
-                            )}
-                          </span>
-                        </label>
-                      </div>
 
                       {/* Per-coin threshold overrides */}
                       {(() => {

@@ -992,10 +992,6 @@ export interface BotConfig {
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
-  convictionZoneFloorBuffer?: number; // conviction only: how far below kalshiLockPrice the pre-order gate still passes (default 0.01 = 1¢); absoluteMin = lockPrice − buffer; emergency close still uses strict lockPrice
-  convictionZoneCapBuffer?: number;   // conviction only: how far above kalshiLockPriceCap the pre-order gate still passes (default 0.04 = 4¢); absoluteMax = lockPriceCap + buffer; FOK limit set to absoluteMax; emergency close still uses strict lockPriceCap
-  convictionStrikeProximityMinPct?: number; // conviction only: base proximity threshold % (default: inherits strikeProximityMinPct); set lower (e.g. 0.15) to allow tighter entries in conviction mode
-  convictionProximityAtrMultiplierCap?: number; // conviction only: caps ATR scaling multiplier so threshold never grows unboundedly (default 2.0 → max effective = base × 2); prevents 0.30 × 5 = 1.5% blocking every entry on volatile days
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
   scalePhase?: number;             // scaling phase tracker: 1=test ($3/$6), 2=build ($7/$15), 3=full ($10/$25); default 1
@@ -1436,7 +1432,6 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   strikeProximityMinPct: 0.30,
   strikeProximityAtrScale: true,
   strikeProximityMinPctOverrides: {},
-  convictionProximityAtrMultiplierCap: 2.0,
   convictionMomentumGateEnabled: true,
   convictionMomentumLookbackMinutes: 3,
   convictionMomentumSafetyFactor: 0.6,
@@ -1675,51 +1670,10 @@ export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
  * Per-coin override in strikeProximityMinPctOverrides takes priority over the
  * global strikeProximityMinPct.  Falls back to 0.30% when neither is set.
  */
-export function getEffectiveProximityThreshold(sym: string, config: BotConfig, isConviction = false): number {
-  // Priority order:
-  //   conviction mode:  convictionStrikeProximityMinPct → per-coin override → global
-  //   regular mode:     per-coin override → global
-  // The conviction-specific value MUST beat per-coin overrides — it is the
-  // operator's calibration knob for conviction entries.  When it was checked
-  // AFTER the per-coin overrides, any coin with an override silently ignored
-  // the conviction calibration (e.g. SOL NO at 83¢, inside the zone, blocked
-  // by its 0.19% override while convictionStrikeProximityMinPct was ignored).
-  if (isConviction && config.convictionStrikeProximityMinPct != null) {
-    return config.convictionStrikeProximityMinPct;
-  }
+export function getEffectiveProximityThreshold(sym: string, config: BotConfig): number {
   const override = config.strikeProximityMinPctOverrides?.[sym];
   if (override != null && override > 0) return override;
   return config.strikeProximityMinPct ?? 0.30;
-}
-
-/**
- * isConvictionFokFillable — pure, exported for testing.
- *
- * The conviction pre-order trigger uses buffered bounds (absoluteMin/Max), but
- * the FOK limit price is pinned to the STRICT zone (lockPriceCap).  When the
- * live book is past the strict cap, the capped limit can never execute:
- *   YES buy  FOK fills only when limit ≥ best ask
- *   NO  (YES-sell) FOK fills only when limit ≤ best yes-bid
- * Placing such an order is a guaranteed kill → retry exhaustion →
- * windowFailedFills lockout for the rest of the window.  Callers must skip
- * (WITHOUT charging windowFailedFills) when this returns false, so the coin
- * can still enter later if price pulls back into the strict zone.
- *
- * Returns true when the side's fresh price is unavailable (nothing to check).
- */
-export function isConvictionFokFillable(
-  direction: "yes" | "no",
-  orderLimitPrice: number,
-  freshYesAsk: number | null | undefined,
-  freshYesBid: number | null | undefined,
-): boolean {
-  const EPS = 1e-9;
-  if (direction === "yes") {
-    if (freshYesAsk == null) return true;
-    return orderLimitPrice >= freshYesAsk - EPS;
-  }
-  if (freshYesBid == null) return true;
-  return orderLimitPrice <= freshYesBid + EPS;
 }
 
 /**
@@ -1751,9 +1705,8 @@ export function computeStrikeProximityGate(opts: {
   thresholdPct: number;
   atrPct?: number | null;
   atrScaleEnabled?: boolean;
-  atrMultiplierCap?: number;   // caps ATR scaling (default: no cap / Infinity); conviction mode uses convictionProximityAtrMultiplierCap (default 2.0)
 }): StrikeProximityResult {
-  const { livePrice, kalshiStrike, thresholdPct, atrPct, atrScaleEnabled = true, atrMultiplierCap = Infinity } = opts;
+  const { livePrice, kalshiStrike, thresholdPct, atrPct, atrScaleEnabled = true } = opts;
 
   // Fail-open: unavailable data must never block a bet silently.
   if (!livePrice || !kalshiStrike || kalshiStrike <= 0) {
@@ -1762,12 +1715,9 @@ export function computeStrikeProximityGate(opts: {
 
   const gapPct = Math.abs(livePrice - kalshiStrike) / kalshiStrike * 100;
 
-  const rawMultiplier = atrScaleEnabled && atrPct != null && atrPct > 0
+  const atrMultiplier = atrScaleEnabled && atrPct != null && atrPct > 0
     ? Math.max(1, atrPct / 0.20)
     : 1;
-  // Cap the ATR multiplier to prevent runaway thresholds on volatile days.
-  // e.g. with cap=2.0 and base=0.30%: max effective = 0.60% regardless of ATR.
-  const atrMultiplier = Math.min(rawMultiplier, atrMultiplierCap);
   const effectiveThreshold = thresholdPct * atrMultiplier;
 
   return { blocked: gapPct < effectiveThreshold, gapPct, effectiveThreshold };

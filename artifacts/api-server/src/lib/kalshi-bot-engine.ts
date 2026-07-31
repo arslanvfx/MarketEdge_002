@@ -61,7 +61,6 @@ import {
   applyLockPrice092Bootstrap,
   applyLockPrice082Migration,
   getEffectiveProximityThreshold,
-  isConvictionFokFillable,
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
   computeAdverseMomentumGate,
@@ -139,8 +138,6 @@ export {
   computeStrikeProximityGate,
   // Per-coin proximity threshold helper and calibrated suggestions.
   getEffectiveProximityThreshold,
-  // Conviction FOK fillability check — pure, exported for unit tests and callers.
-  isConvictionFokFillable,
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.

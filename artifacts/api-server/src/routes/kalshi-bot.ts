@@ -697,10 +697,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled,
     convictionMomentumLookbackMinutes,
     convictionMomentumSafetyFactor,
-    convictionZoneFloorBuffer,
-    convictionZoneCapBuffer,
-    convictionStrikeProximityMinPct,
-    convictionProximityAtrMultiplierCap,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -798,10 +794,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled?: boolean;
     convictionMomentumLookbackMinutes?: number;
     convictionMomentumSafetyFactor?: number;
-    convictionZoneFloorBuffer?: number;
-    convictionZoneCapBuffer?: number;
-    convictionStrikeProximityMinPct?: number | null;
-    convictionProximityAtrMultiplierCap?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -981,24 +973,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       }
     }
     partial.strikeProximityMinPctOverrides = cleaned;
-  }
-  // Floor buffer: 0–0.10 (0¢–10¢ below lockPrice still passes pre-order gate)
-  if (typeof convictionZoneFloorBuffer === "number" && convictionZoneFloorBuffer >= 0 && convictionZoneFloorBuffer <= 0.10) {
-    partial.convictionZoneFloorBuffer = convictionZoneFloorBuffer;
-  }
-  // Cap buffer: 0–0.15 (0¢–15¢ above lockPriceCap still passes pre-order gate)
-  if (typeof convictionZoneCapBuffer === "number" && convictionZoneCapBuffer >= 0 && convictionZoneCapBuffer <= 0.15) {
-    partial.convictionZoneCapBuffer = convictionZoneCapBuffer;
-  }
-  // conviction-specific proximity base threshold: null = inherit from strikeProximityMinPct; 0.05–2.00 = override
-  if (convictionStrikeProximityMinPct === null) {
-    partial.convictionStrikeProximityMinPct = undefined; // clear override — fall back to strikeProximityMinPct
-  } else if (typeof convictionStrikeProximityMinPct === "number" && convictionStrikeProximityMinPct >= 0.05 && convictionStrikeProximityMinPct <= 2.00) {
-    partial.convictionStrikeProximityMinPct = convictionStrikeProximityMinPct;
-  }
-  // ATR multiplier cap for conviction proximity gate: 1.0–10.0 (default 2.0)
-  if (typeof convictionProximityAtrMultiplierCap === "number" && convictionProximityAtrMultiplierCap >= 1.0 && convictionProximityAtrMultiplierCap <= 10.0) {
-    partial.convictionProximityAtrMultiplierCap = convictionProximityAtrMultiplierCap;
   }
   // 0 = disabled; valid range 0–0.85
   if (typeof convictionStopLossFloor === "number" && convictionStopLossFloor >= 0 && convictionStopLossFloor <= 0.85) {
