@@ -959,7 +959,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97) {
     partial.kalshiLockPriceCap = kalshiLockPriceCap;
   }
-  if (typeof strikeProximityMinPct === "number" && strikeProximityMinPct >= 0.10 && strikeProximityMinPct <= 2.00) {
+  if (typeof strikeProximityMinPct === "number" && strikeProximityMinPct >= 0.01 && strikeProximityMinPct <= 2.00) {
     partial.strikeProximityMinPct = strikeProximityMinPct;
   }
   if (typeof strikeProximityAtrScale === "boolean") {
@@ -968,7 +968,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (strikeProximityMinPctOverrides != null && typeof strikeProximityMinPctOverrides === "object") {
     const cleaned: Record<string, number> = {};
     for (const [sym, val] of Object.entries(strikeProximityMinPctOverrides)) {
-      if (typeof val === "number" && val >= 0.05 && val <= 3.00) {
+      if (typeof val === "number" && val >= 0.01 && val <= 3.00) {
         cleaned[sym.toUpperCase()] = val;
       }
     }

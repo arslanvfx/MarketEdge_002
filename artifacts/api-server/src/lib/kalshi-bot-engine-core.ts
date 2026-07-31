@@ -1649,31 +1649,38 @@ export function applyLockPrice082Migration(
 
 /**
  * Per-coin baseline suggestions for strikeProximityMinPct.
- * Derived from typical 15-min ATR profiles and Kalshi orderbook depth.
- * These are defaults the UI surfaces to the user — they are NOT applied automatically.
- * Lower values = more bets allowed near the strike; calibrate per observed behavior.
+ * Calibrated for conviction mode where the Kalshi market is already pricing 82–90¢
+ * and the crypto naturally sits close to the Kalshi strike.  Typical gapPct values
+ * in conviction entries are 0.01–0.05%, so thresholds must be in the same range
+ * to allow bets while still blocking zero-gap (right-on-the-line) entries.
+ * Lower values = more bets allowed near the strike.
  */
 export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
-  BTC:  0.10,   // Deep Kalshi orderbook, tight crypto spreads, lowest intra-window ATR
-  ETH:  0.12,   // Very liquid, slightly higher 15-min ATR than BTC
-  XRP:  0.15,   // Liquid on Kalshi, moderate short-term vol
-  BNB:  0.15,   // Similar profile to XRP
-  SOL:  0.18,   // Higher intra-window ATR than BTC/ETH/XRP
-  DOGE: 0.20,   // Moderate-high vol, shallow Kalshi orderbook vs BTC
-  NEAR: 0.22,   // Lower Kalshi liquidity, wider tick spreads
-  HYPE: 0.25,   // Newer market, lower liquidity, spiky short-term moves
-  ZEC:  0.28,   // Lowest Kalshi liquidity among traded coins; wide spread at entry
+  BTC:  0.02,   // Deep Kalshi orderbook, tight crypto spreads, lowest intra-window ATR
+  ETH:  0.02,   // Very liquid, slightly higher 15-min ATR than BTC
+  XRP:  0.03,   // Liquid on Kalshi, moderate short-term vol
+  BNB:  0.03,   // Similar profile to XRP
+  SOL:  0.03,   // Higher intra-window ATR than BTC/ETH/XRP
+  DOGE: 0.04,   // Moderate-high vol, shallow Kalshi orderbook vs BTC
+  NEAR: 0.04,   // Lower Kalshi liquidity, wider tick spreads
+  HYPE: 0.05,   // Newer market, lower liquidity, spiky short-term moves
+  ZEC:  0.05,   // Lowest Kalshi liquidity among traded coins; wide spread at entry
 };
 
 /**
  * Returns the effective strike-proximity threshold for a specific symbol.
- * Per-coin override in strikeProximityMinPctOverrides takes priority over the
- * global strikeProximityMinPct.  Falls back to 0.30% when neither is set.
+ * Priority order (highest wins):
+ *   1. Per-coin override in strikeProximityMinPctOverrides (user-configured)
+ *   2. Per-coin entry in PROXIMITY_THRESHOLD_SUGGESTIONS (calibrated defaults)
+ *   3. Global strikeProximityMinPct config field
+ *   4. Hard fallback of 0.05%
  */
 export function getEffectiveProximityThreshold(sym: string, config: BotConfig): number {
   const override = config.strikeProximityMinPctOverrides?.[sym];
   if (override != null && override > 0) return override;
-  return config.strikeProximityMinPct ?? 0.30;
+  const suggestion = PROXIMITY_THRESHOLD_SUGGESTIONS[sym];
+  if (suggestion != null) return suggestion;
+  return config.strikeProximityMinPct ?? 0.05;
 }
 
 /**
@@ -1688,14 +1695,18 @@ export function getEffectiveProximityThreshold(sym: string, config: BotConfig): 
  * the gate passes so the bot never silently blocks entries due to missing data.
  *
  * ATR scaling (when atrScaleEnabled=true):
- *   effectiveThreshold = thresholdPct × max(1, atrPct / 0.20)
- *   — coins with higher volatility (atrPct > 0.20%) need a wider gap to be safe.
+ *   multiplier = clamp(atrPct / 0.20, 1, atrMultiplierCap)
+ *   effectiveThreshold = thresholdPct × multiplier
+ *   — coins with higher volatility need a wider gap to be safe.
  *   — reference baseline 0.20% is ≈ BTC quiet-session volatility.
+ *   — cap (default 2×) prevents high-ATR coins from multiplying the threshold
+ *     so aggressively that no conviction entry can ever pass.
  */
 export interface StrikeProximityResult {
   blocked: boolean;
   gapPct: number | null;           // null when livePrice or kalshiStrike unavailable (gate passes)
   effectiveThreshold: number;      // threshold used for this evaluation (may be ATR-scaled)
+  atrMultiplier: number;           // the multiplier that was applied (1 when scaling off/unavailable)
 }
 
 export function computeStrikeProximityGate(opts: {
@@ -1705,22 +1716,23 @@ export function computeStrikeProximityGate(opts: {
   thresholdPct: number;
   atrPct?: number | null;
   atrScaleEnabled?: boolean;
+  atrMultiplierCap?: number;
 }): StrikeProximityResult {
-  const { livePrice, kalshiStrike, thresholdPct, atrPct, atrScaleEnabled = true } = opts;
+  const { livePrice, kalshiStrike, thresholdPct, atrPct, atrScaleEnabled = true, atrMultiplierCap = 2 } = opts;
 
   // Fail-open: unavailable data must never block a bet silently.
   if (!livePrice || !kalshiStrike || kalshiStrike <= 0) {
-    return { blocked: false, gapPct: null, effectiveThreshold: thresholdPct };
+    return { blocked: false, gapPct: null, effectiveThreshold: thresholdPct, atrMultiplier: 1 };
   }
 
   const gapPct = Math.abs(livePrice - kalshiStrike) / kalshiStrike * 100;
 
   const atrMultiplier = atrScaleEnabled && atrPct != null && atrPct > 0
-    ? Math.max(1, atrPct / 0.20)
+    ? Math.min(atrMultiplierCap, Math.max(1, atrPct / 0.20))
     : 1;
   const effectiveThreshold = thresholdPct * atrMultiplier;
 
-  return { blocked: gapPct < effectiveThreshold, gapPct, effectiveThreshold };
+  return { blocked: gapPct < effectiveThreshold, gapPct, effectiveThreshold, atrMultiplier };
 }
 
 /**
