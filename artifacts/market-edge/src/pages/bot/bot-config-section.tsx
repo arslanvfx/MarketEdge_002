@@ -966,19 +966,19 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </span>
                         <input
                           type="number"
-                          min={0.10}
+                          min={0.01}
                           max={2.00}
-                          step={0.05}
+                          step={0.01}
                           className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground w-28"
-                          value={merged.strikeProximityMinPct ?? 0.30}
+                          value={merged.strikeProximityMinPct ?? 0.05}
                           onChange={e => {
                             const v = parseFloat(e.target.value);
-                            if (!Number.isNaN(v) && v >= 0.10 && v <= 2.00) {
+                            if (!Number.isNaN(v) && v >= 0.01 && v <= 2.00) {
                               setConfigDraft(d => ({ ...d, strikeProximityMinPct: v }));
                             }
                           }}
                         />
-                        <span className="text-[10px] text-muted-foreground/60">|livePrice − strike| / strike × 100. Default: 0.30%. Range: 0.10–2.00%.</span>
+                        <span className="text-[10px] text-muted-foreground/60">|livePrice − strike| / strike × 100. Default: 0.05%. Range: 0.01–2.00%.</span>
                       </label>
                       <div className="flex items-center justify-between mt-0.5">
                         <span className="text-xs text-muted-foreground">ATR Scale</span>
@@ -997,7 +997,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       {/* Per-coin threshold overrides */}
                       {(() => {
                         const COINS = ["BTC","ETH","XRP","BNB","SOL","DOGE","NEAR","HYPE","ZEC"];
-                        const SUGGESTED: Record<string,number> = { BTC:0.10, ETH:0.12, XRP:0.15, BNB:0.15, SOL:0.18, DOGE:0.20, NEAR:0.22, HYPE:0.25, ZEC:0.28 };
+                        const SUGGESTED: Record<string,number> = { BTC:0.02, ETH:0.02, XRP:0.03, BNB:0.03, SOL:0.03, DOGE:0.04, NEAR:0.04, HYPE:0.05, ZEC:0.05 };
                         const overrides: Record<string,number> = { ...(merged.strikeProximityMinPctOverrides ?? {}) };
                         const globalFloor = merged.strikeProximityMinPct ?? 0.30;
                         return (
