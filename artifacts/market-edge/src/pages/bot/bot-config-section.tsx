@@ -1047,7 +1047,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                     </div>
                                     <input
                                       type="number"
-                                      min={0.05}
+                                      min={0.01}
                                       max={3.00}
                                       step={0.01}
                                       placeholder={`${(suggested ?? globalFloor).toFixed(2)}`}
@@ -1063,7 +1063,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                           };
                                           if (raw === "" || Number.isNaN(v)) {
                                             delete next[sym];
-                                          } else if (v >= 0.05 && v <= 3.00) {
+                                          } else if (v >= 0.01 && v <= 3.00) {
                                             next[sym] = v;
                                           }
                                           return { ...d, strikeProximityMinPctOverrides: next };
