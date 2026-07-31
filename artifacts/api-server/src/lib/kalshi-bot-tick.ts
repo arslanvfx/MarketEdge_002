@@ -2266,16 +2266,18 @@ async function _runBotTick(
     // is exactly what the user does not want ("fill in the zone or not at all").
     if (direction === "yes" && freshYesAsk != null) {
       expectedFillCost = freshYesAsk;
-      // Limit = live ask, capped at absoluteMax so we never pay beyond the
-      // operator's configured hard ceiling (lockPriceCap + capBuffer).
-      // The post-fill emergency close still uses the strict lockPriceCap — this
-      // limit just controls how much we're willing to pay at order time.
-      orderLimitPrice = Math.floor(Math.min(freshYesAsk, absoluteMax) * 100) / 100;
+      // Limit = live ask, capped at the STRICT lockPriceCap (not absoluteMax).
+      // The capBuffer only widens the pre-order trigger check — the actual FOK
+      // limit price must never exceed lockPriceCap or the post-fill emergency
+      // close will fire immediately (it uses the strict zone).
+      orderLimitPrice = Math.floor(Math.min(freshYesAsk, lockPriceCap) * 100) / 100;
     } else if (direction === "no" && freshYesBid != null) {
       expectedFillCost = 1 - freshYesBid;
       // For NO orders the limit is expressed as a YES price.  Floor at
-      // (1 - absoluteMax) so the implied NO fill price can never exceed absoluteMax.
-      orderLimitPrice = Math.ceil(Math.max(freshYesBid, 1 - absoluteMax) * 100) / 100;
+      // (1 - lockPriceCap) — strict zone, NOT (1 - absoluteMax) — so the
+      // implied NO fill price cannot land below lockPrice and trigger an
+      // emergency close.
+      orderLimitPrice = Math.ceil(Math.max(freshYesBid, 1 - lockPriceCap) * 100) / 100;
     }
     const freshContractCount = Math.floor(targetBetSize / expectedFillCost);
     if (freshContractCount >= 1 && freshContractCount !== contractCount) {
