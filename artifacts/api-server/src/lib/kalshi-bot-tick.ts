@@ -2383,13 +2383,18 @@ async function _runBotTick(
       ? candles[candles.length - 1].c
       : (getCachedPrediction(sym)?.price ?? null);
     const _proxAtrPct = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
+    const _proxBaseThreshold = getEffectiveProximityThreshold(sym, S.config);
     const _prox = computeStrikeProximityGate({
-      livePrice:       _proxLivePrice,
-      kalshiStrike:    kalshiTarget,
+      livePrice:        _proxLivePrice,
+      kalshiStrike:     kalshiTarget,
       direction,
-      thresholdPct:    getEffectiveProximityThreshold(sym, S.config),
-      atrPct:          _proxAtrPct,
-      atrScaleEnabled: S.config.strikeProximityAtrScale ?? true,
+      thresholdPct:     _proxBaseThreshold,
+      atrPct:           _proxAtrPct,
+      atrScaleEnabled:  S.config.strikeProximityAtrScale ?? true,
+      // Conviction entries are naturally near-strike; cap ATR amplification at
+      // 1.2× so a high-vol coin doesn't double the threshold and re-block entries
+      // that are in the Kalshi conviction zone by design.
+      atrMultiplierCap: 1.2,
     });
     if (_prox.blocked) {
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
@@ -2401,6 +2406,8 @@ async function _runBotTick(
         {
           sym, direction, windowKey,
           gapPct:             _prox.gapPct?.toFixed(4),
+          baseThreshold:      _proxBaseThreshold.toFixed(4),
+          atrMultiplier:      _prox.atrMultiplier.toFixed(2),
           effectiveThreshold: _prox.effectiveThreshold.toFixed(4),
           livePrice:          _proxLivePrice,
           kalshiStrike:       kalshiTarget,

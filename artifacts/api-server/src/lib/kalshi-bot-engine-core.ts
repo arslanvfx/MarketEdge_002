@@ -1661,15 +1661,19 @@ export function applyLockPrice082Migration(
  * Lower values = more bets allowed near the strike.
  */
 export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
-  BTC:  0.02,   // Deep Kalshi orderbook, tight crypto spreads, lowest intra-window ATR
-  ETH:  0.02,   // Very liquid, slightly higher 15-min ATR than BTC
-  XRP:  0.03,   // Liquid on Kalshi, moderate short-term vol
-  BNB:  0.03,   // Similar profile to XRP
-  SOL:  0.03,   // Higher intra-window ATR than BTC/ETH/XRP
-  DOGE: 0.04,   // Moderate-high vol, shallow Kalshi orderbook vs BTC
-  NEAR: 0.04,   // Lower Kalshi liquidity, wider tick spreads
-  HYPE: 0.05,   // Newer market, lower liquidity, spiky short-term moves
-  ZEC:  0.05,   // Lowest Kalshi liquidity among traded coins; wide spread at entry
+  // Calibrated to observed gapPct values when Kalshi is in the 81–86¢ conviction
+  // zone.  At those prices the crypto spot is naturally 0.001–0.04% from the
+  // Kalshi strike, so thresholds must stay below that range.
+  // ATR scaling (cap 1.2× in conviction re-check) can add at most 20% on top.
+  BTC:  0.005,  // Ultra-liquid; gapPct ≈ 0.002–0.005% in zone
+  ETH:  0.005,  // Very liquid; gapPct ≈ 0.003–0.006% in zone
+  XRP:  0.010,  // Moderate vol; gapPct ≈ 0.005–0.015% in zone
+  BNB:  0.010,  // Similar profile to XRP
+  SOL:  0.005,  // Slightly higher ATR but gapPct still sub-0.005% in zone
+  DOGE: 0.020,  // Higher vol; gapPct ≈ 0.010–0.035% in zone
+  NEAR: 0.020,  // Lower Kalshi liquidity; wider tick spreads
+  HYPE: 0.030,  // Newer market, spiky moves; still below typical gapPct in zone
+  ZEC:  0.030,  // Lowest Kalshi liquidity; widest spread at entry
 };
 
 /**
