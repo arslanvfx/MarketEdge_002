@@ -64,6 +64,7 @@ import {
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
   computeAdverseMomentumGate,
+  computeConvictionDirectionGate,
   computeStrikeProximityGate,
   DEFAULT_BOT_CONFIG,
   computeDynamicBetSize,
@@ -134,6 +135,8 @@ export {
   deriveConvictionZone,
   // Adverse momentum gate math — pure, exported for unit tests and callers.
   computeAdverseMomentumGate,
+  // Direction guard — pure, exported for unit tests and callers.
+  computeConvictionDirectionGate,
   // Strike-proximity gate — pure, exported for unit tests and callers.
   computeStrikeProximityGate,
   // Per-coin proximity threshold helper and calibrated suggestions.

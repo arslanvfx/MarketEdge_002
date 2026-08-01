@@ -700,6 +700,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumLookbackMinutes,
     convictionMomentumSafetyFactor,
     disableMidExitForConviction,
+    convictionDirectionGuardEnabled,
+    convictionDirectionLookbackCandles,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -799,6 +801,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumLookbackMinutes?: number;
     convictionMomentumSafetyFactor?: number;
     disableMidExitForConviction?: boolean;
+    convictionDirectionGuardEnabled?: boolean;
+    convictionDirectionLookbackCandles?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -1135,6 +1139,12 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionMomentumSafetyFactor === "number" && convictionMomentumSafetyFactor >= 0.1 && convictionMomentumSafetyFactor <= 1.0) {
     partial.convictionMomentumSafetyFactor = +convictionMomentumSafetyFactor.toFixed(1);
+  }
+  if (typeof convictionDirectionGuardEnabled === "boolean") {
+    partial.convictionDirectionGuardEnabled = convictionDirectionGuardEnabled;
+  }
+  if (typeof convictionDirectionLookbackCandles === "number" && convictionDirectionLookbackCandles >= 1 && convictionDirectionLookbackCandles <= 10) {
+    partial.convictionDirectionLookbackCandles = Math.round(convictionDirectionLookbackCandles);
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

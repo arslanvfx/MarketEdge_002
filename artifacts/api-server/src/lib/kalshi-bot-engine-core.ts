@@ -1234,6 +1234,10 @@ export interface BotConfig {
   convictionMomentumLookbackMinutes?: number; // velocity lookback in 1-min candles (default 3)
   convictionMomentumSafetyFactor?: number;    // block if time-to-cross < remaining × factor (default 0.6)
 
+  // Conviction direction guard — blocks entry when price is moving toward the strike
+  convictionDirectionGuardEnabled?: boolean;   // master toggle (default true)
+  convictionDirectionLookbackCandles?: number; // candles to measure slope over (default 3, clamp 1–10)
+
   // ── Extreme Caution mode (conviction only) ────────────────────────────────
   // When enabled: (1) if a YES conviction bet was aborted this window because
   // the YES bid was below the zone floor, all further YES entries for that
@@ -1439,6 +1443,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionMomentumGateEnabled: true,
   convictionMomentumLookbackMinutes: 3,
   convictionMomentumSafetyFactor: 0.6,
+  convictionDirectionGuardEnabled: true,
+  convictionDirectionLookbackCandles: 3,
   minHoldMinutes: 4,
   enableMidExit: false,
   disableMidExitForConviction: true,
@@ -1606,6 +1612,52 @@ export function computeAdverseMomentumGate(opts: {
   // If velocity eats more than (1 − safetyFactor) of the gap before window close → block.
   const projectedGap = currentMarginDollars - absVel * minutesRemaining;
   return { blocked: projectedGap < safetyFactor * currentMarginDollars, timeToCrossMin };
+}
+
+/**
+ * computeConvictionDirectionGate — pure, exported for testing.
+ *
+ * Blocks a conviction entry when the crypto spot price is moving in the
+ * WRONG direction relative to the bet:
+ *   YES bet → price must be rising  (toPrice > fromPrice)
+ *   NO  bet → price must be falling (toPrice < fromPrice)
+ *
+ * "Wrong direction" = price is heading TOWARD the Kalshi strike instead of
+ * away from it.  Uses the close prices of the last `lookback` candles.
+ *
+ * Fail-open: returns blocked=false when fewer than 2 candles are available so
+ * the bot is never silently stopped by missing data.
+ */
+export interface ConvictionDirectionGateResult {
+  blocked: boolean;
+  fromPrice: number | null;
+  toPrice: number | null;
+  slopePrice: number | null; // toPrice − fromPrice; positive = rising
+}
+
+export function computeConvictionDirectionGate(opts: {
+  candles: Array<{ c: number }>;
+  direction: "yes" | "no";
+  lookback?: number; // default 3
+}): ConvictionDirectionGateResult {
+  const { candles, direction, lookback = 3 } = opts;
+  const n = Math.max(1, Math.min(lookback, 10));
+
+  if (candles.length < 2) {
+    // Fail-open: not enough data to evaluate → never block
+    return { blocked: false, fromPrice: null, toPrice: null, slopePrice: null };
+  }
+
+  const toPrice   = candles[candles.length - 1].c;
+  const fromIdx   = Math.max(0, candles.length - 1 - n);
+  const fromPrice = candles[fromIdx].c;
+  const slopePrice = toPrice - fromPrice;
+
+  // YES: we need price to be rising (moving away from strike upward)
+  // NO:  we need price to be falling (moving away from strike downward)
+  const blocked = direction === "yes" ? slopePrice <= 0 : slopePrice >= 0;
+
+  return { blocked, fromPrice, toPrice, slopePrice };
 }
 
 /**

@@ -1140,6 +1140,43 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </>)}
                     </div>
 
+                    {/* Direction Guard */}
+                    <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-sky-300 flex items-center gap-1.5">
+                          <TrendingUp className="w-3 h-3" />
+                          Direction Guard
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setConfigDraft(d => ({ ...d, convictionDirectionGuardEnabled: !(merged.convictionDirectionGuardEnabled ?? true) }))}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.convictionDirectionGuardEnabled ?? true)
+                            ? "bg-sky-500/15 text-sky-400 border-sky-500/30 hover:bg-sky-500/25"
+                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
+                        >
+                          {(merged.convictionDirectionGuardEnabled ?? true) ? "On" : "Off"}
+                        </button>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                        Blocks entry when price is moving <em>toward</em> the strike at order time. YES bets require a rising price; NO bets require a falling price. Prevents buying in as the market moves against you.
+                      </span>
+                      {(merged.convictionDirectionGuardEnabled ?? true) && (
+                        <label className="flex flex-col gap-1.5 mt-1">
+                          <span className="text-xs text-muted-foreground">Direction Lookback (candles)</span>
+                          <select
+                            className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                            value={merged.convictionDirectionLookbackCandles ?? 3}
+                            onChange={e => setConfigDraft(d => ({ ...d, convictionDirectionLookbackCandles: parseInt(e.target.value) }))}
+                          >
+                            {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                              <option key={n} value={n}>{n} candle{n > 1 ? "s" : ""}{n === 1 ? " — fastest (single candle)" : n === 3 ? " — default" : n >= 7 ? " — smoothest" : ""}</option>
+                            ))}
+                          </select>
+                          <span className="text-[10px] text-muted-foreground/60">How many 1-min candles to measure the price slope over. Fewer = reacts faster but noisier.</span>
+                        </label>
+                      )}
+                    </div>
+
                     {/* Stability Gate */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
                       <div className="flex items-center justify-between">

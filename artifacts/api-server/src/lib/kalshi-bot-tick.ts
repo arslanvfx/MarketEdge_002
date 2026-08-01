@@ -15,6 +15,7 @@ import {
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   deriveConvictionZone,
   computeAdverseMomentumGate,
+  computeConvictionDirectionGate,
   checkExtremeCautionEarlyGuard,
   computeNoAskBounceThreshold,
   computeExtremeCautionNoAskCeiling,
@@ -2423,6 +2424,45 @@ async function _runBotTick(
         effectiveThreshold: _prox.effectiveThreshold.toFixed(4),
       },
       "[kalshi-bot] conviction proximity re-check: gap OK — proceeding",
+    );
+  }
+
+  // ── Conviction direction guard ────────────────────────────────────────────
+  // Block entry when the crypto spot price is moving TOWARD the Kalshi strike
+  // rather than away from it.  At the moment of entry:
+  //   YES bet → price must be rising  (moving further above the strike)
+  //   NO  bet → price must be falling (moving further below the strike)
+  // Fail-open: skipped when candle data is unavailable.
+  if (S.config.decisionMode === "conviction" &&
+      (S.config.convictionDirectionGuardEnabled ?? true) &&
+      candles.length >= 2) {
+    const _dirLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
+    const _dir = computeConvictionDirectionGate({ candles, direction, lookback: _dirLookback });
+    if (_dir.blocked) {
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] conviction direction guard: max-bet token restored");
+      }
+      logger.warn(
+        {
+          sym, direction, windowKey,
+          fromPrice:   _dir.fromPrice,
+          toPrice:     _dir.toPrice,
+          slopePrice:  _dir.slopePrice?.toFixed(2),
+          lookback:    _dirLookback,
+        },
+        "[kalshi-bot] conviction direction guard: price moving toward strike — order aborted",
+      );
+      return;
+    }
+    logger.info(
+      {
+        sym, direction, windowKey,
+        slopePrice: _dir.slopePrice?.toFixed(2),
+        lookback:   _dirLookback,
+      },
+      "[kalshi-bot] conviction direction guard: price moving away from strike — OK",
     );
   }
 

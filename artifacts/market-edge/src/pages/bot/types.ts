@@ -116,6 +116,8 @@ export interface BotConfig {
   convictionMomentumGateEnabled?: boolean;
   convictionMomentumLookbackMinutes?: number;
   convictionMomentumSafetyFactor?: number;
+  convictionDirectionGuardEnabled?: boolean;
+  convictionDirectionLookbackCandles?: number;
   kalshiLockPriceCap?: number;
   strikeProximityMinPct?: number;
   strikeProximityAtrScale?: boolean;
