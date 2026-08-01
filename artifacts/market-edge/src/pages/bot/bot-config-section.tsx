@@ -1755,6 +1755,16 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       ? "Bot will cashout early when signal divergence, price flip, or Phase 2 conditions are met."
                       : "Bot holds every position until the 15-min window closes. Safest option — no early exit risk."}
                   </span>
+                  {isConviction && (
+                    <div className="mt-1 rounded-md border border-violet-500/25 bg-violet-500/8 px-3 py-2 flex items-start gap-2">
+                      <Shield className="w-3 h-3 text-violet-400 mt-0.5 shrink-0" />
+                      <span className="text-[11px] text-violet-300/80 leading-relaxed">
+                        <span className="font-semibold text-violet-300">Conviction mode:</span> mid-exit is automatically suppressed regardless of the toggle above.
+                        Conviction positions always hold to window expiry — the edge is in the price cross, not ongoing signals.
+                        Only the conviction stop-loss (below) can close a position early.
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Time-Stop */}
@@ -1813,8 +1823,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 {(() => {
                   const lockMin = merged.minWindowEntryMinutes ?? 0;
                   const bypassOn = merged.convictionEarlyBypassEnabled !== false;
-                  const bypassPct = Math.round((merged.convictionEarlyBypassThreshold ?? 0.92) * 100);
-                  const oppositePct = 100 - bypassPct;
+                  const bypassFloor = merged.convictionEarlyBypassThreshold ?? 0.81;
+                  const bypassCap   = merged.convictionEarlyBypassCap ?? 0.95;
+                  const floorPct = Math.round(bypassFloor * 100);
+                  const capPct   = Math.round(bypassCap * 100);
+                  const noFloorPct = 100 - capPct;
+                  const noCapPct   = 100 - floorPct;
                   return (
                     <div className="flex flex-col gap-2">
                       <label className="flex flex-col gap-1.5">
@@ -1830,14 +1844,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <option value={0}>No lockout — bets allowed immediately</option>
                           {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
                             <option key={m} value={m}>
-                              Block first {m} min{bypassOn ? ` (bypass at ≥${bypassPct}¢ / ≤${oppositePct}¢)` : " (no bypass)"}
+                              Block first {m} min{bypassOn ? ` (bypass ${floorPct}–${capPct}¢ YES / ${noFloorPct}–${noCapPct}¢ NO)` : " (no bypass)"}
                             </option>
                           ))}
                         </select>
                         {lockMin > 0 && (
                           <span className="text-xs text-muted-foreground/70">
                             {bypassOn
-                              ? `No bets in the first ${lockMin} min unless YES price hits ≥${bypassPct}¢ or ≤${oppositePct}¢.`
+                              ? `No bets in the first ${lockMin} min unless YES price is ${floorPct}–${capPct}¢ (YES zone) or ${noFloorPct}–${noCapPct}¢ (NO zone).`
                               : `No bets in the first ${lockMin} min — timer is always respected (bypass disabled).`}
                           </span>
                         )}
@@ -1856,22 +1870,37 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             </span>
                           </label>
                           {bypassOn && (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground/70">Bypass threshold (YES price)</span>
-                              <select className="bg-background border border-border/60 rounded-md px-2 py-1 text-xs text-foreground"
-                                value={merged.convictionEarlyBypassThreshold ?? 0.92}
-                                onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassThreshold: parseFloat(e.target.value) }))}>
-                                {[0.88, 0.89, 0.90, 0.91, 0.92, 0.93, 0.94, 0.95].map(v => {
-                                  const pct = Math.round(v * 100);
-                                  return (
-                                    <option key={v} value={v}>≥{pct}¢ / ≤{100 - pct}¢</option>
-                                  );
-                                })}
-                              </select>
+                            <div className="flex flex-col gap-2">
+                              <label className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground/70">Bypass floor (YES — lower bound)</span>
+                                <select className="bg-background border border-border/60 rounded-md px-2 py-1 text-xs text-foreground"
+                                  value={bypassFloor}
+                                  onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassThreshold: parseFloat(e.target.value) }))}>
+                                  {[0.75, 0.78, 0.80, 0.81, 0.82, 0.83, 0.84, 0.85, 0.86, 0.87, 0.88, 0.90].map(v => {
+                                    const pct = Math.round(v * 100);
+                                    return (
+                                      <option key={v} value={v}>{pct}¢ (NO mirror: ≤{100 - pct}¢)</option>
+                                    );
+                                  })}
+                                </select>
+                              </label>
+                              <label className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground/70">Bypass cap (YES — upper bound)</span>
+                                <select className="bg-background border border-border/60 rounded-md px-2 py-1 text-xs text-foreground"
+                                  value={bypassCap}
+                                  onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassCap: parseFloat(e.target.value) }))}>
+                                  {[0.90, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98].map(v => {
+                                    const pct = Math.round(v * 100);
+                                    return (
+                                      <option key={v} value={v}>{pct}¢ (NO mirror: ≥{100 - pct}¢)</option>
+                                    );
+                                  })}
+                                </select>
+                              </label>
                               <span className="text-[10px] text-muted-foreground/50">
-                                Timer is skipped when YES price crosses this level before the lockout expires.
+                                Timer is skipped when YES price is in the {floorPct}–{capPct}¢ range (YES bets) or {noFloorPct}–{noCapPct}¢ range (NO bets).
                               </span>
-                            </label>
+                            </div>
                           )}
                         </div>
                       )}

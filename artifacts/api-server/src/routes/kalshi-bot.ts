@@ -177,6 +177,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     maxBetsPerWindow: 2,
     profitLockPct: 97,
     enableMidExit: false,
+    disableMidExitForConviction: true,
     regimePenalty: 0,
     enableDirectionCap: false,
     maxSameDirectionBets: 4,
@@ -664,6 +665,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minWindowEntryMinutes,
     convictionEarlyBypassEnabled,
     convictionEarlyBypassThreshold,
+    convictionEarlyBypassCap,
     convictionStopLossFloor,
     convictionStopLossActivationMinute,
     convictionEmergencyCloseFloor,
@@ -697,6 +699,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled,
     convictionMomentumLookbackMinutes,
     convictionMomentumSafetyFactor,
+    disableMidExitForConviction,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -719,6 +722,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minWindowEntryMinutes?: number;
     convictionEarlyBypassEnabled?: boolean;
     convictionEarlyBypassThreshold?: number;
+    convictionEarlyBypassCap?: number;
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
@@ -794,6 +798,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumGateEnabled?: boolean;
     convictionMomentumLookbackMinutes?: number;
     convictionMomentumSafetyFactor?: number;
+    disableMidExitForConviction?: boolean;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -829,6 +834,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof phase2ThresholdPp === "number" && phase2ThresholdPp >= 10 && phase2ThresholdPp <= 50) {
     partial.phase2ThresholdPp = phase2ThresholdPp;
+  }
+  if (typeof disableMidExitForConviction === "boolean") {
+    partial.disableMidExitForConviction = disableMidExitForConviction;
   }
   if (typeof maxEntryMinutes === "number" && maxEntryMinutes >= 0 && maxEntryMinutes <= 13) {
     partial.maxEntryMinutes = maxEntryMinutes;
@@ -1077,8 +1085,11 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof convictionEarlyBypassEnabled === "boolean") {
     partial.convictionEarlyBypassEnabled = convictionEarlyBypassEnabled;
   }
-  if (typeof convictionEarlyBypassThreshold === "number" && convictionEarlyBypassThreshold >= 0.80 && convictionEarlyBypassThreshold <= 0.99) {
+  if (typeof convictionEarlyBypassThreshold === "number" && convictionEarlyBypassThreshold >= 0.70 && convictionEarlyBypassThreshold <= 0.95) {
     partial.convictionEarlyBypassThreshold = +convictionEarlyBypassThreshold.toFixed(2);
+  }
+  if (typeof convictionEarlyBypassCap === "number" && convictionEarlyBypassCap >= 0.80 && convictionEarlyBypassCap <= 0.99) {
+    partial.convictionEarlyBypassCap = +convictionEarlyBypassCap.toFixed(2);
   }
   // Extreme Caution mode
   if (typeof extremeCautionEnabled === "boolean") partial.extremeCautionEnabled = extremeCautionEnabled;

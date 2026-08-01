@@ -974,8 +974,9 @@ export interface BotConfig {
   minRemainingMinutes: number; // floor: don't enter when fewer than this many minutes remain; 0 = disabled (no floor)
   windowEntryBufferSeconds?: number; // seconds to wait at window open before ANY bet fires; 0/undefined = use server default (120)
   minWindowEntryMinutes?: number;     // hard lockout: no bets in the first N minutes of a window; 0/undefined = disabled
-  convictionEarlyBypassEnabled?: boolean;   // when true (default), minWindowEntryMinutes is bypassed when yesPrice crosses the extreme threshold; false = timer always respected
-  convictionEarlyBypassThreshold?: number;  // YES price threshold for the early bypass (default 0.92); only active when convictionEarlyBypassEnabled=true
+  convictionEarlyBypassEnabled?: boolean;   // when true (default), minWindowEntryMinutes is bypassed when yesPrice is in the extreme range; false = timer always respected
+  convictionEarlyBypassThreshold?: number;  // lower bound of the YES bypass range (default 0.81 = 81¢); bypass fires when floor ≤ yesPrice ≤ cap or mirror NO zone
+  convictionEarlyBypassCap?: number;        // upper bound of the YES bypass range (default 0.95 = 95¢); bypass fires when floor ≤ yesPrice ≤ cap
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
   kalshiLockPrice?: number;           // conviction only: entry floor (default 0.82; BET fires when Kalshi YES ≥ this value)
   lockPrice091Migrated?: boolean;     // legacy one-time migration marker: 0.90 → 0.91 target bump (superseded)
@@ -1129,6 +1130,7 @@ export interface BotConfig {
   profitLockPct: number;               // 0 = disabled; 1–99 = cash out when current value reaches this % of max payout
   minHoldMinutes: number;              // min minutes to hold before ANY exit is evaluated (default 4); 0 = disabled
   enableMidExit: boolean;              // master switch for mid-window cashout/exit system (default false = disabled)
+  disableMidExitForConviction?: boolean; // when true (default), suppress all mid-exit logic in conviction mode regardless of enableMidExit
   enableTimeStop?: boolean;            // when true, also exit losing positions with <2 min left regardless of mid-exit sensitivity (default false)
 
   // ── Free-run mode ────────────────────────────────────────────────────────
@@ -1343,7 +1345,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // 0/undefined in DB → uses this default of 60 s (1 tracker snap cycle).
   windowEntryBufferSeconds: 60,
   convictionEarlyBypassEnabled: true,
-  convictionEarlyBypassThreshold: 0.92,
+  convictionEarlyBypassThreshold: 0.81,
+  convictionEarlyBypassCap: 0.95,
   // Allow up to 7 bets per window (matches 7-coin training set: BTC/ETH/XRP/HYPE/BNB/SOL/DOGE).
   maxBetsPerWindow: 7,
   enabled: true,
@@ -1437,6 +1440,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionMomentumSafetyFactor: 0.6,
   minHoldMinutes: 4,
   enableMidExit: false,
+  disableMidExitForConviction: true,
   enableTimeStop: false,
   freeRunMode: false,
   consensusMinCents: 25,

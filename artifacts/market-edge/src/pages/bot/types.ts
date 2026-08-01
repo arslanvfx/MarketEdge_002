@@ -56,9 +56,11 @@ export interface BotConfig {
   minWindowEntryMinutes?: number;
   convictionEarlyBypassEnabled?: boolean;
   convictionEarlyBypassThreshold?: number;
+  convictionEarlyBypassCap?: number;
   betDelayMinutes?: number;
   minHoldMinutes?: number;
   enableMidExit?: boolean;
+  disableMidExitForConviction?: boolean;
   enableTimeStop?: boolean;
   coinStreakPenalty1LossPp?: number;
   coinStreakPenalty2PlusLossPp?: number;

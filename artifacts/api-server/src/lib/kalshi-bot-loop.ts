@@ -845,6 +845,19 @@ export async function runBotLoopTick(): Promise<void> {
           return;
         }
 
+        // ── Conviction-mode exit suppression ──────────────────────────────────
+        // Pipeline-recheck exits are also suppressed in conviction mode when
+        // disableMidExitForConviction is set.  Conviction positions hold to
+        // window expiry regardless of signal flips — the edge is in the price
+        // cross, not in ongoing signal agreement.
+        if (S.config.decisionMode === "conviction" && S.config.disableMidExitForConviction !== false) {
+          logger.info(
+            { sym, signalsAgainstBet, exitRatio: exitRatio.toFixed(3) },
+            "[pipeline-recheck] conviction mode — mid-exit suppressed, holding to expiry",
+          );
+          return;
+        }
+
         // ── Double-check: run a second independent pipeline read before closing ─
         // A single flipped read can be a transient artifact (stat mid-snap noise,
         // a momentary Claude re-call, etc.).  Re-running all three models right
@@ -1347,12 +1360,17 @@ export async function runBotLoopTick(): Promise<void> {
       const convMinEntryMin = S.config.convictionMinEntryMinutes ?? 0;
       if (convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
         const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
-        const _bypassThreshold = S.config.convictionEarlyBypassThreshold ?? 0.92;
+        const _bypassFloor = S.config.convictionEarlyBypassThreshold ?? 0.81;
+        const _bypassCap   = S.config.convictionEarlyBypassCap ?? 0.95;
         const _pollerPrice = getConvictionLivePrice(sym);
         const _liveYes = _pollerPrice?.yesAsk ?? _pollerPrice?.yesBid ?? null;
+        const _lNoFloor = +(1 - _bypassCap).toFixed(4);
+        const _lNoCap   = +(1 - _bypassFloor).toFixed(4);
         const _isExtreme = _bypassEnabled &&
-          _liveYes !== null &&
-          (_liveYes >= _bypassThreshold || _liveYes <= +(1 - _bypassThreshold).toFixed(4));
+          _liveYes !== null && (
+            (_liveYes >= _bypassFloor && _liveYes <= _bypassCap) ||
+            (_liveYes >= _lNoFloor && _liveYes <= _lNoCap)
+          );
         if (!_isExtreme) {
           evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: min entry wait (${convMinEntryMin}min — ${(clockElapsedS / 60).toFixed(1)}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
           continue;
