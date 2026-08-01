@@ -313,6 +313,7 @@ export default function BotDashboard() {
     coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
     coinTrajectory?: Record<string, import("./bot/types").TrajectoryGateResult>;
     extremeCautionAborted?: string[];
+    convictionDirectionBlocked?: Record<string, "yes" | "no">;
     activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
   }>({
     queryKey: ["bot-pipeline-status"],
@@ -682,6 +683,7 @@ export default function BotDashboard() {
             }}
             maxBetMinWindowEntryMinutes={status?.config?.maxBetMinWindowEntryMinutes}
             extremeCautionAborted={pipelineStatusData.extremeCautionAborted}
+            convictionDirectionBlocked={pipelineStatusData.convictionDirectionBlocked}
             activeScheduleBracket={pipelineStatusData.activeScheduleBracket}
           />
         )}

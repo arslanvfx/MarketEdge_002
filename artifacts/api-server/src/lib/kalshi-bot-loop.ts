@@ -45,9 +45,9 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken,
+  convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken, convictionDirectionGuardBlockedMap,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
-  maxBetCandidateForWindow, convictionPriceTicks,
+  maxBetCandidateForWindow,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -518,7 +518,7 @@ export async function runBotLoopTick(): Promise<void> {
     extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();
     convictionEmergencyCloses.clear();
-    convictionPriceTicks.clear();
+    convictionDirectionGuardBlockedMap.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
     maxBetCandidateForWindow.clear(); // stale window keys no longer relevant
@@ -2436,18 +2436,10 @@ export async function runBotLoopTick(): Promise<void> {
     if (S.config.decisionMode === "conviction") {
       const pollerPrice = getConvictionLivePrice(sym);
       if (pollerPrice != null) {
-        const midP =
+        yesPrice =
           pollerPrice.yesAsk != null && pollerPrice.yesBid != null
             ? (pollerPrice.yesAsk + pollerPrice.yesBid) / 2
-            : pollerPrice.yesAsk ?? pollerPrice.yesBid ?? null;
-        yesPrice = midP ?? yesPrice;
-        // Update rolling second-level price history for the direction guard.
-        if (midP != null) {
-          const ticks = convictionPriceTicks.get(sym) ?? [];
-          ticks.push({ price: midP, ts: Date.now() });
-          if (ticks.length > 30) ticks.splice(0, ticks.length - 30);
-          convictionPriceTicks.set(sym, ticks);
-        }
+            : pollerPrice.yesAsk ?? pollerPrice.yesBid ?? yesPrice;
       }
     }
     try {

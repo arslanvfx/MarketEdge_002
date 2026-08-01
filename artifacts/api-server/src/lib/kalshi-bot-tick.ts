@@ -57,7 +57,7 @@ import {
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   windowRandomizerUsedValues,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
-  convictionAbortCooldown, convictionPriceTicks,
+  convictionAbortCooldown, convictionDirectionGuardBlockedMap,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -2428,51 +2428,43 @@ async function _runBotTick(
   }
 
   // ── Conviction direction guard ────────────────────────────────────────────
-  // Block entry when the crypto spot price has been moving TOWARD the Kalshi
-  // strike for `convictionDirectionGuardMinSeconds` consecutive seconds.
+  // Block entry when the crypto spot price is moving TOWARD the Kalshi strike
+  // rather than away from it.  At the moment of entry:
   //   YES bet → price must be rising  (moving further above the strike)
   //   NO  bet → price must be falling (moving further below the strike)
-  // Uses second-level poller ticks (primary) or minute candles (fallback).
-  // Fail-open when neither source has enough data.
+  // Fail-open: skipped when candle data is unavailable.
   if (S.config.decisionMode === "conviction" &&
-      (S.config.convictionDirectionGuardEnabled ?? true)) {
-    const _dirMinSec  = S.config.convictionDirectionGuardMinSeconds ?? 4;
+      (S.config.convictionDirectionGuardEnabled ?? true) &&
+      candles.length >= 2) {
     const _dirLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
-    const _ticks = convictionPriceTicks.get(sym) ?? [];
-    const _dir = computeConvictionDirectionGate({
-      priceTicks: _ticks,
-      candles:    candles.length >= 2 ? candles : undefined,
-      direction,
-      minSeconds: _dirMinSec,
-      lookback:   _dirLookback,
-    });
+    const _dir = computeConvictionDirectionGate({ candles, direction, lookback: _dirLookback });
     if (_dir.blocked) {
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       if (boostBetSize != null) {
         maxBetWindowToken.remaining++;
         logger.info({ sym }, "[kalshi-bot] conviction direction guard: max-bet token restored");
       }
+      // Surface the block to the dashboard: mark this coin as direction-blocked.
+      convictionDirectionGuardBlockedMap.set(sym, direction);
       logger.warn(
         {
           sym, direction, windowKey,
-          fromPrice:               _dir.fromPrice,
-          toPrice:                 _dir.toPrice,
-          slopePrice:              _dir.slopePrice?.toFixed(4),
-          consecutiveAdverseSec:   _dir.consecutiveAdverseSeconds,
-          requiredSec:             _dirMinSec,
-          ticksAvailable:          _ticks.length,
+          fromPrice:   _dir.fromPrice,
+          toPrice:     _dir.toPrice,
+          slopePrice:  _dir.slopePrice?.toFixed(2),
+          lookback:    _dirLookback,
         },
         "[kalshi-bot] conviction direction guard: price moving toward strike — order aborted",
       );
       return;
     }
+    // Guard passed — clear any prior block for this coin so the dashboard badge disappears.
+    convictionDirectionGuardBlockedMap.delete(sym);
     logger.info(
       {
         sym, direction, windowKey,
-        slopePrice:            _dir.slopePrice?.toFixed(4),
-        consecutiveAdverseSec: _dir.consecutiveAdverseSeconds,
-        requiredSec:           _dirMinSec,
-        ticksAvailable:        _ticks.length,
+        slopePrice: _dir.slopePrice?.toFixed(2),
+        lookback:   _dirLookback,
       },
       "[kalshi-bot] conviction direction guard: price moving away from strike — OK",
     );

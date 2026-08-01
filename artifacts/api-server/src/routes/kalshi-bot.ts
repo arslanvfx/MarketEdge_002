@@ -38,7 +38,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
-import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow } from "../lib/kalshi-bot-state";
+import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow, convictionDirectionGuardBlockedMap } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 
@@ -469,6 +469,15 @@ function pipelineStatusHandler(_req: any, res: any) {
       sym => extremeCautionAbortedThisWindow.has(`${sym}:${clockWindowKey}`)
     );
 
+    // ── Conviction direction guard live state ─────────────────────────────────
+    // Per-coin: "yes" | "no" when the direction guard is ACTIVELY blocking entry
+    // (price moving toward the strike on the latest tick).  Deleted when the
+    // guard passes, so the dashboard badge clears automatically.
+    const convictionDirectionBlocked: Record<string, "yes" | "no"> = {};
+    for (const [sym, dir] of convictionDirectionGuardBlockedMap) {
+      convictionDirectionBlocked[sym] = dir;
+    }
+
     // ── Active time-bet schedule bracket ─────────────────────────────────────
     // The highest-matching bracket for the current elapsed window minutes, if
     // timeBetScheduleEnabled=true and at least one bracket matches.
@@ -509,6 +518,7 @@ function pipelineStatusHandler(_req: any, res: any) {
       coinStability: Object.fromEntries(coinStabilityCache),
       coinTrajectory: Object.fromEntries(coinTrajectoryCache),
       extremeCautionAborted,
+      convictionDirectionBlocked,
       activeScheduleBracket,
       boosts: { mlWeight: ML_WEIGHT, claudeWeight: CLAUDE_WEIGHT, statBoost: STAT_BOOST, statPenalty: STAT_PENALTY },
       adaptiveFilters: {
