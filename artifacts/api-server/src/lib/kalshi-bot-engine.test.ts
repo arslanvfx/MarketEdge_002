@@ -63,6 +63,7 @@ import {
   type CircuitBreakerState,
   type ConvictionInputs,
   computeAdverseMomentumGate,
+  computeConvictionDirectionGate,
 } from "./kalshi-bot-engine-core.ts";
 
 const DEFAULT_MIN_CONFIDENCE = 60;
@@ -2367,4 +2368,245 @@ test("one-sided book NO: bid=null, ask=0.05, lockPrice=0.88 → oneSidedConfirme
   const r = checkConvictionOneSidedBook("no", 0.05, null, 0.88);
   assert.equal(r.oneSidedConfirmed, true);
   assert.equal(r.side, "ask");
+});
+
+// ── computeConvictionDirectionGate tests ──────────────────────────────────────
+//
+// The direction gate blocks conviction entries when the crypto spot price is
+// moving in the WRONG direction relative to the bet:
+//   YES bet → needs price rising  (toPrice > fromPrice, i.e. slopePrice > 0)
+//   NO  bet → needs price falling (toPrice < fromPrice, i.e. slopePrice < 0)
+//
+// The slope is computed between the close of the candle `lookback` bars ago
+// (fromPrice) and the most recent close (toPrice).  This endpoint-slope design
+// means a single noisy intermediate candle has no effect on the result —
+// the gate is inherently robust to individual candle spikes.
+//
+// Fail-open: fewer than 2 candles → blocked=false so missing data never
+// silently stops all conviction entries.
+
+// Helper: build a candle array with specific close prices
+function candles(...closes: number[]): Array<{ c: number }> {
+  return closes.map((c) => ({ c }));
+}
+
+// ── YES direction ─────────────────────────────────────────────────────────────
+
+test("direction gate YES pass: rising candles → blocked=false", () => {
+  // Prices clearly rising: 100 → 101 → 102 → 103 → 105
+  const r = computeConvictionDirectionGate({
+    candles: candles(100, 101, 102, 103, 105),
+    direction: "yes",
+  });
+  assert.equal(r.blocked, false);
+  assert.ok(r.slopePrice !== null && r.slopePrice > 0, `Expected positive slope, got ${r.slopePrice}`);
+  assert.equal(r.toPrice, 105);
+});
+
+test("direction gate YES block: falling candles → blocked=true", () => {
+  // Prices falling: 105 → 104 → 103 → 102 → 100
+  const r = computeConvictionDirectionGate({
+    candles: candles(105, 104, 103, 102, 100),
+    direction: "yes",
+  });
+  assert.equal(r.blocked, true);
+  assert.ok(r.slopePrice !== null && r.slopePrice < 0, `Expected negative slope, got ${r.slopePrice}`);
+});
+
+test("direction gate YES block: flat candles (slopePrice=0) → blocked=true", () => {
+  // Prices flat: 100 → 100 → 100 → 100
+  const r = computeConvictionDirectionGate({
+    candles: candles(100, 100, 100, 100),
+    direction: "yes",
+  });
+  assert.equal(r.blocked, true);
+  assert.equal(r.slopePrice, 0);
+});
+
+// ── NO direction ──────────────────────────────────────────────────────────────
+
+test("direction gate NO pass: falling candles → blocked=false", () => {
+  // Prices falling: 105 → 104 → 103 → 102 → 100
+  const r = computeConvictionDirectionGate({
+    candles: candles(105, 104, 103, 102, 100),
+    direction: "no",
+  });
+  assert.equal(r.blocked, false);
+  assert.ok(r.slopePrice !== null && r.slopePrice < 0, `Expected negative slope, got ${r.slopePrice}`);
+  assert.equal(r.toPrice, 100);
+});
+
+test("direction gate NO block: rising candles → blocked=true", () => {
+  // Prices rising: 100 → 101 → 102 → 103 → 105
+  const r = computeConvictionDirectionGate({
+    candles: candles(100, 101, 102, 103, 105),
+    direction: "no",
+  });
+  assert.equal(r.blocked, true);
+  assert.ok(r.slopePrice !== null && r.slopePrice > 0, `Expected positive slope, got ${r.slopePrice}`);
+});
+
+test("direction gate NO block: flat candles (slopePrice=0) → blocked=true", () => {
+  // Prices flat: 100 → 100 → 100 → 100
+  const r = computeConvictionDirectionGate({
+    candles: candles(100, 100, 100, 100),
+    direction: "no",
+  });
+  assert.equal(r.blocked, true);
+  assert.equal(r.slopePrice, 0);
+});
+
+// ── Fail-open paths ──────────────────────────────────────────────────────────
+
+test("direction gate fail-open: 0 candles → blocked=false (missing data never blocks)", () => {
+  const r = computeConvictionDirectionGate({ candles: [], direction: "yes" });
+  assert.equal(r.blocked, false);
+  assert.equal(r.fromPrice, null);
+  assert.equal(r.toPrice, null);
+  assert.equal(r.slopePrice, null);
+});
+
+test("direction gate fail-open: 1 candle → blocked=false (need ≥2 candles to compute slope)", () => {
+  const r = computeConvictionDirectionGate({ candles: candles(100), direction: "yes" });
+  assert.equal(r.blocked, false);
+  assert.equal(r.fromPrice, null);
+  assert.equal(r.toPrice, null);
+  assert.equal(r.slopePrice, null);
+});
+
+test("direction gate fail-open: 1 candle NO direction → also blocked=false", () => {
+  const r = computeConvictionDirectionGate({ candles: candles(100), direction: "no" });
+  assert.equal(r.blocked, false);
+  assert.equal(r.slopePrice, null);
+});
+
+// ── lookback > available candles ──────────────────────────────────────────────
+
+test("direction gate lookback>available: lookback=10 with 4 candles → uses full available window (fromIdx=0)", () => {
+  // 4 candles [90, 95, 98, 105], lookback=10 → fromIdx=max(0,4-1-10)=0 → from=90,to=105 → rising → YES passes
+  const r = computeConvictionDirectionGate({
+    candles: candles(90, 95, 98, 105),
+    direction: "yes",
+    lookback: 10,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.fromPrice, 90);
+  assert.equal(r.toPrice, 105);
+  assert.ok(r.slopePrice !== null && r.slopePrice > 0);
+});
+
+test("direction gate lookback>available: falling trend with lookback=10 and 3 candles → still blocked for YES", () => {
+  // 3 candles [105, 102, 100], lookback=10 → fromIdx=0 → from=105, to=100 → falling → YES blocked
+  const r = computeConvictionDirectionGate({
+    candles: candles(105, 102, 100),
+    direction: "yes",
+    lookback: 10,
+  });
+  assert.equal(r.blocked, true);
+  assert.equal(r.fromPrice, 105);
+  assert.equal(r.toPrice, 100);
+});
+
+// ── Lookback parameterisation ─────────────────────────────────────────────────
+
+test("direction gate lookback=1: YES — uses only adjacent candles (last two)", () => {
+  // Candles: 100, 99, 98, 102 — lookback=1: fromIdx=3-1=2 → from=98, to=102 → rising → YES passes
+  // Without this guard, lookback=3 would see 100→102 (still rising), but if last spike matters only
+  const r = computeConvictionDirectionGate({
+    candles: candles(100, 99, 98, 102),
+    direction: "yes",
+    lookback: 1,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.fromPrice, 98);
+  assert.equal(r.toPrice, 102);
+  assert.equal(r.slopePrice, 4);
+});
+
+test("direction gate lookback=1: YES — last candle dips → blocked even though earlier trend was rising", () => {
+  // Candles: 98, 99, 101, 100 — lookback=1: from=101 to=100 → falling → YES blocked
+  const r = computeConvictionDirectionGate({
+    candles: candles(98, 99, 101, 100),
+    direction: "yes",
+    lookback: 1,
+  });
+  assert.equal(r.blocked, true);
+  assert.equal(r.fromPrice, 101);
+  assert.equal(r.toPrice, 100);
+  assert.equal(r.slopePrice, -1);
+});
+
+test("direction gate lookback=5: YES — spans 5 candles back from tail", () => {
+  // Candles: [90, 92, 94, 95, 97, 100, 103]  (7 candles)
+  // lookback=5: fromIdx=max(0,7-1-5)=1 → from=candles[1].c=92, to=103 → slopePrice=11 → rising → YES passes
+  const r = computeConvictionDirectionGate({
+    candles: candles(90, 92, 94, 95, 97, 100, 103),
+    direction: "yes",
+    lookback: 5,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.fromPrice, 92);
+  assert.equal(r.toPrice, 103);
+  assert.equal(r.slopePrice, 11);
+});
+
+test("direction gate lookback=5: NO — falls correctly over 5-candle window", () => {
+  // Candles: [103, 100, 97, 95, 94, 92, 90]  (7 candles, falling)
+  // lookback=5: fromIdx=max(0,7-1-5)=1 → from=candles[1].c=100, to=90 → slopePrice=-10 → falling → NO passes
+  const r = computeConvictionDirectionGate({
+    candles: candles(103, 100, 97, 95, 94, 92, 90),
+    direction: "no",
+    lookback: 5,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.fromPrice, 100);
+  assert.equal(r.toPrice, 90);
+  assert.equal(r.slopePrice, -10);
+});
+
+// ── Robustness: single noisy candle in the middle ─────────────────────────────
+// The slope is endpoint-based (fromPrice to toPrice), so a noisy spike in the
+// middle of the window has no effect on whether the gate blocks.
+
+test("direction gate YES: single noisy dip in the middle does NOT block rising trend", () => {
+  // Candles: 100, 98(dip), 103 — overall trend rising; lookback=3 → from=candles[0]=100, to=103
+  // The noisy dip at 98 is completely irrelevant to the slope calculation.
+  const r = computeConvictionDirectionGate({
+    candles: candles(100, 98, 103),
+    direction: "yes",
+    lookback: 3,
+  });
+  assert.equal(r.blocked, false, "A single mid-window dip should not block a rising YES entry");
+  assert.equal(r.fromPrice, 100);
+  assert.equal(r.toPrice, 103);
+  assert.equal(r.slopePrice, 3);
+});
+
+test("direction gate NO: single noisy spike in the middle does NOT block falling trend", () => {
+  // Candles: 103, 106(spike), 100 — overall trend falling; lookback=3 → from=candles[0]=103, to=100
+  // The spike at 106 is irrelevant to the gate decision.
+  const r = computeConvictionDirectionGate({
+    candles: candles(103, 106, 100),
+    direction: "no",
+    lookback: 3,
+  });
+  assert.equal(r.blocked, false, "A single mid-window spike should not block a falling NO entry");
+  assert.equal(r.fromPrice, 103);
+  assert.equal(r.toPrice, 100);
+  assert.equal(r.slopePrice, -3);
+});
+
+// ── Result fields ─────────────────────────────────────────────────────────────
+
+test("direction gate result fields: fromPrice, toPrice, slopePrice populated correctly", () => {
+  // Candles: [200, 204, 210], lookback=3 → fromIdx=0 → from=200, to=210, slope=10
+  const r = computeConvictionDirectionGate({
+    candles: candles(200, 204, 210),
+    direction: "yes",
+    lookback: 3,
+  });
+  assert.equal(r.fromPrice, 200);
+  assert.equal(r.toPrice, 210);
+  assert.equal(r.slopePrice, 10);
+  assert.equal(r.blocked, false);
 });
