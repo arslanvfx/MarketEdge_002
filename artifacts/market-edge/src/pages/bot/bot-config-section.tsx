@@ -1158,22 +1158,37 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Blocks entry when price is moving <em>toward</em> the strike at order time. YES bets require a rising price; NO bets require a falling price. Prevents buying in as the market moves against you.
+                        Blocks entry when price has been falling continuously for N seconds toward the strike. Measures second-by-second from the live 1 s poller — a single noisy tick will not trigger it.
                       </span>
                       {(merged.convictionDirectionGuardEnabled ?? true) && (
-                        <label className="flex flex-col gap-1.5 mt-1">
-                          <span className="text-xs text-muted-foreground">Direction Lookback (candles)</span>
-                          <select
-                            className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
-                            value={merged.convictionDirectionLookbackCandles ?? 3}
-                            onChange={e => setConfigDraft(d => ({ ...d, convictionDirectionLookbackCandles: parseInt(e.target.value) }))}
-                          >
-                            {[1,2,3,4,5,6,7,8,9,10].map(n => (
-                              <option key={n} value={n}>{n} candle{n > 1 ? "s" : ""}{n === 1 ? " — fastest (single candle)" : n === 3 ? " — default" : n >= 7 ? " — smoothest" : ""}</option>
-                            ))}
-                          </select>
-                          <span className="text-[10px] text-muted-foreground/60">How many 1-min candles to measure the price slope over. Fewer = reacts faster but noisier.</span>
-                        </label>
+                        <div className="flex flex-col gap-2 mt-1">
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">Min adverse seconds to block</span>
+                            <select
+                              className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                              value={merged.convictionDirectionGuardMinSeconds ?? 4}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionDirectionGuardMinSeconds: parseInt(e.target.value) }))}
+                            >
+                              {[2,3,4,5,6,7,8,9,10].map(n => (
+                                <option key={n} value={n}>{n}s consecutive{n === 4 ? " — default" : n <= 3 ? " — sensitive" : n >= 7 ? " — permissive" : ""}</option>
+                              ))}
+                            </select>
+                            <span className="text-[10px] text-muted-foreground/60">Price must move toward the strike for this many seconds in a row before the entry is blocked. Lower = blocks sooner; higher = only blocks sustained slides.</span>
+                          </label>
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground/80">Candle fallback lookback</span>
+                            <select
+                              className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground/80"
+                              value={merged.convictionDirectionLookbackCandles ?? 3}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionDirectionLookbackCandles: parseInt(e.target.value) }))}
+                            >
+                              {[1,2,3,4,5].map(n => (
+                                <option key={n} value={n}>{n} candle{n > 1 ? "s" : ""}{n === 3 ? " — default" : ""}</option>
+                              ))}
+                            </select>
+                            <span className="text-[10px] text-muted-foreground/50">Used only in the first few seconds of a window before tick data is available. Has no effect once live ticks are flowing.</span>
+                          </label>
+                        </div>
                       )}
                     </div>
 

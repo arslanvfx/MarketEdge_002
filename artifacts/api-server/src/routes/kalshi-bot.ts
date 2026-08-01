@@ -701,6 +701,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumSafetyFactor,
     disableMidExitForConviction,
     convictionDirectionGuardEnabled,
+    convictionDirectionGuardMinSeconds,
     convictionDirectionLookbackCandles,
   } = req.body as {
     betSize?: number;
@@ -802,6 +803,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionMomentumSafetyFactor?: number;
     disableMidExitForConviction?: boolean;
     convictionDirectionGuardEnabled?: boolean;
+    convictionDirectionGuardMinSeconds?: number;
     convictionDirectionLookbackCandles?: number;
   };
 
@@ -1142,6 +1144,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionDirectionGuardEnabled === "boolean") {
     partial.convictionDirectionGuardEnabled = convictionDirectionGuardEnabled;
+  }
+  if (typeof convictionDirectionGuardMinSeconds === "number" && convictionDirectionGuardMinSeconds >= 2 && convictionDirectionGuardMinSeconds <= 10) {
+    partial.convictionDirectionGuardMinSeconds = Math.round(convictionDirectionGuardMinSeconds);
   }
   if (typeof convictionDirectionLookbackCandles === "number" && convictionDirectionLookbackCandles >= 1 && convictionDirectionLookbackCandles <= 10) {
     partial.convictionDirectionLookbackCandles = Math.round(convictionDirectionLookbackCandles);

@@ -1236,7 +1236,8 @@ export interface BotConfig {
 
   // Conviction direction guard — blocks entry when price is moving toward the strike
   convictionDirectionGuardEnabled?: boolean;   // master toggle (default true)
-  convictionDirectionLookbackCandles?: number; // candles to measure slope over (default 3, clamp 1–10)
+  convictionDirectionGuardMinSeconds?: number; // consecutive adverse seconds required to block (default 4, clamp 2–10)
+  convictionDirectionLookbackCandles?: number; // candle fallback lookback when tick data unavailable (default 3, clamp 1–10)
 
   // ── Extreme Caution mode (conviction only) ────────────────────────────────
   // When enabled: (1) if a YES conviction bet was aborted this window because
@@ -1444,6 +1445,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionMomentumLookbackMinutes: 3,
   convictionMomentumSafetyFactor: 0.6,
   convictionDirectionGuardEnabled: true,
+  convictionDirectionGuardMinSeconds: 4,
   convictionDirectionLookbackCandles: 3,
   minHoldMinutes: 4,
   enableMidExit: false,
@@ -1618,46 +1620,79 @@ export function computeAdverseMomentumGate(opts: {
  * computeConvictionDirectionGate — pure, exported for testing.
  *
  * Blocks a conviction entry when the crypto spot price is moving in the
- * WRONG direction relative to the bet:
- *   YES bet → price must be rising  (toPrice > fromPrice)
- *   NO  bet → price must be falling (toPrice < fromPrice)
+ * WRONG direction relative to the bet — i.e. toward the Kalshi strike:
+ *   YES bet → price must be rising  (moving away from strike upward)
+ *   NO  bet → price must be falling (moving away from strike downward)
  *
- * "Wrong direction" = price is heading TOWARD the Kalshi strike instead of
- * away from it.  Uses the close prices of the last `lookback` candles.
+ * Primary mode — second-level tick data (priceTicks):
+ *   Counts consecutive adverse second-by-second moves going backward from the
+ *   most recent tick.  Blocks only when that run is ≥ minSeconds long so a
+ *   single noisy tick never trips the gate.
  *
- * Fail-open: returns blocked=false when fewer than 2 candles are available so
- * the bot is never silently stopped by missing data.
+ * Fallback mode — minute candles (when priceTicks unavailable / too few):
+ *   Simple slope check over the last `lookback` candles.
+ *
+ * Fail-open: returns blocked=false when neither source has ≥ 2 data points.
  */
 export interface ConvictionDirectionGateResult {
   blocked: boolean;
   fromPrice: number | null;
   toPrice: number | null;
-  slopePrice: number | null; // toPrice − fromPrice; positive = rising
+  slopePrice: number | null;           // toPrice − fromPrice; positive = rising
+  consecutiveAdverseSeconds: number;   // 0 when using candle fallback
 }
 
 export function computeConvictionDirectionGate(opts: {
-  candles: Array<{ c: number }>;
+  priceTicks?: Array<{ price: number; ts: number }>; // preferred: 1 s poller data
+  candles?: Array<{ c: number }>;                    // fallback: minute candles
   direction: "yes" | "no";
-  lookback?: number; // default 3
+  minSeconds?: number;  // consecutive adverse seconds to block (default 4, clamp 2–10)
+  lookback?: number;    // candle fallback lookback (default 3, clamp 1–10)
 }): ConvictionDirectionGateResult {
-  const { candles, direction, lookback = 3 } = opts;
-  const n = Math.max(1, Math.min(lookback, 10));
+  const { priceTicks, candles, direction, minSeconds = 4, lookback = 3 } = opts;
+  const reqSeconds  = Math.max(2, Math.min(minSeconds, 10));
+  const candleLook  = Math.max(1, Math.min(lookback, 10));
 
-  if (candles.length < 2) {
-    // Fail-open: not enough data to evaluate → never block
-    return { blocked: false, fromPrice: null, toPrice: null, slopePrice: null };
+  // ── Primary: second-level ticks ─────────────────────────────────────────
+  if (priceTicks && priceTicks.length >= 2) {
+    const now       = Date.now();
+    const windowMs  = (reqSeconds + 3) * 1_000; // a few extra seconds of headroom
+    const recent    = priceTicks
+      .filter(t => now - t.ts <= windowMs)
+      .sort((a, b) => a.ts - b.ts);
+
+    if (recent.length >= 2) {
+      // Walk backward from the latest tick; count how many consecutive
+      // second-level intervals are moving in the adverse direction.
+      let consecutiveAdverse = 0;
+      for (let i = recent.length - 1; i > 0; i--) {
+        const delta   = recent[i].price - recent[i - 1].price;
+        // Adverse: YES → falling (≤ 0), NO → rising (≥ 0)
+        const adverse = direction === "yes" ? delta <= 0 : delta >= 0;
+        if (adverse) {
+          consecutiveAdverse++;
+        } else {
+          break; // not consecutive — stop counting
+        }
+      }
+      const toPrice   = recent[recent.length - 1].price;
+      const fromIdx   = Math.max(0, recent.length - 1 - consecutiveAdverse);
+      const fromPrice = recent[fromIdx].price;
+      const blocked   = consecutiveAdverse >= reqSeconds;
+      return { blocked, fromPrice, toPrice, slopePrice: toPrice - fromPrice, consecutiveAdverseSeconds: consecutiveAdverse };
+    }
   }
 
+  // ── Fallback: minute-candle slope ────────────────────────────────────────
+  if (!candles || candles.length < 2) {
+    return { blocked: false, fromPrice: null, toPrice: null, slopePrice: null, consecutiveAdverseSeconds: 0 };
+  }
   const toPrice   = candles[candles.length - 1].c;
-  const fromIdx   = Math.max(0, candles.length - 1 - n);
+  const fromIdx   = Math.max(0, candles.length - 1 - candleLook);
   const fromPrice = candles[fromIdx].c;
   const slopePrice = toPrice - fromPrice;
-
-  // YES: we need price to be rising (moving away from strike upward)
-  // NO:  we need price to be falling (moving away from strike downward)
-  const blocked = direction === "yes" ? slopePrice <= 0 : slopePrice >= 0;
-
-  return { blocked, fromPrice, toPrice, slopePrice };
+  const blocked   = direction === "yes" ? slopePrice <= 0 : slopePrice >= 0;
+  return { blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0 };
 }
 
 /**

@@ -211,6 +211,11 @@ export const extremeCautionAbortedThisWindow = new Set<string>();
 // TTL: 10 s — long enough to outlast one poller cycle + bot-loop latency.
 export const convictionAbortCooldown = new Map<string, number>();
 export const CONVICTION_ABORT_COOLDOWN_MS = 10_000;
+// Per-coin rolling price ticks from the conviction 1 s poller.
+// Used by the direction guard to detect consecutive-seconds adverse movement.
+// Entries are pushed on every poller read and trimmed to the last 30.
+// Cleared on window transition so each window starts with a clean slate.
+export const convictionPriceTicks = new Map<string, Array<{ price: number; ts: number }>>();
 // Counts emergency closes (out-of-zone fills) per `sym:windowKey` this window.
 // After MAX_EMERGENCY_CLOSES_PER_WINDOW the coin is locked out for the rest of
 // the window — prevents the buy → emergency-close → re-buy bleed loop
