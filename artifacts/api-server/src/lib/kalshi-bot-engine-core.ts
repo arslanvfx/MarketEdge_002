@@ -990,6 +990,7 @@ export interface BotConfig {
   strikeProximityMinPctOverrides?: Record<string, number>; // per-coin override of strikeProximityMinPct; takes priority over global when set; key = symbol (e.g. "BTC")
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.75 = sell when contract drops to 75¢; skipped if already at/near 0¢; 0 = disabled)
   convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately
+  convictionStopLossSuppressionMarginPct?: number; // conviction only: widen the crypto-confirmation suppression window by this fraction (e.g. 0.02 = suppress when crypto is within 2% of the strike on the winning side); default 0.02
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
@@ -1749,8 +1750,15 @@ export function computeStrikeProximityGate(opts: {
  * strike), causing the stop-loss to exit a winning trade early.
  *
  * Suppression logic:
- *   NO  bet: livePrice < kalshiStrike → crypto says NO wins  → suppress
- *   YES bet: livePrice > kalshiStrike → crypto says YES wins → suppress
+ *   NO  bet: livePrice < kalshiStrike × (1 + marginPct) → crypto near/below strike → suppress
+ *   YES bet: livePrice > kalshiStrike × (1 − marginPct) → crypto near/above strike → suppress
+ *
+ * The marginPct buffer (default 0, typically 0.02 = 2%) widens the suppression
+ * zone slightly so near-strike boundary cases — where Kalshi mispricing can
+ * transiently push contract value through the floor — are also suppressed.
+ * Production data (96 conviction stop-loss exits, Jul–Aug 2026) showed a 2%
+ * false-trigger rate where livePrice was unavailable or momentarily borderline;
+ * a 2% margin eliminates those edge cases without opening up genuine losses.
  *
  * Fail-CLOSED: returns false (allow stop-loss) when livePrice or kalshiStrike
  * is unavailable.  We never suppress when we can't confirm the direction.
@@ -1759,12 +1767,15 @@ export function shouldSuppressConvictionStopLoss(opts: {
   direction: "yes" | "no";
   livePrice: number | null;
   kalshiStrike: number | null;
+  /** Fractional buffer widening the suppression zone (default 0). Pass
+   *  `S.config.convictionStopLossSuppressionMarginPct ?? 0.02`. */
+  marginPct?: number;
 }): boolean {
-  const { direction, livePrice, kalshiStrike } = opts;
+  const { direction, livePrice, kalshiStrike, marginPct = 0 } = opts;
   if (livePrice == null || kalshiStrike == null || kalshiStrike <= 0) return false;
   return direction === "no"
-    ? livePrice < kalshiStrike  // NO wins when crypto is below the strike
-    : livePrice > kalshiStrike; // YES wins when crypto is above the strike
+    ? livePrice < kalshiStrike * (1 + marginPct)  // NO wins when crypto is at/below strike + margin
+    : livePrice > kalshiStrike * (1 - marginPct); // YES wins when crypto is at/above strike - margin
 }
 
 /**

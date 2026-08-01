@@ -2199,6 +2199,59 @@ test("stop-loss suppression: livePrice exactly at strike → allow stop-loss (at
   assert.equal(result, false, "Should not suppress when livePrice equals strike (not strictly below)");
 });
 
+// ── shouldSuppressConvictionStopLoss margin tests ─────────────────────────────
+// marginPct widens the suppression zone so near-strike boundary cases are caught.
+// Production data (Jul–Aug 2026): 2% false-trigger rate from borderline/null livePrice;
+// a 2% margin suppresses those without releasing genuine losses.
+
+test("stop-loss suppression (margin 2%): NO bet — livePrice 1% above strike → suppress (within margin)", () => {
+  // DOGE strike=0.072927; livePrice=0.073656 (1% above) — Kalshi mispricing risk
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.073656, kalshiStrike: 0.072927, marginPct: 0.02,
+  });
+  assert.equal(result, true, "Should suppress when crypto is within 2% above strike for NO bet");
+});
+
+test("stop-loss suppression (margin 2%): NO bet — livePrice 3% above strike → allow stop-loss (outside margin)", () => {
+  // DOGE strike=0.072927; livePrice=0.075115 (3% above) — crypto clearly above strike, NO losing
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.075115, kalshiStrike: 0.072927, marginPct: 0.02,
+  });
+  assert.equal(result, false, "Should fire when crypto is more than 2% above strike for NO bet");
+});
+
+test("stop-loss suppression (margin 2%): YES bet — livePrice 1% below strike → suppress (within margin)", () => {
+  // BTC strike=65983; livePrice=65323 (1% below) — transient dip, still near-win territory
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "yes", livePrice: 65323, kalshiStrike: 65983, marginPct: 0.02,
+  });
+  assert.equal(result, true, "Should suppress when crypto is within 2% below strike for YES bet");
+});
+
+test("stop-loss suppression (margin 2%): YES bet — livePrice 3% below strike → allow stop-loss (outside margin)", () => {
+  // BTC strike=65983; livePrice=64003 (3% below) — crypto clearly below, YES genuinely losing
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "yes", livePrice: 64003, kalshiStrike: 65983, marginPct: 0.02,
+  });
+  assert.equal(result, false, "Should fire when crypto is more than 2% below strike for YES bet");
+});
+
+test("stop-loss suppression (margin 0): NO bet — livePrice exactly at strike → allow stop-loss (no margin)", () => {
+  // Without a margin, exactly-at-strike is not suppressed — same as existing test
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.072927, kalshiStrike: 0.072927, marginPct: 0,
+  });
+  assert.equal(result, false, "Zero margin: at-strike should not suppress");
+});
+
+test("stop-loss suppression (margin 2%): NO bet — livePrice exactly at strike → suppress (at margin boundary)", () => {
+  // With margin=2%, exactly at strike is within the suppression zone (livePrice < strike×1.02)
+  const result = shouldSuppressConvictionStopLoss({
+    direction: "no", livePrice: 0.072927, kalshiStrike: 0.072927, marginPct: 0.02,
+  });
+  assert.equal(result, true, "2% margin: at-strike should be suppressed (within buffer zone)");
+});
+
 // ── applyLockPrice082Migration tests ─────────────────────────────────────────
 
 test("lockPrice082Migration: config with kalshiLockPrice=0.90 → migrated to 0.82, cap set to 0.91", () => {

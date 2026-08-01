@@ -714,13 +714,15 @@ export async function runBotLoopTick(): Promise<void> {
         // livePrice or kalshiStrike is unavailable, allow the stop-loss.
         const _slLivePrice   = getCachedPrediction(sym)?.price ?? null;
         const _slKalshiStrike = kd?.value ?? null;
-        if (shouldSuppressConvictionStopLoss({ direction: pos.direction, livePrice: _slLivePrice, kalshiStrike: _slKalshiStrike })) {
+        const _slMarginPct = S.config.convictionStopLossSuppressionMarginPct ?? 0.02;
+        if (shouldSuppressConvictionStopLoss({ direction: pos.direction, livePrice: _slLivePrice, kalshiStrike: _slKalshiStrike, marginPct: _slMarginPct })) {
           logger.warn(
             {
               sym, direction: pos.direction,
-              livePrice:     _slLivePrice,
-              kalshiStrike:  _slKalshiStrike,
-              contractValue: +contractValue.toFixed(4),
+              livePrice:      _slLivePrice,
+              kalshiStrike:   _slKalshiStrike,
+              suppressMargin: _slMarginPct,
+              contractValue:  +contractValue.toFixed(4),
               stopFloor,
             },
             "[kalshi-bot] conviction stop-loss SUPPRESSED — crypto confirms position is winning (Kalshi mispricing)",
