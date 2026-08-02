@@ -47,7 +47,7 @@ import {
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken, convictionDirectionGuardBlockedMap,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
-  maxBetCandidateForWindow,
+  maxBetCandidateForWindow, convictionPriceTicks,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -519,6 +519,7 @@ export async function runBotLoopTick(): Promise<void> {
     convictionAbortCooldown.clear();
     convictionEmergencyCloses.clear();
     convictionDirectionGuardBlockedMap.clear();
+    convictionPriceTicks.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
     maxBetCandidateForWindow.clear(); // stale window keys no longer relevant
@@ -2440,6 +2441,18 @@ export async function runBotLoopTick(): Promise<void> {
           pollerPrice.yesAsk != null && pollerPrice.yesBid != null
             ? (pollerPrice.yesAsk + pollerPrice.yesBid) / 2
             : pollerPrice.yesAsk ?? pollerPrice.yesBid ?? yesPrice;
+      }
+      // Track CRYPTO SPOT price (not Kalshi contract price) for the direction guard.
+      // Kalshi contract prices oscillate ±1–2¢ at the zone boundary due to bid/ask
+      // spread — any single down-tick resets the consecutive counter to 0, so the
+      // guard never fires even when spot has been rising smoothly for minutes.
+      // Spot prices trend clearly and correctly reflect adverse movement toward strike.
+      const spotPrice = prediction?.price ?? null;
+      if (spotPrice != null) {
+        const ticks = convictionPriceTicks.get(sym) ?? [];
+        ticks.push({ price: spotPrice, ts: Date.now() });
+        if (ticks.length > 30) ticks.splice(0, ticks.length - 30);
+        convictionPriceTicks.set(sym, ticks);
       }
     }
     try {
