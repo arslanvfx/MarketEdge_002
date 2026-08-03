@@ -1691,7 +1691,10 @@ export function computeConvictionDirectionGate(opts: {
   const fromIdx   = Math.max(0, candles.length - 1 - candleLook);
   const fromPrice = candles[fromIdx].c;
   const slopePrice = toPrice - fromPrice;
-  const blocked   = direction === "yes" ? slopePrice <= 0 : slopePrice >= 0;
+  // Strict inequality: flat price (slope === 0) is neutral, not adverse.
+  // <= 0 / >= 0 was blocking entries whenever price was perfectly stable across
+  // the lookback candles, which killed conviction NO bets in sideways markets.
+  const blocked   = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
   return { blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0 };
 }
 

@@ -2413,13 +2413,15 @@ test("direction gate YES block: falling candles → blocked=true", () => {
   assert.ok(r.slopePrice !== null && r.slopePrice < 0, `Expected negative slope, got ${r.slopePrice}`);
 });
 
-test("direction gate YES block: flat candles (slopePrice=0) → blocked=true", () => {
+test("direction gate YES block: flat candles (slopePrice=0) → blocked=false (flat is neutral)", () => {
   // Prices flat: 100 → 100 → 100 → 100
+  // Flat slope is neutral — only a strictly negative slope (price actively
+  // falling toward the strike) should block a YES entry.
   const r = computeConvictionDirectionGate({
     candles: candles(100, 100, 100, 100),
     direction: "yes",
   });
-  assert.equal(r.blocked, true);
+  assert.equal(r.blocked, false);
   assert.equal(r.slopePrice, 0);
 });
 
@@ -2446,13 +2448,15 @@ test("direction gate NO block: rising candles → blocked=true", () => {
   assert.ok(r.slopePrice !== null && r.slopePrice > 0, `Expected positive slope, got ${r.slopePrice}`);
 });
 
-test("direction gate NO block: flat candles (slopePrice=0) → blocked=true", () => {
+test("direction gate NO block: flat candles (slopePrice=0) → blocked=false (flat is neutral)", () => {
   // Prices flat: 100 → 100 → 100 → 100
+  // Flat slope is neutral — only a strictly positive slope (price actively
+  // rising toward the strike) should block a NO entry.
   const r = computeConvictionDirectionGate({
     candles: candles(100, 100, 100, 100),
     direction: "no",
   });
-  assert.equal(r.blocked, true);
+  assert.equal(r.blocked, false);
   assert.equal(r.slopePrice, 0);
 });
 
