@@ -1667,8 +1667,10 @@ export function computeConvictionDirectionGate(opts: {
       let consecutiveAdverse = 0;
       for (let i = recent.length - 1; i > 0; i--) {
         const delta   = recent[i].price - recent[i - 1].price;
-        // Adverse: YES → falling (≤ 0), NO → rising (≥ 0)
-        const adverse = direction === "yes" ? delta <= 0 : delta >= 0;
+        // Adverse: YES → strictly falling (< 0), NO → strictly rising (> 0).
+        // Flat (delta === 0) is neutral — a stable price must never block a bet.
+        // The candle fallback uses the same strict-inequality semantics.
+        const adverse = direction === "yes" ? delta < 0 : delta > 0;
         if (adverse) {
           consecutiveAdverse++;
         } else {
