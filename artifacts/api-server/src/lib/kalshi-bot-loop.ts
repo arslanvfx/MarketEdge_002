@@ -2409,6 +2409,31 @@ export async function runBotLoopTick(): Promise<void> {
     consecutiveAllNullPriceWindows = 0;
   }
 
+  // ── Conviction: collect spot price ticks for ALL coins every loop tick ──────
+  // Must run BEFORE Phase 4 / runCoin so coins not yet in the conviction zone
+  // (yes_price outside 82–91%) already have spot-price history in their ticks
+  // array by the time they enter.  Collecting ticks only inside runCoin (which
+  // runs for betSymbols/skipSymbols) caused the gate to see an empty array the
+  // moment a coin first entered the zone — after a 60-second decline where its
+  // yes_price was above the cap and runCoin was never called for it.
+  if (S.config.decisionMode === "conviction") {
+    const convictionCoins = CRYPTO_COINS.filter(c => KALSHI_SERIES[c.symbol]);
+    const nowMs = Date.now();
+    for (const coin of convictionCoins) {
+      const sym = coin.symbol.toUpperCase();
+      const spotPrice = getCachedPrediction(sym)?.price ?? null;
+      if (spotPrice != null) {
+        const ticks = convictionPriceTicks.get(sym) ?? [];
+        ticks.push({ price: spotPrice, ts: nowMs });
+        // Keep ~5 min of history at 1s cadence — the direction gate filters to
+        // the last 7s via timestamp, but deep history costs little and ensures
+        // a coin approaching the zone has readings across its full approach.
+        if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
+        convictionPriceTicks.set(sym, ticks);
+      }
+    }
+  }
+
   // Phase 4: run all eligible coins in parallel.
   // Phase 3 is the authoritative filter — it has already enforced the global bet cap,
   // directional caps, chop filter, and all other guards on bets[].
@@ -2442,18 +2467,9 @@ export async function runBotLoopTick(): Promise<void> {
             ? (pollerPrice.yesAsk + pollerPrice.yesBid) / 2
             : pollerPrice.yesAsk ?? pollerPrice.yesBid ?? yesPrice;
       }
-      // Track CRYPTO SPOT price (not Kalshi contract price) for the direction guard.
-      // Kalshi contract prices oscillate ±1–2¢ at the zone boundary due to bid/ask
-      // spread — any single down-tick resets the consecutive counter to 0, so the
-      // guard never fires even when spot has been rising smoothly for minutes.
-      // Spot prices trend clearly and correctly reflect adverse movement toward strike.
-      const spotPrice = prediction?.price ?? null;
-      if (spotPrice != null) {
-        const ticks = convictionPriceTicks.get(sym) ?? [];
-        ticks.push({ price: spotPrice, ts: Date.now() });
-        if (ticks.length > 30) ticks.splice(0, ticks.length - 30);
-        convictionPriceTicks.set(sym, ticks);
-      }
+      // Note: spot price tick collection was moved out of runCoin and into the
+      // pre-Phase-4 loop above so ALL conviction coins accumulate ticks every
+      // second, not only those already in betSymbols/skipSymbols.
     }
     try {
       await runBotTickForCoin(

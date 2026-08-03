@@ -2614,3 +2614,120 @@ test("direction gate result fields: fromPrice, toPrice, slopePrice populated cor
   assert.equal(r.slopePrice, 10);
   assert.equal(r.blocked, false);
 });
+
+// ── priceTicks primary path — pre-zone approach regression tests ──────────────
+//
+// These tests cover the root cause of the Aug 3 BTC conviction bet:
+// tick collection was previously inside runCoin (only runs for in-zone coins).
+// A coin declining for 60+ seconds before its yes_price entered the conviction
+// zone had ZERO ticks when the gate ran — falling through to candle fallback
+// which showed the earlier rise and allowed the entry.
+//
+// Fix: ticks are now collected globally for all conviction coins every second.
+// These tests verify the priceTicks primary path of computeConvictionDirectionGate
+// works correctly with pre-zone history.
+//
+// All priceTick entries use timestamps within the 7-second recency window
+// (500ms apart → 14 ticks max before oldest exceeds 7000ms).
+
+// Helper: build a priceTicks array with prices spaced 500ms apart (all within 7s)
+function priceTicks(...prices: number[]): Array<{ price: number; ts: number }> {
+  const now = Date.now();
+  return prices.map((price, i) => ({
+    price,
+    ts: now - (prices.length - 1 - i) * 500, // 500ms apart, most recent = now
+  }));
+}
+
+test("direction gate priceTicks YES block: 10 declining ticks → blocked=true (pre-zone approach)", () => {
+  // Simulates BTC declining into conviction zone for ~5 seconds before yes_price
+  // crosses the 91% cap.  With the fix, these ticks are collected globally before
+  // zone entry — gate fires immediately on first in-zone evaluation.
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(62680, 62678, 62676, 62675, 62674, 62673, 62672, 62671, 62670, 62669),
+    direction: "yes",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, true);
+  assert.ok((r.consecutiveAdverseSeconds ?? 0) >= 4, `expected consecutiveAdverseSeconds≥4, got ${r.consecutiveAdverseSeconds}`);
+});
+
+test("direction gate priceTicks YES pass: 10 rising ticks → blocked=false (correct direction for YES)", () => {
+  // Rising price approaching zone — YES bet is valid, gate must not block.
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(62660, 62662, 62664, 62666, 62668, 62670, 62672, 62674, 62676, 62678),
+    direction: "yes",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.consecutiveAdverseSeconds, 0);
+});
+
+test("direction gate priceTicks YES: 6 rising then 4 declining → blocked=true (exactly 4 consecutive adverse)", () => {
+  // Rising then reversing — the last 4 ticks are all adverse; gate fires at the threshold.
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(100, 101, 102, 103, 104, 106, 105, 104, 103, 102),
+    direction: "yes",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, true);
+  assert.equal(r.consecutiveAdverseSeconds, 4);
+});
+
+test("direction gate priceTicks YES: only 3 consecutive declining ticks → blocked=false (below minSeconds=4)", () => {
+  // 7 rising then 3 declining — consecutive adverse count at tail is 3, below threshold.
+  // A coin that just started turning should still be allowed entry.
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(100, 101, 102, 103, 104, 105, 106, 105, 104, 103),
+    direction: "yes",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.consecutiveAdverseSeconds, 3);
+});
+
+test("direction gate priceTicks YES: flat tick breaks consecutive adverse count → blocked=false", () => {
+  // 5 declining, 1 flat (delta=0), then 3 more declining.
+  // Flat breaks the streak — only 3 consecutive adverse at tail, below threshold.
+  // from tail: 103-104=-1✓, 104-105=-1✓, 105-106=-1✓, 106-106=0 (flat)→break → count=3
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(110, 109, 108, 107, 106, 106, 105, 104, 103),
+    direction: "yes",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.consecutiveAdverseSeconds, 3);
+});
+
+test("direction gate priceTicks NO block: 10 rising ticks → blocked=true (rising price adverse for NO bet)", () => {
+  // For a NO bet (betting price stays below target), a rising spot price is adverse.
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(62620, 62622, 62624, 62626, 62628, 62630, 62632, 62634, 62636, 62638),
+    direction: "no",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, true);
+  assert.ok((r.consecutiveAdverseSeconds ?? 0) >= 4);
+});
+
+test("direction gate priceTicks: primary path takes priority over candle fallback", () => {
+  // priceTicks shows rising price (safe for YES) but candles show falling (would block).
+  // priceTicks path must win — candle fallback is skipped when priceTicks has ≥2 recent entries.
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(100, 101, 102, 103, 104),  // rising = YES safe
+    candles:    candles(105, 104, 103, 102, 100),      // falling = would block YES
+    direction: "yes",
+  });
+  assert.equal(r.blocked, false, "priceTicks (rising) must override candle fallback (falling)");
+});
+
+test("direction gate priceTicks: 1 tick falls through to candle fallback", () => {
+  // Only 1 tick — priceTicks path requires ≥2 recent entries; falls through to candles.
+  // Falling candles → YES should block via fallback.
+  const r = computeConvictionDirectionGate({
+    priceTicks: [{ price: 62676, ts: Date.now() }],   // only 1 tick — falls through
+    candles:    candles(105, 104, 103, 102, 100),      // falling candles
+    direction: "yes",
+  });
+  assert.equal(r.blocked, true, "Should fall through to candle fallback with 1 tick and block (falling candles)");
+});
