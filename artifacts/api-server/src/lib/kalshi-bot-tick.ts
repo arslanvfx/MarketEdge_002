@@ -70,6 +70,7 @@ import {
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
   tickInFlight, getEffectiveDailyLossLimit, extremeCautionAbortedThisWindow,
+  convictionPriceTicks,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
@@ -2437,7 +2438,13 @@ async function _runBotTick(
       (S.config.convictionDirectionGuardEnabled ?? true) &&
       candles.length >= 2) {
     const _dirLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
-    const _dir = computeConvictionDirectionGate({ candles, direction, lookback: _dirLookback });
+    const _dir = computeConvictionDirectionGate({
+      priceTicks: convictionPriceTicks.get(sym),
+      minSeconds: S.config.convictionDirectionGuardMinSeconds ?? 4,
+      candles,
+      direction,
+      lookback: _dirLookback,
+    });
     if (_dir.blocked) {
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       if (boostBetSize != null) {
@@ -2467,6 +2474,48 @@ async function _runBotTick(
         lookback:   _dirLookback,
       },
       "[kalshi-bot] conviction direction guard: price moving away from strike — OK",
+    );
+  }
+
+  // ── Pipeline direction guard (all non-conviction modes) ──────────────────
+  // Conviction mode already has its own guard above (with second-level ticks).
+  // For pipeline/ml_gate/classic entries the signals tell you *where price
+  // closes*, but say nothing about intra-window entry momentum.  If spot is
+  // trending toward the strike right now, that is a bad-timing entry regardless
+  // of the longer-horizon prediction.  Reuse computeConvictionDirectionGate
+  // with only candle slope (no priceTicks — those are conviction-poller-sourced).
+  // Fail-open: guard is skipped when < 2 candles are available.
+  if (S.config.decisionMode !== "conviction" &&
+      (S.config.convictionDirectionGuardEnabled ?? true) &&
+      candles.length >= 2) {
+    const _pLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
+    const _pDir = computeConvictionDirectionGate({ candles, direction, lookback: _pLookback });
+    if (_pDir.blocked) {
+      if (boostBetSize != null) {
+        maxBetWindowToken.remaining++;
+        logger.info({ sym }, "[kalshi-bot] pipeline direction guard: max-bet token restored");
+      }
+      logger.warn(
+        {
+          sym, direction, windowKey,
+          decisionMode: S.config.decisionMode,
+          fromPrice:    _pDir.fromPrice,
+          toPrice:      _pDir.toPrice,
+          slopePrice:   _pDir.slopePrice?.toFixed(2),
+          lookback:     _pLookback,
+        },
+        "[kalshi-bot] pipeline direction guard: price moving toward strike — order aborted",
+      );
+      return;
+    }
+    logger.info(
+      {
+        sym, direction, windowKey,
+        decisionMode: S.config.decisionMode,
+        slopePrice: _pDir.slopePrice?.toFixed(2),
+        lookback:   _pLookback,
+      },
+      "[kalshi-bot] pipeline direction guard: price moving away from strike — OK",
     );
   }
 
