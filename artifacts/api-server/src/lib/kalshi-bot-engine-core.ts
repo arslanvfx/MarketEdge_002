@@ -1662,26 +1662,17 @@ export function computeConvictionDirectionGate(opts: {
       .sort((a, b) => a.ts - b.ts);
 
     if (recent.length >= 2) {
-      // Walk backward from the latest tick; count how many consecutive
-      // second-level intervals are moving in the adverse direction.
-      let consecutiveAdverse = 0;
-      for (let i = recent.length - 1; i > 0; i--) {
-        const delta   = recent[i].price - recent[i - 1].price;
-        // Adverse: YES → strictly falling (< 0), NO → strictly rising (> 0).
-        // Flat (delta === 0) is neutral — a stable price must never block a bet.
-        // The candle fallback uses the same strict-inequality semantics.
-        const adverse = direction === "yes" ? delta < 0 : delta > 0;
-        if (adverse) {
-          consecutiveAdverse++;
-        } else {
-          break; // not consecutive — stop counting
-        }
-      }
-      const toPrice   = recent[recent.length - 1].price;
-      const fromIdx   = Math.max(0, recent.length - 1 - consecutiveAdverse);
-      const fromPrice = recent[fromIdx].price;
-      const blocked   = consecutiveAdverse >= reqSeconds;
-      return { blocked, fromPrice, toPrice, slopePrice: toPrice - fromPrice, consecutiveAdverseSeconds: consecutiveAdverse };
+      // Slope-based check: compare oldest tick in window to newest.
+      // A single neutral or bounce tick in the middle cannot mask a sustained
+      // adverse trend — only the net direction over the full window counts.
+      // YES adverse = net falling (slopePrice < 0).
+      // NO  adverse = net rising  (slopePrice > 0).
+      // Flat (slopePrice === 0) is neutral — never blocks.
+      const fromPrice  = recent[0].price;
+      const toPrice    = recent[recent.length - 1].price;
+      const slopePrice = toPrice - fromPrice;
+      const blocked    = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
+      return { blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0 };
     }
   }
 
