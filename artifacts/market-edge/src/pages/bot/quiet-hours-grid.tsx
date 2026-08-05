@@ -99,8 +99,8 @@ function HourCell({
     good:  "bg-emerald-500/10 border-emerald-500/25",
     ok:    "bg-amber-500/10   border-amber-500/25",
     bad:   "bg-red-500/10     border-red-500/25",
-    // No-data cells get a dashed border so they're visually distinct from silenced cells
-    empty: "bg-transparent border-border/25 border-dashed",
+    // No-data cells: subtle solid background so the silenced overlay is visible when toggled
+    empty: "bg-muted/15 border-border/30",
   };
   const winRateColor: Record<string, string> = {
     good:  "text-emerald-300",
@@ -421,7 +421,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-400 shrink-0" /> &lt;75%</span>
         <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-slate-400 shrink-0" /> Silenced (tap to toggle)</span>
         <span className="flex items-center gap-1.5"><TrendingDown className="w-3 h-3 text-amber-400 shrink-0" /> Reduced bets</span>
-        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded border border-border/40 border-dashed shrink-0" /> No data yet</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded bg-muted/30 border border-border/30 shrink-0" /> No data yet</span>
       </div>
 
       {/* ── Grid: 3 rows of 8 ── */}
