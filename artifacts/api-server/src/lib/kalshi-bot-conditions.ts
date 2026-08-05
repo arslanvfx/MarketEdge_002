@@ -161,6 +161,7 @@ export interface BotConditionsSnapshot {
   isInQuietHours: boolean;
   quietHoursStart: number;
   quietHoursEnd: number;
+  quietHoursV2State: { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number };
   circuitBreakerActive: boolean;
   circuitBreakerWindowsRemaining: number;
   dailyLimitHit: boolean;
@@ -223,6 +224,16 @@ export function getWindowConditions(): BotConditionsSnapshot {
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
     quietHoursStart: S.config.quietHoursStart,
     quietHoursEnd: S.config.quietHoursEnd,
+    quietHoursV2State: (() => {
+      const utcHour = new Date().getUTCHours();
+      const qhv2 = S.config.quietHoursV2;
+      if (qhv2?.enabled) {
+        if (qhv2.silencedUtcHours.includes(utcHour)) return { mode: "silenced" as const, utcHour };
+        const reduced = qhv2.reducedBetUtcHours[String(utcHour)];
+        if (reduced != null) return { mode: "reduced" as const, reducedBetAmount: reduced, utcHour };
+      }
+      return { mode: "active" as const, utcHour };
+    })(),
     circuitBreakerActive: S.cbState.circuitBreakerWindowsRemaining > 0,
     circuitBreakerWindowsRemaining: S.cbState.circuitBreakerWindowsRemaining,
     dailyLimitHit: S.dailyPnl <= -getEffectiveDailyLossLimit(),

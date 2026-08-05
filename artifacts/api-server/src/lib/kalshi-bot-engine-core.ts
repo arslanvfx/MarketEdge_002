@@ -958,6 +958,18 @@ export function checkMomentumOverride(
 
 export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
 
+/**
+ * Per-hour silence / reduced-bet schedule (V2 quiet hours).
+ * - silencedUtcHours: fully block new entries during these UTC hours.
+ * - reducedBetUtcHours: cap bet size to the specified $ amount during these UTC hours.
+ * V2 takes precedence over the legacy quietHoursStart/quietHoursEnd range when enabled.
+ */
+export interface QuietHoursV2 {
+  enabled: boolean;
+  silencedUtcHours: number[];                   // UTC hours 0–23 to fully block
+  reducedBetUtcHours: Record<string, number>;   // UTC hour string (e.g. "13") → bet amount cap ($)
+}
+
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
@@ -1002,6 +1014,7 @@ export interface BotConfig {
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
   quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
+  quietHoursV2?: QuietHoursV2; // per-hour silence / reduced-bet controls (V2); takes precedence over legacy range when enabled
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
   circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
   // Directional balance filter: caps correlated exposure by limiting same-direction
@@ -1359,6 +1372,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   // start === end → disabled; 7 = 07:00 UTC stored value (set equal to disable)
   quietHoursStart: 7,
   quietHoursEnd: 7,
+  quietHoursV2: { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} },
   // 0 = disabled (no circuit breaker on consecutive losses)
   maxConsecutiveLosses: 0,
   circuitBreakerPauseWindows: 2,

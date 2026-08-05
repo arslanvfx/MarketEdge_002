@@ -1473,6 +1473,24 @@ async function _runBotTick(
     );
     targetBetSize = override;
   }
+
+  // ── QUIET HOURS V2 REDUCED BET CAP ───────────────────────────────────────
+  // When the current UTC hour is in the "reduced bet" list, cap targetBetSize
+  // to the configured reduced amount.  This is a hard ceiling applied AFTER
+  // all other sizing (including time-bet schedule and extreme caution) so a
+  // reduced-bet hour can never produce a larger bet than the cap, regardless
+  // of which other sizing path matched.  Intentionally does not check
+  // betScheduleApplied so the cap cannot be bypassed by a schedule bracket.
+  if (S.quietHoursV2ReducedBet != null && S.quietHoursV2ReducedBet > 0) {
+    const reducedCap = S.quietHoursV2ReducedBet;
+    if (targetBetSize > reducedCap) {
+      logger.info(
+        { sym, reducedCap: +reducedCap.toFixed(2), prev: +targetBetSize.toFixed(2) },
+        "[kalshi-bot] quiet-hours-v2 reduced bet cap applied",
+      );
+      targetBetSize = reducedCap;
+    }
+  }
   // ─────────────────────────────────────────────────────────────────────────
 
   // ── BET AMOUNT RANDOMIZER ─────────────────────────────────────────────────

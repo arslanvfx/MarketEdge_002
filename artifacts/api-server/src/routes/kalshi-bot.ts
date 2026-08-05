@@ -626,6 +626,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enabled,
     quietHoursStart,
     quietHoursEnd,
+    quietHoursV2,
     maxConsecutiveLosses,
     circuitBreakerPauseWindows,
     enableDirectionCap,
@@ -739,6 +740,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
+    quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown };
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
     enableDirectionCap?: boolean;
@@ -872,6 +874,25 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof quietHoursEnd === "number" && quietHoursEnd >= 0 && quietHoursEnd <= 23) {
     partial.quietHoursEnd = quietHoursEnd;
+  }
+  if (quietHoursV2 !== undefined && typeof quietHoursV2 === "object" && quietHoursV2 !== null) {
+    const v2 = quietHoursV2 as { enabled?: unknown; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown };
+    partial.quietHoursV2 = {
+      enabled: typeof v2.enabled === "boolean" ? v2.enabled : false,
+      silencedUtcHours: Array.isArray(v2.silencedUtcHours)
+        ? (v2.silencedUtcHours as unknown[]).filter((h): h is number => typeof h === "number" && h >= 0 && h <= 23)
+        : [],
+      reducedBetUtcHours: (typeof v2.reducedBetUtcHours === "object" && v2.reducedBetUtcHours !== null)
+        ? Object.fromEntries(
+            Object.entries(v2.reducedBetUtcHours as Record<string, unknown>)
+              .filter(([k, v]) => {
+                const h = parseInt(k, 10);
+                return !isNaN(h) && h >= 0 && h <= 23 && typeof v === "number" && v > 0;
+              })
+              .map(([k, v]) => [k, v as number])
+          )
+        : {},
+    };
   }
   if (typeof maxConsecutiveLosses === "number" && maxConsecutiveLosses >= 0 && maxConsecutiveLosses <= 10) {
     partial.maxConsecutiveLosses = maxConsecutiveLosses;
@@ -1366,6 +1387,59 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
 });
 
 // GET /crypto/bot/conviction-threshold-analysis?mode=paper|live
+// GET /crypto/bot/quiet-hours-analysis?days=14&targetWinRate=85
+// Groups live bets from the last N days by UTC hour and returns win-rate,
+// P&L stats, and suggested hours to silence (below targetWinRate with ≥5 bets).
+router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(String(req.query.days ?? "14"), 10) || 14));
+    const targetWinRate = Math.min(100, Math.max(0, parseFloat(String(req.query.targetWinRate ?? "85")) || 85));
+
+    const result = await db.execute(sql`
+      SELECT
+        EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS utc_hour,
+        COUNT(*) AS total_bets,
+        COUNT(CASE WHEN outcome = 'win' THEN 1 END) AS wins,
+        COUNT(CASE WHEN outcome = 'loss' THEN 1 END) AS losses,
+        ROUND(SUM(pnl::numeric), 2) AS total_pnl,
+        ROUND(AVG(pnl::numeric), 4) AS avg_pnl
+      FROM kalshi_bot_bets
+      WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
+        AND mode = 'live'
+        AND outcome IN ('win', 'loss')
+        AND archived_at IS NULL
+      GROUP BY utc_hour
+      ORDER BY utc_hour
+    `);
+
+    const hourStats = Array.from({ length: 24 }, (_, h) => {
+      const row = result.rows.find((r: Record<string, unknown>) => Number(r.utc_hour) === h);
+      if (!row) return { utcHour: h, totalBets: 0, wins: 0, losses: 0, winRatePct: null as number | null, totalPnl: 0, avgPnl: 0 };
+      const wins = Number(row.wins);
+      const losses = Number(row.losses);
+      const total = wins + losses;
+      return {
+        utcHour: h,
+        totalBets: Number(row.total_bets),
+        wins,
+        losses,
+        winRatePct: total > 0 ? Math.round(wins / total * 1000) / 10 : null as number | null,
+        totalPnl: Number(row.total_pnl ?? 0),
+        avgPnl: Number(row.avg_pnl ?? 0),
+      };
+    });
+
+    const suggestedSilencedHours = hourStats
+      .filter(h => h.winRatePct !== null && h.winRatePct < targetWinRate && h.totalBets >= 5)
+      .map(h => h.utcHour);
+
+    res.json({ hourStats, suggestedSilencedHours, days, targetWinRate });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
 // Returns win-rate breakdown of conviction-mode bets by entry YES price band,
 // plus an auto-suggested optimal lock price (best win-rate band with ≥5 bets, all-time).
 router.get("/crypto/bot/conviction-threshold-analysis", async (req, res) => {

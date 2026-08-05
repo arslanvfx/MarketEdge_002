@@ -2,7 +2,8 @@ import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart
 import { Button } from "@/components/ui/button";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import React from "react";
-import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode } from "./types";
+import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode, QuietHoursV2 } from "./types";
+import { QuietHoursGrid } from "./quiet-hours-grid";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 import { PhaseTracker } from "./phase-tracker";
 
@@ -2026,29 +2027,45 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </label>
                 </div>
 
-                {/* Quiet Hours Start */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Quiet Hours Start ({ET_LABEL})</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={utcToEst(merged.quietHoursStart ?? 0)}
-                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursStart: estToUtc(parseInt(e.target.value)) }))}>
-                    {Array.from({ length: 24 }, (_, i) => (
-                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 {ET_LABEL}</option>
-                    ))}
-                  </select>
-                </label>
+                {/* ── Smart Quiet Hours V2 ── */}
+                <div className="col-span-full">
+                  <QuietHoursGrid
+                    value={merged.quietHoursV2 ?? { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} }}
+                    onChange={(v: QuietHoursV2) => setConfigDraft(d => ({ ...d, quietHoursV2: v }))}
+                  />
+                </div>
 
-                {/* Quiet Hours End */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Quiet Hours End ({ET_LABEL}) — set equal to start to disable</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={utcToEst(merged.quietHoursEnd ?? 0)}
-                    onChange={e => setConfigDraft(d => ({ ...d, quietHoursEnd: estToUtc(parseInt(e.target.value)) }))}>
-                    {Array.from({ length: 24 }, (_, i) => (
-                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00 {ET_LABEL}{i === utcToEst(merged.quietHoursStart ?? 0) ? " (disabled)" : ""}</option>
-                    ))}
-                  </select>
-                </label>
+                {/* ── Legacy quiet hours (collapsed) ── */}
+                <div className="col-span-full">
+                  <details className="group">
+                    <summary className="flex items-center gap-1.5 cursor-pointer list-none text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors select-none">
+                      <svg className="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M7 7l3-3 3 3m0 6l-3 3-3-3" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>
+                      Legacy quiet hours range (simple start–end UTC)
+                    </summary>
+                    <div className="mt-2 flex flex-col gap-3 pl-4 border-l border-border/50">
+                      <label className="flex flex-col gap-1.5">
+                        <span className="text-xs text-muted-foreground">Quiet Hours Start ({ET_LABEL})</span>
+                        <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                          value={utcToEst(merged.quietHoursStart ?? 0)}
+                          onChange={e => setConfigDraft(d => ({ ...d, quietHoursStart: estToUtc(parseInt(e.target.value)) }))}>
+                          {Array.from({ length: 24 }, (_, i) => (
+                            <option key={i} value={i}>{String(i).padStart(2, "0")}:00 {ET_LABEL}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1.5">
+                        <span className="text-xs text-muted-foreground">Quiet Hours End ({ET_LABEL}) — set equal to start to disable</span>
+                        <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                          value={utcToEst(merged.quietHoursEnd ?? 0)}
+                          onChange={e => setConfigDraft(d => ({ ...d, quietHoursEnd: estToUtc(parseInt(e.target.value)) }))}>
+                          {Array.from({ length: 24 }, (_, i) => (
+                            <option key={i} value={i}>{String(i).padStart(2, "0")}:00 {ET_LABEL}{i === utcToEst(merged.quietHoursStart ?? 0) ? " (disabled)" : ""}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  </details>
+                </div>
 
                 {/* Max Consecutive Losses */}
                 <label className="flex flex-col gap-1.5">

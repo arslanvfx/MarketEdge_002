@@ -53,6 +53,18 @@ export function BotHeader({ status, openPosList, statusLabel, cfg, merged, confi
               Quiet
             </span>
           )}
+          {status?.quietHoursV2State?.mode === "silenced" && (
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-slate-500/15 text-slate-400 border border-slate-500/30" title={`Smart Quiet Hours V2: silenced (${status.quietHoursV2State.utcHour} UTC) — no new entries`}>
+              <Clock className="w-3 h-3" />
+              🔇 Silenced
+            </span>
+          )}
+          {status?.quietHoursV2State?.mode === "reduced" && (
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20" title={`Smart Quiet Hours V2: reduced bets ($${status.quietHoursV2State.reducedBetAmount?.toFixed(2) ?? "—"}) (${status.quietHoursV2State.utcHour} UTC)`}>
+              <Clock className="w-3 h-3" />
+              📉 ${ status.quietHoursV2State.reducedBetAmount?.toFixed(2) ?? "—"}
+            </span>
+          )}
           {status?.dbDegraded && (
             <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30 animate-pulse" title={`Database unreachable since ${status.dbDegradedSince ? new Date(status.dbDegradedSince).toLocaleTimeString() : "recently"} — new bets paused until connection restores`}>
               <AlertTriangle className="w-3 h-3" />

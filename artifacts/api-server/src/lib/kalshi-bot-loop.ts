@@ -936,7 +936,9 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   // Quiet-hours gate: skip new entries during the configured UTC hour range.
-  if (!S.config.freeRunMode && isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd)) {
+  // When quietHoursV2 is enabled, skip this legacy gate entirely — V2 handles
+  // all hour-based gating below (with per-hour silence, reduced-bet, or pass-through).
+  if (!S.config.freeRunMode && !(S.config.quietHoursV2?.enabled) && isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd)) {
     logger.debug(
       { utcHour: new Date().getUTCHours(), quietHoursStart: S.config.quietHoursStart, quietHoursEnd: S.config.quietHoursEnd },
       "[kalshi-bot] quiet hours — skipping new entry",
@@ -962,6 +964,50 @@ export async function runBotLoopTick(): Promise<void> {
     }
     return;
   }
+
+  // ── Smart Quiet Hours V2 ────────────────────────────────────────────────────
+  // V2 takes precedence over the legacy range above when enabled.
+  // Silenced hours: full block (same exit path as legacy quiet hours).
+  // Reduced-bet hours: continue to the tick but cap bet size via S.quietHoursV2ReducedBet.
+  {
+    const qhv2 = S.config.quietHoursV2;
+    if (!S.config.freeRunMode && qhv2?.enabled) {
+      const nowUTCHour = new Date().getUTCHours();
+      if (qhv2.silencedUtcHours.includes(nowUTCHour)) {
+        logger.debug(
+          { utcHour: nowUTCHour },
+          "[kalshi-bot] quiet-hours-v2: silenced — skipping new entry",
+        );
+        if (isCBNewWindow) {
+          const qh2WindowKey = currentWindowKey();
+          const qh2Now = new Date().toISOString();
+          S.lastWindowEvaluation = CRYPTO_COINS
+            .filter(c => KALSHI_SERIES[c.symbol])
+            .map(c => ({
+              symbol: c.symbol.toUpperCase(),
+              action: "SKIP" as const,
+              confidence: 0,
+              score: 0,
+              reason: `quiet-hours-v2 silenced (${nowUTCHour} UTC)`,
+              windowKey: qh2WindowKey,
+              selected: false,
+              betPlacedThisWindow: false,
+              evaluatedAt: qh2Now,
+              trendStability: null,
+              regime: null,
+            }));
+        }
+        S.quietHoursV2ReducedBet = null;
+        return;
+      }
+      // Reduced-bet hour: set the cap, tick proceeds normally
+      const reducedBet = qhv2.reducedBetUtcHours[String(nowUTCHour)];
+      S.quietHoursV2ReducedBet = (reducedBet != null && reducedBet > 0) ? reducedBet : null;
+    } else {
+      S.quietHoursV2ReducedBet = null;
+    }
+  }
+  // ───────────────────────────────────────────────────────────────────────────
 
   // Circuit breaker gate: gate on the PRE-decrement snapshot so that N pause windows
   // = N windows where new entries are blocked (countdown already advanced at top of loop).

@@ -67,6 +67,7 @@ export interface BotStateSnapshot {
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;
   isInQuietHours: boolean;
+  quietHoursV2State: { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number };
   dbDegraded: boolean;
   dbDegradedSince: string | null;
   isProductionEnv: boolean;
@@ -171,6 +172,10 @@ export const S = {
   timingCache: new Map<string, number | null>(),
   timingCacheAt: 0,
   lastWindowEvaluation: [] as WindowCoinEvaluation[],
+  // Set by the bot loop when V2 quiet hours puts the current UTC hour in
+  // "reduced bet" mode.  Cleared at the start of every loop tick outside
+  // a reduced-bet hour.  The tick reads this to cap targetBetSize.
+  quietHoursV2ReducedBet: null as number | null,
 };
 
 // ---------------------------------------------------------------------------

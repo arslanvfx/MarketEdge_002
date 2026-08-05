@@ -147,6 +147,16 @@ export function getBotState(): BotStateSnapshot {
     circuitBreakerWindowsRemaining: S.cbState.circuitBreakerWindowsRemaining,
     consecutiveLosses: S.cbState.consecutiveLosses,
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
+    quietHoursV2State: (() => {
+      const utcHour = new Date().getUTCHours();
+      const qhv2 = S.config.quietHoursV2;
+      if (qhv2?.enabled) {
+        if (qhv2.silencedUtcHours.includes(utcHour)) return { mode: "silenced" as const, utcHour };
+        const reduced = qhv2.reducedBetUtcHours[String(utcHour)];
+        if (reduced != null) return { mode: "reduced" as const, reducedBetAmount: reduced, utcHour };
+      }
+      return { mode: "active" as const, utcHour };
+    })(),
     dbDegraded: S.dbDegradedSince !== null,
     dbDegradedSince: S.dbDegradedSince?.toISOString() ?? null,
     isProductionEnv: process.env.NODE_ENV === "production",

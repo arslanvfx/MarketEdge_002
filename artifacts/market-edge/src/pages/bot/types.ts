@@ -2,6 +2,29 @@
 
 export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
 
+export interface QuietHoursV2 {
+  enabled: boolean;
+  silencedUtcHours: number[];
+  reducedBetUtcHours: Record<string, number>;
+}
+
+export interface QuietHoursHourStat {
+  utcHour: number;
+  totalBets: number;
+  wins: number;
+  losses: number;
+  winRatePct: number | null;
+  totalPnl: number;
+  avgPnl: number;
+}
+
+export interface QuietHoursAnalysis {
+  hourStats: QuietHoursHourStat[];
+  suggestedSilencedHours: number[];
+  days: number;
+  targetWinRate: number;
+}
+
 export interface BotConfig {
   betSize: number;
   dailyLossLimit: number;
@@ -18,6 +41,7 @@ export interface BotConfig {
   enabled: boolean;
   quietHoursStart: number;
   quietHoursEnd: number;
+  quietHoursV2?: QuietHoursV2;
   maxConsecutiveLosses: number;
   circuitBreakerPauseWindows: number;
   enableDirectionCap: boolean;
@@ -191,6 +215,7 @@ export interface BotStatus {
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;
   isInQuietHours: boolean;
+  quietHoursV2State?: { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number };
   dbDegraded?: boolean;
   dbDegradedSince?: string | null;
   isProductionEnv?: boolean;
@@ -255,6 +280,7 @@ export interface BotConditionsSnapshot {
   isInQuietHours: boolean;
   quietHoursStart: number;
   quietHoursEnd: number;
+  quietHoursV2State?: { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number };
   circuitBreakerActive: boolean;
   circuitBreakerWindowsRemaining: number;
   dailyLimitHit: boolean;
