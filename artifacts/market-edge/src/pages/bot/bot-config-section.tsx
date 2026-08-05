@@ -2027,7 +2027,35 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </label>
                 </div>
 
-                {/* ── Smart Quiet Hours V2 ── */}
+                {/* Max Consecutive Losses */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Circuit Breaker Trigger (losses)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.maxConsecutiveLosses ?? 3}
+                    onChange={e => setConfigDraft(d => ({ ...d, maxConsecutiveLosses: parseInt(e.target.value) }))}>
+                    <option value={0}>Disabled</option>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n} consecutive loss{n > 1 ? "es" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Circuit Breaker Pause Windows */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Circuit Breaker Pause (windows)</span>
+                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.circuitBreakerPauseWindows ?? 2}
+                    onChange={e => setConfigDraft(d => ({ ...d, circuitBreakerPauseWindows: parseInt(e.target.value) }))}>
+                    <option value={0}>Disabled</option>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+                      <option key={n} value={n}>Pause {n} window{n > 1 ? "s" : ""}</option>
+                    ))}
+                  </select>
+                </label>
+
+                </>)}
+
+                {/* ── Smart Quiet Hours V2 — visible in all modes ── */}
                 <div className="col-span-full">
                   <QuietHoursGrid
                     value={merged.quietHoursV2 ?? { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} }}
@@ -2067,33 +2095,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </details>
                 </div>
 
-                {/* Max Consecutive Losses */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Circuit Breaker Trigger (losses)</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.maxConsecutiveLosses ?? 3}
-                    onChange={e => setConfigDraft(d => ({ ...d, maxConsecutiveLosses: parseInt(e.target.value) }))}>
-                    <option value={0}>Disabled</option>
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
-                      <option key={n} value={n}>{n} consecutive loss{n > 1 ? "es" : ""}</option>
-                    ))}
-                  </select>
-                </label>
-
-                {/* Circuit Breaker Pause Windows */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs text-muted-foreground">Circuit Breaker Pause (windows)</span>
-                  <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.circuitBreakerPauseWindows ?? 2}
-                    onChange={e => setConfigDraft(d => ({ ...d, circuitBreakerPauseWindows: parseInt(e.target.value) }))}>
-                    <option value={0}>Disabled</option>
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
-                      <option key={n} value={n}>Pause {n} window{n > 1 ? "s" : ""}</option>
-                    ))}
-                  </select>
-                </label>
-
-                </>)}
                 {!isConviction && (<>
                 {/* Direction Cap Enable */}
                 <label className="flex flex-col gap-1.5">
