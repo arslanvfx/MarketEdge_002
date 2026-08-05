@@ -1,10 +1,8 @@
 import React, { useState } from "react";
 import { useAuth } from "@clerk/react";
-import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw } from "lucide-react";
-import type { QuietHoursV2, QuietHoursAnalysis, BotStatus } from "./types";
-import { utcToEst, ET_LABEL, API_BASE } from "./utils";
-import { BarChart2, VolumeX, TrendingDown, Zap, Calendar } from "lucide-react";
+import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar } from "lucide-react";
 import type { QuietHoursV2, QuietHoursAnalysis, QuietHoursHourStat } from "./types";
+import { utcToEst, ET_LABEL, API_BASE } from "./utils";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -91,7 +89,7 @@ function HourCell({
   return (
     <div
       className={`
-        group relative flex flex-col rounded-xl border cursor-pointer select-none
+        group relative flex flex-col rounded-lg sm:rounded-xl border cursor-pointer select-none
         transition-all duration-150 hover:brightness-125 active:scale-[0.97]
         ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${modeRing}
       `}
@@ -100,38 +98,38 @@ function HourCell({
     >
       {/* Per-dow calendar badge */}
       {hasDowBadge && (
-        <div className="absolute top-1 right-1 z-10">
-          <Calendar className="w-2.5 h-2.5 text-sky-400/80" />
+        <div className="absolute top-0.5 right-0.5 sm:top-1 sm:right-1 z-10">
+          <Calendar className="w-2 h-2 sm:w-2.5 sm:h-2.5 text-sky-400/80" />
         </div>
       )}
 
-      <div className="flex flex-col gap-1 p-3">
+      <div className="flex flex-col gap-0.5 sm:gap-1 p-1.5 sm:p-3">
         {/* Row 1: hour label + mode icon */}
-        <div className="flex items-center justify-between gap-1">
-          <span className="text-[11px] font-semibold text-foreground/80 leading-none tracking-wide">
+        <div className="flex items-center justify-between gap-0.5">
+          <span className="text-[9px] sm:text-[11px] font-semibold text-foreground/80 leading-none tracking-wide">
             {estLabel}
           </span>
           <span className="flex items-center">
-            {mode === "silenced" && <VolumeX className="w-3 h-3 text-slate-400" />}
-            {mode === "reduced" && <TrendingDown className="w-3 h-3 text-amber-400" />}
-            {mode === "active" && <span className={`w-2 h-2 rounded-full ${dotColor[tier]}`} />}
+            {mode === "silenced" && <VolumeX className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-slate-400" />}
+            {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-amber-400" />}
+            {mode === "active" && <span className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${dotColor[tier]}`} />}
           </span>
         </div>
 
         {/* Row 2: win rate */}
-        <div className={`text-[18px] font-bold leading-tight ${winRateColor[tier]}`}>
+        <div className={`text-[13px] sm:text-[18px] font-bold leading-tight ${winRateColor[tier]}`}>
           {totalBets === 0 ? (
-            <span className="text-[13px] text-muted-foreground/30 font-normal">—</span>
+            <span className="text-[10px] sm:text-[13px] text-muted-foreground/30 font-normal">—</span>
           ) : winRatePct !== null ? (
             `${winRatePct.toFixed(0)}%`
           ) : (
-            <span className="text-[13px] text-muted-foreground/30 font-normal">—</span>
+            <span className="text-[10px] sm:text-[13px] text-muted-foreground/30 font-normal">—</span>
           )}
         </div>
 
-        {/* Row 3: bets + P&L */}
+        {/* Row 3: bets + P&L — hidden on mobile, shown on sm+ */}
         {totalBets > 0 && (
-          <div className="flex items-center gap-1.5">
+          <div className="hidden sm:flex items-center gap-1.5">
             <span className="text-[10px] text-muted-foreground/60 leading-none">{totalBets}b</span>
             <span className={`text-[10px] font-medium leading-none ${totalPnl >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
               {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(0)}
@@ -139,7 +137,7 @@ function HourCell({
           </div>
         )}
 
-        {/* Reduced bet input */}
+        {/* Reduced bet input — hidden on mobile */}
         {mode === "reduced" && (
           <input
             type="number"
@@ -153,7 +151,7 @@ function HourCell({
               const v = parseFloat(e.target.value);
               if (!isNaN(v) && v > 0) onReducedBetChange(utcHour, v);
             }}
-            className="mt-0.5 w-full text-[11px] rounded-md px-2 py-1 bg-background/70 border border-amber-400/40 text-amber-300 outline-none focus:ring-1 focus:ring-amber-400/60 placeholder:text-amber-300/40"
+            className="hidden sm:block mt-0.5 w-full text-[11px] rounded-md px-2 py-1 bg-background/70 border border-amber-400/40 text-amber-300 outline-none focus:ring-1 focus:ring-amber-400/60 placeholder:text-amber-300/40"
           />
         )}
       </div>
@@ -369,7 +367,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
       </div>
 
       {/* ── Day-of-week tabs ── */}
-      <div className="flex items-center gap-1 flex-wrap">
+      <div className="flex items-center gap-0.5 sm:gap-1 flex-wrap">
         {DOW_TABS.map(tab => {
           const isActive = selectedDow === tab.dow;
           const dowExtra = tab.dow != null ? countDowExtra(value, tab.dow) : 0;
@@ -377,7 +375,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             <button
               key={tab.label}
               onClick={() => handleTabChange(tab.dow)}
-              className={`relative text-[11px] px-2.5 py-1 rounded-md transition-colors font-medium ${
+              className={`relative text-[10px] sm:text-[11px] px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-md transition-colors font-medium ${
                 isActive
                   ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
                   : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border border-transparent"
@@ -391,11 +389,17 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
           );
         })}
         {selectedDow != null && (
-          <span className="ml-2 text-[11px] text-muted-foreground/50">
+          <span className="hidden sm:inline ml-2 text-[11px] text-muted-foreground/50">
             Showing {DOW_NAMES[selectedDow]} data · click cells to set {DOW_NAMES[selectedDow]}-only rules
           </span>
         )}
       </div>
+      {/* Mobile-only tab hint */}
+      {selectedDow != null && (
+        <p className="sm:hidden text-[10px] text-muted-foreground/50 -mt-2">
+          {DOW_NAMES[selectedDow]} data · tap cells to set day-only rules
+        </p>
+      )}
 
       {/* ── Legend ── */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-muted-foreground">
@@ -410,19 +414,22 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         <span className="text-muted-foreground/50 hidden sm:block">· Click a cell to cycle Active → Silenced → Reduced</span>
       </div>
 
-      {/* ── Grid: 3 rows of 8, with ET row labels ── */}
-      <div className="flex flex-col gap-3">
+      {/* ── Grid: 3 rows of 8 (desktop) / 4 cols wrapping (mobile) ── */}
+      <div className="flex flex-col gap-2 sm:gap-3">
         {rows.map((rowHours, rowIdx) => (
-          <div key={rowIdx} className="flex items-start gap-3">
-            <div className="flex flex-col items-end justify-center shrink-0 pt-3" style={{ width: "5rem" }}>
-              <span className="text-[11px] font-medium text-foreground/60 text-right leading-tight">
-                {ROW_LABELS[rowIdx].range} {ET_LABEL}
+          <div key={rowIdx} className="flex items-start gap-2 sm:gap-3">
+            {/* Row label — narrower on mobile, UTC sublabel hidden on mobile */}
+            <div className="flex flex-col items-end justify-center shrink-0 pt-2 sm:pt-3 w-12 sm:w-20">
+              <span className="text-[9px] sm:text-[11px] font-medium text-foreground/60 text-right leading-tight">
+                {ROW_LABELS[rowIdx].range}
+                <span className="hidden sm:inline"> {ET_LABEL}</span>
               </span>
-              <span className="text-[9px] text-muted-foreground/40 text-right mt-0.5">
+              <span className="hidden sm:block text-[9px] text-muted-foreground/40 text-right mt-0.5">
                 {ROW_LABELS[rowIdx].sublabel}
               </span>
             </div>
-            <div className="grid gap-2 flex-1" style={{ gridTemplateColumns: "repeat(8, minmax(0, 1fr))" }}>
+            {/* 4 cols on mobile, 8 on sm+ */}
+            <div className="grid grid-cols-4 sm:grid-cols-8 gap-1 sm:gap-2 flex-1">
               {rowHours.map(h => {
                 const stat = activeHourStats.find(s => s.utcHour === h);
                 return (
