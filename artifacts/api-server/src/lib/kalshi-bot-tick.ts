@@ -2967,6 +2967,36 @@ async function _runBotTick(
     // Max-bet flag: true when the stability gate + probability roll upgraded this bet.
     isMaxBet: boostBetSize != null,
   });
+
+  // Shadow paper bet: when live mode is active and shadowPaperBets is enabled,
+  // write an identical mode='paper' row so quiet-hours analysis accumulates data
+  // from both streams without any additional Kalshi API calls.
+  if (S.config.shadowPaperBets && entryMode === "live") {
+    const shadowId = `${id}:shadow`;
+    // Tag the open position so closePosition can close the mirrored row too.
+    const livePos = openPositions.get(sym);
+    if (livePos) livePos.shadowPaperId = shadowId;
+    // Fire-and-forget — a failure here must never block the live bet's success path.
+    persistBetRecord({
+      symbol: sym,
+      windowKey,
+      ticker: expectedTicker,
+      direction,
+      action: "bet",
+      signals: enrichedSignals,
+      entryPrice: newPosition.entryYesPrice,
+      kalshiTarget,
+      contractCount,
+      betAmount: actualBetAmount,
+      insertId: shadowId,
+      cryptoPriceAtEntry,
+      decisionMode: S.config.decisionMode ?? "classic",
+      mode: "paper",
+      entryYesPrice: yesPrice,
+      isMaxBet: boostBetSize != null,
+    }).catch(err => logger.warn({ err, sym }, "[kalshi-bot] shadow paper bet persist failed (non-fatal)"));
+  }
+
   // Mark this window as having a recorded decision so SKIP dedup works correctly
   lastDecisionWindowKey.set(sym, windowKey);
   // Increment the per-window bet counter so subsequent ticks respect maxBetsPerWindow.

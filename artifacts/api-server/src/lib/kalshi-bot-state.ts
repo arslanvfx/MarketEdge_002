@@ -42,6 +42,8 @@ export interface OpenPosition {
   entryMode: BotMode;
   source?: "bot" | "manual";
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
+  /** ID of a mirrored paper-mode DB record created when shadowPaperBets is enabled in live mode. */
+  shadowPaperId?: string;
 }
 
 export interface OpenPositionDisplay extends OpenPosition {

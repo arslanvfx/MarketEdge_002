@@ -1071,6 +1071,10 @@ export interface BotConfig {
   paperStartingBalance: number;  // (default 100)
   paperWinReturnRate: number;    // (default 0.5)
   paperBalanceResetAt: string | null; // (default null = count all bets)
+  // shadowPaperBets: when true and bot is in live mode, each live bet is also
+  // recorded as an identical paper-mode DB row so quiet-hours analysis accumulates
+  // data twice as fast without additional Kalshi API calls.
+  shadowPaperBets: boolean;      // (default true)
   // liveStatsResetAt / paperStatsResetAt: ISO timestamps for a visual-only stats
   // reset.  All display queries (win/loss %, profit, history, performance report,
   // logic-mode performance) filter to bets placed *after* this timestamp.  Zero
@@ -1413,6 +1417,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   paperStartingBalance: 100,
   paperWinReturnRate: 0.50,
   paperBalanceResetAt: null,
+  shadowPaperBets: true,
   liveStatsResetAt: null,
   paperStatsResetAt: null,
   // Safety cap: hard-abort any bet whose computed dollar cost exceeds this.

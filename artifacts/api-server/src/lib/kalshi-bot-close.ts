@@ -310,6 +310,36 @@ export async function closePosition(
       existingId: pos.id,
       cryptoPriceAtExit,
     });
+
+    // Shadow paper bet: close the mirrored paper record with the same outcome.
+    // pnl for paper uses the fixed simulation rate (not real contract math).
+    if (pos.shadowPaperId) {
+      const PAPER_WIN_RATE = S.config.paperWinReturnRate ?? 0.50;
+      const paperPnl = isExpiry
+        ? (pnl >= 0 ? pos.betAmount * PAPER_WIN_RATE : -pos.betAmount)
+        : pnl; // mid-window price-delta PnL is equivalent for paper
+      persistBetRecord({
+        symbol: pos.symbol,
+        windowKey: pos.windowKey,
+        ticker: pos.ticker,
+        direction: pos.direction,
+        action: isLateRecovery ? "late_recovery_exit" : isExpiry ? "expired" : "exit",
+        signals: pos.entryDecision.signals,
+        entryPrice: pos.entryYesPrice,
+        exitPrice: fillPrice ?? undefined,
+        kalshiTarget: pos.kalshiTarget,
+        contractCount: pos.contractCount,
+        betAmount: pos.betAmount,
+        pnl: paperPnl,
+        exitReason: reason,
+        phase2Activated: pos.phase2Activated,
+        phase2RecoveredAmount: phase2RecoveredAmount ?? undefined,
+        existingId: pos.shadowPaperId,
+        cryptoPriceAtExit,
+        mode: "paper",
+      }).catch(() => {}); // fire-and-forget, non-fatal
+    }
+
     if (isExpiry) {
       logger.info(
         { sym: pos.symbol, windowKey: pos.windowKey, direction: pos.direction, pnl: pnl.toFixed(4) },

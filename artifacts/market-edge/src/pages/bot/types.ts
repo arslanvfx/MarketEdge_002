@@ -71,6 +71,7 @@ export interface BotConfig {
   betProfile: "normal" | "aggressive";
   paperStartingBalance: number;
   paperWinReturnRate: number;
+  shadowPaperBets?: boolean;
   paperBalanceResetAt: string | null;
   liveStatsResetAt: string | null;
   paperStatsResetAt: string | null;

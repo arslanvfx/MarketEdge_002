@@ -2608,6 +2608,30 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </label>
               </div>
 
+              {/* Shadow paper bets — always visible; relevant in live mode */}
+              <div className="border border-border/60 rounded-lg p-4 bg-violet-500/5">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex flex-col gap-0.5 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-violet-400">Shadow Paper Bets (Live Mode)</span>
+                    </div>
+                    <span className="text-[10px] text-muted-foreground/70 leading-snug">
+                      While running live, also record every bet as a paper entry in the background.
+                      Doubles the data available for quiet-hours learning without extra API calls.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={merged.shadowPaperBets !== false}
+                    onClick={() => setConfigDraft(d => ({ ...d, shadowPaperBets: !(merged.shadowPaperBets !== false) }))}
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent transition-colors focus:outline-none ${merged.shadowPaperBets !== false ? "bg-violet-500" : "bg-muted"}`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${merged.shadowPaperBets !== false ? "translate-x-4" : "translate-x-0"}`} />
+                  </button>
+                </div>
+              </div>
+
               {/* Paper Trading Simulation — only visible in paper mode */}
               {status?.mode === "paper" && (
                 <div className="border border-border/60 rounded-lg p-4 space-y-4 bg-sky-500/5">
