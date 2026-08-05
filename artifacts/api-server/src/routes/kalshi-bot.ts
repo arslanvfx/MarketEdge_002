@@ -645,6 +645,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperWinReturnRate,
     paperBalanceResetAt,
     shadowPaperBets,
+    shadowPaperIgnoreQuietHours,
     paperStatsResetAt,
     maxBetSize,
     minAccountBalance,
@@ -759,6 +760,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     paperStartingBalance?: number;
     paperWinReturnRate?: number;
     paperBalanceResetAt?: string | null;
+    shadowPaperBets?: boolean;
+    shadowPaperIgnoreQuietHours?: boolean;
     paperStatsResetAt?: string | null;
     maxBetSize?: number;
     minAccountBalance?: number;
@@ -981,6 +984,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.paperWinReturnRate = paperWinReturnRate;
   }
   if (typeof shadowPaperBets === "boolean") partial.shadowPaperBets = shadowPaperBets;
+  if (typeof shadowPaperIgnoreQuietHours === "boolean") partial.shadowPaperIgnoreQuietHours = shadowPaperIgnoreQuietHours;
   if ("paperBalanceResetAt" in req.body) {
     partial.paperBalanceResetAt = typeof paperBalanceResetAt === "string" ? paperBalanceResetAt : null;
   }

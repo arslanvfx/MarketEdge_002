@@ -72,6 +72,7 @@ export interface BotConfig {
   paperStartingBalance: number;
   paperWinReturnRate: number;
   shadowPaperBets?: boolean;
+  shadowPaperIgnoreQuietHours?: boolean;
   paperBalanceResetAt: string | null;
   liveStatsResetAt: string | null;
   paperStatsResetAt: string | null;

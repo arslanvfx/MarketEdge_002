@@ -1075,6 +1075,12 @@ export interface BotConfig {
   // recorded as an identical paper-mode DB row so quiet-hours analysis accumulates
   // data twice as fast without additional Kalshi API calls.
   shadowPaperBets: boolean;      // (default true)
+  // shadowPaperIgnoreQuietHours: when true AND the bot is running in live mode,
+  // the quiet-hours gate is bypassed for paper evaluation only.  The bot evaluates
+  // signals and writes a paper record for every silenced hour — live orders are
+  // never placed (the tick runs as paper-only during the bypass).  Auto-tune can
+  // then learn whether a silenced slot should be unsilenced.  (default false)
+  shadowPaperIgnoreQuietHours: boolean; // (default false)
   // liveStatsResetAt / paperStatsResetAt: ISO timestamps for a visual-only stats
   // reset.  All display queries (win/loss %, profit, history, performance report,
   // logic-mode performance) filter to bets placed *after* this timestamp.  Zero
@@ -1418,6 +1424,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   paperWinReturnRate: 0.50,
   paperBalanceResetAt: null,
   shadowPaperBets: true,
+  shadowPaperIgnoreQuietHours: false,
   liveStatsResetAt: null,
   paperStatsResetAt: null,
   // Safety cap: hard-abort any bet whose computed dollar cost exceeds this.

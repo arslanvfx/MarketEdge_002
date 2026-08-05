@@ -2609,7 +2609,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
               </div>
 
               {/* Shadow paper bets — always visible; relevant in live mode */}
-              <div className="border border-border/60 rounded-lg p-4 bg-violet-500/5">
+              <div className="border border-border/60 rounded-lg p-4 bg-violet-500/5 space-y-3">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex flex-col gap-0.5 min-w-0">
                     <div className="flex items-center gap-2">
@@ -2628,6 +2628,25 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent transition-colors focus:outline-none ${merged.shadowPaperBets !== false ? "bg-violet-500" : "bg-muted"}`}
                   >
                     <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${merged.shadowPaperBets !== false ? "translate-x-4" : "translate-x-0"}`} />
+                  </button>
+                </div>
+                {/* Quiet-hours bypass for shadow paper — fills the auto-tune blind spot */}
+                <div className="flex items-center justify-between gap-4 pt-2 border-t border-border/40">
+                  <div className="flex flex-col gap-0.5 min-w-0">
+                    <span className="text-xs font-medium text-violet-300">Evaluate During Quiet Hours</span>
+                    <span className="text-[10px] text-muted-foreground/60 leading-snug">
+                      Run paper-only signal evaluation during silenced hours so auto-tune can discover
+                      whether those slots should be unsilenced. Live orders are never placed.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={merged.shadowPaperIgnoreQuietHours === true}
+                    onClick={() => setConfigDraft(d => ({ ...d, shadowPaperIgnoreQuietHours: !(merged.shadowPaperIgnoreQuietHours === true) }))}
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent transition-colors focus:outline-none ${merged.shadowPaperIgnoreQuietHours === true ? "bg-violet-500" : "bg-muted"}`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${merged.shadowPaperIgnoreQuietHours === true ? "translate-x-4" : "translate-x-0"}`} />
                   </button>
                 </div>
               </div>

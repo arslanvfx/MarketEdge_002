@@ -58,6 +58,7 @@ import {
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
   WINDOW_ENTRY_BUFFER_S, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow,
+  setShadowQhBypass,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState, type CoinStabilityResult,
 } from "./kalshi-bot-state";
@@ -939,30 +940,43 @@ export async function runBotLoopTick(): Promise<void> {
   // When quietHoursV2 is enabled, skip this legacy gate entirely — V2 handles
   // all hour-based gating below (with per-hour silence, reduced-bet, or pass-through).
   if (!S.config.freeRunMode && !(S.config.quietHoursV2?.enabled) && isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd)) {
-    logger.debug(
-      { utcHour: new Date().getUTCHours(), quietHoursStart: S.config.quietHoursStart, quietHoursEnd: S.config.quietHoursEnd },
-      "[kalshi-bot] quiet hours — skipping new entry",
-    );
-    if (isCBNewWindow) {
-      const qhWindowKey = currentWindowKey();
-      const qhNow = new Date().toISOString();
-      S.lastWindowEvaluation = CRYPTO_COINS
-        .filter(c => KALSHI_SERIES[c.symbol])
-        .map(c => ({
-          symbol: c.symbol.toUpperCase(),
-          action: "SKIP" as const,
-          confidence: 0,
-          score: 0,
-          reason: "quiet hours — no new entries",
-          windowKey: qhWindowKey,
-          selected: false,
-          betPlacedThisWindow: false,
-          evaluatedAt: qhNow,
-          trendStability: null,
-          regime: null,
-        }));
+    // shadowPaperIgnoreQuietHours bypass: when the flag is on and the bot is live,
+    // activate the narrow bypass flag so new entries in this tick are treated as
+    // paper-only.  S.botMode is NOT changed — position management (closes, exits)
+    // and all risk counters (S.dailyPnl, circuit breaker) continue using the real
+    // live mode.  Only new entry placement is suppressed via shadowQhBypassActive.
+    if (S.config.shadowPaperIgnoreQuietHours && S.botMode === "live") {
+      setShadowQhBypass(true);
+      logger.debug(
+        { utcHour: new Date().getUTCHours() },
+        "[kalshi-bot] quiet hours — shadowPaperIgnoreQuietHours bypass: paper-only entries this tick for auto-tune data",
+      );
+    } else {
+      logger.debug(
+        { utcHour: new Date().getUTCHours(), quietHoursStart: S.config.quietHoursStart, quietHoursEnd: S.config.quietHoursEnd },
+        "[kalshi-bot] quiet hours — skipping new entry",
+      );
+      if (isCBNewWindow) {
+        const qhWindowKey = currentWindowKey();
+        const qhNow = new Date().toISOString();
+        S.lastWindowEvaluation = CRYPTO_COINS
+          .filter(c => KALSHI_SERIES[c.symbol])
+          .map(c => ({
+            symbol: c.symbol.toUpperCase(),
+            action: "SKIP" as const,
+            confidence: 0,
+            score: 0,
+            reason: "quiet hours — no new entries",
+            windowKey: qhWindowKey,
+            selected: false,
+            betPlacedThisWindow: false,
+            evaluatedAt: qhNow,
+            trendStability: null,
+            regime: null,
+          }));
+      }
+      return;
     }
-    return;
   }
 
   // ── Smart Quiet Hours V2 ────────────────────────────────────────────────────
@@ -989,31 +1003,43 @@ export async function runBotLoopTick(): Promise<void> {
       const silenceSource = hasDowSilenceRules ? `dow-${nowUTCDow}` : "flat-fallback";
 
       if (isSilenced) {
-        logger.debug(
-          { utcHour: nowUTCHour, utcDow: nowUTCDow, silenceSource },
-          "[kalshi-bot] quiet-hours-v2: silenced — skipping new entry",
-        );
-        if (isCBNewWindow) {
-          const qh2WindowKey = currentWindowKey();
-          const qh2Now = new Date().toISOString();
-          S.lastWindowEvaluation = CRYPTO_COINS
-            .filter(c => KALSHI_SERIES[c.symbol])
-            .map(c => ({
-              symbol: c.symbol.toUpperCase(),
-              action: "SKIP" as const,
-              confidence: 0,
-              score: 0,
-              reason: `quiet-hours-v2 silenced (${nowUTCHour} UTC, ${silenceSource})`,
-              windowKey: qh2WindowKey,
-              selected: false,
-              betPlacedThisWindow: false,
-              evaluatedAt: qh2Now,
-              trendStability: null,
-              regime: null,
-            }));
+        // shadowPaperIgnoreQuietHours bypass for V2: activate the narrow bypass
+        // flag so new entries in this tick are treated as paper-only.  S.botMode
+        // is NOT changed — position management and risk counters stay live-correct.
+        if (S.config.shadowPaperIgnoreQuietHours && S.botMode === "live") {
+          setShadowQhBypass(true);
+          S.quietHoursV2ReducedBet = null;
+          logger.debug(
+            { utcHour: nowUTCHour, utcDow: nowUTCDow, silenceSource },
+            "[kalshi-bot] quiet-hours-v2: silenced — shadowPaperIgnoreQuietHours bypass: paper-only entries this tick for auto-tune data",
+          );
+        } else {
+          logger.debug(
+            { utcHour: nowUTCHour, utcDow: nowUTCDow, silenceSource },
+            "[kalshi-bot] quiet-hours-v2: silenced — skipping new entry",
+          );
+          if (isCBNewWindow) {
+            const qh2WindowKey = currentWindowKey();
+            const qh2Now = new Date().toISOString();
+            S.lastWindowEvaluation = CRYPTO_COINS
+              .filter(c => KALSHI_SERIES[c.symbol])
+              .map(c => ({
+                symbol: c.symbol.toUpperCase(),
+                action: "SKIP" as const,
+                confidence: 0,
+                score: 0,
+                reason: `quiet-hours-v2 silenced (${nowUTCHour} UTC, ${silenceSource})`,
+                windowKey: qh2WindowKey,
+                selected: false,
+                betPlacedThisWindow: false,
+                evaluatedAt: qh2Now,
+                trendStability: null,
+                regime: null,
+              }));
+          }
+          S.quietHoursV2ReducedBet = null;
+          return;
         }
-        S.quietHoursV2ReducedBet = null;
-        return;
       }
       // Reduced-bet hour: same per-day-first logic.
       const hasDowReducedRules = qhv2.reducedByDow != null && todayDowStr in (qhv2.reducedByDow as Record<string, unknown>);
@@ -2615,6 +2641,9 @@ export async function runBotLoopTick(): Promise<void> {
     }
   }
   } finally {
+    // Clear the shadow-QH bypass flag unconditionally — it is safe to call even
+    // when the flag was never set (setShadowQhBypass(false) is a no-op there).
+    setShadowQhBypass(false);
     tickInFlight = false;
   }
 }

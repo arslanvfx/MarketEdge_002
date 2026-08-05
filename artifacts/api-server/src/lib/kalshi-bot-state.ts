@@ -401,3 +401,14 @@ export function resetDailyIfNeeded(): void {
 
 // Per-coin concurrent-tick guard (prevents double-processing same coin in one scheduler tick)
 export const tickInFlight = new Set<string>();
+
+// shadowQhBypassActive: set to true for the duration of a quiet-hours bypass tick
+// (shadowPaperIgnoreQuietHours=true, bot is live, current hour is silenced).
+// When true, new entry ticks MUST treat the entry as paper-only — live orders
+// must NOT be placed.  Existing position management (closes, exits) is unaffected
+// because closePosition uses pos.entryMode directly (not S.botMode or this flag).
+// S.botMode is never modified by the bypass — risk counters stay correct.
+export let shadowQhBypassActive = false;
+export function setShadowQhBypass(active: boolean): void {
+  shadowQhBypassActive = active;
+}

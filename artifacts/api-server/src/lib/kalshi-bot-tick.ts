@@ -70,7 +70,7 @@ import {
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
   tickInFlight, getEffectiveDailyLossLimit, extremeCautionAbortedThisWindow,
-  convictionPriceTicks,
+  convictionPriceTicks, shadowQhBypassActive,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
@@ -548,6 +548,13 @@ async function _runBotTick(
 
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
 
+  // Effective mode for ALL entry accounting in this tick.
+  // When shadowQhBypassActive is true (quiet-hours paper bypass), new entries are
+  // treated as paper-only so they don't consume live spend budgets, window caps,
+  // or failed-fill locks.  S.botMode is never mutated — position close accounting
+  // (closePosition uses pos.entryMode directly) is unaffected.
+  const effectiveMode: BotMode = shadowQhBypassActive ? "paper" : S.botMode;
+
   // Multi-bet guard: purge stale window entries then check the per-window cap.
   // Purge any entry for this symbol that belongs to an older window key (any mode).
   for (const [k] of windowBetCounts) {
@@ -556,7 +563,7 @@ async function _runBotTick(
     }
   }
   // Mode-aware key so paper bets don't count against the live cap and vice-versa.
-  const windowBetKey = `${sym}:${windowKey}:${S.botMode}`;
+  const windowBetKey = `${sym}:${windowKey}:${effectiveMode}`;
   const betsThisWindow = windowBetCounts.get(windowBetKey) ?? 0;
   if (betsThisWindow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, betsThisWindow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] maxBetsPerWindow reached — skipping entry");
@@ -568,7 +575,7 @@ async function _runBotTick(
   // gives the authoritative live count.
   // CONVICTION MODE: global cap bypassed — each coin bets independently on price cross;
   // max-bet slots are governed by convictionStabilityMaxBetsPerWindow.
-  const globalTotalNow = windowTotalBets.get(`${windowKey}:${S.botMode}`) ?? 0;
+  const globalTotalNow = windowTotalBets.get(`${windowKey}:${effectiveMode}`) ?? 0;
   if (S.config.decisionMode !== "conviction" && S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, globalTotalNow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] global cap reached at entry — skipping");
     return;
@@ -754,7 +761,7 @@ async function _runBotTick(
     const windowKeyMs  = new Date(windowKey).getTime();
     const clockElapsedS = (Date.now() - windowKeyMs) / 1000;
     const minuteMark   = Math.min(14, Math.max(0, Math.floor(clockElapsedS / 60)));
-    const timingKey    = `${sym}:${windowKey}:${minuteMark}:${S.botMode}`;
+    const timingKey    = `${sym}:${windowKey}:${minuteMark}:${effectiveMode}`;
     if (!entryTimingWritten.has(timingKey)) {
       entryTimingWritten.add(timingKey);
       writeBotEntryTimingSnapshot({
@@ -762,7 +769,7 @@ async function _runBotTick(
         coin:                 sym,
         windowKey,
         minuteMark,
-        mode:                 S.botMode,
+        mode:                 effectiveMode,
         statAbove:            decision.signals.statAbove,
         claudeAbove:          decision.signals.claudeAbove,
         mlAbove:              decision.signals.mlAbove,
@@ -1563,16 +1570,17 @@ async function _runBotTick(
         targetBetSize: targetBetSize.toFixed(4),
         expectedFillCost: expectedFillCost.toFixed(4),
         direction,
-        mode: S.botMode,
+        mode: effectiveMode,
       },
       "[kalshi-bot] SKIP — budget cannot buy 1 contract at current ask; engaging fill cooldown",
     );
-    windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
+    windowFailedFills.add(`${sym}:${windowKey}:${effectiveMode}`);
     return;
   }
   const betAmount = contractCount * expectedFillCost; // expected dollars risked
   // Conviction daily spend gate: block entry if today's total spend would exceed the configured cap.
-  if ((S.config.convictionMaxDailySpend ?? 0) > 0) {
+  // Only applies to live entries — paper bypass entries don't consume real capital.
+  if (effectiveMode === "live" && (S.config.convictionMaxDailySpend ?? 0) > 0) {
     const spendCap = S.config.convictionMaxDailySpend!;
     if (S.dailySpendAmount + betAmount > spendCap) {
       logger.info(
@@ -1617,7 +1625,7 @@ async function _runBotTick(
         contractCount,
         costPerContract: expectedFillCost.toFixed(4),
         direction,
-        mode: S.botMode,
+        mode: effectiveMode,
       },
       "[kalshi-bot] SAFETY ABORT — computed betAmount exceeds maxBetSize cap; trade cancelled",
     );
@@ -1626,7 +1634,7 @@ async function _runBotTick(
   // ─────────────────────────────────────────────────────────────────────────────
 
   // ── LIVE-ONLY GUARDS: slippage strikes, account balance, total exposure ───
-  if (S.botMode === "live") {
+  if (effectiveMode === "live") {
     // Slippage: skip entry on the window immediately following ≥3 unfair fills.
     // Strikes accumulated in window W → entry skipped in window W+1, then cleared.
     // (Strikes in the same window don't block entry — the bet already went through.)
@@ -2310,7 +2318,7 @@ async function _runBotTick(
     } else if (freshContractCount < 1) {
       logger.warn({ sym, direction, expectedFillCost, targetBetSize }, "[kalshi-bot] conviction gate: fresh prices give contractCount<1 — skipping");
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-      windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
+      windowFailedFills.add(`${sym}:${windowKey}:${effectiveMode}`);
       return;
     }
     // Post-gate safety re-check: the pre-gate maxBetSizeGuard used stale expectedFillCost
@@ -2331,7 +2339,7 @@ async function _runBotTick(
         "[kalshi-bot] SAFETY ABORT — post-conviction-gate sizing exceeds maxBetSize cap; trade cancelled",
       );
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-      windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
+      windowFailedFills.add(`${sym}:${windowKey}:${effectiveMode}`);
       return;
     }
   }
@@ -2555,7 +2563,13 @@ async function _runBotTick(
   // the live order is filling, this entry must still be recorded and exited as
   // the mode it was actually placed in — otherwise a real live buy could be
   // recorded as paper and never sold, stranding funds on the exchange.
-  const entryMode: BotMode = S.botMode;
+  //
+  // shadowQhBypassActive: set by the loop when shadowPaperIgnoreQuietHours fires
+  // during a silenced hour.  We treat new entries as paper-only for that tick so
+  // auto-tune data accumulates without placing any live order.  S.botMode is NOT
+  // changed by the bypass — position closes and risk counters stay live-correct
+  // because closePosition uses pos.entryMode (not S.botMode or this flag).
+  const entryMode: BotMode = shadowQhBypassActive ? "paper" : S.botMode;
 
   if (entryMode === "live") {
     try {
@@ -3014,10 +3028,13 @@ async function _runBotTick(
     );
   }
   // Track gross daily spend so convictionMaxDailySpend gate can block future entries.
-  S.dailySpendAmount += actualBetAmount;
+  // Only live entries consume real capital — paper bypass entries must not affect this counter.
+  if (entryMode === "live") {
+    S.dailySpendAmount += actualBetAmount;
+  }
   // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
-  // Mode-aware: paper and live each have their own counter.
-  const totalKey = `${windowKey}:${S.botMode}`;
+  // Mode-aware: paper and live each have their own counter (effectiveMode matches entryMode here).
+  const totalKey = `${windowKey}:${effectiveMode}`;
   windowTotalBets.set(totalKey, (windowTotalBets.get(totalKey) ?? 0) + 1);
   // Store bet details so the eval panel can display actual direction + confidence
   // even after the coin switches to "directional cap reached" on later ticks.
