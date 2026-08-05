@@ -615,16 +615,9 @@ app.listen(port, (err) => {
         runQuietHoursAutoTune().catch(err =>
           logger.warn({ err }, "[qh-autotune] scheduled run failed (non-fatal)"),
         );
-      runQHAutoTune(); // immediate run — no-op if autoTuneEnabled is false
-      const msToNextUtcHour = (): number => {
-        const now = Date.now();
-        const nextHour = Math.ceil((now + 1) / (60 * 60_000)) * (60 * 60_000);
-        return Math.max(5_000, nextHour - now);
-      };
-      setTimeout(() => {
-        runQHAutoTune();
-        setInterval(runQHAutoTune, 60 * 60_000);
-      }, msToNextUtcHour());
+      runQHAutoTune(); // immediate run — no-op if autoTuneEnabled is false or interval not elapsed
+      // Poll every 30 min; runQuietHoursAutoTune() guards internally with lastRunAt + interval.
+      setInterval(runQHAutoTune, 30 * 60_000);
 
       // Bring up the stock trading vertical independently — a failure here must
       // never take down the crypto tracker or Kalshi bot above.

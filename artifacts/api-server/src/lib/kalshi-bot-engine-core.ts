@@ -961,13 +961,13 @@ export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "
 /**
  * Per-hour silence / reduced-bet schedule (V2 quiet hours).
  * - silencedUtcHours: fully block new entries during these UTC hours.
- * - reducedBetUtcHours: cap bet size to the specified $ amount during these UTC hours.
+ * - reducedBetUtcHours: reduce bet size by the specified percentage (1–99) during these UTC hours.
  * V2 takes precedence over the legacy quietHoursStart/quietHoursEnd range when enabled.
  */
 export interface QuietHoursV2 {
   enabled: boolean;
 
-  reducedBetUtcHours: Record<string, number>;   // UTC hour string (e.g. "13") → bet amount cap ($) (all days)
+  reducedBetUtcHours: Record<string, number>;   // UTC hour string (e.g. "13") → % reduction 1–99 (all days)
   // ── Auto-tune ──
   // Per-day-of-week overrides (JS getUTCDay(): "0"=Sun, "1"=Mon, …, "6"=Sat)
 
@@ -981,7 +981,7 @@ export interface QuietHoursV2 {
 
   silencedByDow?: Record<string, number[]>;              // dow → UTC hours to fully block on that day only
 
-  reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → bet cap on that day only
+  reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 on that day only
 }
 
 export interface BotConfig {

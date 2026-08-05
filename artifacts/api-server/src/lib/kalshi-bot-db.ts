@@ -899,6 +899,15 @@ export async function runQuietHoursAutoTune(): Promise<void> {
   const qhv2 = S.config.quietHoursV2;
   if (!qhv2?.enabled || !qhv2.autoTuneEnabled) return;
 
+  // Respect the configured interval (default 2h).  The scheduler polls every
+  // 30 min so this guard prevents over-running during short-interval schedules.
+  const intervalHours = Math.max(1, Math.min(12, qhv2.autoTuneIntervalHours ?? 2));
+  const intervalMs    = intervalHours * 60 * 60_000;
+  if (S.autoTuneQHLastRunAt) {
+    const elapsed = Date.now() - new Date(S.autoTuneQHLastRunAt).getTime();
+    if (elapsed < intervalMs) return;
+  }
+
   const days      = Math.min(90, Math.max(1, qhv2.autoTuneDays      ?? 14));
   const threshold =                            qhv2.autoTuneThreshold ?? 84.5;
 

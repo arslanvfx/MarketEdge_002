@@ -8,17 +8,14 @@ export interface QuietHoursV2 {
   silencedUtcHours: number[];                    // UTC hours 0–23 silenced every day
 
   autoTuneEnabled?: boolean;
-
   autoTuneDays?: number;
-
   autoTuneThreshold?: number;
+  autoTuneIntervalHours?: number;                // how often auto-tune runs: 1 | 2 | 4 | 6 | 12
 
-  reducedBetUtcHours: Record<string, number>;    // UTC hour → bet cap ($), every day
+  reducedBetUtcHours: Record<string, number>;    // UTC hour → % reduction 1–99 (all days)
   // Per-day-of-week overrides (JS getUTCDay(): "0"=Sun, "1"=Mon, …, "6"=Sat)
-
   silencedByDow?: Record<string, number[]>;               // dow → UTC hours silenced on that day only
-
-  reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → bet cap on that day only
+  reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 that day only
 }
 
 export interface QuietHoursHourStat {

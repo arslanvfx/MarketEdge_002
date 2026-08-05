@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useAuth } from "@clerk/react";
-import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar } from "lucide-react";
+import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar, X } from "lucide-react";
 import type { QuietHoursV2, QuietHoursAnalysis, QuietHoursHourStat } from "./types";
 import { utcToEst, ET_LABEL, API_BASE } from "./utils";
 
@@ -34,6 +34,7 @@ function hasDowOverride(h: number, v2: QuietHoursV2, dow: number | null): boolea
   const reducedDow  = v2.reducedByDow?.[dowStr]?.[String(h)] != null;
   return silencedDow || reducedDow;
 }
+
 interface HourCellProps {
   utcHour: number;
   mode: "silenced" | "reduced" | "active";
@@ -41,10 +42,11 @@ interface HourCellProps {
   winRatePct: number | null;
   totalBets: number;
   totalPnl: number;
-  reducedBetAmount: number | undefined;
+  reducedPct: number | undefined;     // 1–99: % reduction; undefined = not reduced
   isCurrentHour: boolean;
-  onCycleMode: (h: number) => void;
-  onReducedBetChange: (h: number, amount: number) => void;
+  onToggleSilence: (h: number) => void;
+  onSetReducedPct: (h: number, pct: number) => void;
+  onClearReducedPct: (h: number) => void;
 }
 
 function HourCell({
@@ -54,11 +56,15 @@ function HourCell({
   winRatePct,
   totalBets,
   totalPnl,
-  reducedBetAmount,
+  reducedPct,
   isCurrentHour,
-  onCycleMode,
-  onReducedBetChange,
+  onToggleSilence,
+  onSetReducedPct,
+  onClearReducedPct,
 }: HourCellProps) {
+  const [editingPct, setEditingPct] = useState(false);
+  const [pctInput, setPctInput] = useState("");
+
   const estHour = utcToEst(utcHour);
   const estLabel = `${String(estHour).padStart(2, "0")}:00`;
   const tier = winRateTier(winRatePct, totalBets);
@@ -84,17 +90,24 @@ function HourCell({
 
   const silencedOverlay = mode === "silenced" ? "opacity-40 grayscale-[60%]" : "";
   const currentRing = isCurrentHour ? "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background" : "";
-  const modeRing = mode === "reduced" && !isCurrentHour ? "ring-1 ring-amber-400/50" : "";
+  const reducedRing = reducedPct != null && mode !== "silenced" ? "ring-1 ring-amber-400/50" : "";
+
+  function commitPct() {
+    const v = parseInt(pctInput, 10);
+    if (!isNaN(v) && v >= 1 && v <= 99) {
+      onSetReducedPct(utcHour, v);
+    }
+    setEditingPct(false);
+    setPctInput("");
+  }
 
   return (
     <div
       className={`
-        group relative flex flex-col rounded-lg sm:rounded-xl border cursor-pointer select-none
-        transition-all duration-150 hover:brightness-125 active:scale-[0.97]
-        ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${modeRing}
+        group relative flex flex-col rounded-lg sm:rounded-xl border select-none
+        transition-all duration-150
+        ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${reducedRing}
       `}
-      onClick={() => onCycleMode(utcHour)}
-      title={`${estLabel} ${ET_LABEL} (UTC ${String(utcHour).padStart(2, "0")}:00)\nClick to cycle: Active → Silenced → Reduced${mode === "reduced" ? `\nReduced to: $${reducedBetAmount ?? "—"}` : ""}`}
     >
       {/* Per-dow calendar badge */}
       {hasDowBadge && (
@@ -103,7 +116,12 @@ function HourCell({
         </div>
       )}
 
-      <div className="flex flex-col gap-0.5 sm:gap-1 p-1.5 sm:p-3">
+      {/* Main clickable area — toggles silence */}
+      <div
+        className="flex flex-col gap-0.5 sm:gap-1 p-1.5 sm:p-3 cursor-pointer hover:brightness-125 active:scale-[0.97]"
+        onClick={() => onToggleSilence(utcHour)}
+        title={`${estLabel} ${ET_LABEL} (UTC ${String(utcHour).padStart(2, "0")}:00)\nClick to ${mode === "silenced" ? "activate" : "silence"}`}
+      >
         {/* Row 1: hour label + mode icon */}
         <div className="flex items-center justify-between gap-0.5">
           <span className="text-[9px] sm:text-[11px] font-semibold text-foreground/80 leading-none tracking-wide">
@@ -111,8 +129,8 @@ function HourCell({
           </span>
           <span className="flex items-center">
             {mode === "silenced" && <VolumeX className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-slate-400" />}
-            {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-amber-400" />}
-            {mode === "active" && <span className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${dotColor[tier]}`} />}
+            {mode !== "silenced" && reducedPct != null && <TrendingDown className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-amber-400" />}
+            {mode !== "silenced" && reducedPct == null && <span className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${dotColor[tier]}`} />}
           </span>
         </div>
 
@@ -127,7 +145,7 @@ function HourCell({
           )}
         </div>
 
-        {/* Row 3: bets + P&L — hidden on mobile, shown on sm+ */}
+        {/* Row 3: bets + P&L — hidden on mobile */}
         {totalBets > 0 && (
           <div className="hidden sm:flex items-center gap-1.5">
             <span className="text-[10px] text-muted-foreground/60 leading-none">{totalBets}b</span>
@@ -136,25 +154,55 @@ function HourCell({
             </span>
           </div>
         )}
-
-        {/* Reduced bet input — hidden on mobile */}
-        {mode === "reduced" && (
-          <input
-            type="number"
-            min={0.01}
-            max={99}
-            step={0.25}
-            value={reducedBetAmount ?? ""}
-            placeholder="$ cap"
-            onClick={e => e.stopPropagation()}
-            onChange={e => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v) && v > 0) onReducedBetChange(utcHour, v);
-            }}
-            className="hidden sm:block mt-0.5 w-full text-[11px] rounded-md px-2 py-1 bg-background/70 border border-amber-400/40 text-amber-300 outline-none focus:ring-1 focus:ring-amber-400/60 placeholder:text-amber-300/40"
-          />
-        )}
       </div>
+
+      {/* Reduced-% control — only when not silenced */}
+      {mode !== "silenced" && (
+        <div className="px-1.5 pb-1.5 sm:px-2 sm:pb-2 -mt-0.5" onClick={e => e.stopPropagation()}>
+          {editingPct ? (
+            <div className="flex items-center gap-1">
+              <input
+                autoFocus
+                type="number"
+                min={1}
+                max={99}
+                step={5}
+                value={pctInput}
+                placeholder="30"
+                onChange={e => setPctInput(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") commitPct(); if (e.key === "Escape") { setEditingPct(false); setPctInput(""); } }}
+                onBlur={commitPct}
+                className="w-full text-[10px] rounded px-1.5 py-0.5 bg-background/80 border border-amber-400/50 text-amber-300 outline-none focus:ring-1 focus:ring-amber-400/60 placeholder:text-amber-300/30"
+              />
+              <span className="text-[9px] text-amber-300/60 shrink-0">%</span>
+            </div>
+          ) : reducedPct != null ? (
+            <div className="flex items-center gap-0.5 justify-between">
+              <button
+                onClick={() => { setPctInput(String(reducedPct)); setEditingPct(true); }}
+                className="text-[9px] sm:text-[10px] text-amber-400 bg-amber-400/10 rounded px-1 py-0.5 hover:bg-amber-400/20 transition-colors leading-none font-medium"
+              >
+                –{reducedPct}%
+              </button>
+              <button
+                onClick={() => onClearReducedPct(utcHour)}
+                className="text-slate-500 hover:text-slate-300 transition-colors"
+                title="Remove reduction"
+              >
+                <X className="w-2.5 h-2.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { setPctInput(""); setEditingPct(true); }}
+              className="text-[9px] text-muted-foreground/30 hover:text-amber-400/60 transition-colors leading-none"
+              title="Set reduced bet %"
+            >
+              +reduce
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -228,95 +276,89 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   function applySuggested() {
     if (!analysis) return;
     if (selectedDow == null) {
-      // All tab: update flat silencedUtcHours
       onChange({ ...value, silencedUtcHours: analysis.suggestedSilencedHours });
     } else {
-      // Per-day tab: update silencedByDow[dow]
       const dowStr = String(selectedDow);
       const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: analysis.suggestedSilencedHours };
       onChange({ ...value, silencedByDow: newSilencedByDow });
     }
   }
 
-  // Cycle mode for "All" tab (flat arrays)
-  function cycleModeFlat(h: number) {
-    const current = hourMode(h, value, null);
-    if (current === "active") {
-      onChange({ ...value, silencedUtcHours: [...value.silencedUtcHours, h] });
-    } else if (current === "silenced") {
-      const defaultAmount = Number((value.reducedBetUtcHours[String(h)] ?? 0.50).toFixed(2));
-      onChange({
-        ...value,
-        silencedUtcHours: value.silencedUtcHours.filter(x => x !== h),
-        reducedBetUtcHours: { ...value.reducedBetUtcHours, [String(h)]: defaultAmount },
-      });
+  // ── Toggle silence for "All" tab ──────────────────────────────────────────
+  // Simple 2-state toggle on the flat silencedUtcHours list.
+  function toggleSilenceFlat(h: number) {
+    const isSilenced = value.silencedUtcHours.includes(h);
+    if (isSilenced) {
+      onChange({ ...value, silencedUtcHours: value.silencedUtcHours.filter(x => x !== h) });
     } else {
-      const { [String(h)]: _, ...rest } = value.reducedBetUtcHours;
-      onChange({ ...value, silencedUtcHours: value.silencedUtcHours.filter(x => x !== h), reducedBetUtcHours: rest });
+      onChange({ ...value, silencedUtcHours: [...value.silencedUtcHours, h] });
     }
   }
 
-  // Cycle mode for a per-dow tab (only touches silencedByDow / reducedByDow)
-  function cycleModeDow(h: number, dow: number) {
+  // ── Toggle silence for a DOW tab ─────────────────────────────────────────
+  // Uses the visual mode (hourMode) as source of truth.
+  // Un-silencing removes from BOTH flat and DOW lists so the cell becomes
+  // fully active regardless of where the rule originally came from.
+  // Silencing adds a DOW-specific entry so other days are not affected.
+  function toggleSilenceDow(h: number, dow: number) {
     const dowStr = String(dow);
-    const silencedForDow = value.silencedByDow?.[dowStr] ?? [];
-    const reducedForDow = value.reducedByDow?.[dowStr] ?? {};
+    const visual = hourMode(h, value, dow);
 
-    const isDowSilenced = silencedForDow.includes(h);
-    const isDowReduced  = reducedForDow[String(h)] != null;
-    const isFlatSilenced = value.silencedUtcHours.includes(h);
-    const isFlatReduced  = value.reducedBetUtcHours[String(h)] != null;
-
-    if (!isDowSilenced && !isDowReduced && !isFlatSilenced && !isFlatReduced) {
-      // Active → add dow-silenced
-      const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: [...silencedForDow, h] };
-      onChange({ ...value, silencedByDow: newSilencedByDow });
-    } else if (isDowSilenced || isFlatSilenced) {
-      // Silenced → dow-reduced (remove from dow-silenced list, add to dow-reduced)
-      const newSilenced = silencedForDow.filter(x => x !== h);
-      const defaultAmount = Number((reducedForDow[String(h)] ?? value.reducedBetUtcHours[String(h)] ?? 0.50).toFixed(2));
-      const newReduced = { ...reducedForDow, [String(h)]: defaultAmount };
-      const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: newSilenced };
-      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: newReduced };
-      onChange({ ...value, silencedByDow: newSilencedByDow, reducedByDow: newReducedByDow });
+    if (visual === "silenced") {
+      // Remove from flat silenced list + from this DOW's silenced list
+      const newFlatSilenced   = value.silencedUtcHours.filter(x => x !== h);
+      const dowSilenced       = value.silencedByDow?.[dowStr] ?? [];
+      const newDowSilenced    = dowSilenced.filter(x => x !== h);
+      const newSilencedByDow  = { ...(value.silencedByDow ?? {}), [dowStr]: newDowSilenced };
+      onChange({ ...value, silencedUtcHours: newFlatSilenced, silencedByDow: newSilencedByDow });
     } else {
-      // Reduced → active (remove from dow-reduced)
-      const { [String(h)]: _, ...restReduced } = reducedForDow;
-      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: restReduced };
+      // Active or reduced → add DOW-specific silence
+      const dowSilenced = value.silencedByDow?.[dowStr] ?? [];
+      if (!dowSilenced.includes(h)) {
+        const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: [...dowSilenced, h] };
+        onChange({ ...value, silencedByDow: newSilencedByDow });
+      }
+    }
+  }
+
+  function toggleSilence(h: number) {
+    if (selectedDow == null) toggleSilenceFlat(h);
+    else toggleSilenceDow(h, selectedDow);
+  }
+
+  // ── Reduced-% controls ────────────────────────────────────────────────────
+  function setReducedPct(h: number, pct: number) {
+    if (selectedDow == null) {
+      onChange({ ...value, reducedBetUtcHours: { ...value.reducedBetUtcHours, [String(h)]: pct } });
+    } else {
+      const dowStr = String(selectedDow);
+      const existing = value.reducedByDow?.[dowStr] ?? {};
+      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: { ...existing, [String(h)]: pct } };
       onChange({ ...value, reducedByDow: newReducedByDow });
     }
   }
 
-  function cycleMode(h: number) {
+  function clearReducedPct(h: number) {
     if (selectedDow == null) {
-      cycleModeFlat(h);
-    } else {
-      cycleModeDow(h, selectedDow);
-    }
-  }
-
-  function setReducedBetAmount(h: number, amount: number) {
-    if (selectedDow == null) {
-      onChange({ ...value, reducedBetUtcHours: { ...value.reducedBetUtcHours, [String(h)]: amount } });
+      const { [String(h)]: _, ...rest } = value.reducedBetUtcHours;
+      onChange({ ...value, reducedBetUtcHours: rest });
     } else {
       const dowStr = String(selectedDow);
       const existing = value.reducedByDow?.[dowStr] ?? {};
-      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: { ...existing, [String(h)]: amount } };
+      const { [String(h)]: _, ...rest } = existing;
+      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: rest };
       onChange({ ...value, reducedByDow: newReducedByDow });
     }
   }
 
   function handleTabChange(dow: number | null) {
     setSelectedDow(dow);
-    // If we already have data for this tab (hourStatsByDow present), no refetch needed
-    // unless the user explicitly clicks Analyze
   }
 
   const activeHourStats = getActiveHourStats();
   const silencedCount = value.silencedUtcHours.length;
   const reducedCount = Object.keys(value.reducedBetUtcHours).length;
 
-  // Per-dow extra counts for the summary
   const dowExtraCounts = DOW_TABS
     .filter(t => t.dow != null)
     .map(t => ({ label: t.label, dow: t.dow!, extra: countDowExtra(value, t.dow!) }))
@@ -390,14 +432,14 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         })}
         {selectedDow != null && (
           <span className="hidden sm:inline ml-2 text-[11px] text-muted-foreground/50">
-            Showing {DOW_NAMES[selectedDow]} data · click cells to set {DOW_NAMES[selectedDow]}-only rules
+            {DOW_NAMES[selectedDow]} data · tap to silence/activate per-day
           </span>
         )}
       </div>
       {/* Mobile-only tab hint */}
       {selectedDow != null && (
         <p className="sm:hidden text-[10px] text-muted-foreground/50 -mt-2">
-          {DOW_NAMES[selectedDow]} data · tap cells to set day-only rules
+          {DOW_NAMES[selectedDow]} · tap cell to silence/activate for this day only
         </p>
       )}
 
@@ -406,19 +448,18 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0" /> ≥85% win rate</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0" /> 75–84%</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-400 shrink-0" /> &lt;75%</span>
-        <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-slate-400 shrink-0" /> Silenced</span>
+        <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-slate-400 shrink-0" /> Silenced (tap to toggle)</span>
         <span className="flex items-center gap-1.5"><TrendingDown className="w-3 h-3 text-amber-400 shrink-0" /> Reduced</span>
         {selectedDow != null && (
           <span className="flex items-center gap-1.5"><Calendar className="w-3 h-3 text-sky-400 shrink-0" /> Day-specific rule</span>
         )}
-        <span className="text-muted-foreground/50 hidden sm:block">· Click a cell to cycle Active → Silenced → Reduced</span>
       </div>
 
       {/* ── Grid: 3 rows of 8 (desktop) / 4 cols wrapping (mobile) ── */}
       <div className="flex flex-col gap-2 sm:gap-3">
         {rows.map((rowHours, rowIdx) => (
           <div key={rowIdx} className="flex items-start gap-2 sm:gap-3">
-            {/* Row label — narrower on mobile, UTC sublabel hidden on mobile */}
+            {/* Row label */}
             <div className="flex flex-col items-end justify-center shrink-0 pt-2 sm:pt-3 w-12 sm:w-20">
               <span className="text-[9px] sm:text-[11px] font-medium text-foreground/60 text-right leading-tight">
                 {ROW_LABELS[rowIdx].range}
@@ -432,6 +473,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             <div className="grid grid-cols-4 sm:grid-cols-8 gap-1 sm:gap-2 flex-1">
               {rowHours.map(h => {
                 const stat = activeHourStats.find(s => s.utcHour === h);
+                const reducedPct = effectiveReducedPct(h, value, selectedDow);
                 return (
                   <HourCell
                     key={h}
@@ -441,10 +483,11 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
                     winRatePct={stat?.winRatePct ?? null}
                     totalBets={stat?.totalBets ?? 0}
                     totalPnl={stat?.totalPnl ?? 0}
-                    reducedBetAmount={effectiveReducedBet(h, value, selectedDow)}
+                    reducedPct={reducedPct}
                     isCurrentHour={h === currentUtcHour}
-                    onCycleMode={cycleMode}
-                    onReducedBetChange={setReducedBetAmount}
+                    onToggleSilence={toggleSilence}
+                    onSetReducedPct={setReducedPct}
+                    onClearReducedPct={clearReducedPct}
                   />
                 );
               })}
@@ -466,13 +509,25 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             </div>
             <span className="text-xs font-medium text-foreground/80 flex items-center gap-1.5">
               <RefreshCw className="w-3 h-3 text-cyan-400" />
-              Auto-tune hourly
+              Auto-tune
             </span>
           </label>
 
           {value.autoTuneEnabled && (
             <>
-              {/* Days */}
+              {/* Interval */}
+              <label className="flex items-center gap-1.5">
+                <span className="text-[11px] text-muted-foreground">Every</span>
+                <select
+                  className="bg-background border border-border rounded-md px-2 py-0.5 text-[11px] text-foreground"
+                  value={value.autoTuneIntervalHours ?? 2}
+                  onChange={e => onChange({ ...value, autoTuneIntervalHours: parseInt(e.target.value, 10) })}
+                >
+                  {[1, 2, 4, 6, 12].map(h => <option key={h} value={h}>{h}h</option>)}
+                </select>
+              </label>
+
+              {/* History */}
               <label className="flex items-center gap-1.5">
                 <span className="text-[11px] text-muted-foreground">History</span>
                 <select
@@ -516,7 +571,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         </div>
         {value.autoTuneEnabled && (
           <p className="text-[10px] text-muted-foreground/50 leading-snug">
-            Runs every hour. Silences hours with &lt;{value.autoTuneThreshold ?? 84.5}% win rate (≥5 bets) and unsilences hours that recover above it.
+            Runs every {value.autoTuneIntervalHours ?? 2}h. Silences hours with &lt;{value.autoTuneThreshold ?? 84.5}% win rate (≥5 bets) and unsilences hours that recover above it.
           </p>
         )}
       </div>
@@ -601,8 +656,8 @@ function countDowExtra(v2: QuietHoursV2, dow: number): number {
   return silencedDow.length + reducedDow.length;
 }
 
-/** Per-dow reduced bet amount for a given hour (falls back to flat). */
-function effectiveReducedBet(h: number, v2: QuietHoursV2, dow: number | null): number | undefined {
+/** Effective reduced % for a given hour (DOW override takes precedence over flat). */
+function effectiveReducedPct(h: number, v2: QuietHoursV2, dow: number | null): number | undefined {
   if (dow != null) {
     const dowVal = v2.reducedByDow?.[String(dow)]?.[String(h)];
     if (dowVal != null) return dowVal;

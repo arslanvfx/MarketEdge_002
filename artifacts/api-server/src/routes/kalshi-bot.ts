@@ -740,7 +740,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
-    quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: boolean; autoTuneDays?: number; autoTuneThreshold?: number };
+    quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: boolean; autoTuneDays?: number; autoTuneThreshold?: number; autoTuneIntervalHours?: number };
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
     enableDirectionCap?: boolean;
@@ -876,7 +876,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.quietHoursEnd = quietHoursEnd;
   }
   if (quietHoursV2 !== undefined && typeof quietHoursV2 === "object" && quietHoursV2 !== null) {
-    const v2 = quietHoursV2 as { enabled?: unknown; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: unknown; autoTuneDays?: unknown; autoTuneThreshold?: unknown };
+    const v2 = quietHoursV2 as { enabled?: unknown; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: unknown; autoTuneDays?: unknown; autoTuneThreshold?: unknown; autoTuneIntervalHours?: unknown };
 
     // Helper: parse a Record<string, number[]> where keys are dow strings "0"–"6"
     function parseSilencedByDow(raw: unknown): Record<string, number[]> | undefined {
@@ -903,7 +903,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
         for (const [hk, hv] of Object.entries(val as Record<string, unknown>)) {
           const h = parseInt(hk, 10);
           if (isNaN(h) || h < 0 || h > 23) continue;
-          if (typeof hv !== "number" || hv <= 0) continue;
+          if (typeof hv !== "number" || hv < 1 || hv > 99) continue;
           inner[String(h)] = hv;
         }
         if (Object.keys(inner).length > 0) out[String(dow)] = inner;
@@ -921,7 +921,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
             Object.entries(v2.reducedBetUtcHours as Record<string, unknown>)
               .filter(([k, v]) => {
                 const h = parseInt(k, 10);
-                return !isNaN(h) && h >= 0 && h <= 23 && typeof v === "number" && v > 0;
+                return !isNaN(h) && h >= 0 && h <= 23 && typeof v === "number" && v >= 1 && v <= 99;
               })
               .map(([k, v]) => [k, v as number])
           )
@@ -931,6 +931,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       ...(typeof v2.autoTuneEnabled === "boolean" ? { autoTuneEnabled: v2.autoTuneEnabled } : {}),
       ...(typeof v2.autoTuneDays === "number" && v2.autoTuneDays >= 1 && v2.autoTuneDays <= 90 ? { autoTuneDays: v2.autoTuneDays } : {}),
       ...(typeof v2.autoTuneThreshold === "number" && v2.autoTuneThreshold >= 50 && v2.autoTuneThreshold <= 100 ? { autoTuneThreshold: v2.autoTuneThreshold } : {}),
+      ...(typeof v2.autoTuneIntervalHours === "number" && [1,2,4,6,12].includes(v2.autoTuneIntervalHours) ? { autoTuneIntervalHours: v2.autoTuneIntervalHours } : {}),
     };
   }
   if (typeof maxConsecutiveLosses === "number" && maxConsecutiveLosses >= 0 && maxConsecutiveLosses <= 10) {

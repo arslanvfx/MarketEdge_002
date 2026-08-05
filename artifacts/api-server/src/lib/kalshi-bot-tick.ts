@@ -1481,14 +1481,15 @@ async function _runBotTick(
   // reduced-bet hour can never produce a larger bet than the cap, regardless
   // of which other sizing path matched.  Intentionally does not check
   // betScheduleApplied so the cap cannot be bypassed by a schedule bracket.
-  if (S.quietHoursV2ReducedBet != null && S.quietHoursV2ReducedBet > 0) {
-    const reducedCap = S.quietHoursV2ReducedBet;
-    if (targetBetSize > reducedCap) {
+  if (S.quietHoursV2ReducedBet != null && S.quietHoursV2ReducedBet >= 1) {
+    const reducedPct = S.quietHoursV2ReducedBet; // 1–99 — percentage to reduce bet by
+    const reducedSize = +(targetBetSize * (1 - reducedPct / 100)).toFixed(2);
+    if (reducedSize < targetBetSize) {
       logger.info(
-        { sym, reducedCap: +reducedCap.toFixed(2), prev: +targetBetSize.toFixed(2) },
-        "[kalshi-bot] quiet-hours-v2 reduced bet cap applied",
+        { sym, reducedPct, prev: +targetBetSize.toFixed(2), next: reducedSize },
+        "[kalshi-bot] quiet-hours-v2 reduced bet % applied",
       );
-      targetBetSize = reducedCap;
+      targetBetSize = reducedSize;
     }
   }
   // ─────────────────────────────────────────────────────────────────────────

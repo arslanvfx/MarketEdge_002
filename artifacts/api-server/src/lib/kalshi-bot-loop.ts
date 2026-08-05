@@ -1016,7 +1016,7 @@ export async function runBotLoopTick(): Promise<void> {
       const reducedBetDow = qhv2.reducedByDow?.[String(nowUTCDow)]?.[String(nowUTCHour)];
       const reducedBetFlat = qhv2.reducedBetUtcHours[String(nowUTCHour)];
       const reducedBet = reducedBetDow != null ? reducedBetDow : reducedBetFlat;
-      S.quietHoursV2ReducedBet = (reducedBet != null && reducedBet > 0) ? reducedBet : null;
+      S.quietHoursV2ReducedBet = (reducedBet != null && reducedBet >= 1 && reducedBet <= 99) ? reducedBet : null;
     } else {
       S.quietHoursV2ReducedBet = null;
     }
