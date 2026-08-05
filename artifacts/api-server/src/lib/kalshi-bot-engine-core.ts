@@ -968,6 +968,10 @@ export interface QuietHoursV2 {
   enabled: boolean;
   silencedUtcHours: number[];                   // UTC hours 0–23 to fully block
   reducedBetUtcHours: Record<string, number>;   // UTC hour string (e.g. "13") → bet amount cap ($)
+  // ── Auto-tune ──
+  autoTuneEnabled?: boolean;    // automatically silence/unsilence hours based on live win-rate data
+  autoTuneDays?: number;        // days of live-bet history to analyse (default 14)
+  autoTuneThreshold?: number;   // silence when win rate < this %; unsilence when ≥ this % (default 84.5)
 }
 
 export interface BotConfig {

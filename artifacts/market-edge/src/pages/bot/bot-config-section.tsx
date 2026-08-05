@@ -2060,6 +2060,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <QuietHoursGrid
                     value={merged.quietHoursV2 ?? { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} }}
                     onChange={(v: QuietHoursV2) => setConfigDraft(d => ({ ...d, quietHoursV2: v }))}
+                    autoTuneLastRunAt={status?.autoTuneQHLastRunAt}
+                    autoTuneLastChanges={status?.autoTuneQHLastChanges}
                   />
                 </div>
 

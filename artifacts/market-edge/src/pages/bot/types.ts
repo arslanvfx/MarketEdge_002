@@ -6,6 +6,9 @@ export interface QuietHoursV2 {
   enabled: boolean;
   silencedUtcHours: number[];
   reducedBetUtcHours: Record<string, number>;
+  autoTuneEnabled?: boolean;
+  autoTuneDays?: number;
+  autoTuneThreshold?: number;
 }
 
 export interface QuietHoursHourStat {
@@ -216,6 +219,8 @@ export interface BotStatus {
   consecutiveLosses: number;
   isInQuietHours: boolean;
   quietHoursV2State?: { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number };
+  autoTuneQHLastRunAt?: string | null;
+  autoTuneQHLastChanges?: { silenced: number[]; unsilenced: number[] } | null;
   dbDegraded?: boolean;
   dbDegradedSince?: string | null;
   isProductionEnv?: boolean;

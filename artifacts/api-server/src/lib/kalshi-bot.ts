@@ -21,7 +21,7 @@ import {
 } from "./kalshi-bot-state";
 import {
   _persistModeToConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
-  loadCoinStreakStateFromDB, loadPaperBalanceFromDB,
+  loadCoinStreakStateFromDB, loadPaperBalanceFromDB, runQuietHoursAutoTune,
 } from "./kalshi-bot-db";
 
 // ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ export {
   loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB,
   loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, clearBetHistoryOld,
-  updateBotConfig,
+  updateBotConfig, runQuietHoursAutoTune,
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
 export { runBotTickForCoin } from "./kalshi-bot-tick";
@@ -157,6 +157,8 @@ export function getBotState(): BotStateSnapshot {
       }
       return { mode: "active" as const, utcHour };
     })(),
+    autoTuneQHLastRunAt: S.autoTuneQHLastRunAt,
+    autoTuneQHLastChanges: S.autoTuneQHLastChanges,
     dbDegraded: S.dbDegradedSince !== null,
     dbDegradedSince: S.dbDegradedSince?.toISOString() ?? null,
     isProductionEnv: process.env.NODE_ENV === "production",

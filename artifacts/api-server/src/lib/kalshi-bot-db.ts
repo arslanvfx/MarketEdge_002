@@ -877,6 +877,75 @@ export async function getTimingAccuracy(symbol: string, minutesElapsed: number):
 const tickInFlight = new Set<string>();
 
 // Update bot config and persist to DB. Exported here to avoid circular deps.
+// ---------------------------------------------------------------------------
+// Quiet-hours auto-tune
+// ---------------------------------------------------------------------------
+
+/**
+ * Analyses live-bet win rates by UTC hour for the last N days, then
+ * automatically silences hours below the threshold and unsilences hours that
+ * have recovered above it.
+ *
+ * Rules:
+ *  - Silence  : win rate < threshold AND ≥ MIN_BETS data points
+ *  - Unsilence : win rate ≥ threshold AND ≥ MIN_BETS data points (and currently silenced)
+ *  - Skip      : fewer than MIN_BETS bets — not enough data to act either way
+ *
+ * Threshold default 84.5 % (user rule: "84.5 is okay, 84 is not").
+ */
+const QH_MIN_BETS = 5;
+
+export async function runQuietHoursAutoTune(): Promise<void> {
+  const qhv2 = S.config.quietHoursV2;
+  if (!qhv2?.enabled || !qhv2.autoTuneEnabled) return;
+
+  const days      = Math.min(90, Math.max(1, qhv2.autoTuneDays      ?? 14));
+  const threshold =                            qhv2.autoTuneThreshold ?? 84.5;
+
+  // ── query ──────────────────────────────────────────────────────────────
+  const result = await db.execute(sql`
+    SELECT
+      EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS utc_hour,
+      COUNT(*)                                                AS total_bets,
+      COUNT(CASE WHEN outcome = 'win' THEN 1 END)             AS wins
+    FROM kalshi_bot_bets
+    WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
+      AND mode       = 'live'
+      AND outcome IN ('win', 'loss')
+      AND archived_at IS NULL
+    GROUP BY utc_hour
+  `);
+
+  // ── per-hour win rates ─────────────────────────────────────────────────
+  interface HourStat { hour: number; winRate: number | null; bets: number }
+  const stats: HourStat[] = Array.from({ length: 24 }, (_, h) => {
+    const row = result.rows.find((r: Record<string, unknown>) => Number(r.utc_hour) === h);
+    if (!row) return { hour: h, winRate: null, bets: 0 };
+    const bets = Number(row.total_bets);
+    const wins = Number(row.wins);
+    return { hour: h, winRate: bets > 0 ? (wins / bets) * 100 : null, bets };
+  });
+
+  const currentSilenced = new Set(qhv2.silencedUtcHours);
+
+  const toSilence   = stats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate  < threshold && !currentSilenced.has(s.hour)).map(s => s.hour);
+  const toUnsilence = stats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate >= threshold &&  currentSilenced.has(s.hour)).map(s => s.hour);
+
+  S.autoTuneQHLastRunAt = new Date().toISOString();
+  S.autoTuneQHLastChanges = { silenced: toSilence, unsilenced: toUnsilence };
+
+  if (toSilence.length === 0 && toUnsilence.length === 0) {
+    logger.info({ threshold, days }, "[qh-autotune] no changes needed");
+    return;
+  }
+
+  const unsilenceSet = new Set(toUnsilence);
+  const newSilenced  = [...currentSilenced, ...toSilence].filter(h => !unsilenceSet.has(h));
+
+  await updateBotConfig({ quietHoursV2: { ...qhv2, silencedUtcHours: newSilenced } });
+  logger.info({ toSilence, toUnsilence, total: newSilenced.length, threshold, days }, "[qh-autotune] applied");
+}
+
 export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean }> {
   const modeSpecific: Partial<BotConfig> = {};
   if ("decisionMode" in partial && partial.decisionMode) {

@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker, fetchCryptoPredictions } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
+import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
 import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -607,6 +607,24 @@ app.listen(port, (err) => {
         runAutoTune();
         setInterval(runAutoTune, 15 * 60_000);
       }, msToNext15MinBoundary());
+
+      // Quiet-hours auto-tune: runs immediately at startup (if enabled), then
+      // every hour aligned to UTC hour boundaries.  Silences hours below the
+      // configured threshold and unsilences hours that have recovered above it.
+      const runQHAutoTune = () =>
+        runQuietHoursAutoTune().catch(err =>
+          logger.warn({ err }, "[qh-autotune] scheduled run failed (non-fatal)"),
+        );
+      runQHAutoTune(); // immediate run — no-op if autoTuneEnabled is false
+      const msToNextUtcHour = (): number => {
+        const now = Date.now();
+        const nextHour = Math.ceil((now + 1) / (60 * 60_000)) * (60 * 60_000);
+        return Math.max(5_000, nextHour - now);
+      };
+      setTimeout(() => {
+        runQHAutoTune();
+        setInterval(runQHAutoTune, 60 * 60_000);
+      }, msToNextUtcHour());
 
       // Bring up the stock trading vertical independently — a failure here must
       // never take down the crypto tracker or Kalshi bot above.

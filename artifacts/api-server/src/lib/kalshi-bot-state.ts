@@ -68,6 +68,8 @@ export interface BotStateSnapshot {
   consecutiveLosses: number;
   isInQuietHours: boolean;
   quietHoursV2State: { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number };
+  autoTuneQHLastRunAt: string | null;
+  autoTuneQHLastChanges: { silenced: number[]; unsilenced: number[] } | null;
   dbDegraded: boolean;
   dbDegradedSince: string | null;
   isProductionEnv: boolean;
@@ -176,6 +178,8 @@ export const S = {
   // "reduced bet" mode.  Cleared at the start of every loop tick outside
   // a reduced-bet hour.  The tick reads this to cap targetBetSize.
   quietHoursV2ReducedBet: null as number | null,
+  autoTuneQHLastRunAt: null as string | null,
+  autoTuneQHLastChanges: null as { silenced: number[]; unsilenced: number[] } | null,
 };
 
 // ---------------------------------------------------------------------------

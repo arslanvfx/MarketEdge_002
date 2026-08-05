@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useAuth } from "@clerk/react";
-import { BarChart2, VolumeX, TrendingDown, Zap } from "lucide-react";
-import type { QuietHoursV2, QuietHoursAnalysis } from "./types";
+import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw } from "lucide-react";
+import type { QuietHoursV2, QuietHoursAnalysis, BotStatus } from "./types";
 import { utcToEst, ET_LABEL, API_BASE } from "./utils";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,11 +158,22 @@ function HourCell({
   );
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function formatAgo(isoStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+  if (diff < 60)  return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ago`;
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface QuietHoursGridProps {
   value: QuietHoursV2;
   onChange: (v: QuietHoursV2) => void;
+  autoTuneLastRunAt?: string | null;
+  autoTuneLastChanges?: { silenced: number[]; unsilenced: number[] } | null;
 }
 
 // Row labels for the 3-row layout (8 cols × 3 rows)
@@ -172,7 +183,7 @@ const ROW_LABELS = [
   { range: "4 PM – 11 PM", sublabel: "UTC 16–23" },
 ];
 
-export function QuietHoursGrid({ value, onChange }: QuietHoursGridProps) {
+export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges }: QuietHoursGridProps) {
   const { getToken } = useAuth();
   const [analysis, setAnalysis] = useState<QuietHoursAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
@@ -322,6 +333,74 @@ export function QuietHoursGrid({ value, onChange }: QuietHoursGridProps) {
             </div>
           </div>
         ))}
+      </div>
+
+      {/* ── Auto-tune ── */}
+      <div className="flex flex-col gap-2 pt-3 border-t border-border/50">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          {/* Toggle */}
+          <label className="flex items-center gap-2 cursor-pointer">
+            <div
+              className={`w-8 h-4 rounded-full relative transition-colors ${value.autoTuneEnabled ? "bg-cyan-500" : "bg-muted"}`}
+              onClick={() => onChange({ ...value, autoTuneEnabled: !value.autoTuneEnabled })}
+            >
+              <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${value.autoTuneEnabled ? "translate-x-4" : "translate-x-0.5"}`} />
+            </div>
+            <span className="text-xs font-medium text-foreground/80 flex items-center gap-1.5">
+              <RefreshCw className="w-3 h-3 text-cyan-400" />
+              Auto-tune hourly
+            </span>
+          </label>
+
+          {value.autoTuneEnabled && (
+            <>
+              {/* Days */}
+              <label className="flex items-center gap-1.5">
+                <span className="text-[11px] text-muted-foreground">History</span>
+                <select
+                  className="bg-background border border-border rounded-md px-2 py-0.5 text-[11px] text-foreground"
+                  value={value.autoTuneDays ?? 14}
+                  onChange={e => onChange({ ...value, autoTuneDays: parseInt(e.target.value, 10) })}
+                >
+                  {[7, 14, 30, 60, 90].map(d => <option key={d} value={d}>{d}d</option>)}
+                </select>
+              </label>
+
+              {/* Threshold */}
+              <label className="flex items-center gap-1.5">
+                <span className="text-[11px] text-muted-foreground">Silence below</span>
+                <select
+                  className="bg-background border border-border rounded-md px-2 py-0.5 text-[11px] text-foreground"
+                  value={value.autoTuneThreshold ?? 84.5}
+                  onChange={e => onChange({ ...value, autoTuneThreshold: parseFloat(e.target.value) })}
+                >
+                  {[80, 82.5, 84.5, 85, 87.5, 90].map(t => (
+                    <option key={t} value={t}>{t}% win rate</option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+
+          {/* Last-run status */}
+          {autoTuneLastRunAt && (
+            <span className="text-[11px] text-muted-foreground/60 ml-auto flex items-center gap-1.5">
+              Last run {formatAgo(autoTuneLastRunAt)}
+              {autoTuneLastChanges && (autoTuneLastChanges.silenced.length > 0 || autoTuneLastChanges.unsilenced.length > 0) ? (
+                <span className="text-amber-400">
+                  · silenced {autoTuneLastChanges.silenced.length}, unsilenced {autoTuneLastChanges.unsilenced.length}
+                </span>
+              ) : (
+                <span className="text-emerald-400/70">· no changes</span>
+              )}
+            </span>
+          )}
+        </div>
+        {value.autoTuneEnabled && (
+          <p className="text-[10px] text-muted-foreground/50 leading-snug">
+            Runs every hour. Silences hours with &lt;{value.autoTuneThreshold ?? 84.5}% win rate (≥5 bets) and unsilences hours that recover above it.
+          </p>
+        )}
       </div>
 
       {/* ── Analyze + Apply controls ── */}
