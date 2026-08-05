@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useAuth } from "@clerk/react";
 import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar, X } from "lucide-react";
 import type { QuietHoursV2, QuietHoursAnalysis, QuietHoursHourStat } from "./types";
@@ -249,6 +249,11 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   const [selectedDow, setSelectedDow] = useState<number>(() => new Date().getUTCDay());
 
   const currentUtcHour = new Date().getUTCHours();
+
+  // Auto-fetch analysis on mount and whenever the selected day changes.
+  // This means win-rate data is always visible without needing a manual click.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchAnalysis(selectedDow); }, [selectedDow]);
 
   // ── Fetch analysis for a specific day ──────────────────────────────────────
   async function fetchAnalysis(forDow: number = selectedDow) {
