@@ -740,7 +740,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
-    quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown };
+    quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: boolean; autoTuneDays?: number; autoTuneThreshold?: number };
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
     enableDirectionCap?: boolean;
@@ -876,7 +876,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.quietHoursEnd = quietHoursEnd;
   }
   if (quietHoursV2 !== undefined && typeof quietHoursV2 === "object" && quietHoursV2 !== null) {
-    const v2 = quietHoursV2 as { enabled?: unknown; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown };
+    const v2 = quietHoursV2 as { enabled?: unknown; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: unknown; autoTuneDays?: unknown; autoTuneThreshold?: unknown };
 
     // Helper: parse a Record<string, number[]> where keys are dow strings "0"–"6"
     function parseSilencedByDow(raw: unknown): Record<string, number[]> | undefined {
@@ -928,6 +928,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
         : {},
       ...(parseSilencedByDow(v2.silencedByDow) != null ? { silencedByDow: parseSilencedByDow(v2.silencedByDow) } : {}),
       ...(parseReducedByDow(v2.reducedByDow) != null ? { reducedByDow: parseReducedByDow(v2.reducedByDow) } : {}),
+      ...(typeof v2.autoTuneEnabled === "boolean" ? { autoTuneEnabled: v2.autoTuneEnabled } : {}),
+      ...(typeof v2.autoTuneDays === "number" && v2.autoTuneDays >= 1 && v2.autoTuneDays <= 90 ? { autoTuneDays: v2.autoTuneDays } : {}),
+      ...(typeof v2.autoTuneThreshold === "number" && v2.autoTuneThreshold >= 50 && v2.autoTuneThreshold <= 100 ? { autoTuneThreshold: v2.autoTuneThreshold } : {}),
     };
   }
   if (typeof maxConsecutiveLosses === "number" && maxConsecutiveLosses >= 0 && maxConsecutiveLosses <= 10) {
