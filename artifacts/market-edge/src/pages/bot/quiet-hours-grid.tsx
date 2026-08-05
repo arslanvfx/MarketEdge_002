@@ -280,11 +280,11 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   }
 
   // ── Suggested hours: computed client-side from whatever is visible ─────────
-  // This guarantees the suggestion always matches what's shown on screen.
-  // Requires ≥5 bets for an hour to be suggested as a silence candidate.
+  // Manual apply (user is reviewing data) — silences any red hour with ≥1 bet.
+  // Auto-tune (unattended) uses a stricter ≥5 bet guard server-side.
   function computeSuggestedHours(stats: QuietHoursHourStat[]): number[] {
     return stats
-      .filter(s => s.winRatePct !== null && s.winRatePct < targetWinRate && s.totalBets >= 5)
+      .filter(s => s.winRatePct !== null && s.winRatePct < targetWinRate && s.totalBets >= 1)
       .map(s => s.utcHour);
   }
 
