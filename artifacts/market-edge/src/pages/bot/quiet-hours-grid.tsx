@@ -92,7 +92,9 @@ function HourCell({
   const [pctInput, setPctInput] = useState("");
 
   const estHour = utcToEst(utcHour);
-  const estLabel = `${String(estHour).padStart(2, "0")}:00`;
+  const h12 = estHour % 12 || 12;
+  const ampm = estHour < 12 ? "AM" : "PM";
+  const estLabel = `${h12}${ampm}`;
   const tier = winRateTier(winRatePct, totalBets);
 
   const tierStyles: Record<string, string> = {
@@ -172,6 +174,7 @@ function HourCell({
                 {PRESETS.map(p => (
                   <button
                     key={p}
+                    onMouseDown={e => e.preventDefault()} // keep input focused so onBlur doesn't fire first
                     onClick={() => { onSetReducedPct(utcHour, p); setEditingPct(false); }}
                     className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 leading-none hover:bg-amber-500/35 transition-colors"
                   >

@@ -615,8 +615,9 @@ app.listen(port, (err) => {
         runQuietHoursAutoTune().catch(err =>
           logger.warn({ err }, "[qh-autotune] scheduled run failed (non-fatal)"),
         );
-      runQHAutoTune(); // immediate run — no-op if autoTuneEnabled is false or interval not elapsed
       // Poll every 30 min; runQuietHoursAutoTune() guards internally with lastRunAt + interval.
+      // No immediate startup run — firing on restart would overwrite manual config changes made
+      // right before a restart and confuse operators who just applied per-day adjustments.
       setInterval(runQHAutoTune, 30 * 60_000);
 
       // Bring up the stock trading vertical independently — a failure here must
