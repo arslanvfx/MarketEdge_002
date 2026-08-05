@@ -911,48 +911,77 @@ export async function runQuietHoursAutoTune(): Promise<void> {
   const days      = Math.min(90, Math.max(1, qhv2.autoTuneDays      ?? 14));
   const threshold =                            qhv2.autoTuneThreshold ?? 84.5;
 
-  // ── query ──────────────────────────────────────────────────────────────
+  // ── single query: DOW × hour, paper + live bets both included ──────────
   const result = await db.execute(sql`
     SELECT
+      EXTRACT(DOW  FROM created_at AT TIME ZONE 'UTC')::int AS utc_dow,
       EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS utc_hour,
-      COUNT(*)                                                AS total_bets,
-      COUNT(CASE WHEN outcome = 'win' THEN 1 END)             AS wins
+      COUNT(*)                                               AS total_bets,
+      COUNT(CASE WHEN outcome = 'win' THEN 1 END)            AS wins
     FROM kalshi_bot_bets
     WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
-      AND mode       = 'live'
       AND outcome IN ('win', 'loss')
       AND archived_at IS NULL
-    GROUP BY utc_hour
+    GROUP BY utc_dow, utc_hour
   `);
 
-  // ── per-hour win rates ─────────────────────────────────────────────────
-  interface HourStat { hour: number; winRate: number | null; bets: number }
-  const stats: HourStat[] = Array.from({ length: 24 }, (_, h) => {
-    const row = result.rows.find((r: Record<string, unknown>) => Number(r.utc_hour) === h);
-    if (!row) return { hour: h, winRate: null, bets: 0 };
-    const bets = Number(row.total_bets);
-    const wins = Number(row.wins);
-    return { hour: h, winRate: bets > 0 ? (wins / bets) * 100 : null, bets };
+  interface HourStat { dow: number; hour: number; winRate: number | null; bets: number }
+  const stats: HourStat[] = result.rows.map((r: Record<string, unknown>) => {
+    const bets = Number(r.total_bets);
+    const wins = Number(r.wins);
+    return { dow: Number(r.utc_dow), hour: Number(r.utc_hour), bets, winRate: bets > 0 ? (wins / bets) * 100 : null };
   });
 
-  const currentSilenced = new Set(qhv2.silencedUtcHours);
+  // ── process each day of week independently ─────────────────────────────
+  const newSilencedByDow: Record<string, number[]> = { ...(qhv2.silencedByDow ?? {}) };
+  let totalSilenced   = 0;
+  let totalUnsilenced = 0;
 
-  const toSilence   = stats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate  < threshold && !currentSilenced.has(s.hour)).map(s => s.hour);
-  const toUnsilence = stats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate >= threshold &&  currentSilenced.has(s.hour)).map(s => s.hour);
+  for (let dow = 0; dow <= 6; dow++) {
+    const dowStats = stats.filter(s => s.dow === dow);
+    // Only configure a day when it has ≥1 hour with enough data
+    if (!dowStats.some(s => s.bets >= QH_MIN_BETS)) continue;
+
+    const currentSilenced = new Set<number>(newSilencedByDow[String(dow)] ?? []);
+    const toSilence   = dowStats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate  < threshold && !currentSilenced.has(s.hour)).map(s => s.hour);
+    const toUnsilence = dowStats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate >= threshold &&  currentSilenced.has(s.hour)).map(s => s.hour);
+
+    if (toSilence.length > 0 || toUnsilence.length > 0) {
+      const unsilenceSet = new Set(toUnsilence);
+      newSilencedByDow[String(dow)] = [...currentSilenced, ...toSilence].filter(h => !unsilenceSet.has(h));
+      totalSilenced   += toSilence.length;
+      totalUnsilenced += toUnsilence.length;
+    }
+  }
+
+  // Sync flat silencedUtcHours = intersection of every configured day
+  // (hours that are universally bad serve as the flat fallback for un-configured days)
+  const configuredDows = Object.keys(newSilencedByDow);
+  const newFlatSilenced = configuredDows.length > 0
+    ? Array.from({ length: 24 }, (_, h) => h).filter(h =>
+        configuredDows.every(d => (newSilencedByDow[d] ?? []).includes(h))
+      )
+    : qhv2.silencedUtcHours;
 
   S.autoTuneQHLastRunAt = new Date().toISOString();
-  S.autoTuneQHLastChanges = { silenced: toSilence, unsilenced: toUnsilence };
+  // arrays hold dummy values — UI only inspects .length for display counts
+  S.autoTuneQHLastChanges = {
+    silenced:   new Array(totalSilenced).fill(0),
+    unsilenced: new Array(totalUnsilenced).fill(0),
+  };
 
-  if (toSilence.length === 0 && toUnsilence.length === 0) {
-    logger.info({ threshold, days }, "[qh-autotune] no changes needed");
+  if (totalSilenced === 0 && totalUnsilenced === 0) {
+    logger.info({ threshold, days }, "[qh-autotune] no per-day changes needed");
     return;
   }
 
-  const unsilenceSet = new Set(toUnsilence);
-  const newSilenced  = [...currentSilenced, ...toSilence].filter(h => !unsilenceSet.has(h));
-
-  await updateBotConfig({ quietHoursV2: { ...qhv2, silencedUtcHours: newSilenced } });
-  logger.info({ toSilence, toUnsilence, total: newSilenced.length, threshold, days }, "[qh-autotune] applied");
+  await updateBotConfig({
+    quietHoursV2: { ...qhv2, silencedByDow: newSilencedByDow, silencedUtcHours: newFlatSilenced },
+  });
+  logger.info(
+    { totalSilenced, totalUnsilenced, configuredDays: configuredDows.length, threshold, days },
+    "[qh-autotune] per-day applied",
+  );
 }
 
 export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ config: BotConfig; persisted: boolean }> {

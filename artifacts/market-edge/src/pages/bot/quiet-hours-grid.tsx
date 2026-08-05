@@ -272,14 +272,23 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
     return analysis.hourStats;
   }
 
-  // Apply suggested hours to the correct config layer
+  // Apply suggested hours to the correct config layer.
+  // All tab: applies to every day of the week simultaneously (and flat as fallback).
+  // Day tab: applies only to that day's silencedByDow entry.
   function applySuggested() {
     if (!analysis) return;
+    const hours = analysis.suggestedSilencedHours;
     if (selectedDow == null) {
-      onChange({ ...value, silencedUtcHours: analysis.suggestedSilencedHours });
+      const allDays: Record<string, number[]> = {};
+      for (let d = 0; d <= 6; d++) allDays[String(d)] = [...hours];
+      onChange({
+        ...value,
+        silencedUtcHours: hours,                                        // flat fallback = same
+        silencedByDow: { ...(value.silencedByDow ?? {}), ...allDays },  // every day
+      });
     } else {
       const dowStr = String(selectedDow);
-      const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: analysis.suggestedSilencedHours };
+      const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: hours };
       onChange({ ...value, silencedByDow: newSilencedByDow });
     }
   }
@@ -571,7 +580,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         </div>
         {value.autoTuneEnabled && (
           <p className="text-[10px] text-muted-foreground/50 leading-snug">
-            Runs every {value.autoTuneIntervalHours ?? 2}h. Silences hours with &lt;{value.autoTuneThreshold ?? 84.5}% win rate (≥5 bets) and unsilences hours that recover above it.
+            Runs every {value.autoTuneIntervalHours ?? 2}h. Analyzes each day of the week separately using paper + live bets. Silences hours with &lt;{value.autoTuneThreshold ?? 84.5}% win rate (≥5 bets) and unsilences hours that recover above it. Monday rules apply only on Mondays, etc.
           </p>
         )}
       </div>
@@ -617,7 +626,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
           >
             <Zap className="w-3.5 h-3.5" />
             Apply suggested ({analysis.suggestedSilencedHours.length} hour{analysis.suggestedSilencedHours.length !== 1 ? "s" : ""})
-            {selectedDow != null && <span className="ml-1 opacity-70">{DOW_NAMES[selectedDow]} only</span>}
+            <span className="ml-1 opacity-70">{selectedDow != null ? `${DOW_NAMES[selectedDow]} only` : "all 7 days"}</span>
           </button>
         )}
 

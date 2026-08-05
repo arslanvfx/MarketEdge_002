@@ -979,12 +979,16 @@ export async function runBotLoopTick(): Promise<void> {
       const nowUTCHour = nowDate.getUTCHours();
       const nowUTCDow = nowDate.getUTCDay(); // 0=Sun … 6=Sat (matches JS getUTCDay)
 
-      // Check flat (all-day) silence list first, then per-dow override for this day
-      const silencedFlat = qhv2.silencedUtcHours.includes(nowUTCHour);
-      const silencedForDow = (qhv2.silencedByDow?.[String(nowUTCDow)] ?? []).includes(nowUTCHour);
+      // Per-day-first: if today's DOW has its own rule set, use it exclusively.
+      // Only fall back to flat all-days list for days that have never been configured.
+      const todayDowStr = String(nowUTCDow);
+      const hasDowSilenceRules = qhv2.silencedByDow != null && todayDowStr in (qhv2.silencedByDow as Record<string, unknown>);
+      const isSilenced = hasDowSilenceRules
+        ? (qhv2.silencedByDow![todayDowStr] ?? []).includes(nowUTCHour)
+        : qhv2.silencedUtcHours.includes(nowUTCHour);
+      const silenceSource = hasDowSilenceRules ? `dow-${nowUTCDow}` : "flat-fallback";
 
-      if (silencedFlat || silencedForDow) {
-        const silenceSource = silencedForDow ? `dow-${nowUTCDow}` : "flat";
+      if (isSilenced) {
         logger.debug(
           { utcHour: nowUTCHour, utcDow: nowUTCDow, silenceSource },
           "[kalshi-bot] quiet-hours-v2: silenced — skipping new entry",
@@ -1011,11 +1015,11 @@ export async function runBotLoopTick(): Promise<void> {
         S.quietHoursV2ReducedBet = null;
         return;
       }
-      // Reduced-bet hour: per-dow override takes precedence over flat config.
-      // Tick proceeds normally, but bet size is capped downstream.
-      const reducedBetDow = qhv2.reducedByDow?.[String(nowUTCDow)]?.[String(nowUTCHour)];
-      const reducedBetFlat = qhv2.reducedBetUtcHours[String(nowUTCHour)];
-      const reducedBet = reducedBetDow != null ? reducedBetDow : reducedBetFlat;
+      // Reduced-bet hour: same per-day-first logic.
+      const hasDowReducedRules = qhv2.reducedByDow != null && todayDowStr in (qhv2.reducedByDow as Record<string, unknown>);
+      const reducedBet = hasDowReducedRules
+        ? (qhv2.reducedByDow![todayDowStr]?.[String(nowUTCHour)] ?? null)
+        : (qhv2.reducedBetUtcHours[String(nowUTCHour)] ?? null);
       S.quietHoursV2ReducedBet = (reducedBet != null && reducedBet >= 1 && reducedBet <= 99) ? reducedBet : null;
     } else {
       S.quietHoursV2ReducedBet = null;

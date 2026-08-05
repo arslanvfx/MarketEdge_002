@@ -1471,7 +1471,6 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
         ROUND(AVG(pnl::numeric), 4) AS avg_pnl
       FROM kalshi_bot_bets
       WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
-        AND mode = 'live'
         AND outcome IN ('win', 'loss')
         AND archived_at IS NULL
         ${dowFilter ? sql.raw(`AND ${dowFilter}`) : sql.raw("")}
@@ -1516,7 +1515,6 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
         ROUND(AVG(pnl::numeric), 4) AS avg_pnl
       FROM kalshi_bot_bets
       WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
-        AND mode = 'live'
         AND outcome IN ('win', 'loss')
         AND archived_at IS NULL
       GROUP BY utc_dow, utc_hour
