@@ -740,7 +740,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enabled?: boolean;
     quietHoursStart?: number;
     quietHoursEnd?: number;
-    quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown };
+    quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown };
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
     enableDirectionCap?: boolean;
@@ -876,7 +876,41 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.quietHoursEnd = quietHoursEnd;
   }
   if (quietHoursV2 !== undefined && typeof quietHoursV2 === "object" && quietHoursV2 !== null) {
-    const v2 = quietHoursV2 as { enabled?: unknown; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown };
+    const v2 = quietHoursV2 as { enabled?: unknown; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown };
+
+    // Helper: parse a Record<string, number[]> where keys are dow strings "0"–"6"
+    function parseSilencedByDow(raw: unknown): Record<string, number[]> | undefined {
+      if (typeof raw !== "object" || raw === null) return undefined;
+      const out: Record<string, number[]> = {};
+      for (const [k, val] of Object.entries(raw as Record<string, unknown>)) {
+        const dow = parseInt(k, 10);
+        if (isNaN(dow) || dow < 0 || dow > 6) continue;
+        if (!Array.isArray(val)) continue;
+        out[String(dow)] = (val as unknown[]).filter((h): h is number => typeof h === "number" && h >= 0 && h <= 23);
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    }
+
+    // Helper: parse a Record<string, Record<string, number>> where outer keys are dow strings "0"–"6"
+    function parseReducedByDow(raw: unknown): Record<string, Record<string, number>> | undefined {
+      if (typeof raw !== "object" || raw === null) return undefined;
+      const out: Record<string, Record<string, number>> = {};
+      for (const [k, val] of Object.entries(raw as Record<string, unknown>)) {
+        const dow = parseInt(k, 10);
+        if (isNaN(dow) || dow < 0 || dow > 6) continue;
+        if (typeof val !== "object" || val === null) continue;
+        const inner: Record<string, number> = {};
+        for (const [hk, hv] of Object.entries(val as Record<string, unknown>)) {
+          const h = parseInt(hk, 10);
+          if (isNaN(h) || h < 0 || h > 23) continue;
+          if (typeof hv !== "number" || hv <= 0) continue;
+          inner[String(h)] = hv;
+        }
+        if (Object.keys(inner).length > 0) out[String(dow)] = inner;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    }
+
     partial.quietHoursV2 = {
       enabled: typeof v2.enabled === "boolean" ? v2.enabled : false,
       silencedUtcHours: Array.isArray(v2.silencedUtcHours)
@@ -892,6 +926,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
               .map(([k, v]) => [k, v as number])
           )
         : {},
+      ...(parseSilencedByDow(v2.silencedByDow) != null ? { silencedByDow: parseSilencedByDow(v2.silencedByDow) } : {}),
+      ...(parseReducedByDow(v2.reducedByDow) != null ? { reducedByDow: parseReducedByDow(v2.reducedByDow) } : {}),
     };
   }
   if (typeof maxConsecutiveLosses === "number" && maxConsecutiveLosses >= 0 && maxConsecutiveLosses <= 10) {
@@ -1387,15 +1423,41 @@ router.get("/crypto/bot/backtest-modes", async (_req, res) => {
 });
 
 // GET /crypto/bot/conviction-threshold-analysis?mode=paper|live
-// GET /crypto/bot/quiet-hours-analysis?days=14&targetWinRate=85
-// Groups live bets from the last N days by UTC hour and returns win-rate,
-// P&L stats, and suggested hours to silence (below targetWinRate with ≥5 bets).
+// GET /crypto/bot/quiet-hours-analysis?days=14&targetWinRate=85&dow=all|weekday|weekend|0-6
+// Groups live bets from the last N days by UTC hour (optionally filtered by day-of-week)
+// and returns win-rate, P&L stats, and suggested hours to silence.
+// ?dow param:
+//   omitted | "all"     → aggregate across all days (existing behaviour, ≥5 bets)
+//   "weekday"           → aggregate Mon–Fri (dow 1–5)
+//   "weekend"           → aggregate Sat–Sun (dow 0,6)
+//   "0"–"6"             → specific JS-style day (0=Sun … 6=Sat), ≥3 bets guard
+// Response always includes hourStatsByDow (keyed "0"–"6") so the UI can
+// pre-populate every tab without a separate request per day.
 router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, parseInt(String(req.query.days ?? "14"), 10) || 14));
     const targetWinRate = Math.min(100, Math.max(0, parseFloat(String(req.query.targetWinRate ?? "85")) || 85));
+    const dowRaw = String(req.query.dow ?? "all").trim().toLowerCase();
 
-    const result = await db.execute(sql`
+    // Determine DOW filter clause and minimum bets threshold
+    // EXTRACT(DOW …) returns 0=Sun … 6=Sat (same as JS getUTCDay())
+    let dowFilter: string | null = null;  // raw SQL fragment; null = no filter
+    let minBetsForSuggest = 5;            // aggregate view uses 5; per-day uses 3
+
+    if (dowRaw === "weekday") {
+      dowFilter = "EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC') BETWEEN 1 AND 5";
+      minBetsForSuggest = 3;
+    } else if (dowRaw === "weekend") {
+      dowFilter = "EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC') IN (0, 6)";
+      minBetsForSuggest = 3;
+    } else if (/^[0-6]$/.test(dowRaw)) {
+      dowFilter = `EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC') = ${parseInt(dowRaw, 10)}`;
+      minBetsForSuggest = 3;
+    }
+    // else: "all" or anything unrecognised → no filter, keep minBets=5
+
+    // ── Primary query: aggregate for the requested DOW filter ────────────────
+    const primaryResult = await db.execute(sql`
       SELECT
         EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS utc_hour,
         COUNT(*) AS total_bets,
@@ -1408,32 +1470,62 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
         AND mode = 'live'
         AND outcome IN ('win', 'loss')
         AND archived_at IS NULL
+        ${dowFilter ? sql.raw(`AND ${dowFilter}`) : sql.raw("")}
       GROUP BY utc_hour
       ORDER BY utc_hour
     `);
 
-    const hourStats = Array.from({ length: 24 }, (_, h) => {
-      const row = result.rows.find((r: Record<string, unknown>) => Number(r.utc_hour) === h);
-      if (!row) return { utcHour: h, totalBets: 0, wins: 0, losses: 0, winRatePct: null as number | null, totalPnl: 0, avgPnl: 0 };
-      const wins = Number(row.wins);
-      const losses = Number(row.losses);
-      const total = wins + losses;
-      return {
-        utcHour: h,
-        totalBets: Number(row.total_bets),
-        wins,
-        losses,
-        winRatePct: total > 0 ? Math.round(wins / total * 1000) / 10 : null as number | null,
-        totalPnl: Number(row.total_pnl ?? 0),
-        avgPnl: Number(row.avg_pnl ?? 0),
-      };
-    });
+    function buildHourStats(rows: Record<string, unknown>[]) {
+      return Array.from({ length: 24 }, (_, h) => {
+        const row = rows.find((r) => Number(r.utc_hour) === h);
+        if (!row) return { utcHour: h, totalBets: 0, wins: 0, losses: 0, winRatePct: null as number | null, totalPnl: 0, avgPnl: 0 };
+        const wins = Number(row.wins);
+        const losses = Number(row.losses);
+        const total = wins + losses;
+        return {
+          utcHour: h,
+          totalBets: Number(row.total_bets),
+          wins,
+          losses,
+          winRatePct: total > 0 ? Math.round(wins / total * 1000) / 10 : null as number | null,
+          totalPnl: Number(row.total_pnl ?? 0),
+          avgPnl: Number(row.avg_pnl ?? 0),
+        };
+      });
+    }
+
+    const hourStats = buildHourStats(primaryResult.rows as Record<string, unknown>[]);
 
     const suggestedSilencedHours = hourStats
-      .filter(h => h.winRatePct !== null && h.winRatePct < targetWinRate && h.totalBets >= 5)
+      .filter(h => h.winRatePct !== null && h.winRatePct < targetWinRate && h.totalBets >= minBetsForSuggest)
       .map(h => h.utcHour);
 
-    res.json({ hourStats, suggestedSilencedHours, days, targetWinRate });
+    // ── Per-DOW breakdown (always computed, keyed "0"–"6") ───────────────────
+    const dowResult = await db.execute(sql`
+      SELECT
+        EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC')::int  AS utc_dow,
+        EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS utc_hour,
+        COUNT(*) AS total_bets,
+        COUNT(CASE WHEN outcome = 'win' THEN 1 END) AS wins,
+        COUNT(CASE WHEN outcome = 'loss' THEN 1 END) AS losses,
+        ROUND(SUM(pnl::numeric), 2) AS total_pnl,
+        ROUND(AVG(pnl::numeric), 4) AS avg_pnl
+      FROM kalshi_bot_bets
+      WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
+        AND mode = 'live'
+        AND outcome IN ('win', 'loss')
+        AND archived_at IS NULL
+      GROUP BY utc_dow, utc_hour
+      ORDER BY utc_dow, utc_hour
+    `);
+
+    const hourStatsByDow: Record<string, ReturnType<typeof buildHourStats>> = {};
+    for (let d = 0; d <= 6; d++) {
+      const dayRows = (dowResult.rows as Record<string, unknown>[]).filter(r => Number(r.utc_dow) === d);
+      hourStatsByDow[String(d)] = buildHourStats(dayRows);
+    }
+
+    res.json({ hourStats, suggestedSilencedHours, days, targetWinRate, dow: dowRaw, hourStatsByDow });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

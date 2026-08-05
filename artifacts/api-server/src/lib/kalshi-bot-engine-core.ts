@@ -966,12 +966,22 @@ export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "
  */
 export interface QuietHoursV2 {
   enabled: boolean;
-  silencedUtcHours: number[];                   // UTC hours 0–23 to fully block
-  reducedBetUtcHours: Record<string, number>;   // UTC hour string (e.g. "13") → bet amount cap ($)
+
+  reducedBetUtcHours: Record<string, number>;   // UTC hour string (e.g. "13") → bet amount cap ($) (all days)
   // ── Auto-tune ──
+  // Per-day-of-week overrides (JS getUTCDay(): "0"=Sun, "1"=Mon, …, "6"=Sat)
+
   autoTuneEnabled?: boolean;    // automatically silence/unsilence hours based on live win-rate data
+
   autoTuneDays?: number;        // days of live-bet history to analyse (default 14)
+
   autoTuneThreshold?: number;   // silence when win rate < this %; unsilence when ≥ this % (default 84.5)
+
+  silencedUtcHours: number[];                   // UTC hours 0–23 to fully block (all days)
+
+  silencedByDow?: Record<string, number[]>;              // dow → UTC hours to fully block on that day only
+
+  reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → bet cap on that day only
 }
 
 export interface BotConfig {
@@ -2317,4 +2327,3 @@ export function checkSignalDivergenceCutout(
     reason: `divergence-cutout: ${flippedCount}/${DIVERGENCE_MIN_SIGNALS_FLIPPED} signals flipped — not enough to exit`,
   };
 }
-

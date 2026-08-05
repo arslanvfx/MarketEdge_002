@@ -4,11 +4,21 @@ export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "
 
 export interface QuietHoursV2 {
   enabled: boolean;
-  silencedUtcHours: number[];
-  reducedBetUtcHours: Record<string, number>;
+
+  silencedUtcHours: number[];                    // UTC hours 0–23 silenced every day
+
   autoTuneEnabled?: boolean;
+
   autoTuneDays?: number;
+
   autoTuneThreshold?: number;
+
+  reducedBetUtcHours: Record<string, number>;    // UTC hour → bet cap ($), every day
+  // Per-day-of-week overrides (JS getUTCDay(): "0"=Sun, "1"=Mon, …, "6"=Sat)
+
+  silencedByDow?: Record<string, number[]>;               // dow → UTC hours silenced on that day only
+
+  reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → bet cap on that day only
 }
 
 export interface QuietHoursHourStat {
@@ -26,6 +36,8 @@ export interface QuietHoursAnalysis {
   suggestedSilencedHours: number[];
   days: number;
   targetWinRate: number;
+  dow?: string;                                           // "all" | "weekday" | "weekend" | "0"–"6"
+  hourStatsByDow?: Record<string, QuietHoursHourStat[]>; // keyed "0"–"6"
 }
 
 export interface BotConfig {
@@ -505,4 +517,3 @@ export interface CoinGuardState {
   coins: CoinGuardEntry[];
   maxDailyLossPerCoin: number;
 }
-

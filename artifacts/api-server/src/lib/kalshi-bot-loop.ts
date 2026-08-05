@@ -969,13 +969,24 @@ export async function runBotLoopTick(): Promise<void> {
   // V2 takes precedence over the legacy range above when enabled.
   // Silenced hours: full block (same exit path as legacy quiet hours).
   // Reduced-bet hours: continue to the tick but cap bet size via S.quietHoursV2ReducedBet.
+  // Per-day overrides (silencedByDow / reducedByDow) are checked AFTER the flat
+  // arrays and take precedence for their specific day.  Flat arrays remain as
+  // "every day" overrides so existing configs are 100% backward compatible.
   {
     const qhv2 = S.config.quietHoursV2;
     if (!S.config.freeRunMode && qhv2?.enabled) {
-      const nowUTCHour = new Date().getUTCHours();
-      if (qhv2.silencedUtcHours.includes(nowUTCHour)) {
+      const nowDate = new Date();
+      const nowUTCHour = nowDate.getUTCHours();
+      const nowUTCDow = nowDate.getUTCDay(); // 0=Sun … 6=Sat (matches JS getUTCDay)
+
+      // Check flat (all-day) silence list first, then per-dow override for this day
+      const silencedFlat = qhv2.silencedUtcHours.includes(nowUTCHour);
+      const silencedForDow = (qhv2.silencedByDow?.[String(nowUTCDow)] ?? []).includes(nowUTCHour);
+
+      if (silencedFlat || silencedForDow) {
+        const silenceSource = silencedForDow ? `dow-${nowUTCDow}` : "flat";
         logger.debug(
-          { utcHour: nowUTCHour },
+          { utcHour: nowUTCHour, utcDow: nowUTCDow, silenceSource },
           "[kalshi-bot] quiet-hours-v2: silenced — skipping new entry",
         );
         if (isCBNewWindow) {
@@ -988,7 +999,7 @@ export async function runBotLoopTick(): Promise<void> {
               action: "SKIP" as const,
               confidence: 0,
               score: 0,
-              reason: `quiet-hours-v2 silenced (${nowUTCHour} UTC)`,
+              reason: `quiet-hours-v2 silenced (${nowUTCHour} UTC, ${silenceSource})`,
               windowKey: qh2WindowKey,
               selected: false,
               betPlacedThisWindow: false,
@@ -1000,8 +1011,11 @@ export async function runBotLoopTick(): Promise<void> {
         S.quietHoursV2ReducedBet = null;
         return;
       }
-      // Reduced-bet hour: set the cap, tick proceeds normally
-      const reducedBet = qhv2.reducedBetUtcHours[String(nowUTCHour)];
+      // Reduced-bet hour: per-dow override takes precedence over flat config.
+      // Tick proceeds normally, but bet size is capped downstream.
+      const reducedBetDow = qhv2.reducedByDow?.[String(nowUTCDow)]?.[String(nowUTCHour)];
+      const reducedBetFlat = qhv2.reducedBetUtcHours[String(nowUTCHour)];
+      const reducedBet = reducedBetDow != null ? reducedBetDow : reducedBetFlat;
       S.quietHoursV2ReducedBet = (reducedBet != null && reducedBet > 0) ? reducedBet : null;
     } else {
       S.quietHoursV2ReducedBet = null;

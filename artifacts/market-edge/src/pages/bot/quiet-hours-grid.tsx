@@ -3,6 +3,8 @@ import { useAuth } from "@clerk/react";
 import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw } from "lucide-react";
 import type { QuietHoursV2, QuietHoursAnalysis, BotStatus } from "./types";
 import { utcToEst, ET_LABEL, API_BASE } from "./utils";
+import { BarChart2, VolumeX, TrendingDown, Zap, Calendar } from "lucide-react";
+import type { QuietHoursV2, QuietHoursAnalysis, QuietHoursHourStat } from "./types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -13,17 +15,31 @@ function winRateTier(wr: number | null, totalBets: number): "good" | "ok" | "bad
   return "bad";
 }
 
-function hourMode(h: number, v2: QuietHoursV2): "silenced" | "reduced" | "active" {
-  if (v2.silencedUtcHours.includes(h)) return "silenced";
-  if (v2.reducedBetUtcHours[String(h)] != null) return "reduced";
+/** Effective mode for a given hour, considering flat + per-dow overrides. */
+function hourMode(h: number, v2: QuietHoursV2, dow: number | null): "silenced" | "reduced" | "active" {
+  const dowStr = dow != null ? String(dow) : null;
+  const silencedFlat = v2.silencedUtcHours.includes(h);
+  const silencedDow  = dowStr != null && (v2.silencedByDow?.[dowStr] ?? []).includes(h);
+  if (silencedFlat || silencedDow) return "silenced";
+
+  const reducedFlat = v2.reducedBetUtcHours[String(h)];
+  const reducedDow  = dowStr != null ? v2.reducedByDow?.[dowStr]?.[String(h)] : undefined;
+  if (reducedFlat != null || reducedDow != null) return "reduced";
   return "active";
 }
 
-// ── Single hour cell ──────────────────────────────────────────────────────────
-
+/** Returns true when an hour has a per-dow specific override (so a badge should appear). */
+function hasDowOverride(h: number, v2: QuietHoursV2, dow: number | null): boolean {
+  if (dow == null) return false;
+  const dowStr = String(dow);
+  const silencedDow = (v2.silencedByDow?.[dowStr] ?? []).includes(h);
+  const reducedDow  = v2.reducedByDow?.[dowStr]?.[String(h)] != null;
+  return silencedDow || reducedDow;
+}
 interface HourCellProps {
   utcHour: number;
   mode: "silenced" | "reduced" | "active";
+  hasDowBadge: boolean;
   winRatePct: number | null;
   totalBets: number;
   totalPnl: number;
@@ -36,6 +52,7 @@ interface HourCellProps {
 function HourCell({
   utcHour,
   mode,
+  hasDowBadge,
   winRatePct,
   totalBets,
   totalPnl,
@@ -48,21 +65,18 @@ function HourCell({
   const estLabel = `${String(estHour).padStart(2, "0")}:00`;
   const tier = winRateTier(winRatePct, totalBets);
 
-  // Background + border by tier and mode
   const tierStyles: Record<string, string> = {
     good:  "bg-emerald-500/10 border-emerald-500/25",
     ok:    "bg-amber-500/10   border-amber-500/25",
     bad:   "bg-red-500/10     border-red-500/25",
     empty: "bg-muted/20       border-border/40",
   };
-
   const winRateColor: Record<string, string> = {
     good:  "text-emerald-300",
     ok:    "text-amber-300",
     bad:   "text-red-300",
     empty: "text-muted-foreground/40",
   };
-
   const dotColor: Record<string, string> = {
     good:  "bg-emerald-400",
     ok:    "bg-amber-400",
@@ -70,17 +84,9 @@ function HourCell({
     empty: "bg-muted-foreground/25",
   };
 
-  const silencedOverlay = mode === "silenced"
-    ? "opacity-40 grayscale-[60%]"
-    : "";
-
-  const currentRing = isCurrentHour
-    ? "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background"
-    : "";
-
-  const modeRing = mode === "reduced" && !isCurrentHour
-    ? "ring-1 ring-amber-400/50"
-    : "";
+  const silencedOverlay = mode === "silenced" ? "opacity-40 grayscale-[60%]" : "";
+  const currentRing = isCurrentHour ? "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background" : "";
+  const modeRing = mode === "reduced" && !isCurrentHour ? "ring-1 ring-amber-400/50" : "";
 
   return (
     <div
@@ -92,28 +98,27 @@ function HourCell({
       onClick={() => onCycleMode(utcHour)}
       title={`${estLabel} ${ET_LABEL} (UTC ${String(utcHour).padStart(2, "0")}:00)\nClick to cycle: Active → Silenced → Reduced${mode === "reduced" ? `\nReduced to: $${reducedBetAmount ?? "—"}` : ""}`}
     >
-      {/* Inner padding wrapper */}
-      <div className="flex flex-col gap-1 p-3">
+      {/* Per-dow calendar badge */}
+      {hasDowBadge && (
+        <div className="absolute top-1 right-1 z-10">
+          <Calendar className="w-2.5 h-2.5 text-sky-400/80" />
+        </div>
+      )}
 
+      <div className="flex flex-col gap-1 p-3">
         {/* Row 1: hour label + mode icon */}
         <div className="flex items-center justify-between gap-1">
           <span className="text-[11px] font-semibold text-foreground/80 leading-none tracking-wide">
             {estLabel}
           </span>
           <span className="flex items-center">
-            {mode === "silenced" && (
-              <VolumeX className="w-3 h-3 text-slate-400" />
-            )}
-            {mode === "reduced" && (
-              <TrendingDown className="w-3 h-3 text-amber-400" />
-            )}
-            {mode === "active" && (
-              <span className={`w-2 h-2 rounded-full ${dotColor[tier]}`} />
-            )}
+            {mode === "silenced" && <VolumeX className="w-3 h-3 text-slate-400" />}
+            {mode === "reduced" && <TrendingDown className="w-3 h-3 text-amber-400" />}
+            {mode === "active" && <span className={`w-2 h-2 rounded-full ${dotColor[tier]}`} />}
           </span>
         </div>
 
-        {/* Row 2: win rate — dominant */}
+        {/* Row 2: win rate */}
         <div className={`text-[18px] font-bold leading-tight ${winRateColor[tier]}`}>
           {totalBets === 0 ? (
             <span className="text-[13px] text-muted-foreground/30 font-normal">—</span>
@@ -127,9 +132,7 @@ function HourCell({
         {/* Row 3: bets + P&L */}
         {totalBets > 0 && (
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px] text-muted-foreground/60 leading-none">
-              {totalBets}b
-            </span>
+            <span className="text-[10px] text-muted-foreground/60 leading-none">{totalBets}b</span>
             <span className={`text-[10px] font-medium leading-none ${totalPnl >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
               {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(0)}
             </span>
@@ -176,7 +179,6 @@ interface QuietHoursGridProps {
   autoTuneLastChanges?: { silenced: number[]; unsilenced: number[] } | null;
 }
 
-// Row labels for the 3-row layout (8 cols × 3 rows)
 const ROW_LABELS = [
   { range: "12 AM – 7 AM", sublabel: "UTC 00–07" },
   { range: "8 AM – 3 PM",  sublabel: "UTC 08–15" },
@@ -190,16 +192,19 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   const [days, setDays] = useState(14);
   const [targetWinRate, setTargetWinRate] = useState(85);
   const [error, setError] = useState<string | null>(null);
+  // Selected DOW tab: null = "All", 0–6 = specific day (JS getUTCDay)
+  const [selectedDow, setSelectedDow] = useState<number | null>(null);
 
   const currentUtcHour = new Date().getUTCHours();
 
-  async function fetchAnalysis() {
+  async function fetchAnalysis(forDow: number | null = selectedDow) {
     setLoading(true);
     setError(null);
     try {
       const token = await getToken();
+      const dowParam = forDow != null ? `&dow=${forDow}` : "";
       const resp = await fetch(
-        `${API_BASE}/crypto/bot/quiet-hours-analysis?days=${days}&targetWinRate=${targetWinRate}`,
+        `${API_BASE}/crypto/bot/quiet-hours-analysis?days=${days}&targetWinRate=${targetWinRate}${dowParam}`,
         { headers: token ? { Authorization: `Bearer ${token}` } : {} },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -212,13 +217,32 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
     }
   }
 
-  function applySuggested() {
-    if (!analysis) return;
-    onChange({ ...value, silencedUtcHours: analysis.suggestedSilencedHours });
+  // Get the hour stats appropriate for the currently selected tab
+  function getActiveHourStats(): QuietHoursHourStat[] {
+    if (!analysis) return [];
+    if (selectedDow != null && analysis.hourStatsByDow?.[String(selectedDow)]) {
+      return analysis.hourStatsByDow[String(selectedDow)];
+    }
+    return analysis.hourStats;
   }
 
-  function cycleMode(h: number) {
-    const current = hourMode(h, value);
+  // Apply suggested hours to the correct config layer
+  function applySuggested() {
+    if (!analysis) return;
+    if (selectedDow == null) {
+      // All tab: update flat silencedUtcHours
+      onChange({ ...value, silencedUtcHours: analysis.suggestedSilencedHours });
+    } else {
+      // Per-day tab: update silencedByDow[dow]
+      const dowStr = String(selectedDow);
+      const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: analysis.suggestedSilencedHours };
+      onChange({ ...value, silencedByDow: newSilencedByDow });
+    }
+  }
+
+  // Cycle mode for "All" tab (flat arrays)
+  function cycleModeFlat(h: number) {
+    const current = hourMode(h, value, null);
     if (current === "active") {
       onChange({ ...value, silencedUtcHours: [...value.silencedUtcHours, h] });
     } else if (current === "silenced") {
@@ -230,26 +254,80 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
       });
     } else {
       const { [String(h)]: _, ...rest } = value.reducedBetUtcHours;
-      onChange({
-        ...value,
-        silencedUtcHours: value.silencedUtcHours.filter(x => x !== h),
-        reducedBetUtcHours: rest,
-      });
+      onChange({ ...value, silencedUtcHours: value.silencedUtcHours.filter(x => x !== h), reducedBetUtcHours: rest });
+    }
+  }
+
+  // Cycle mode for a per-dow tab (only touches silencedByDow / reducedByDow)
+  function cycleModeDow(h: number, dow: number) {
+    const dowStr = String(dow);
+    const silencedForDow = value.silencedByDow?.[dowStr] ?? [];
+    const reducedForDow = value.reducedByDow?.[dowStr] ?? {};
+
+    const isDowSilenced = silencedForDow.includes(h);
+    const isDowReduced  = reducedForDow[String(h)] != null;
+    const isFlatSilenced = value.silencedUtcHours.includes(h);
+    const isFlatReduced  = value.reducedBetUtcHours[String(h)] != null;
+
+    if (!isDowSilenced && !isDowReduced && !isFlatSilenced && !isFlatReduced) {
+      // Active → add dow-silenced
+      const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: [...silencedForDow, h] };
+      onChange({ ...value, silencedByDow: newSilencedByDow });
+    } else if (isDowSilenced || isFlatSilenced) {
+      // Silenced → dow-reduced (remove from dow-silenced list, add to dow-reduced)
+      const newSilenced = silencedForDow.filter(x => x !== h);
+      const defaultAmount = Number((reducedForDow[String(h)] ?? value.reducedBetUtcHours[String(h)] ?? 0.50).toFixed(2));
+      const newReduced = { ...reducedForDow, [String(h)]: defaultAmount };
+      const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: newSilenced };
+      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: newReduced };
+      onChange({ ...value, silencedByDow: newSilencedByDow, reducedByDow: newReducedByDow });
+    } else {
+      // Reduced → active (remove from dow-reduced)
+      const { [String(h)]: _, ...restReduced } = reducedForDow;
+      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: restReduced };
+      onChange({ ...value, reducedByDow: newReducedByDow });
+    }
+  }
+
+  function cycleMode(h: number) {
+    if (selectedDow == null) {
+      cycleModeFlat(h);
+    } else {
+      cycleModeDow(h, selectedDow);
     }
   }
 
   function setReducedBetAmount(h: number, amount: number) {
-    onChange({ ...value, reducedBetUtcHours: { ...value.reducedBetUtcHours, [String(h)]: amount } });
+    if (selectedDow == null) {
+      onChange({ ...value, reducedBetUtcHours: { ...value.reducedBetUtcHours, [String(h)]: amount } });
+    } else {
+      const dowStr = String(selectedDow);
+      const existing = value.reducedByDow?.[dowStr] ?? {};
+      const newReducedByDow = { ...(value.reducedByDow ?? {}), [dowStr]: { ...existing, [String(h)]: amount } };
+      onChange({ ...value, reducedByDow: newReducedByDow });
+    }
   }
 
+  function handleTabChange(dow: number | null) {
+    setSelectedDow(dow);
+    // If we already have data for this tab (hourStatsByDow present), no refetch needed
+    // unless the user explicitly clicks Analyze
+  }
+
+  const activeHourStats = getActiveHourStats();
   const silencedCount = value.silencedUtcHours.length;
   const reducedCount = Object.keys(value.reducedBetUtcHours).length;
 
-  // Split 24 hours into three rows of 8
+  // Per-dow extra counts for the summary
+  const dowExtraCounts = DOW_TABS
+    .filter(t => t.dow != null)
+    .map(t => ({ label: t.label, dow: t.dow!, extra: countDowExtra(value, t.dow!) }))
+    .filter(x => x.extra > 0);
+
   const rows = [
-    Array.from({ length: 8 }, (_, i) => i),       // UTC 00–07
-    Array.from({ length: 8 }, (_, i) => i + 8),   // UTC 08–15
-    Array.from({ length: 8 }, (_, i) => i + 16),  // UTC 16–23
+    Array.from({ length: 8 }, (_, i) => i),
+    Array.from({ length: 8 }, (_, i) => i + 8),
+    Array.from({ length: 8 }, (_, i) => i + 16),
   ];
 
   return (
@@ -259,18 +337,23 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 flex-wrap">
           <span className="text-sm font-semibold text-foreground">Smart Quiet Hours</span>
-          {value.enabled && (silencedCount > 0 || reducedCount > 0) && (
-            <div className="flex items-center gap-1.5">
+          {value.enabled && (
+            <div className="flex items-center gap-1.5 flex-wrap">
               {silencedCount > 0 && (
                 <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-slate-500/10 text-slate-400 border border-slate-500/20">
-                  <VolumeX className="w-3 h-3" /> {silencedCount} silenced
+                  <VolumeX className="w-3 h-3" /> {silencedCount} silenced all days
                 </span>
               )}
               {reducedCount > 0 && (
                 <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                  <TrendingDown className="w-3 h-3" /> {reducedCount} reduced
+                  <TrendingDown className="w-3 h-3" /> {reducedCount} reduced all days
                 </span>
               )}
+              {dowExtraCounts.map(({ label, extra }) => (
+                <span key={label} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                  <Calendar className="w-2.5 h-2.5" /> {label} +{extra}
+                </span>
+              ))}
             </div>
           )}
         </div>
@@ -280,11 +363,38 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             className={`w-9 h-5 rounded-full transition-colors relative ${value.enabled ? "bg-cyan-500" : "bg-muted"}`}
             onClick={() => onChange({ ...value, enabled: !value.enabled })}
           >
-            <span
-              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value.enabled ? "translate-x-4" : "translate-x-0.5"}`}
-            />
+            <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value.enabled ? "translate-x-4" : "translate-x-0.5"}`} />
           </div>
         </label>
+      </div>
+
+      {/* ── Day-of-week tabs ── */}
+      <div className="flex items-center gap-1 flex-wrap">
+        {DOW_TABS.map(tab => {
+          const isActive = selectedDow === tab.dow;
+          const dowExtra = tab.dow != null ? countDowExtra(value, tab.dow) : 0;
+          return (
+            <button
+              key={tab.label}
+              onClick={() => handleTabChange(tab.dow)}
+              className={`relative text-[11px] px-2.5 py-1 rounded-md transition-colors font-medium ${
+                isActive
+                  ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/30 border border-transparent"
+              }`}
+            >
+              {tab.label}
+              {dowExtra > 0 && (
+                <span className="ml-1 text-[9px] text-sky-400">+{dowExtra}</span>
+              )}
+            </button>
+          );
+        })}
+        {selectedDow != null && (
+          <span className="ml-2 text-[11px] text-muted-foreground/50">
+            Showing {DOW_NAMES[selectedDow]} data · click cells to set {DOW_NAMES[selectedDow]}-only rules
+          </span>
+        )}
       </div>
 
       {/* ── Legend ── */}
@@ -294,6 +404,9 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-400 shrink-0" /> &lt;75%</span>
         <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-slate-400 shrink-0" /> Silenced</span>
         <span className="flex items-center gap-1.5"><TrendingDown className="w-3 h-3 text-amber-400 shrink-0" /> Reduced</span>
+        {selectedDow != null && (
+          <span className="flex items-center gap-1.5"><Calendar className="w-3 h-3 text-sky-400 shrink-0" /> Day-specific rule</span>
+        )}
         <span className="text-muted-foreground/50 hidden sm:block">· Click a cell to cycle Active → Silenced → Reduced</span>
       </div>
 
@@ -301,7 +414,6 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
       <div className="flex flex-col gap-3">
         {rows.map((rowHours, rowIdx) => (
           <div key={rowIdx} className="flex items-start gap-3">
-            {/* Row label */}
             <div className="flex flex-col items-end justify-center shrink-0 pt-3" style={{ width: "5rem" }}>
               <span className="text-[11px] font-medium text-foreground/60 text-right leading-tight">
                 {ROW_LABELS[rowIdx].range} {ET_LABEL}
@@ -310,20 +422,19 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
                 {ROW_LABELS[rowIdx].sublabel}
               </span>
             </div>
-
-            {/* 8 cells */}
             <div className="grid gap-2 flex-1" style={{ gridTemplateColumns: "repeat(8, minmax(0, 1fr))" }}>
               {rowHours.map(h => {
-                const stat = analysis?.hourStats.find(s => s.utcHour === h);
+                const stat = activeHourStats.find(s => s.utcHour === h);
                 return (
                   <HourCell
                     key={h}
                     utcHour={h}
-                    mode={hourMode(h, value)}
+                    mode={hourMode(h, value, selectedDow)}
+                    hasDowBadge={hasDowOverride(h, value, selectedDow)}
                     winRatePct={stat?.winRatePct ?? null}
                     totalBets={stat?.totalBets ?? 0}
                     totalPnl={stat?.totalPnl ?? 0}
-                    reducedBetAmount={value.reducedBetUtcHours[String(h)]}
+                    reducedBetAmount={effectiveReducedBet(h, value, selectedDow)}
                     isCurrentHour={h === currentUtcHour}
                     onCycleMode={cycleMode}
                     onReducedBetChange={setReducedBetAmount}
@@ -428,22 +539,23 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         </label>
 
         <button
-          onClick={fetchAnalysis}
+          onClick={() => fetchAnalysis(selectedDow)}
           disabled={loading}
           className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg border border-sky-500/40 text-sky-400 hover:bg-sky-500/10 disabled:opacity-50 transition-colors"
         >
           <BarChart2 className={`w-3.5 h-3.5 ${loading ? "animate-pulse" : ""}`} />
-          {loading ? "Loading…" : "Analyze"}
+          {loading ? "Loading…" : selectedDow != null ? `Analyze ${DOW_NAMES[selectedDow]}` : "Analyze"}
         </button>
 
         {analysis && (
           <button
             onClick={applySuggested}
             className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg border border-amber-500/50 bg-amber-500/5 text-amber-400 hover:bg-amber-500/15 transition-colors font-medium"
-            title={`Auto-silence ${analysis.suggestedSilencedHours.length} hour${analysis.suggestedSilencedHours.length !== 1 ? "s" : ""} below ${targetWinRate}% win rate (≥5 bets)`}
+            title={`Auto-silence ${analysis.suggestedSilencedHours.length} hour${analysis.suggestedSilencedHours.length !== 1 ? "s" : ""}${selectedDow != null ? ` on ${DOW_NAMES[selectedDow]} only` : ""} below ${targetWinRate}% win rate`}
           >
             <Zap className="w-3.5 h-3.5" />
             Apply suggested ({analysis.suggestedSilencedHours.length} hour{analysis.suggestedSilencedHours.length !== 1 ? "s" : ""})
+            {selectedDow != null && <span className="ml-1 opacity-70">{DOW_NAMES[selectedDow]} only</span>}
           </button>
         )}
 
@@ -451,10 +563,46 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
 
         {analysis && !error && (
           <span className="text-[11px] text-muted-foreground/60 ml-auto self-center">
-            {analysis.days}d · {analysis.hourStats.reduce((s, h) => s + h.totalBets, 0).toLocaleString()} live bets
+            {analysis.days}d
+            {selectedDow != null ? ` · ${DOW_NAMES[selectedDow]}` : ""}
+            {" · "}{(activeHourStats.reduce((s, h) => s + h.totalBets, 0)).toLocaleString()} live bets
           </span>
         )}
       </div>
     </div>
   );
 }
+
+const DOW_TABS: { label: string; dow: number | null; apiDow: string }[] = [
+  { label: "All",  dow: null, apiDow: "all" },
+  { label: "Mon",  dow: 1,    apiDow: "1" },
+  { label: "Tue",  dow: 2,    apiDow: "2" },
+  { label: "Wed",  dow: 3,    apiDow: "3" },
+  { label: "Thu",  dow: 4,    apiDow: "4" },
+  { label: "Fri",  dow: 5,    apiDow: "5" },
+  { label: "Sat",  dow: 6,    apiDow: "6" },
+  { label: "Sun",  dow: 0,    apiDow: "0" },
+];
+
+function countDowExtra(v2: QuietHoursV2, dow: number): number {
+  const silencedDow = (v2.silencedByDow?.[String(dow)] ?? []).filter(
+    h => !v2.silencedUtcHours.includes(h),
+  );
+  const reducedDow = Object.keys(v2.reducedByDow?.[String(dow)] ?? {}).filter(
+    hk => v2.reducedBetUtcHours[hk] == null,
+  );
+  return silencedDow.length + reducedDow.length;
+}
+
+/** Per-dow reduced bet amount for a given hour (falls back to flat). */
+function effectiveReducedBet(h: number, v2: QuietHoursV2, dow: number | null): number | undefined {
+  if (dow != null) {
+    const dowVal = v2.reducedByDow?.[String(dow)]?.[String(h)];
+    if (dowVal != null) return dowVal;
+  }
+  return v2.reducedBetUtcHours[String(h)];
+}
+
+const DOW_NAMES: Record<number, string> = {
+  0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat",
+};
