@@ -897,7 +897,8 @@ const QH_MIN_BETS = 5;
 
 export async function runQuietHoursAutoTune(): Promise<void> {
   const qhv2 = S.config.quietHoursV2;
-  if (!qhv2?.enabled || !qhv2.autoTuneEnabled) return;
+  // autoTuneEnabled defaults to true (undefined → on); set explicitly to false to disable.
+  if (!qhv2?.enabled || qhv2.autoTuneEnabled === false) return;
 
   // Respect the configured interval (default 2h).  The scheduler polls every
   // 30 min so this guard prevents over-running during short-interval schedules.

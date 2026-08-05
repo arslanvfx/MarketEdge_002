@@ -495,10 +495,10 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
           {/* Toggle */}
           <label className="flex items-center gap-2 cursor-pointer">
             <div
-              className={`w-8 h-4 rounded-full relative transition-colors ${value.autoTuneEnabled ? "bg-cyan-500" : "bg-muted"}`}
-              onClick={() => onChange({ ...value, autoTuneEnabled: !value.autoTuneEnabled })}
+              className={`w-8 h-4 rounded-full relative transition-colors ${value.autoTuneEnabled !== false ? "bg-cyan-500" : "bg-muted"}`}
+              onClick={() => onChange({ ...value, autoTuneEnabled: value.autoTuneEnabled === false })}
             >
-              <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${value.autoTuneEnabled ? "translate-x-4" : "translate-x-0.5"}`} />
+              <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${value.autoTuneEnabled !== false ? "translate-x-4" : "translate-x-0.5"}`} />
             </div>
             <span className="text-xs font-medium text-foreground/80 flex items-center gap-1.5">
               <RefreshCw className="w-3 h-3 text-cyan-400" />
@@ -506,7 +506,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             </span>
           </label>
 
-          {value.autoTuneEnabled && (
+          {value.autoTuneEnabled !== false && (
             <>
               {/* Interval */}
               <label className="flex items-center gap-1.5">
@@ -562,9 +562,9 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             </span>
           )}
         </div>
-        {value.autoTuneEnabled && (
+        {value.autoTuneEnabled !== false && (
           <p className="text-[10px] text-muted-foreground/50 leading-snug">
-            Runs every {value.autoTuneIntervalHours ?? 2}h. Analyzes each day of the week separately using paper + live bets. Silences hours below {value.autoTuneThreshold ?? 84.5}% win rate (≥5 bets) and unsilences hours that recover above it. Monday rules apply only on Mondays, etc.
+            Runs every {value.autoTuneIntervalHours ?? 2}h. Analyzes each day of the week separately using all bets (live + shadow paper). Silences hours below {value.autoTuneThreshold ?? 84.5}% win rate (≥5 bets) and unsilences hours that recover above it. Monday rules apply only on Mondays, etc.
           </p>
         )}
       </div>
