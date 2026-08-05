@@ -120,32 +120,26 @@ function HourCell({
   const currentRing = isCurrentHour ? "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background" : "";
   const reducedRing = reducedPct != null && mode !== "silenced" ? "ring-1 ring-amber-400/50" : "";
 
-  function commitPct() {
-    const v = parseInt(pctInput, 10);
-    if (!isNaN(v) && v >= 1 && v <= 99) {
-      onSetReducedPct(utcHour, v);
-    }
-    setEditingPct(false);
-  }
+  // Preset bet percentages (% of regular bet to use)
+  const PRESETS = [75, 50, 25];
 
   return (
-    <div className={`relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${reducedRing}`}>
-      {/* Click area: silence toggle */}
-      <button
-        onClick={() => onToggleSilence(utcHour)}
-        className="flex items-center justify-between gap-1 w-full group"
-      >
-        {/* Left: ET time + mode icon */}
+    // Entire card is tappable to toggle silence/active
+    <div
+      onClick={() => onToggleSilence(utcHour)}
+      className={`cursor-pointer relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all select-none ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${reducedRing}`}
+    >
+      {/* Top row: time label + mode icon + dot */}
+      <div className="flex items-center justify-between gap-1">
         <div className="flex items-center gap-1 min-w-0">
           <span className="text-[9px] sm:text-[10px] font-mono text-foreground/70 leading-none shrink-0">{estLabel}</span>
           {mode === "silenced" && <VolumeX className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
           {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
         </div>
-        {/* Right: dot — hidden for no-data cells */}
         {tier !== "empty" && (
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor[tier]}`} />
         )}
-      </button>
+      </div>
 
       {/* Win rate */}
       <div className={`text-[10px] sm:text-[11px] font-semibold leading-none ${winRateColor[tier]}`}>
@@ -168,29 +162,59 @@ function HourCell({
         )}
       </div>
 
-      {/* Reduced-% chip or +reduce button */}
+      {/* Reduce section — stopPropagation so tapping here doesn't toggle the cell */}
       {mode !== "silenced" && (
-        <div className="mt-0.5">
-          {reducedPct != null ? (
-            <div className="flex items-center gap-0.5">
-              {editingPct ? (
-                <input
-                  autoFocus
-                  className="w-10 text-[9px] bg-background border border-amber-500/40 rounded px-1 py-0.5 text-amber-300"
-                  value={pctInput}
-                  onChange={e => setPctInput(e.target.value)}
-                  onBlur={commitPct}
-                  onKeyDown={e => { if (e.key === "Enter") commitPct(); if (e.key === "Escape") setEditingPct(false); }}
-                  placeholder="1-99"
-                />
-              ) : (
+        <div className="mt-0.5" onClick={e => e.stopPropagation()}>
+          {editingPct ? (
+            // Preset buttons + custom input (mobile-friendly)
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-0.5 flex-wrap">
+                {PRESETS.map(p => (
+                  <button
+                    key={p}
+                    onClick={() => { onSetReducedPct(utcHour, p); setEditingPct(false); }}
+                    className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 leading-none hover:bg-amber-500/35 transition-colors"
+                  >
+                    {p}%
+                  </button>
+                ))}
                 <button
-                  onClick={() => { setPctInput(String(reducedPct)); setEditingPct(true); }}
-                  className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 leading-none hover:bg-amber-500/25 transition-colors"
+                  onClick={() => setEditingPct(false)}
+                  className="text-[9px] text-muted-foreground/40 hover:text-red-400 transition-colors ml-auto"
                 >
-                  –{reducedPct}%
+                  <X className="w-2.5 h-2.5" />
                 </button>
-              )}
+              </div>
+              <input
+                autoFocus
+                className="w-full text-[9px] bg-background border border-amber-500/40 rounded px-1 py-0.5 text-amber-300"
+                value={pctInput}
+                onChange={e => setPctInput(e.target.value)}
+                onBlur={() => {
+                  const v = parseInt(pctInput, 10);
+                  if (!isNaN(v) && v >= 10 && v <= 99) onSetReducedPct(utcHour, v);
+                  setEditingPct(false);
+                }}
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    const v = parseInt(pctInput, 10);
+                    if (!isNaN(v) && v >= 10 && v <= 99) onSetReducedPct(utcHour, v);
+                    setEditingPct(false);
+                  }
+                  if (e.key === "Escape") setEditingPct(false);
+                }}
+                placeholder="10–99"
+              />
+            </div>
+          ) : reducedPct != null ? (
+            // Show current % chip — tap to re-open picker
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={() => { setPctInput(String(reducedPct)); setEditingPct(true); }}
+                className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 leading-none hover:bg-amber-500/25 transition-colors"
+              >
+                {reducedPct}% of bet
+              </button>
               <button
                 onClick={() => onClearReducedPct(utcHour)}
                 className="text-[9px] text-muted-foreground/40 hover:text-red-400 transition-colors"
@@ -199,9 +223,10 @@ function HourCell({
               </button>
             </div>
           ) : (
+            // No reduction set — tap to open picker
             <button
               onClick={() => { setPctInput(""); setEditingPct(true); }}
-              className="text-[9px] text-muted-foreground/30 hover:text-amber-400 transition-colors leading-none"
+              className="text-[9px] text-muted-foreground/40 hover:text-amber-400 transition-colors leading-none"
             >
               +reduce
             </button>

@@ -921,7 +921,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
             Object.entries(v2.reducedBetUtcHours as Record<string, unknown>)
               .filter(([k, v]) => {
                 const h = parseInt(k, 10);
-                return !isNaN(h) && h >= 0 && h <= 23 && typeof v === "number" && v >= 1 && v <= 99;
+                return !isNaN(h) && h >= 0 && h <= 23 && typeof v === "number" && v >= 10 && v <= 99;
               })
               .map(([k, v]) => [k, v as number])
           )

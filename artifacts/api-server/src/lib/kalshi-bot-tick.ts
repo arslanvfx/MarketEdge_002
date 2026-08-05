@@ -1482,8 +1482,8 @@ async function _runBotTick(
   // of which other sizing path matched.  Intentionally does not check
   // betScheduleApplied so the cap cannot be bypassed by a schedule bracket.
   if (S.quietHoursV2ReducedBet != null && S.quietHoursV2ReducedBet >= 1) {
-    const reducedPct = S.quietHoursV2ReducedBet; // 1–99 — percentage to reduce bet by
-    const reducedSize = +(targetBetSize * (1 - reducedPct / 100)).toFixed(2);
+    const reducedPct = S.quietHoursV2ReducedBet; // 10–99 — percentage OF regular bet to use (50 = bet at 50% of normal)
+    const reducedSize = +(targetBetSize * (reducedPct / 100)).toFixed(2);
     if (reducedSize < targetBetSize) {
       logger.info(
         { sym, reducedPct, prev: +targetBetSize.toFixed(2), next: reducedSize },
