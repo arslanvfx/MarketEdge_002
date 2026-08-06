@@ -30,6 +30,7 @@ import {
   getWindowConditions,
   resetWindowConditions,
   reEvaluateSettledBets,
+  runQuietHoursAutoTune,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
