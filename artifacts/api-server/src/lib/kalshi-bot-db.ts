@@ -912,25 +912,31 @@ export async function runQuietHoursAutoTune(): Promise<void> {
   const days      = Math.min(90, Math.max(1, qhv2.autoTuneDays      ?? 14));
   const threshold =                            qhv2.autoTuneThreshold ?? 84.5;
 
-  // ── single query: DOW × hour, paper + live bets both included ──────────
+  // ── single query: DOW × hour, paper + live + shadow bets all included ───
+  // DOW uses America/New_York so evening bets placed between 8 PM and
+  // midnight ET are attributed to the correct calendar day rather than
+  // rolling over to the next UTC day (which would silently misclassify them
+  // under the wrong day of week for auto-tune decisions).
+  // Hour stays as UTC — silencedByDow stores UTC hours and the frontend
+  // converts them to ET for display via utcToEst().
   const result = await db.execute(sql`
     SELECT
-      EXTRACT(DOW  FROM created_at AT TIME ZONE 'UTC')::int AS utc_dow,
-      EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS utc_hour,
-      COUNT(*)                                               AS total_bets,
-      COUNT(CASE WHEN outcome = 'win' THEN 1 END)            AS wins
+      EXTRACT(DOW  FROM created_at AT TIME ZONE 'America/New_York')::int AS et_dow,
+      EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int              AS utc_hour,
+      COUNT(*)                                                            AS total_bets,
+      COUNT(CASE WHEN outcome = 'win' THEN 1 END)                        AS wins
     FROM kalshi_bot_bets
     WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
       AND outcome IN ('win', 'loss')
       AND archived_at IS NULL
-    GROUP BY utc_dow, utc_hour
+    GROUP BY et_dow, utc_hour
   `);
 
   interface HourStat { dow: number; hour: number; winRate: number | null; bets: number }
   const stats: HourStat[] = result.rows.map((r: Record<string, unknown>) => {
     const bets = Number(r.total_bets);
     const wins = Number(r.wins);
-    return { dow: Number(r.utc_dow), hour: Number(r.utc_hour), bets, winRate: bets > 0 ? (wins / bets) * 100 : null };
+    return { dow: Number(r.et_dow), hour: Number(r.utc_hour), bets, winRate: bets > 0 ? (wins / bets) * 100 : null };
   });
 
   // ── process each day of week independently ─────────────────────────────

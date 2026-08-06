@@ -1454,14 +1454,18 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
     let dowFilter: string | null = null;  // raw SQL fragment; null = no filter
     let minBetsForSuggest = 5;            // aggregate view uses 5; per-day uses 3
 
+    // DOW uses America/New_York so evening bets placed between 8 PM and
+    // midnight ET land on the correct calendar day — not the next UTC day.
+    // Example: a bet at 9:54 PM EDT Wednesday = 1:54 AM UTC Thursday would
+    // otherwise be bucketed under Thursday and invisible on the Wednesday tab.
     if (dowRaw === "weekday") {
-      dowFilter = "EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC') BETWEEN 1 AND 5";
+      dowFilter = "EXTRACT(DOW FROM created_at AT TIME ZONE 'America/New_York') BETWEEN 1 AND 5";
       minBetsForSuggest = 3;
     } else if (dowRaw === "weekend") {
-      dowFilter = "EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC') IN (0, 6)";
+      dowFilter = "EXTRACT(DOW FROM created_at AT TIME ZONE 'America/New_York') IN (0, 6)";
       minBetsForSuggest = 3;
     } else if (/^[0-6]$/.test(dowRaw)) {
-      dowFilter = `EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC') = ${parseInt(dowRaw, 10)}`;
+      dowFilter = `EXTRACT(DOW FROM created_at AT TIME ZONE 'America/New_York') = ${parseInt(dowRaw, 10)}`;
       minBetsForSuggest = 3;
     }
     // else: "all" or anything unrecognised → no filter, keep minBets=5
@@ -1510,10 +1514,14 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
       .map(h => h.utcHour);
 
     // ── Per-DOW breakdown (always computed, keyed "0"–"6") ───────────────────
+    // DOW uses America/New_York so evening bets after 8 PM ET appear on the
+    // correct calendar day. Hour stays as UTC — the frontend converts to ET
+    // via utcToEst(). Both paper and live bets (including shadow paper bets)
+    // are included with no mode filter.
     const dowResult = await db.execute(sql`
       SELECT
-        EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC')::int  AS utc_dow,
-        EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS utc_hour,
+        EXTRACT(DOW FROM created_at AT TIME ZONE 'America/New_York')::int AS et_dow,
+        EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int             AS utc_hour,
         COUNT(*) AS total_bets,
         COUNT(CASE WHEN outcome = 'win' THEN 1 END) AS wins,
         COUNT(CASE WHEN outcome = 'loss' THEN 1 END) AS losses,
@@ -1523,13 +1531,13 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
       WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
         AND outcome IN ('win', 'loss')
         AND archived_at IS NULL
-      GROUP BY utc_dow, utc_hour
-      ORDER BY utc_dow, utc_hour
+      GROUP BY et_dow, utc_hour
+      ORDER BY et_dow, utc_hour
     `);
 
     const hourStatsByDow: Record<string, ReturnType<typeof buildHourStats>> = {};
     for (let d = 0; d <= 6; d++) {
-      const dayRows = (dowResult.rows as Record<string, unknown>[]).filter(r => Number(r.utc_dow) === d);
+      const dayRows = (dowResult.rows as Record<string, unknown>[]).filter(r => Number(r.et_dow) === d);
       hourStatsByDow[String(d)] = buildHourStats(dayRows);
     }
 

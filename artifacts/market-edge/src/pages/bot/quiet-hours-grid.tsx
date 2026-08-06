@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useAuth } from "@clerk/react";
 import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar, X } from "lucide-react";
 import type { QuietHoursV2, QuietHoursAnalysis, QuietHoursHourStat } from "./types";
-import { utcToEst, ET_LABEL, API_BASE } from "./utils";
+import { utcToEst, ET_LABEL, API_BASE, getEtUtcOffset } from "./utils";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -273,8 +273,13 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // selectedDow is always a number — default to today's UTC day
-  const [selectedDow, setSelectedDow] = useState<number>(() => new Date().getUTCDay());
+  // selectedDow defaults to today's ET day (not UTC day).
+  // At 9:54 PM EDT Wednesday, getUTCDay() returns 4 (Thursday) because
+  // it's already 1:54 AM UTC Thursday — but the user expects Wednesday's tab.
+  const [selectedDow, setSelectedDow] = useState<number>(() => {
+    const etMs = Date.now() - getEtUtcOffset() * 3_600_000;
+    return new Date(etMs).getUTCDay();
+  });
 
   const currentUtcHour = new Date().getUTCHours();
 
