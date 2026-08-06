@@ -65,6 +65,7 @@ import {
   deriveConvictionZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
+  computeConvictionCandleSlopeGate,
   computeStrikeProximityGate,
   DEFAULT_BOT_CONFIG,
   computeDynamicBetSize,
@@ -137,6 +138,8 @@ export {
   computeAdverseMomentumGate,
   // Direction guard — pure, exported for unit tests and callers.
   computeConvictionDirectionGate,
+  // Candle-slope gate — medium-term trend check run alongside direction guard.
+  computeConvictionCandleSlopeGate,
   // Strike-proximity gate — pure, exported for unit tests and callers.
   computeStrikeProximityGate,
   // Per-coin proximity threshold helper and calibrated suggestions.

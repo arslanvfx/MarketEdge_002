@@ -1276,6 +1276,12 @@ export interface BotConfig {
   convictionDirectionGuardMinSeconds?: number; // consecutive adverse seconds required to block (default 4, clamp 2–10)
   convictionDirectionLookbackCandles?: number; // candle fallback lookback when tick data unavailable (default 3, clamp 1–10)
 
+  // Conviction candle-slope gate — blocks entry when the medium-term (multi-minute)
+  // candle trend is running against the bet direction, even if the 7-second tick
+  // window appears flat.  Runs in ADDITION to the direction guard above.
+  convictionCandleLookback?: number;             // minute-candles to inspect (default 5, clamp 2–10)
+  convictionCandleSlopeThresholdPct?: number;    // net decline % of price needed to block (default 0.05)
+
   // ── Extreme Caution mode (conviction only) ────────────────────────────────
   // When enabled: (1) if a YES conviction bet was aborted this window because
   // the YES bid was below the zone floor, all further YES entries for that
@@ -1487,6 +1493,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionDirectionGuardEnabled: true,
   convictionDirectionGuardMinSeconds: 4,
   convictionDirectionLookbackCandles: 3,
+  convictionCandleLookback: 5,
+  convictionCandleSlopeThresholdPct: 0.05,
   minHoldMinutes: 4,
   enableMidExit: false,
   disableMidExitForConviction: true,
@@ -1729,6 +1737,91 @@ export function computeConvictionDirectionGate(opts: {
   // the lookback candles, which killed conviction NO bets in sideways markets.
   const blocked   = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
   return { blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0 };
+}
+
+/**
+ * computeConvictionCandleSlopeGate — pure, exported for testing.
+ *
+ * Medium-term directional confirmation gate for conviction entries.
+ * Runs ALONGSIDE (not instead of) computeConvictionDirectionGate.
+ *
+ * Problem it solves: the direction gate looks at only the last 7 seconds of
+ * price ticks.  If price peaked 2 minutes ago and has been falling ever since
+ * but happens to go flat for 7 seconds at the moment of entry, slopePrice = 0
+ * and the direction gate passes.  This gate looks at the last N minute-candles
+ * to catch that sustained prior decline.
+ *
+ * Logic:
+ *   slopePct = (lastCandle.c − candles[−lookback].c) / candles[−lookback].c × 100
+ *   For YES bet: block when slopePct < −effectiveThreshold  (sustained decline)
+ *   For NO  bet: block when slopePct > +effectiveThreshold  (sustained rise)
+ *   Flat (|slopePct| ≤ threshold) is always neutral — never blocks.
+ *
+ * ATR scaling: identical to computeStrikeProximityGate — wider threshold for
+ * volatile coins so normal chop doesn't block every entry.  Cap defaults to 2×.
+ *
+ * Fail-open: returns blocked=false when candle data is unavailable or
+ * lookback exceeds the available candle count.
+ */
+export interface ConvictionCandleSlopeResult {
+  blocked: boolean;
+  slopePct: number | null;       // net change %; null = insufficient data (gate open)
+  effectiveThreshold: number;    // threshold used for this evaluation (may be ATR-scaled)
+  atrMultiplier: number;
+  lookback: number;
+}
+
+export function computeConvictionCandleSlopeGate(opts: {
+  candles: Array<{ c: number }>;
+  direction: "yes" | "no";
+  lookback?: number;             // number of minute-candles to look back (default 5, clamp 2–10)
+  thresholdPct?: number;         // % decline required to block (default 0.05)
+  atrPct?: number | null;        // coin ATR as % of price; enables ATR scaling when provided
+  atrScaleEnabled?: boolean;     // default true
+  atrMultiplierCap?: number;     // default 2
+}): ConvictionCandleSlopeResult {
+  const {
+    candles,
+    direction,
+    lookback       = 5,
+    thresholdPct   = 0.05,
+    atrPct,
+    atrScaleEnabled  = true,
+    atrMultiplierCap = 2,
+  } = opts;
+
+  const clampedLookback = Math.max(2, Math.min(lookback, 10));
+
+  // ATR scaling — identical formula to computeStrikeProximityGate.
+  // baseline 0.20% ≈ BTC quiet-session ATR; scale widens threshold for
+  // volatile coins so normal chop doesn't block every entry.
+  const atrMultiplier = atrScaleEnabled && atrPct != null && atrPct > 0
+    ? Math.min(atrMultiplierCap, Math.max(1, atrPct / 0.20))
+    : 1;
+  const effectiveThreshold = thresholdPct * atrMultiplier;
+
+  // Fail-open: need at least lookback+1 candles to compute a meaningful slope.
+  if (!candles || candles.length < clampedLookback + 1) {
+    return { blocked: false, slopePct: null, effectiveThreshold, atrMultiplier, lookback: clampedLookback };
+  }
+
+  const fromCandle = candles[candles.length - 1 - clampedLookback];
+  const toCandle   = candles[candles.length - 1];
+
+  if (!fromCandle || fromCandle.c <= 0) {
+    return { blocked: false, slopePct: null, effectiveThreshold, atrMultiplier, lookback: clampedLookback };
+  }
+
+  const slopePct = (toCandle.c - fromCandle.c) / fromCandle.c * 100;
+
+  // YES adverse = net falling beyond threshold (slopePct < −threshold)
+  // NO  adverse = net rising beyond threshold  (slopePct > +threshold)
+  // Flat (within ±threshold) = neutral, never blocks.
+  const blocked = direction === "yes"
+    ? slopePct < -effectiveThreshold
+    : slopePct > +effectiveThreshold;
+
+  return { blocked, slopePct, effectiveThreshold, atrMultiplier, lookback: clampedLookback };
 }
 
 /**

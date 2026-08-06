@@ -717,6 +717,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionDirectionGuardEnabled,
     convictionDirectionGuardMinSeconds,
     convictionDirectionLookbackCandles,
+    convictionCandleLookback,
+    convictionCandleSlopeThresholdPct,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -822,6 +824,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionDirectionGuardEnabled?: boolean;
     convictionDirectionGuardMinSeconds?: number;
     convictionDirectionLookbackCandles?: number;
+    convictionCandleLookback?: number;
+    convictionCandleSlopeThresholdPct?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -1228,6 +1232,12 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionDirectionLookbackCandles === "number" && convictionDirectionLookbackCandles >= 1 && convictionDirectionLookbackCandles <= 10) {
     partial.convictionDirectionLookbackCandles = Math.round(convictionDirectionLookbackCandles);
+  }
+  if (typeof convictionCandleLookback === "number" && convictionCandleLookback >= 2 && convictionCandleLookback <= 10) {
+    partial.convictionCandleLookback = Math.round(convictionCandleLookback);
+  }
+  if (typeof convictionCandleSlopeThresholdPct === "number" && convictionCandleSlopeThresholdPct >= 0.01 && convictionCandleSlopeThresholdPct <= 0.20) {
+    partial.convictionCandleSlopeThresholdPct = +convictionCandleSlopeThresholdPct.toFixed(3);
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);

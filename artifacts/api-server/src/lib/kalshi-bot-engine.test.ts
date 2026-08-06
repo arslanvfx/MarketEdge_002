@@ -64,6 +64,7 @@ import {
   type ConvictionInputs,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
+  computeConvictionCandleSlopeGate,
 } from "./kalshi-bot-engine-core.ts";
 
 const DEFAULT_MIN_CONFIDENCE = 60;
@@ -2741,4 +2742,145 @@ test("direction gate priceTicks: 1 tick falls through to candle fallback", () =>
     direction: "yes",
   });
   assert.equal(r.blocked, true, "Should fall through to candle fallback with 1 tick and block (falling candles)");
+});
+
+// ── computeConvictionCandleSlopeGate tests ────────────────────────────────────
+//
+// Medium-term candle trend gate that runs ALONGSIDE computeConvictionDirectionGate.
+// Catches sustained prior declines (e.g. 2+ min downtrend) that appear flat in
+// the last 7 seconds — the scenario that caused the HYPE real-money loss.
+//
+// Logic:
+//   slopePct = (lastCandle.c − candles[−lookback].c) / candles[−lookback].c × 100
+//   YES adverse: slopePct < −effectiveThreshold  → blocked=true
+//   NO  adverse: slopePct > +effectiveThreshold  → blocked=true
+//   Flat (|slopePct| ≤ threshold)               → blocked=false (neutral)
+//   Insufficient candles                         → blocked=false (fail-open)
+
+// ── YES direction ─────────────────────────────────────────────────────────────
+
+test("candle-slope gate YES block: sustained 5-candle decline exceeds threshold → blocked=true", () => {
+  // Price fell ~0.19% over 5 candles — well above 0.05% default threshold.
+  // Represents the HYPE scenario: price peaked then fell for 2+ minutes.
+  const cs = candles(55.85, 55.80, 55.75, 55.73, 55.72, 55.71);  // 6 candles, lookback=5
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, true, "Sustained decline should block YES entry");
+  assert.ok(r.slopePct !== null && r.slopePct < -0.05, `Expected slopePct < -0.05, got ${r.slopePct}`);
+});
+
+test("candle-slope gate YES pass: sustained 5-candle rise → blocked=false", () => {
+  const cs = candles(55.60, 55.65, 55.70, 55.75, 55.80, 55.85);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, false);
+  assert.ok(r.slopePct !== null && r.slopePct > 0);
+});
+
+test("candle-slope gate YES pass: flat candles within threshold → blocked=false (neutral)", () => {
+  // Prices vary by < 0.05% — oscillation, not a trend.
+  const cs = candles(55.73, 55.74, 55.73, 55.72, 55.73, 55.73);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, false, "Flat price within threshold is neutral, must not block");
+  assert.ok(r.slopePct !== null && Math.abs(r.slopePct) < 0.05);
+});
+
+// ── NO direction ──────────────────────────────────────────────────────────────
+
+test("candle-slope gate NO block: sustained 5-candle rise exceeds threshold → blocked=true", () => {
+  // Price rose ~0.27% over 5 candles — adverse for a NO bet.
+  const cs = candles(55.60, 55.65, 55.70, 55.73, 55.74, 55.75);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "no", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, true, "Sustained rise should block NO entry");
+  assert.ok(r.slopePct !== null && r.slopePct > 0.05);
+});
+
+test("candle-slope gate NO pass: sustained 5-candle decline → blocked=false", () => {
+  const cs = candles(55.85, 55.80, 55.75, 55.73, 55.72, 55.71);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "no", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, false);
+  assert.ok(r.slopePct !== null && r.slopePct < 0);
+});
+
+test("candle-slope gate NO pass: flat candles within threshold → blocked=false (neutral)", () => {
+  const cs = candles(55.73, 55.74, 55.73, 55.72, 55.73, 55.73);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "no", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, false, "Flat price within threshold is neutral for NO too");
+});
+
+// ── Threshold boundary ────────────────────────────────────────────────────────
+
+test("candle-slope gate YES: decline exactly equal to threshold → blocked=false (strict < required)", () => {
+  // slopePct exactly equals -threshold — gate uses strict <, so boundary is NOT blocked.
+  // fromPrice=100, toPrice=99.95, slopePct=-0.05 → not < -0.05 → blocked=false.
+  const cs = candles(100, 100, 100, 100, 100, 99.95);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, false, "Boundary equality must not block (strict < required)");
+});
+
+test("candle-slope gate YES: decline just beyond threshold → blocked=true", () => {
+  // fromPrice=100, toPrice≈99.94, slopePct≈-0.06 → < -0.05 → blocked=true.
+  const cs = candles(100, 100, 100, 100, 100, 99.94);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05, atrScaleEnabled: false });
+  assert.equal(r.blocked, true, "Just-beyond-threshold decline must block");
+  assert.ok(r.slopePct !== null && r.slopePct < -0.05);
+});
+
+// ── Fail-open paths ───────────────────────────────────────────────────────────
+
+test("candle-slope gate fail-open: empty candles → blocked=false", () => {
+  const r = computeConvictionCandleSlopeGate({ candles: [], direction: "yes" });
+  assert.equal(r.blocked, false);
+  assert.equal(r.slopePct, null);
+});
+
+test("candle-slope gate fail-open: too few candles for lookback → blocked=false", () => {
+  // lookback=5 requires ≥6 candles; only 4 provided → fail-open.
+  const cs = candles(100, 99, 98, 97);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "yes", lookback: 5 });
+  assert.equal(r.blocked, false, "Insufficient data must never block (fail-open)");
+  assert.equal(r.slopePct, null);
+});
+
+test("candle-slope gate fail-open: fromCandle.c === 0 → blocked=false (no division by zero)", () => {
+  // fromCandle has price 0 — division by zero is defended; gate opens.
+  const cs = candles(0, 100, 100, 100, 100, 100);
+  const r = computeConvictionCandleSlopeGate({ candles: cs, direction: "yes", lookback: 5, atrScaleEnabled: false });
+  assert.equal(r.blocked, false, "Zero fromCandle price must not block");
+  assert.equal(r.slopePct, null);
+});
+
+// ── ATR scaling ───────────────────────────────────────────────────────────────
+
+test("candle-slope gate ATR scaling: high-ATR coin widens threshold — mild decline no longer blocks", () => {
+  // slopePct ≈ -0.06% (just above base 0.05% threshold).
+  // atrPct=0.40%, baseline=0.20%, multiplier=min(2,0.40/0.20)=2.0
+  // effectiveThreshold = 0.05 × 2.0 = 0.10% → slopePct -0.06 > -0.10 → NOT blocked.
+  const cs = candles(100, 100, 100, 100, 100, 99.94);  // slopePct ≈ -0.06%
+  const r = computeConvictionCandleSlopeGate({
+    candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05,
+    atrPct: 0.40, atrScaleEnabled: true, atrMultiplierCap: 2,
+  });
+  assert.equal(r.blocked, false, "ATR-scaled threshold (0.10%) should let mild decline through");
+  assert.ok(r.atrMultiplier >= 1.9 && r.atrMultiplier <= 2.1, `Expected multiplier≈2, got ${r.atrMultiplier}`);
+  assert.ok(r.effectiveThreshold >= 0.09 && r.effectiveThreshold <= 0.11);
+});
+
+test("candle-slope gate ATR cap: very high ATR is capped at atrMultiplierCap=2", () => {
+  // atrPct=1.0%, would give multiplier=5 without a cap; cap=2 limits it to 2×.
+  const cs = candles(100, 100, 100, 100, 100, 99.94);
+  const r = computeConvictionCandleSlopeGate({
+    candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05,
+    atrPct: 1.0, atrScaleEnabled: true, atrMultiplierCap: 2,
+  });
+  assert.ok(r.atrMultiplier <= 2.01, `Multiplier must be capped at 2, got ${r.atrMultiplier}`);
+  assert.ok(r.effectiveThreshold <= 0.101);
+});
+
+test("candle-slope gate ATR disabled: atrScaleEnabled=false → multiplier=1 regardless of atrPct", () => {
+  const cs = candles(100, 100, 100, 100, 100, 99.94);
+  const r = computeConvictionCandleSlopeGate({
+    candles: cs, direction: "yes", lookback: 5, thresholdPct: 0.05,
+    atrPct: 1.0, atrScaleEnabled: false,
+  });
+  assert.equal(r.atrMultiplier, 1, "ATR disabled → multiplier must be 1");
+  assert.ok(Math.abs(r.effectiveThreshold - 0.05) < 0.001);
 });

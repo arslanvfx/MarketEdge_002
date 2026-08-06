@@ -1193,6 +1193,47 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       )}
                     </div>
 
+                    {/* Candle-slope gate */}
+                    {(merged.convictionDirectionGuardEnabled ?? true) && (
+                      <div className="flex flex-col gap-2 mt-2 border-t border-sky-500/10 pt-2">
+                        <span className="text-[11px] font-medium text-sky-300/80 flex items-center gap-1.5">
+                          <TrendingUp className="w-3 h-3 opacity-60" />
+                          Candle-slope gate
+                        </span>
+                        <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                          Checks the last N minute-candles for a sustained prior trend against your bet — catches a 2-minute decline even when price goes flat in the final 7 seconds before entry.
+                        </span>
+                        <div className="flex flex-col gap-2">
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">Candle lookback</span>
+                            <select
+                              className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                              value={merged.convictionCandleLookback ?? 5}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionCandleLookback: parseInt(e.target.value) }))}
+                            >
+                              {[2,3,4,5,6,7,8,9,10].map(n => (
+                                <option key={n} value={n}>{n} min{n === 5 ? " — default" : n <= 3 ? " — tight" : n >= 8 ? " — wide" : ""}</option>
+                              ))}
+                            </select>
+                            <span className="text-[10px] text-muted-foreground/60">How many 1-minute candles to look back when measuring the prior trend. Default 5 = last 5 minutes.</span>
+                          </label>
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">Slope threshold (%)</span>
+                            <select
+                              className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
+                              value={merged.convictionCandleSlopeThresholdPct ?? 0.05}
+                              onChange={e => setConfigDraft(d => ({ ...d, convictionCandleSlopeThresholdPct: parseFloat(e.target.value) }))}
+                            >
+                              {[0.02, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20].map(v => (
+                                <option key={v} value={v}>{v.toFixed(2)}%{v === 0.05 ? " — default" : v <= 0.03 ? " — sensitive" : v >= 0.10 ? " — permissive" : ""}</option>
+                              ))}
+                            </select>
+                            <span className="text-[10px] text-muted-foreground/60">Minimum net price decline over the lookback period to block a YES entry (or rise to block NO). Scaled wider automatically for volatile coins.</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Stability Gate */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
                       <div className="flex items-center justify-between">
