@@ -205,6 +205,13 @@ const convictionDiagLastLogAt = new Map<string, number>();
 // Per-coin conviction win rates — refreshed at most once per hour
 // ---------------------------------------------------------------------------
 let _lastWinRateRefreshAt = 0;
+// Shadow bet evaluation — runs at most once per 60 s.
+// evalShadowBets() makes a DB query; calling it every tick (every second)
+// exhausts the connection pool and causes the regime/border cache refresh
+// inside runBotLoopTick to throw, aborting the entire tick before any coin
+// is evaluated.  60 s is short enough to evaluate prior-window shadow bets
+// promptly and long enough not to stress the DB.
+let _lastShadowEvalAt = 0;
 async function refreshConvictionWinRates(): Promise<void> {
   const now = Date.now();
   if (now - _lastWinRateRefreshAt < 60 * 60 * 1000) return; // at most once per hour
@@ -441,8 +448,16 @@ export async function runBotLoopTick(): Promise<void> {
   // Evaluate any closed bets that haven't been stamped with outcome yet.
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
   evalClosedBets().catch(() => {});
-  // Evaluate shadow (probe) bets from prior windows — also fire-and-forget.
-  evalShadowBets().catch(() => {});
+  // Evaluate shadow (probe) bets from prior windows — rate-limited to once
+  // per 60 s.  Calling this every tick exhausts the DB connection pool because
+  // each fire-and-forget call holds a connection until the query completes,
+  // and ticks arrive every 1 s.  60 s cadence is sufficient to evaluate
+  // last-window shadow bets promptly without stressing the pool.
+  const _shadowNow = Date.now();
+  if (_shadowNow - _lastShadowEvalAt >= 60_000) {
+    _lastShadowEvalAt = _shadowNow;
+    evalShadowBets().catch(() => {});
+  }
 
   // Always run window-expiry check, even when S.paused or disabled.
   // If the 15-minute window rolls over while a position is still open (e.g.
@@ -1282,20 +1297,30 @@ export async function runBotLoopTick(): Promise<void> {
   const globalCapReached = S.config.maxBetsPerWindow > 0 && globalBetsThisWindow >= S.config.maxBetsPerWindow;
 
   // Refresh border-proximity and regime caches once per window transition.
+  // Wrapped in try/catch: if the DB pool is stressed (e.g. from concurrent
+  // queries) this refresh should NOT abort the tick — the stale cache from
+  // the previous window is better than skipping the entire coin evaluation.
+  // The window keys are NOT updated on failure so the next tick retries.
   if (windowKey !== S.borderProximityCacheWindow) {
-    const syms = CRYPTO_COINS
-      .filter(c => KALSHI_SERIES[c.symbol])
-      .map(c => c.symbol.toUpperCase());
-    if (S.config.enableBorderGuard) {
-      S.borderProximityCache = await loadBorderProximityCache(syms, S.config.borderLookbackBets);
-      logger.debug({ borderProximityCache: Object.fromEntries(S.borderProximityCache) },
-        "[kalshi-bot] border-proximity cache refreshed");
+    try {
+      const syms = CRYPTO_COINS
+        .filter(c => KALSHI_SERIES[c.symbol])
+        .map(c => c.symbol.toUpperCase());
+      if (S.config.enableBorderGuard) {
+        S.borderProximityCache = await loadBorderProximityCache(syms, S.config.borderLookbackBets);
+        logger.debug({ borderProximityCache: Object.fromEntries(S.borderProximityCache) },
+          "[kalshi-bot] border-proximity cache refreshed");
+      }
+      S.regimeCache = await loadRegimeCache(syms, S.config.borderLookbackBets);
+      S.regimeCacheWindow = windowKey;
+      S.borderProximityCacheWindow = windowKey;
+      logger.debug({ regimeCache: Object.fromEntries(S.regimeCache) },
+        "[kalshi-bot] regime cache refreshed");
+    } catch (err) {
+      logger.warn({ err, windowKey },
+        "[kalshi-bot] regime/border cache refresh failed — using stale values; will retry next tick");
+      // Do NOT update window keys — next tick will retry the refresh.
     }
-    S.regimeCache = await loadRegimeCache(syms, S.config.borderLookbackBets);
-    S.regimeCacheWindow = windowKey;
-    S.borderProximityCacheWindow = windowKey;
-    logger.debug({ regimeCache: Object.fromEntries(S.regimeCache) },
-      "[kalshi-bot] regime cache refreshed");
   }
 
   // Conviction mode: proactively refresh Kalshi bid/ask prices for every coin
@@ -2646,6 +2671,12 @@ export async function runBotLoopTick(): Promise<void> {
       windowDirectionCounts.set(dir, (windowDirectionCounts.get(dir) ?? 0) + 1);
     }
   }
+  } catch (err) {
+    // Catch-all: an unhandled error inside the tick body (e.g. a DB call with
+    // no local try/catch that throws on pool exhaustion) would otherwise abort
+    // the tick silently.  Log it clearly so the cause is visible in logs, then
+    // let the finally block reset tickInFlight so the next tick can proceed.
+    logger.error({ err }, "[kalshi-bot] TICK ABORT — unhandled error in runBotLoopTick; coin loop skipped this tick");
   } finally {
     // Clear the shadow-QH bypass flag unconditionally — it is safe to call even
     // when the flag was never set (setShadowQhBypass(false) is a no-op there).
