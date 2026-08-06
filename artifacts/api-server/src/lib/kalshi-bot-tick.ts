@@ -2494,7 +2494,13 @@ async function _runBotTick(
         logger.info({ sym }, "[kalshi-bot] conviction direction guard: max-bet token restored");
       }
       // Surface the block to the dashboard: mark this coin as direction-blocked.
-      convictionDirectionGuardBlockedMap.set(sym, direction);
+      convictionDirectionGuardBlockedMap.set(sym, {
+        direction,
+        gate: "tick",
+        lookback: _dirLookback,
+        fromPrice: _dir.fromPrice,
+        toPrice: _dir.toPrice,
+      });
       logger.warn(
         {
           sym, direction, windowKey,
@@ -2558,7 +2564,14 @@ async function _runBotTick(
         maxBetWindowToken.remaining++;
         logger.info({ sym }, "[kalshi-bot] conviction candle-slope gate: max-bet token restored");
       }
-      convictionDirectionGuardBlockedMap.set(sym, direction);
+      const _candleGateReason: "candle-decline" | "candle-rise" = direction === "yes" ? "candle-decline" : "candle-rise";
+      convictionDirectionGuardBlockedMap.set(sym, {
+        direction,
+        gate: _candleGateReason,
+        slopePct: _candleGate.slopePct ?? undefined,
+        effectiveThreshold: _candleGate.effectiveThreshold,
+        lookback: _candleLookback,
+      });
       const _reason = direction === "yes" ? "conviction-candle-decline" : "conviction-candle-rise";
       logger.warn(
         {

@@ -233,7 +233,22 @@ export const convictionPriceTicks = new Map<string, Array<{ price: number; ts: n
 // (XRP filled 4× out of zone in one window on 2026-07-13).
 export const convictionEmergencyCloses = new Map<string, number>();
 
-export const convictionDirectionGuardBlockedMap = new Map<string, "yes" | "no">();
+export interface ConvictionDirectionBlockInfo {
+  direction: "yes" | "no";
+  /** Which gate fired: 7-second tick slope ("tick") or multi-candle slope ("candle-decline" | "candle-rise") */
+  gate: "tick" | "candle-decline" | "candle-rise";
+  /** Candle-gate: slope % over the lookback window (positive = rising, negative = falling) */
+  slopePct?: number;
+  /** Effective threshold used by the gate (may be ATR-scaled) */
+  effectiveThreshold?: number;
+  /** Number of candles / seconds in the lookback */
+  lookback?: number;
+  /** Tick-gate: price at start of the tick window */
+  fromPrice?: number;
+  /** Tick-gate: price at end of the tick window */
+  toPrice?: number;
+}
+export const convictionDirectionGuardBlockedMap = new Map<string, ConvictionDirectionBlockInfo>();
 export const convictionBoostWindowCoins = new Set<string>();
 // Global per-window max-bet token.  Rolled ONCE at window transition; a coin
 // claims it by decrementing to 0.  At 100% probability exactly 1 max bet slot

@@ -313,7 +313,7 @@ export default function BotDashboard() {
     coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
     coinTrajectory?: Record<string, import("./bot/types").TrajectoryGateResult>;
     extremeCautionAborted?: string[];
-    convictionDirectionBlocked?: Record<string, "yes" | "no">;
+    convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
     activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
   }>({
     queryKey: ["bot-pipeline-status"],
