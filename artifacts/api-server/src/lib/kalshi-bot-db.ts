@@ -895,18 +895,21 @@ const tickInFlight = new Set<string>();
  */
 const QH_MIN_BETS = 5;
 
-export async function runQuietHoursAutoTune(): Promise<void> {
+export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise<void> {
   const qhv2 = S.config.quietHoursV2;
   // autoTuneEnabled defaults to true (undefined → on); set explicitly to false to disable.
   if (!qhv2?.enabled || qhv2.autoTuneEnabled === false) return;
 
   // Respect the configured interval (default 2h).  The scheduler polls every
   // 30 min so this guard prevents over-running during short-interval schedules.
-  const intervalHours = Math.max(1, Math.min(12, qhv2.autoTuneIntervalHours ?? 2));
-  const intervalMs    = intervalHours * 60 * 60_000;
-  if (S.autoTuneQHLastRunAt) {
-    const elapsed = Date.now() - new Date(S.autoTuneQHLastRunAt).getTime();
-    if (elapsed < intervalMs) return;
+  // Pass force:true to bypass this guard (e.g. manual "Run now" from the UI).
+  if (!opts?.force) {
+    const intervalHours = Math.max(1, Math.min(12, qhv2.autoTuneIntervalHours ?? 2));
+    const intervalMs    = intervalHours * 60 * 60_000;
+    if (S.autoTuneQHLastRunAt) {
+      const elapsed = Date.now() - new Date(S.autoTuneQHLastRunAt).getTime();
+      if (elapsed < intervalMs) return;
+    }
   }
 
   const days      = Math.min(90, Math.max(1, qhv2.autoTuneDays      ?? 14));

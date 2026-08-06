@@ -1393,6 +1393,22 @@ router.get("/crypto/bot/performance-report", (req, res) => {
   }
 });
 
+// POST /crypto/bot/quiet-hours-auto-tune/run — force-run auto-tune immediately (bypasses interval guard)
+router.post("/crypto/bot/quiet-hours-auto-tune/run", requireAuth, async (_req, res) => {
+  try {
+    await runQuietHoursAutoTune({ force: true });
+    const S = getBotState();
+    res.json({
+      ok: true,
+      lastRunAt:     S.autoTuneQHLastRunAt     ?? null,
+      lastChanges:   S.autoTuneQHLastChanges   ?? null,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
 // GET /crypto/bot/auto-tune-log?limit=20 — recent auto-tune mutations (public)
 router.get("/crypto/bot/auto-tune-log", async (req, res) => {
   const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));

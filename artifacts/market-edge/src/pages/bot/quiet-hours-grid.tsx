@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@clerk/react";
-import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar, X } from "lucide-react";
+import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar, X, Check, AlertCircle } from "lucide-react";
 import type { QuietHoursV2, QuietHoursAnalysis, QuietHoursHourStat } from "./types";
 import { utcToEst, ET_LABEL, API_BASE, getEtUtcOffset } from "./utils";
 
@@ -68,6 +68,8 @@ interface HourCellProps {
   mode: "silenced" | "reduced" | "active";
   winRatePct: number | null;
   totalBets: number;
+  wins: number;
+  losses: number;
   totalPnl: number;
   reducedPct: number | undefined;
   isCurrentHour: boolean;
@@ -81,6 +83,8 @@ function HourCell({
   mode,
   winRatePct,
   totalBets,
+  wins,
+  losses,
   totalPnl,
   reducedPct,
   isCurrentHour,
@@ -148,19 +152,21 @@ function HourCell({
         {winRatePct != null ? `${winRatePct}%` : "—"}
       </div>
 
-      {/* Bet count + PnL */}
-      <div className="text-[9px] text-muted-foreground/50 leading-none">
+      {/* Win / loss record */}
+      <div className="text-[9px] leading-none">
         {totalBets > 0 ? (
-          <>
-            {totalBets}b
+          <span className="flex items-center gap-0.5">
+            <span className="text-emerald-400/70">{wins}W</span>
+            <span className="text-muted-foreground/30">·</span>
+            <span className="text-red-400/60">{losses}L</span>
             {totalPnl !== 0 && (
-              <span className={totalPnl >= 0 ? "text-emerald-400/60" : "text-red-400/60"}>
-                {" "}{totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+              <span className={`ml-0.5 ${totalPnl >= 0 ? "text-emerald-400/50" : "text-red-400/50"}`}>
+                {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
               </span>
             )}
-          </>
+          </span>
         ) : (
-          <span className="opacity-40">no data</span>
+          <span className="opacity-30">no data</span>
         )}
       </div>
 
@@ -272,6 +278,32 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   const [analysis, setAnalysis] = useState<QuietHoursAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Auto-tune "Run now" state ─────────────────────────────────────────────
+  const [atRunState, setAtRunState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [atRunError, setAtRunError] = useState<string | null>(null);
+
+  const runAutoTuneNow = useCallback(async () => {
+    setAtRunState("running");
+    setAtRunError(null);
+    try {
+      const token = await getToken();
+      const resp = await fetch(`${API_BASE}/crypto/bot/quiet-hours-auto-tune/run`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setAtRunState("done");
+      // Re-fetch so the grid immediately reflects any silencing changes
+      fetchAnalysis(selectedDow);
+      setTimeout(() => setAtRunState("idle"), 4_000);
+    } catch (e) {
+      setAtRunError(e instanceof Error ? e.message : "Failed");
+      setAtRunState("error");
+      setTimeout(() => setAtRunState("idle"), 5_000);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getToken, selectedDow]);
 
   // selectedDow defaults to today's ET day (not UTC day).
   // At 9:54 PM EDT Wednesday, getUTCDay() returns 4 (Thursday) because
@@ -483,6 +515,8 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
                     mode={hourMode(h, value, selectedDow)}
                     winRatePct={stat?.winRatePct ?? null}
                     totalBets={stat?.totalBets ?? 0}
+                    wins={stat?.wins ?? 0}
+                    losses={stat?.losses ?? 0}
                     totalPnl={stat?.totalPnl ?? 0}
                     reducedPct={reducedPct}
                     isCurrentHour={h === currentUtcHour}
@@ -556,10 +590,35 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             </>
           )}
 
+          {/* Run now button */}
+          {value.autoTuneEnabled !== false && (
+            <button
+              onClick={runAutoTuneNow}
+              disabled={atRunState === "running"}
+              className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-md border transition-all ${
+                atRunState === "done"
+                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                  : atRunState === "error"
+                  ? "border-red-500/50 bg-red-500/10 text-red-400"
+                  : "border-slate-500/30 text-muted-foreground hover:text-foreground hover:border-slate-400/50 disabled:opacity-50"
+              }`}
+              title="Force-run auto-tune now, bypassing the interval timer"
+            >
+              {atRunState === "running" && <RefreshCw className="w-3 h-3 animate-spin" />}
+              {atRunState === "done"    && <Check className="w-3 h-3" />}
+              {atRunState === "error"   && <AlertCircle className="w-3 h-3" />}
+              {atRunState === "idle"    && <RefreshCw className="w-3 h-3" />}
+              {atRunState === "running" ? "Running…"
+                : atRunState === "done" ? "Done"
+                : atRunState === "error" ? (atRunError ?? "Error")
+                : "Run now"}
+            </button>
+          )}
+
           {/* Last-run status */}
           {autoTuneLastRunAt && (
             <span className="text-[11px] text-muted-foreground/60 ml-auto flex items-center gap-1.5">
-              Last auto-tune {formatAgo(autoTuneLastRunAt)}
+              Last run {formatAgo(autoTuneLastRunAt)}
               {autoTuneLastChanges && (autoTuneLastChanges.silenced.length > 0 || autoTuneLastChanges.unsilenced.length > 0) ? (
                 <span className="text-amber-400">
                   · silenced {autoTuneLastChanges.silenced.length}, unsilenced {autoTuneLastChanges.unsilenced.length}
