@@ -279,6 +279,14 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // selectedDow defaults to today's ET day (not UTC day).
+  // At 9:54 PM EDT Wednesday, getUTCDay() returns 4 (Thursday) because
+  // it's already 1:54 AM UTC Thursday — but the user expects Wednesday's tab.
+  const [selectedDow, setSelectedDow] = useState<number>(() => {
+    const etMs = Date.now() - getEtUtcOffset() * 3_600_000;
+    return new Date(etMs).getUTCDay();
+  });
+
   // ── Auto-tune "Run now" state ─────────────────────────────────────────────
   const [atRunState, setAtRunState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [atRunError, setAtRunError] = useState<string | null>(null);
@@ -304,14 +312,6 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getToken, selectedDow]);
-
-  // selectedDow defaults to today's ET day (not UTC day).
-  // At 9:54 PM EDT Wednesday, getUTCDay() returns 4 (Thursday) because
-  // it's already 1:54 AM UTC Thursday — but the user expects Wednesday's tab.
-  const [selectedDow, setSelectedDow] = useState<number>(() => {
-    const etMs = Date.now() - getEtUtcOffset() * 3_600_000;
-    return new Date(etMs).getUTCDay();
-  });
 
   const currentUtcHour = new Date().getUTCHours();
 
