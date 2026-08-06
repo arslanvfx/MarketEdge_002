@@ -57,7 +57,7 @@ import {
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   windowRandomizerUsedValues,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
-  convictionAbortCooldown, convictionDirectionGuardBlockedMap,
+  convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -1993,13 +1993,14 @@ async function _runBotTick(
           : 1 - pYesBid;
       if (pollerRefPrice < lockPrice - 0.005 || pollerRefPrice > lockPriceCap + 0.005) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
         if (boostBetSize != null) {
           maxBetWindowToken.remaining++;
           logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book, poller out of zone)");
         }
         logger.info(
-          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap },
-          "[kalshi-bot] conviction live-price gate: empty book — poller price out of zone, releasing lock for retry",
+          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap, cooldownMs: CONVICTION_ABORT_COOLDOWN_MS },
+          "[conviction-diag] tick-time price miss: empty book poller out of zone — abort cooldown set",
         );
         return;
       }
@@ -2110,19 +2111,23 @@ async function _runBotTick(
     if (belowFloor) {
       // Price reversed back through the entry floor — abort and clear lock so
       // a future tick can re-evaluate if price recovers into the zone.
+      // Set abort cooldown so the loop does not immediately re-dispatch while
+      // the conviction poller has not yet pushed a fresh in-zone reading through.
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
       if (boostBetSize != null) {
         maxBetWindowToken.remaining++;
         logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (price reversed below floor)");
       }
-      logger.warn(
+      logger.info(
         {
           sym, direction, windowKey,
           freshRefPrice: freshRefPrice != null ? +freshRefPrice.toFixed(4) : null,
           lockPrice, lockPriceCap, gateBuffer: GATE_BUFFER,
           freshYesAsk, freshYesBid,
+          cooldownMs: CONVICTION_ABORT_COOLDOWN_MS,
         },
-        "[kalshi-bot] conviction live-price gate: price reversed below floor — order aborted",
+        "[conviction-diag] tick-time price miss: reversed below floor — abort cooldown set",
       );
       return;
     }
@@ -2131,18 +2136,21 @@ async function _runBotTick(
       // Price has moved PAST the cap — entry window missed, strict enforcement.
       // Abort and release the once-per-window lock so a future tick can
       // re-evaluate if price pulls back into [lockPrice, lockPriceCap].
+      // Set abort cooldown to prevent immediate re-dispatch.
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+      convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
       if (boostBetSize != null) {
         maxBetWindowToken.remaining++;
         logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (price past cap)");
       }
-      logger.warn(
+      logger.info(
         {
           sym, direction, windowKey,
           freshRefPrice: +freshRefPrice.toFixed(4),
           lockPrice, lockPriceCap,
+          cooldownMs: CONVICTION_ABORT_COOLDOWN_MS,
         },
-        "[kalshi-bot] conviction live-price gate: price past cap — order aborted",
+        "[conviction-diag] tick-time price miss: price past cap — abort cooldown set",
       );
       return;
     }
@@ -2181,19 +2189,21 @@ async function _runBotTick(
       const yesAskBounceThreshold = computeNoAskBounceThreshold(lockPrice, S.config.extremeCautionEnabled ?? false);
       if (freshYesAsk > yesAskBounceThreshold) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
         if (boostBetSize != null) {
           maxBetWindowToken.remaining++;
           logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (NO cross-check abort)");
         }
-        logger.warn(
+        logger.info(
           {
             sym, direction, windowKey,
             freshYesAsk: +freshYesAsk.toFixed(4),
             freshYesBid: freshYesBid != null ? +freshYesBid.toFixed(4) : null,
             yesAskBounceThreshold: +yesAskBounceThreshold.toFixed(4),
             lockPrice, lockPriceCap,
+            cooldownMs: CONVICTION_ABORT_COOLDOWN_MS,
           },
-          "[kalshi-bot] conviction live-price gate: NO cross-check — YES ask bounced above target; order aborted",
+          "[conviction-diag] tick-time price miss: NO cross-check YES ask bounced above target — abort cooldown set",
         );
         return;
       }
@@ -2228,19 +2238,21 @@ async function _runBotTick(
       );
       if (bidAbort.abort) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
         if (boostBetSize != null) {
           maxBetWindowToken.remaining++;
           logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (YES cross-check abort)");
         }
-        logger.warn(
+        logger.info(
           {
             sym, direction, windowKey,
             freshYesBid: +freshYesBid.toFixed(4),
             freshYesAsk: freshYesAsk != null ? +freshYesAsk.toFixed(4) : null,
             yesBidDropThreshold: +lockPrice.toFixed(4),
             lockPrice, lockPriceCap,
+            cooldownMs: CONVICTION_ABORT_COOLDOWN_MS,
           },
-          "[kalshi-bot] conviction live-price gate: YES cross-check — bid below zone floor; order aborted (no sub-zone fills possible when bid >= lockPrice)",
+          "[conviction-diag] tick-time price miss: YES cross-check bid below zone floor — abort cooldown set",
         );
         if (bidAbort.populateECSet) {
           extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
@@ -2265,19 +2277,21 @@ async function _runBotTick(
       const noAskCeiling = computeExtremeCautionNoAskCeiling(lockPrice);
       if (freshNoAsk > noAskCeiling) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
         if (boostBetSize != null) {
           maxBetWindowToken.remaining++;
         }
         extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
-        logger.warn(
+        logger.info(
           {
             sym, windowKey, direction,
             freshNoAsk: +freshNoAsk.toFixed(4),
             noAskCeiling: +noAskCeiling.toFixed(4),
             freshYesBid: +freshYesBid.toFixed(4),
             lockPrice,
+            cooldownMs: CONVICTION_ABORT_COOLDOWN_MS,
           },
-          "[kalshi-bot] extreme caution: YES entry aborted — NO ask (complement) above zone ceiling; YES re-entry blocked for rest of window",
+          "[conviction-diag] tick-time price miss: extreme caution NO ask complement above ceiling — abort cooldown set; YES re-entry blocked for rest of window",
         );
         return;
       }

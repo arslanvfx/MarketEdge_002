@@ -1424,12 +1424,18 @@ export async function runBotLoopTick(): Promise<void> {
     }
     // Abort cooldown: after a live-gate "price moved outside window" abort, skip
     // re-entry for CONVICTION_ABORT_COOLDOWN_MS (10 s) while the 1 s conviction
-    // poller refreshes the cache.  Prevents a second abort loop if the bot-loop
-    // tick fires before the poller has pushed a fresh price through.
+    // poller refreshes the cache.  Prevents the dispatch-loop from re-queuing the
+    // same coin every second while the price oscillates at the zone boundary
+    // (e.g. ZEC sitting at 81.5¢ with lockPrice=82¢ — dispatched every tick,
+    // rejected by live-price gate, released, dispatched again → zero bets).
     if (isConviction) {
       const abortedAt = convictionAbortCooldown.get(`${sym}:${windowKey}`);
       if (abortedAt != null && Date.now() - abortedAt < CONVICTION_ABORT_COOLDOWN_MS) {
         const remainingS = Math.ceil((CONVICTION_ABORT_COOLDOWN_MS - (Date.now() - abortedAt)) / 1_000);
+        logger.info(
+          { sym, windowKey, remainingS, cooldownMs: CONVICTION_ABORT_COOLDOWN_MS },
+          "[conviction-diag] tick-time price miss — cooldown active, suppressing dispatch",
+        );
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: abort cooldown (${remainingS}s remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
       }
