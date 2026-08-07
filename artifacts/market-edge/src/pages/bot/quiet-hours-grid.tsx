@@ -413,10 +413,14 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   const suggestedHours  = computeSuggestedHours(activeHourStats);
   const silencedCount   = countDaySilenced(value, selectedDow);
 
+  // Build UTC-hour arrays for each ET time band.
+  // utcToEst converts UTC→ET, so ET hour X = UTC hour (X + etOffset) % 24.
+  // Without this, UTC 0-7 renders as ET 8PM-3AM (EDT) — labelled as "12a-8a" — wrong.
+  const etOffset = getEtUtcOffset(); // 4=EDT, 5=EST
   const rows = [
-    Array.from({ length: 8 }, (_, i) => i),
-    Array.from({ length: 8 }, (_, i) => i + 8),
-    Array.from({ length: 8 }, (_, i) => i + 16),
+    Array.from({ length: 8 }, (_, i) => (i + etOffset) % 24),        // ET 12a–8a
+    Array.from({ length: 8 }, (_, i) => (i + 8 + etOffset) % 24),    // ET 8a–4p
+    Array.from({ length: 8 }, (_, i) => (i + 16 + etOffset) % 24),   // ET 4p–12a
   ];
 
   return (
