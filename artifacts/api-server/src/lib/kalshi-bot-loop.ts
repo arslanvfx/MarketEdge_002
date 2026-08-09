@@ -1518,7 +1518,10 @@ export async function runBotLoopTick(): Promise<void> {
       continue;
     }
 
-    if (!S.config.allowLateEntries) {
+    // Conviction mode always allows late entries: the whole point is to catch a
+    // zone re-entry even with 1–3 min left in the window. The floors otherwise
+    // stop monitoring ~min 12+ and a blocked coin could never retry late.
+    if (!S.config.allowLateEntries && !isConviction) {
       const minRem = S.config.minRemainingMinutes ?? 0;
       if (minRem > 0 && 15 * 60 - clockElapsedS < minRem * 60) {
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining, clock=${Math.floor(clockElapsedS)}s elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -2330,6 +2333,10 @@ export async function runBotLoopTick(): Promise<void> {
         thresholdPct:    getEffectiveProximityThreshold(sym, S.config),
         atrPct:          _proxAtrPct,
         atrScaleEnabled: S.config.strikeProximityAtrScale ?? true,
+        // Must match the tick-time re-check cap (1.2×). The default cap here
+        // was 2×, so Phase 3 could block a coin that the tick re-check would
+        // have allowed — the coin never even got dispatched.
+        atrMultiplierCap: 1.2,
       });
       if (_prox.blocked) {
         logger.info(

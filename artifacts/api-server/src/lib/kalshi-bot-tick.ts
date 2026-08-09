@@ -631,7 +631,7 @@ async function _runBotTick(
   // Bypassed entirely when allowLateEntries=true (conviction mode design: the
   // price crossing happens near settlement; blocking it defeats the purpose).
   // The hard pre-order floor below is also bypassed when allowLateEntries=true.
-  if (!S.config.allowLateEntries) {
+  if (!S.config.allowLateEntries && S.config.decisionMode !== "conviction") {
     const minRemaining = S.config.minRemainingMinutes ?? 0;
     if (minRemaining > 0 && 15 * 60 - secondsElapsed < minRemaining * 60) {
       logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping tick early");
@@ -1687,7 +1687,7 @@ async function _runBotTick(
   //
   // secondsElapsedNow / secondsRemainingNow / nowMs / windowStartMs are declared
   // earlier (before the time-bet schedule block) so they are also available here.
-  if (!S.config.allowLateEntries) {
+  if (!S.config.allowLateEntries && S.config.decisionMode !== "conviction") {
     const hardFloorS = (S.config.minRemainingMinutes ?? 0) * 60;
     if (hardFloorS > 0 && secondsRemainingNow < hardFloorS) {
       logger.warn(
@@ -1947,6 +1947,15 @@ async function _runBotTick(
       // Treat a ticker mismatch exactly like an OB timeout: skip the tick so
       // the next 1-second tick can retry with a hopefully-corrected poller.
       if (pollerSnap?.ticker != null && pollerSnap.ticker !== expectedTicker) {
+        // Release the once-per-window lock and restore the max-bet token —
+        // exactly like the OB-timeout and one-sided-poller branches. Without
+        // this, a single ticker mismatch permanently locked the coin out for
+        // the rest of the window AND leaked the max-bet slot.
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+          logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (poller ticker mismatch)");
+        }
         logger.warn(
           { sym, direction, windowKey, expectedTicker, pollerTicker: pollerSnap.ticker },
           "[kalshi-bot] conviction live-price gate: poller ticker mismatch — skipping tick, will retry next second",

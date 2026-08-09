@@ -96,4 +96,5 @@
 - [Conviction mode — pure reactive FOK](conviction-mode-reactive.md) — no GTC, no model veto, no pre-entry zone; fires FOK at yesPrice≥lockPrice (YES) or ≤1-lockPrice (NO); ConvictionInputs has only yesPrice/lockPrice/minConfidence
 - [Conviction stability gate](conviction-stability-gate.md) — replaces random roll; stable=ER≥0.30+osc≤8+vol≤3%+ML≥52%+no spike → max bet; volatile → regular; coinStabilityCache Map in state; board shows per-coin conditions
 - [Max-bet pre-selection](max-bet-pre-selection.md) — best stable coin wins token deterministically (ER×100−osc×1.5+mlConf×0.3−vol×10); set before parallel dispatch; guard in IIFE before token claim
+- [Conviction late-window retry](conviction-late-retry.md) — conviction bypasses all min-remaining floors; every live-gate abort must release lock+token (ticker-mismatch leaked both); proximity gate atrMultiplierCap must be 1.2 at ALL call sites
 - [Conviction ROI gate bypass](conviction-roi-gate-bypass.md) — roi-too-low SKIP in makeBotDecision must be gated on `decisionMode !== "conviction"`; kills ALL bets when market prices a direction strongly
