@@ -5,7 +5,6 @@ import React from "react";
 import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode, QuietHoursV2 } from "./types";
 import { QuietHoursGrid } from "./quiet-hours-grid";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
-import { PhaseTracker } from "./phase-tracker";
 
 const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC"];
 
@@ -638,7 +637,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       No spot-price math. Models are soft advisors; a bet only skips if ALL available models unanimously oppose that direction.
                       Bot re-checks every 5 seconds so a cross at any point in the window is caught quickly.
                     </span>
-                    <PhaseTracker onConfigSaved={saveConfig} />
                     {(() => {
                       const floor = merged.kalshiLockPrice    ?? 0.82;
                       const cap   = merged.kalshiLockPriceCap ?? 0.91;

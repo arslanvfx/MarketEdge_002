@@ -21,8 +21,6 @@ import {
   getBacktestModes,
   getConvictionThresholdAnalysis,
   getConvictionStabilityAnalysis,
-  getPhaseStatus,
-  SCALE_PHASE_PRESETS,
   clearAllPauses,
   getCoinGuardState,
   placeManualOrder,
@@ -687,8 +685,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionDailyLossLimit,
     convictionMinEntryMinutes,
     convictionMaxDailySpend,
-    scalePhase,
-    phaseStartedAt,
     convictionBoostBetSize,
     convictionBoostProbability,
     convictionBoostMinWinRate,
@@ -792,8 +788,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionDailyLossLimit?: number;
     convictionMinEntryMinutes?: number;
     convictionMaxDailySpend?: number;
-    scalePhase?: number;
-    phaseStartedAt?: string | null;
     convictionBoostBetSize?: number;
     convictionBoostProbability?: number;
     convictionBoostMinWinRate?: number;
@@ -1088,12 +1082,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionMaxDailySpend === "number" && convictionMaxDailySpend >= 0) {
     partial.convictionMaxDailySpend = convictionMaxDailySpend > 0 ? convictionMaxDailySpend : undefined;
-  }
-  if (typeof scalePhase === "number" && [1, 2, 3].includes(scalePhase)) {
-    partial.scalePhase = scalePhase;
-  }
-  if (phaseStartedAt === null || (typeof phaseStartedAt === "string" && phaseStartedAt.length > 0)) {
-    partial.phaseStartedAt = phaseStartedAt;
   }
   // 0 = disabled; > 0 enables boost for that dollar amount
   if (typeof convictionBoostBetSize === "number" && convictionBoostBetSize >= 0) {
@@ -1901,92 +1889,6 @@ router.post("/crypto/bot/reset-live-stats", requireAuth, async (_req, res) => {
     const { config } = await updateBotConfig({ liveStatsResetAt: now, paperStatsResetAt: now });
     const resetResult = resetWindowConditions();
     res.json({ ok: true, liveStatsResetAt: config.liveStatsResetAt, paperStatsResetAt: config.paperStatsResetAt, guardReset: resetResult });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown error";
-    res.status(500).json({ error: msg });
-  }
-});
-
-// GET /crypto/bot/phase-status — current scaling phase progress (live bets only)
-router.get("/crypto/bot/phase-status", requireAuth, async (_req, res) => {
-  try {
-    const { config } = getBotState();
-    const phase = config.scalePhase ?? 1;
-    const phaseStartedAt = config.phaseStartedAt ?? null;
-    const status = await getPhaseStatus(phase, phaseStartedAt);
-    res.json(status);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown error";
-    res.status(500).json({ error: msg });
-  }
-});
-
-// POST /crypto/bot/advance-phase — advance to the next scaling phase.
-// Updates betSize + maxBetSize to the next phase preset and resets phaseStartedAt.
-// Requires all current phase gates to pass; returns 409 if gates unmet.
-router.post("/crypto/bot/advance-phase", requireAuth, async (_req, res) => {
-  try {
-    const { config } = getBotState();
-    const phase = config.scalePhase ?? 1;
-    const phaseStartedAt = config.phaseStartedAt ?? null;
-
-    if (phase >= 3) {
-      return res.status(400).json({ error: "Already at final phase (Phase 3)" });
-    }
-
-    const status = await getPhaseStatus(phase, phaseStartedAt);
-    if (!status.allPassed) {
-      return res.status(409).json({
-        error: "Phase gate requirements not yet met",
-        status,
-      });
-    }
-
-    const nextPhase = phase + 1;
-    const nextPreset = SCALE_PHASE_PRESETS.find(p => p.phase === nextPhase);
-    if (!nextPreset) return res.status(500).json({ error: "No preset for next phase" });
-
-    const { config: updated } = await updateBotConfig({
-      scalePhase: nextPhase,
-      phaseStartedAt: new Date().toISOString(),
-      betSize: nextPreset.betSize,
-      maxBetSize: nextPreset.maxBetSize,
-    });
-
-    res.json({
-      ok: true,
-      newPhase: nextPhase,
-      betSize: nextPreset.betSize,
-      maxBetSize: nextPreset.maxBetSize,
-      phaseStartedAt: updated.phaseStartedAt,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown error";
-    res.status(500).json({ error: msg });
-  }
-});
-
-// POST /crypto/bot/reset-phase — manually reset the phase tracker start time
-// without changing the phase number (useful to re-baseline after a bad run).
-router.post("/crypto/bot/reset-phase", requireAuth, async (req, res) => {
-  try {
-    const { phase } = req.body as { phase?: number };
-    const newPhase = typeof phase === "number" && [1, 2, 3].includes(phase) ? phase : undefined;
-    const preset = newPhase != null
-      ? SCALE_PHASE_PRESETS.find(p => p.phase === newPhase)
-      : undefined;
-
-    const patch: Parameters<typeof updateBotConfig>[0] = {
-      phaseStartedAt: new Date().toISOString(),
-    };
-    if (newPhase != null) patch.scalePhase = newPhase;
-    if (preset) {
-      patch.betSize = preset.betSize;
-      patch.maxBetSize = preset.maxBetSize;
-    }
-
-    await updateBotConfig(patch);
-    res.json({ ok: true, phase: newPhase, phaseStartedAt: patch.phaseStartedAt });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

@@ -38,8 +38,6 @@ export {
   backtestModeApproval,
   getConvictionThresholdAnalysis,
   getConvictionStabilityAnalysis,
-  getPhaseStatus,
-  SCALE_PHASE_PRESETS,
   getBotGapAnalytics,
 } from "./kalshi-bot-analytics";
 export type { GapBandRow, GapAnalyticsResult } from "./kalshi-bot-analytics";
@@ -52,7 +50,6 @@ export type {
   StabilityThresholdRow,
   StabilityDimensionAnalysis,
   ConvictionStabilityAnalysis,
-  PhaseStatus,
 } from "./kalshi-bot-analytics";
 
 // ---------------------------------------------------------------------------
