@@ -18,6 +18,7 @@ import { getSectorMomentum } from "../lib/stock/scanner";
 import { lookupUniverse, STOCK_UNIVERSE, SECTORS } from "../lib/stock/universe";
 import { mlStatus } from "../lib/stock/ml";
 import { runBotCycle, botStatus, manualClosePosition } from "../lib/stock/bot";
+import { runBacktest } from "../lib/stock/backtest";
 import {
   listWatchlist,
   addWatchlist,
@@ -227,6 +228,7 @@ router.put("/stocks/bot/config", requireAuth, async (req, res) => {
     "swingMaxHoldDays", "longMaxHoldDays", "earningsBlackout", "earningsBlackoutHours",
     "newsSensitivity", "sectorFocus", "maxPositionDollars",
     "dynamicSizing", "minMarketCapBillion", "maxSectorPct",
+    "aiEnabled", "atrStops", "atrStopMult", "atrTargetMult", "riskPerTradePct",
   ];
   const partial: Partial<StockBotConfig> = {};
   for (const k of allowed) {
@@ -237,6 +239,46 @@ router.put("/stocks/bot/config", requireAuth, async (req, res) => {
     res.json({ config: cfg });
   } catch {
     res.status(500).json({ error: "Failed to save config" });
+  }
+});
+
+// Offline stat-signal replay over historical bars (narrow simulation of the
+// core statistical signal + ATR exits — not the full live AI-off pipeline;
+// see lib/stock/backtest.ts scope note).
+// Body: { tickers?: string[], minConfidence?, atrStops?, atrStopMult?, atrTargetMult?, stopPct?, targetPct?, bars?, timeframe? }
+router.post("/stocks/bot/backtest", requireAuth, async (req, res) => {
+  try {
+    if (!alpacaConfigured()) {
+      res.status(400).json({ error: "Broker not configured — historical bars unavailable" });
+      return;
+    }
+    const body = req.body ?? {};
+    let tickers: string[] = Array.isArray(body.tickers)
+      ? body.tickers.map((t: unknown) => String(t).toUpperCase().trim()).filter(Boolean)
+      : [];
+    if (tickers.length === 0) {
+      // Default: top upward scanner names, else a liquid large-cap sample.
+      tickers = (await getScannerResults())
+        .filter((r) => r.direction === "up")
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10)
+        .map((r) => r.ticker);
+      if (tickers.length === 0) tickers = ["AAPL", "MSFT", "NVDA", "AMZN", "META"];
+    }
+    const result = await runBacktest({
+      tickers,
+      timeframe: typeof body.timeframe === "string" ? body.timeframe : undefined,
+      bars: typeof body.bars === "number" ? body.bars : undefined,
+      minConfidence: typeof body.minConfidence === "number" ? body.minConfidence : undefined,
+      atrStops: typeof body.atrStops === "boolean" ? body.atrStops : undefined,
+      atrStopMult: typeof body.atrStopMult === "number" ? body.atrStopMult : undefined,
+      atrTargetMult: typeof body.atrTargetMult === "number" ? body.atrTargetMult : undefined,
+      stopPct: typeof body.stopPct === "number" ? body.stopPct : undefined,
+      targetPct: typeof body.targetPct === "number" ? body.targetPct : undefined,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: "Backtest failed" });
   }
 });
 
@@ -412,6 +454,22 @@ router.get("/stocks/bot/performance", async (_req, res) => {
       ? tradePoints
       : [{ date: anchor, cumPnl: 0 }, ...tradePoints];
 
+    // Extra analytics: slippage / regime / drawdown from stored entryContext.
+    const extraRes = await db.execute(sql`
+      SELECT
+        AVG((signals->'entryContext'->>'slippagePct')::numeric)
+          FILTER (WHERE signals->'entryContext'->>'slippagePct' IS NOT NULL) AS avg_slippage_pct,
+        COUNT(*) FILTER (WHERE signals->'entryContext'->>'slippagePct' IS NOT NULL) AS slippage_samples,
+        COUNT(*) FILTER (WHERE signals->'entryContext'->>'regime' = 'trending' AND outcome = 'win')  AS trending_wins,
+        COUNT(*) FILTER (WHERE signals->'entryContext'->>'regime' = 'trending' AND outcome = 'loss') AS trending_losses,
+        COALESCE(SUM(pnl) FILTER (WHERE signals->'entryContext'->>'regime' = 'trending'), 0)         AS trending_pnl,
+        COUNT(*) FILTER (WHERE signals->'entryContext'->>'regime' = 'choppy' AND outcome = 'win')    AS choppy_wins,
+        COUNT(*) FILTER (WHERE signals->'entryContext'->>'regime' = 'choppy' AND outcome = 'loss')   AS choppy_losses,
+        COALESCE(SUM(pnl) FILTER (WHERE signals->'entryContext'->>'regime' = 'choppy'), 0)           AS choppy_pnl
+      FROM stock_bot_bets
+      WHERE exited_at IS NOT NULL AND mode = ${cfg.mode} AND archived_at IS NULL
+    `) as unknown as { rows: any[] };
+
     const s = ((summaryRes as any).rows ?? [])[0] ?? {};
     const totalWins = Number(s.total_wins) || 0;
     const totalLosses = Number(s.total_losses) || 0;
@@ -431,18 +489,52 @@ router.get("/stocks/bot/performance", async (_req, res) => {
       }
     }
 
+    // Max drawdown from the cumulative equity curve.
+    let peakCum = 0;
+    let maxDrawdown = 0;
+    for (const p of equityCurve) {
+      peakCum = Math.max(peakCum, p.cumPnl);
+      maxDrawdown = Math.max(maxDrawdown, peakCum - p.cumPnl);
+    }
+
+    const winRate = totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) : 0;
+    const avgWin = Number(s.avg_win) || 0;
+    const avgLoss = Number(s.avg_loss) || 0; // negative
+    // Expectancy = expected $ per trade.
+    const expectancy = winRate * avgWin + (1 - winRate) * avgLoss;
+
+    const x = ((extraRes as any).rows ?? [])[0] ?? {};
+    const regimeBucket = (w: any, l: any, p: any) => {
+      const wins = Number(w) || 0, losses = Number(l) || 0;
+      return {
+        wins, losses,
+        winRate: wins + losses > 0 ? wins / (wins + losses) : null,
+        totalPnl: parseFloat((Number(p) || 0).toFixed(2)),
+      };
+    };
+
     res.json({
       equityCurve,
       summary: {
         totalTrades: Number(s.total_trades) || 0,
-        winRate: totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) : 0,
-        avgWin: parseFloat((Number(s.avg_win) || 0).toFixed(2)),
-        avgLoss: parseFloat((Number(s.avg_loss) || 0).toFixed(2)),
+        winRate,
+        avgWin: parseFloat(avgWin.toFixed(2)),
+        avgLoss: parseFloat(avgLoss.toFixed(2)),
         bestTrade: parseFloat((Number(s.best_trade) || 0).toFixed(2)),
         worstTrade: parseFloat((Number(s.worst_trade) || 0).toFixed(2)),
         totalPnl: parseFloat((Number(s.total_pnl) || 0).toFixed(2)),
+        expectancy: parseFloat(expectancy.toFixed(2)),
+        maxDrawdown: parseFloat(maxDrawdown.toFixed(2)),
       },
       byMode,
+      byRegime: {
+        trending: regimeBucket(x.trending_wins, x.trending_losses, x.trending_pnl),
+        choppy: regimeBucket(x.choppy_wins, x.choppy_losses, x.choppy_pnl),
+      },
+      slippage: {
+        avgSlippagePct: x.avg_slippage_pct != null ? parseFloat(Number(x.avg_slippage_pct).toFixed(4)) : null,
+        samples: Number(x.slippage_samples) || 0,
+      },
     });
   } catch {
     res.status(500).json({ error: "Failed to load performance data" });

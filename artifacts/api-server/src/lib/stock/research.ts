@@ -14,6 +14,9 @@
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { stockAiPermitted } from "./ai-policy";
+import { getConfig } from "./config";
+import { isAiFeatureEnabled } from "../ai-spend";
 import { logger } from "../logger";
 import { getScoredNews } from "./news";
 import { getEarnings, getLatestEarningsSurprise } from "./earnings";
@@ -381,10 +384,21 @@ Respond with ONLY this JSON (no prose):
 Confidence rubric: 85+ = exceptional, all signals aligned; 70-84 = strong, most signals green; 55-69 = solid but mixed; 40-54 = wait for confirmation; <40 = avoid. Be skeptical by default — most stocks are noise. Only "buy_now" when technicals + fundamentals + volume ALL agree.`;
 }
 
+/**
+ * Unified stock-AI policy check at the API-call boundary. Re-evaluated
+ * immediately before EVERY Anthropic invocation so a config/spend change
+ * mid-batch stops further calls; returns false (no-call outcome) instead of
+ * throwing.
+ */
+function researchAiPermitted(): boolean {
+  return stockAiPermitted(getConfig().aiEnabled, isAiFeatureEnabled("stock_research"));
+}
+
 async function researchOne(
   ticker: string,
   ctx: ResearchTechContext,
 ): Promise<ResearchReport | null> {
+  if (!researchAiPermitted()) return null;
   const T = ticker.toUpperCase();
 
   // Structured extras: EPS surprise + upcoming earnings (best-effort).
@@ -419,6 +433,7 @@ async function researchOne(
 
   let message;
   let usedWebSearch = webSearchSupported;
+  if (!researchAiPermitted()) return null; // re-check at the call boundary
   try {
     message = await callClaude(webSearchSupported);
   } catch (err) {
@@ -601,6 +616,7 @@ Rules:
         : {}),
     });
 
+  if (!researchAiPermitted()) return null; // policy check at the call boundary
   try {
     let message: Awaited<ReturnType<typeof runCall>>;
     let usedWebSearch = webSearchSupported;

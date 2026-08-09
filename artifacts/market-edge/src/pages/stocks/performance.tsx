@@ -8,7 +8,7 @@ import { Loader2, Trophy, TrendingUp, TrendingDown } from "lucide-react";
 import { StocksShell } from "./stocks-shell";
 import {
   stockGet, fmtSignedUsd,
-  type HistoryRow, type StockPnl, type BotStatus,
+  type HistoryRow, type StockPnl, type BotStatus, type BotPerformance,
 } from "@/lib/stocks-api";
 
 interface Bucket { key: string; wins: number; losses: number; pnl: number; }
@@ -33,6 +33,11 @@ export default function StockPerformance() {
     queryKey: ["stocks-bot-status"],
     queryFn: () => stockGet("/bot/status"),
     refetchInterval: 10_000,
+  });
+  const { data: perf } = useQuery<BotPerformance>({
+    queryKey: ["stocks-bot-performance"],
+    queryFn: () => stockGet("/bot/performance"),
+    refetchInterval: 30_000,
   });
 
   // The summary cards come from /bot/pnl, which the backend scopes to the bot's
@@ -103,6 +108,32 @@ export default function StockPerformance() {
             </div>
           ))}
         </div>
+
+        {/* Risk & quality cards */}
+        {perf?.summary && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { label: "Expectancy / trade", value: fmtSignedUsd(perf.summary.expectancy ?? 0), color: (perf.summary.expectancy ?? 0) >= 0 ? "text-emerald-400" : "text-red-400" },
+              { label: "Max Drawdown", value: fmtSignedUsd(-(perf.summary.maxDrawdown ?? 0)), color: "text-amber-400" },
+              {
+                label: "Trending vs Choppy", color: "text-sky-400",
+                value: `${perf.byRegime?.trending?.winRate != null ? Math.round(perf.byRegime.trending.winRate * 100) + "%" : "—"} / ${perf.byRegime?.choppy?.winRate != null ? Math.round(perf.byRegime.choppy.winRate * 100) + "%" : "—"}`,
+                sub: "win rate by market regime",
+              },
+              {
+                label: "Avg Entry Slippage", color: "text-violet-400",
+                value: perf.slippage?.avgSlippagePct != null ? `${perf.slippage.avgSlippagePct >= 0 ? "+" : ""}${perf.slippage.avgSlippagePct.toFixed(3)}%` : "—",
+                sub: perf.slippage?.samples ? `${perf.slippage.samples} fills measured` : "no fills measured yet",
+              },
+            ].map(({ label, value, sub, color }) => (
+              <div key={label} className="bg-card border border-border rounded-lg p-4">
+                <div className="text-xs text-muted-foreground mb-1">{label}</div>
+                <div className={`text-xl font-bold ${color}`}>{value}</div>
+                {sub && <div className="text-[11px] text-muted-foreground mt-0.5">{sub}</div>}
+              </div>
+            ))}
+          </div>
+        )}
 
         {isLoading ? (
           <div className="h-40 flex items-center justify-center text-muted-foreground">

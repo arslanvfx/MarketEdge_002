@@ -26,18 +26,23 @@ const BASE_CFG: StockBotConfig = {
   minConfidence: 60,
   stopLossPct: 3,          // global fallback
   targetGainPct: 6,        // global fallback
-  dayStopLossPct: undefined,
-  dayTargetGainPct: undefined,
-  swingStopLossPct: undefined,
-  swingTargetGainPct: undefined,
-  longStopLossPct: undefined,
-  longTargetGainPct: undefined,
+  dayStopLossPct: null,
+  dayTargetGainPct: null,
+  swingStopLossPct: null,
+  swingTargetGainPct: null,
+  longStopLossPct: null,
+  longTargetGainPct: null,
   swingMaxHoldDays: 5,
   longMaxHoldDays: 30,
   earningsBlackout: true,
   earningsBlackoutHours: 24,
   newsSensitivity: 3,
   autoStartStop: true,
+  aiEnabled: true,
+  atrStops: false, // tests exercise the fixed-percent path unless stated
+  atrStopMult: 1.5,
+  atrTargetMult: 3,
+  riskPerTradePct: 0,
   sectorFocus: [],
   maxPositionDollars: null,
   dynamicSizing: false,
@@ -343,4 +348,60 @@ test("long: no exit reason when position is healthy and trending up", () => {
   // price at peak — no drawdown
   const { reason } = evaluateExitReason(params(bet, 102, {}));
   assert.equal(reason, null);
+});
+
+// ── ATR risk-engine regression tests ─────────────────────────────────────────
+// Stored hard levels (ATR-derived at entry) must be authoritative for
+// long-horizon exits; config longTargetGainPct only applies as legacy fallback.
+
+test("long: stored ATR target price triggers long_target exit", () => {
+  const cfg = { ...BASE_CFG, longTargetGainPct: null as any };
+  const bet = longBet({ targetPrice: 108 }); // ATR-derived hard target
+  const { reason } = evaluateExitReason(params(bet, 108.5, cfg));
+  assert.equal(reason, "long_target");
+});
+
+test("long: below stored target stays open (no config fallback when levels exist)", () => {
+  const cfg = { ...BASE_CFG, longTargetGainPct: 5 };
+  const bet = longBet({ targetPrice: 112 }); // stored level authoritative
+  // +6% gain would hit the config 5% fallback, but the stored 12% target rules
+  const { reason } = evaluateExitReason(params(bet, 106, cfg));
+  assert.equal(reason, null);
+});
+
+test("long: legacy row without stored target falls back to config longTargetGainPct", () => {
+  const cfg = { ...BASE_CFG, longTargetGainPct: 5 };
+  const bet = longBet({ targetPrice: null });
+  const { reason } = evaluateExitReason(params(bet, 106, cfg));
+  assert.equal(reason, "long_target");
+});
+
+test("long short-side: stored target below entry triggers long_target on the way down", () => {
+  const cfg = { ...BASE_CFG, longTargetGainPct: null as any };
+  const bet = longBet({ side: "short", targetPrice: 92 });
+  const { reason } = evaluateExitReason(params(bet, 91.5, cfg));
+  assert.equal(reason, "long_target");
+});
+
+test("long: stored ATR stop still fires via hard stop check", () => {
+  // peak close to price so the trailing check doesn't fire first
+  const bet = longBet({ stopLoss: 95, peakPrice: 96 });
+  const { reason } = evaluateExitReason(params(bet, 94.8, {}));
+  assert.equal(reason, "stop_loss");
+});
+
+test("swing: stored hard target authoritative over config swing target", () => {
+  const cfg = { ...BASE_CFG, swingTargetGainPct: 4 };
+  const bet = swingBet({ stopLoss: 97, targetPrice: 110 });
+  // +5% would hit config 4% target, but stored levels exist → stay open
+  const { reason } = evaluateExitReason(params(bet, 105, cfg));
+  assert.equal(reason, null);
+});
+
+test("swing: 1R-then-full-retrace triggers swing_trail", () => {
+  // stop dist = 3% (stopLoss 97 on entry 100). Peak 107 (>1R in the money),
+  // price retraces >3% from peak while still above entry.
+  const bet = swingBet({ stopLoss: 97, targetPrice: 120, peakPrice: 107 });
+  const { reason } = evaluateExitReason(params(bet, 103.5, {}));
+  assert.equal(reason, "swing_trail");
 });

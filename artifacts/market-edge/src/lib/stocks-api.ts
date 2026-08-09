@@ -221,6 +221,11 @@ export interface StockBotConfig {
   dynamicSizing: boolean;
   minMarketCapBillion: number;
   maxSectorPct: number;
+  aiEnabled: boolean;
+  atrStops: boolean;
+  atrStopMult: number;
+  atrTargetMult: number;
+  riskPerTradePct: number;
 }
 
 export interface AlpacaAccount {
@@ -261,8 +266,12 @@ export interface BotPerformance {
     bestTrade: number;
     worstTrade: number;
     totalPnl: number;
+    expectancy: number;
+    maxDrawdown: number;
   };
   byMode: Record<"day" | "swing" | "long", { wins: number; losses: number; totalPnl: number }>;
+  byRegime: Record<"trending" | "choppy", { wins: number; losses: number; winRate: number | null; totalPnl: number }>;
+  slippage: { avgSlippagePct: number | null; samples: number };
 }
 
 export interface BotCycleStatus {

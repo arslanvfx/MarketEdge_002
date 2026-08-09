@@ -168,4 +168,17 @@ export interface StockBotConfig {
   dynamicSizing: boolean;        // scale position size by confidence (minConf→maxCap)
   minMarketCapBillion: number;   // 0=any, 1, 5, 10 → filter micro-caps
   maxSectorPct: number;          // 0=disabled; max % of open budget in one sector
+  // ── Revamp: AI-optional + ATR risk engine ─────────────────────────────────
+  /** Master AI toggle: false = pure data/technical bot (no Claude research
+   *  gating, no Claude exit re-checks, no stance requirements). */
+  aiEnabled: boolean;
+  /** Use ATR-adaptive stops/targets instead of fixed percentages. */
+  atrStops: boolean;
+  /** Stop distance = atrPct × this multiple (clamped 0.75%–12%). */
+  atrStopMult: number;
+  /** Target distance = atrPct × this multiple (clamped 1.5%–25%). */
+  atrTargetMult: number;
+  /** Risk per trade as % of equity (0 = disabled; sizes qty so a stop-out
+   *  loses at most this much). */
+  riskPerTradePct: number;
 }

@@ -17,6 +17,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { logger } from "../logger";
 import { isAiFeatureEnabled } from "../ai-spend";
+import { stockAiPermitted } from "./ai-policy";
 import { alpacaConfigured, getSnapshots, getBars, getClock, type StockSnapshot } from "./alpaca";
 import { getMarketUniverse, getUniverseStatus, type UniverseCandidate } from "./market-universe";
 import { lookupUniverse } from "./universe";
@@ -336,7 +337,10 @@ export async function runScan(opts: { force?: boolean } = {}): Promise<{ scanned
     );
 
     // ── Tier 3: Claude + web research for the top scored tickers ────────────
-    if (isAiFeatureEnabled("stock_research")) {
+    // Unified stock-AI policy: the user's aiEnabled toggle AND the spend
+    // guard must BOTH permit research. With AI disabled, the scheduled scan
+    // performs tiers 1-2 only and makes NO Claude calls.
+    if (stockAiPermitted(getConfig().aiEnabled, isAiFeatureEnabled("stock_research"))) {
       // Only escalate BULLISH candidates (direction="up") to the research phase.
       // Bearish stocks score high on momentum too (big drops = high score), but
       // sending them to Claude produces correct "avoid" verdicts that pollute the

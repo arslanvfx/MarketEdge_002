@@ -366,6 +366,37 @@ export async function placeOrder(
   };
 }
 
+export interface OrderStatus {
+  id: string;
+  status: string; // new | partially_filled | filled | canceled | expired | rejected ...
+  filledQty: number;
+  filledAvgPrice: number | null;
+}
+
+/** Fetch current status of an order (used to confirm fills before persisting bets). */
+export async function getOrder(mode: "paper" | "live", orderId: string): Promise<OrderStatus> {
+  const data = await req<any>(`${tradingBase(mode)}/v2/orders/${encodeURIComponent(orderId)}`);
+  return {
+    id: data.id,
+    status: data.status,
+    filledQty: Number(data.filled_qty) || 0,
+    filledAvgPrice: data.filled_avg_price ? Number(data.filled_avg_price) : null,
+  };
+}
+
+/**
+ * Cancel an order. A 404 (unknown order) or 422 (already in terminal state)
+ * is treated as success — the order cannot produce further fills.
+ */
+export async function cancelOrder(mode: "paper" | "live", orderId: string): Promise<void> {
+  try {
+    await req(`${tradingBase(mode)}/v2/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
+  } catch (err) {
+    if (err instanceof Error && /Alpaca (404|422)\b/.test(err.message)) return;
+    throw err;
+  }
+}
+
 /**
  * Liquidate an entire position at market.
  *

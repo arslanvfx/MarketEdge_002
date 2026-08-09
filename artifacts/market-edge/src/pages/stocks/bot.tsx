@@ -830,6 +830,48 @@ export default function StockBot() {
               )}
             </div>
 
+            {/* AI layer */}
+            <div className="border-t border-border pt-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-sm text-foreground">Claude AI analysis</span>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    On: Claude research gates entries, boosts confidence, and re-checks exits. Off: the bot trades purely on technicals, volume, news, macro, and ML — no AI calls.
+                  </p>
+                </div>
+                <button onClick={() => patchSafe({ aiEnabled: !(merged.aiEnabled ?? true) })}
+                  className={`ml-4 flex-shrink-0 w-9 h-5 rounded-full relative transition-colors ${(merged.aiEnabled ?? true) ? "bg-emerald-500" : "bg-muted"}`}>
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${(merged.aiEnabled ?? true) ? "translate-x-4" : "translate-x-0.5"}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* Risk engine */}
+            <div className="border-t border-border pt-4 space-y-4">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Risk engine</p>
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-sm text-foreground">ATR-adaptive stops &amp; targets</span>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Scale stop/target distances to each stock's volatility (ATR) instead of fixed percentages. Swing 1.5× and long 2.5× wider than day trades.
+                  </p>
+                </div>
+                <button onClick={() => patchSafe({ atrStops: !(merged.atrStops ?? true) })}
+                  className={`ml-4 flex-shrink-0 w-9 h-5 rounded-full relative transition-colors ${(merged.atrStops ?? true) ? "bg-emerald-500" : "bg-muted"}`}>
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${(merged.atrStops ?? true) ? "translate-x-4" : "translate-x-0.5"}`} />
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4">
+                {(merged.atrStops ?? true) && (
+                  <>
+                    <NumField label="ATR stop multiple" value={merged.atrStopMult ?? 1.5} min={0.5} max={4} step={0.25} onChange={(v) => setField("atrStopMult", v)} />
+                    <NumField label="ATR target multiple" value={merged.atrTargetMult ?? 3} min={1} max={8} step={0.5} onChange={(v) => setField("atrTargetMult", v)} />
+                  </>
+                )}
+                <NumField label="Risk per trade (% equity, 0=off)" value={merged.riskPerTradePct ?? 1} min={0} max={5} step={0.25} onChange={(v) => setField("riskPerTradePct", v)} />
+              </div>
+            </div>
+
             {/* Advanced */}
             <div className="border-t border-border pt-4 space-y-4">
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Advanced</p>

@@ -133,23 +133,59 @@ export function evaluateExitReason({
       reason = "max_hold";
     }
   } else if (bet.tradingMode === "swing") {
+    // Hard levels (bet.stopLoss / bet.targetPrice) are set at entry — with
+    // atrStops on they are ATR-adaptive, otherwise fixed-percent. When hard
+    // levels exist they are authoritative; the config percentages only apply
+    // as a fallback for legacy rows without stored levels.
     const swingStop = cfg.swingStopLossPct ?? cfg.stopLossPct;
     const swingTarget = cfg.swingTargetGainPct ?? cfg.targetGainPct;
+    const hasLevels = bet.stopLoss != null && bet.entryPrice > 0;
+    // Stop distance in % implied by the stored hard stop (works for ATR and fixed).
+    const stopDistPct = hasLevels
+      ? Math.abs((bet.stopLoss! - bet.entryPrice) / bet.entryPrice) * 100
+      : swingStop;
     const hitHardStop = bet.stopLoss != null && (
       side === "short" ? price >= bet.stopLoss : price <= bet.stopLoss
     );
-    if (gainPct <= -swingStop) {
-      reason = "swing_stop";
-    } else if (gainPct >= swingTarget) {
-      reason = "swing_target";
-    } else if (hitHardStop) {
+    const hitHardTarget = bet.targetPrice != null && (
+      side === "short" ? price <= bet.targetPrice : price >= bet.targetPrice
+    );
+
+    // Trailing peak/trough tracking (protect profits once ≥ 1R in the money).
+    let retracePct = 0;
+    if (side === "short") {
+      const trough = Math.min(bet.peakPrice ?? bet.entryPrice, price);
+      if (trough < (bet.peakPrice ?? bet.entryPrice)) newPeak = trough;
+      retracePct = trough > 0 ? ((price - trough) / trough) * 100 : 0;
+    } else {
+      const peak = Math.max(bet.peakPrice ?? bet.entryPrice, price);
+      if (peak > (bet.peakPrice ?? 0)) newPeak = peak;
+      retracePct = peak > 0 ? ((peak - price) / peak) * 100 : 0;
+    }
+
+    if (hitHardStop) {
       reason = "stop_loss";
+    } else if (hitHardTarget) {
+      reason = "swing_target";
+    } else if (!hasLevels && gainPct <= -swingStop) {
+      reason = "swing_stop";
+    } else if (!hasLevels && gainPct >= swingTarget) {
+      reason = "swing_target";
+    } else if (gainPct >= stopDistPct && retracePct >= stopDistPct) {
+      // ≥1R unrealized, then gave back a full stop-distance from the extreme.
+      reason = "swing_trail";
     } else if (heldMs >= maxHoldMs("swing", cfg)) {
       reason = "max_hold";
     }
   } else {
     // Long/Short multi-week position: trailing stop.
     const longTrailStop = cfg.longStopLossPct ?? cfg.stopLossPct;
+
+    // Stored hard target is authoritative (ATR-derived under atrStops);
+    // config longTargetGainPct only applies as a legacy fallback.
+    const hitHardTarget = bet.targetPrice != null && (
+      side === "short" ? price <= bet.targetPrice : price >= bet.targetPrice
+    );
 
     if (side === "short") {
       // Short: trough = lowest price (stored in peakPrice field for simplicity).
@@ -161,7 +197,9 @@ export function evaluateExitReason({
 
       if (research != null && research.confidence < LONG_MIN_RESEARCH_CONF) {
         reason = `research_downgrade (conf ${research.confidence})`;
-      } else if (cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
+      } else if (hitHardTarget) {
+        reason = "long_target";
+      } else if (bet.targetPrice == null && cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
         reason = "long_target";
       } else if (reboundPct >= longTrailStop) {
         reason = "trailing_stop";
@@ -179,7 +217,9 @@ export function evaluateExitReason({
 
       if (research != null && research.confidence < LONG_MIN_RESEARCH_CONF) {
         reason = `research_downgrade (conf ${research.confidence})`;
-      } else if (cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
+      } else if (hitHardTarget) {
+        reason = "long_target";
+      } else if (bet.targetPrice == null && cfg.longTargetGainPct != null && gainPct >= cfg.longTargetGainPct) {
         reason = "long_target";
       } else if (drawdownPct >= longTrailStop) {
         reason = "trailing_stop";

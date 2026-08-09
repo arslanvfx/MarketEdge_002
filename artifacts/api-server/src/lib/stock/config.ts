@@ -41,6 +41,12 @@ export const DEFAULT_CONFIG: StockBotConfig = {
   dynamicSizing: false,
   minMarketCapBillion: 0,
   maxSectorPct: 0,
+  // Revamp defaults (evidence-based: see backtest.ts replay harness).
+  aiEnabled: true,
+  atrStops: true,
+  atrStopMult: 1.5,
+  atrTargetMult: 3,
+  riskPerTradePct: 1,
 };
 
 let current: StockBotConfig = { ...DEFAULT_CONFIG };

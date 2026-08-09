@@ -4,6 +4,8 @@
 
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { isAiFeatureEnabled } from "../ai-spend";
+import { stockAiPermitted } from "./ai-policy";
+import { getConfig } from "./config";
 import { logger } from "../logger";
 import {
   rsi,
@@ -92,6 +94,11 @@ export async function claudeSignal(
   earnings: EarningsInfo | undefined,
   stat: StatSignal,
 ): Promise<ClaudeSignal> {
+  // Hard policy gate at the call itself: even if a future caller forgets to
+  // check, aiEnabled=false (or a disabled spend guard) blocks the API call.
+  if (!stockAiPermitted(getConfig().aiEnabled, isAiFeatureEnabled("stock_signal"))) {
+    throw new Error("stock AI disabled by policy (aiEnabled toggle or spend guard)");
+  }
   const T = ticker.toUpperCase();
   const cached = claudeCache.get(T);
   if (cached && Date.now() - cached.at < CLAUDE_TTL_MS) {
@@ -182,7 +189,8 @@ export async function buildSignals(
   const ml: MlSignal = predictStock(ticker, features);
 
   let claude: ClaudeSignal | undefined;
-  if (opts.useClaude && isAiFeatureEnabled("stock_signal")) {
+  // Unified stock-AI policy: user toggle AND spend guard must both permit.
+  if (opts.useClaude && stockAiPermitted(getConfig().aiEnabled, isAiFeatureEnabled("stock_signal"))) {
     claude = await claudeSignal(ticker, candles, news, earnings, stat);
   }
 
