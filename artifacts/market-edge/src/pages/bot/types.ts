@@ -151,9 +151,6 @@ export interface BotConfig {
   betRandomizerEnabled?: boolean;
   betRandomizerValues?: number[];
   convictionCatastrophicFillThresholdCents?: number;
-  convictionMomentumGateEnabled?: boolean;
-  convictionMomentumLookbackMinutes?: number;
-  convictionMomentumSafetyFactor?: number;
   convictionDirectionGuardEnabled?: boolean;
   convictionDirectionGuardMinSeconds?: number;
   convictionDirectionLookbackCandles?: number;
