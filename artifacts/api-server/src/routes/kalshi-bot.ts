@@ -711,9 +711,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionDirectionGuardEnabled,
     convictionDirectionGuardMinSeconds,
     convictionDirectionLookbackCandles,
-    convictionCandleLookback,
-    convictionCandleSlopeThresholdPct,
-    convictionCandleAtrScaleEnabled,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;

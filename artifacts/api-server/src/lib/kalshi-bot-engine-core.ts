@@ -1274,13 +1274,6 @@ export interface BotConfig {
   convictionDirectionGuardMinSeconds?: number; // consecutive adverse seconds required to block (default 4, clamp 2–10)
   convictionDirectionLookbackCandles?: number; // candle fallback lookback when tick data unavailable (default 3, clamp 1–10)
 
-  // Conviction candle-slope gate — blocks entry when the medium-term (multi-minute)
-  // candle trend is running against the bet direction, even if the 7-second tick
-  // window appears flat.  Runs in ADDITION to the direction guard above.
-  convictionCandleLookback?: number;             // minute-candles to inspect (default 5, clamp 2–10)
-  convictionCandleSlopeThresholdPct?: number;    // net move % of price needed to block (default 0.01)
-  convictionCandleAtrScaleEnabled?: boolean;     // scale candle-slope threshold by ATR (default false — direction gate should be binary, not wider for volatile coins)
-
   // ── Extreme Caution mode (conviction only) ────────────────────────────────
   // When enabled: (1) if a YES conviction bet was aborted this window because
   // the YES bid was below the zone floor, all further YES entries for that
@@ -1493,12 +1486,6 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionDirectionGuardEnabled: true,
   convictionDirectionGuardMinSeconds: 4,
   convictionDirectionLookbackCandles: 3,
-  convictionCandleLookback: 5,
-  // 0.01% threshold: any real directional move over N candles exceeds this (sub-penny noise floor).
-  // ATR scaling is OFF — for a direction gate, volatile coins moving adversely are MORE dangerous,
-  // not less. Scaling would widen the threshold for the very coins that need stricter blocking.
-  convictionCandleSlopeThresholdPct: 0.01,
-  convictionCandleAtrScaleEnabled: false,
   minHoldMinutes: 4,
   enableMidExit: false,
   disableMidExitForConviction: true,

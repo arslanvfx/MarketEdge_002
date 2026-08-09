@@ -16,7 +16,6 @@ import {
   deriveConvictionZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
-  computeConvictionCandleSlopeGate,
   checkExtremeCautionEarlyGuard,
   computeNoAskBounceThreshold,
   computeExtremeCautionNoAskCeiling,
@@ -2523,74 +2522,6 @@ async function _runBotTick(
       },
       "[kalshi-bot] conviction direction guard: price moving away from strike — OK",
     );
-  }
-
-  // ── Conviction candle-slope gate (medium-term trend) ─────────────────────
-  // The direction guard above inspects only a 7-second tick window — if price
-  // is momentarily flat in those 7 seconds but has been declining for 2+ minutes
-  // the direction guard passes and a YES bet fires into a falling market.
-  // This gate looks at the last N minute-candles to catch that sustained trend.
-  // Runs alongside (not instead of) the direction guard above.
-  // Fail-open: skipped when fewer than lookback+1 candles are available.
-  if (S.config.decisionMode === "conviction" &&
-      (S.config.convictionDirectionGuardEnabled ?? true) &&
-      candles.length >= 2) {
-    const _candleLookback   = Math.max(2, Math.min(S.config.convictionCandleLookback ?? 5, 10));
-    const _candleThreshold  = S.config.convictionCandleSlopeThresholdPct ?? 0.01;
-    const _candleAtrPct     = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
-    const _candleGate = computeConvictionCandleSlopeGate({
-      candles,
-      direction,
-      lookback:        _candleLookback,
-      thresholdPct:    _candleThreshold,
-      atrPct:          _candleAtrPct,
-      // ATR scaling disabled by default: for a direction gate, a volatile coin moving
-      // adversely is MORE dangerous, not less. Widening the threshold for high-ATR coins
-      // is the inverse of what we want. Use convictionCandleAtrScaleEnabled to opt in.
-      atrScaleEnabled: S.config.convictionCandleAtrScaleEnabled ?? false,
-      atrMultiplierCap: 1.2,
-    });
-    logger.info(
-      {
-        sym, direction, windowKey,
-        slopePct:          _candleGate.slopePct?.toFixed(3),
-        effectiveThreshold: _candleGate.effectiveThreshold.toFixed(3),
-        atrMultiplier:     _candleGate.atrMultiplier.toFixed(2),
-        lookback:          _candleLookback,
-        blocked:           _candleGate.blocked,
-      },
-      "[conviction-diag] candle-slope gate",
-    );
-    if (_candleGate.blocked) {
-      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
-      if (boostBetSize != null) {
-        maxBetWindowToken.remaining++;
-        logger.info({ sym }, "[kalshi-bot] conviction candle-slope gate: max-bet token restored");
-      }
-      const _candleGateReason: "candle-decline" | "candle-rise" = direction === "yes" ? "candle-decline" : "candle-rise";
-      convictionDirectionGuardBlockedMap.set(sym, {
-        direction,
-        gate: _candleGateReason,
-        slopePct: _candleGate.slopePct ?? undefined,
-        effectiveThreshold: _candleGate.effectiveThreshold,
-        lookback: _candleLookback,
-      });
-      const _reason = direction === "yes" ? "conviction-candle-decline" : "conviction-candle-rise";
-      logger.warn(
-        {
-          sym, direction, windowKey,
-          reason:            _reason,
-          slopePct:          _candleGate.slopePct?.toFixed(3),
-          effectiveThreshold: _candleGate.effectiveThreshold.toFixed(3),
-          atrMultiplier:     _candleGate.atrMultiplier.toFixed(2),
-          lookback:          _candleLookback,
-        },
-        "[kalshi-bot] conviction candle-slope gate: sustained candle trend against bet — order aborted",
-      );
-      return;
-    }
-    // Gate passed — clear block map so dashboard badge disappears.
-    convictionDirectionGuardBlockedMap.delete(sym);
   }
 
   // ── Pipeline direction guard (all non-conviction modes) ──────────────────
