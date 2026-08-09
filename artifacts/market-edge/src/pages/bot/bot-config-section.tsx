@@ -1033,35 +1033,22 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Blocks entry when price has been falling continuously for N seconds toward the strike. Measures second-by-second from the live 1 s poller — a single noisy tick will not trigger it.
+                        Blocks entry when the coin's spot price is trending toward the Kalshi strike over the lookback window. YES bets: blocked when spot price is falling toward the strike. NO bets: blocked when spot price is rising toward the strike. Flat price (slope = 0) always passes.
                       </span>
                       {(merged.convictionDirectionGuardEnabled ?? true) && (
                         <div className="flex flex-col gap-2 mt-1">
                           <label className="flex flex-col gap-1.5">
-                            <span className="text-xs text-muted-foreground">Min adverse seconds to block</span>
+                            <span className="text-xs text-muted-foreground">Lookback window</span>
                             <select
                               className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
                               value={merged.convictionDirectionGuardMinSeconds ?? 4}
                               onChange={e => setConfigDraft(d => ({ ...d, convictionDirectionGuardMinSeconds: parseInt(e.target.value) }))}
                             >
                               {[2,3,4,5,6,7,8,9,10].map(n => (
-                                <option key={n} value={n}>{n}s consecutive{n === 4 ? " — default" : n <= 3 ? " — sensitive" : n >= 7 ? " — permissive" : ""}</option>
+                                <option key={n} value={n}>{n}s{n === 4 ? " — default" : n <= 3 ? " — tight" : n >= 7 ? " — wide" : ""}</option>
                               ))}
                             </select>
-                            <span className="text-[10px] text-muted-foreground/60">Price must move toward the strike for this many seconds in a row before the entry is blocked. Lower = blocks sooner; higher = only blocks sustained slides.</span>
-                          </label>
-                          <label className="flex flex-col gap-1.5">
-                            <span className="text-xs text-muted-foreground/80">Candle fallback lookback</span>
-                            <select
-                              className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground/80"
-                              value={merged.convictionDirectionLookbackCandles ?? 3}
-                              onChange={e => setConfigDraft(d => ({ ...d, convictionDirectionLookbackCandles: parseInt(e.target.value) }))}
-                            >
-                              {[1,2,3,4,5].map(n => (
-                                <option key={n} value={n}>{n} candle{n > 1 ? "s" : ""}{n === 3 ? " — default" : ""}</option>
-                              ))}
-                            </select>
-                            <span className="text-[10px] text-muted-foreground/50">Used only in the first few seconds of a window before tick data is available. Has no effect once live ticks are flowing.</span>
+                            <span className="text-[10px] text-muted-foreground/60">Compares the coin's spot price from N seconds ago against the current price. If the net move is toward the strike, entry is blocked. Shorter = reacts faster; longer = only catches sustained moves.</span>
                           </label>
                         </div>
                       )}
