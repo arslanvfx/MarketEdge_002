@@ -1887,15 +1887,17 @@ export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
  * Returns the effective strike-proximity threshold for a specific symbol.
  * Priority order (highest wins):
  *   1. Per-coin override in strikeProximityMinPctOverrides (user-configured)
- *   2. Per-coin entry in PROXIMITY_THRESHOLD_SUGGESTIONS (calibrated defaults)
- *   3. Global strikeProximityMinPct config field
- *   4. Hard fallback of 0.05%
+ *   2. Global strikeProximityMinPct config field
+ *   3. Hard fallback of 0.05%
+ *
+ * PROXIMITY_THRESHOLD_SUGGESTIONS is intentionally NOT in the priority chain —
+ * it is displayed in the UI as a reference hint only.  Putting it here would
+ * silently shadow the global threshold whenever a coin has no per-coin override,
+ * which contradicts the UI's guarantee that "blank = global threshold".
  */
 export function getEffectiveProximityThreshold(sym: string, config: BotConfig): number {
   const override = config.strikeProximityMinPctOverrides?.[sym];
   if (override != null && override > 0) return override;
-  const suggestion = PROXIMITY_THRESHOLD_SUGGESTIONS[sym];
-  if (suggestion != null) return suggestion;
   return config.strikeProximityMinPct ?? 0.05;
 }
 

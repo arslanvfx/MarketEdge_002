@@ -892,12 +892,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         Strike Proximity Guard
                       </span>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Blocks a FOK when the live crypto price is within <span className="text-sky-400 font-mono">{((merged.strikeProximityMinPct ?? 0.30)).toFixed(2)}%</span> of the Kalshi strike — too close means a single adverse candle can flip the outcome. Fail-open: passes when price data is unavailable.
-                        {(merged.strikeProximityAtrScale ?? true) && <span className="text-sky-400/70"> Threshold is ATR-scaled (wider for volatile coins).</span>}
+                        Blocks a FOK when the live crypto price is too close to the Kalshi strike — a single adverse candle near the strike can flip the outcome. Each coin uses its per-coin override if set, otherwise the global threshold below. Fail-open: passes when price data is unavailable.
+                        {(merged.strikeProximityAtrScale ?? true) && <span className="text-sky-400/70"> Threshold is ATR-scaled up to 1.2× for volatile coins.</span>}
                       </span>
                       <label className="flex flex-col gap-1.5">
                         <span className="text-xs text-muted-foreground">
-                          Min Gap% <span className="font-mono text-sky-400">{(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}%</span>
+                          Global threshold <span className="font-mono text-sky-400">{(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}%</span>
                         </span>
                         <input
                           type="number"
@@ -905,7 +905,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           max={2.00}
                           step={0.01}
                           className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground w-28"
-                          value={merged.strikeProximityMinPct ?? 0.05}
+                          value={merged.strikeProximityMinPct ?? 0.30}
                           onChange={e => {
                             const v = parseFloat(e.target.value);
                             if (!Number.isNaN(v) && v >= 0.01 && v <= 2.00) {
@@ -913,7 +913,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             }
                           }}
                         />
-                        <span className="text-[10px] text-muted-foreground/60">|livePrice − strike| / strike × 100. Default: 0.05%. Range: 0.01–2.00%.</span>
+                        <span className="text-[10px] text-muted-foreground/60">|livePrice − strike| / strike × 100. Applies to coins with no per-coin override. Default: 0.30%. Range: 0.01–2.00%.</span>
                       </label>
                       <div className="flex items-center justify-between mt-0.5">
                         <span className="text-xs text-muted-foreground">ATR Scale</span>
@@ -927,14 +927,18 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           {(merged.strikeProximityAtrScale ?? true) ? "On" : "Off"}
                         </button>
                       </div>
-                      <span className="text-[10px] text-muted-foreground/60 leading-relaxed">When on: threshold × max(1, volPct/0.20). High-volatility coins require a wider gap. Baseline 0.20% = typical BTC quiet session.</span>
+                      <span className="text-[10px] text-muted-foreground/60 leading-relaxed">When on: threshold × clamp(volPct/0.20, 1, 1.2). Scales the threshold wider for volatile coins, capped at 1.2× so no coin's threshold more than doubles. Baseline 0.20% ≈ BTC quiet session.</span>
 
                       {/* Per-coin threshold overrides */}
                       {(() => {
                         const COINS = ["BTC","ETH","XRP","BNB","SOL","DOGE","NEAR","HYPE","ZEC"];
-                        const SUGGESTED: Record<string,number> = { BTC:0.02, ETH:0.02, XRP:0.03, BNB:0.03, SOL:0.03, DOGE:0.04, NEAR:0.04, HYPE:0.05, ZEC:0.05 };
+                        // Suggested values match PROXIMITY_THRESHOLD_SUGGESTIONS on the backend —
+                        // calibrated from observed gapPct values during 82–91¢ conviction entries.
+                        // These are the minimum thresholds that still block zero-gap entries while
+                        // allowing typical conviction entries where gapPct is 0.001–0.04%.
+                        const SUGGESTED: Record<string,number> = { BTC:0.005, ETH:0.005, XRP:0.010, BNB:0.010, SOL:0.005, DOGE:0.020, NEAR:0.020, HYPE:0.030, ZEC:0.030 };
                         const overrides: Record<string,number> = { ...(merged.strikeProximityMinPctOverrides ?? {}) };
-                        const globalFloor = merged.strikeProximityMinPct ?? 0.30;
+                        const globalThreshold = merged.strikeProximityMinPct ?? 0.30;
                         return (
                           <div className="mt-2">
                             <div className="flex items-center justify-between mb-1.5">
@@ -950,7 +954,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                               </button>
                             </div>
                             <span className="text-[9.5px] text-muted-foreground/50 block mb-2 leading-relaxed">
-                              Overrides the global threshold for each coin. Leave blank to use the global floor ({globalFloor.toFixed(2)}%). Suggested values are derived from each coin's typical 15-min ATR and Kalshi orderbook depth.
+                              Sets a per-coin threshold, taking priority over the global value. Leave blank to fall back to the global threshold ({globalThreshold.toFixed(2)}%). Suggested values are calibrated from each coin's typical gapPct during conviction entries (usually 0.001–0.04%).
                             </span>
                             <div className="grid grid-cols-3 gap-x-3 gap-y-1.5">
                               {COINS.map(sym => {
@@ -964,7 +968,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                         <button
                                           type="button"
                                           className="text-[9px] text-muted-foreground/50 hover:text-red-400"
-                                          title="Clear override (use global)"
+                                          title="Clear override — coin will use the global threshold"
                                           onClick={() => {
                                             setConfigDraft(d => {
                                               const next = {
@@ -985,7 +989,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                       min={0.01}
                                       max={3.00}
                                       step={0.01}
-                                      placeholder={`${(suggested ?? globalFloor).toFixed(2)}`}
+                                      placeholder={`${(suggested ?? globalThreshold).toFixed(3)}`}
                                       className={`w-full bg-background border rounded px-1.5 py-1 text-[11px] font-mono text-foreground ${currentVal != null ? "border-sky-500/30 text-sky-400" : "border-border/50 text-muted-foreground"}`}
                                       value={currentVal != null ? currentVal : ""}
                                       onChange={e => {
@@ -1005,7 +1009,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                         });
                                       }}
                                     />
-                                    <span className="text-[9px] text-muted-foreground/40">sugg: {(suggested ?? globalFloor).toFixed(2)}%</span>
+                                    <span className="text-[9px] text-muted-foreground/40">sugg: {suggested != null ? suggested.toFixed(3) : globalThreshold.toFixed(2)}%</span>
                                   </div>
                                 );
                               })}

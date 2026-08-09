@@ -56,6 +56,7 @@ import {
   applyLockPrice082Migration,
   deriveConvictionZone,
   computeStrikeProximityGate,
+  getEffectiveProximityThreshold,
   checkConvictionOneSidedBook,
   shouldSuppressConvictionStopLoss,
   type BotConfig,
@@ -2141,6 +2142,74 @@ test("strike proximity (tick re-check): YES direction tiny gap also blocked", ()
   });
   assert.equal(r.blocked, true);
   assert.ok(r.gapPct != null && r.gapPct < 0.15);
+});
+
+// ── getEffectiveProximityThreshold priority tests ─────────────────────────────
+
+test("getEffectiveProximityThreshold: per-coin override wins over global", () => {
+  const config = {
+    strikeProximityMinPct: 0.30,
+    strikeProximityMinPctOverrides: { BTC: 0.50 },
+  } as unknown as BotConfig;
+  assert.equal(getEffectiveProximityThreshold("BTC", config), 0.50,
+    "Per-coin override (0.50) should win over global (0.30)");
+});
+
+test("getEffectiveProximityThreshold: per-coin override wins even when lower than global", () => {
+  // User's intentionally conservative global (0.30) should be bypassed for
+  // coins with an explicit override set lower — the override is what wins.
+  const config = {
+    strikeProximityMinPct: 0.30,
+    strikeProximityMinPctOverrides: { ETH: 0.10 },
+  } as unknown as BotConfig;
+  assert.equal(getEffectiveProximityThreshold("ETH", config), 0.10,
+    "Per-coin override (0.10) wins regardless of global value");
+});
+
+test("getEffectiveProximityThreshold: no override → global threshold used", () => {
+  // PROXIMITY_THRESHOLD_SUGGESTIONS are NOT in the priority chain (display-only).
+  // A coin with no per-coin override should get the global value, not a suggestion.
+  const config = {
+    strikeProximityMinPct: 0.30,
+    strikeProximityMinPctOverrides: {},
+  } as unknown as BotConfig;
+  assert.equal(getEffectiveProximityThreshold("BTC", config), 0.30,
+    "No per-coin override → global threshold (0.30), not built-in suggestion (0.005)");
+});
+
+test("getEffectiveProximityThreshold: unknown coin, no override → global threshold", () => {
+  const config = {
+    strikeProximityMinPct: 0.25,
+    strikeProximityMinPctOverrides: {},
+  } as unknown as BotConfig;
+  assert.equal(getEffectiveProximityThreshold("UNKNOWN", config), 0.25);
+});
+
+test("getEffectiveProximityThreshold: no override, no global → hard fallback 0.05%", () => {
+  const config = {
+    strikeProximityMinPctOverrides: {},
+  } as unknown as BotConfig;
+  assert.equal(getEffectiveProximityThreshold("BTC", config), 0.05,
+    "No override, no global → fallback 0.05");
+});
+
+test("getEffectiveProximityThreshold: zero-value override is ignored (treated as unset)", () => {
+  // An override of 0 is invalid — skip it and fall back to global.
+  const config = {
+    strikeProximityMinPct: 0.30,
+    strikeProximityMinPctOverrides: { SOL: 0 },
+  } as unknown as BotConfig;
+  assert.equal(getEffectiveProximityThreshold("SOL", config), 0.30,
+    "Zero override should be ignored; global (0.30) should apply");
+});
+
+test("getEffectiveProximityThreshold: override present for different coin → global used", () => {
+  const config = {
+    strikeProximityMinPct: 0.20,
+    strikeProximityMinPctOverrides: { BTC: 0.50 },
+  } as unknown as BotConfig;
+  assert.equal(getEffectiveProximityThreshold("ETH", config), 0.20,
+    "BTC override should not affect ETH; ETH gets global (0.20)");
 });
 
 // ── shouldSuppressConvictionStopLoss tests ────────────────────────────────────

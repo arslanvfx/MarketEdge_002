@@ -190,6 +190,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
   const proximityMinPct       = stabilityConfig?.strikeProximityMinPct ?? 0.30;
   const proximityAtrScale     = stabilityConfig?.strikeProximityAtrScale ?? true;
   const proximityOverrides    = stabilityConfig?.strikeProximityMinPctOverrides ?? {};
+  // Priority: per-coin override → global threshold (matches getEffectiveProximityThreshold backend)
   const getProximityThreshold = (sym: string) => proximityOverrides[sym] ?? proximityMinPct;
   const dangerBand            = trajectoryConfig?.dangerBandPct         ?? 0.15;
 
@@ -447,16 +448,17 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                       if (gapPct == null) return <span className="text-muted-foreground/40 font-mono">—</span>;
                       const coinThreshold = getProximityThreshold(sym);
                       const hasOverride = proximityOverrides[sym] != null;
+                      // Cap matches backend conviction re-check: atrMultiplierCap=1.2
                       const atrMultiplier = (proximityAtrScale && stab?.volPct != null && stab.volPct > 0)
-                        ? Math.max(1, stab.volPct / 0.20)
+                        ? Math.min(1.2, Math.max(1, stab.volPct / 0.20))
                         : 1;
                       const effectiveThreshold = coinThreshold * atrMultiplier;
                       const ok = gapPct >= effectiveThreshold;
                       const tooltipParts = [
                         `gap: ${gapPct.toFixed(3)}%`,
                         `threshold: ${effectiveThreshold.toFixed(3)}%`,
-                        hasOverride ? `per-coin override ${coinThreshold.toFixed(2)}%` : `global ${proximityMinPct.toFixed(2)}%`,
-                        proximityAtrScale && atrMultiplier > 1 ? `ATR ×${atrMultiplier.toFixed(1)}` : "no ATR scale",
+                        hasOverride ? `per-coin override ${coinThreshold.toFixed(3)}%` : `global ${proximityMinPct.toFixed(2)}%`,
+                        proximityAtrScale && atrMultiplier > 1 ? `ATR ×${atrMultiplier.toFixed(2)} (cap 1.2×)` : "no ATR scale",
                       ];
                       return (
                         <span
