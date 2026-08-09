@@ -159,6 +159,7 @@ export interface BotConfig {
   convictionDirectionLookbackCandles?: number;
   convictionCandleLookback?: number;
   convictionCandleSlopeThresholdPct?: number;
+  convictionCandleAtrScaleEnabled?: boolean;
   kalshiLockPriceCap?: number;
   strikeProximityMinPct?: number;
   strikeProximityAtrScale?: boolean;

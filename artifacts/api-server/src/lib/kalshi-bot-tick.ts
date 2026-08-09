@@ -150,7 +150,7 @@ export function computeTrajectoryGate(
   // point in the window, not just the final N minutes.
   // Guard: only activates when called from a conviction-mode tick (isConvictionMode=true).
   // Regular-trajectory calls always skip this block — config flag alone is not sufficient.
-  const amEnabled = isConvictionMode && (config.convictionMomentumGateEnabled ?? true);
+  const amEnabled = isConvictionMode && (config.convictionMomentumGateEnabled ?? false);
   if (amEnabled && minutesRemaining > 0) {
     const amLookbackMin = Math.max(1, config.convictionMomentumLookbackMinutes ?? lookbackMin);
     const amActual = Math.min(amLookbackMin, candles.length - 1);
@@ -2368,7 +2368,7 @@ async function _runBotTick(
   // but with convictionMomentumGateEnabled as the master toggle so it can be
   // turned off in the bot config without touching regularBetTrajectoryEnabled.
   if (S.config.decisionMode === "conviction" &&
-      (S.config.convictionMomentumGateEnabled ?? true) &&
+      (S.config.convictionMomentumGateEnabled ?? false) &&
       kalshiTarget != null && candles.length >= 2) {
     const _convTrajLiveP  = candles[candles.length - 1].c;
     const _convTrajWkMs   = new Date(windowKey).getTime();
@@ -2536,7 +2536,7 @@ async function _runBotTick(
       (S.config.convictionDirectionGuardEnabled ?? true) &&
       candles.length >= 2) {
     const _candleLookback   = Math.max(2, Math.min(S.config.convictionCandleLookback ?? 5, 10));
-    const _candleThreshold  = S.config.convictionCandleSlopeThresholdPct ?? 0.05;
+    const _candleThreshold  = S.config.convictionCandleSlopeThresholdPct ?? 0.01;
     const _candleAtrPct     = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
     const _candleGate = computeConvictionCandleSlopeGate({
       candles,
@@ -2544,8 +2544,11 @@ async function _runBotTick(
       lookback:        _candleLookback,
       thresholdPct:    _candleThreshold,
       atrPct:          _candleAtrPct,
-      atrScaleEnabled: true,
-      atrMultiplierCap: 2,
+      // ATR scaling disabled by default: for a direction gate, a volatile coin moving
+      // adversely is MORE dangerous, not less. Widening the threshold for high-ATR coins
+      // is the inverse of what we want. Use convictionCandleAtrScaleEnabled to opt in.
+      atrScaleEnabled: S.config.convictionCandleAtrScaleEnabled ?? false,
+      atrMultiplierCap: 1.2,
     });
     logger.info(
       {

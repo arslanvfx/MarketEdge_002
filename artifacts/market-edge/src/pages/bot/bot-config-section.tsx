@@ -698,17 +698,17 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </div>
                       <button
                         type="button"
-                        onClick={() => setConfigDraft(d => ({ ...d, convictionMomentumGateEnabled: !(merged.convictionMomentumGateEnabled ?? true) }))}
-                        className={`ml-4 shrink-0 rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.convictionMomentumGateEnabled ?? true)
+                        onClick={() => setConfigDraft(d => ({ ...d, convictionMomentumGateEnabled: !(merged.convictionMomentumGateEnabled ?? false) }))}
+                        className={`ml-4 shrink-0 rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.convictionMomentumGateEnabled ?? false)
                           ? "bg-rose-500/15 border-rose-500/40 text-rose-300"
                           : "bg-muted/30 border-border text-muted-foreground"}`}
                       >
-                        {(merged.convictionMomentumGateEnabled ?? true) ? "On" : "Off"}
+                        {(merged.convictionMomentumGateEnabled ?? false) ? "On" : "Off"}
                       </button>
                     </div>
 
                     {/* Freefall Gate sensitivity controls — only when gate is On */}
-                    {(merged.convictionMomentumGateEnabled ?? true) && (
+                    {(merged.convictionMomentumGateEnabled ?? false) && (
                       <div className="flex flex-col gap-2 mt-2 pl-3 border-l border-rose-500/20">
                         <label className="flex flex-col gap-1.5" title="How aggressively the gate blocks entries. Higher = blocks more conservatively (catches slower freefalls but may block legitimate entries with moderate drift).">
                           <div className="flex items-center justify-between">
@@ -1201,7 +1201,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           Candle-slope gate
                         </span>
                         <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                          Checks the last N minute-candles for a sustained prior trend against your bet — catches a 2-minute decline even when price goes flat in the final 7 seconds before entry.
+                          Checks the last N minute-candles for a sustained prior trend against your bet — catches a 5-minute decline even when price goes flat in the final 7 seconds before entry. Binary like the tick gate: any real directional move over N candles exceeds the 0.01% noise floor and blocks.
                         </span>
                         <div className="flex flex-col gap-2">
                           <label className="flex flex-col gap-1.5">
@@ -1221,14 +1221,27 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             <span className="text-xs text-muted-foreground">Slope threshold (%)</span>
                             <select
                               className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
-                              value={merged.convictionCandleSlopeThresholdPct ?? 0.05}
+                              value={merged.convictionCandleSlopeThresholdPct ?? 0.01}
                               onChange={e => setConfigDraft(d => ({ ...d, convictionCandleSlopeThresholdPct: parseFloat(e.target.value) }))}
                             >
-                              {[0.02, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20].map(v => (
-                                <option key={v} value={v}>{v.toFixed(2)}%{v === 0.05 ? " — default" : v <= 0.03 ? " — sensitive" : v >= 0.10 ? " — permissive" : ""}</option>
+                              {[0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20].map(v => (
+                                <option key={v} value={v}>{v.toFixed(2)}%{v === 0.01 ? " — default" : v <= 0.03 ? " — sensitive" : v >= 0.10 ? " — permissive" : ""}</option>
                               ))}
                             </select>
-                            <span className="text-[10px] text-muted-foreground/60">Minimum net price decline over the lookback period to block a YES entry (or rise to block NO). Scaled wider automatically for volatile coins.</span>
+                            <span className="text-[10px] text-muted-foreground/60">Minimum net price move over the lookback period to block entry. 0.01% is a sub-penny noise floor — any real directional move exceeds it.</span>
+                          </label>
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground">ATR scaling</span>
+                            <button
+                              type="button"
+                              onClick={() => setConfigDraft(d => ({ ...d, convictionCandleAtrScaleEnabled: !(merged.convictionCandleAtrScaleEnabled ?? false) }))}
+                              className={`rounded-md px-3 py-1.5 text-sm font-medium border transition-colors ${(merged.convictionCandleAtrScaleEnabled ?? false)
+                                ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                                : "bg-background border-border text-muted-foreground"}`}
+                            >
+                              {(merged.convictionCandleAtrScaleEnabled ?? false) ? "On — threshold widens for volatile coins" : "Off — flat threshold (default)"}
+                            </button>
+                            <span className="text-[10px] text-muted-foreground/60">Off is recommended: for a direction gate, a volatile coin moving adversely is MORE dangerous, not less. ATR scaling widens the threshold for the very coins that need stricter blocking.</span>
                           </label>
                         </div>
                       </div>

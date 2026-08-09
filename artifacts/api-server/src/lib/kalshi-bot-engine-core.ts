@@ -1280,7 +1280,8 @@ export interface BotConfig {
   // candle trend is running against the bet direction, even if the 7-second tick
   // window appears flat.  Runs in ADDITION to the direction guard above.
   convictionCandleLookback?: number;             // minute-candles to inspect (default 5, clamp 2–10)
-  convictionCandleSlopeThresholdPct?: number;    // net decline % of price needed to block (default 0.05)
+  convictionCandleSlopeThresholdPct?: number;    // net move % of price needed to block (default 0.01)
+  convictionCandleAtrScaleEnabled?: boolean;     // scale candle-slope threshold by ATR (default false — direction gate should be binary, not wider for volatile coins)
 
   // ── Extreme Caution mode (conviction only) ────────────────────────────────
   // When enabled: (1) if a YES conviction bet was aborted this window because
@@ -1487,14 +1488,21 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   strikeProximityMinPct: 0.30,
   strikeProximityAtrScale: true,
   strikeProximityMinPctOverrides: {},
-  convictionMomentumGateEnabled: true,
+  // Adverse momentum gate disabled by default — the direction guard (tick + candle-slope)
+  // already answers "is price moving the wrong way?" without needing a projection formula.
+  // Re-enable via bot config UI if the projection check is desired.
+  convictionMomentumGateEnabled: false,
   convictionMomentumLookbackMinutes: 3,
   convictionMomentumSafetyFactor: 0.6,
   convictionDirectionGuardEnabled: true,
   convictionDirectionGuardMinSeconds: 4,
   convictionDirectionLookbackCandles: 3,
   convictionCandleLookback: 5,
-  convictionCandleSlopeThresholdPct: 0.05,
+  // 0.01% threshold: any real directional move over N candles exceeds this (sub-penny noise floor).
+  // ATR scaling is OFF — for a direction gate, volatile coins moving adversely are MORE dangerous,
+  // not less. Scaling would widen the threshold for the very coins that need stricter blocking.
+  convictionCandleSlopeThresholdPct: 0.01,
+  convictionCandleAtrScaleEnabled: false,
   minHoldMinutes: 4,
   enableMidExit: false,
   disableMidExitForConviction: true,

@@ -2884,3 +2884,98 @@ test("candle-slope gate ATR disabled: atrScaleEnabled=false → multiplier=1 reg
   assert.equal(r.atrMultiplier, 1, "ATR disabled → multiplier must be 1");
   assert.ok(Math.abs(r.effectiveThreshold - 0.05) < 0.001);
 });
+
+// ── Adverse momentum gate — default-off regression ───────────────────────────
+//
+// convictionMomentumGateEnabled changed from `true` to `false` as its default.
+// Old persisted DB rows may not have this field at all (undefined).  The runtime
+// fallback `config.convictionMomentumGateEnabled ?? false` must evaluate to false
+// so those rows behave as if the gate is off — not silently re-enabled.
+
+test("adverse momentum gate: convictionMomentumGateEnabled absent from config (undefined) defaults to OFF", () => {
+  // Simulate an old DB row that predates the field — config has no value for it.
+  const configWithoutField: Partial<BotConfig> = {};
+  const gateEnabled = configWithoutField.convictionMomentumGateEnabled ?? false;
+  assert.equal(gateEnabled, false,
+    "Absent convictionMomentumGateEnabled must default to false (gate off)");
+
+  // Confirm DEFAULT_BOT_CONFIG itself has the field set to false
+  assert.equal(DEFAULT_BOT_CONFIG.convictionMomentumGateEnabled, false,
+    "DEFAULT_BOT_CONFIG.convictionMomentumGateEnabled must be false (gate disabled by default)");
+
+  // Downstream: computeAdverseMomentumGate with enabled=false never blocks,
+  // even when the price trajectory is clearly adverse (rising into NO strike).
+  const adverseResult = computeAdverseMomentumGate({
+    livePrice: 100,
+    kalshiTarget: 99,       // price ABOVE target — adverse for NO bet
+    direction: "no",
+    velocityPerMin: 0.10,   // rising 10¢/min toward the strike
+    minutesRemaining: 8,    // 8 minutes left — would project to cross
+    safetyFactor: 0.6,
+    enabled: gateEnabled,   // false → gate off regardless of trajectory
+  });
+  assert.equal(adverseResult.blocked, false,
+    "Gate with enabled=false (absent field) must not block regardless of price trajectory");
+});
+
+// ── Default-config regression — SOL Aug-8 scenario ───────────────────────────
+//
+// This is the real-money loss that drove this fix:
+//   SOL NO bet at 10:09 PM EST — price was RISING toward the strike ($75.77 → $75.83).
+//   With old defaults (threshold=0.05%, ATR scaling ON, ATR cap=2):
+//     SOL ATR ≈ 0.40% → multiplier=min(2, 0.40/0.20)=2.0 → effectiveThreshold=0.10%
+//     5-candle slope = +0.053% < 0.10% → gate PASSED → NO bet fired into rising market → LOSS
+//   With new defaults (threshold=0.01%, ATR scaling OFF):
+//     effectiveThreshold = 0.01%
+//     5-candle slope = +0.053% > 0.01% → gate BLOCKS ✓
+//
+// The ATR-scaling tests above still pass (they use explicit atrScaleEnabled:true),
+// confirming the opt-in path still works correctly.
+
+test("candle-slope gate SOL regression: +0.053% slope with defaults (atrScaleEnabled=false, threshold=0.01%) → BLOCKED for NO", () => {
+  // Simulate 6 candles: last 5 show a +0.053% rise (adverse for NO bet).
+  // SOL scenario: price at ~75.77, rising toward strike 75.83.
+  // fromCandle = candles[0] = 75.77, toCandle = candles[5] = 75.817
+  // slopePct = (75.817 − 75.77) / 75.77 × 100 ≈ +0.062% > 0.01% threshold → blocked
+  const basePrice = 75.77;
+  const risePct = 0.062; // approximately +0.053–0.062% rise over 5 candles
+  const toPrice = basePrice * (1 + risePct / 100);
+  const cs = candles(basePrice, basePrice, basePrice, basePrice, basePrice, toPrice);
+
+  // Use only the new default args — no explicit atrScaleEnabled or thresholdPct.
+  // DEFAULT_BOT_CONFIG.convictionCandleSlopeThresholdPct = 0.01
+  // DEFAULT_BOT_CONFIG.convictionCandleAtrScaleEnabled  = false
+  const r = computeConvictionCandleSlopeGate({
+    candles: cs,
+    direction: "no",
+    lookback: 5,
+    thresholdPct: DEFAULT_BOT_CONFIG.convictionCandleSlopeThresholdPct ?? 0.01,
+    atrPct: 0.40,   // SOL's actual ATR at time of loss
+    atrScaleEnabled: DEFAULT_BOT_CONFIG.convictionCandleAtrScaleEnabled ?? false,
+    atrMultiplierCap: 1.2,
+  });
+
+  assert.equal(r.blocked, true,
+    `SOL regression: rising slope should block NO bet with default config. Got slopePct=${r.slopePct?.toFixed(4)}, effectiveThreshold=${r.effectiveThreshold?.toFixed(4)}`);
+  assert.ok(r.slopePct !== null && r.slopePct > 0.01,
+    `Expected slopePct > 0.01 (default threshold), got ${r.slopePct}`);
+  assert.equal(r.atrMultiplier, 1,
+    "ATR scaling disabled by default — multiplier must be 1 regardless of atrPct");
+  assert.ok(r.effectiveThreshold !== undefined && Math.abs(r.effectiveThreshold - 0.01) < 0.001,
+    `Expected effectiveThreshold=0.01 (default), got ${r.effectiveThreshold}`);
+});
+
+test("candle-slope gate SOL regression: same scenario with old defaults (threshold=0.05%, ATR ON, cap=2) → PASSES (demonstrates the bug)", () => {
+  // Confirms the old config INCORRECTLY let the SOL bet through — documenting the regression.
+  const basePrice = 75.77;
+  const toPrice = basePrice * (1 + 0.062 / 100);
+  const cs = candles(basePrice, basePrice, basePrice, basePrice, basePrice, toPrice);
+  const r = computeConvictionCandleSlopeGate({
+    candles: cs, direction: "no", lookback: 5,
+    thresholdPct: 0.05, atrPct: 0.40, atrScaleEnabled: true, atrMultiplierCap: 2,
+  });
+  // With old config: multiplier=2 → effectiveThreshold=0.10% → slope 0.062% < 0.10% → NOT blocked
+  assert.equal(r.blocked, false,
+    "Old config bug confirmed: ATR scaling doubled threshold to 0.10%, letting +0.062% slope through");
+  assert.ok(r.atrMultiplier >= 1.9, `Expected multiplier≈2 (old cap), got ${r.atrMultiplier}`);
+});
