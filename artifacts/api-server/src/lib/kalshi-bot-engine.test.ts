@@ -2530,28 +2530,86 @@ test("direction gate NO block: flat candles (slopePrice=0) → blocked=false (fl
   assert.equal(r.slopePrice, 0);
 });
 
-// ── Fail-open paths ──────────────────────────────────────────────────────────
+// ── No-usable-source paths ───────────────────────────────────────────────────
+//
+// The PURE gate returns blocked=false with source="none" when neither ticks nor
+// candles have ≥2 points.  Conviction callers MUST inspect source==="none" and
+// fail CLOSED (abort the entry) — this is the un-skippable-guard contract that
+// prevents the wrong-direction-bet-on-missing-data bypass.
 
-test("direction gate fail-open: 0 candles → blocked=false (missing data never blocks)", () => {
+test("direction gate no-source: 0 candles → source='none' (conviction caller must fail closed)", () => {
   const r = computeConvictionDirectionGate({ candles: [], direction: "yes" });
   assert.equal(r.blocked, false);
+  assert.equal(r.source, "none");
+  assert.equal(r.sampleCount, 0);
   assert.equal(r.fromPrice, null);
   assert.equal(r.toPrice, null);
   assert.equal(r.slopePrice, null);
 });
 
-test("direction gate fail-open: 1 candle → blocked=false (need ≥2 candles to compute slope)", () => {
+test("direction gate no-source: 1 candle → source='none' (need ≥2 candles to compute slope)", () => {
   const r = computeConvictionDirectionGate({ candles: candles(100), direction: "yes" });
   assert.equal(r.blocked, false);
+  assert.equal(r.source, "none");
   assert.equal(r.fromPrice, null);
   assert.equal(r.toPrice, null);
   assert.equal(r.slopePrice, null);
 });
 
-test("direction gate fail-open: 1 candle NO direction → also blocked=false", () => {
+test("direction gate no-source: 1 candle NO direction → also source='none'", () => {
   const r = computeConvictionDirectionGate({ candles: candles(100), direction: "no" });
   assert.equal(r.blocked, false);
+  assert.equal(r.source, "none");
   assert.equal(r.slopePrice, null);
+});
+
+test("direction gate no-source: no ticks AND no candles → source='none'", () => {
+  const r = computeConvictionDirectionGate({ priceTicks: [], candles: [], direction: "yes" });
+  assert.equal(r.blocked, false);
+  assert.equal(r.source, "none");
+  assert.equal(r.sampleCount, 0);
+});
+
+test("direction gate no-source: stale ticks (outside time window) + no candles → source='none'", () => {
+  // Ticks exist but are all older than the guard's time window — the recent
+  // filter drops them, and with no candle fallback the source is 'none'.
+  const staleTs = Date.now() - 60_000; // 60 s old, window is ~7 s
+  const r = computeConvictionDirectionGate({
+    priceTicks: [
+      { price: 100, ts: staleTs },
+      { price: 101, ts: staleTs + 500 },
+    ],
+    direction: "yes",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.source, "none");
+});
+
+test("direction gate: ticks evaluated even when candles are missing (source='ticks')", () => {
+  // THE XRP BUG: the caller previously skipped the whole guard when
+  // candles.length < 2, even though fresh poller ticks were available.
+  // The pure gate must evaluate ticks independently of candle availability.
+  const r = computeConvictionDirectionGate({
+    priceTicks: priceTicks(1.030, 1.028, 1.026, 1.024, 1.022), // falling → block YES
+    candles: [],                                                // no candles at all
+    direction: "yes",
+    minSeconds: 4,
+  });
+  assert.equal(r.blocked, true, "Falling ticks must block YES even with zero candles");
+  assert.equal(r.source, "ticks");
+  assert.ok(r.sampleCount >= 2);
+  assert.ok(r.ageSpanMs !== null && r.ageSpanMs >= 0);
+});
+
+test("direction gate source labeling: candle fallback reports source='candles'", () => {
+  const r = computeConvictionDirectionGate({
+    candles: candles(100, 101, 102, 103, 105),
+    direction: "yes",
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.source, "candles");
+  assert.ok(r.sampleCount >= 2);
 });
 
 // ── lookback > available candles ──────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from "react";
-import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity, Zap, TrendingUp, Clock } from "lucide-react";
+import { ArrowUp, ArrowDown, Brain, Cpu, BarChart2, Activity, Zap, TrendingUp, Clock, AlertTriangle } from "lucide-react";
 import type { CoinSignals, CoinStabilityResult, TrajectoryGateResult } from "./types";
 import { wkToEstRange, ET_LABEL } from "./utils";
 
@@ -29,7 +29,7 @@ interface CoinSignalBoardProps {
   maxBetMinWindowEntryMinutes?: number | null;
   extremeCautionAborted?: string[];
   /** Per-coin direction block info when the conviction guard is actively blocking entry. Cleared when guard passes. */
-  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
+  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
   activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
 }
 
@@ -169,7 +169,7 @@ interface MarketConditionsBoardProps {
   trajectoryConfig?: TrajectoryThresholds | null;
   maxBetMinWindowEntryMinutes?: number | null;
   extremeCautionAborted?: string[];
-  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
+  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
   activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
 }
 
@@ -294,9 +294,12 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                         const { direction: blockedDir, gate, slopePct, effectiveThreshold, lookback, fromPrice, toPrice } = dirBlockInfo;
                         const isTickGate = gate === "tick";
                         const isCandleGate = gate === "candle-decline" || gate === "candle-rise";
+                        const isNoDataGate = gate === "no-data";
 
                         let tooltipText: string;
-                        if (isTickGate) {
+                        if (isNoDataGate) {
+                          tooltipText = "Direction guard: no usable price data (neither live ticks nor candles) — entry blocked until the price feed recovers (fail-closed safety)";
+                        } else if (isTickGate) {
                           const from = fromPrice != null ? `$${fromPrice.toFixed(2)}` : "?";
                           const to   = toPrice   != null ? `$${toPrice.toFixed(2)}`   : "?";
                           tooltipText = blockedDir === "yes"
@@ -310,20 +313,26 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                             : `Candle-trend gate: ${lookback ?? "?"}-candle rising slope ${slope}${thresh} — NO entry held back until trend stabilises`;
                         }
 
-                        const label = isTickGate
-                          ? (blockedDir === "yes" ? "Tick ↓" : "Tick ↑")
-                          : (blockedDir === "yes" ? "Trend ↓" : "Trend ↑");
+                        const label = isNoDataGate
+                          ? "No data"
+                          : isTickGate
+                            ? (blockedDir === "yes" ? "Tick ↓" : "Tick ↑")
+                            : (blockedDir === "yes" ? "Trend ↓" : "Trend ↑");
 
                         return (
                           <span
                             className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
-                              isCandleGate
-                                ? "bg-red-500/15 text-red-300 border-red-500/25"
-                                : "bg-orange-500/15 text-orange-300 border-orange-500/25"
+                              isNoDataGate
+                                ? "bg-slate-500/15 text-slate-300 border-slate-500/25"
+                                : isCandleGate
+                                  ? "bg-red-500/15 text-red-300 border-red-500/25"
+                                  : "bg-orange-500/15 text-orange-300 border-orange-500/25"
                             }`}
                             title={tooltipText}
                           >
-                            {blockedDir === "yes" ? <ArrowDown className="w-2.5 h-2.5" /> : <ArrowUp className="w-2.5 h-2.5" />}
+                            {isNoDataGate
+                              ? <AlertTriangle className="w-2.5 h-2.5" />
+                              : blockedDir === "yes" ? <ArrowDown className="w-2.5 h-2.5" /> : <ArrowUp className="w-2.5 h-2.5" />}
                             {label}
                           </span>
                         );

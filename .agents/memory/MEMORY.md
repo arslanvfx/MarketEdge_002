@@ -101,3 +101,4 @@
 - [Quiet hours byDow keyed by ET day](quiet-hours-et-dow.md) — silencedByDow/reducedByDow keys are ET days (UI tabs) with UTC hour cells; enforcement must use getEtDow(), never getUTCDay(), and the % cap applies after the randomizer
 - [Conviction ROI gate bypass](conviction-roi-gate-bypass.md) — roi-too-low SKIP in makeBotDecision must be gated on `decisionMode !== "conviction"`; kills ALL bets when market prices a direction strongly
 - [Direction guard live-price feed](direction-guard-live-price.md) — convictionPriceTicks MUST be fed the fresh live spot price (getTickerFresh, 1s poller), NOT getCachedPrediction; predCache is 15s-stale so every tick was identical → net slope ≈0 → guard never blocked
+- [Conviction guard fail-closed](conviction-guard-fail-closed.md) — direction guard source:"none" = hard block; guard+candle-slope gate re-run on EVERY dispatch incl. post-FOK-failure re-dispatch; candle-slope default 0.01%/ATR off

@@ -235,8 +235,10 @@ export const convictionEmergencyCloses = new Map<string, number>();
 
 export interface ConvictionDirectionBlockInfo {
   direction: "yes" | "no";
-  /** Which gate fired: 7-second tick slope ("tick") or multi-candle slope ("candle-decline" | "candle-rise") */
-  gate: "tick" | "candle-decline" | "candle-rise";
+  /** Which gate fired: 7-second tick slope ("tick"), multi-candle slope
+   *  ("candle-decline" | "candle-rise"), or fail-closed data outage ("no-data" —
+   *  neither poller ticks nor candles had ≥2 usable points at entry time) */
+  gate: "tick" | "candle-decline" | "candle-rise" | "no-data";
   /** Candle-gate: slope % over the lookback window (positive = rising, negative = falling) */
   slopePct?: number;
   /** Effective threshold used by the gate (may be ATR-scaled) */

@@ -1322,6 +1322,17 @@ export interface BotConfig {
   convictionDirectionGuardMinSeconds?: number; // consecutive adverse seconds required to block (default 4, clamp 2–10)
   convictionDirectionLookbackCandles?: number; // candle fallback lookback when tick data unavailable (default 3, clamp 1–10)
 
+  // Conviction candle-slope gate — medium-term trend confirmation that runs
+  // ALONGSIDE the direction guard.  Catches a sustained multi-minute adverse
+  // trend that happens to look flat in the last few seconds of tick data.
+  // Defaults calibrated from the SOL Aug-8 wrong-direction loss: threshold
+  // 0.01% with ATR scaling OFF (scaling doubled the threshold and let a
+  // +0.062% adverse slope through).
+  convictionCandleSlopeGateEnabled?: boolean;  // master toggle (default true)
+  convictionCandleSlopeLookback?: number;      // minute-candles to look back (default 5, clamp 2–10)
+  convictionCandleSlopeThresholdPct?: number;  // % net move required to block (default 0.01)
+  convictionCandleAtrScaleEnabled?: boolean;   // ATR-widen the threshold (default false)
+
   // ── Extreme Caution mode (conviction only) ────────────────────────────────
   // When enabled: (1) if a YES conviction bet was aborted this window because
   // the YES bid was below the zone floor, all further YES entries for that
@@ -1534,6 +1545,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionDirectionGuardEnabled: true,
   convictionDirectionGuardMinSeconds: 4,
   convictionDirectionLookbackCandles: 3,
+  convictionCandleSlopeGateEnabled: true,
+  convictionCandleSlopeLookback: 5,
+  convictionCandleSlopeThresholdPct: 0.01,
+  convictionCandleAtrScaleEnabled: false,
   minHoldMinutes: 4,
   enableMidExit: false,
   disableMidExitForConviction: true,
@@ -1727,6 +1742,16 @@ export interface ConvictionDirectionGateResult {
   toPrice: number | null;
   slopePrice: number | null;           // toPrice − fromPrice; positive = rising
   consecutiveAdverseSeconds: number;   // 0 when using candle fallback
+  /** Which data source actually produced the verdict:
+   *    "ticks"   — second-level poller ticks (primary path)
+   *    "candles" — minute-candle fallback
+   *    "none"    — neither source had ≥ 2 usable points (gate returned fail-open;
+   *                conviction callers MUST treat this as fail-closed) */
+  source: "ticks" | "candles" | "none";
+  /** Number of data points used for the verdict (0 when source === "none") */
+  sampleCount: number;
+  /** Milliseconds spanned by the samples (ticks: newest−oldest ts; candles/none: null) */
+  ageSpanMs: number | null;
 }
 
 export function computeConvictionDirectionGate(opts: {
@@ -1759,13 +1784,24 @@ export function computeConvictionDirectionGate(opts: {
       const toPrice    = recent[recent.length - 1].price;
       const slopePrice = toPrice - fromPrice;
       const blocked    = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
-      return { blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0 };
+      return {
+        blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0,
+        source: "ticks", sampleCount: recent.length,
+        ageSpanMs: recent[recent.length - 1].ts - recent[0].ts,
+      };
     }
   }
 
   // ── Fallback: minute-candle slope ────────────────────────────────────────
   if (!candles || candles.length < 2) {
-    return { blocked: false, fromPrice: null, toPrice: null, slopePrice: null, consecutiveAdverseSeconds: 0 };
+    // No usable source. blocked=false here is the PURE fail-open contract —
+    // conviction callers must inspect source === "none" and fail CLOSED
+    // (skip the entry) because a wrong-direction conviction bet is far more
+    // costly than a missed one.
+    return {
+      blocked: false, fromPrice: null, toPrice: null, slopePrice: null,
+      consecutiveAdverseSeconds: 0, source: "none", sampleCount: 0, ageSpanMs: null,
+    };
   }
   const toPrice   = candles[candles.length - 1].c;
   const fromIdx   = Math.max(0, candles.length - 1 - candleLook);
@@ -1775,7 +1811,10 @@ export function computeConvictionDirectionGate(opts: {
   // <= 0 / >= 0 was blocking entries whenever price was perfectly stable across
   // the lookback candles, which killed conviction NO bets in sideways markets.
   const blocked   = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
-  return { blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0 };
+  return {
+    blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0,
+    source: "candles", sampleCount: candles.length - fromIdx, ageSpanMs: null,
+  };
 }
 
 /**

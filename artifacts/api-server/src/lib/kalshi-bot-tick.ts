@@ -16,6 +16,7 @@ import {
   deriveConvictionZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
+  computeConvictionCandleSlopeGate,
   checkExtremeCautionEarlyGuard,
   computeNoAskBounceThreshold,
   computeExtremeCautionNoAskCeiling,
@@ -2484,10 +2485,21 @@ async function _runBotTick(
   // rather than away from it.  At the moment of entry:
   //   YES bet → price must be rising  (moving further above the strike)
   //   NO  bet → price must be falling (moving further below the strike)
-  // Fail-open: skipped when candle data is unavailable.
+  //
+  // UN-SKIPPABLE (fail-closed): this guard is evaluated on EVERY conviction
+  // dispatch — including 0-fill retries, which re-enter this function via a
+  // fresh tick — and there is NO data-availability precondition on the outer
+  // `if`.  Previously the whole block was gated on `candles.length >= 2`, so a
+  // coin with missing candle data skipped the guard entirely even when fresh
+  // poller ticks were available — this is exactly how a wrong-direction XRP
+  // conviction bet slipped through on a retry.  Now:
+  //   • ticks are evaluated independently of candle availability (the pure
+  //     gate prefers ticks and only falls back to candles), and
+  //   • when NEITHER ticks nor candles have ≥2 usable points, the entry is
+  //     BLOCKED (source === "none" → fail closed).  A wrong-direction
+  //     conviction bet is far more costly than a missed one.
   if (S.config.decisionMode === "conviction" &&
-      (S.config.convictionDirectionGuardEnabled ?? true) &&
-      candles.length >= 2) {
+      (S.config.convictionDirectionGuardEnabled ?? true)) {
     const _dirLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
     const _dir = computeConvictionDirectionGate({
       priceTicks: convictionPriceTicks.get(sym),
@@ -2496,7 +2508,8 @@ async function _runBotTick(
       direction,
       lookback: _dirLookback,
     });
-    if (_dir.blocked) {
+    const _noUsableSource = _dir.source === "none";
+    if (_dir.blocked || _noUsableSource) {
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       if (boostBetSize != null) {
         maxBetWindowToken.remaining++;
@@ -2505,33 +2518,102 @@ async function _runBotTick(
       // Surface the block to the dashboard: mark this coin as direction-blocked.
       convictionDirectionGuardBlockedMap.set(sym, {
         direction,
-        gate: "tick",
+        gate: _noUsableSource ? "no-data" : "tick",
         lookback: _dirLookback,
-        fromPrice: _dir.fromPrice,
-        toPrice: _dir.toPrice,
+        fromPrice: _dir.fromPrice ?? undefined,
+        toPrice: _dir.toPrice ?? undefined,
       });
       logger.warn(
         {
           sym, direction, windowKey,
+          source:      _dir.source,
+          sampleCount: _dir.sampleCount,
+          ageSpanMs:   _dir.ageSpanMs,
           fromPrice:   _dir.fromPrice,
           toPrice:     _dir.toPrice,
-          slopePrice:  _dir.slopePrice?.toFixed(2),
+          slopePrice:  _dir.slopePrice,      // full precision — sub-cent slopes matter
           lookback:    _dirLookback,
+          tickCount:   convictionPriceTicks.get(sym)?.length ?? 0,
+          candleCount: candles.length,
         },
-        "[kalshi-bot] conviction direction guard: price moving toward strike — order aborted",
+        _noUsableSource
+          ? "[kalshi-bot] conviction direction guard: NO usable price source (ticks+candles both <2 points) — failing CLOSED, order aborted"
+          : "[kalshi-bot] conviction direction guard: price moving toward strike — order aborted",
       );
       return;
     }
-    // Guard passed — clear any prior block for this coin so the dashboard badge disappears.
-    convictionDirectionGuardBlockedMap.delete(sym);
     logger.info(
       {
         sym, direction, windowKey,
-        slopePrice: _dir.slopePrice?.toFixed(2),
-        lookback:   _dirLookback,
+        source:      _dir.source,
+        sampleCount: _dir.sampleCount,
+        ageSpanMs:   _dir.ageSpanMs,
+        fromPrice:   _dir.fromPrice,
+        toPrice:     _dir.toPrice,
+        slopePrice:  _dir.slopePrice,        // full precision — "-0.00" hid a real decline
+        lookback:    _dirLookback,
       },
       "[kalshi-bot] conviction direction guard: price moving away from strike — OK",
     );
+
+    // ── Conviction candle-slope gate (medium-term trend confirmation) ───────
+    // Runs ALONGSIDE the short-horizon direction guard above.  The tick guard
+    // only sees the last few seconds; if price peaked minutes ago and has been
+    // falling ever since but happens to be flat for those few seconds, the tick
+    // guard passes.  This gate checks the net slope over the last N minute
+    // candles and blocks a sustained adverse trend.  Fail-open on insufficient
+    // candles — the guard above already fail-closes total data outages.
+    if (S.config.convictionCandleSlopeGateEnabled ?? true) {
+      const _slope = computeConvictionCandleSlopeGate({
+        candles,
+        direction,
+        lookback:     S.config.convictionCandleSlopeLookback ?? 5,
+        // Defaults from the SOL Aug-8 regression: tight 0.01% threshold, ATR
+        // scaling OFF (scaling widened the threshold and let the loss through).
+        thresholdPct: S.config.convictionCandleSlopeThresholdPct ?? 0.01,
+        atrPct:       getCachedPrediction(sym)?.indicators?.volatilityPct ?? null,
+        atrScaleEnabled:  S.config.convictionCandleAtrScaleEnabled ?? false,
+        atrMultiplierCap: 1.2,
+      });
+      if (_slope.blocked) {
+        convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        if (boostBetSize != null) {
+          maxBetWindowToken.remaining++;
+          logger.info({ sym }, "[kalshi-bot] conviction candle-slope gate: max-bet token restored");
+        }
+        convictionDirectionGuardBlockedMap.set(sym, {
+          direction,
+          gate: direction === "yes" ? "candle-decline" : "candle-rise",
+          slopePct: _slope.slopePct ?? undefined,
+          effectiveThreshold: _slope.effectiveThreshold,
+          lookback: _slope.lookback,
+        });
+        logger.warn(
+          {
+            sym, direction, windowKey,
+            slopePct:           _slope.slopePct,
+            effectiveThreshold: _slope.effectiveThreshold,
+            atrMultiplier:      _slope.atrMultiplier,
+            lookback:           _slope.lookback,
+            candleCount:        candles.length,
+          },
+          "[kalshi-bot] conviction candle-slope gate: sustained adverse trend — order aborted",
+        );
+        return;
+      }
+      logger.info(
+        {
+          sym, direction, windowKey,
+          slopePct:           _slope.slopePct,
+          effectiveThreshold: _slope.effectiveThreshold,
+          lookback:           _slope.lookback,
+        },
+        "[kalshi-bot] conviction candle-slope gate: trend OK",
+      );
+    }
+
+    // Both gates passed — clear any prior block so the dashboard badge disappears.
+    convictionDirectionGuardBlockedMap.delete(sym);
   }
 
   // ── Pipeline direction guard (all non-conviction modes) ──────────────────

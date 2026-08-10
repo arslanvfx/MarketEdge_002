@@ -38,6 +38,30 @@ import { logger } from "./logger";
 
 const POLL_INTERVAL_MS = 1_000;
 const LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
+const HEALTH_LOG_INTERVAL_MS = 60_000; // periodic tick-feed health summary
+
+// ── Fresh-tick feed health tracking ─────────────────────────────────────────
+// Per-coin counters for the getTickerFresh spot-price fetch that feeds the
+// direction guard's tick data.  A silent run of failures here means the guard
+// is operating on candle fallback (or failing closed) — that state must be
+// visible in production logs, not silent.
+interface TickFeedHealth {
+  okCount: number;         // successful fresh fetches since last health log
+  failCount: number;       // failed/invalid fetches since last health log
+  consecutiveFails: number;
+  lastOkAt: number | null; // ts of last successful tick push
+}
+const tickFeedHealth = new Map<string, TickFeedHealth>();
+let lastHealthLogAt = 0;
+
+function healthFor(sym: string): TickFeedHealth {
+  let h = tickFeedHealth.get(sym);
+  if (!h) {
+    h = { okCount: 0, failCount: 0, consecutiveFails: 0, lastOkAt: null };
+    tickFeedHealth.set(sym, h);
+  }
+  return h;
+}
 
 // Symbol → Coinbase product id (e.g. "BTC" → "BTC-USD") for the live spot-price
 // fetch that feeds the direction guard.  Built once from CRYPTO_COINS.
@@ -105,6 +129,7 @@ async function pollOnce(): Promise<void> {
       // (the guard returns blocked=false when it has < 2 samples).
       const product = COIN_PRODUCT[sym];
       if (product) {
+        const h = healthFor(sym);
         try {
           const spot = await getTickerFresh(product);
           if (Number.isFinite(spot) && spot > 0) {
@@ -114,9 +139,26 @@ async function pollOnce(): Promise<void> {
             // last few seconds via timestamp but deep history costs little.
             if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
             convictionPriceTicks.set(sym, ticks);
+            h.okCount++;
+            h.consecutiveFails = 0;
+            h.lastOkAt = Date.now();
+          } else {
+            // Invalid price (0/NaN) counts as a feed failure — no tick pushed.
+            h.failCount++;
+            h.consecutiveFails++;
           }
         } catch {
-          // fail-open: no tick pushed on error
+          // No tick pushed on error.  The direction guard fails CLOSED when it
+          // ends up with no usable source, so a feed outage blocks entries
+          // rather than fabricating a fake decline OR silently passing.
+          h.failCount++;
+          h.consecutiveFails++;
+          if (h.consecutiveFails === 5 || h.consecutiveFails % 30 === 0) {
+            logger.warn(
+              { sym, consecutiveFails: h.consecutiveFails, lastOkAgoMs: h.lastOkAt != null ? Date.now() - h.lastOkAt : null },
+              "[conviction-poller] fresh spot-price fetch failing repeatedly — direction guard tick feed degraded",
+            );
+          }
         }
       }
 
@@ -182,6 +224,26 @@ async function pollOnce(): Promise<void> {
       // ─────────────────────────────────────────────────────────────────────
     }),
   );
+
+  // ── Periodic tick-feed health summary ────────────────────────────────────
+  // Once a minute, log per-coin ok/fail counts since the previous summary so
+  // production logs always show whether the direction-guard tick feed is
+  // healthy — without spamming a line per second.
+  if (nowMs - lastHealthLogAt >= HEALTH_LOG_INTERVAL_MS) {
+    lastHealthLogAt = nowMs;
+    const summary: Record<string, { ok: number; fail: number; consecutiveFails: number; lastOkAgoMs: number | null }> = {};
+    for (const [sym, h] of tickFeedHealth) {
+      summary[sym] = {
+        ok: h.okCount,
+        fail: h.failCount,
+        consecutiveFails: h.consecutiveFails,
+        lastOkAgoMs: h.lastOkAt != null ? nowMs - h.lastOkAt : null,
+      };
+      h.okCount = 0;
+      h.failCount = 0;
+    }
+    logger.info({ feeds: summary }, "[conviction-poller] tick-feed health (last 60 s)");
+  }
 }
 
 /**
@@ -220,6 +282,7 @@ export function stopConvictionPoller(): void {
   clearInterval(pollerHandle);
   pollerHandle = null;
   convictionPriceMap.clear();
+  tickFeedHealth.clear();
   logger.info("[conviction-poller] stopped");
 }
 
@@ -243,6 +306,9 @@ export function isConvictionPollerRunning(): boolean {
 export interface ConvictionPollerStats {
   running: boolean;
   priceAgeMs: Record<string, number>;
+  /** Direction-guard tick feed health: per-coin consecutive fresh-fetch
+   *  failures and ms since the last successful spot-price tick. */
+  tickFeed: Record<string, { consecutiveFails: number; lastOkAgoMs: number | null }>;
 }
 
 /**
@@ -256,5 +322,12 @@ export function getPollerStats(): ConvictionPollerStats {
   for (const [sym, entry] of convictionPriceMap.entries()) {
     priceAgeMs[sym] = now - entry.fetchedAt;
   }
-  return { running: pollerHandle !== null, priceAgeMs };
+  const tickFeed: Record<string, { consecutiveFails: number; lastOkAgoMs: number | null }> = {};
+  for (const [sym, h] of tickFeedHealth.entries()) {
+    tickFeed[sym] = {
+      consecutiveFails: h.consecutiveFails,
+      lastOkAgoMs: h.lastOkAt != null ? now - h.lastOkAt : null,
+    };
+  }
+  return { running: pollerHandle !== null, priceAgeMs, tickFeed };
 }
