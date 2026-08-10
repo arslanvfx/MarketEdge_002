@@ -2547,6 +2547,7 @@ async function _runBotTick(
       candles,
       direction,
       lookback: _dirLookback,
+      trendWindowSeconds: S.config.convictionDirectionTrendWindowSeconds ?? 90,
     });
     const _noUsableSource = _dir.source === "none";
     if (_dir.blocked || _noUsableSource) {

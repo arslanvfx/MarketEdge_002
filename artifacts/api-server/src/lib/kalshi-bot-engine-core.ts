@@ -1452,6 +1452,10 @@ export interface BotConfig {
   convictionDirectionGuardEnabled?: boolean;   // master toggle (default true)
   convictionDirectionGuardMinSeconds?: number; // consecutive adverse seconds required to block (default 4, clamp 2–10)
   convictionDirectionLookbackCandles?: number; // candle fallback lookback when tick data unavailable (default 3, clamp 1–10)
+  // Broader recent tick horizon (seconds) evaluated alongside the short window
+  // so a sub-minute freefall toward the strike cannot hide behind a few flat
+  // seconds at entry.  Default 90; clamp 15–300; 0 disables.
+  convictionDirectionTrendWindowSeconds?: number;
 
   // Conviction candle-slope gate — medium-term trend confirmation that runs
   // ALONGSIDE the direction guard.  Catches a sustained multi-minute adverse
@@ -1676,6 +1680,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionDirectionGuardEnabled: true,
   convictionDirectionGuardMinSeconds: 4,
   convictionDirectionLookbackCandles: 3,
+  convictionDirectionTrendWindowSeconds: 90,
   convictionCandleSlopeGateEnabled: true,
   convictionCandleSlopeLookback: 5,
   convictionCandleSlopeThresholdPct: 0.01,
@@ -1891,32 +1896,77 @@ export function computeConvictionDirectionGate(opts: {
   direction: "yes" | "no";
   minSeconds?: number;  // consecutive adverse seconds to block (default 4, clamp 2–10)
   lookback?: number;    // candle fallback lookback (default 3, clamp 1–10)
+  /**
+   * Broader recent horizon (seconds) evaluated ALONGSIDE the short window so a
+   * sub-minute freefall toward the strike cannot hide behind a few flat seconds
+   * at the moment of entry.  Default 90 s; clamp 15–300.  Set 0 to disable.
+   */
+  trendWindowSeconds?: number;
 }): ConvictionDirectionGateResult {
-  const { priceTicks, candles, direction, minSeconds = 4, lookback = 3 } = opts;
+  const {
+    priceTicks, candles, direction, minSeconds = 4, lookback = 3,
+    trendWindowSeconds = 90,
+  } = opts;
   const reqSeconds  = Math.max(2, Math.min(minSeconds, 10));
   const candleLook  = Math.max(1, Math.min(lookback, 10));
+  const trendSecs   = trendWindowSeconds > 0
+    ? Math.max(15, Math.min(trendWindowSeconds, 300))
+    : 0;
 
   // ── Primary: second-level ticks ─────────────────────────────────────────
   if (priceTicks && priceTicks.length >= 2) {
     const now       = Date.now();
     const windowMs  = (reqSeconds + 3) * 1_000; // a few extra seconds of headroom
-    const recent    = priceTicks
-      .filter(t => now - t.ts <= windowMs)
-      .sort((a, b) => a.ts - b.ts);
+    const sorted    = [...priceTicks].sort((a, b) => a.ts - b.ts);
+    const recent    = sorted.filter(t => now - t.ts <= windowMs);
 
     if (recent.length >= 2) {
-      // Slope-based check: compare oldest tick in window to newest.
-      // A single neutral or bounce tick in the middle cannot mask a sustained
-      // adverse trend — only the net direction over the full window counts.
-      // YES adverse = net falling (slopePrice < 0).
-      // NO  adverse = net rising  (slopePrice > 0).
-      // Flat (slopePrice === 0) is neutral — never blocks.
+      // ── Short-horizon check (entry timing) ───────────────────────────────
+      // Compare oldest tick in the short window to newest.  A single neutral
+      // or bounce tick in the middle cannot mask a sustained adverse trend —
+      // only the net direction over the full window counts.
+      //   YES adverse = net falling (slopePrice < 0).
+      //   NO  adverse = net rising  (slopePrice > 0).
+      //   Flat (slopePrice === 0) is neutral — never blocks.
       const fromPrice  = recent[0].price;
       const toPrice    = recent[recent.length - 1].price;
       const slopePrice = toPrice - fromPrice;
-      const blocked    = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
+      const shortBlocked = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
+
+      // ── Broader-horizon trend check (freefall detector) ──────────────────
+      // The short window above only sees the last few seconds.  A price in
+      // freefall toward the strike that goes flat for those few seconds at the
+      // instant of entry would pass the short check (slopePrice === 0) even
+      // though the larger recent move is clearly adverse.  Evaluate the net
+      // move over a broader recent horizon and block if IT is adverse — the
+      // most recent price is still `toPrice`, so a genuine reversal (price now
+      // above where it was, for YES) is not penalised.
+      let trendBlocked = false;
+      let trendFromPrice: number | null = null;
+      let trendSlopePrice: number | null = null;
+      if (trendSecs > 0) {
+        const trendMs   = trendSecs * 1_000;
+        const trendPool = sorted.filter(t => now - t.ts <= trendMs);
+        if (trendPool.length >= 2) {
+          trendFromPrice  = trendPool[0].price;
+          trendSlopePrice = toPrice - trendFromPrice;
+          trendBlocked = direction === "yes"
+            ? trendSlopePrice < 0
+            : trendSlopePrice > 0;
+        }
+      }
+
+      const blocked = shortBlocked || trendBlocked;
+      // Surface whichever slope actually triggered the block so the diagnostic
+      // reflects the real reason (a flat short slope with an adverse trend
+      // slope must not log "slopePrice: 0 — OK").
+      const reportFrom  = trendBlocked && !shortBlocked && trendFromPrice != null
+        ? trendFromPrice : fromPrice;
+      const reportSlope = trendBlocked && !shortBlocked && trendSlopePrice != null
+        ? trendSlopePrice : slopePrice;
       return {
-        blocked, fromPrice, toPrice, slopePrice, consecutiveAdverseSeconds: 0,
+        blocked, fromPrice: reportFrom, toPrice, slopePrice: reportSlope,
+        consecutiveAdverseSeconds: 0,
         source: "ticks", sampleCount: recent.length,
         ageSpanMs: recent[recent.length - 1].ts - recent[0].ts,
       };

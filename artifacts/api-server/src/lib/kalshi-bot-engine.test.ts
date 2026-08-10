@@ -2530,6 +2530,116 @@ test("direction gate NO block: flat candles (slopePrice=0) → blocked=false (fl
   assert.equal(r.slopePrice, 0);
 });
 
+// ── Tick freefall detector (broader recent horizon) ──────────────────────────
+//
+// Regression for the Aug 10 2026 ETH NO loss: the direction guard saw a flat
+// last ~5 s (slopePrice=0 over a 7 s window) and passed "moving away from strike
+// — OK", even though ETH had been in freefall toward the strike for the prior
+// minute.  The tick path now evaluates a broader recent horizon (default 90 s)
+// ALONGSIDE the short window: if the net move over that horizon is adverse, the
+// entry is blocked even when the last few seconds are flat.
+
+// Build ticks: an adverse run over `trendSec` seconds ending in `flatSec`
+// seconds of a perfectly flat price at `endPrice`.  `startPrice` is the price
+// `trendSec` ago (before the run).  1 s cadence.
+function freefallTicks(opts: {
+  startPrice: number;
+  endPrice: number;
+  trendSec: number;
+  flatSec: number;
+}): Array<{ price: number; ts: number }> {
+  const { startPrice, endPrice, trendSec, flatSec } = opts;
+  const now = Date.now();
+  const out: Array<{ price: number; ts: number }> = [];
+  // Adverse run from startPrice → endPrice over (trendSec - flatSec) seconds…
+  const runSec = Math.max(1, trendSec - flatSec);
+  for (let i = 0; i <= runSec; i++) {
+    const frac = i / runSec;
+    const price = startPrice + (endPrice - startPrice) * frac;
+    const ageSec = trendSec - i; // oldest first
+    out.push({ price, ts: now - ageSec * 1_000 });
+  }
+  // …then flatSec seconds pinned exactly at endPrice (the "flat at entry" spot).
+  for (let s = flatSec - 1; s >= 0; s--) {
+    out.push({ price: endPrice, ts: now - s * 1_000 });
+  }
+  return out;
+}
+
+// Direction convention (pure gate, strike-agnostic):
+//   YES adverse = price FALLING  (slopePrice < 0)
+//   NO  adverse = price RISING    (slopePrice > 0)
+// The Aug-10 ETH loss was a NO bet where the spot price was RISING toward the
+// strike over ~80 s but happened to be flat for the last ~5 s, so the 7 s
+// short-window slope was 0 and the guard passed.  The freefall detector must
+// catch that broader adverse rise.
+
+test("direction gate NO tick freefall: price rose toward strike for ~80 s then flat 5 s → BLOCKED (Aug-10 ETH regression)", () => {
+  // NO adverse = rising. Rose 1874 → 1876 over ~75 s, then flat at 1876 last 5 s.
+  const ticks = freefallTicks({ startPrice: 1874, endPrice: 1876, trendSec: 80, flatSec: 5 });
+  const r = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no" });
+  assert.equal(r.source, "ticks");
+  assert.equal(r.blocked, true, "rising toward strike must block a NO entry even with a flat last few seconds");
+  // Diagnostic must reflect the adverse trend slope, not the flat short slope.
+  assert.ok(r.slopePrice !== null && r.slopePrice > 0,
+    `Expected reported adverse (positive) trend slope, got ${r.slopePrice}`);
+});
+
+test("direction gate YES tick freefall: price fell for ~80 s then flat → BLOCKED", () => {
+  // YES adverse = falling. Fell 1876 → 1874 over ~75 s, then flat at 1874.
+  const ticks = freefallTicks({ startPrice: 1876, endPrice: 1874, trendSec: 80, flatSec: 5 });
+  const r = computeConvictionDirectionGate({ priceTicks: ticks, direction: "yes" });
+  assert.equal(r.blocked, true, "falling must block a YES entry even with a flat last few seconds");
+  assert.ok(r.slopePrice !== null && r.slopePrice < 0);
+});
+
+test("direction gate NO tick genuine reversal: spiked up earlier but now back below start → NOT blocked", () => {
+  // For NO, adverse = rising. A price that ends BELOW where it started over the
+  // horizon is favorable (net falling) and must NOT block, even after a mid dip up.
+  const now = Date.now();
+  const ticks: Array<{ price: number; ts: number }> = [
+    { price: 1876, ts: now - 80_000 }, // start
+    { price: 1878, ts: now - 60_000 }, // spiked up (adverse intra-window)
+    { price: 1874, ts: now - 20_000 }, // came back down
+    { price: 1873, ts: now - 4_000 },  // now clearly below start
+    { price: 1873, ts: now - 1_000 },
+  ];
+  const r = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no" });
+  assert.equal(r.blocked, false, "net move ended below start → favorable for NO, must not block");
+});
+
+test("direction gate NO tick short-window still blocks: last few seconds rising", () => {
+  // Even with a favorable broader trend, an adverse SHORT slope must block.
+  const now = Date.now();
+  const ticks: Array<{ price: number; ts: number }> = [
+    { price: 1880, ts: now - 80_000 }, // far above (net falling trend, favorable for NO)
+    { price: 1880, ts: now - 40_000 },
+    { price: 1873, ts: now - 4_000 },  // last few seconds rising
+    { price: 1874, ts: now - 2_000 },
+    { price: 1875, ts: now - 500 },
+  ];
+  const r = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no" });
+  assert.equal(r.blocked, true, "adverse short-window slope must block regardless of favorable broader trend");
+});
+
+test("direction gate trendWindowSeconds=0 disables the freefall detector (short window only)", () => {
+  // Rose earlier, but the last ~10 s are perfectly flat so the SHORT window is
+  // neutral.  With the trend detector ON this blocks (proven below); OFF it must
+  // pass, isolating that the freefall detector is what does the blocking.
+  const now = Date.now();
+  const ticks: Array<{ price: number; ts: number }> = [
+    { price: 1874, ts: now - 80_000 }, // start (below)
+    { price: 1876, ts: now - 20_000 }, // rose toward strike
+    { price: 1876, ts: now - 6_000 },  // flat within short window
+    { price: 1876, ts: now - 3_000 },
+    { price: 1876, ts: now - 500 },
+  ];
+  const off = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no", trendWindowSeconds: 0 });
+  assert.equal(off.blocked, false, "detector OFF → flat short window slope=0 → not blocked (old behavior)");
+  const on = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no" });
+  assert.equal(on.blocked, true, "detector ON → broader adverse rise is caught");
+});
+
 // ── No-usable-source paths ───────────────────────────────────────────────────
 //
 // The PURE gate returns blocked=false with source="none" when neither ticks nor
