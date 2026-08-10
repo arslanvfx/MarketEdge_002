@@ -2543,30 +2543,15 @@ export async function runBotLoopTick(): Promise<void> {
     consecutiveAllNullPriceWindows = 0;
   }
 
-  // ── Conviction: collect spot price ticks for ALL coins every loop tick ──────
-  // Must run BEFORE Phase 4 / runCoin so coins not yet in the conviction zone
-  // (yes_price outside 82–91%) already have spot-price history in their ticks
-  // array by the time they enter.  Collecting ticks only inside runCoin (which
-  // runs for betSymbols/skipSymbols) caused the gate to see an empty array the
-  // moment a coin first entered the zone — after a 60-second decline where its
-  // yes_price was above the cap and runCoin was never called for it.
-  if (S.config.decisionMode === "conviction") {
-    const convictionCoins = CRYPTO_COINS.filter(c => KALSHI_SERIES[c.symbol]);
-    const nowMs = Date.now();
-    for (const coin of convictionCoins) {
-      const sym = coin.symbol.toUpperCase();
-      const spotPrice = getCachedPrediction(sym)?.price ?? null;
-      if (spotPrice != null) {
-        const ticks = convictionPriceTicks.get(sym) ?? [];
-        ticks.push({ price: spotPrice, ts: nowMs });
-        // Keep ~5 min of history at 1s cadence — the direction gate filters to
-        // the last 7s via timestamp, but deep history costs little and ensures
-        // a coin approaching the zone has readings across its full approach.
-        if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
-        convictionPriceTicks.set(sym, ticks);
-      }
-    }
-  }
+  // ── Conviction: spot-price ticks are collected by the conviction poller ─────
+  // The direction guard reads convictionPriceTicks to detect consecutive-seconds
+  // adverse movement.  Those ticks are now populated exclusively by the
+  // conviction poller (kalshi-conviction-poller.ts), which fetches the REAL live
+  // spot price fresh every second via getTickerFresh — bypassing the 2 s ticker
+  // TTL / 15 s predCache staleness that previously made every tick carry the same
+  // frozen price (net slope ≈ 0 → guard never blocked).  Do NOT re-populate the
+  // map here: a second writer using the stale getCachedPrediction price would
+  // re-introduce flat samples and defeat the guard.
 
   // Phase 4: run all eligible coins in parallel.
   // Phase 3 is the authoritative filter — it has already enforced the global bet cap,

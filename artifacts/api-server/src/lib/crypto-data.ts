@@ -189,6 +189,23 @@ export async function getTicker(product: string): Promise<number> {
   return price;
 }
 
+/**
+ * getTickerFresh — like getTicker but ALWAYS hits the live Coinbase ticker,
+ * bypassing the 2 s TTL cache.  Used by the conviction 1 s spot-price poller
+ * so the direction guard sees genuinely moving prices instead of a value that
+ * only refreshes every 2 s (and, via predCache, effectively every 15 s).
+ * The fresh value still populates the shared tickerCache so other callers
+ * benefit from it within their TTL window.
+ */
+export async function getTickerFresh(product: string): Promise<number> {
+  const raw = await fetchJson<Record<string, string>>(
+    `${COINBASE}/products/${product}/ticker`,
+  );
+  const price = parseFloat(raw.price ?? "0");
+  if (price > 0) tickerCache.set(product, { at: Date.now(), value: price });
+  return price;
+}
+
 export async function getCandles(product: string): Promise<Candle[]> {
   const hit = candleCache.get(product);
   if (hit && Date.now() - hit.at < CANDLE_TTL) return hit.value;

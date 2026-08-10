@@ -31,12 +31,19 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S, convictionAbortCooldown, convictionFiredThisWindow } from "./kalshi-bot-state";
+import { S, convictionAbortCooldown, convictionFiredThisWindow, convictionPriceTicks } from "./kalshi-bot-state";
 import { deriveConvictionZone } from "./kalshi-bot-engine";
+import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
 
 const POLL_INTERVAL_MS = 1_000;
 const LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
+
+// Symbol → Coinbase product id (e.g. "BTC" → "BTC-USD") for the live spot-price
+// fetch that feeds the direction guard.  Built once from CRYPTO_COINS.
+const COIN_PRODUCT: Record<string, string> = Object.fromEntries(
+  CRYPTO_COINS.map((c) => [c.symbol.toUpperCase(), c.product]),
+);
 
 export interface ConvictionLivePrice {
   yesAsk: number | null;
@@ -86,6 +93,33 @@ async function pollOnce(): Promise<void> {
 
   await Promise.allSettled(
     syms.map(async (sym) => {
+      // ── Live spot-price tick for the direction guard ──────────────────────
+      // Fetch the REAL crypto spot price fresh (bypassing the 2 s ticker TTL)
+      // and push it into convictionPriceTicks.  This is the ONLY writer of that
+      // map — the direction guard reads it to detect consecutive-seconds adverse
+      // movement.  Previously the bot loop populated it from getCachedPrediction,
+      // whose predCache refreshes only every ~15 s, so every "tick" carried the
+      // same frozen price → the guard's net slope was always ~0 (flat) → it
+      // never blocked a wrong-way entry.  Fail-open: on fetch error or a 0/NaN
+      // price we push nothing, so a feed outage cannot fabricate a fake decline
+      // (the guard returns blocked=false when it has < 2 samples).
+      const product = COIN_PRODUCT[sym];
+      if (product) {
+        try {
+          const spot = await getTickerFresh(product);
+          if (Number.isFinite(spot) && spot > 0) {
+            const ticks = convictionPriceTicks.get(sym) ?? [];
+            ticks.push({ price: spot, ts: Date.now() });
+            // Keep ~5 min of history at 1 s cadence; the guard filters to the
+            // last few seconds via timestamp but deep history costs little.
+            if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
+            convictionPriceTicks.set(sym, ticks);
+          }
+        } catch {
+          // fail-open: no tick pushed on error
+        }
+      }
+
       // forceRefresh=true bypasses the TTL check without deleting the existing
       // cache entry.  The old entry stays readable to other callers until the
       // live fetch atomically overwrites it — no transient null gap.

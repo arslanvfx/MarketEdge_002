@@ -100,3 +100,4 @@
 - [Conviction late-window retry](conviction-late-retry.md) — conviction bypasses all min-remaining floors; every live-gate abort must release lock+token (ticker-mismatch leaked both); proximity gate atrMultiplierCap must be 1.2 at ALL call sites
 - [Quiet hours byDow keyed by ET day](quiet-hours-et-dow.md) — silencedByDow/reducedByDow keys are ET days (UI tabs) with UTC hour cells; enforcement must use getEtDow(), never getUTCDay(), and the % cap applies after the randomizer
 - [Conviction ROI gate bypass](conviction-roi-gate-bypass.md) — roi-too-low SKIP in makeBotDecision must be gated on `decisionMode !== "conviction"`; kills ALL bets when market prices a direction strongly
+- [Direction guard live-price feed](direction-guard-live-price.md) — convictionPriceTicks MUST be fed the fresh live spot price (getTickerFresh, 1s poller), NOT getCachedPrediction; predCache is 15s-stale so every tick was identical → net slope ≈0 → guard never blocked
