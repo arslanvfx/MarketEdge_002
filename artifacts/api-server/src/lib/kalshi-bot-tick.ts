@@ -1481,32 +1481,14 @@ async function _runBotTick(
     targetBetSize = override;
   }
 
-  // ── QUIET HOURS V2 REDUCED BET CAP ───────────────────────────────────────
-  // When the current UTC hour is in the "reduced bet" list, cap targetBetSize
-  // to the configured reduced amount.  This is a hard ceiling applied AFTER
-  // all other sizing (including time-bet schedule and extreme caution) so a
-  // reduced-bet hour can never produce a larger bet than the cap, regardless
-  // of which other sizing path matched.  Intentionally does not check
-  // betScheduleApplied so the cap cannot be bypassed by a schedule bracket.
-  if (S.quietHoursV2ReducedBet != null && S.quietHoursV2ReducedBet >= 1) {
-    const reducedPct = S.quietHoursV2ReducedBet; // 10–99 — percentage OF regular bet to use (50 = bet at 50% of normal)
-    const reducedSize = +(targetBetSize * (reducedPct / 100)).toFixed(2);
-    if (reducedSize < targetBetSize) {
-      logger.info(
-        { sym, reducedPct, prev: +targetBetSize.toFixed(2), next: reducedSize },
-        "[kalshi-bot] quiet-hours-v2 reduced bet % applied",
-      );
-      targetBetSize = reducedSize;
-    }
-  }
-  // ─────────────────────────────────────────────────────────────────────────
-
   // ── BET AMOUNT RANDOMIZER ─────────────────────────────────────────────────
   // When enabled and ≥ 2 values are configured, override targetBetSize with a
   // randomly-chosen value from the list.  This runs AFTER all other sizing
   // paths (conviction boost, regime, dynamic, time-schedule, extreme caution)
   // so it overrides all of them.  The per-coin maxBetSize (from coinOverrides)
   // is the only hard cap that still applies after randomization.
+  // NOTE: Smart Quiet Hours is applied AFTER this block so the percentage
+  // reduction is always honoured regardless of which sizing path set the value.
   // betRandomizerApplied is tracked so the downstream maxBetCap guard widens
   // to honour the randomized amount (same pattern as betScheduleApplied).
   //
@@ -1556,6 +1538,25 @@ async function _runBotTick(
         { sym, values: vals, usedThisWindow: [...usedSet].map(v => +v.toFixed(2)) },
         "[kalshi-bot] bet randomizer: all values used this window — falling back to normal sizing",
       );
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── QUIET HOURS V2 REDUCED BET CAP ───────────────────────────────────────
+  // Applied LAST — after every other sizing path including the randomizer —
+  // so the operator-configured percentage is always honoured regardless of
+  // whether overall sizing, conviction boost, or bet randomization set the
+  // pre-reduction value.  Intentionally does not check betScheduleApplied or
+  // betRandomizerApplied so neither can bypass this reduction.
+  if (S.quietHoursV2ReducedBet != null && S.quietHoursV2ReducedBet >= 1) {
+    const reducedPct = S.quietHoursV2ReducedBet; // 10–99 — percentage OF regular bet to use (50 = bet at 50% of normal)
+    const reducedSize = +(targetBetSize * (reducedPct / 100)).toFixed(2);
+    if (reducedSize < targetBetSize) {
+      logger.info(
+        { sym, reducedPct, prev: +targetBetSize.toFixed(2), next: reducedSize, randomizerApplied: betRandomizerApplied },
+        "[kalshi-bot] quiet-hours-v2 reduced bet % applied",
+      );
+      targetBetSize = reducedSize;
     }
   }
   // ─────────────────────────────────────────────────────────────────────────
