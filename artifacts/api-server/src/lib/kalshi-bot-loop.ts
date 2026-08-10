@@ -16,6 +16,7 @@ import {
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
   shouldSuppressConvictionStopLoss,
+  getEtDow,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -1006,7 +1007,12 @@ export async function runBotLoopTick(): Promise<void> {
     if (!S.config.freeRunMode && qhv2?.enabled) {
       const nowDate = new Date();
       const nowUTCHour = nowDate.getUTCHours();
-      const nowUTCDow = nowDate.getUTCDay(); // 0=Sun … 6=Sat (matches JS getUTCDay)
+      // Day-of-week resolved in ET (America/New_York), NOT UTC.  The UI grid's
+      // day tabs are ET days while cells store UTC hours, so byDow rules are
+      // keyed by (ET day, UTC hour).  Using getUTCDay() here made every
+      // ET-evening rule (8PM–midnight ET = UTC hours 0–4) land under the wrong
+      // day and silently never fire.
+      const nowUTCDow = getEtDow(nowDate); // 0=Sun … 6=Sat, ET day
 
       // Per-day-first: if today's DOW has its own rule set, use it exclusively.
       // Only fall back to flat all-days list for days that have never been configured.

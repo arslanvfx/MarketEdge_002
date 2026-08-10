@@ -984,6 +984,54 @@ export interface QuietHoursV2 {
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 on that day only
 }
 
+/**
+ * Day-of-week in America/New_York (0=Sun … 6=Sat).
+ *
+ * The quiet-hours UI presents day tabs as ET days while cells store UTC hours.
+ * That means a cell like "Sunday 9PM ET" is stored as (dow=0, utcHour=1) even
+ * though 1:00 UTC is already Monday in UTC.  Enforcement therefore MUST resolve
+ * "today" in ET too — using getUTCDay() makes every ET-evening rule
+ * (8PM–midnight ET, i.e. UTC hours 0–4) silently land under the wrong day and
+ * never fire.
+ */
+const ET_DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+export function getEtDow(d: Date = new Date()): number {
+  const name = d.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short" });
+  const idx = ET_DOW_NAMES.indexOf(name);
+  return idx >= 0 ? idx : d.getUTCDay(); // defensive fallback — should never trigger
+}
+
+/**
+ * Resolve the effective Smart Quiet Hours V2 state for `now`.
+ * Mirrors the UI grid exactly: DOW-first (per-ET-day rules take precedence and
+ * are exclusive for that day), flat lists as all-days fallback.
+ * Pure — shared by the bot loop (enforcement) and status endpoints (display)
+ * so they can never disagree.
+ */
+export function resolveQuietHoursV2State(
+  qhv2: QuietHoursV2 | undefined,
+  now: Date = new Date(),
+): { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number } {
+  const utcHour = now.getUTCHours();
+  if (!qhv2?.enabled) return { mode: "active", utcHour };
+  const dowStr = String(getEtDow(now));
+
+  const hasDowSilence = qhv2.silencedByDow != null && dowStr in qhv2.silencedByDow;
+  const isSilenced = hasDowSilence
+    ? (qhv2.silencedByDow![dowStr] ?? []).includes(utcHour)
+    : qhv2.silencedUtcHours.includes(utcHour);
+  if (isSilenced) return { mode: "silenced", utcHour };
+
+  const hasDowReduced = qhv2.reducedByDow != null && dowStr in qhv2.reducedByDow;
+  const reduced = hasDowReduced
+    ? (qhv2.reducedByDow![dowStr]?.[String(utcHour)] ?? null)
+    : (qhv2.reducedBetUtcHours[String(utcHour)] ?? null);
+  if (reduced != null && reduced >= 1 && reduced <= 99) {
+    return { mode: "reduced", reducedBetAmount: reduced, utcHour };
+  }
+  return { mode: "active", utcHour };
+}
+
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)

@@ -13,6 +13,7 @@ import {
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
+  resolveQuietHoursV2State,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -224,16 +225,7 @@ export function getWindowConditions(): BotConditionsSnapshot {
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
     quietHoursStart: S.config.quietHoursStart,
     quietHoursEnd: S.config.quietHoursEnd,
-    quietHoursV2State: (() => {
-      const utcHour = new Date().getUTCHours();
-      const qhv2 = S.config.quietHoursV2;
-      if (qhv2?.enabled) {
-        if (qhv2.silencedUtcHours.includes(utcHour)) return { mode: "silenced" as const, utcHour };
-        const reduced = qhv2.reducedBetUtcHours[String(utcHour)];
-        if (reduced != null) return { mode: "reduced" as const, reducedBetAmount: reduced, utcHour };
-      }
-      return { mode: "active" as const, utcHour };
-    })(),
+    quietHoursV2State: resolveQuietHoursV2State(S.config.quietHoursV2),
     circuitBreakerActive: S.cbState.circuitBreakerWindowsRemaining > 0,
     circuitBreakerWindowsRemaining: S.cbState.circuitBreakerWindowsRemaining,
     dailyLimitHit: S.dailyPnl <= -getEffectiveDailyLossLimit(),

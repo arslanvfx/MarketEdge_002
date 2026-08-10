@@ -186,3 +186,66 @@ test("reduced-bet cap: target one cent above cap → capped", () => {
   const result = applyReducedBetCap(1.01, 1.00);
   assert.ok(result <= 1.00, `Expected cap 1.00, got ${result}`);
 });
+
+// ---------------------------------------------------------------------------
+// ET-day resolution for byDow rules (regression: UI day tabs are ET days,
+// cells are UTC hours — enforcement must resolve "today" in ET, not UTC,
+// or every ET-evening rule (UTC hours 0–4) lands under the wrong day).
+// ---------------------------------------------------------------------------
+
+import { getEtDow, resolveQuietHoursV2State } from "./kalshi-bot-engine-core.ts";
+
+test("getEtDow: 1:00 UTC Monday is still Sunday in ET", () => {
+  // 2026-08-10T01:30Z — Monday in UTC, Sunday 9:30 PM EDT
+  const d = new Date("2026-08-10T01:30:00Z");
+  assert.equal(d.getUTCDay(), 1);
+  assert.equal(getEtDow(d), 0);
+});
+
+test("getEtDow: midday UTC matches UTC day", () => {
+  const d = new Date("2026-08-10T15:00:00Z"); // Monday both in UTC and ET
+  assert.equal(getEtDow(d), 1);
+});
+
+test("resolveQuietHoursV2State: Sunday-ET evening reducedByDow rule fires at 1:00 UTC Monday", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    reducedByDow: { "0": { "1": 50 } }, // Sunday ET, 1:00 UTC → 50%
+  };
+  const st = resolveQuietHoursV2State(qhv2, new Date("2026-08-10T01:30:00Z"));
+  assert.equal(st.mode, "reduced");
+  assert.equal(st.reducedBetAmount, 50);
+});
+
+test("resolveQuietHoursV2State: dow entry is exclusive — flat list ignored for that day", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: { "1": 25 }, // flat all-days 25% at hour 1
+    reducedByDow: { "0": {} },       // Sunday ET has its own (empty) rule set
+  };
+  const st = resolveQuietHoursV2State(qhv2, new Date("2026-08-10T01:30:00Z"));
+  assert.equal(st.mode, "active");
+});
+
+test("resolveQuietHoursV2State: silencedByDow keyed by ET day fires across UTC midnight", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "0": [2] }, // Sunday ET, 2:00 UTC (10 PM EDT Sunday)
+  };
+  const st = resolveQuietHoursV2State(qhv2, new Date("2026-08-10T02:15:00Z"));
+  assert.equal(st.mode, "silenced");
+});
+
+test("resolveQuietHoursV2State: disabled → active regardless of rules", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: false,
+    silencedUtcHours: [1],
+    reducedBetUtcHours: { "1": 50 },
+  };
+  assert.equal(resolveQuietHoursV2State(qhv2, new Date("2026-08-10T01:30:00Z")).mode, "active");
+});

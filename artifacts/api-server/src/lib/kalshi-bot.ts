@@ -8,6 +8,7 @@ import { isKalshiConfigured, getCachedKalshiBalance } from "./kalshi-trader";
 import { syncConvictionPoller, getPollerStats } from "./kalshi-conviction-poller";
 import {
   DEFAULT_BOT_CONFIG, isInQuietHours, assertSetBotModeAllowed,
+  resolveQuietHoursV2State,
   type BotConfig,
 } from "./kalshi-bot-engine";
 import {
@@ -144,16 +145,7 @@ export function getBotState(): BotStateSnapshot {
     circuitBreakerWindowsRemaining: S.cbState.circuitBreakerWindowsRemaining,
     consecutiveLosses: S.cbState.consecutiveLosses,
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
-    quietHoursV2State: (() => {
-      const utcHour = new Date().getUTCHours();
-      const qhv2 = S.config.quietHoursV2;
-      if (qhv2?.enabled) {
-        if (qhv2.silencedUtcHours.includes(utcHour)) return { mode: "silenced" as const, utcHour };
-        const reduced = qhv2.reducedBetUtcHours[String(utcHour)];
-        if (reduced != null) return { mode: "reduced" as const, reducedBetAmount: reduced, utcHour };
-      }
-      return { mode: "active" as const, utcHour };
-    })(),
+    quietHoursV2State: resolveQuietHoursV2State(S.config.quietHoursV2),
     autoTuneQHLastRunAt: S.autoTuneQHLastRunAt,
     autoTuneQHLastChanges: S.autoTuneQHLastChanges,
     dbDegraded: S.dbDegradedSince !== null,
