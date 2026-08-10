@@ -31,3 +31,5 @@ plus `stockGet`/`stockAuth` fetch helpers and formatters). Routes are lazy-loade
   shell shows a banner; every page renders empty states rather than erroring.
 - Candlesticks in `stock-detail.tsx` are a hand-rolled SVG (Recharts has no candlestick);
   RSI/Bollinger and the Performance charts use Recharts.
+
+**Profitability-first rule:** stock surfaces lead with dollar metrics (P&L, profit factor, expectancy, R); win rate is secondary only. Do not reintroduce win-rate-led cards or crypto-style win/loss outcome badges.

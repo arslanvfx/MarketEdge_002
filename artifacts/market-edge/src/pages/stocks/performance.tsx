@@ -4,7 +4,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, ResponsiveContainer,
   Tooltip as RTooltip, ReferenceLine, Cell,
 } from "recharts";
-import { Loader2, Trophy, TrendingUp, TrendingDown } from "lucide-react";
+import { Loader2, Trophy, TrendingDown } from "lucide-react";
 import { StocksShell } from "./stocks-shell";
 import {
   stockGet, fmtSignedUsd,
@@ -16,6 +16,11 @@ interface Bucket { key: string; wins: number; losses: number; pnl: number; }
 function winRate(b: Bucket): number | null {
   const n = b.wins + b.losses;
   return n === 0 ? null : (b.wins / n) * 100;
+}
+
+function fmtProfitFactor(pf: number | null | undefined): string {
+  if (pf == null) return "∞";
+  return pf.toFixed(2);
 }
 
 export default function StockPerformance() {
@@ -78,9 +83,9 @@ export default function StockPerformance() {
     return Array.from(map.values());
   };
 
-  const bySector = useMemo(() => bucketBy((r) => r.sector).map((b) => ({ ...b, winRate: winRate(b) })), [closed]);
-  const byMode = useMemo(() => bucketBy((r) => r.trading_mode).map((b) => ({ ...b, winRate: winRate(b) })), [closed]);
-  const bySignal = useMemo(() => bucketBy((r) => r.signal_type).map((b) => ({ ...b, winRate: winRate(b) })), [closed]);
+  const bySector = useMemo(() => bucketBy((r) => r.sector).map((b) => ({ ...b, pnl: Number(b.pnl.toFixed(2)), winRate: winRate(b) })), [closed]);
+  const byMode = useMemo(() => bucketBy((r) => r.trading_mode).map((b) => ({ ...b, pnl: Number(b.pnl.toFixed(2)), winRate: winRate(b) })), [closed]);
+  const bySignal = useMemo(() => bucketBy((r) => r.signal_type).map((b) => ({ ...b, pnl: Number(b.pnl.toFixed(2)), winRate: winRate(b) })), [closed]);
   const byTicker = useMemo(() => bucketBy((r) => r.ticker), [closed]);
 
   const bestTickers = useMemo(() => [...byTicker].sort((a, b) => b.pnl - a.pnl).slice(0, 5), [byTicker]);
@@ -90,16 +95,26 @@ export default function StockPerformance() {
   const signalLabel = (k: string) =>
     k === "technical" ? "Technical" : k === "ai" ? "Claude AI" : k === "ml" ? "ML" : "Unknown";
 
+  const pnlTooltip = (v: number, _n: unknown, p: any): [string, string] => {
+    const b = p.payload as Bucket & { winRate: number | null };
+    const wr = b.winRate != null ? ` · ${Math.round(b.winRate)}% wins (${b.wins + b.losses} trades)` : "";
+    return [`${fmtSignedUsd(v)}${wr}`, "P&L"];
+  };
+
   return (
     <StocksShell>
       <div className="p-6 space-y-6">
-        {/* Summary cards */}
+        {/* Money metrics — the headline */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
             { label: "Total P&L", value: fmtSignedUsd(pnl?.totalPnl ?? 0), color: (pnl?.totalPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400" },
             { label: "Today's P&L", value: fmtSignedUsd(pnl?.todayPnl ?? 0), color: (pnl?.todayPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400" },
-            { label: "Win Rate", value: pnl ? `${Math.round(pnl.winRate * 100)}%` : "—", sub: pnl ? `${pnl.wins}W / ${pnl.losses}L` : undefined, color: "text-violet-400" },
-            { label: "Open / Closed", value: pnl ? `${pnl.open} / ${pnl.closed}` : "—", color: "text-sky-400" },
+            {
+              label: "Profit Factor", value: pnl ? fmtProfitFactor(pnl.profitFactor) : "—",
+              sub: "gross profit ÷ gross loss · >1 = profitable",
+              color: pnl == null ? "text-foreground" : pnl.profitFactor == null || pnl.profitFactor >= 1 ? "text-emerald-400" : "text-red-400",
+            },
+            { label: "Expectancy / trade", value: perf?.summary ? fmtSignedUsd(perf.summary.expectancy ?? 0) : "—", color: (perf?.summary?.expectancy ?? 0) >= 0 ? "text-emerald-400" : "text-red-400" },
           ].map(({ label, value, sub, color }) => (
             <div key={label} className="bg-card border border-border rounded-lg p-4">
               <div className="text-xs text-muted-foreground mb-1">{label}</div>
@@ -109,16 +124,20 @@ export default function StockPerformance() {
           ))}
         </div>
 
-        {/* Risk & quality cards */}
+        {/* Risk & quality — secondary stats */}
         {perf?.summary && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { label: "Expectancy / trade", value: fmtSignedUsd(perf.summary.expectancy ?? 0), color: (perf.summary.expectancy ?? 0) >= 0 ? "text-emerald-400" : "text-red-400" },
               { label: "Max Drawdown", value: fmtSignedUsd(-(perf.summary.maxDrawdown ?? 0)), color: "text-amber-400" },
               {
-                label: "Trending vs Choppy", color: "text-sky-400",
-                value: `${perf.byRegime?.trending?.winRate != null ? Math.round(perf.byRegime.trending.winRate * 100) + "%" : "—"} / ${perf.byRegime?.choppy?.winRate != null ? Math.round(perf.byRegime.choppy.winRate * 100) + "%" : "—"}`,
-                sub: "win rate by market regime",
+                label: "Avg Win / Avg Loss", color: "text-sky-400",
+                value: `${fmtSignedUsd(perf.summary.avgWin ?? 0)} / ${fmtSignedUsd(perf.summary.avgLoss ?? 0)}`,
+                sub: perf.summary.avgR != null ? `avg ${perf.summary.avgR >= 0 ? "+" : ""}${perf.summary.avgR.toFixed(2)}R per trade` : undefined,
+              },
+              {
+                label: "Win Rate", color: "text-muted-foreground",
+                value: pnl ? `${Math.round(pnl.winRate * 100)}%` : "—",
+                sub: pnl ? `${pnl.wins}W / ${pnl.losses}L · ${pnl.open} open / ${pnl.closed} closed` : undefined,
               },
               {
                 label: "Avg Entry Slippage", color: "text-violet-400",
@@ -161,58 +180,28 @@ export default function StockPerformance() {
               </ResponsiveContainer>
             </section>
 
-            {/* Win rate by sector & mode */}
+            {/* P&L by sector & horizon */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <section className="rounded-lg border border-border bg-card p-5">
-                <h2 className="text-sm font-bold text-foreground mb-3">Win Rate by Sector</h2>
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={bySector} margin={{ top: 8, right: 12, bottom: 0, left: -18 }}>
-                    <XAxis dataKey="key" tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" tickFormatter={(v) => `${v}%`} />
-                    <RTooltip contentStyle={{ background: "hsl(222 47% 11%)", border: "1px solid hsl(216 34% 17%)", borderRadius: 8, fontSize: 12 }}
-                      formatter={(v: number, _n, p) => [`${Math.round(v)}% (${(p.payload as Bucket).wins}W/${(p.payload as Bucket).losses}L)`, "Win rate"]} />
-                    <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
-                      {bySector.map((b, i) => (
-                        <Cell key={i} fill={(b.winRate ?? 0) >= 50 ? "#34d399" : "#f87171"} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </section>
-
-              <section className="rounded-lg border border-border bg-card p-5">
-                <h2 className="text-sm font-bold text-foreground mb-3">Win Rate by Trading Mode</h2>
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={byMode.map((b) => ({ ...b, label: modeLabel(b.key) }))} margin={{ top: 8, right: 12, bottom: 0, left: -18 }}>
-                    <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" tickFormatter={(v) => `${v}%`} />
-                    <RTooltip contentStyle={{ background: "hsl(222 47% 11%)", border: "1px solid hsl(216 34% 17%)", borderRadius: 8, fontSize: 12 }}
-                      formatter={(v: number, _n, p) => [`${Math.round(v)}% (${(p.payload as Bucket).wins}W/${(p.payload as Bucket).losses}L)`, "Win rate"]} />
-                    <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
-                      {byMode.map((b, i) => (
-                        <Cell key={i} fill={(b.winRate ?? 0) >= 50 ? "#818cf8" : "#f87171"} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </section>
+              <PnlBarSection title="P&L by Sector" data={bySector} tooltip={pnlTooltip} />
+              <PnlBarSection title="P&L by Horizon" data={byMode.map((b) => ({ ...b, key: modeLabel(b.key) }))} tooltip={pnlTooltip} />
             </div>
 
-            {/* Win rate by signal type */}
+            {/* P&L by signal type */}
             <section className="rounded-lg border border-border bg-card p-5">
-              <h2 className="text-sm font-bold text-foreground mb-1">Win Rate by Signal Type</h2>
+              <h2 className="text-sm font-bold text-foreground mb-1">P&L by Signal Type</h2>
               <p className="text-[11px] text-muted-foreground mb-3">
-                Which edge — Technical, Claude AI, or ML — drove each entry, by the highest-weighted signal that agreed with the trade.
+                Which edge — Technical, Claude AI, or ML — actually makes money, in dollars. Win rate shown in the tooltip.
               </p>
               <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={bySignal.map((b) => ({ ...b, label: signalLabel(b.key) }))} margin={{ top: 8, right: 12, bottom: 0, left: -18 }}>
-                  <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" />
-                  <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" tickFormatter={(v) => `${v}%`} />
+                <BarChart data={bySignal.map((b) => ({ ...b, key: signalLabel(b.key) }))} margin={{ top: 8, right: 12, bottom: 0, left: -8 }}>
+                  <XAxis dataKey="key" tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" />
+                  <YAxis tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" tickFormatter={(v) => `$${v}`} />
+                  <ReferenceLine y={0} stroke="hsl(216 34% 30%)" />
                   <RTooltip contentStyle={{ background: "hsl(222 47% 11%)", border: "1px solid hsl(216 34% 17%)", borderRadius: 8, fontSize: 12 }}
-                    formatter={(v: number, _n, p) => [`${Math.round(v)}% (${(p.payload as Bucket).wins}W/${(p.payload as Bucket).losses}L)`, "Win rate"]} />
-                  <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                    formatter={pnlTooltip} />
+                  <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>
                     {bySignal.map((b, i) => (
-                      <Cell key={i} fill={(b.winRate ?? 0) >= 50 ? "#fbbf24" : "#f87171"} />
+                      <Cell key={i} fill={b.pnl >= 0 ? "#fbbf24" : "#f87171"} />
                     ))}
                   </Bar>
                 </BarChart>
@@ -228,6 +217,32 @@ export default function StockPerformance() {
         )}
       </div>
     </StocksShell>
+  );
+}
+
+function PnlBarSection({ title, data, tooltip }: {
+  title: string;
+  data: (Bucket & { winRate: number | null })[];
+  tooltip: (v: number, n: unknown, p: any) => [string, string];
+}) {
+  return (
+    <section className="rounded-lg border border-border bg-card p-5">
+      <h2 className="text-sm font-bold text-foreground mb-3">{title}</h2>
+      <ResponsiveContainer width="100%" height={200}>
+        <BarChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: -8 }}>
+          <XAxis dataKey="key" tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" />
+          <YAxis tick={{ fontSize: 10 }} stroke="hsl(215 20% 65%)" tickFormatter={(v) => `$${v}`} />
+          <ReferenceLine y={0} stroke="hsl(216 34% 30%)" />
+          <RTooltip contentStyle={{ background: "hsl(222 47% 11%)", border: "1px solid hsl(216 34% 17%)", borderRadius: 8, fontSize: 12 }}
+            formatter={tooltip} />
+          <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>
+            {data.map((b, i) => (
+              <Cell key={i} fill={b.pnl >= 0 ? "#34d399" : "#f87171"} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </section>
   );
 }
 
@@ -247,7 +262,7 @@ function TickerBoard({ title, icon: Icon, tickers, positive }: {
             <div key={t.key} className="flex items-center justify-between text-sm">
               <span className="font-semibold text-foreground">{t.key}</span>
               <span className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">{t.wins}W / {t.losses}L</span>
+                <span className="text-xs text-muted-foreground">{t.wins + t.losses} trades</span>
                 <span className={`font-semibold w-20 text-right ${t.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtSignedUsd(t.pnl)}</span>
               </span>
             </div>

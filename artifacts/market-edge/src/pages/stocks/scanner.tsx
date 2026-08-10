@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Search, RefreshCw, Star, TrendingUp, TrendingDown, CalendarClock, Loader2, ArrowUpDown, BarChart2, FlaskConical, Layers,
+  Search, RefreshCw, Star, TrendingUp, TrendingDown, CalendarClock, Loader2, ArrowUpDown, BarChart2, FlaskConical, Layers, Newspaper, Volume2, Zap, Flame,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
@@ -297,6 +297,15 @@ export default function StockScanner() {
           <p className="text-[11px] text-muted-foreground -mt-2">{scanStatusText}</p>
         )}
 
+        {/* Movers forming — top ranked candidates with their catalyst */}
+        {results.length > 0 && (
+          <MoversBoard
+            rows={results}
+            researchMap={researchMap}
+            onOpen={(t) => setDetail(t)}
+          />
+        )}
+
         {isLoading ? (
           <div className="h-40 flex items-center justify-center text-muted-foreground">
             <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading scanner…
@@ -348,6 +357,84 @@ export default function StockScanner() {
 
       <StockDetail ticker={detail} onClose={() => setDetail(null)} />
     </StocksShell>
+  );
+}
+
+const CATALYST_STYLE: Record<string, { icon: typeof Newspaper; cls: string }> = {
+  news: { icon: Newspaper, cls: "border-sky-500/40 bg-sky-500/10 text-sky-400" },
+  volume: { icon: Volume2, cls: "border-violet-500/40 bg-violet-500/10 text-violet-400" },
+  gap: { icon: Zap, cls: "border-amber-500/40 bg-amber-500/10 text-amber-400" },
+  technical: { icon: BarChart2, cls: "border-border/60 text-muted-foreground" },
+};
+
+function CatalystBadge({ catalyst }: { catalyst: NonNullable<ScannerRow["catalyst"]> }) {
+  const s = CATALYST_STYLE[catalyst.type] ?? CATALYST_STYLE.technical;
+  const Icon = s.icon;
+  return (
+    <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${s.cls}`} title="Primary catalyst driving this candidate">
+      <Icon className="w-3 h-3" /> {catalyst.label}
+    </span>
+  );
+}
+
+/**
+ * "Movers forming" board — the top-ranked bullish candidates the scanner is
+ * tracking right now, with the catalyst behind each. Refreshed automatically
+ * every scan cycle (~20 min, incl. pre-market).
+ */
+function MoversBoard({ rows, researchMap, onOpen }: {
+  rows: ScannerRow[];
+  researchMap: Record<string, ResearchReport>;
+  onOpen: (ticker: string) => void;
+}) {
+  const movers = useMemo(() => {
+    return [...rows]
+      .filter((r) => r.direction === "up" && !r.earningsSoon)
+      .sort((a, b) => {
+        const ra = researchMap[a.ticker]; const rb = researchMap[b.ticker];
+        const ta = ra && ra.stance !== "avoid" ? 1 : 0;
+        const tb = rb && rb.stance !== "avoid" ? 1 : 0;
+        if (ta !== tb) return tb - ta;
+        return b.score - a.score;
+      })
+      .slice(0, 6);
+  }, [rows, researchMap]);
+
+  if (movers.length === 0) return null;
+
+  return (
+    <section className="rounded-lg border border-emerald-500/25 bg-emerald-500/[0.04] p-4">
+      <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400 mb-2.5">
+        <Flame className="w-3.5 h-3.5" /> Movers forming
+        <span className="text-muted-foreground font-normal">— top candidates the bot is tracking, with their catalyst · auto-refreshed every scan</span>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+        {movers.map((r) => {
+          const research = researchMap[r.ticker];
+          return (
+            <button
+              key={r.ticker}
+              onClick={() => onOpen(r.ticker)}
+              data-testid={`mover-${r.ticker}`}
+              className="text-left rounded-lg border border-border bg-card px-3 py-2.5 hover:border-emerald-500/40 transition-colors"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-bold text-sm text-foreground">{r.ticker}</span>
+                <span className={`text-xs font-semibold ${r.changePct >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtPct(r.changePct)}</span>
+              </div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {r.catalyst && <CatalystBadge catalyst={r.catalyst} />}
+                {research && research.stance !== "avoid" && (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border border-violet-500/40 bg-violet-500/10 text-violet-400" title={research.summary || undefined}>
+                    <FlaskConical className="w-3 h-3" /> {research.stance} · {research.confidence}
+                  </span>
+                )}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -478,6 +565,7 @@ function ScannerCard({ row, research, watched, botExcluded, onOpen, onToggleWatc
             {Math.round(row.confidence)}%
           </span>
         )}
+        {row.catalyst && row.catalyst.type !== "technical" && <CatalystBadge catalyst={row.catalyst} />}
         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${sentimentColor(row.newsSentiment)}`}>{row.newsSentiment}</span>
         {research && <ResearchBadge r={research} />}
         {botExcluded && (

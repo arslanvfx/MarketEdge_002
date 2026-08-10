@@ -434,15 +434,15 @@ export default function StockBot() {
                 </div>
               )}
 
-              {/* Summary stats */}
+              {/* Summary stats — money first */}
               <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
                 {[
-                  { label: "Win Rate", value: fmtPct(perf.summary.winRate * 100, 1), color: perf.summary.winRate >= 0.5 ? "text-emerald-400" : "text-red-400" },
-                  { label: "Avg Win", value: fmtUsd(perf.summary.avgWin), color: "text-emerald-400" },
-                  { label: "Avg Loss", value: fmtUsd(perf.summary.avgLoss), color: "text-red-400" },
-                  { label: "Total Trades", value: String(perf.summary.totalTrades), color: "text-foreground" },
-                  { label: "Best Trade", value: fmtSignedUsd(perf.summary.bestTrade), color: "text-emerald-400" },
-                  { label: "Worst Trade", value: fmtSignedUsd(perf.summary.worstTrade), color: "text-red-400" },
+                  { label: "Total P&L", value: fmtSignedUsd(perf.summary.totalPnl), color: perf.summary.totalPnl >= 0 ? "text-emerald-400" : "text-red-400" },
+                  { label: "Profit Factor", value: perf.summary.profitFactor == null ? "∞" : perf.summary.profitFactor.toFixed(2), color: perf.summary.profitFactor == null || perf.summary.profitFactor >= 1 ? "text-emerald-400" : "text-red-400" },
+                  { label: "Expectancy", value: fmtSignedUsd(perf.summary.expectancy), color: perf.summary.expectancy >= 0 ? "text-emerald-400" : "text-red-400" },
+                  { label: "Max Drawdown", value: fmtSignedUsd(-(perf.summary.maxDrawdown ?? 0)), color: "text-amber-400" },
+                  { label: "Avg Win / Loss", value: `${fmtUsd(perf.summary.avgWin)} / ${fmtUsd(perf.summary.avgLoss)}`, color: "text-sky-400" },
+                  { label: "Trades · Win %", value: `${perf.summary.totalTrades} · ${fmtPct(perf.summary.winRate * 100, 0)}`, color: "text-muted-foreground" },
                 ].map(({ label, value, color }) => (
                   <div key={label} className="flex flex-col gap-0.5">
                     <span className="text-[10px] text-muted-foreground">{label}</span>
@@ -451,18 +451,17 @@ export default function StockBot() {
                 ))}
               </div>
 
-              {/* By-mode breakdown */}
+              {/* By-horizon breakdown — P&L first */}
               <div>
-                <p className="text-[11px] text-muted-foreground mb-2">By Mode</p>
+                <p className="text-[11px] text-muted-foreground mb-2">By Horizon</p>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-muted-foreground border-b border-border">
-                        <th className="text-left pb-1.5 font-medium">Mode</th>
-                        <th className="text-right pb-1.5 font-medium">Wins</th>
-                        <th className="text-right pb-1.5 font-medium">Losses</th>
-                        <th className="text-right pb-1.5 font-medium">Win Rate</th>
+                        <th className="text-left pb-1.5 font-medium">Horizon</th>
                         <th className="text-right pb-1.5 font-medium">P&L</th>
+                        <th className="text-right pb-1.5 font-medium">Trades</th>
+                        <th className="text-right pb-1.5 font-medium">Win Rate</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -473,13 +472,12 @@ export default function StockBot() {
                         return (
                           <tr key={m} className="border-b border-border/50 last:border-0">
                             <td className="py-1.5 font-medium text-foreground">{MODE_LABELS[m]}</td>
-                            <td className="py-1.5 text-right text-emerald-400">{row.wins}</td>
-                            <td className="py-1.5 text-right text-red-400">{row.losses}</td>
-                            <td className={`py-1.5 text-right font-semibold ${wr == null ? "text-muted-foreground" : wr >= 0.5 ? "text-emerald-400" : "text-red-400"}`}>
-                              {wr != null ? fmtPct(wr * 100, 0) : "—"}
-                            </td>
                             <td className={`py-1.5 text-right font-semibold ${row.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                               {fmtSignedUsd(row.totalPnl)}
+                            </td>
+                            <td className="py-1.5 text-right text-muted-foreground">{total}</td>
+                            <td className={`py-1.5 text-right ${wr == null ? "text-muted-foreground" : "text-foreground"}`}>
+                              {wr != null ? fmtPct(wr * 100, 0) : "—"}
                             </td>
                           </tr>
                         );

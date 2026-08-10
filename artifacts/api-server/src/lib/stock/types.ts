@@ -117,6 +117,8 @@ export interface ScannerRow {
   earningsSoon: boolean;
   details?: Record<string, unknown>;
   updatedAt: string;
+  /** Primary "why is this moving" driver, derived server-side. */
+  catalyst?: { type: "news" | "volume" | "gap" | "technical"; label: string };
 }
 
 export interface OpenPosition {

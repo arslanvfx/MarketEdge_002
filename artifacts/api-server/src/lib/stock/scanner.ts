@@ -436,6 +436,30 @@ async function persistRow(r: ScannerRow): Promise<void> {
   `);
 }
 
+/**
+ * Derive the primary "why is this moving" catalyst for a scanned row.
+ * Priority: fresh news > volume surge > gap/momentum > technical setup.
+ */
+export function deriveCatalyst(r: {
+  changePct: number;
+  newsSentiment: Sentiment;
+  details: Record<string, any> | null | undefined;
+}): { type: "news" | "volume" | "gap" | "technical"; label: string } {
+  const d = (r.details ?? {}) as Record<string, any>;
+  const newsCount = Number(d.newsCount) || 0;
+  const volSurge = typeof d.volumeSurge === "number" ? d.volumeSurge : null;
+  if (r.newsSentiment !== "neutral" && newsCount > 0) {
+    return { type: "news", label: `${r.newsSentiment === "bullish" ? "Bullish" : "Bearish"} news (${newsCount})` };
+  }
+  if (volSurge != null && volSurge >= 2) {
+    return { type: "volume", label: `Volume ${volSurge.toFixed(1)}×` };
+  }
+  if (Math.abs(r.changePct) >= 3) {
+    return { type: "gap", label: `${r.changePct >= 0 ? "+" : ""}${r.changePct.toFixed(1)}% move` };
+  }
+  return { type: "technical", label: d.maAlignment ? "Trend setup" : "Technical" };
+}
+
 export async function getScannerResults(): Promise<ScannerRow[]> {
   const res = (await db.execute(sql`
     SELECT ticker, company_name, sector, price, change_pct, score, direction, confidence,
@@ -443,20 +467,23 @@ export async function getScannerResults(): Promise<ScannerRow[]> {
     FROM stock_scanner_results
     ORDER BY score DESC
   `)) as unknown as { rows: any[] };
-  return (res.rows ?? []).map((r) => ({
-    ticker: r.ticker,
-    companyName: r.company_name ?? r.ticker,
-    sector: r.sector,
-    price: Number(r.price) || 0,
-    changePct: Number(r.change_pct) || 0,
-    score: Number(r.score) || 0,
-    direction: (r.direction ?? null) as Direction | null,
-    confidence: Number(r.confidence) || 50,
-    newsSentiment: (r.news_sentiment ?? "neutral") as Sentiment,
-    earningsSoon: !!r.earnings_soon,
-    details: r.details ?? {},
-    updatedAt: new Date(r.updated_at).toISOString(),
-  }));
+  return (res.rows ?? []).map((r) => {
+    const base = {
+      ticker: r.ticker,
+      companyName: r.company_name ?? r.ticker,
+      sector: r.sector,
+      price: Number(r.price) || 0,
+      changePct: Number(r.change_pct) || 0,
+      score: Number(r.score) || 0,
+      direction: (r.direction ?? null) as Direction | null,
+      confidence: Number(r.confidence) || 50,
+      newsSentiment: (r.news_sentiment ?? "neutral") as Sentiment,
+      earningsSoon: !!r.earnings_soon,
+      details: r.details ?? {},
+      updatedAt: new Date(r.updated_at).toISOString(),
+    };
+    return { ...base, catalyst: deriveCatalyst(base) };
+  });
 }
 
 export function lastScanTime(): number {

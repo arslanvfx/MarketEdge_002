@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ChevronLeft, ChevronRight, Loader2, CheckCircle2, XCircle, Minus,
+  ChevronLeft, ChevronRight, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StocksShell } from "./stocks-shell";
@@ -68,7 +68,7 @@ export default function StockHistory() {
               <table className="w-full text-sm">
                 <thead className="bg-muted/40 text-xs text-muted-foreground">
                   <tr>
-                    {["Time", "Ticker", "Mode", "Action", "Conf.", "Entry", "Exit", "P&L", "Reason", "Outcome"].map((h) => (
+                    {["Time", "Ticker", "Horizon", "Side", "Entry", "Exit", "P&L", "Return", "Reason"].map((h) => (
                       <th key={h} className="text-left font-medium px-3 py-2 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -76,17 +76,22 @@ export default function StockHistory() {
                 <tbody>
                   {paged.map((r) => {
                     const pnl = r.pnl == null ? null : Number(r.pnl);
+                    const entry = r.entry_price != null ? Number(r.entry_price) : null;
+                    const notional = r.notional != null ? Number(r.notional) : (entry != null && r.qty != null ? entry * Number(r.qty) : null);
+                    const retPct = pnl != null && notional ? (pnl / notional) * 100 : null;
                     return (
                       <tr key={r.id} className="border-t border-border" data-testid={`history-row-${r.id}`}>
                         <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{fmtDateTime(r.created_at)}</td>
                         <td className="px-3 py-2 font-bold text-foreground">{r.ticker}</td>
                         <td className="px-3 py-2 text-muted-foreground capitalize">{r.trading_mode ?? "—"}</td>
-                        <td className="px-3 py-2 text-foreground capitalize">{r.action}</td>
-                        <td className="px-3 py-2 text-muted-foreground">{r.confidence != null ? `${Math.round(Number(r.confidence))}%` : "—"}</td>
+                        <td className="px-3 py-2 text-muted-foreground capitalize">{r.side === "short" ? "Short" : "Long"}</td>
                         <td className="px-3 py-2 text-foreground">{fmtUsd(r.entry_price)}</td>
-                        <td className="px-3 py-2 text-foreground">{fmtUsd(r.exit_price)}</td>
+                        <td className="px-3 py-2 text-foreground">{r.exited_at ? fmtUsd(r.exit_price) : <span className="text-xs text-sky-400">open</span>}</td>
                         <td className={`px-3 py-2 font-semibold ${pnl == null ? "text-muted-foreground" : pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {pnl == null ? "—" : fmtSignedUsd(pnl)}
+                        </td>
+                        <td className={`px-3 py-2 ${retPct == null ? "text-muted-foreground" : retPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          {retPct == null ? "—" : `${retPct >= 0 ? "+" : ""}${retPct.toFixed(2)}%`}
                         </td>
                         <td
                           className="px-3 py-2 text-muted-foreground text-xs whitespace-nowrap"
@@ -94,17 +99,6 @@ export default function StockHistory() {
                           data-testid={`exit-reason-${r.id}`}
                         >
                           {fmtExitReason(r.exit_reason) ?? "—"}
-                        </td>
-                        <td className="px-3 py-2">
-                          {r.outcome === "win" ? (
-                            <span className="inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="w-3.5 h-3.5" />win</span>
-                          ) : r.outcome === "loss" ? (
-                            <span className="inline-flex items-center gap-1 text-xs text-red-400"><XCircle className="w-3.5 h-3.5" />loss</span>
-                          ) : r.outcome === "push" ? (
-                            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground"><Minus className="w-3.5 h-3.5" />push</span>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">open</span>
-                          )}
                         </td>
                       </tr>
                     );

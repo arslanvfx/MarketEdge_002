@@ -431,7 +431,11 @@ router.get("/stocks/bot/performance", async (_req, res) => {
           COALESCE(AVG(pnl) FILTER (WHERE outcome = 'loss'), 0) AS avg_loss,
           COALESCE(MAX(pnl), 0)                               AS best_trade,
           COALESCE(MIN(pnl), 0)                               AS worst_trade,
-          COALESCE(SUM(pnl), 0)                               AS total_pnl
+          COALESCE(SUM(pnl), 0)                               AS total_pnl,
+          COALESCE(SUM(pnl) FILTER (WHERE pnl > 0), 0)        AS gross_profit,
+          COALESCE(SUM(pnl) FILTER (WHERE pnl < 0), 0)        AS gross_loss,
+          AVG(pnl / NULLIF(ABS(entry_price - stop_loss) * qty, 0))
+            FILTER (WHERE stop_loss IS NOT NULL AND stop_loss > 0 AND qty > 0) AS avg_r
         FROM stock_bot_bets
         WHERE exited_at IS NOT NULL AND mode = ${cfg.mode} AND archived_at IS NULL
       `) as unknown as Promise<{ rows: any[] }>,
@@ -502,6 +506,12 @@ router.get("/stocks/bot/performance", async (_req, res) => {
     const avgLoss = Number(s.avg_loss) || 0; // negative
     // Expectancy = expected $ per trade.
     const expectancy = winRate * avgWin + (1 - winRate) * avgLoss;
+    // Profit factor = gross profit / |gross loss| (null until first loss).
+    const grossProfit = Number(s.gross_profit) || 0;
+    const grossLoss = Math.abs(Number(s.gross_loss) || 0);
+    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? null : 0);
+    // Avg R = mean P&L per unit of risk (entry→stop distance × qty).
+    const avgR = s.avg_r != null ? Number(s.avg_r) : null;
 
     const x = ((extraRes as any).rows ?? [])[0] ?? {};
     const regimeBucket = (w: any, l: any, p: any) => {
@@ -525,6 +535,10 @@ router.get("/stocks/bot/performance", async (_req, res) => {
         totalPnl: parseFloat((Number(s.total_pnl) || 0).toFixed(2)),
         expectancy: parseFloat(expectancy.toFixed(2)),
         maxDrawdown: parseFloat(maxDrawdown.toFixed(2)),
+        profitFactor: profitFactor != null ? parseFloat(profitFactor.toFixed(2)) : null,
+        avgR: avgR != null ? parseFloat(avgR.toFixed(2)) : null,
+        grossProfit: parseFloat(grossProfit.toFixed(2)),
+        grossLoss: parseFloat((-grossLoss).toFixed(2)),
       },
       byMode,
       byRegime: {
@@ -551,6 +565,8 @@ router.get("/stocks/bot/pnl", async (_req, res) => {
         COALESCE(SUM(pnl), 0) AS total_pnl,
         COUNT(*) FILTER (WHERE outcome = 'win') AS wins,
         COUNT(*) FILTER (WHERE outcome = 'loss') AS losses,
+        COALESCE(SUM(pnl) FILTER (WHERE pnl > 0), 0) AS gross_profit,
+        COALESCE(SUM(pnl) FILTER (WHERE pnl < 0), 0) AS gross_loss,
         COALESCE(SUM(pnl) FILTER (WHERE exited_at >= date_trunc('day', NOW())), 0) AS today_pnl
       FROM stock_bot_bets
       WHERE mode = ${cfg.mode} AND archived_at IS NULL
@@ -558,6 +574,8 @@ router.get("/stocks/bot/pnl", async (_req, res) => {
     const s = summary.rows?.[0] ?? {};
     const wins = Number(s.wins) || 0;
     const losses = Number(s.losses) || 0;
+    const grossProfit = Number(s.gross_profit) || 0;
+    const grossLoss = Math.abs(Number(s.gross_loss) || 0);
     res.json({
       closed: Number(s.closed) || 0,
       open: Number(s.open) || 0,
@@ -566,6 +584,7 @@ router.get("/stocks/bot/pnl", async (_req, res) => {
       wins,
       losses,
       winRate: wins + losses > 0 ? wins / (wins + losses) : 0,
+      profitFactor: grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? null : 0),
     });
   } catch {
     res.status(500).json({ error: "Failed to load P&L" });

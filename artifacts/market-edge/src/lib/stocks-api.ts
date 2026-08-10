@@ -25,6 +25,7 @@ export interface ScannerRow {
   earningsSoon: boolean;
   details?: Record<string, unknown>;
   updatedAt: string;
+  catalyst?: { type: "news" | "volume" | "gap" | "technical"; label: string };
 }
 
 export interface WatchlistEntry {
@@ -268,6 +269,10 @@ export interface BotPerformance {
     totalPnl: number;
     expectancy: number;
     maxDrawdown: number;
+    profitFactor: number | null;
+    avgR: number | null;
+    grossProfit: number;
+    grossLoss: number;
   };
   byMode: Record<"day" | "swing" | "long", { wins: number; losses: number; totalPnl: number }>;
   byRegime: Record<"trending" | "choppy", { wins: number; losses: number; winRate: number | null; totalPnl: number }>;
@@ -320,6 +325,7 @@ export interface StockPnl {
   wins: number;
   losses: number;
   winRate: number;
+  profitFactor: number | null;
 }
 
 // ─── Fetch helpers ───────────────────────────────────────────────────────────
