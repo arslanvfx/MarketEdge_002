@@ -49,6 +49,9 @@ import {
   BET_PROFILES,
   getEtDow,
   resolveQuietHoursV2State,
+  resolveEntryQuietHoursDecision,
+  applyQuietHoursAutoTuneDeltas,
+  applyPlacementTimeReducedPct,
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
@@ -92,6 +95,8 @@ import {
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
+  type EntryQuietHoursDecision,
+  type QuietHoursAutoTuneDelta,
 } from "./kalshi-bot-engine-core";
 
 // Re-export constants and types so callers only import from this file.
@@ -120,6 +125,9 @@ export {
   BET_PROFILES,
   getEtDow,
   resolveQuietHoursV2State,
+  resolveEntryQuietHoursDecision,
+  applyQuietHoursAutoTuneDeltas,
+  applyPlacementTimeReducedPct,
   isInQuietHours,
   applyBetOutcome,
   tickCircuitBreakerWindow,
@@ -180,6 +188,8 @@ export {
   type CircuitBreakerState,
   type PriceRegime,
   type CoinStreakEntry,
+  type EntryQuietHoursDecision,
+  type QuietHoursAutoTuneDelta,
 };
 
 export interface SignalSnapshot {

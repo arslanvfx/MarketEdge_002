@@ -25,6 +25,8 @@ import {
   checkConvictionOneSidedBook,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
+  resolveEntryQuietHoursDecision,
+  applyPlacementTimeReducedPct,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -549,12 +551,31 @@ async function _runBotTick(
 
   // ── ENTRY DECISION ────────────────────────────────────────────────────────
 
+  // ── Tick-level Smart Hours gate (path-independent) ────────────────────────
+  // The loop-level quiet-hours gates are a fast path only: the pipeline-
+  // completion trigger, bet-delay timers, and conviction dispatch/retry call
+  // this tick directly and never pass through them.  Resolving here guarantees
+  // EVERY entry path honors Smart Hours regardless of which code dispatched it.
+  // Fail-closed: a silenced hour blocks all new entries (paper included)
+  // unless the shadowPaperIgnoreQuietHours bypass applies — which only ever
+  // DEMOTES a live entry to paper, never permits a live order.
+  const qhEntry = resolveEntryQuietHoursDecision(S.config, S.botMode);
+  if (qhEntry.action === "block") {
+    logger.info(
+      { sym, windowKey, qhMode: qhEntry.qhMode, utcHour: qhEntry.utcHour, botMode: S.botMode, source: "tick-entry-gate" },
+      "[kalshi-bot] smart-hours entry gate: hour is silenced — blocking new entry",
+    );
+    return;
+  }
+
   // Effective mode for ALL entry accounting in this tick.
-  // When shadowQhBypassActive is true (quiet-hours paper bypass), new entries are
-  // treated as paper-only so they don't consume live spend budgets, window caps,
-  // or failed-fill locks.  S.botMode is never mutated — position close accounting
+  // shadowQhBypassActive: loop-set bypass flag (scheduler path).
+  // qhEntry.forcedPaper: tick-level resolution of the same rule — covers
+  // direct-dispatch paths that skip the loop.  Either one demotes the entry to
+  // paper so it doesn't consume live spend budgets, window caps, or failed-fill
+  // locks.  S.botMode is never mutated — position close accounting
   // (closePosition uses pos.entryMode directly) is unaffected.
-  const effectiveMode: BotMode = shadowQhBypassActive ? "paper" : S.botMode;
+  const effectiveMode: BotMode = (shadowQhBypassActive || qhEntry.forcedPaper) ? "paper" : S.botMode;
 
   // Multi-bet guard: purge stale window entries then check the per-window cap.
   // Purge any entry for this symbol that belongs to an older window key (any mode).
@@ -1549,8 +1570,26 @@ async function _runBotTick(
   // whether overall sizing, conviction boost, or bet randomization set the
   // pre-reduction value.  Intentionally does not check betScheduleApplied or
   // betRandomizerApplied so neither can bypass this reduction.
-  if (S.quietHoursV2ReducedBet != null && S.quietHoursV2ReducedBet >= 1) {
-    const reducedPct = S.quietHoursV2ReducedBet; // 10–99 — percentage OF regular bet to use (50 = bet at 50% of normal)
+  //
+  // The percentage is RE-RESOLVED here at sizing time (qhSizing) rather than
+  // read from the loop's tick-start snapshot (S.quietHoursV2ReducedBet): a
+  // tick that crosses an hour boundary — or a direct-dispatch entry that never
+  // went through the loop — must use the rule for the hour the bet is actually
+  // placed in.  The loop snapshot is kept as a fallback for safety (larger
+  // reduction wins).
+  const qhSizing = resolveEntryQuietHoursDecision(S.config, S.botMode);
+  const effectiveReducedPct = (() => {
+    const fresh = qhSizing.reducedPct;
+    const snap  = S.quietHoursV2ReducedBet;
+    if (fresh != null && snap != null) return Math.min(fresh, snap); // most conservative
+    return fresh ?? snap;
+  })();
+  // Remembered for the FINAL pre-order gate: if the clock crosses into a
+  // stricter reduced hour between here and order submission, the contract
+  // count is rescaled there using this as the already-applied baseline.
+  let sizingReducedPctApplied: number | null = null;
+  if (effectiveReducedPct != null && effectiveReducedPct >= 1) {
+    const reducedPct = effectiveReducedPct; // 10–99 — percentage OF regular bet to use (50 = bet at 50% of normal)
     const reducedSize = +(targetBetSize * (reducedPct / 100)).toFixed(2);
     if (reducedSize < targetBetSize) {
       logger.info(
@@ -1559,6 +1598,7 @@ async function _runBotTick(
       );
       targetBetSize = reducedSize;
     }
+    sizingReducedPctApplied = reducedPct;
   }
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -2671,17 +2711,76 @@ async function _runBotTick(
   let fillPrice = yesPrice; // paper fill
   let orderId: string | null = null;
 
+  // ── FINAL SMART HOURS CHECK — immediately before order placement ─────────
+  // Authoritative, fail-closed re-resolution at the moment the order would be
+  // submitted.  Catches (a) entry paths that bypassed the loop gates entirely,
+  // and (b) ticks that started in an allowed hour but crossed into a silenced
+  // hour before reaching this point.  A live order must NEVER be placed during
+  // a silenced hour — with the shadow bypass the entry is demoted to paper;
+  // without it the entry is rejected outright.
+  const qhFinal = resolveEntryQuietHoursDecision(S.config, S.botMode);
+  if (qhFinal.action === "block") {
+    logger.warn(
+      { sym, windowKey, direction, qhMode: qhFinal.qhMode, utcHour: qhFinal.utcHour, botMode: S.botMode, source: "pre-order-final-gate" },
+      "[kalshi-bot] smart-hours FINAL gate: hour is silenced — order rejected at placement time",
+    );
+    // Release conviction lock + restore max-bet token so state isn't leaked.
+    if (S.config.decisionMode === "conviction") {
+      convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+    }
+    if (boostBetSize != null) maxBetWindowToken.remaining++;
+    return;
+  }
+
+  // ── FINAL REDUCED-% ENFORCEMENT — same placement-time authority as above ──
+  // Sizing ran earlier in the tick; if the clock crossed from an active hour
+  // (or a milder reduction) into a STRICTER reduced hour before reaching this
+  // point, the already-computed contract count is too large for the hour the
+  // bet is actually placed in.  Rescale it here (most-conservative-wins: a
+  // reduced→active crossing never inflates the bet back up).  If the stricter
+  // budget can no longer buy one contract, reject the order outright and
+  // release conviction state exactly like the silenced-hour block above.
+  {
+    const rescaled = applyPlacementTimeReducedPct(contractCount, sizingReducedPctApplied, qhFinal.reducedPct);
+    if (rescaled !== contractCount) {
+      if (rescaled < 1) {
+        logger.warn(
+          { sym, windowKey, direction, sizedCount: contractCount, sizingReducedPctApplied, finalReducedPct: qhFinal.reducedPct, utcHour: qhFinal.utcHour, source: "pre-order-final-gate" },
+          "[kalshi-bot] smart-hours FINAL gate: hour turned reduced — budget no longer buys 1 contract; order rejected at placement time",
+        );
+        if (S.config.decisionMode === "conviction") {
+          convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+        }
+        if (boostBetSize != null) maxBetWindowToken.remaining++;
+        return;
+      }
+      logger.warn(
+        { sym, windowKey, direction, prevCount: contractCount, newCount: rescaled, sizingReducedPctApplied, finalReducedPct: qhFinal.reducedPct, utcHour: qhFinal.utcHour, source: "pre-order-final-gate" },
+        "[kalshi-bot] smart-hours FINAL gate: hour turned reduced after sizing — contract count rescaled at placement time",
+      );
+      contractCount = rescaled;
+    }
+  }
+
   // Snapshot the mode ONCE before any await. If the user flips the mode while
   // the live order is filling, this entry must still be recorded and exited as
   // the mode it was actually placed in — otherwise a real live buy could be
   // recorded as paper and never sold, stranding funds on the exchange.
   //
   // shadowQhBypassActive: set by the loop when shadowPaperIgnoreQuietHours fires
-  // during a silenced hour.  We treat new entries as paper-only for that tick so
-  // auto-tune data accumulates without placing any live order.  S.botMode is NOT
-  // changed by the bypass — position closes and risk counters stay live-correct
-  // because closePosition uses pos.entryMode (not S.botMode or this flag).
-  const entryMode: BotMode = shadowQhBypassActive ? "paper" : S.botMode;
+  // during a silenced hour.  qhFinal.forcedPaper is the tick-level resolution of
+  // the same rule (covers direct-dispatch paths).  Either demotes the entry to
+  // paper-only so auto-tune data accumulates without placing any live order.
+  // S.botMode is NOT changed by the bypass — position closes and risk counters
+  // stay live-correct because closePosition uses pos.entryMode (not S.botMode
+  // or these flags).
+  const entryMode: BotMode = (shadowQhBypassActive || qhFinal.forcedPaper) ? "paper" : S.botMode;
+  if (qhFinal.forcedPaper && !shadowQhBypassActive) {
+    logger.info(
+      { sym, windowKey, direction, utcHour: qhFinal.utcHour, source: "pre-order-final-gate" },
+      "[kalshi-bot] smart-hours FINAL gate: silenced hour + shadow bypass — live entry demoted to paper",
+    );
+  }
 
   if (entryMode === "live") {
     try {

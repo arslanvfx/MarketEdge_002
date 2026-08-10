@@ -13,8 +13,9 @@ import {
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, buildStreakSnapshot, restoreStreakState,
+  applyQuietHoursAutoTuneDeltas,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
-  type DecisionMode, type CoinStreakEntry,
+  type DecisionMode, type CoinStreakEntry, type QuietHoursAutoTuneDelta,
 } from "./kalshi-bot-engine";
 import {
   makeInitialExitState, runExitGuard, type ExitState, type GuardStates,
@@ -942,8 +943,15 @@ export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise
     return { dow: Number(r.et_dow), hour: Number(r.utc_hour), bets, winRate: bets > 0 ? (wins / bets) * 100 : null };
   });
 
-  // ── process each day of week independently ─────────────────────────────
-  const newSilencedByDow: Record<string, number[]> = { ...(qhv2.silencedByDow ?? {}) };
+  // ── compute per-day DELTAS (not a whole-map rewrite) ────────────────────
+  // The DB aggregation above is async: the operator may toggle a slot in the
+  // UI while it runs.  Computing deltas against the pre-query snapshot and
+  // then MERGING them per-cell onto the freshest config (below) means a
+  // concurrent manual toggle to any other cell can never be clobbered by
+  // this write.  Overlapping cells: auto-tune's silence/unsilence for cells
+  // it has ≥MIN_BETS data on still wins for those specific cells only.
+  const snapshotByDow = qhv2.silencedByDow ?? {};
+  const deltas: Record<string, QuietHoursAutoTuneDelta> = {};
   let totalSilenced   = 0;
   let totalUnsilenced = 0;
 
@@ -952,26 +960,16 @@ export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise
     // Only configure a day when it has ≥1 hour with enough data
     if (!dowStats.some(s => s.bets >= QH_MIN_BETS)) continue;
 
-    const currentSilenced = new Set<number>(newSilencedByDow[String(dow)] ?? []);
+    const currentSilenced = new Set<number>(snapshotByDow[String(dow)] ?? []);
     const toSilence   = dowStats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate  < threshold && !currentSilenced.has(s.hour)).map(s => s.hour);
     const toUnsilence = dowStats.filter(s => s.bets >= QH_MIN_BETS && s.winRate !== null && s.winRate >= threshold &&  currentSilenced.has(s.hour)).map(s => s.hour);
 
-    if (toSilence.length > 0 || toUnsilence.length > 0) {
-      const unsilenceSet = new Set(toUnsilence);
-      newSilencedByDow[String(dow)] = [...currentSilenced, ...toSilence].filter(h => !unsilenceSet.has(h));
-      totalSilenced   += toSilence.length;
-      totalUnsilenced += toUnsilence.length;
-    }
+    // Always record the day as configured (even with empty deltas) so the
+    // flat-fallback intersection includes every day auto-tune has data for.
+    deltas[String(dow)] = { silence: toSilence, unsilence: toUnsilence };
+    totalSilenced   += toSilence.length;
+    totalUnsilenced += toUnsilence.length;
   }
-
-  // Sync flat silencedUtcHours = intersection of every configured day
-  // (hours that are universally bad serve as the flat fallback for un-configured days)
-  const configuredDows = Object.keys(newSilencedByDow);
-  const newFlatSilenced = configuredDows.length > 0
-    ? Array.from({ length: 24 }, (_, h) => h).filter(h =>
-        configuredDows.every(d => (newSilencedByDow[d] ?? []).includes(h))
-      )
-    : qhv2.silencedUtcHours;
 
   S.autoTuneQHLastRunAt = new Date().toISOString();
   // arrays hold dummy values — UI only inspects .length for display counts
@@ -985,11 +983,20 @@ export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise
     return;
   }
 
+  // Re-read the FRESHEST config at write time (S.config may have changed while
+  // the aggregation query ran) and apply only the per-cell deltas onto it.
+  const freshQhv2 = S.config.quietHoursV2 ?? qhv2;
+  const merged = applyQuietHoursAutoTuneDeltas(
+    freshQhv2.silencedByDow ?? {},
+    deltas,
+    freshQhv2.silencedUtcHours,
+  );
+
   await updateBotConfig({
-    quietHoursV2: { ...qhv2, silencedByDow: newSilencedByDow, silencedUtcHours: newFlatSilenced },
+    quietHoursV2: { ...freshQhv2, silencedByDow: merged.silencedByDow, silencedUtcHours: merged.silencedUtcHours },
   });
   logger.info(
-    { totalSilenced, totalUnsilenced, configuredDays: configuredDows.length, threshold, days },
+    { totalSilenced, totalUnsilenced, configuredDays: Object.keys(merged.silencedByDow).length, threshold, days },
     "[qh-autotune] per-day applied",
   );
 }

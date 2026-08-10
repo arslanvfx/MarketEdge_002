@@ -249,3 +249,267 @@ test("resolveQuietHoursV2State: disabled → active regardless of rules", () => 
   };
   assert.equal(resolveQuietHoursV2State(qhv2, new Date("2026-08-10T01:30:00Z")).mode, "active");
 });
+
+// ---------------------------------------------------------------------------
+// Placement-time entry gate (resolveEntryQuietHoursDecision) — the tick-level,
+// path-independent Smart Hours check.  Regression for the direct-dispatch
+// bypass: entry paths that never pass through the loop gates (pipeline
+// trigger, bet-delay timer, conviction dispatch) call this at entry AND again
+// immediately before order submission, so a live order can never be placed in
+// a silenced hour regardless of dispatch path.
+// ---------------------------------------------------------------------------
+
+import { resolveEntryQuietHoursDecision, applyQuietHoursAutoTuneDeltas, applyPlacementTimeReducedPct } from "./kalshi-bot-engine-core.ts";
+
+// Monday 2026-08-10 15:30 UTC = Monday 11:30 AM EDT (ET dow = 1, UTC hour 15).
+const MON_11AM_ET = new Date("2026-08-10T15:30:00Z");
+
+function qhCfg(qhv2: QuietHoursV2 | undefined, extra?: Partial<BotConfig>) {
+  return {
+    freeRunMode: false,
+    quietHoursStart: 7,
+    quietHoursEnd: 7, // legacy range disabled (start === end)
+    shadowPaperIgnoreQuietHours: false,
+    quietHoursV2: qhv2,
+    ...extra,
+  };
+}
+
+test("entry gate: silenced hour blocks a live entry (direct-dispatch bypass regression)", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "1": [15] }, // Monday ET, 15:00 UTC = 11 AM EDT
+  };
+  const d = resolveEntryQuietHoursDecision(qhCfg(qhv2), "live", MON_11AM_ET);
+  assert.equal(d.action, "block");
+  assert.equal(d.qhMode, "silenced");
+});
+
+test("entry gate: silenced hour blocks paper entries too (no bypass flag)", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [15],
+    reducedBetUtcHours: {},
+  };
+  const d = resolveEntryQuietHoursDecision(qhCfg(qhv2), "paper", MON_11AM_ET);
+  assert.equal(d.action, "block");
+});
+
+test("entry gate: shadow bypass demotes live to paper — NEVER allows a live order in a silenced hour", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "1": [15] },
+  };
+  const d = resolveEntryQuietHoursDecision(
+    qhCfg(qhv2, { shadowPaperIgnoreQuietHours: true }), "live", MON_11AM_ET,
+  );
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "paper", "silenced-hour live entry must be demoted to paper");
+  assert.equal(d.forcedPaper, true);
+});
+
+test("entry gate: shadow bypass in paper mode still blocks (bypass is live-only)", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [15],
+    reducedBetUtcHours: {},
+  };
+  const d = resolveEntryQuietHoursDecision(
+    qhCfg(qhv2, { shadowPaperIgnoreQuietHours: true }), "paper", MON_11AM_ET,
+  );
+  assert.equal(d.action, "block");
+});
+
+test("entry gate: reduced hour proceeds live with reducedPct set", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    reducedByDow: { "1": { "15": 25 } },
+  };
+  const d = resolveEntryQuietHoursDecision(qhCfg(qhv2), "live", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+  assert.equal(d.reducedPct, 25);
+  assert.equal(d.qhMode, "reduced");
+});
+
+test("entry gate: hour-boundary transition — reduced at :59, silenced at :00 next hour", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "1": [16] },
+    reducedByDow:  { "1": { "15": 50 } },
+  };
+  const cfg = qhCfg(qhv2);
+  const before = resolveEntryQuietHoursDecision(cfg, "live", new Date("2026-08-10T15:59:59Z"));
+  assert.equal(before.action, "proceed");
+  assert.equal(before.reducedPct, 50);
+  const after = resolveEntryQuietHoursDecision(cfg, "live", new Date("2026-08-10T16:00:01Z"));
+  assert.equal(after.action, "block", "crossing into a silenced hour must block at placement time");
+});
+
+test("entry gate: legacy range enforced when V2 disabled — bypass demotes to paper", () => {
+  const cfg = qhCfg(
+    { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} },
+    { quietHoursStart: 14, quietHoursEnd: 18, shadowPaperIgnoreQuietHours: true },
+  );
+  const d = resolveEntryQuietHoursDecision(cfg, "live", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "paper");
+  assert.equal(d.qhMode, "legacy-silenced");
+});
+
+test("entry gate: legacy range blocks without the bypass flag", () => {
+  const cfg = qhCfg(
+    { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} },
+    { quietHoursStart: 14, quietHoursEnd: 18 },
+  );
+  assert.equal(resolveEntryQuietHoursDecision(cfg, "live", MON_11AM_ET).action, "block");
+});
+
+test("entry gate: freeRunMode bypasses everything", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: Array.from({ length: 24 }, (_, i) => i),
+    reducedBetUtcHours: {},
+  };
+  const d = resolveEntryQuietHoursDecision(qhCfg(qhv2, { freeRunMode: true }), "live", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+});
+
+test("entry gate: active hour proceeds live untouched", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [3],
+    reducedBetUtcHours: {},
+  };
+  const d = resolveEntryQuietHoursDecision(qhCfg(qhv2), "live", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+  assert.equal(d.reducedPct, null);
+});
+
+// ---------------------------------------------------------------------------
+// Auto-tune merge-safe writes (applyQuietHoursAutoTuneDeltas) — a concurrent
+// manual toggle saved between auto-tune's read and write must survive.
+// ---------------------------------------------------------------------------
+
+test("auto-tune merge: applies silence/unsilence deltas per-cell", () => {
+  const merged = applyQuietHoursAutoTuneDeltas(
+    { "1": [10, 15] },
+    { "1": { silence: [16], unsilence: [10] } },
+    [],
+  );
+  assert.deepEqual(merged.silencedByDow["1"], [15, 16]);
+});
+
+test("auto-tune merge: concurrent manual toggle on ANOTHER cell survives", () => {
+  // Auto-tune snapshot saw Monday=[15]. While its query ran, the operator
+  // manually silenced Tuesday 12 → freshest map is { "1": [15], "2": [12] }.
+  // Auto-tune's delta only touches Monday — Tuesday's manual change must survive.
+  const merged = applyQuietHoursAutoTuneDeltas(
+    { "1": [15], "2": [12] },          // freshest config at write time
+    { "1": { silence: [16], unsilence: [] } }, // deltas computed from stale snapshot
+    [],
+  );
+  assert.deepEqual(merged.silencedByDow["1"], [15, 16]);
+  assert.deepEqual(merged.silencedByDow["2"], [12], "manual Tuesday toggle must not be clobbered");
+});
+
+test("auto-tune merge: concurrent manual silence on the SAME day, different hour survives", () => {
+  // Snapshot: Monday=[15]. Operator adds Monday 20 while query runs.
+  // Delta unsilences 15. Result must keep the manual 20.
+  const merged = applyQuietHoursAutoTuneDeltas(
+    { "1": [15, 20] },
+    { "1": { silence: [], unsilence: [15] } },
+    [],
+  );
+  assert.deepEqual(merged.silencedByDow["1"], [20]);
+});
+
+test("auto-tune merge: idempotent — re-silencing an already-silenced hour is a no-op", () => {
+  const merged = applyQuietHoursAutoTuneDeltas(
+    { "1": [15] },
+    { "1": { silence: [15], unsilence: [] } },
+    [],
+  );
+  assert.deepEqual(merged.silencedByDow["1"], [15]);
+});
+
+test("auto-tune merge: flat fallback = intersection of all configured days", () => {
+  const merged = applyQuietHoursAutoTuneDeltas(
+    { "0": [3, 15], "1": [15] },
+    { "1": { silence: [3], unsilence: [] } },
+    [99],
+  );
+  // After merge: Sun=[3,15], Mon=[3,15] → intersection = [3,15]
+  assert.deepEqual(merged.silencedUtcHours, [3, 15]);
+});
+
+test("auto-tune merge: no configured days → flat list passes through unchanged", () => {
+  const merged = applyQuietHoursAutoTuneDeltas({}, {}, [5, 6]);
+  assert.deepEqual(merged.silencedUtcHours, [5, 6]);
+  assert.deepEqual(merged.silencedByDow, {});
+});
+
+// ---------------------------------------------------------------------------
+// Placement-time reduced-% rescale (applyPlacementTimeReducedPct) — a tick
+// that sizes in an active (or milder-reduced) hour and reaches order
+// submission after crossing into a stricter reduced hour must NOT submit the
+// full-size contract count.
+// ---------------------------------------------------------------------------
+
+test("reduced rescale: active→reduced crossing shrinks the sized count", () => {
+  // Sized 10 contracts with no reduction; hour turned reduced-25% before placement.
+  assert.equal(applyPlacementTimeReducedPct(10, null, 25), 2);
+});
+
+test("reduced rescale: milder→stricter reduction rescales relative to what was applied", () => {
+  // Sizing applied 50% (10 contracts already reflect it); placement hour says 25%.
+  // Effective bet must end at 25% of full → 10 × (25/50) = 5.
+  assert.equal(applyPlacementTimeReducedPct(10, 50, 25), 5);
+});
+
+test("reduced rescale: reduced→active crossing never inflates the bet back up", () => {
+  assert.equal(applyPlacementTimeReducedPct(3, 25, null), 3);
+});
+
+test("reduced rescale: same percentage at both points is a no-op", () => {
+  assert.equal(applyPlacementTimeReducedPct(7, 25, 25), 7);
+});
+
+test("reduced rescale: stricter hour can push the count to 0 → caller must reject the order", () => {
+  // 1 contract sized full; hour turned reduced-10% → floor(1 × 0.10) = 0.
+  assert.equal(applyPlacementTimeReducedPct(1, null, 10), 0);
+});
+
+test("reduced rescale: placement-time pct equal or milder keeps the (smaller) sized count", () => {
+  // Sizing applied 25%; placement hour is milder 50% — keep the conservative count.
+  assert.equal(applyPlacementTimeReducedPct(4, 25, 50), 4);
+});
+
+test("entry gate + rescale integration: hour boundary active→reduced between sizing and placement", () => {
+  // Simulates the tick timeline the code follows:
+  //   sizing at 15:59 (active) → full count; placement at 16:00 (reduced 25%).
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    reducedByDow: { "1": { "16": 25 } }, // Monday ET, 16:00 UTC reduced to 25%
+  };
+  const cfg = qhCfg(qhv2);
+  const atSizing = resolveEntryQuietHoursDecision(cfg, "live", new Date("2026-08-10T15:59:50Z"));
+  assert.equal(atSizing.reducedPct, null, "sizing hour is active — full size");
+  const sizedCount = 8; // full-size contracts computed from targetBetSize
+  const atPlacement = resolveEntryQuietHoursDecision(cfg, "live", new Date("2026-08-10T16:00:05Z"));
+  assert.equal(atPlacement.reducedPct, 25);
+  const submitted = applyPlacementTimeReducedPct(sizedCount, atSizing.reducedPct, atPlacement.reducedPct);
+  assert.equal(submitted, 2, "submitted count must honour the placement-time 25% cap");
+});

@@ -1032,6 +1032,137 @@ export function resolveQuietHoursV2State(
   return { mode: "active", utcHour };
 }
 
+/**
+ * Authoritative placement-time quiet-hours decision for a NEW entry.
+ *
+ * The loop-level gates in kalshi-bot-loop.ts are a fast path only — several
+ * entry paths (pipeline-completion trigger, bet-delay timers, conviction
+ * dispatch/retry) call the tick directly and never pass through them.  This
+ * resolver is therefore called INSIDE the tick, immediately before entry
+ * accounting and again immediately before live order submission, so that no
+ * code path can place a live order during a silenced hour.
+ *
+ * Semantics (mirrors the loop gates exactly so they can never disagree):
+ *  - freeRunMode          → proceed, no restrictions.
+ *  - V2 enabled           → resolveQuietHoursV2State decides (ET-day + UTC-hour).
+ *  - V2 disabled          → legacy quietHoursStart/End range decides.
+ *  - Silenced hour        → block ALL new entries (paper included) UNLESS
+ *                           shadowPaperIgnoreQuietHours is on AND the bot is
+ *                           live — then the entry proceeds demoted to paper
+ *                           (forcedPaper=true). A live order is NEVER allowed
+ *                           during a silenced hour.
+ *  - Reduced hour         → proceed with reducedPct set (sizing cap).
+ */
+export interface EntryQuietHoursDecision {
+  action: "proceed" | "block";
+  /** Mode the entry must be recorded/placed as when action is "proceed". */
+  entryMode: "paper" | "live";
+  /** True when a silenced hour + shadow bypass demoted a live entry to paper. */
+  forcedPaper: boolean;
+  /** Reduced-bet percentage (1–99) to apply at sizing, or null. */
+  reducedPct: number | null;
+  /** Which rule matched — for operator-facing logs. */
+  qhMode: "active" | "silenced" | "reduced" | "legacy-silenced";
+  utcHour: number;
+}
+
+export function resolveEntryQuietHoursDecision(
+  config: Pick<BotConfig, "freeRunMode" | "quietHoursV2" | "quietHoursStart" | "quietHoursEnd" | "shadowPaperIgnoreQuietHours">,
+  botMode: "paper" | "live",
+  now: Date = new Date(),
+): EntryQuietHoursDecision {
+  const utcHour = now.getUTCHours();
+  const base = { entryMode: botMode, forcedPaper: false, reducedPct: null as number | null, utcHour };
+  if (config.freeRunMode) return { action: "proceed", qhMode: "active", ...base };
+
+  const qhv2 = config.quietHoursV2;
+  if (qhv2?.enabled) {
+    const st = resolveQuietHoursV2State(qhv2, now);
+    if (st.mode === "silenced") {
+      if (config.shadowPaperIgnoreQuietHours && botMode === "live") {
+        return { action: "proceed", qhMode: "silenced", ...base, entryMode: "paper", forcedPaper: true };
+      }
+      return { action: "block", qhMode: "silenced", ...base };
+    }
+    if (st.mode === "reduced") {
+      return { action: "proceed", qhMode: "reduced", ...base, reducedPct: st.reducedBetAmount ?? null };
+    }
+    return { action: "proceed", qhMode: "active", ...base };
+  }
+
+  if (isInQuietHours(utcHour, config.quietHoursStart, config.quietHoursEnd)) {
+    if (config.shadowPaperIgnoreQuietHours && botMode === "live") {
+      return { action: "proceed", qhMode: "legacy-silenced", ...base, entryMode: "paper", forcedPaper: true };
+    }
+    return { action: "block", qhMode: "legacy-silenced", ...base };
+  }
+  return { action: "proceed", qhMode: "active", ...base };
+}
+
+/**
+ * Merge auto-tune silence/unsilence deltas into the CURRENT silencedByDow map.
+ *
+ * Auto-tune computes its deltas from a config snapshot taken before an async
+ * DB aggregation.  If the operator toggles a slot while that query runs, a
+ * whole-object overwrite would silently clobber their change.  This helper
+ * applies only the per-cell deltas (add/remove specific hours) onto whatever
+ * the map looks like NOW, so concurrent manual toggles to other cells survive.
+ * Idempotent: re-silencing an already-silenced hour or un-silencing an
+ * already-clear hour is a no-op.
+ *
+ * Returns the merged per-day map plus the recomputed flat fallback list
+ * (hours silenced on EVERY configured day). When no days are configured the
+ * flat list passes through unchanged.
+ */
+export interface QuietHoursAutoTuneDelta { silence: number[]; unsilence: number[] }
+
+export function applyQuietHoursAutoTuneDeltas(
+  currentByDow: Record<string, number[]>,
+  deltas: Record<string, QuietHoursAutoTuneDelta>,
+  currentFlat: number[],
+): { silencedByDow: Record<string, number[]>; silencedUtcHours: number[] } {
+  const merged: Record<string, number[]> = {};
+  for (const [d, hours] of Object.entries(currentByDow)) merged[d] = [...hours];
+  for (const [d, delta] of Object.entries(deltas)) {
+    const cur = new Set(merged[d] ?? []);
+    for (const h of delta.silence) cur.add(h);
+    for (const h of delta.unsilence) cur.delete(h);
+    merged[d] = [...cur].sort((a, b) => a - b);
+  }
+  const dows = Object.keys(merged);
+  const flat = dows.length > 0
+    ? Array.from({ length: 24 }, (_, h) => h).filter(h => dows.every(d => (merged[d] ?? []).includes(h)))
+    : currentFlat;
+  return { silencedByDow: merged, silencedUtcHours: flat };
+}
+
+/**
+ * Placement-time reduced-% enforcement.
+ *
+ * Sizing (contract count) is computed early in the tick; the order is placed
+ * much later. If the clock crosses from an active hour (or a milder reduction)
+ * into a stricter reduced hour in between, the already-computed contract count
+ * is too large for the hour the bet is ACTUALLY placed in. This rescales the
+ * count so the effective bet honours the placement-time percentage.
+ *
+ * Most-conservative-wins: when the placement-time pct is equal to or milder
+ * than what sizing already applied, the (smaller) sized count is kept — a
+ * reduced→active crossing never inflates the bet back up.
+ *
+ * Returns the contract count to submit; may be 0, in which case the caller
+ * must reject the order (reduced budget can no longer buy one contract).
+ */
+export function applyPlacementTimeReducedPct(
+  contractCount: number,
+  appliedReducedPct: number | null, // pct already applied at sizing (1–100), or null if none
+  finalReducedPct: number | null,   // pct resolved at placement time, or null if none
+): number {
+  const applied = appliedReducedPct != null && appliedReducedPct >= 1 ? Math.min(appliedReducedPct, 100) : 100;
+  const final_  = finalReducedPct  != null && finalReducedPct  >= 1 ? Math.min(finalReducedPct, 100)  : 100;
+  if (final_ >= applied) return contractCount; // placement hour is not stricter — keep sized count
+  return Math.floor(contractCount * (final_ / applied));
+}
+
 export interface BotConfig {
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
