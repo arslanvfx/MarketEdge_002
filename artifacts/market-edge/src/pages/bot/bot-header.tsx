@@ -60,9 +60,9 @@ export function BotHeader({ status, openPosList, statusLabel, cfg, merged, confi
             </span>
           )}
           {status?.quietHoursV2State?.mode === "reduced" && (
-            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20" title={`Smart Quiet Hours V2: reduced bets ($${status.quietHoursV2State.reducedBetAmount?.toFixed(2) ?? "—"}) (${status.quietHoursV2State.utcHour} UTC)`}>
+            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20" title={`Smart Quiet Hours V2: reduced bets to ${status.quietHoursV2State.reducedBetAmount ?? "—"}% of the selected bet size (${status.quietHoursV2State.utcHour} UTC)`}>
               <Clock className="w-3 h-3" />
-              📉 ${ status.quietHoursV2State.reducedBetAmount?.toFixed(2) ?? "—"}
+              📉 {status.quietHoursV2State.reducedBetAmount != null ? `${status.quietHoursV2State.reducedBetAmount}%` : "—"}
             </span>
           )}
           {status?.dbDegraded && (

@@ -173,7 +173,7 @@ export function ConditionsPanel({
               <ConditionChip bad label={`🔇 Silenced (${conditions.quietHoursV2State.utcHour} UTC)`} />
             )}
             {conditions?.quietHoursV2State?.mode === "reduced" && (
-              <ConditionChip warn label={`📉 Reduced bets ($${conditions.quietHoursV2State.reducedBetAmount?.toFixed(2) ?? "—"}) (${conditions.quietHoursV2State.utcHour} UTC)`} />
+              <ConditionChip warn label={`📉 Reduced bets (${conditions.quietHoursV2State.reducedBetAmount != null ? `${conditions.quietHoursV2State.reducedBetAmount}%` : "—"} of selected size) (${conditions.quietHoursV2State.utcHour} UTC)`} />
             )}
             <ConditionChip
               ok={!conditions?.circuitBreakerActive}
