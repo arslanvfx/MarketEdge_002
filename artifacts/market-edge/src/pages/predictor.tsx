@@ -497,7 +497,7 @@ export default function Predictor() {
           </div>
           <div>
             <h1 className="text-lg font-bold tracking-tight leading-none flex items-center gap-2">
-              Crypto Predictor
+              15-Minute Markets
               <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 rounded px-1.5 py-0.5">
                 <Radio className="w-3 h-3" /> Live
               </span>

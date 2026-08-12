@@ -42,6 +42,7 @@
 
 import {
   CRYPTO_COINS,
+  isPythProduct,
   analyzeCoinAt,
   intraWindowMetrics,
   computeWindowBetSignal,
@@ -220,6 +221,24 @@ async function fetchCandlesRange(
   startSec: number,
   endSec: number,
 ): Promise<Candle[]> {
+  // Commodity products: Pyth Benchmarks serves arbitrary ranges in one call
+  // (no 300-candle pagination limit like Coinbase).
+  if (isPythProduct(product)) {
+    const sym = product.slice(5);
+    const res = await fetch(
+      `https://benchmarks.pyth.network/v1/shims/tradingview/history` +
+        `?symbol=${encodeURIComponent(sym)}&resolution=1&from=${startSec}&to=${endSec}`,
+      { headers: { "User-Agent": UA, Accept: "application/json" } },
+    );
+    if (!res.ok) throw new Error(`Pyth Benchmarks ${res.status} for ${product}`);
+    const body = (await res.json()) as {
+      s: string; t?: number[]; o?: number[]; h?: number[]; l?: number[]; c?: number[]; v?: number[];
+    };
+    if (body.s !== "ok" || !body.t?.length) return [];
+    return body.t
+      .map((t, i) => ({ t, o: body.o![i], h: body.h![i], l: body.l![i], c: body.c![i], v: body.v?.[i] ?? 0 }))
+      .sort((a, b) => a.t - b.t);
+  }
   const out: Candle[] = [];
   let cursorEnd = endSec;
   let guard = 0;

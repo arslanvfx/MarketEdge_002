@@ -26,7 +26,8 @@ _Populate as you build — short repo map plus pointers to the source-of-truth f
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- 15-min market universe (crypto + commodities) is defined once in `artifacts/api-server/src/lib/market-defs.ts` (pure, import-free so unit tests can load it); `crypto-data.ts` and `crypto-kalshi.ts` re-export from it.
+- Commodities (GOLD/SILVER/WTI) use Pyth for spot + candles because Kalshi settles those markets against Pyth; products are `PYTH:`-prefixed and every fetcher routes on that prefix. Stale Pyth spot (>60s) throws so conviction gates fail closed when the commodity market is closed.
 
 ## Product
 

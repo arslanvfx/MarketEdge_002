@@ -6,17 +6,10 @@ import crypto from "crypto";
 import { logger } from "./logger";
 
 // Map of symbol → Kalshi series ticker for coins that have 15-min markets.
-export const KALSHI_SERIES: Record<string, string> = {
-  BTC:  "KXBTC15M",
-  ETH:  "KXETH15M",
-  SOL:  "KXSOL15M",
-  XRP:  "KXXRP15M",
-  HYPE: "KXHYPE15M",
-  BNB:  "KXBNB15M",
-  DOGE: "KXDOGE15M",
-  NEAR: "KXNEAR15M",
-  ZEC:  "KXZEC15M",
-};
+// KALSHI_SERIES lives in market-defs.ts (pure module) alongside the market
+// definitions; re-exported here so existing imports keep working.
+export { KALSHI_SERIES } from "./market-defs";
+import { KALSHI_SERIES } from "./market-defs";
 
 // Per-symbol cache so each coin's Kalshi target is fetched independently.
 // Stores the event ticker so window transitions can be detected by callers.

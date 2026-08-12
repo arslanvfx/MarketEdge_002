@@ -44,7 +44,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const navigation = [
     { name: "Markets", href: "/markets", icon: LineChart },
     { name: "Smart Picks", href: "/picks", icon: Sparkles },
-    { name: "Crypto Predictor", href: "/predictor", icon: CandlestickChart },
+    { name: "15-Minute Markets", href: "/predictor", icon: CandlestickChart },
     { name: "Combo Builder", href: "/builder", icon: Target },
     { name: "Portfolio", href: "/portfolio", icon: LayoutDashboard },
   ];

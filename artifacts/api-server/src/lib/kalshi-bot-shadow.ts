@@ -30,6 +30,7 @@ import {
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
+import { isPythProduct, fetchPythWindowClosePrice } from "./crypto-data";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
@@ -68,6 +69,10 @@ import { updateBotConfig } from "./kalshi-bot-db";
  * Returns null on any error so the caller can retry next cycle.
  */
 export async function fetchWindowClosePrice(product: string, windowKey: string): Promise<number | null> {
+  // Commodity products (Pyth) have no Coinbase candles — route to the Pyth
+  // Benchmarks candle close.  Pyth is also what Kalshi settles these markets
+  // against, so this fallback is settlement-consistent by construction.
+  if (isPythProduct(product)) return fetchPythWindowClosePrice(product, windowKey);
   try {
     const COINBASE = "https://api.exchange.coinbase.com";
     const UA = "MarketEdge/1.0 (crypto-predictor)";

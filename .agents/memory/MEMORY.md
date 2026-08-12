@@ -103,3 +103,4 @@
 - [Conviction ROI gate bypass](conviction-roi-gate-bypass.md) — roi-too-low SKIP in makeBotDecision must be gated on `decisionMode !== "conviction"`; kills ALL bets when market prices a direction strongly
 - [Direction guard live-price feed](direction-guard-live-price.md) — convictionPriceTicks MUST be fed the fresh live spot price (getTickerFresh, 1s poller), NOT getCachedPrediction; predCache is 15s-stale so every tick was identical → net slope ≈0 → guard never blocked
 - [Conviction guard fail-closed](conviction-guard-fail-closed.md) — direction guard source:"none" = hard block; guard+candle-slope gate re-run on EVERY dispatch incl. post-FOK-failure re-dispatch; candle-slope default 0.01%/ATR off
+- [Commodity 15-min markets via Pyth](commodity-markets-pyth.md) — GOLD/SILVER/WTI defs in pure market-defs.ts; PYTH: prefix routes all fetchers; spot >60s old throws (fail closed); WTI uses Commodities.USOILSPOT not PYTHOIL

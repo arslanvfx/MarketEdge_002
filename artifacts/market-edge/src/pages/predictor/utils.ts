@@ -5,7 +5,10 @@ import { TrendingUp, TrendingDown, Minus } from "lucide-react";
 // ---------------------------------------------------------------------------
 
 // Coins that have Kalshi 15-min markets (must match KALSHI_SERIES in the API).
-export const KALSHI_COINS = ["BTC", "ETH", "SOL", "XRP", "HYPE", "BNB", "DOGE", "NEAR", "ZEC"];
+export const KALSHI_COINS = ["BTC", "ETH", "SOL", "XRP", "HYPE", "BNB", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
+
+// Commodity symbols shown under the "Commodities" section of the market grid.
+export const COMMODITY_SYMBOLS = ["GOLD", "SILVER", "WTI"];
 
 export const COIN_STYLE: Record<string, { glyph: string; accent: string; ring: string; glow: string }> = {
   BTC:  { glyph: "₿", accent: "text-amber-400",   ring: "ring-amber-500/40 border-amber-500/40",   glow: "shadow-amber-500/20" },
@@ -18,6 +21,9 @@ export const COIN_STYLE: Record<string, { glyph: string; accent: string; ring: s
   DOGE: { glyph: "Ð", accent: "text-yellow-400",  ring: "ring-yellow-500/40 border-yellow-500/40",  glow: "shadow-yellow-500/20" },
   NEAR: { glyph: "Ⓝ", accent: "text-green-400",   ring: "ring-green-500/40 border-green-500/40",    glow: "shadow-green-500/20" },
   ZEC:  { glyph: "ⓩ", accent: "text-orange-400",  ring: "ring-orange-500/40 border-orange-500/40",  glow: "shadow-orange-500/20" },
+  GOLD:   { glyph: "◈", accent: "text-yellow-400",  ring: "ring-yellow-500/40 border-yellow-500/40",  glow: "shadow-yellow-500/20" },
+  SILVER: { glyph: "◇", accent: "text-slate-300",   ring: "ring-slate-400/40 border-slate-400/40",    glow: "shadow-slate-400/20" },
+  WTI:    { glyph: "◉", accent: "text-stone-400",   ring: "ring-stone-500/40 border-stone-500/40",    glow: "shadow-stone-500/20" },
 };
 
 export function formatPrice(p: number): string {

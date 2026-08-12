@@ -437,6 +437,7 @@ export interface CoinPrediction {
   symbol: string;
   product: string;
   name: string;
+  category?: "crypto" | "commodity";
   price: number;
   change24hPct: number;
   change1hPct: number;

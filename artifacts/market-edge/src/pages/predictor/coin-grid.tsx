@@ -2,7 +2,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Bot, Sparkles, Minus } from "lucide-react";
 import type { CoinPrediction, CoinPrice, AutoPilotDecision } from "./types";
 import { computeBetSignal } from "./types";
-import { COIN_STYLE, DIR, formatPct } from "./utils";
+import { COIN_STYLE, COMMODITY_SYMBOLS, DIR, formatPct } from "./utils";
 import { Sparkline, LivePrice } from "./sparkline";
 
 interface CoinGridProps {
@@ -24,11 +24,12 @@ export function CoinGrid({
   coins, priceMap, accuracyMap, trainingCoinsSet, autoPilotMap, autoPilot,
   claudeEnabledSet, selected, onSelect, livePrice, tz, isLoading,
 }: CoinGridProps) {
-  return (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          {isLoading
-            ? Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-28 rounded-xl" />)
-            : coins.map((coin) => {
+  const isCommodity = (c: CoinPrediction) =>
+    c.category === "commodity" || COMMODITY_SYMBOLS.includes(c.symbol);
+  const cryptoCoins = coins.filter((c) => !isCommodity(c));
+  const commodityCoins = coins.filter(isCommodity);
+
+  const renderTile = (coin: CoinPrediction) => {
                 const style = COIN_STYLE[coin.symbol] ?? COIN_STYLE.BTC;
                 const isSel = coin.symbol === selected;
                 // For the selected coin, always mirror livePrice so the tile and big display stay in sync.
@@ -147,8 +148,32 @@ export function CoinGrid({
                     })()}
                   </button>
                 );
-              })}
-        </div>
+  };
 
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-28 rounded-xl" />)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold mb-2">Crypto</p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {cryptoCoins.map(renderTile)}
+        </div>
+      </div>
+      {commodityCoins.length > 0 && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold mb-2">Commodities</p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {commodityCoins.map(renderTile)}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

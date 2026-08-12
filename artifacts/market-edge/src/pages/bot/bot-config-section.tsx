@@ -6,7 +6,7 @@ import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode, QuietHoursV
 import { QuietHoursGrid } from "./quiet-hours-grid";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 
-const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC"];
+const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
 interface StabilityPreviewProps {
   minER: number;
@@ -931,7 +931,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
                       {/* Per-coin threshold overrides */}
                       {(() => {
-                        const COINS = ["BTC","ETH","XRP","BNB","SOL","DOGE","NEAR","HYPE","ZEC"];
+                        const COINS = ["BTC","ETH","XRP","BNB","SOL","DOGE","NEAR","HYPE","ZEC","GOLD","SILVER","WTI"];
                         // Suggested values match PROXIMITY_THRESHOLD_SUGGESTIONS on the backend —
                         // calibrated from observed gapPct values during 82–91¢ conviction entries.
                         // These are the minimum thresholds that still block zero-gap entries while
@@ -2581,7 +2581,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
               {/* ── Per-Coin Overrides ── */}
               {(() => {
-                const COINS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "HYPE", "NEAR", "ZEC"];
+                const COINS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
                 const overrides = (merged.coinOverrides ?? {}) as Record<string, { paused?: boolean; maxBetSize?: number }>;
                 const globalMax = merged.maxBetSize ?? 2;
                 return (

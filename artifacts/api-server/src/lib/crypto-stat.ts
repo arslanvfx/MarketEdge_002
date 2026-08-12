@@ -206,6 +206,7 @@ export function analyzeCoin(
     symbol: coin.symbol,
     product: coin.product,
     name: coin.name,
+    category: coin.category ?? "crypto",
     price,
     change24hPct,
     change1hPct,
