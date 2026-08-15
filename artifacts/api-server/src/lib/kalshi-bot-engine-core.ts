@@ -2177,13 +2177,13 @@ export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
  */
 export function applyProximityCalibrationMigration(
   config: BotConfig,
-): { changed: boolean; clampedGlobal: boolean; clampedCoins: string[] } {
+): { changed: boolean; clampedGlobal: boolean } {
   if (config.proximityCalibrationMigrated) {
-    return { changed: false, clampedGlobal: false, clampedCoins: [] };
+    return { changed: false, clampedGlobal: false };
   }
-  const { clampedGlobal, clampedCoins } = clampProximityToCalibratedBand(config);
+  const { clampedGlobal } = clampProximityToCalibratedBand(config);
   config.proximityCalibrationMigrated = true;
-  return { changed: true, clampedGlobal, clampedCoins };
+  return { changed: true, clampedGlobal };
 }
 
 /** Top of the calibrated global strike-proximity band (%). */
@@ -2192,43 +2192,33 @@ export const PROXIMITY_GLOBAL_MAX_PCT = 0.05;
 /**
  * clampProximityToCalibratedBand — pure, NOT flag-guarded.
  *
- * Clamps any strike-proximity values above the calibrated band down into it:
- * global → ≤ PROXIMITY_GLOBAL_MAX_PCT, per-coin override → ≤ its calibrated
- * suggestion.  Values at/below the band (deliberately tighter) are preserved.
+ * Clamps the GLOBAL strike-proximity threshold back into the calibrated band
+ * (≤ PROXIMITY_GLOBAL_MAX_PCT) when built-in mode defaults or saved presets
+ * carry stale pre-calibration values (the old 0.30 default).
+ *
+ * Per-coin overrides are NEVER touched — they are intentional risk controls
+ * set by the operator and must be honored exactly as configured.
  *
  * Used in two places:
  *   1. The one-time startup migration above (flag-guarded wrapper).
- *   2. EVERY switch into conviction mode — built-in mode defaults and saved
- *      user presets are merged as the mode baseline, and either source may
- *      carry drifted pre-calibration values (the old 0.30 built-in default,
- *      or a preset snapshotted before calibration).  Without this clamp a
- *      mode switch silently re-introduces the entry-blocking regression the
- *      migration fixed — and since the migration flag is already set, no
- *      restart would ever repair it.
+ *   2. EVERY switch into conviction mode — the built-in default or a saved
+ *      preset is merged as the mode baseline and may carry the stale 0.30
+ *      global. Without this guard a mode switch silently re-introduces the
+ *      entry-blocking regression the migration fixed, since the migration flag
+ *      is already set and no restart would ever repair it.
  *
- * Deliberate post-calibration user edits are unaffected: the config-update
- * endpoint writes proximity fields directly and never routes through this
- * clamp — only mode-switch baselines and first-boot migration do.
+ * Deliberate post-calibration global edits are unaffected: the config-update
+ * endpoint writes proximity fields directly after this baseline merge.
  */
 export function clampProximityToCalibratedBand(
-  config: Pick<BotConfig, "strikeProximityMinPct" | "strikeProximityMinPctOverrides">,
-): { clampedGlobal: boolean; clampedCoins: string[] } {
+  config: Pick<BotConfig, "strikeProximityMinPct">,
+): { clampedGlobal: boolean } {
   let clampedGlobal = false;
   if (config.strikeProximityMinPct != null && config.strikeProximityMinPct > PROXIMITY_GLOBAL_MAX_PCT) {
     config.strikeProximityMinPct = PROXIMITY_GLOBAL_MAX_PCT;
     clampedGlobal = true;
   }
-  const clampedCoins: string[] = [];
-  if (config.strikeProximityMinPctOverrides) {
-    for (const [sym, val] of Object.entries(config.strikeProximityMinPctOverrides)) {
-      const suggestion = PROXIMITY_THRESHOLD_SUGGESTIONS[sym];
-      if (suggestion != null && val > suggestion) {
-        config.strikeProximityMinPctOverrides[sym] = suggestion;
-        clampedCoins.push(sym);
-      }
-    }
-  }
-  return { clampedGlobal, clampedCoins };
+  return { clampedGlobal };
 }
 
 /**

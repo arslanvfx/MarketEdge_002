@@ -1,6 +1,6 @@
 ---
 name: Conviction entry sizing & proximity band
-description: Order time-in-force rules for larger conviction entries, and why proximity thresholds must stay in the calibrated band everywhere config baselines merge
+description: Order time-in-force rules for larger conviction entries, and the global-only proximity clamp on mode-switch baselines
 ---
 
 # Conviction entry time-in-force
@@ -11,10 +11,10 @@ description: Order time-in-force rules for larger conviction entries, and why pr
 
 **How to apply:** Entries use the size-fallback helper in the trader module; exits never do — exits depend on the volume-rejection throw to keep the in-memory position open for retry. The limit price still hard-caps fill cost, so zone enforcement and post-fill checks are unchanged.
 
-# Proximity calibrated band
+# Global proximity threshold — mode-switch baseline clamp
 
-**Rule:** Strike-proximity thresholds must stay in the calibrated band (global ≤0.05%, per-coin ≤ its calibrated suggestion). Any code path that merges a config baseline — startup migration, mode-switch presets, built-in mode defaults — must clamp to this band; the one-time migration flag alone is not enough because presets/defaults are re-applied on every mode switch.
+**Rule:** The GLOBAL `strikeProximityMinPct` is clamped to ≤ 0.05% whenever built-in mode defaults or saved presets are merged as a mode-switch baseline. Per-coin `strikeProximityMinPctOverrides` are **NEVER modified** by any migration, clamp, or mode-switch — they are intentional operator risk controls and must be honored exactly as configured.
 
-**Why:** In-zone conviction gaps are naturally 0.01–0.06% and ATR scaling (cap 1.2×) adds up to 20%; thresholds above the band block essentially every entry, silently.
+**Why:** In-zone conviction gaps are naturally 0.01–0.06%; a stale 0.30% global (the old built-in default) blocks essentially every entry. A one-time startup migration handles first-boot, but the mode-switch path re-merges baselines every time — the un-guarded clamp runs there too.
 
-**How to apply:** Deliberately tighter user values are preserved; explicit user edits are applied after the clamp so they win. When adding a new preset/default source, route it through the shared clamp helper.
+**How to apply:** Use `clampProximityToCalibratedBand(partial)` on the merged baseline inside the mode-switch endpoint, before request-body overrides are applied (so explicit user edits still win). Never route per-coin overrides through any clamp.

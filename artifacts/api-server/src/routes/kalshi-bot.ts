@@ -858,15 +858,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     // this clamp (request body wins), so they are unaffected.
     if (decisionMode === "conviction") {
       const clamp = clampProximityToCalibratedBand(partial);
-      if (clamp.clampedGlobal || clamp.clampedCoins.length > 0) {
+      if (clamp.clampedGlobal) {
         logger.info(
           {
-            clampedGlobal: clamp.clampedGlobal,
-            clampedCoins: clamp.clampedCoins,
+            clampedGlobal: true,
             strikeProximityMinPct: partial.strikeProximityMinPct,
-            strikeProximityMinPctOverrides: partial.strikeProximityMinPctOverrides,
           },
-          "[kalshi-bot] mode switch: preset/default proximity thresholds above calibrated band — clamped",
+          "[kalshi-bot] mode switch: global proximity threshold above calibrated band — clamped (per-coin overrides preserved)",
         );
       }
     }

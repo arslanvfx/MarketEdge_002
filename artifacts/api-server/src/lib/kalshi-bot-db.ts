@@ -156,15 +156,13 @@ export async function loadBotConfigFromDB(): Promise<void> {
       // conviction-zone gaps are 0.01–0.06% — the gate blocked nearly every entry.
       const proximityMigration = applyProximityCalibrationMigration(S.config);
       if (proximityMigration.changed) {
-        if (proximityMigration.clampedGlobal || proximityMigration.clampedCoins.length > 0) {
+        if (proximityMigration.clampedGlobal) {
           logger.info(
             {
               strikeProximityMinPct: S.config.strikeProximityMinPct,
-              strikeProximityMinPctOverrides: S.config.strikeProximityMinPctOverrides,
-              clampedGlobal: proximityMigration.clampedGlobal,
-              clampedCoins: proximityMigration.clampedCoins,
+              clampedGlobal: true,
             },
-            "[kalshi-bot] migration: strike-proximity thresholds clamped back to calibrated band — persisting",
+            "[kalshi-bot] migration: global strike-proximity threshold clamped back to calibrated band (per-coin overrides preserved) — persisting",
           );
         }
         _persistModeToConfig().catch(() => {});
