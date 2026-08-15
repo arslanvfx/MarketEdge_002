@@ -264,6 +264,62 @@ test("size fallback CRITICAL: non-volume error on the HALVED retry is re-thrown"
   );
 });
 
+// ---------------------------------------------------------------------------
+// Single-attempt mode (disableHalfSizeRetry) — used by the one-shot IOC
+// remainder re-attempt after a partial conviction fill.  The remainder must
+// place EXACTLY ONE exchange order: a volume rejection is final (synthetic
+// 0-fill), never a second half-size submission.
+// ---------------------------------------------------------------------------
+
+test("single-attempt mode: clean fill → one order, result passed through", async () => {
+  let calls = 0;
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 5 },
+    async (p) => { calls++; return { ...FILLED, filledCount: p.count }; },
+    { disableHalfSizeRetry: true },
+  );
+  assert.equal(calls, 1);
+  assert.equal(res.filledCount, 5);
+  assert.equal(res.attemptedCount, 5);
+});
+
+test("single-attempt mode: partial fill accepted as-is — no follow-up order", async () => {
+  let calls = 0;
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 5 },
+    async () => { calls++; return { orderId: "o9", status: "filled", filledCount: 2, avgPrice: 0.82 }; },
+    { disableHalfSizeRetry: true },
+  );
+  assert.equal(calls, 1, "partial remainder fill is final — no additional orders");
+  assert.equal(res.filledCount, 2);
+});
+
+test("single-attempt mode CRITICAL: volume rejection → synthetic 0-fill, NO half-size retry", async () => {
+  let calls = 0;
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 5 },
+    async () => { calls++; throw VOLUME_ERR; },
+    { disableHalfSizeRetry: true },
+  );
+  assert.equal(calls, 1, "single-attempt mode must place exactly one order");
+  assert.equal(res.filledCount, 0);
+  assert.equal(res.status, "unfilled");
+  assert.equal(res.orderId, null);
+});
+
+test("single-attempt mode CRITICAL: non-volume error is still re-thrown", async () => {
+  let calls = 0;
+  await assert.rejects(
+    placeEntryOrderWithSizeFallback(
+      { ...baseParams, count: 5 },
+      async () => { calls++; throw new Error("Kalshi POST → 401: unauthorized"); },
+      { disableHalfSizeRetry: true },
+    ),
+    /401: unauthorized/,
+  );
+  assert.equal(calls, 1);
+});
+
 test("size fallback: partial fill on the halved retry is accepted as-is", async () => {
   const res = await placeEntryOrderWithSizeFallback(
     { ...baseParams, count: 12 },

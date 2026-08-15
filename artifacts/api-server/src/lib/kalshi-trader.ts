@@ -596,6 +596,7 @@ export function isInsufficientVolumeError(err: unknown): boolean {
 export async function placeEntryOrderWithSizeFallback(
   params: PlaceOrderParams,
   placeFn: (p: PlaceOrderParams) => Promise<PlaceOrderResult> = placeOrder,
+  opts?: { disableHalfSizeRetry?: boolean },
 ): Promise<PlaceOrderResult & { attemptedCount: number }> {
   const timeInForce = params.timeInForce ?? "immediate_or_cancel";
   try {
@@ -603,6 +604,15 @@ export async function placeEntryOrderWithSizeFallback(
     return { ...r, attemptedCount: params.count };
   } catch (err) {
     if (!isInsufficientVolumeError(err)) throw err;
+    if (opts?.disableHalfSizeRetry) {
+      // Single-attempt mode (used by the one-shot IOC remainder re-attempt):
+      // a volume rejection is FINAL — report 0 fills, place no further orders.
+      logger.warn(
+        { ticker: params.ticker, side: params.side, count: params.count, timeInForce },
+        "[kalshi-trader] entry volume-rejected in single-attempt mode — reporting 0 fills (no half-size retry)",
+      );
+      return { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null, attemptedCount: params.count };
+    }
     const halved = Math.max(1, Math.floor(params.count / 2));
     if (halved >= params.count) {
       // Already at 1 contract — nothing smaller to try. Synthetic 0-fill.

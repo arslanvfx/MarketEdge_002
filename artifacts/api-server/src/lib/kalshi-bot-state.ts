@@ -419,6 +419,21 @@ export function resetDailyIfNeeded(): void {
 // Per-coin concurrent-tick guard (prevents double-processing same coin in one scheduler tick)
 export const tickInFlight = new Set<string>();
 
+// ---------------------------------------------------------------------------
+// Tick-time abort reason map (for dashboard skip-reason display)
+// ---------------------------------------------------------------------------
+// Populated by _runBotTick whenever a conviction gate fires AFTER the Phase-3
+// loop has already dispatched the coin.  The loop's WindowCoinEvaluation reason
+// only reflects the loop-level gate (e.g. "price in zone — monitoring"); this
+// map captures the more-specific tick-time abort that the user actually wants to
+// see (e.g. "strike-proximity re-check: gap 0.008% < 0.040%").
+//
+// Key format: `${sym}:${windowKey}` — one entry per (coin, window).
+// The value is replaced on every abort call so the dashboard always shows the
+// most recent abort reason.  Cleared on window transition alongside other
+// per-window Maps.
+export const tickAbortReasons = new Map<string, { reason: string; at: number }>();
+
 // shadowQhBypassActive: set to true for the duration of a quiet-hours bypass tick
 // (shadowPaperIgnoreQuietHours=true, bot is live, current hour is silenced).
 // When true, new entry ticks MUST treat the entry as paper-only — live orders
