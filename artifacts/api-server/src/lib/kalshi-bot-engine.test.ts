@@ -54,6 +54,10 @@ import {
   applyLockPrice093Bootstrap,
   applyLockPrice092Bootstrap,
   applyLockPrice082Migration,
+  applyProximityCalibrationMigration,
+  clampProximityToCalibratedBand,
+  PROXIMITY_GLOBAL_MAX_PCT,
+  PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
@@ -2350,6 +2354,117 @@ test("lockPrice082Migration: config with kalshiLockPrice=0.82 (already low) → 
   assert.equal(result.migrated, false); // was already below 0.88
   assert.equal(config.kalshiLockPrice, 0.82); // unchanged
   assert.equal(config.kalshiLockPriceCap, 0.91);
+});
+
+// ── applyProximityCalibrationMigration tests ─────────────────────────────────
+
+test("proximityCalibrationMigration: drifted config (Aug-15 regression) → clamped to calibrated band", () => {
+  // Reproduces the production regression: global 0.06 + per-coin 0.03–0.06
+  // overrides all above the calibrated suggestions.
+  const config: Partial<BotConfig> = {
+    strikeProximityMinPct: 0.06,
+    strikeProximityMinPctOverrides: {
+      BNB: 0.05, BTC: 0.03, ETH: 0.03, SOL: 0.03, XRP: 0.03, DOGE: 0.03,
+      ZEC: 0.06, HYPE: 0.06, NEAR: 0.06,
+    },
+  };
+  const result = applyProximityCalibrationMigration(config as BotConfig);
+  assert.equal(result.changed, true);
+  assert.equal(result.clampedGlobal, true);
+  assert.equal(config.strikeProximityMinPct, 0.05);
+  // Every drifted override lands on its calibrated suggestion.
+  for (const sym of ["BNB", "BTC", "ETH", "SOL", "XRP", "DOGE", "ZEC", "HYPE", "NEAR"]) {
+    assert.equal(
+      config.strikeProximityMinPctOverrides![sym],
+      PROXIMITY_THRESHOLD_SUGGESTIONS[sym],
+      `${sym} should be clamped to its suggestion`,
+    );
+    assert.ok(result.clampedCoins.includes(sym), `${sym} should be reported as clamped`);
+  }
+  assert.equal(config.proximityCalibrationMigrated, true);
+});
+
+test("proximityCalibrationMigration: already migrated → no-op even with drifted values", () => {
+  const config: Partial<BotConfig> = {
+    strikeProximityMinPct: 0.50,
+    strikeProximityMinPctOverrides: { BTC: 0.30 },
+    proximityCalibrationMigrated: true,
+  };
+  const result = applyProximityCalibrationMigration(config as BotConfig);
+  assert.equal(result.changed, false);
+  assert.equal(config.strikeProximityMinPct, 0.50, "post-migration user choice preserved");
+  assert.equal(config.strikeProximityMinPctOverrides!.BTC, 0.30);
+});
+
+test("proximityCalibrationMigration: overrides at/below suggestion are preserved (tighter is fine)", () => {
+  const config: Partial<BotConfig> = {
+    strikeProximityMinPct: 0.03, // already in band
+    strikeProximityMinPctOverrides: { BTC: 0.003, DOGE: 0.020 }, // ≤ suggestions
+  };
+  const result = applyProximityCalibrationMigration(config as BotConfig);
+  assert.equal(result.changed, true, "flag is still set");
+  assert.equal(result.clampedGlobal, false);
+  assert.deepEqual(result.clampedCoins, []);
+  assert.equal(config.strikeProximityMinPct, 0.03);
+  assert.equal(config.strikeProximityMinPctOverrides!.BTC, 0.003);
+  assert.equal(config.strikeProximityMinPctOverrides!.DOGE, 0.020);
+  assert.equal(config.proximityCalibrationMigrated, true);
+});
+
+test("proximityCalibrationMigration: unknown symbol override left untouched", () => {
+  const config: Partial<BotConfig> = {
+    strikeProximityMinPctOverrides: { FAKECOIN: 0.50 },
+  };
+  const result = applyProximityCalibrationMigration(config as BotConfig);
+  assert.equal(config.strikeProximityMinPctOverrides!.FAKECOIN, 0.50, "no suggestion → no clamp");
+  assert.deepEqual(result.clampedCoins, []);
+});
+
+// ── clampProximityToCalibratedBand (mode-switch guard) ───────────────────────
+// The startup migration is one-shot. A switch INTO conviction mode merges
+// built-in defaults + a saved preset as the baseline; either can carry drifted
+// pre-calibration values. The mode-switch path must clamp them even when
+// proximityCalibrationMigrated is already true.
+
+test("mode-switch clamp: drifted preset values clamped even AFTER migration flag is set", () => {
+  // Simulates: migration already ran (flag true), then user switches to
+  // conviction and the saved preset carries the old 0.30 global.
+  const mergedBaseline: Partial<BotConfig> = {
+    proximityCalibrationMigrated: true, // migration will no-op…
+    strikeProximityMinPct: 0.30,        // …but the clamp must still fire
+    strikeProximityMinPctOverrides: { BTC: 0.03, HYPE: 0.06 },
+  };
+  // Prove the flag-guarded migration does NOT fix this:
+  const mig = applyProximityCalibrationMigration(mergedBaseline as BotConfig);
+  assert.equal(mig.changed, false);
+  assert.equal(mergedBaseline.strikeProximityMinPct, 0.30, "migration is a no-op post-flag");
+  // The un-guarded clamp (used by the mode-switch endpoint) DOES fix it:
+  const clamp = clampProximityToCalibratedBand(mergedBaseline as BotConfig);
+  assert.equal(clamp.clampedGlobal, true);
+  assert.equal(mergedBaseline.strikeProximityMinPct, PROXIMITY_GLOBAL_MAX_PCT);
+  assert.equal(mergedBaseline.strikeProximityMinPctOverrides!.BTC, PROXIMITY_THRESHOLD_SUGGESTIONS.BTC);
+  assert.equal(mergedBaseline.strikeProximityMinPctOverrides!.HYPE, PROXIMITY_THRESHOLD_SUGGESTIONS.HYPE);
+  assert.deepEqual(clamp.clampedCoins.sort(), ["BTC", "HYPE"]);
+});
+
+test("mode-switch clamp: in-band values pass through untouched", () => {
+  const baseline: Partial<BotConfig> = {
+    strikeProximityMinPct: 0.05, // exactly at the band top — allowed
+    strikeProximityMinPctOverrides: { BTC: 0.005, DOGE: 0.020 }, // at suggestions
+  };
+  const clamp = clampProximityToCalibratedBand(baseline as BotConfig);
+  assert.equal(clamp.clampedGlobal, false);
+  assert.deepEqual(clamp.clampedCoins, []);
+  assert.equal(baseline.strikeProximityMinPct, 0.05);
+  assert.equal(baseline.strikeProximityMinPctOverrides!.BTC, 0.005);
+});
+
+test("mode-switch clamp: missing proximity fields → no-op (mode baseline without proximity keys)", () => {
+  const baseline: Partial<BotConfig> = {};
+  const clamp = clampProximityToCalibratedBand(baseline as BotConfig);
+  assert.equal(clamp.clampedGlobal, false);
+  assert.deepEqual(clamp.clampedCoins, []);
+  assert.equal(baseline.strikeProximityMinPct, undefined);
 });
 
 // ---------------------------------------------------------------------------

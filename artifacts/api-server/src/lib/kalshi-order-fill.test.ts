@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   computeMarketableLimitPrice,
   placeOrderWithRetry,
+  placeEntryOrderWithSizeFallback,
+  isInsufficientVolumeError,
   type PlaceOrderParams,
   type PlaceOrderResult,
 } from "./kalshi-trader.ts";
@@ -154,4 +156,144 @@ test("CRITICAL: any error from the exchange is re-thrown immediately", async () 
     ),
     /401: unauthorized/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// placeEntryOrderWithSizeFallback — half-size retry on insufficient volume
+//
+// The $10-bet-size regression: 12-18 contract FOK orders were rejected with
+// 409 fill_or_kill_insufficient_resting_volume even when most contracts were
+// available. This helper retries ONCE at half size, and converts a second
+// volume rejection into a synthetic 0-fill so the caller's zero-fill attempt
+// counter (not the generic error path) handles it.
+// ---------------------------------------------------------------------------
+
+const VOLUME_ERR = new Error(
+  "Kalshi POST /portfolio/orders → 409: {\"error\":{\"code\":\"fill_or_kill_insufficient_resting_volume\"}}",
+);
+
+test("isInsufficientVolumeError: matches Kalshi 409 volume rejection, not other errors", () => {
+  assert.equal(isInsufficientVolumeError(VOLUME_ERR), true);
+  assert.equal(isInsufficientVolumeError(new Error("Kalshi POST → 401: unauthorized")), false);
+  assert.equal(isInsufficientVolumeError(new Error("insufficient_resting_volume")), true);
+});
+
+test("size fallback: clean fill on first attempt → no retry, attemptedCount = requested", async () => {
+  let calls = 0;
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 12 },
+    async (p) => { calls++; return { ...FILLED, filledCount: p.count }; },
+  );
+  assert.equal(calls, 1);
+  assert.equal(res.filledCount, 12);
+  assert.equal(res.attemptedCount, 12);
+});
+
+test("size fallback: volume rejection at 12 → retries once at 6 (floor of half)", async () => {
+  const counts: number[] = [];
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 12 },
+    async (p) => {
+      counts.push(p.count);
+      if (p.count === 12) throw VOLUME_ERR;
+      return { orderId: "o3", status: "filled", filledCount: p.count, avgPrice: 0.82 };
+    },
+  );
+  assert.deepEqual(counts, [12, 6]);
+  assert.equal(res.filledCount, 6);
+  assert.equal(res.attemptedCount, 6);
+});
+
+test("size fallback: odd count 13 → half is floor(13/2)=6, min 1", async () => {
+  const counts: number[] = [];
+  await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 13 },
+    async (p) => {
+      counts.push(p.count);
+      if (p.count === 13) throw VOLUME_ERR;
+      return { ...FILLED, filledCount: p.count };
+    },
+  );
+  assert.deepEqual(counts, [13, 6]);
+});
+
+test("size fallback: BOTH attempts volume-rejected → synthetic 0-fill, no throw", async () => {
+  let calls = 0;
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 12 },
+    async () => { calls++; throw VOLUME_ERR; },
+  );
+  assert.equal(calls, 2, "exactly one retry — never a third attempt");
+  assert.equal(res.filledCount, 0);
+  assert.equal(res.status, "unfilled");
+  assert.equal(res.orderId, null);
+});
+
+test("size fallback: count=1 volume-rejected → no smaller retry possible, synthetic 0-fill", async () => {
+  let calls = 0;
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 1 },
+    async () => { calls++; throw VOLUME_ERR; },
+  );
+  assert.equal(calls, 1, "no retry at the same size");
+  assert.equal(res.filledCount, 0);
+});
+
+test("size fallback CRITICAL: non-volume error on first attempt is re-thrown (no retry)", async () => {
+  let calls = 0;
+  await assert.rejects(
+    placeEntryOrderWithSizeFallback(
+      { ...baseParams, count: 12 },
+      async () => { calls++; throw new Error("Kalshi POST → 401: unauthorized"); },
+    ),
+    /401: unauthorized/,
+  );
+  assert.equal(calls, 1);
+});
+
+test("size fallback CRITICAL: non-volume error on the HALVED retry is re-thrown", async () => {
+  await assert.rejects(
+    placeEntryOrderWithSizeFallback(
+      { ...baseParams, count: 12 },
+      async (p) => {
+        if (p.count === 12) throw VOLUME_ERR;
+        throw new Error("Kalshi POST → 500: internal");
+      },
+    ),
+    /500: internal/,
+  );
+});
+
+test("size fallback: partial fill on the halved retry is accepted as-is", async () => {
+  const res = await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 12 },
+    async (p) => {
+      if (p.count === 12) throw VOLUME_ERR;
+      return { orderId: "o4", status: "filled", filledCount: 4, avgPrice: 0.82 }; // 4 of 6
+    },
+  );
+  assert.equal(res.filledCount, 4, "IOC partial fill on retry tracked by actual count");
+  assert.equal(res.attemptedCount, 6);
+});
+
+test("size fallback: preserves caller timeInForce on both attempts (FOK poller-fallback path)", async () => {
+  const tifs: (string | undefined)[] = [];
+  await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 12, timeInForce: "fill_or_kill" },
+    async (p) => {
+      tifs.push(p.timeInForce);
+      if (p.count === 12) throw VOLUME_ERR;
+      return { ...FILLED, filledCount: p.count };
+    },
+  );
+  assert.deepEqual(tifs, ["fill_or_kill", "fill_or_kill"]);
+});
+
+test("size fallback: defaults to IOC when caller does not specify timeInForce", async () => {
+  let received: string | undefined;
+  await placeEntryOrderWithSizeFallback(
+    { ...baseParams, count: 12 },
+    async (p) => { received = p.timeInForce; return { ...FILLED, filledCount: p.count }; },
+  );
+  assert.equal(received, "immediate_or_cancel");
 });

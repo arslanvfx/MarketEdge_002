@@ -12,7 +12,7 @@ import {
   DEFAULT_BOT_CONFIG, BET_PROFILES, computeDynamicBetSize, makeBotDecision,
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
-  applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, buildStreakSnapshot, restoreStreakState,
+  applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, applyProximityCalibrationMigration, buildStreakSnapshot, restoreStreakState,
   applyQuietHoursAutoTuneDeltas,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry, type QuietHoursAutoTuneDelta,
@@ -147,6 +147,26 @@ export async function loadBotConfigFromDB(): Promise<void> {
           { kalshiLockPrice: S.config.kalshiLockPrice, kalshiLockPriceCap: S.config.kalshiLockPriceCap, migrated: migration082.migrated },
           "[kalshi-bot] migration: zone widened to 82¢–91¢ (independent floor + cap) — persisting",
         );
+        _persistModeToConfig().catch(() => {});
+      }
+
+      // One-time migration: clamp drifted strike-proximity thresholds back to
+      // the calibrated band (global ≤0.05%, per-coin ≤ calibrated suggestion).
+      // The Aug-15 config update pushed thresholds to 0.05–0.06% while real
+      // conviction-zone gaps are 0.01–0.06% — the gate blocked nearly every entry.
+      const proximityMigration = applyProximityCalibrationMigration(S.config);
+      if (proximityMigration.changed) {
+        if (proximityMigration.clampedGlobal || proximityMigration.clampedCoins.length > 0) {
+          logger.info(
+            {
+              strikeProximityMinPct: S.config.strikeProximityMinPct,
+              strikeProximityMinPctOverrides: S.config.strikeProximityMinPctOverrides,
+              clampedGlobal: proximityMigration.clampedGlobal,
+              clampedCoins: proximityMigration.clampedCoins,
+            },
+            "[kalshi-bot] migration: strike-proximity thresholds clamped back to calibrated band — persisting",
+          );
+        }
         _persistModeToConfig().catch(() => {});
       }
 

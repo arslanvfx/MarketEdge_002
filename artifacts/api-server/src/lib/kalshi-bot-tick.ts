@@ -35,6 +35,7 @@ import {
 } from "./kalshi-bot-exit";
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
+  placeEntryOrderWithSizeFallback,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
 } from "./kalshi-trader";
@@ -2785,37 +2786,48 @@ async function _runBotTick(
 
   if (entryMode === "live") {
     try {
-      // ── FOK/IOC ORDER (unified path for both empty-book and real-book) ──────
+      // ── ENTRY ORDER (IOC real-book / FOK poller-fallback) ───────────────────
       // Kalshi does not support any GTC/resting time-in-force value — both
       // "gtc" and "good_till_cancelled" are rejected with a 400 oneof error.
-      // Market makers on Kalshi fill FOK orders reactively; an empty
-      // authenticated orderbook does NOT mean fills are unavailable.  The
-      // poller spread check (≤4¢ YES / ≤6¢ NO) at the live-price gate already
-      // confirmed a tight, in-zone quote from the market maker, so a FOK at
-      // orderLimitPrice will transact at that price.
       //
-      // Both paths use placeOrderWithRetry (FOK with limit price):
-      //   • Empty-book (usedPollerFallback=true): limit = zone-capped poller price.
-      //   • Real-book  (usedPollerFallback=false): limit = ask + 3¢ crossing buffer.
-      // 0-fill handling is identical: allow up to 2 attempts before window-block.
+      // Time-in-force selection (changed 2026-08-15 — the $10 sizing regression):
+      //   • Real-book (usedPollerFallback=false): IOC.  At 12–18 contracts an
+      //     all-or-nothing FOK is rejected with 409 insufficient_resting_volume
+      //     even when MOST contracts are available (e.g. 11 of 12).  IOC fills
+      //     whatever the book has at our limit and cancels the rest — the
+      //     partial-fill correction below tracks the position by ACTUAL fill
+      //     count.  The limit price still hard-caps the fill price, so zone
+      //     enforcement is unchanged.
+      //   • Empty-book (usedPollerFallback=true): FOK.  Market makers fill FOK
+      //     orders reactively even when the authenticated book appears empty —
+      //     IOC against a literally-empty book cancels instantly with 0 fills,
+      //     so FOK is required to trigger the reactive MM match.  The poller
+      //     spread check (≤4¢ YES / ≤6¢ NO) already confirmed a tight, in-zone
+      //     quote, so a FOK at orderLimitPrice transacts at that price.
+      //
+      // Both paths go through placeEntryOrderWithSizeFallback: a 409 volume
+      // rejection triggers ONE retry at half the contract count (min 1); a
+      // second rejection surfaces as a 0-fill result that feeds the existing
+      // zero-fill attempt counter below (up to 10 attempts per window in
+      // conviction) instead of throwing into the generic error path.
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
+      const entryTimeInForce: "fill_or_kill" | "immediate_or_cancel" =
+        usedPollerFallback ? "fill_or_kill" : "immediate_or_cancel";
+
       logger.info(
-        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback },
-        `[kalshi-bot] conviction entry: placing FOK order${usedPollerFallback ? " (poller-fallback path)" : ""}`,
+        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback, timeInForce: entryTimeInForce },
+        `[kalshi-bot] conviction entry: placing ${entryTimeInForce === "fill_or_kill" ? "FOK" : "IOC"} order${usedPollerFallback ? " (poller-fallback path)" : ""}`,
       );
 
-      const fokResult = await placeOrderWithRetry(
+      const fokResult = await placeEntryOrderWithSizeFallback(
         {
           ticker: expectedTicker,
           side: direction,
           action: "buy",
           count: contractCount,
           type: "market",
-          // Conviction entries use FOK (triggers reactive MM fills on Kalshi even
-          // when the authenticated book is empty).  All other modes use IOC so
-          // partial fills are accepted without needing all contracts simultaneously.
-          timeInForce: S.config.decisionMode === "conviction" ? "fill_or_kill" : "immediate_or_cancel",
+          timeInForce: entryTimeInForce,
           // Use the zone-capped/crossing-buffered limit price when available.
           // Falls back to midpoint mode (yesPrice + minReturnMultiple) only when
           // neither the poller nor the authenticated book supplied a price.

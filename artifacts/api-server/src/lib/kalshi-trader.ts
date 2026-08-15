@@ -564,6 +564,72 @@ export async function placeOrderWithRetry(
   return placeFn({ ...params, timeInForce: params.timeInForce ?? "immediate_or_cancel" });
 }
 
+/** True when the error is Kalshi's 409 for a FOK/IOC order that could not be
+ *  matched against enough immediately-available resting volume. */
+export function isInsufficientVolumeError(err: unknown): boolean {
+  return String((err as Error)?.message ?? err).includes("insufficient_resting_volume");
+}
+
+/**
+ * Entry-order placement with a single half-size fallback.
+ *
+ * Why: at $1 bet size (1 contract) FOK almost always matched; at $10+ (12–18
+ * contracts) an all-or-nothing FOK is rejected with 409
+ * fill_or_kill_insufficient_resting_volume even when MOST of the contracts are
+ * available. Burning every per-window attempt at the same size guarantees zero
+ * fills on thin books.
+ *
+ * Behaviour:
+ *   1. Place the order at the requested count with the caller's timeInForce
+ *      (defaults to IOC — partial fills accepted, tracked by actual fill count).
+ *   2. If the exchange rejects it for insufficient resting volume AND count > 1,
+ *      retry ONCE at floor(count/2) (min 1).
+ *   3. If the halved retry is also volume-rejected — or count was already 1 —
+ *      return a synthetic 0-fill result instead of throwing, so the caller's
+ *      existing zero-fill accounting (attempt counter → window block) applies.
+ *
+ * Any non-volume error is re-thrown unchanged: auth failures, invalid tickers,
+ * timeouts etc. must surface to the caller's error path, never be masked as
+ * "no fill". Exits must NOT use this helper — they rely on the 409 throw to
+ * keep a live position open for retry (see placeOrder note).
+ */
+export async function placeEntryOrderWithSizeFallback(
+  params: PlaceOrderParams,
+  placeFn: (p: PlaceOrderParams) => Promise<PlaceOrderResult> = placeOrder,
+): Promise<PlaceOrderResult & { attemptedCount: number }> {
+  const timeInForce = params.timeInForce ?? "immediate_or_cancel";
+  try {
+    const r = await placeFn({ ...params, timeInForce });
+    return { ...r, attemptedCount: params.count };
+  } catch (err) {
+    if (!isInsufficientVolumeError(err)) throw err;
+    const halved = Math.max(1, Math.floor(params.count / 2));
+    if (halved >= params.count) {
+      // Already at 1 contract — nothing smaller to try. Synthetic 0-fill.
+      logger.warn(
+        { ticker: params.ticker, side: params.side, count: params.count, timeInForce },
+        "[kalshi-trader] entry rejected — insufficient resting volume at minimum size (1 contract)",
+      );
+      return { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null, attemptedCount: params.count };
+    }
+    logger.warn(
+      { ticker: params.ticker, side: params.side, requested: params.count, halved, timeInForce },
+      "[kalshi-trader] entry rejected — insufficient resting volume; retrying once at half size",
+    );
+    try {
+      const r2 = await placeFn({ ...params, count: halved, timeInForce });
+      return { ...r2, attemptedCount: halved };
+    } catch (err2) {
+      if (!isInsufficientVolumeError(err2)) throw err2;
+      logger.warn(
+        { ticker: params.ticker, side: params.side, halved, timeInForce },
+        "[kalshi-trader] half-size entry also volume-rejected — reporting 0 fills to caller",
+      );
+      return { orderId: null, status: "unfilled", filledCount: 0, avgPrice: null, attemptedCount: halved };
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

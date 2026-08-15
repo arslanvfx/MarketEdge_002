@@ -187,7 +187,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
   const maxOsc                = stabilityConfig?.maxOsc                ?? 8;
   const maxVolPct             = stabilityConfig?.maxVolPct             ?? 3.0;
   const minMLConf             = stabilityConfig?.minMLConf             ?? 52;
-  const proximityMinPct       = stabilityConfig?.strikeProximityMinPct ?? 0.30;
+  const proximityMinPct       = stabilityConfig?.strikeProximityMinPct ?? 0.05;
   const proximityAtrScale     = stabilityConfig?.strikeProximityAtrScale ?? true;
   const proximityOverrides    = stabilityConfig?.strikeProximityMinPctOverrides ?? {};
   // Priority: per-coin override → global threshold (matches getEffectiveProximityThreshold backend)

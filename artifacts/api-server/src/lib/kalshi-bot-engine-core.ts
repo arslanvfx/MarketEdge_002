@@ -1190,7 +1190,8 @@ export interface BotConfig {
   lockPrice092Bootstrap?: boolean;    // one-time startup bootstrap: 0.93 → 0.92 target (asymmetric zone [90¢, 95¢])
   lockPrice082Migrated?: boolean;     // one-time startup migration: ≥88¢ lockPrice → 0.82 floor + set kalshiLockPriceCap=0.91
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.91; above this the window is missed → SKIP)
-  strikeProximityMinPct?: number;     // conviction only: global minimum |cryptoPrice−kalshiStrike|/strike % required before any FOK fires (default 0.30); fail-open when price/strike unavailable
+  strikeProximityMinPct?: number;     // conviction only: global minimum |cryptoPrice−kalshiStrike|/strike % required before any FOK fires (default 0.05); fail-open when price/strike unavailable
+  proximityCalibrationMigrated?: boolean; // one-time startup migration: clamp drifted proximity thresholds back to the calibrated band (global ≤0.05, per-coin ≤ suggestion)
   strikeProximityAtrScale?: boolean;  // when true, effectiveThreshold = strikeProximityMinPct × max(1, atrPct/0.20); scales guard wider for more volatile coins (default true)
   strikeProximityMinPctOverrides?: Record<string, number>; // per-coin override of strikeProximityMinPct; takes priority over global when set; key = symbol (e.g. "BTC")
   convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.75 = sell when contract drops to 75¢; skipped if already at/near 0¢; 0 = disabled)
@@ -1668,7 +1669,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   maxBetTrajectoryFinalMinutes: 5,
   maxBetTrajectoryBlockOnCross: true,
   maxBetTrajectoryMinVelocityATR: 0,
-  strikeProximityMinPct: 0.30,
+  // 0.05 = top of the calibrated band. Conviction-zone gaps are naturally
+  // 0.01–0.06%, so anything higher blocks normal entries (Aug-15 regression:
+  // 0.06 global blocked 94 entries in hours). Per-coin overrides should follow
+  // PROXIMITY_THRESHOLD_SUGGESTIONS.
+  strikeProximityMinPct: 0.05,
   strikeProximityAtrScale: true,
   strikeProximityMinPctOverrides: {},
   // Adverse momentum gate disabled by default — the direction guard (tick + candle-slope)
@@ -2150,6 +2155,81 @@ export const PROXIMITY_THRESHOLD_SUGGESTIONS: Record<string, number> = {
   HYPE: 0.030,  // Newer market, spiky moves; still below typical gapPct in zone
   ZEC:  0.030,  // Lowest Kalshi liquidity; widest spread at entry
 };
+
+/**
+ * applyProximityCalibrationMigration — one-time startup migration that clamps
+ * drifted strike-proximity thresholds back into the calibrated band.
+ *
+ * Why: a 2026-08-15 config update pushed per-coin thresholds to 0.05–0.06%
+ * (0.06–0.072% after 1.2× ATR scaling) while real conviction-zone gaps are
+ * 0.01–0.06% — the gate blocked 94 entries in a few hours vs zero in the prior
+ * two days.  PROXIMITY_THRESHOLD_SUGGESTIONS holds the values calibrated from
+ * observed gapPct distributions; anything above a coin's suggestion blocks
+ * normal in-zone entries.
+ *
+ * Semantics (pure config transform, mutates in place, flag-guarded):
+ *   1. Global strikeProximityMinPct is clamped to ≤ GLOBAL_MAX (0.05).
+ *   2. Each per-coin override above its calibrated suggestion is clamped down
+ *      to the suggestion.  Overrides at/below their suggestion are preserved —
+ *      a deliberately tighter user value is never loosened.
+ *   3. Marks the migration done so it never fires again (later deliberate user
+ *      values are never reverted).
+ */
+export function applyProximityCalibrationMigration(
+  config: BotConfig,
+): { changed: boolean; clampedGlobal: boolean; clampedCoins: string[] } {
+  if (config.proximityCalibrationMigrated) {
+    return { changed: false, clampedGlobal: false, clampedCoins: [] };
+  }
+  const { clampedGlobal, clampedCoins } = clampProximityToCalibratedBand(config);
+  config.proximityCalibrationMigrated = true;
+  return { changed: true, clampedGlobal, clampedCoins };
+}
+
+/** Top of the calibrated global strike-proximity band (%). */
+export const PROXIMITY_GLOBAL_MAX_PCT = 0.05;
+
+/**
+ * clampProximityToCalibratedBand — pure, NOT flag-guarded.
+ *
+ * Clamps any strike-proximity values above the calibrated band down into it:
+ * global → ≤ PROXIMITY_GLOBAL_MAX_PCT, per-coin override → ≤ its calibrated
+ * suggestion.  Values at/below the band (deliberately tighter) are preserved.
+ *
+ * Used in two places:
+ *   1. The one-time startup migration above (flag-guarded wrapper).
+ *   2. EVERY switch into conviction mode — built-in mode defaults and saved
+ *      user presets are merged as the mode baseline, and either source may
+ *      carry drifted pre-calibration values (the old 0.30 built-in default,
+ *      or a preset snapshotted before calibration).  Without this clamp a
+ *      mode switch silently re-introduces the entry-blocking regression the
+ *      migration fixed — and since the migration flag is already set, no
+ *      restart would ever repair it.
+ *
+ * Deliberate post-calibration user edits are unaffected: the config-update
+ * endpoint writes proximity fields directly and never routes through this
+ * clamp — only mode-switch baselines and first-boot migration do.
+ */
+export function clampProximityToCalibratedBand(
+  config: Pick<BotConfig, "strikeProximityMinPct" | "strikeProximityMinPctOverrides">,
+): { clampedGlobal: boolean; clampedCoins: string[] } {
+  let clampedGlobal = false;
+  if (config.strikeProximityMinPct != null && config.strikeProximityMinPct > PROXIMITY_GLOBAL_MAX_PCT) {
+    config.strikeProximityMinPct = PROXIMITY_GLOBAL_MAX_PCT;
+    clampedGlobal = true;
+  }
+  const clampedCoins: string[] = [];
+  if (config.strikeProximityMinPctOverrides) {
+    for (const [sym, val] of Object.entries(config.strikeProximityMinPctOverrides)) {
+      const suggestion = PROXIMITY_THRESHOLD_SUGGESTIONS[sym];
+      if (suggestion != null && val > suggestion) {
+        config.strikeProximityMinPctOverrides[sym] = suggestion;
+        clampedCoins.push(sym);
+      }
+    }
+  }
+  return { clampedGlobal, clampedCoins };
+}
 
 /**
  * Returns the effective strike-proximity threshold for a specific symbol.

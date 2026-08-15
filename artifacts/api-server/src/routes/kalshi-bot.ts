@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, type BetProfile } from "../lib/kalshi-bot-engine";
 import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
@@ -162,7 +162,11 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minReturnMultiple: 1.00,
     kalshiLockPrice: 0.82,
     kalshiLockPriceCap: 0.91,
-    strikeProximityMinPct: 0.30,
+    // 0.05 = top of the calibrated band (conviction-zone gaps are naturally
+    // 0.01–0.06%). Anything higher recreates the entry-blocking regression the
+    // proximity calibration migration fixes — keep in sync with
+    // DEFAULT_BOT_CONFIG.strikeProximityMinPct and PROXIMITY_THRESHOLD_SUGGESTIONS.
+    strikeProximityMinPct: 0.05,
     strikeProximityAtrScale: true,
     betDelayMinutes: 0,
     maxEntryMinutes: 0,
@@ -844,6 +848,28 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       Object.assign(partial, modePreset);
     }
     partial.decisionMode = decisionMode;
+
+    // Saved presets (and historically, built-in defaults) can carry drifted
+    // pre-calibration proximity values (e.g. the old 0.30 global). The startup
+    // migration is one-shot and already marked complete, so a mode switch is
+    // the ONLY path that could silently re-introduce the entry-blocking
+    // regression — clamp the merged baseline back into the calibrated band.
+    // Deliberate user edits via the proximity fields below are applied AFTER
+    // this clamp (request body wins), so they are unaffected.
+    if (decisionMode === "conviction") {
+      const clamp = clampProximityToCalibratedBand(partial);
+      if (clamp.clampedGlobal || clamp.clampedCoins.length > 0) {
+        logger.info(
+          {
+            clampedGlobal: clamp.clampedGlobal,
+            clampedCoins: clamp.clampedCoins,
+            strikeProximityMinPct: partial.strikeProximityMinPct,
+            strikeProximityMinPctOverrides: partial.strikeProximityMinPctOverrides,
+          },
+          "[kalshi-bot] mode switch: preset/default proximity thresholds above calibrated band — clamped",
+        );
+      }
+    }
   }
   if (
     midExitSensitivity === "conservative" ||
