@@ -18,6 +18,7 @@ import {
 import {
   S, openPositions, lastGuardStatesMap, lastGuardReasonMap,
   activeCoinStreakState, WINDOW_ENTRY_BUFFER_S, getEffectiveDailyLossLimit,
+  restingEntryStatus,
   type BotMode, type BotStatus, type OpenPositionDisplay, type BotStateSnapshot,
 } from "./kalshi-bot-state";
 import {
@@ -61,6 +62,7 @@ export {
   loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB,
   loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, clearBetHistoryOld,
+  reconcilePendingRestingOrdersFromDB,
   updateBotConfig, runQuietHoursAutoTune,
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
@@ -154,6 +156,7 @@ export function getBotState(): BotStateSnapshot {
     coinStreakState: Object.fromEntries(activeCoinStreakState()),
     convictionPollerRunning: getPollerStats().running,
     convictionPriceAgeMs: getPollerStats().priceAgeMs,
+    restingEntries: Object.fromEntries(restingEntryStatus),
   };
 }
 

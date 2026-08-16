@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker, fetchCryptoPredictions } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
+import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, fixLiveExpiredPnlHistorical, reEvaluateSettledBets, reconcilePendingRestingOrdersFromDB } from "./lib/kalshi-bot";
 import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -498,6 +498,12 @@ app.listen(port, (err) => {
       );
       await loadPaperBalanceFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] paper balance load failed (non-fatal)"),
+      );
+      // Reconcile in-flight resting entry orders BEFORE restoring positions so
+      // fills that landed while the server was down are adopted into bet rows
+      // first (and any still-live order is cancelled + confirmed terminal).
+      await reconcilePendingRestingOrdersFromDB().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] resting-order reconcile failed (non-fatal)"),
       );
       await loadOpenPositionFromDB().catch((err) =>
         logger.warn({ err }, "[kalshi-bot] open position restore failed (non-fatal)"),

@@ -263,12 +263,20 @@ export interface PlaceOrderParams {
   //   "fill_or_kill"       — all contracts must fill immediately or the order is cancelled.
   //                          Used for exits so we never leave a partial position open.
   //   "immediate_or_cancel"— fill whatever the book has at this price right now,
-  //                          cancel the rest. Used for entries: a partial fill is
-  //                          accepted and the position is tracked by actual fill count.
+  //                          cancel the rest.
+  //   "good_till_canceled" — resting limit order; stays on the book until filled,
+  //                          cancelled, or expired (use with expirationTime).
+  //                          NOTE: Kalshi v2 accepts "good_till_canceled" (one L).
+  //                          "gtc" and "good_till_cancelled" (two L) return 400.
   // Defaults to "fill_or_kill" so existing callers (buyYes/buyNo/sellYes/sellNo) are unchanged.
-  // Kalshi v2 only accepts "fill_or_kill" and "immediate_or_cancel".
-  // "gtc" and "good_till_cancelled" both return 400 (oneof failure) — do not use.
-  timeInForce?: "fill_or_kill" | "immediate_or_cancel";
+  timeInForce?: "fill_or_kill" | "immediate_or_cancel" | "good_till_canceled";
+  // Unix seconds. When set with good_till_canceled, Kalshi cancels the order server-side
+  // at this time even if the bot is offline. Acts as a safety backstop for resting entries.
+  expirationTime?: number;
+  // Caller-supplied idempotency key. When provided it is sent as client_order_id,
+  // letting the caller reconcile an order whose POST failed at the transport
+  // level (timeout after Kalshi accepted it) via findOrderIdByClientId.
+  clientOrderId?: string;
   yesPrice?: number; // reference YES price as a fraction (0-1); used to bound the marketable-limit price
   // Minimum payout multiple (1/cost). When > 1, the marketable-limit price is
   // capped so a contract can NEVER fill at a cost whose payout multiple falls
@@ -291,6 +299,7 @@ export interface PlaceOrderResult {
   status: string;
   filledCount: number;
   avgPrice: number | null; // in fraction (0-1)
+  clientOrderId?: string;  // idempotency key actually sent — for post-timeout reconcile
 }
 
 /**
@@ -374,7 +383,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   // with time_in_force="fill_or_kill". We send an aggressive price that crosses
   // the spread; price-improvement means we never pay worse than the resting book,
   // and FOK guarantees the whole order fills at once or is killed (never rests).
-  const clientOrderId = crypto.randomUUID();
+  const clientOrderId = params.clientOrderId ?? crypto.randomUUID();
 
   // Which side of the YES book acquires the exposure we want.
   const wantYesExposure =
@@ -416,10 +425,15 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     side: bookSide, // BookSide: "bid" | "ask"
     count: String(params.count), // FixedPointCount string
     price, // required in v2 (YES-side)
-    // Kalshi only accepts "fill_or_kill" and "immediate_or_cancel".
-    // "gtc" and "good_till_cancelled" both return 400 (oneof tag failure).
+    // Kalshi v2 accepts "fill_or_kill", "immediate_or_cancel", "good_till_canceled".
+    // ("gtc" / "good_till_cancelled" [two L] both return 400 oneof failures.)
     time_in_force: (params.timeInForce ?? "fill_or_kill"),
     self_trade_prevention_type: "taker_at_cross",
+    // Server-side expiration backstop for resting (GTC) orders — Kalshi cancels
+    // the order at this Unix-seconds timestamp even if the bot process is down.
+    ...(params.expirationTime != null && params.timeInForce === "good_till_canceled"
+      ? { expiration_time: Math.floor(params.expirationTime) }
+      : {}),
   };
 
   // CreateOrderV2Response is a FLAT object (not wrapped in { order: {} }).
@@ -444,6 +458,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     status: filled > 0 ? "filled" : "unfilled",
     filledCount: filled,
     avgPrice: Number.isFinite(avg) ? avg : null, // YES-side fraction 0-1
+    clientOrderId,
   };
 }
 
@@ -466,6 +481,35 @@ export async function cancelOrder(orderId: string): Promise<boolean> {
     if (res.status === 404) return false; // order already gone — not an error
     const text = await res.text().catch(() => "");
     throw new Error(`Kalshi DELETE ${path} → ${res.status}: ${text}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Look up an order id by the client_order_id we sent.  Used to reconcile a
+// placement whose POST failed at the transport level (timeout/abort) AFTER
+// Kalshi accepted the order — the order may be live on the exchange even though
+// we never received its order_id.  Returns null when no such order exists
+// (placement genuinely never landed).  Throws on non-404 API errors so the
+// caller can treat the state as unknown rather than assume "no order".
+export async function findOrderIdByClientId(clientOrderId: string): Promise<string | null> {
+  if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
+  const path = `/portfolio/orders?limit=200`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const res = await fetch(`${KALSHI_TRADE_BASE}${path}`, {
+      method: "GET",
+      headers: makeSignedHeaders("GET", path),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Kalshi GET ${path} → ${res.status}: ${text}`);
+    }
+    const data = (await res.json()) as { orders?: Array<{ order_id?: string; client_order_id?: string }> };
+    const match = (data.orders ?? []).find((o) => o.client_order_id === clientOrderId);
+    return match?.order_id ?? null;
   } finally {
     clearTimeout(timer);
   }

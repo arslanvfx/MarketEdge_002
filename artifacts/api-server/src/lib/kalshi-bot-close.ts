@@ -2,6 +2,7 @@ import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@wo
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
+import { reconcilePendingEntryOrder } from "./kalshi-pending-entry-reconcile";
 import {
   checkMaxBetSizeGuard, checkDailyLossGuard, checkStreakPauseGuard,
   checkSlippageStrikeGuard, checkWindowMonitorReadyGuard, checkBalanceGuard,
@@ -22,7 +23,7 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
-  fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
+  fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder, cancelOrder, getOrder,
 } from "./kalshi-trader";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
@@ -69,7 +70,8 @@ export async function closePosition(
     // 0.01 (worst-case placeholder); evalClosedBets corrects the record once Kalshi settles.
     // Use for stop-loss exits where we want out at any price, not just on a tick
     // where the book happens to have resting volume.
-    // NOTE: "gtc" is NOT supported by Kalshi v2 — it returns 400 (oneof failure).
+    // NOTE: exits stay IOC — resting GTC is used only for entries, where the
+    // zone cap bounds the fill price; a resting sell would race settlement.
     gtcFallback?: boolean;
   },
 ): Promise<void> {
@@ -84,6 +86,28 @@ export async function closePosition(
   // price before window change to compute estimated settlement.
   // This will be corrected by the evaluator job (task #112) once Kalshi settles.
   let fillPrice: number | null = isExpiry ? null : currentYesPrice;
+
+  // ── CANCEL PENDING ENTRY ORDER BEFORE ANY SELL ────────────────────────────
+  // If a resting entry order is (or may still be) live on the exchange, cancel
+  // it FIRST and reconcile the fill count.  Selling while an entry order can
+  // still fill creates a race: the entry fills after the sell and the bot ends
+  // up with an untracked position (or an oversell rejection).  Fail closed —
+  // if the cancel cannot be confirmed, abort the exit and retry next tick.
+  if (pos.entryMode === "live" && pos.pendingEntryOrderId != null) {
+    // reconcilePendingEntryOrder THROWS when terminal state cannot be
+    // confirmed — the throw propagates out of closePosition so callers keep
+    // the position tracked (restore-on-failure) and retry next tick.
+    const rec = await reconcilePendingEntryOrder(
+      { sym: pos.symbol, pendingId: pos.pendingEntryOrderId, recordedCount: pos.contractCount },
+      {
+        cancelOrder,
+        getOrder: (oid) => getOrder(oid, pos.direction),
+        log: logger,
+      },
+    );
+    pos.contractCount = rec.actualCount;
+    pos.pendingEntryOrderId = undefined;
+  }
 
   if (pos.entryMode === "live" && !isExpiry) {
     try {

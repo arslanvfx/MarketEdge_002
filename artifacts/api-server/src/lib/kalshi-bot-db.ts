@@ -24,7 +24,9 @@ import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets,
+  findOrderIdByClientId, getOrder, cancelOrder,
 } from "./kalshi-trader";
+import { reconcilePendingRestingOrder, computeFillMerge, type PendingRestingOrderRow } from "./kalshi-resting-recovery";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
@@ -594,7 +596,192 @@ export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }
  *   - Window expired → skips restoration; evalClosedBets will settle the row
  *     once the bot-loop window-expiry check closes it.
  */
+/**
+ * Startup reconciliation of in-flight resting entry orders.
+ * Every resting entry writes a provisional "resting_pending" row (keyed by
+ * client_order_id) BEFORE the order is placed.  If the process crashed during
+ * the resting lifecycle, that row is the only durable link to a possibly-live
+ * exchange order.  This resolves each pending row fail-closed:
+ *   • confirmed absent → row deleted (clean no-order)
+ *   • order found → cancel if still resting, CONFIRM terminal, and adopt any
+ *     fills that exceed what the bet rows already record
+ *   • anything unconfirmed → row kept pending; retried on next startup
+ * MUST run before loadOpenPositionFromDB so adopted fills are restored.
+ */
+export async function reconcilePendingRestingOrdersFromDB(): Promise<void> {
+  let rows: Array<typeof kalshiBotBetsTable.$inferSelect>;
+  try {
+    rows = await db
+      .select()
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          eq(kalshiBotBetsTable.action, "resting_pending"),
+          sql`${kalshiBotBetsTable.createdAt} >= NOW() - INTERVAL '24 hours'`,
+        ),
+      );
+  } catch (err) {
+    logger.warn({ err }, "[resting-recovery] pending-order query failed (non-fatal)");
+    return;
+  }
+  if (rows.length === 0) return;
+
+  // FAIL CLOSED FIRST: block every symbol with a pending row BEFORE any
+  // exchange call.  If Kalshi is unreachable (or this function throws), the
+  // blocks stay in place and the entry path refuses new orders for these
+  // symbols — a prior GTC order may still be live, and a new entry would
+  // create a double position.  Blocks are re-derived from the DB rows on
+  // every restart, so they are durable until reconciliation confirms
+  // terminal state and deletes the row.
+  for (const row of rows) restingRecoveryBlocks.add(row.symbol);
+  logger.info({ count: rows.length, blockedSymbols: Array.from(restingRecoveryBlocks) }, "[resting-recovery] reconciling in-flight resting orders from before restart");
+
+  if (!isKalshiConfigured()) {
+    logger.warn("[resting-recovery] Kalshi not configured — pending rows cannot be reconciled; symbols stay blocked");
+    return;
+  }
+
+  for (const row of rows) {
+    const sig = (row.signals ?? {}) as Record<string, unknown>;
+    const clientOrderId = typeof sig["clientOrderId"] === "string" ? (sig["clientOrderId"] as string) : null;
+    if (!clientOrderId || !row.direction) {
+      logger.warn({ id: row.id }, "[resting-recovery] pending row missing clientOrderId/direction — skipping");
+      continue;
+    }
+    const pending: PendingRestingOrderRow = {
+      rowId: row.id,
+      symbol: row.symbol,
+      windowKey: row.windowKey,
+      ticker: row.ticker,
+      direction: row.direction as "yes" | "no",
+      clientOrderId,
+      orderId: typeof sig["orderId"] === "string" ? (sig["orderId"] as string) : null,
+      requestedCount: row.contractCount ?? 0,
+      limitPrice: row.entryYesPrice != null ? parseFloat(String(row.entryYesPrice)) : null,
+    };
+    // Fail closed by default: the symbol stays blocked for new entries unless
+    // reconciliation CONFIRMS the prior order is terminal.  (The block was
+    // already added when the pending rows were scanned, before any exchange
+    // call — so an exception below leaves it in place.)
+    try {
+      // Locate the existing OPEN bet row for this coin/window (the partial
+      // position persisted before the crash), if any.  Recovery must MERGE
+      // total exchange fills into this row — never append a delta row —
+      // because position restore keys one row per symbol and an appended
+      // delta would restore only part of the exposure.
+      const findOpenBetRow = async () => {
+        const betRows = await db
+          .select()
+          .from(kalshiBotBetsTable)
+          .where(
+            and(
+              eq(kalshiBotBetsTable.symbol, pending.symbol),
+              eq(kalshiBotBetsTable.windowKey, pending.windowKey),
+              eq(kalshiBotBetsTable.mode, "live"),
+              eq(kalshiBotBetsTable.action, "bet"),
+              isNull(kalshiBotBetsTable.exitedAt),
+            ),
+          )
+          .orderBy(desc(kalshiBotBetsTable.createdAt));
+        return betRows[0] ?? null;
+      };
+
+      const outcome = await reconcilePendingRestingOrder(pending, {
+        findOrderIdByClientId,
+        getOrder: (oid) => getOrder(oid, pending.direction),
+        cancelOrder,
+        getRecordedCount: async () => {
+          const open = await findOpenBetRow();
+          return open?.contractCount ?? 0;
+        },
+        adoptFills: async (p, actual) => {
+          const open = await findOpenBetRow();
+          const merged = computeFillMerge(
+            open != null && open.contractCount != null && open.entryPrice != null
+              ? { contractCount: open.contractCount, entryYesPrice: parseFloat(String(open.entryPrice)) }
+              : null,
+            { filledCount: actual.filledCount, avgPrice: actual.avgPrice },
+            p.direction,
+            p.limitPrice,
+          );
+          if (open != null) {
+            // MERGE into the existing open bet row: total count, order-wide
+            // avg price, recomputed cost.  One row = full exchange exposure.
+            await db.update(kalshiBotBetsTable)
+              .set({
+                contractCount: merged.contractCount,
+                entryPrice: String(merged.entryYesPrice),
+                entryYesPrice: String(merged.entryYesPrice),
+                betAmount: String(merged.betAmount),
+                signals: {
+                  ...((open.signals ?? {}) as Record<string, unknown>),
+                  recoveredFromRestingOrder: true,
+                  recoveredClientOrderId: p.clientOrderId,
+                  preRecoveryContractCount: open.contractCount,
+                },
+              })
+              .where(eq(kalshiBotBetsTable.id, open.id));
+          } else {
+            // No partial position was persisted before the crash — the whole
+            // fill is new.  Insert one complete bet row.
+            await db.insert(kalshiBotBetsTable).values({
+              id: `recovered:${p.clientOrderId}`,
+              symbol: p.symbol,
+              windowKey: p.windowKey,
+              ticker: p.ticker,
+              direction: p.direction,
+              action: "bet",
+              mode: "live",
+              contractCount: merged.contractCount,
+              entryPrice: String(merged.entryYesPrice),
+              entryYesPrice: String(merged.entryYesPrice),
+              betAmount: String(merged.betAmount),
+              kalshiTarget: row.kalshiTarget ?? "0",
+              signals: { recoveredFromRestingOrder: true, clientOrderId: p.clientOrderId },
+              createdAt: row.createdAt ?? new Date(),
+            }).onConflictDoNothing();
+          }
+          logger.warn(
+            { sym: p.symbol, windowKey: p.windowKey, totalFilled: merged.contractCount, avgYes: merged.entryYesPrice, mergedIntoExisting: open != null },
+            "[resting-recovery] fills reconciled into open bet row (merged, not appended)",
+          );
+        },
+        markResolved: async (p, note) => {
+          await db.delete(kalshiBotBetsTable).where(eq(kalshiBotBetsTable.id, p.rowId));
+          logger.info({ sym: p.symbol, note }, "[resting-recovery] pending order resolved");
+        },
+        log: logger,
+      });
+      if (outcome === "resolved") {
+        restingRecoveryBlocks.delete(pending.symbol);
+      } else {
+        logger.warn(
+          { sym: pending.symbol, clientOrderId },
+          "[resting-recovery] order state unconfirmed — symbol BLOCKED for new entries until a reconcile pass confirms terminal state",
+        );
+      }
+    } catch (err) {
+      logger.warn({ err, sym: pending.symbol }, "[resting-recovery] reconcile failed — symbol stays blocked, row kept pending (non-fatal)");
+    }
+  }
+
+  if (restingRecoveryBlocks.size > 0) {
+    logger.warn(
+      { blockedSymbols: Array.from(restingRecoveryBlocks) },
+      "[resting-recovery] symbols with unresolved resting orders — new entries blocked until reconciled",
+    );
+  }
+}
+
 export async function loadOpenPositionFromDB(): Promise<void> {
+  // Resting-entry orders and restarts: every resting entry persists a
+  // provisional "resting_pending" row (with client_order_id) BEFORE placement.
+  // reconcilePendingRestingOrdersFromDB() — which runs BEFORE this function on
+  // startup — resolves those rows against the exchange: cancel + confirm
+  // terminal, and adopt any fills that landed while the server was down into
+  // the bet rows this function restores from.  The server-side expiration_time
+  // backstop (≤ ~75 s) additionally bounds order lifetime if reconciliation
+  // itself cannot reach the exchange.
   try {
     // Use a 24-hour rolling window instead of a DATE equality so a position
     // opened just before UTC midnight is still found after a post-midnight restart.

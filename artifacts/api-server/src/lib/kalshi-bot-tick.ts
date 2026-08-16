@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
@@ -38,8 +39,10 @@ import {
   placeEntryOrderWithSizeFallback,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
+  cancelOrder, getOrder, findOrderIdByClientId,
 } from "./kalshi-trader";
-import { decideRemainderAttempt } from "./kalshi-entry-remainder";
+import { planRestingEntry, accountRestingFill } from "./kalshi-resting-entry";
+import { runRestingEntryLifecycle } from "./kalshi-resting-lifecycle";
 import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
@@ -64,7 +67,7 @@ import {
   windowRandomizerUsedValues,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
-  tickAbortReasons,
+  tickAbortReasons, restingEntryStatus,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -270,6 +273,171 @@ export function refreshTrajectoryForAllCoins(): void {
 // At $0 sell value there is no benefit over holding to expiry — the position
 // might still recover. Only exit when there is meaningful value to capture.
 const MIN_EXIT_CASHOUT_PER_CONTRACT = 0.15;
+
+// Bounded active rest time for a resting GTC entry order.  Market makers fill
+// in-zone conviction orders within seconds; 75 s covers slow books without
+// letting an unfilled order linger while price drifts.
+const RESTING_ENTRY_MAX_REST_MS = 75_000;
+
+// ---------------------------------------------------------------------------
+// Resting full-size entry: place one GTC order, poll for fills, cancel early
+// ---------------------------------------------------------------------------
+// Places a single good_till_canceled limit order for the FULL contract count at
+// the zone-capped limit price and lets it rest on the book (like the Kalshi
+// app).  Polls the order every ~1.5s and cancels it early when the price leaves
+// the conviction zone, the 3-min floor is reached, or the max rest time elapses.
+// A server-side expiration_time backstop guarantees the order dies even if the
+// process restarts.  Returns the ACTUAL filled count and weighted-average price.
+//
+// Zone safety: the limit price is only an UPPER bound — a resting YES bid at
+// the cap CAN be filled below the zone floor if the market moves through it
+// between polls.  The Layer-3 post-fill zone check (emergency close) remains
+// the safety net for adverse-move fills and MUST stay active for this path.
+interface RestingEntryPollArgs {
+  sym: string;
+  direction: "yes" | "no";
+  ticker: string;
+  count: number;
+  limitPrice: number;         // YES-side limit (zone cap)
+  expirationTimeSec: number;  // Unix seconds server-side backstop
+  maxRestMs: number;
+  lockPrice: number;
+  lockPriceCap: number;
+  windowKey: string;
+}
+interface RestingEntryPollResult {
+  requested: number;
+  filledCount: number;
+  avgPrice: number | null;   // YES-side
+  orderId: string | null;
+  clientOrderId: string;
+  cancelled: boolean;
+  /** True when the order may still be live and cancellation is UNCONFIRMED. */
+  stillResting: boolean;
+  /** True when placement outcome could not be determined at all (order state unknown). */
+  unknown?: boolean;
+}
+async function placeRestingEntryAndPoll(a: RestingEntryPollArgs): Promise<RestingEntryPollResult> {
+  // A caller-owned idempotency key lets us reconcile a placement whose POST
+  // failed at the transport level (timeout/abort) AFTER Kalshi accepted it —
+  // the order may be LIVE on the exchange even though we never got its id.
+  const clientOrderId = randomUUID();
+
+  const wkMs = new Date(a.windowKey + (a.windowKey.endsWith("Z") ? "" : ":00Z")).getTime();
+  const windowCloseMs = isNaN(wkMs) ? Date.now() : wkMs + 15 * 60_000;
+
+  // ── CRASH-SAFE PROVISIONAL ROW (before placement) ─────────────────────────
+  // If the process dies mid-lifecycle, this row is the only durable link to a
+  // possibly-live exchange order.  Startup recovery
+  // (reconcilePendingRestingOrdersFromDB) resolves it by client_order_id:
+  // cancel + confirm terminal, adopt any fills that landed while the server
+  // was down.  The row is deleted below once the lifecycle ends with a
+  // CONFIRMED terminal state; it is kept (with the order id) when the state
+  // is unconfirmed so recovery retries.
+  const provisionalId = `resting-pending:${clientOrderId}`;
+  try {
+    await db.insert(kalshiBotBetsTable).values({
+      id: provisionalId,
+      symbol: a.sym,
+      windowKey: a.windowKey,
+      ticker: a.ticker,
+      direction: a.direction,
+      action: "resting_pending",
+      mode: "live",
+      contractCount: a.count,
+      entryYesPrice: String(a.limitPrice),
+      kalshiTarget: "0",
+      signals: {
+        clientOrderId,
+        requestedCount: a.count,
+        limitPrice: a.limitPrice,
+        orderId: null,
+        expirationTimeSec: a.expirationTimeSec,
+      },
+      createdAt: new Date(),
+    }).onConflictDoNothing();
+  } catch (err) {
+    // Do not block the entry on a DB hiccup: the server-side expiration_time
+    // backstop still bounds the order's lifetime, and the settlement evaluator
+    // reconciles fills from Kalshi's settled markets.  But log loudly — a
+    // crash during THIS lifecycle would lose the client-id link.
+    logger.error({ err, sym: a.sym, clientOrderId }, "[kalshi-bot] resting entry: provisional row persist FAILED — crash recovery unavailable for this order");
+  }
+
+  const r = await runRestingEntryLifecycle(
+    {
+      sym: a.sym,
+      direction: a.direction,
+      count: a.count,
+      clientOrderId,
+      expirationTimeSec: a.expirationTimeSec,
+      maxRestMs: a.maxRestMs,
+      lockPrice: a.lockPrice,
+      lockPriceCap: a.lockPriceCap,
+      windowCloseMs,
+    },
+    {
+      placeOrder: (cid) =>
+        placeOrder({
+          ticker: a.ticker,
+          side: a.direction,
+          action: "buy",
+          count: a.count,
+          type: "limit",
+          timeInForce: "good_till_canceled",
+          expirationTime: a.expirationTimeSec,
+          limitPrice: a.limitPrice,
+          clientOrderId: cid,
+        }),
+      getOrder: (oid) => getOrder(oid, a.direction),
+      cancelOrder,
+      findOrderIdByClientId,
+      getRefYesPrice: () => {
+        const live = getConvictionLivePrice(a.sym);
+        return live?.yesAsk != null && live?.yesBid != null
+          ? (live.yesAsk + live.yesBid) / 2
+          : live?.yesAsk ?? (live?.yesBid != null ? 1 - live.yesBid : null);
+      },
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((res) => setTimeout(res, ms)),
+      onStatus: ({ filledSoFar, orderId }) => {
+        restingEntryStatus.set(a.sym, {
+          requested: a.count, filledSoFar, limitPrice: a.limitPrice,
+          orderId, state: "resting", updatedAt: Date.now(),
+        });
+      },
+      log: logger,
+    },
+  );
+
+  // ── PROVISIONAL ROW RESOLUTION ────────────────────────────────────────────
+  // Confirmed terminal (order dead or confirmed-absent) → delete the pending
+  // row; the normal bet row (written by the caller) is the durable record.
+  // UNCONFIRMED (unknown placement or unconfirmed cancel) → KEEP the row and
+  // stamp the learned order id so startup recovery can reconcile after a crash
+  // and closePosition/exit paths remain the in-process fail-closed handlers.
+  try {
+    if (!r.unknown && !r.stillResting) {
+      await db.delete(kalshiBotBetsTable).where(eq(kalshiBotBetsTable.id, provisionalId));
+    } else {
+      await db.update(kalshiBotBetsTable)
+        .set({
+          signals: {
+            clientOrderId,
+            requestedCount: a.count,
+            limitPrice: a.limitPrice,
+            orderId: r.orderId,
+            expirationTimeSec: a.expirationTimeSec,
+            filledCountAtLastPoll: r.filledCount,
+          },
+        })
+        .where(eq(kalshiBotBetsTable.id, provisionalId));
+    }
+  } catch (err) {
+    logger.warn({ err, sym: a.sym, provisionalId }, "[kalshi-bot] resting entry: provisional row update failed (recovery will re-reconcile — safe)");
+  }
+  return r;
+}
 
 
 export async function runBotTickForCoin(
@@ -2811,6 +2979,9 @@ async function _runBotTick(
 
   let fillPrice = yesPrice; // paper fill
   let orderId: string | null = null;
+  // Set when a resting entry order could not be confirmed cancelled — the
+  // position must carry it so every exit path cancels it before selling.
+  let pendingEntryOrderIdForPos: string | undefined;
 
   // ── FINAL SMART HOURS CHECK — immediately before order placement ─────────
   // Authoritative, fail-closed re-resolution at the moment the order would be
@@ -2888,48 +3059,150 @@ async function _runBotTick(
 
   if (entryMode === "live") {
     try {
-      // ── ENTRY ORDER (IOC real-book / FOK poller-fallback) ───────────────────
-      // Kalshi does not support any GTC/resting time-in-force value — both
-      // "gtc" and "good_till_cancelled" are rejected with a 400 oneof error.
+      // ── ENTRY ORDER (resting GTC real-book / FOK poller-fallback) ────────────
+      // Fixed 2026-08-15 (the partial-fill regression): real-book conviction
+      // entries place ONE good-till-canceled limit order for the FULL contract
+      // count at the zone-capped price and let it REST on the book — exactly
+      // like the Kalshi app.  Market makers fill it within seconds.  This
+      // supersedes the earlier IOC + one-shot-remainder approach, which took
+      // whatever slice of the book existed at that instant and left tiny
+      // partial positions (DOGE: 1 of 9 contracts, $0.83 of $8).
       //
-      // Time-in-force selection (changed 2026-08-15 — the $10 sizing regression):
-      //   • Real-book (usedPollerFallback=false): IOC.  At 12–18 contracts an
-      //     all-or-nothing FOK is rejected with 409 insufficient_resting_volume
-      //     even when MOST contracts are available (e.g. 11 of 12).  IOC fills
-      //     whatever the book has at our limit and cancels the rest — the
-      //     partial-fill correction below tracks the position by ACTUAL fill
-      //     count.  The limit price still hard-caps the fill price, so zone
-      //     enforcement is unchanged.
-      //   • Empty-book (usedPollerFallback=true): FOK.  Market makers fill FOK
-      //     orders reactively even when the authenticated book appears empty —
-      //     IOC against a literally-empty book cancels instantly with 0 fills,
-      //     so FOK is required to trigger the reactive MM match.  The poller
-      //     spread check (≤4¢ YES / ≤6¢ NO) already confirmed a tight, in-zone
-      //     quote, so a FOK at orderLimitPrice transacts at that price.
-      //
-      // Both paths go through placeEntryOrderWithSizeFallback: a 409 volume
-      // rejection triggers ONE retry at half the contract count (min 1); a
-      // second rejection surfaces as a 0-fill result that feeds the existing
-      // zero-fill attempt counter below (up to 10 attempts per window in
-      // conviction) instead of throwing into the generic error path.
+      //   • Real-book (usedPollerFallback=false): good_till_canceled with a
+      //     server-side expiration_time backstop.  The bot polls the order for
+      //     up to maxRestMs and cancels it early if price leaves the zone or the
+      //     3-min hard floor is reached.  ANY fills are recorded by ACTUAL count
+      //     and weighted-average price; a cancel with a partial fill yields a
+      //     smaller-but-correct position, never marked as the full size.  The
+      //     limit is only an UPPER bound — an adverse move through the zone can
+      //     fill below the floor, so the Layer-3 post-fill zone check stays
+      //     active for this path exactly as it did for FOK.
+      //   • Empty-book (usedPollerFallback=true): FOK all-or-nothing (unchanged).
+      //     Market makers fill FOK reactively even when the authenticated book
+      //     appears empty; a resting order against a literally-empty book would
+      //     just sit unfilled.
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
-      const entryTimeInForce: "fill_or_kill" | "immediate_or_cancel" =
-        usedPollerFallback ? "fill_or_kill" : "immediate_or_cancel";
+      const _entryWkMs   = new Date(windowKey + (windowKey.endsWith("Z") ? "" : ":00Z")).getTime();
+      const _entryMsLeft = isNaN(_entryWkMs) ? 0 : (15 * 60_000 - (Date.now() - _entryWkMs));
+      const restPlan = planRestingEntry({
+        usedPollerFallback,
+        requestedCount: contractCount,
+        msRemaining: _entryMsLeft,
+        maxRestMs: RESTING_ENTRY_MAX_REST_MS,
+        nowMs: Date.now(),
+      });
 
-      logger.info(
-        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback, timeInForce: entryTimeInForce },
-        `[kalshi-bot] conviction entry: placing ${entryTimeInForce === "fill_or_kill" ? "FOK" : "IOC"} order${usedPollerFallback ? " (poller-fallback path)" : ""}`,
-      );
+      if (restPlan.useResting && orderLimitPrice != null) {
+        // ── RESTING FULL-SIZE ORDER PATH ─────────────────────────────────────
+        logger.info(
+          { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, expirationTimeSec: restPlan.expirationTimeSec, maxRestMs: restPlan.maxRestMs },
+          "[kalshi-bot] conviction entry: placing single resting GTC full-size order",
+        );
+        restingEntryStatus.set(sym, {
+          requested: contractCount, filledSoFar: 0, limitPrice: orderLimitPrice,
+          orderId: null, state: "resting", updatedAt: Date.now(),
+        });
 
-      const fokResult = await placeEntryOrderWithSizeFallback(
+        const { lockPrice: _entryLp, lockPriceCap: _entryLpCap } = deriveConvictionZone(
+          S.config.kalshiLockPrice    ?? 0.82,
+          S.config.kalshiLockPriceCap ?? 0.91,
+        );
+        const restResult = await placeRestingEntryAndPoll({
+          sym, direction, ticker: expectedTicker,
+          count: contractCount, limitPrice: orderLimitPrice,
+          expirationTimeSec: restPlan.expirationTimeSec, maxRestMs: restPlan.maxRestMs,
+          lockPrice: _entryLp, lockPriceCap: _entryLpCap,
+          windowKey,
+        });
+
+        if (restResult.unknown || (restResult.stillResting && restResult.filledCount === 0)) {
+          // FAIL CLOSED: the order may be LIVE on the exchange with an
+          // unconfirmed state (placement POST timed out and reconcile failed,
+          // or cancel could not be confirmed with zero known fills).  Never
+          // treat this as a clean 0-fill — a fill could land any moment and
+          // the position would be untracked.  Block the coin for the rest of
+          // the window (no re-entry → no double position) and rely on the
+          // server-side expiration_time backstop to kill the order; the
+          // settlement evaluator reconciles any fill that landed.
+          logger.error(
+            { sym, orderId: restResult.orderId, clientOrderId: restResult.clientOrderId, unknown: restResult.unknown, stillResting: restResult.stillResting },
+            "[kalshi-bot] resting entry: order state UNCONFIRMED with no known fills — blocking coin for window (fail closed)",
+          );
+          restingEntryStatus.set(sym, {
+            requested: contractCount, filledSoFar: 0, limitPrice: orderLimitPrice,
+            orderId: restResult.orderId, state: "resting", updatedAt: Date.now(),
+          });
+          const failWk = currentWindowKey();
+          windowFailedFills.add(`${sym}:${failWk}:${S.botMode}`);
+          // Conviction lock intentionally left set — no re-entry this window.
+          setTickAbortReason(sym, windowKey,
+            `resting order state unconfirmed — blocked for rest of window (expiration backstop will cancel)`);
+          return;
+        }
+
+        if (restResult.filledCount === 0) {
+          // CONFIRMED zero fill (order terminal: cancelled/expired with no fills)
+          // — treat like a 0-fill attempt so the per-window retry accounting applies.
+          restingEntryStatus.set(sym, {
+            requested: contractCount, filledSoFar: 0, limitPrice: orderLimitPrice,
+            orderId: restResult.orderId, state: "cancelled", updatedAt: Date.now(),
+          });
+          const failWk = currentWindowKey();
+          const attemptKey = `${sym}:${failWk}:${S.botMode}`;
+          const attempts = (windowZeroFillAttempts.get(attemptKey) ?? 0) + 1;
+          windowZeroFillAttempts.set(attemptKey, attempts);
+          const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 10 : 2;
+          if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
+            windowFailedFills.add(attemptKey);
+            setTickAbortReason(sym, windowKey,
+              `resting order unfilled after ${attempts} attempts — blocked for rest of window`);
+          } else {
+            if (S.config.decisionMode === "conviction") convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
+            setTickAbortReason(sym, windowKey,
+              `resting order unfilled (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — retrying next tick`);
+          }
+          return;
+        }
+
+        // Record the position by ACTUAL fill (planned accounting is pure/tested).
+        const acct = accountRestingFill({
+          requestedCount: contractCount,
+          filledCount: restResult.filledCount,
+          avgYesPrice: restResult.avgPrice,
+        });
+        contractCount = acct.filledCount;
+        result = { filledCount: acct.filledCount, avgPrice: acct.avgYesPrice, orderId: restResult.orderId };
+        restingEntryStatus.set(sym, {
+          requested: restResult.requested, filledSoFar: acct.filledCount, limitPrice: orderLimitPrice,
+          orderId: restResult.orderId,
+          state: restResult.stillResting ? "resting" : "filled",
+          updatedAt: Date.now(),
+        });
+        // If the cancel could not be confirmed, carry the order id on the
+        // position so every exit path cancels it before selling (no oversell race).
+        if (restResult.stillResting && restResult.orderId != null) {
+          pendingEntryOrderIdForPos = restResult.orderId;
+        }
+        logger.info(
+          { sym, direction, requested: restResult.requested, filled: acct.filledCount, avgPrice: acct.avgYesPrice, cancelled: restResult.cancelled, stillResting: restResult.stillResting },
+          "[kalshi-bot] conviction resting entry: order resolved — recording position by actual fill",
+        );
+      } else {
+        // ── FOK POLLER-FALLBACK PATH (empty book — unchanged, all-or-nothing) ─
+        logger.info(
+          { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback, skipReason: restPlan.skipReason },
+          "[kalshi-bot] conviction entry: placing FOK order (poller-fallback / no-limit path)",
+        );
+
+        const fokResult = await placeEntryOrderWithSizeFallback(
         {
           ticker: expectedTicker,
           side: direction,
           action: "buy",
           count: contractCount,
           type: "market",
-          timeInForce: entryTimeInForce,
+          timeInForce: "fill_or_kill",
           // Use the zone-capped/crossing-buffered limit price when available.
           // Falls back to midpoint mode (yesPrice + minReturnMultiple) only when
           // neither the poller nor the authenticated book supplied a price.
@@ -2981,117 +3254,11 @@ async function _runBotTick(
         }
         return;
       }
+      // FOK is all-or-nothing: filledCount === contractCount (no partials).
       result = fokResult;
+      } // end FOK poller-fallback branch
 
-      // ── PARTIAL FILL CORRECTION + IOC REMAINDER RE-ATTEMPT ────────────────
-      // placeOrderWithRetry uses FOK/IOC: fills what the book has at our price
-      // and cancels the rest.  result.filledCount is the ACTUAL number of
-      // contracts filled — can be less than contractCount.
-      //
-      // Consistency fix (2026-08-15): a partial IOC fill used to be recorded
-      // as-is, so an operator-configured $10 bet could land as $4–7 depending
-      // on book depth at that instant.  Now, when the real-book IOC path fills
-      // only part of the requested size, we immediately re-submit the REMAINDER
-      // as ONE more IOC order at the SAME limit price (no price escalation).
-      // Books refresh within ~1s as market makers replenish, so a single
-      // same-price second shot usually completes the configured amount without
-      // hammering the book.  Whatever the second shot fills (including 0) is
-      // final — total actual fill is recorded, never retried further.
-      //
-      // HARD INVARIANT — at most TWO exchange orders per entry:
-      //   order #1 = the initial entry submission (or, if it was 409
-      //   volume-rejected, the helper's half-size fallback becomes order #2 and
-      //   the budget is spent).  decideRemainderAttempt (pure, unit-tested)
-      //   detects the fallback via attemptedCount < requestedCount and refuses
-      //   the remainder in that case, so a third submission is impossible.
-      // Other guards (all inside decideRemainderAttempt):
-      //   • real-book IOC path only (usedPollerFallback=false).  FOK empty-book
-      //     entries are all-or-nothing by design — no remainder can exist.
-      //   • remainder measured against attemptedCount (actual submitted size).
-      //   • fresh ≥3-min hard floor re-check (same rule as entry dispatch) so
-      //     the remainder cannot land dangerously late in the window.
-      if (fokResult.filledCount > 0 && fokResult.filledCount < contractCount) {
-        const requestedCount = contractCount;
-        const firstFill      = fokResult.filledCount;
-        let totalFilled      = firstFill;
-
-        const _remWkMs    = new Date(windowKey + (windowKey.endsWith("Z") ? "" : ":00Z")).getTime();
-        const _remMinLeft = isNaN(_remWkMs) ? 0 : (15 - (Date.now() - _remWkMs) / 60000);
-
-        const remDecision = decideRemainderAttempt({
-          usedPollerFallback,
-          timeInForce: entryTimeInForce,
-          requestedCount,
-          attemptedCount: fokResult.attemptedCount,
-          filledCount: firstFill,
-          minutesRemaining: _remMinLeft,
-        });
-        const remainder = remDecision.remainder;
-
-        if (remDecision.attempt) {
-          logger.warn(
-            { sym, direction, requested: requestedCount, attempted: fokResult.attemptedCount, filled: firstFill, remainder, limitPrice: orderLimitPrice, minLeft: +_remMinLeft.toFixed(2) },
-            "[kalshi-bot] IOC partial fill — re-submitting remainder once at same limit price",
-          );
-          try {
-            // Single-attempt mode: disableHalfSizeRetry guarantees this places
-            // exactly ONE exchange order — a volume rejection is final (0 fills),
-            // never a second half-size submission.  Total order count per entry
-            // is therefore capped at 2 (initial + this remainder).
-            const remResult = await placeEntryOrderWithSizeFallback(
-              {
-                ticker: expectedTicker,
-                side: direction,
-                action: "buy",
-                count: remainder,
-                type: "market",
-                timeInForce: "immediate_or_cancel",
-                ...(orderLimitPrice != null
-                  ? { limitPrice: orderLimitPrice }
-                  : {
-                      yesPrice: yesPrice ?? undefined,
-                      minReturnMultiple: S.config.minReturnMultiple,
-                    }),
-              },
-              undefined,
-              { disableHalfSizeRetry: true },
-            );
-            if (remResult.filledCount > 0) {
-              totalFilled += remResult.filledCount;
-              // Weighted-average the fill price across both shots so P&L math
-              // reflects the true blended cost.
-              if (result.avgPrice != null && remResult.avgPrice != null) {
-                result = {
-                  ...result,
-                  avgPrice: (result.avgPrice * firstFill + remResult.avgPrice * remResult.filledCount) / totalFilled,
-                };
-              }
-              logger.info(
-                { sym, direction, firstFill, remainderFilled: remResult.filledCount, totalFilled, requested: requestedCount },
-                "[kalshi-bot] IOC remainder re-attempt filled — recording combined position",
-              );
-            } else {
-              logger.warn(
-                { sym, direction, firstFill, remainder, totalFilled },
-                "[kalshi-bot] IOC remainder re-attempt returned 0 fills — recording first fill only",
-              );
-            }
-          } catch (remErr) {
-            logger.warn(
-              { err: remErr, sym, direction, firstFill, remainder },
-              "[kalshi-bot] IOC remainder re-attempt failed (non-fatal) — recording first fill only",
-            );
-          }
-        } else {
-          logger.warn(
-            { sym, direction, requested: requestedCount, attempted: fokResult.attemptedCount, filled: firstFill, usedPollerFallback, skipReason: remDecision.skipReason, minLeft: +_remMinLeft.toFixed(2) },
-            "[kalshi-bot] partial fill — no remainder re-attempt; updating contractCount to actual fill",
-          );
-        }
-        contractCount = totalFilled;
-      }
-
-      // ── FILL ACCOUNTING (both GTC and IOC paths) ───────────────────────────
+      // ── FILL ACCOUNTING (both resting-GTC and FOK paths) ───────────────────
       // Must happen AFTER the branch so both paths feed the same downstream
       // accounting (post-fill zone check, emergency close, position recording).
       fillPrice = result.avgPrice ?? yesPrice;
@@ -3189,6 +3356,13 @@ async function _runBotTick(
                 claudeAbove: _catSigs.claudeAbove ?? null,
                 mlAbove: _catSigs.mlAbove ?? null,
               },
+              // Carry any unconfirmed resting entry order so closePosition
+              // cancels+confirms it BEFORE selling — without this the emergency
+              // close could sell the partial fill while the original GTC keeps
+              // filling (oversell / untracked exposure race).
+              ...(pendingEntryOrderIdForPos != null
+                ? { pendingEntryOrderId: pendingEntryOrderIdForPos }
+                : {}),
             };
             try {
               // closePosition: places sell order, computes P&L, updates balance +
@@ -3361,6 +3535,7 @@ async function _runBotTick(
       claudeAbove: _entrySigs.claudeAbove ?? null,
       mlAbove: _entrySigs.mlAbove ?? null,
     },
+    ...(pendingEntryOrderIdForPos != null ? { pendingEntryOrderId: pendingEntryOrderIdForPos } : {}),
   };
   openPositions.set(sym, newPosition);
 
