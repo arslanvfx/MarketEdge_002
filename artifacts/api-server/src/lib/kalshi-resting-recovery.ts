@@ -79,6 +79,55 @@ export function computeFillMerge(
 }
 
 /**
+ * Per-symbol block bookkeeping for multi-row recovery.  A symbol may have
+ * SEVERAL pending rows (e.g. two crashes in one day); its entry block must be
+ * released only when EVERY one of its rows is confirmed resolved — releasing
+ * on the first resolved row would unblock entries while another order for the
+ * same symbol is still unconfirmed.
+ */
+export function createBlockTracker(symbols: string[]) {
+  const counts = new Map<string, number>();
+  for (const s of symbols) counts.set(s, (counts.get(s) ?? 0) + 1);
+  return {
+    /** Mark one row resolved; returns true iff the symbol is now fully released. */
+    resolve(sym: string): boolean {
+      const c = counts.get(sym) ?? 0;
+      if (c <= 1) {
+        counts.delete(sym);
+        return true;
+      }
+      counts.set(sym, c - 1);
+      return false;
+    },
+    blockedSymbols(): string[] {
+      return [...counts.keys()];
+    },
+  };
+}
+
+/**
+ * Pure entry-gate predicate.  Returns a human-readable block reason, or null
+ * when entry is allowed.  Fail closed on BOTH conditions:
+ *   • scan not complete — the startup resting_pending query has not succeeded
+ *     yet (DB unreachable at boot).  We cannot know whether ANY symbol has a
+ *     live pre-crash order, so all live entries are blocked globally.
+ *   • symbol block — this symbol has ≥1 unresolved pending order.
+ */
+export function isEntryBlockedByRecovery(
+  sym: string,
+  scanComplete: boolean,
+  blockedSymbols: ReadonlySet<string>,
+): string | null {
+  if (!scanComplete) {
+    return "resting-order recovery scan has not completed — live entries blocked globally until pending orders can be checked";
+  }
+  if (blockedSymbols.has(sym)) {
+    return "unresolved resting order from before restart — entries blocked until reconciled";
+  }
+  return null;
+}
+
+/**
  * Reconcile ONE pending resting-order row against the exchange.
  * "left-pending" means the exchange state could not be confirmed — the row
  * must stay pending so a later pass retries (fail closed).

@@ -7,6 +7,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   reconcilePendingRestingOrder,
+  computeFillMerge,
+  createBlockTracker,
+  isEntryBlockedByRecovery,
   type PendingRestingOrderRow,
   type RestingRecoveryDeps,
 } from "./kalshi-resting-recovery.ts";
@@ -127,6 +130,67 @@ test("post-cancel read still shows resting → left-pending (never resolve on am
     cancelOrder: async () => true, // DELETE 'succeeded' but exchange still shows resting
   });
   assert.equal(await reconcilePendingRestingOrder(row(), d), "left-pending");
+});
+
+// ── computeFillMerge: partial persisted fill + later recovered fill ─────────
+test("computeFillMerge: partial position + more fills → total count at order-wide avg", () => {
+  // 3 contracts persisted at 0.90 before crash; order ended with 9 filled at avg 0.89.
+  const m = computeFillMerge(
+    { contractCount: 3, entryYesPrice: 0.9 },
+    { filledCount: 9, avgPrice: 0.89 },
+    "yes",
+    0.9,
+  );
+  assert.equal(m.contractCount, 9, "merged row must carry TOTAL exchange exposure, not the delta");
+  assert.equal(m.entryYesPrice, 0.89, "order-wide avgPrice supersedes the partial price");
+  assert.ok(Math.abs(m.betAmount - 9 * 0.89) < 1e-9);
+});
+
+test("computeFillMerge: NO direction costs (1-avg)×count", () => {
+  const m = computeFillMerge(null, { filledCount: 5, avgPrice: 0.12 }, "no", null);
+  assert.equal(m.contractCount, 5);
+  assert.ok(Math.abs(m.betAmount - 5 * 0.88) < 1e-9);
+});
+
+test("computeFillMerge: null avgPrice falls back to existing price, never shrinks count", () => {
+  const m = computeFillMerge(
+    { contractCount: 4, entryYesPrice: 0.91 },
+    { filledCount: 2, avgPrice: null }, // exchange reports fewer than recorded (shouldn't shrink)
+    "yes",
+    0.9,
+  );
+  assert.equal(m.contractCount, 4);
+  assert.equal(m.entryYesPrice, 0.91);
+});
+
+// ── Global scan gate: DB scan failure must block ALL live entries ────────────
+test("isEntryBlockedByRecovery: scan not complete → every symbol blocked globally", () => {
+  assert.ok(isEntryBlockedByRecovery("BTC", false, new Set()));
+  assert.ok(isEntryBlockedByRecovery("ETH", false, new Set(["BTC"])));
+});
+
+test("isEntryBlockedByRecovery: scan complete → only blocked symbols denied", () => {
+  const blocked = new Set(["BTC"]);
+  assert.ok(isEntryBlockedByRecovery("BTC", true, blocked));
+  assert.equal(isEntryBlockedByRecovery("ETH", true, blocked), null);
+  assert.equal(isEntryBlockedByRecovery("BTC", true, new Set()), null);
+});
+
+// ── Multi-row per-symbol blocks: released only when ALL rows resolve ─────────
+test("createBlockTracker: symbol with two pending rows stays blocked until both resolve", () => {
+  const t = createBlockTracker(["BTC", "BTC", "ETH"]);
+  assert.deepEqual(t.blockedSymbols().sort(), ["BTC", "ETH"]);
+  assert.equal(t.resolve("BTC"), false, "first BTC row resolved — must NOT release the block");
+  assert.deepEqual(t.blockedSymbols().sort(), ["BTC", "ETH"]);
+  assert.equal(t.resolve("BTC"), true, "second BTC row resolved — block released");
+  assert.equal(t.resolve("ETH"), true);
+  assert.deepEqual(t.blockedSymbols(), []);
+});
+
+test("createBlockTracker: resolving an untracked symbol is a safe release", () => {
+  const t = createBlockTracker(["BTC"]);
+  assert.equal(t.resolve("DOGE"), true); // no rows → nothing to hold
+  assert.deepEqual(t.blockedSymbols(), ["BTC"]);
 });
 
 // ── 404 after crash (expiration backstop fired) → recorded state stands ─────

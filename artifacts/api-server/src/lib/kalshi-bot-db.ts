@@ -26,7 +26,7 @@ import {
   fetchKalshiMarketResult, fetchKalshiSettledMarkets,
   findOrderIdByClientId, getOrder, cancelOrder,
 } from "./kalshi-trader";
-import { reconcilePendingRestingOrder, computeFillMerge, type PendingRestingOrderRow } from "./kalshi-resting-recovery";
+import { reconcilePendingRestingOrder, computeFillMerge, createBlockTracker, type PendingRestingOrderRow } from "./kalshi-resting-recovery";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
@@ -48,6 +48,7 @@ import {
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
+  restingRecoveryBlocks, restingRecoveryState,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
   REGIME_AGAINST_PENALTY_FALLBACK, CONTRARIAN_LIVE_REGIME_PENALTY,
@@ -608,6 +609,8 @@ export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }
  *   • anything unconfirmed → row kept pending; retried on next startup
  * MUST run before loadOpenPositionFromDB so adopted fills are restored.
  */
+const RECOVERY_SCAN_RETRY_MS = 30_000;
+
 export async function reconcilePendingRestingOrdersFromDB(): Promise<void> {
   let rows: Array<typeof kalshiBotBetsTable.$inferSelect>;
   try {
@@ -621,10 +624,24 @@ export async function reconcilePendingRestingOrdersFromDB(): Promise<void> {
         ),
       );
   } catch (err) {
-    logger.warn({ err }, "[resting-recovery] pending-order query failed (non-fatal)");
+    // FAIL CLOSED GLOBALLY: we could not read the pending rows, so we do not
+    // know WHICH symbols may have a live pre-crash GTC order.  scanComplete
+    // stays false → the tick-level entry gate blocks ALL live entries.
+    // Retry until the scan succeeds instead of swallowing the failure.
+    logger.error({ err, retryInMs: RECOVERY_SCAN_RETRY_MS },
+      "[resting-recovery] pending-order scan FAILED — ALL live entries blocked until a scan succeeds; retrying");
+    setTimeout(() => {
+      reconcilePendingRestingOrdersFromDB().catch((e) =>
+        logger.error({ err: e }, "[resting-recovery] scan retry threw (will retry again)"));
+    }, RECOVERY_SCAN_RETRY_MS).unref?.();
     return;
   }
-  if (rows.length === 0) return;
+  // Scan succeeded — the global gate can rely on per-symbol blocks from here.
+  restingRecoveryState.scanComplete = true;
+  if (rows.length === 0) {
+    restingRecoveryBlocks.clear();
+    return;
+  }
 
   // FAIL CLOSED FIRST: block every symbol with a pending row BEFORE any
   // exchange call.  If Kalshi is unreachable (or this function throws), the
@@ -633,6 +650,9 @@ export async function reconcilePendingRestingOrdersFromDB(): Promise<void> {
   // create a double position.  Blocks are re-derived from the DB rows on
   // every restart, so they are durable until reconciliation confirms
   // terminal state and deletes the row.
+  // A symbol may have MULTIPLE pending rows; the tracker releases its block
+  // only when the LAST row for that symbol is confirmed resolved.
+  const tracker = createBlockTracker(rows.map((r) => r.symbol));
   for (const row of rows) restingRecoveryBlocks.add(row.symbol);
   logger.info({ count: rows.length, blockedSymbols: Array.from(restingRecoveryBlocks) }, "[resting-recovery] reconciling in-flight resting orders from before restart");
 
@@ -753,7 +773,12 @@ export async function reconcilePendingRestingOrdersFromDB(): Promise<void> {
         log: logger,
       });
       if (outcome === "resolved") {
-        restingRecoveryBlocks.delete(pending.symbol);
+        // Release the symbol's block only when EVERY pending row for it has
+        // resolved — another unconfirmed order for the same symbol must keep
+        // the block in place.
+        if (tracker.resolve(pending.symbol)) {
+          restingRecoveryBlocks.delete(pending.symbol);
+        }
       } else {
         logger.warn(
           { sym: pending.symbol, clientOrderId },

@@ -43,6 +43,7 @@ import {
 } from "./kalshi-trader";
 import { planRestingEntry, accountRestingFill } from "./kalshi-resting-entry";
 import { runRestingEntryLifecycle } from "./kalshi-resting-lifecycle";
+import { isEntryBlockedByRecovery } from "./kalshi-resting-recovery";
 import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
@@ -67,7 +68,7 @@ import {
   windowRandomizerUsedValues,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
-  tickAbortReasons, restingEntryStatus,
+  tickAbortReasons, restingEntryStatus, restingRecoveryBlocks, restingRecoveryState,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -357,11 +358,11 @@ async function placeRestingEntryAndPoll(a: RestingEntryPollArgs): Promise<Restin
       createdAt: new Date(),
     }).onConflictDoNothing();
   } catch (err) {
-    // Do not block the entry on a DB hiccup: the server-side expiration_time
-    // backstop still bounds the order's lifetime, and the settlement evaluator
-    // reconciles fills from Kalshi's settled markets.  But log loudly — a
-    // crash during THIS lifecycle would lose the client-id link.
-    logger.error({ err, sym: a.sym, clientOrderId }, "[kalshi-bot] resting entry: provisional row persist FAILED — crash recovery unavailable for this order");
+    // FAIL CLOSED: without this row, a crash during the lifecycle would leave
+    // a live exchange order with NO durable client-id link — unrecoverable
+    // untracked exposure.  Abort the entry; the coin retries on a later tick.
+    logger.error({ err, sym: a.sym, clientOrderId }, "[kalshi-bot] resting entry: provisional row persist FAILED — aborting entry (fail closed)");
+    return { requested: a.count, filledCount: 0, avgPrice: null, orderId: null, clientOrderId, cancelled: false, stillResting: false, unknown: false };
   }
 
   const r = await runRestingEntryLifecycle(
@@ -749,6 +750,26 @@ async function _runBotTick(
   // exact block — never a reason left over from an earlier tick that would
   // otherwise mask the current state.
   clearTickAbort(tickAbortReasons, sym, windowKey);
+
+  // ── Resting-recovery gate (path-independent, fail closed) ─────────────────
+  // Two conditions block LIVE entries (paper carries no exchange risk):
+  //   • the startup resting_pending scan has not succeeded yet (DB was
+  //     unreachable at boot) — we cannot know WHICH symbols have a live
+  //     pre-crash GTC order, so ALL live entries are blocked globally until
+  //     the scan retry loop completes;
+  //   • this symbol has ≥1 unresolved pending order from before a restart —
+  //     a prior GTC order may still be LIVE on the exchange; a new entry
+  //     would create a double position.
+  // Enforced here (not just the loop) so pipeline-completion triggers and
+  // conviction dispatch honor it too.
+  if (S.botMode === "live") {
+    const recoveryBlock = isEntryBlockedByRecovery(sym, restingRecoveryState.scanComplete, restingRecoveryBlocks);
+    if (recoveryBlock != null) {
+      logger.warn({ sym, windowKey, reason: recoveryBlock }, "[kalshi-bot] live entry blocked by resting-order recovery gate");
+      setTickAbortReason(sym, windowKey, recoveryBlock);
+      return;
+    }
+  }
 
   const qhEntry = resolveEntryQuietHoursDecision(S.config, S.botMode);
   if (qhEntry.action === "block") {

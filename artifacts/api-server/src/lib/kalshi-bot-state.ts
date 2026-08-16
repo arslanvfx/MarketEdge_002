@@ -466,6 +466,14 @@ export const restingEntryStatus = new Map<string, RestingEntryStatus>();
 // because they are derived from the resting_pending DB rows themselves.
 export const restingRecoveryBlocks = new Set<string>();
 
+// Global fail-closed latch for the startup pending-row scan.  Until the
+// resting_pending DB query has completed successfully at least once, we
+// cannot know WHICH symbols may have a live pre-crash order — so ALL live
+// entries are blocked, not just known-blocked symbols.  Set true only by
+// reconcilePendingRestingOrdersFromDB() after a successful scan; a failed
+// scan schedules its own retry and leaves this false.
+export const restingRecoveryState = { scanComplete: false };
+
 // shadowQhBypassActive: set to true for the duration of a quiet-hours bypass tick
 // (shadowPaperIgnoreQuietHours=true, bot is live, current hour is silenced).
 // When true, new entry ticks MUST treat the entry as paper-only — live orders
