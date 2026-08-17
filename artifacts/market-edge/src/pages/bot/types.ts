@@ -16,6 +16,7 @@ export interface QuietHoursV2 {
   // Per-day-of-week overrides (JS getUTCDay(): "0"=Sun, "1"=Mon, …, "6"=Sat)
   silencedByDow?: Record<string, number[]>;               // dow → UTC hours silenced on that day only
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 that day only
+  dataGatheringByDow?: Record<string, number[]>;          // dow → UTC hours with < 2 bets (active but capped)
   calibratedAt?: string;  // ISO timestamp — set by Calibrate All
 }
 
@@ -57,6 +58,7 @@ export interface BotConfig {
   quietHoursV2?: QuietHoursV2;
   quietHoursMode?: 'global' | 'per_market';
   perSymbolQuietHours?: Record<string, QuietHoursV2>;
+  dataGatheringBetCap?: number;  // $ cap for hours with ≤ 2 historical bets (default 1.00)
   maxConsecutiveLosses: number;
   circuitBreakerPauseWindows: number;
   enableDirectionCap: boolean;

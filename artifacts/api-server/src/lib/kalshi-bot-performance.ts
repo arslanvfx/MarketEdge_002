@@ -864,25 +864,35 @@ export function computeSymbolQuietHoursV2(
     else tally[dow][hour].losses++;
   }
 
-  // Build silencedByDow — populate ALL 7 days so DOW-first logic never falls
-  // through to the flat silencedUtcHours list for any day of the week.
+  // Build silencedByDow and dataGatheringByDow — populate ALL 7 days.
+  // silencedByDow: hours with ≥ minBets bets AND win rate < threshold → fully blocked.
+  // dataGatheringByDow: hours with 1 – (minBets-1) bets → active but capped at dataGatheringBetCap.
+  // Hours with zero bets are left out of both lists (no data = no opinion).
   const silencedByDow: Record<string, number[]> = {};
+  const dataGatheringByDow: Record<string, number[]> = {};
   for (let dow = 0; dow < 7; dow++) {
     const dayStats = tally[dow];
     if (!dayStats) {
-      silencedByDow[String(dow)] = []; // no data → no silencing for this day
+      silencedByDow[String(dow)] = [];
+      dataGatheringByDow[String(dow)] = [];
       continue;
     }
     const silenced: number[] = [];
+    const dataGathering: number[] = [];
     for (let h = 0; h < 24; h++) {
       const cell = dayStats[h];
-      if (!cell) continue;
+      if (!cell) continue; // zero bets — no opinion
       const total = cell.wins + cell.losses;
-      if (total < minBets) continue;
+      if (total < minBets) {
+        // Sparse data: flag for bet cap rather than silencing
+        dataGathering.push(h);
+        continue;
+      }
       const wr = (cell.wins / total) * 100;
       if (wr < threshold) silenced.push(h);
     }
     silencedByDow[String(dow)] = silenced;
+    dataGatheringByDow[String(dow)] = dataGathering;
   }
 
   return {
@@ -890,6 +900,7 @@ export function computeSymbolQuietHoursV2(
     silencedUtcHours: [],   // per-symbol uses silencedByDow exclusively
     reducedBetUtcHours: {},
     silencedByDow,
+    dataGatheringByDow,
     autoTuneEnabled: true,
   };
 }

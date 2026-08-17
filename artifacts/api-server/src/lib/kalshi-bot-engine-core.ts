@@ -984,6 +984,7 @@ export interface QuietHoursV2 {
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 on that day only
 
   calibratedAt?: string; // ISO timestamp — when recomputeAllSymbolQuietHours last ran for this coin
+  dataGatheringByDow?: Record<string, number[]>; // dow → UTC hours with < 2 historical bets (active but capped at dataGatheringBetCap)
 }
 
 /**
@@ -1013,7 +1014,7 @@ export function getEtDow(d: Date = new Date()): number {
 export function resolveQuietHoursV2State(
   qhv2: QuietHoursV2 | undefined,
   now: Date = new Date(),
-): { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number } {
+): { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number; isDataGathering?: boolean } {
   const utcHour = now.getUTCHours();
   if (!qhv2?.enabled) return { mode: "active", utcHour };
   const dowStr = String(getEtDow(now));
@@ -1031,6 +1032,13 @@ export function resolveQuietHoursV2State(
   if (reduced != null && reduced >= 1 && reduced <= 99) {
     return { mode: "reduced", reducedBetAmount: reduced, utcHour };
   }
+
+  // Data-gathering hours: < 2 historical bets — not silenced, but bot caps at dataGatheringBetCap.
+  const dgHours = qhv2.dataGatheringByDow?.[dowStr];
+  if (Array.isArray(dgHours) && dgHours.includes(utcHour)) {
+    return { mode: "active", isDataGathering: true, utcHour };
+  }
+
   return { mode: "active", utcHour };
 }
 
@@ -1063,6 +1071,8 @@ export interface EntryQuietHoursDecision {
   forcedPaper: boolean;
   /** Reduced-bet percentage (1–99) to apply at sizing, or null. */
   reducedPct: number | null;
+  /** True when hour has < 2 historical bets — bot stays active but tick applies dataGatheringBetCap. */
+  isDataGathering?: boolean;
   /** Which rule matched — for operator-facing logs. */
   qhMode: "active" | "silenced" | "reduced" | "legacy-silenced";
   utcHour: number;
@@ -1089,7 +1099,7 @@ export function resolveEntryQuietHoursDecision(
     if (st.mode === "reduced") {
       return { action: "proceed", qhMode: "reduced", ...base, reducedPct: st.reducedBetAmount ?? null };
     }
-    return { action: "proceed", qhMode: "active", ...base };
+    return { action: "proceed", qhMode: "active", ...base, isDataGathering: st.isDataGathering };
   }
 
   if (isInQuietHours(utcHour, config.quietHoursStart, config.quietHoursEnd)) {
@@ -1241,6 +1251,7 @@ export interface BotConfig {
   quietHoursV2?: QuietHoursV2; // per-hour silence / reduced-bet controls (V2); takes precedence over legacy range when enabled
   quietHoursMode?: 'global' | 'per_market'; // 'global' = single shared schedule (default); 'per_market' = each symbol uses its own auto-calibrated schedule
   perSymbolQuietHours?: Record<string, QuietHoursV2>; // per-symbol V2 schedules — only active when quietHoursMode === 'per_market'
+  dataGatheringBetCap?: number; // $ cap applied to hours with ≤ 2 historical bets (default 1.00) — bot stays active but collects data at reduced risk
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
   circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
   // Directional balance filter: caps correlated exposure by limiting same-direction

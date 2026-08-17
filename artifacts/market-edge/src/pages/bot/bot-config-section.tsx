@@ -7,7 +7,7 @@ import { QuietHoursGrid } from "./quiet-hours-grid";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 
 const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
-const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "GOLD", "SILVER", "WTI"];
+const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
 function fmtCalAge(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -21,15 +21,22 @@ interface PerSymbolQuietHoursPanelProps {
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   onChange: (sym: string, v: QuietHoursV2) => void;
   authPost: (path: string, body: object) => Promise<unknown>;
+  dgCap?: number;
 }
 
-function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: PerSymbolQuietHoursPanelProps) {
+function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgCap: dgCapProp = 1 }: PerSymbolQuietHoursPanelProps) {
   const [selectedSymbol, setSelectedSymbol] = React.useState(PER_MARKET_SYMBOLS[0]);
   const [calibrating, setCalibrating] = React.useState(false);
   const [calibrateMsg, setCalibrateMsg] = React.useState<string | null>(null);
   const [calibrateOk, setCalibrateOk] = React.useState(true);
   // Threshold matches the grid's "Silence threshold" dropdown (default 85 = silence hours < 85% win rate)
   const [calibrateThreshold, setCalibrateThreshold] = React.useState(85);
+  // Dollar cap for data-gathering hours (≤ 2 historical bets) — saved immediately on change
+  const [dgCap, setDgCap] = React.useState(dgCapProp);
+  React.useEffect(() => { setDgCap(dgCapProp); }, [dgCapProp]);
+  const saveDgCap = React.useCallback(async (cap: number) => {
+    try { await authPost("/crypto/bot/config", { dataGatheringBetCap: cap }); } catch { /* ignore */ }
+  }, [authPost]);
 
   // Always-current ref so tab-switch handler doesn't close over stale props
   const schedulesRef = React.useRef(perSymbolQuietHours);
@@ -131,6 +138,30 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
         <p className="text-[10px] text-muted-foreground/50 leading-snug">
           Analyzes 90 days of bet history per coin · silences hours below the chosen win-rate threshold for each day of the week · applies &amp; saves across all markets at once.
         </p>
+        {/* ── Data-gathering dollar cap ── */}
+        <label className="flex items-center gap-2 text-[11px] text-muted-foreground/70 mt-0.5 flex-wrap">
+          <DollarSign className="w-3 h-3 text-violet-400 shrink-0" />
+          <span className="font-medium text-violet-300/80">Sparse hours bet cap</span>
+          <span className="text-[10px] text-muted-foreground/40">(cells with ≤ 2 bets stay active, capped at)</span>
+          <span className="flex items-center gap-0.5">
+            <span className="text-[10px] text-muted-foreground/50">$</span>
+            <input
+              type="number"
+              min={0.5}
+              max={50}
+              step={0.5}
+              value={dgCap}
+              onChange={e => {
+                const v = parseFloat(e.target.value);
+                if (!isNaN(v) && v >= 0.5 && v <= 50) setDgCap(v);
+              }}
+              onBlur={() => saveDgCap(dgCap)}
+              onKeyDown={e => { if (e.key === "Enter") saveDgCap(dgCap); }}
+              className="w-14 bg-background border border-violet-500/30 rounded px-1 py-0.5 text-[11px] text-violet-300 text-right focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+            />
+          </span>
+          <span className="text-[10px] text-muted-foreground/40">· auto-saves on blur / Enter</span>
+        </label>
       </div>
 
       {/* ── Symbol tabs ── */}
@@ -175,6 +206,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
         value={schedule}
         onChange={v => onChange(selectedSymbol, v)}
         symbolFilter={selectedSymbol}
+        dgCap={dgCap}
         onSave={updated => {
           // "Apply All Days" was clicked — persist immediately, no manual Save needed
           onChange(selectedSymbol, updated);
@@ -2151,6 +2183,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         },
                       }))}
                       authPost={authPost}
+                      dgCap={merged.dataGatheringBetCap ?? 1}
                     />
                   )}
                 </div>

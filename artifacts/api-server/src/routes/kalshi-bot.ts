@@ -664,6 +664,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableDynamicSizing,
     dynamicSizingMaxConfidence,
     profitLockPct,
+    dataGatheringBetCap,
     consensusMinCents,
     momentumLookbackCandles,
     coinStreakPenalty1LossPp,
@@ -783,6 +784,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     enableDynamicSizing?: boolean;
     dynamicSizingMaxConfidence?: number;
     profitLockPct?: number;
+    dataGatheringBetCap?: number;
     consensusMinCents?: number;
     momentumLookbackCandles?: number;
     coinStreakPenalty1LossPp?: number;
@@ -984,6 +986,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
             : [];
         }
       }
+      const parsedDataGatheringByDow: Record<string, number[]> = {};
+      if (typeof v2.dataGatheringByDow === "object" && v2.dataGatheringByDow !== null) {
+        for (const [k, val] of Object.entries(v2.dataGatheringByDow as Record<string, unknown>)) {
+          if (!/^[0-6]$/.test(k)) continue;
+          parsedDataGatheringByDow[k] = Array.isArray(val)
+            ? (val as unknown[]).filter((h): h is number => typeof h === "number" && h >= 0 && h <= 23)
+            : [];
+        }
+      }
       const key = sym.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
       if (!key) continue;
       // Preserve optional per-coin fields so saving one coin never silently
@@ -997,6 +1008,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
         silencedUtcHours: [],
         reducedBetUtcHours: {},
         ...(Object.keys(parsedSilencedByDow).length > 0 ? { silencedByDow: parsedSilencedByDow } : {}),
+        ...(Object.keys(parsedDataGatheringByDow).length > 0 ? { dataGatheringByDow: parsedDataGatheringByDow } : {}),
         autoTuneEnabled: typeof v2.autoTuneEnabled === "boolean" ? v2.autoTuneEnabled : true,
         ...maybeNum("autoTuneIntervalHours"),
         ...maybeNum("autoTuneDays"),
@@ -1076,6 +1088,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof profitLockPct === "number" && profitLockPct >= 0 && profitLockPct <= 99) {
     partial.profitLockPct = profitLockPct;
+  }
+  if (typeof dataGatheringBetCap === "number" && dataGatheringBetCap >= 0.5 && dataGatheringBetCap <= 50) {
+    partial.dataGatheringBetCap = dataGatheringBetCap;
   }
   // Entry safety gate thresholds
   if (typeof consensusMinCents === "number" && consensusMinCents >= 0 && consensusMinCents <= 50) {

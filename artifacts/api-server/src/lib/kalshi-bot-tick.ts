@@ -1653,6 +1653,23 @@ async function _runBotTick(
   }
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ── DATA-GATHERING DOLLAR CAP ───────────────────────────────────────────────
+  // Hours in dataGatheringByDow have < 2 historical bets.  The bot stays active
+  // (not silenced) but is capped at a small dollar amount so it collects data
+  // without exposing real risk.  Applied after all other sizing so the cap is
+  // always honoured regardless of dynamic sizing, conviction boost, or randomizer.
+  if (qhSizing.isDataGathering) {
+    const dgCap = S.config.dataGatheringBetCap ?? 1;
+    if (targetBetSize > dgCap) {
+      logger.info(
+        { sym, prev: +targetBetSize.toFixed(2), cap: dgCap },
+        `[kalshi-bot] data-gathering cap — sparse hour (< 2 bets) capped at $${dgCap}`,
+      );
+      targetBetSize = dgCap;
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   let contractCount = Math.floor(targetBetSize / expectedFillCost);
   // If budget can't buy even one contract at the live ask, skip this entry and
   // engage the FOK-cooldown so this coin doesn't retry the same window.

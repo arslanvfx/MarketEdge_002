@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@clerk/react";
-import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar, X, Check, AlertCircle } from "lucide-react";
+import { BarChart2, VolumeX, TrendingDown, Zap, RefreshCw, Calendar, X, Check, AlertCircle, DollarSign } from "lucide-react";
 import type { QuietHoursV2, QuietHoursAnalysis, QuietHoursHourStat } from "./types";
 import { utcToEst, ET_LABEL, API_BASE, getEtUtcOffset } from "./utils";
 
@@ -40,6 +40,12 @@ function hourMode(h: number, v2: QuietHoursV2, dow: number): "silenced" | "reduc
   return "active";
 }
 
+/** Returns true when the hour is in the data-gathering list for this day (< 2 bets). */
+function isDataGatheringHour(h: number, v2: QuietHoursV2, dow: number): boolean {
+  const dgHours = v2.dataGatheringByDow?.[String(dow)];
+  return Array.isArray(dgHours) && dgHours.includes(h);
+}
+
 /** Returns true when this day has its own per-dow entry (so a calendar badge appears). */
 function hasDowEntry(v2: QuietHoursV2, dow: number): boolean {
   const dowStr = String(dow);
@@ -73,6 +79,8 @@ interface HourCellProps {
   totalPnl: number;
   reducedPct: number | undefined;
   isCurrentHour: boolean;
+  isDataGathering?: boolean;
+  dgCap?: number;
   onToggleSilence: (h: number) => void;
   onSetReducedPct: (h: number, pct: number) => void;
   onClearReducedPct: (h: number) => void;
@@ -88,6 +96,8 @@ function HourCell({
   totalPnl,
   reducedPct,
   isCurrentHour,
+  isDataGathering = false,
+  dgCap = 1,
   onToggleSilence,
   onSetReducedPct,
   onClearReducedPct,
@@ -125,6 +135,7 @@ function HourCell({
   const silencedOverlay = mode === "silenced" ? "opacity-50 saturate-0" : "";
   const currentRing = isCurrentHour ? "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background" : "";
   const reducedRing = reducedPct != null && mode !== "silenced" ? "ring-1 ring-amber-400/50" : "";
+  const dgRing = isDataGathering && mode !== "silenced" ? "ring-1 ring-violet-400/40" : "";
 
   // Preset bet percentages (% of regular bet to use)
   const PRESETS = [75, 50, 25];
@@ -133,7 +144,7 @@ function HourCell({
     // Entire card is tappable to toggle silence/active
     <div
       onClick={() => onToggleSilence(utcHour)}
-      className={`cursor-pointer relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all select-none ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${reducedRing}`}
+      className={`cursor-pointer relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all select-none ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${reducedRing} ${dgRing}`}
     >
       {/* Top row: time label + mode icon + dot */}
       <div className="flex items-center justify-between gap-1">
@@ -141,6 +152,11 @@ function HourCell({
           <span className="text-[9px] sm:text-[10px] font-mono text-foreground/70 leading-none shrink-0">{estLabel}</span>
           {mode === "silenced" && <VolumeX className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
           {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
+          {isDataGathering && mode !== "silenced" && (
+            <span className="text-[7px] font-mono font-bold text-violet-400 bg-violet-500/15 px-0.5 rounded leading-none border border-violet-500/30 shrink-0" title={`Sparse data — capped at $${dgCap}`}>
+              ${dgCap}
+            </span>
+          )}
         </div>
         {tier !== "empty" && (
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor[tier]}`} />
@@ -276,9 +292,11 @@ interface QuietHoursGridProps {
    * hours so the caller can immediately persist without a separate Save click.
    */
   onSave?: (updated: QuietHoursV2) => void;
+  /** Dollar cap shown on cells in dataGatheringByDow (hours with ≤ 2 historical bets). */
+  dgCap?: number;
 }
 
-export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges, symbolFilter, onSave }: QuietHoursGridProps) {
+export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges, symbolFilter, onSave, dgCap = 1 }: QuietHoursGridProps) {
   const { getToken } = useAuth();
   const [days, setDays] = useState(90); // match calibration window so all history is visible by default
   const [targetWinRate, setTargetWinRate] = useState(85);
@@ -504,6 +522,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-slate-400 shrink-0" /> Silenced (tap to toggle)</span>
         <span className="flex items-center gap-1.5"><TrendingDown className="w-3 h-3 text-amber-400 shrink-0" /> Reduced bets</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded bg-muted/30 border border-border/30 shrink-0" /> No data yet</span>
+        <span className="flex items-center gap-1.5"><DollarSign className="w-3 h-3 text-violet-400 shrink-0" /> Sparse data (capped)</span>
       </div>
 
       {/* ── Grid: 3 rows of 8 ── */}
@@ -537,6 +556,8 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
                     totalPnl={stat?.totalPnl ?? 0}
                     reducedPct={reducedPct}
                     isCurrentHour={h === currentUtcHour}
+                    isDataGathering={isDataGatheringHour(h, value, selectedDow)}
+                    dgCap={dgCap}
                     onToggleSilence={toggleSilence}
                     onSetReducedPct={setReducedPct}
                     onClearReducedPct={clearReducedPct}
