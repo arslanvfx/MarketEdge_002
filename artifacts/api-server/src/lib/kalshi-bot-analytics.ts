@@ -98,7 +98,7 @@ export async function getBotAllHistory(limit = 100, offset = 0, filterMode?: Bot
       .select()
       .from(kalshiBotBetsTable)
       .where(sql`
-        ${kalshiBotBetsTable.action} NOT IN ('warmup','resting_pending')
+        ${kalshiBotBetsTable.action} NOT IN ('warmup')
         AND NOT (${kalshiBotBetsTable.action} = 'skip' AND ${kalshiBotBetsTable.signals}->>'reason' IN ('warmup-buffer', 'candle-cache-not-warm'))
         AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}${resetClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))

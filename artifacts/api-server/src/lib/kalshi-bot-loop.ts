@@ -48,7 +48,7 @@ import {
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken, convictionDirectionGuardBlockedMap,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
-  maxBetCandidateForWindow, convictionPriceTicks, tickAbortReasons, restingEntryStatus,
+  maxBetCandidateForWindow, convictionPriceTicks, tickAbortReasons,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -485,13 +485,7 @@ export async function runBotLoopTick(): Promise<void> {
             "window_expired",
           );
         } catch (err) {
-          // RESTORE on failure — especially when closePosition failed closed
-          // because a pending entry order's cancellation could not be confirmed.
-          // Dropping the position here would leave a potentially live entry
-          // order and its partial exposure untracked with no retry path; keep
-          // it in the map so the next loop pass retries the cancel+close.
-          openPositions.set(posSymbol, stalePos);
-          logger.warn({ err, sym: posSymbol }, "[kalshi-bot] window-expiry close error — position restored for retry");
+          logger.warn({ err, sym: posSymbol }, "[kalshi-bot] window-expiry close error (non-fatal)");
         }
       }
     }
@@ -544,7 +538,6 @@ export async function runBotLoopTick(): Promise<void> {
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
     tickAbortReasons.clear();
-    restingEntryStatus.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
     maxBetCandidateForWindow.clear(); // stale window keys no longer relevant

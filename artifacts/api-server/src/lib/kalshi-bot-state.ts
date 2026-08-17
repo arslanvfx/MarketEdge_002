@@ -44,13 +44,6 @@ export interface OpenPosition {
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
   /** ID of a mirrored paper-mode DB record created when shadowPaperBets is enabled in live mode. */
   shadowPaperId?: string;
-  /**
-   * Exchange order id of a still-resting entry order that produced (or may still
-   * produce) fills for this position. Set when a partial fill is recorded while
-   * the GTC order is still live. Exit paths MUST cancel this order before selling
-   * so a sell can never race an in-flight entry fill. Cleared once cancelled.
-   */
-  pendingEntryOrderId?: string;
 }
 
 export interface OpenPositionDisplay extends OpenPosition {
@@ -85,8 +78,6 @@ export interface BotStateSnapshot {
   coinStreakState: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
   convictionPollerRunning: boolean;
   convictionPriceAgeMs: Record<string, number>;
-  /** Live resting-entry order status per coin (conviction real-book entries). */
-  restingEntries: Record<string, RestingEntryStatus>;
 }
 
 export interface WindowCoinEvaluation {
@@ -442,37 +433,6 @@ export const tickInFlight = new Set<string>();
 // most recent abort reason.  Cleared on window transition alongside other
 // per-window Maps.
 export const tickAbortReasons = new Map<string, { reason: string; at: number }>();
-
-// Resting-entry status for the dashboard, keyed by `sym`.  Shows "resting X of Y
-// @ cap" while a GTC entry order is live and the final fill outcome when done.
-// Cleared on window transition alongside the other per-window Maps.
-export interface RestingEntryStatus {
-  requested: number;
-  filledSoFar: number;
-  limitPrice: number;
-  orderId: string | null;
-  state: "resting" | "filled" | "cancelled";
-  updatedAt: number;
-}
-export const restingEntryStatus = new Map<string, RestingEntryStatus>();
-
-// Fail-closed entry blocks for symbols whose crash-recovery reconciliation of
-// a resting entry order is UNRESOLVED (exchange unreachable / order state
-// unconfirmed after a restart).  While a symbol is in this set, NO new entry
-// may be placed for it — a prior GTC order may still be live on the exchange
-// and a new entry would create a double position.  Populated by
-// reconcilePendingRestingOrdersFromDB(); cleared per-symbol only when the
-// pending order is confirmed terminal.  Blocks are durable across restarts
-// because they are derived from the resting_pending DB rows themselves.
-export const restingRecoveryBlocks = new Set<string>();
-
-// Global fail-closed latch for the startup pending-row scan.  Until the
-// resting_pending DB query has completed successfully at least once, we
-// cannot know WHICH symbols may have a live pre-crash order — so ALL live
-// entries are blocked, not just known-blocked symbols.  Set true only by
-// reconcilePendingRestingOrdersFromDB() after a successful scan; a failed
-// scan schedules its own retry and leaves this false.
-export const restingRecoveryState = { scanComplete: false };
 
 // shadowQhBypassActive: set to true for the duration of a quiet-hours bypass tick
 // (shadowPaperIgnoreQuietHours=true, bot is live, current hour is silenced).
