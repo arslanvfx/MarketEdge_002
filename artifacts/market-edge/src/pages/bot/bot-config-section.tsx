@@ -34,18 +34,15 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
   const schedulesRef = React.useRef(perSymbolQuietHours);
   React.useEffect(() => { schedulesRef.current = perSymbolQuietHours; }, [perSymbolQuietHours]);
 
-  // Auto-save all current schedules to the server when the user switches coin tabs
-  const handleSymbolSwitch = React.useCallback(async (newSym: string) => {
+  // Switch tab immediately (optimistic), then save in the background
+  const handleSymbolSwitch = React.useCallback((newSym: string) => {
     if (newSym === selectedSymbol) return;
-    setAutoSaving(true);
-    try {
-      await authPost("/crypto/bot/config", { perSymbolQuietHours: schedulesRef.current });
-    } catch {
-      // non-fatal — draft still has the data
-    } finally {
-      setAutoSaving(false);
-    }
     setSelectedSymbol(newSym);
+    // Fire-and-forget background save — non-fatal if it fails
+    setAutoSaving(true);
+    authPost("/crypto/bot/config", { perSymbolQuietHours: schedulesRef.current })
+      .catch(() => {})
+      .finally(() => setAutoSaving(false));
   }, [selectedSymbol, authPost]);
 
   // Calibrate All — queries all bet history (paper + live + dev) for every symbol at once
