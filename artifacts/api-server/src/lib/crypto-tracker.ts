@@ -1114,18 +1114,6 @@ export async function fetchCryptoPredictions(): Promise<{
         const kalshiTarget = await kalshiTargetP;
         return { ...result, predictions: lockedPreds, kalshiTarget };
       } catch {
-        // For commodity coins (Pyth-sourced), a stale/closed feed is expected
-        // during market-closed hours — keep the tile visible with the last cached
-        // analysis and a marketClosed flag. Bot entry gates use getTicker() directly
-        // and still fail-closed; this only affects the display path.
-        if (coin.category === "commodity") {
-          const stale = predCache.get(coin.symbol);
-          if (stale) {
-            // kalshiTargetP is out of scope here; commodity Kalshi markets
-            // are also inactive when spot is closed, so null is correct.
-            return { ...stale.value, marketClosed: true, kalshiTarget: null };
-          }
-        }
         return null;
       }
     }),
@@ -1179,20 +1167,6 @@ export async function fetchCryptoPrices(): Promise<{
             change24hPct,
           };
         } catch {
-          // For commodity coins, fall back to the last prediction cache entry
-          // so the price grid still shows a stale value instead of dropping the tile.
-          if (coin.category === "commodity") {
-            const stale = predCache.get(coin.symbol);
-            if (stale) {
-              return {
-                symbol: coin.symbol,
-                product: coin.product,
-                name: coin.name,
-                price: stale.value.price,
-                change24hPct: stale.value.change24hPct,
-              };
-            }
-          }
           return null;
         }
       }

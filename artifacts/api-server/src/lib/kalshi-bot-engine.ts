@@ -65,9 +65,6 @@ import {
   applyLockPrice093Bootstrap,
   applyLockPrice092Bootstrap,
   applyLockPrice082Migration,
-  applyProximityCalibrationMigration,
-  clampProximityToCalibratedBand,
-  PROXIMITY_GLOBAL_MAX_PCT,
   getEffectiveProximityThreshold,
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
@@ -147,9 +144,6 @@ export {
   applyLockPrice093Bootstrap,
   applyLockPrice092Bootstrap,
   applyLockPrice082Migration,
-  applyProximityCalibrationMigration,
-  clampProximityToCalibratedBand,
-  PROXIMITY_GLOBAL_MAX_PCT,
   // Conviction zone derivation — single source of truth for [floor, cap].
   deriveConvictionZone,
   // Adverse momentum gate math — pure, exported for unit tests and callers.

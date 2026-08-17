@@ -52,24 +52,18 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX, WINDOW_ENTRY_BUFFER_S,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  getEffectiveDailyLossLimit, tickAbortReasons,
+  getEffectiveDailyLossLimit,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 import { updateBotConfig } from "./kalshi-bot-db";
-import { overlayTickAbortReasons } from "./kalshi-bot-eval-overlay";
 
 // ---------------------------------------------------------------------------
 // Window evaluation accessor (for the bot dashboard)
 // ---------------------------------------------------------------------------
 
 export function getWindowEvaluation(): WindowCoinEvaluation[] {
-  // Overlay tick-time abort reasons (set by _runBotTick when a conviction gate
-  // fires AFTER the Phase-3 loop dispatched the coin).  The loop-level reason
-  // (e.g. "price in zone — monitoring") is stale the moment a tick-time gate
-  // aborts the order — the abort reason is both newer and more specific, so it
-  // wins whenever the map has an entry for this coin+window.
-  return overlayTickAbortReasons(S.lastWindowEvaluation, tickAbortReasons) as WindowCoinEvaluation[];
+  return S.lastWindowEvaluation;
 }
 
 // ---------------------------------------------------------------------------

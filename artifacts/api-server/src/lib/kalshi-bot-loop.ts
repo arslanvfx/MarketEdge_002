@@ -48,7 +48,7 @@ import {
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken, convictionDirectionGuardBlockedMap,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
-  maxBetCandidateForWindow, convictionPriceTicks, tickAbortReasons,
+  maxBetCandidateForWindow, convictionPriceTicks,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -537,7 +537,6 @@ export async function runBotLoopTick(): Promise<void> {
     convictionEmergencyCloses.clear();
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
-    tickAbortReasons.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
     maxBetCandidateForWindow.clear(); // stale window keys no longer relevant

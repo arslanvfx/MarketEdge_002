@@ -35,12 +35,9 @@ import {
 } from "./kalshi-bot-exit";
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
-  placeEntryOrderWithSizeFallback,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
 } from "./kalshi-trader";
-import { decideRemainderAttempt } from "./kalshi-entry-remainder";
-import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchOrderbookPrices,
@@ -64,7 +61,6 @@ import {
   windowRandomizerUsedValues,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
-  tickAbortReasons,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, windowCBBuffer,
@@ -88,17 +84,6 @@ import { writeBotEntryTimingSnapshot } from "./kalshi-bot-entry-timing";
 // Deduplication Set for bot entry timing snapshots (cleared implicitly as
 // window keys rotate — each key encodes coin+windowKey+minuteMark+mode).
 const entryTimingWritten = new Set<string>();
-
-// ---------------------------------------------------------------------------
-// Tick-time abort reason helper
-// ---------------------------------------------------------------------------
-// Called at every conviction gate abort inside _runBotTick.  Stores the most
-// recent human-readable skip reason so the window-eval dashboard can display
-// it instead of the stale Phase-3 loop reason (e.g. "monitoring").
-// The map is keyed by `sym:windowKey` and cleared on window transition.
-function setTickAbortReason(sym: string, windowKey: string, reason: string): void {
-  recordTickAbort(tickAbortReasons, sym, windowKey, reason);
-}
 
 // ---------------------------------------------------------------------------
 // Trajectory Gate
@@ -574,21 +559,12 @@ async function _runBotTick(
   // Fail-closed: a silenced hour blocks all new entries (paper included)
   // unless the shadowPaperIgnoreQuietHours bypass applies — which only ever
   // DEMOTES a live entry to paper, never permits a live order.
-  // ── Tick abort reason refresh ─────────────────────────────────────────────
-  // Every dispatch into the entry path clears the previous tick-time abort
-  // reason for this coin+window.  Each abort path below re-records its own
-  // current reason before returning, so the dashboard always shows THIS tick's
-  // exact block — never a reason left over from an earlier tick that would
-  // otherwise mask the current state.
-  clearTickAbort(tickAbortReasons, sym, windowKey);
-
   const qhEntry = resolveEntryQuietHoursDecision(S.config, S.botMode);
   if (qhEntry.action === "block") {
     logger.info(
       { sym, windowKey, qhMode: qhEntry.qhMode, utcHour: qhEntry.utcHour, botMode: S.botMode, source: "tick-entry-gate" },
       "[kalshi-bot] smart-hours entry gate: hour is silenced — blocking new entry",
     );
-    setTickAbortReason(sym, windowKey, "smart hours: current hour is silenced — new entries blocked");
     return;
   }
 
@@ -613,7 +589,6 @@ async function _runBotTick(
   const betsThisWindow = windowBetCounts.get(windowBetKey) ?? 0;
   if (betsThisWindow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, betsThisWindow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] maxBetsPerWindow reached — skipping entry");
-    setTickAbortReason(sym, windowKey, `per-coin bet cap reached (${betsThisWindow}/${S.config.maxBetsPerWindow} this window)`);
     return;
   }
   // Live global cap re-check: Phase 3 snapshots globalBetsThisWindow once before
@@ -625,16 +600,12 @@ async function _runBotTick(
   const globalTotalNow = windowTotalBets.get(`${windowKey}:${effectiveMode}`) ?? 0;
   if (S.config.decisionMode !== "conviction" && S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, globalTotalNow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] global cap reached at entry — skipping");
-    setTickAbortReason(sym, windowKey, `global bet cap reached (${globalTotalNow}/${S.config.maxBetsPerWindow} this window)`);
     return;
   }
 
   // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
   // 0 = disabled (no ceiling — enter at any point).
-  if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) {
-    setTickAbortReason(sym, windowKey, `past entry ceiling (>${S.config.maxEntryMinutes}min elapsed)`);
-    return;
-  }
+  if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) return;
   // Early-window lockout: hard block on new bets for the first N minutes of the window.
   // Only bypassed at true market extremes (≥92¢ or ≤8¢) regardless of mode.
   // Conviction mode respects minWindowEntryMinutes just like any other mode —
@@ -670,7 +641,6 @@ async function _runBotTick(
           { sym, windowKey, secondsElapsed, minWindowEntryMinutes, yesPrice, noActualAsk: _noActualAsk, bypassEnabled, bypassFloor, bypassCap },
           "[kalshi-bot] early-window lockout — timer active",
         );
-        setTickAbortReason(sym, windowKey, `early-window lockout (first ${minWindowEntryMinutes}min — price not in extreme bypass range)`);
         return;
       }
       logger.debug(
@@ -687,7 +657,6 @@ async function _runBotTick(
     const minRemaining = S.config.minRemainingMinutes ?? 0;
     if (minRemaining > 0 && 15 * 60 - secondsElapsed < minRemaining * 60) {
       logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping tick early");
-      setTickAbortReason(sym, windowKey, `min-remaining floor: <${minRemaining}min left in window`);
       return;
     }
   }
@@ -696,7 +665,6 @@ async function _runBotTick(
       { sym, windowKey, hasKalshiTicker: !!kalshiTicker, kalshiTarget },
       "[kalshi-bot] tick: no ticker/target — skipping (market unpublished or cache race)",
     );
-    setTickAbortReason(sym, windowKey, "no Kalshi ticker/strike yet — market unpublished or cache race");
     return;
   }
 
@@ -747,7 +715,6 @@ async function _runBotTick(
             { sym, distancePct: +distancePct.toFixed(3), threshold, phase, minutesRemaining: +minutesRemaining.toFixed(1) },
             `[kalshi-bot] proximity guard [${sym}]: ${distancePct.toFixed(2)}% from strike — need ${threshold.toFixed(2)}% (${phase}, ${minutesRemaining.toFixed(1)} min remaining)`,
           );
-          setTickAbortReason(sym, windowKey, `proximity guard: ${distancePct.toFixed(2)}% from strike — need ${threshold.toFixed(2)}% (${phase})`);
           return;
         }
       }
@@ -790,8 +757,6 @@ async function _runBotTick(
         },
         "[kalshi-bot] waiting for all signals (stat+Claude+ML) — no bet until all three are ready",
       );
-      setTickAbortReason(sym, windowKey,
-        `waiting for all signals (stat=${live.statAbove === null ? "pending" : "ready"}, Claude=${live.claudeAbove === null ? "pending" : "ready"}, ML=${live.mlAbove === null ? "pending" : "ready"})`);
       return;
     }
   }
@@ -846,12 +811,10 @@ async function _runBotTick(
   // Re-checking here closes that race window unconditionally.
   if (!S.config.freeRunMode && decision.action === "BET_YES" && COIN_YES_BLOCKED.has(sym)) {
     logger.debug({ sym }, "[kalshi-bot] _runBotTick: BET_YES blocked by COIN_YES_BLOCKED (defense-in-depth)");
-    setTickAbortReason(sym, windowKey, "coin filter: YES bets blocked for this coin");
     return;
   }
   if (!S.config.freeRunMode && decision.action !== "SKIP" && COIN_FULLY_BLOCKED.has(sym)) {
     logger.debug({ sym }, "[kalshi-bot] _runBotTick: entry blocked by COIN_FULLY_BLOCKED (defense-in-depth)");
-    setTickAbortReason(sym, windowKey, "coin filter: all bets blocked for this coin");
     return;
   }
 
@@ -870,7 +833,6 @@ async function _runBotTick(
         { sym, windowKey, claudeAbove: dirSigs.claudeAbove, confidence: decision.confidence },
         "[kalshi-bot] _runBotTick: BET_YES blocked — Claude says NO (direction quality gate)",
       );
-      setTickAbortReason(sym, windowKey, "direction quality gate: YES bet blocked — Claude calls BELOW");
       return;
     }
     if (decision.action === "BET_NO" && dirSigs.claudeAbove === true) {
@@ -878,7 +840,6 @@ async function _runBotTick(
         { sym, windowKey, claudeAbove: dirSigs.claudeAbove, confidence: decision.confidence },
         "[kalshi-bot] _runBotTick: BET_NO blocked — Claude says YES (direction quality gate)",
       );
-      setTickAbortReason(sym, windowKey, "direction quality gate: NO bet blocked — Claude calls ABOVE");
       return;
     }
   }
@@ -894,14 +855,12 @@ async function _runBotTick(
     if (newDir === exitedDir) {
       // Same direction as what we just exited — skip to avoid whipsawing.
       logger.debug({ sym, exitedDir, newDir }, "[kalshi-bot] re-entry blocked — same direction as mid-exit");
-      setTickAbortReason(sym, windowKey, `re-entry guard: already exited a ${exitedDir.toUpperCase()} position this window — same-direction re-entry blocked`);
       return;
     }
     // Opposite direction is allowed but requires higher confidence.
     const flipConfidenceBar = (S.config.minConfidence ?? 65) + 5;
     if (decision.confidence < flipConfidenceBar) {
       logger.debug({ sym, confidence: decision.confidence, flipConfidenceBar }, "[kalshi-bot] re-entry blocked — confidence below flip bar");
-      setTickAbortReason(sym, windowKey, `re-entry guard: flip needs confidence ≥${flipConfidenceBar} (have ${decision.confidence})`);
       return;
     }
     logger.info({ sym, exitedDir, newDir, confidence: decision.confidence }, "[kalshi-bot] flip re-entry — entering opposite direction after mid-exit");
@@ -928,7 +887,6 @@ async function _runBotTick(
       },
       "[kalshi-bot] SKIP decision",
     );
-    setTickAbortReason(sym, windowKey, decision.reasoning || "engine returned SKIP");
     // Persist at most once per (symbol, window) to avoid flooding the DB
     if (lastDecisionWindowKey.get(sym) !== windowKey) {
       lastDecisionWindowKey.set(sym, windowKey);
@@ -959,7 +917,6 @@ async function _runBotTick(
       { sym, pauseUntilWindowKey: streakInfo!.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo!.consecutiveLosses },
       "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
     );
-    setTickAbortReason(sym, windowKey, `streak pause: ${streakInfo!.consecutiveLosses} consecutive losses — paused until window ${streakInfo!.pauseUntilWindowKey}`);
     return;
   } else if (streakPause.expired && streakInfo) {
     // Pause has expired — clear it so subsequent streaks can trigger new pauses.
@@ -980,7 +937,6 @@ async function _runBotTick(
         { sym, currentLosses, streakLimit },
         "[kalshi-bot] SKIP — pre-entry streak block: already at streak limit",
       );
-      setTickAbortReason(sym, windowKey, `streak block: ${currentLosses} consecutive losses ≥ limit ${streakLimit}`);
       return;
     }
   }
@@ -994,7 +950,6 @@ async function _runBotTick(
       { sym, coinLossToday: coinLossToday.toFixed(4), maxDailyLossPerCoin: maxCoinLoss },
       "[kalshi-bot] SKIP — coin has reached its daily loss cap",
     );
-    setTickAbortReason(sym, windowKey, `daily loss cap: $${coinLossToday.toFixed(2)} lost today ≥ $${maxCoinLoss} cap`);
     return;
   }
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1021,7 +976,6 @@ async function _runBotTick(
         { sym, direction, candleCount: candles.length, lookbackCandles, predCached: pred != null },
         "[kalshi-bot] SKIP — prediction cache not warm enough for momentum check",
       );
-      setTickAbortReason(sym, windowKey, `momentum check: candle cache not warm (${candles.length}/${lookbackCandles} candles)`);
       if (lastDecisionWindowKey.get(sym) !== windowKey) {
         lastDecisionWindowKey.set(sym, windowKey);
         await persistBetRecord({
@@ -1048,7 +1002,6 @@ async function _runBotTick(
           { sym, direction, netChangePct: +netChangePct.toFixed(3) },
           "[kalshi-bot] SKIP — candle momentum opposes bet direction (reversal guard)",
         );
-        setTickAbortReason(sym, windowKey, `reversal guard: candle momentum ${netChangePct >= 0 ? "+" : ""}${netChangePct.toFixed(2)}% opposes ${direction.toUpperCase()} bet`);
         if (lastDecisionWindowKey.get(sym) !== windowKey) {
           lastDecisionWindowKey.set(sym, windowKey);
           await persistBetRecord({
@@ -1086,7 +1039,6 @@ async function _runBotTick(
           { sym, direction, livePrice, kalshiTarget, distancePct: +distancePct.toFixed(4) },
           "[kalshi-bot] SKIP — price within strike proximity threshold (proximity guard)",
         );
-        setTickAbortReason(sym, windowKey, `strike proximity: price ${distancePct.toFixed(3)}% from strike on at-risk side (< ${STRIKE_PROXIMITY_PCT}%)`);
         if (lastDecisionWindowKey.get(sym) !== windowKey) {
           lastDecisionWindowKey.set(sym, windowKey);
           await persistBetRecord({
@@ -1122,7 +1074,6 @@ async function _runBotTick(
           { sym, direction, crossings, kalshiTarget },
           "[kalshi-bot] SKIP — strike-oscillation: price crossing strike repeatedly",
         );
-        setTickAbortReason(sym, windowKey, `strike oscillation: ${crossings} strike crossings in last 6 candles — market chopping around target`);
         if (lastDecisionWindowKey.get(sym) !== windowKey) {
           lastDecisionWindowKey.set(sym, windowKey);
           await persistBetRecord({
@@ -1237,7 +1188,6 @@ async function _runBotTick(
         },
         "[kalshi-bot] SKIP — live fill cost exceeds return floor; actual return < minReturnMultiple",
       );
-      setTickAbortReason(sym, windowKey, `return floor: fill cost ${(expectedFillCost * 100).toFixed(0)}¢ → return ${(1 / expectedFillCost).toFixed(2)}× < ${minReturnFloor}× minimum`);
       return;
     }
   }
@@ -1272,7 +1222,6 @@ async function _runBotTick(
         { sym, direction, pricePct, floorPct, ceilPct },
         `[kalshi-bot] SKIP — ${msg}`,
       );
-      setTickAbortReason(sym, windowKey, msg);
       if (lastDecisionWindowKey.get(sym) !== windowKey) {
         lastDecisionWindowKey.set(sym, windowKey);
         await persistBetRecord({
@@ -1668,7 +1617,6 @@ async function _runBotTick(
       "[kalshi-bot] SKIP — budget cannot buy 1 contract at current ask; engaging fill cooldown",
     );
     windowFailedFills.add(`${sym}:${windowKey}:${effectiveMode}`);
-    setTickAbortReason(sym, windowKey, `sizing: $${targetBetSize.toFixed(2)} budget cannot buy 1 contract at ${(expectedFillCost * 100).toFixed(0)}¢ ask`);
     return;
   }
   const betAmount = contractCount * expectedFillCost; // expected dollars risked
@@ -1681,7 +1629,6 @@ async function _runBotTick(
         { sym, dailySpendAmount: S.dailySpendAmount.toFixed(2), betAmount: betAmount.toFixed(2), spendCap },
         "[kalshi-bot] SKIP — daily spend cap reached",
       );
-      setTickAbortReason(sym, windowKey, `daily spend cap: $${S.dailySpendAmount.toFixed(2)} spent + $${betAmount.toFixed(2)} bet > $${spendCap} cap`);
       return;
     }
   }
@@ -1724,7 +1671,6 @@ async function _runBotTick(
       },
       "[kalshi-bot] SAFETY ABORT — computed betAmount exceeds maxBetSize cap; trade cancelled",
     );
-    setTickAbortReason(sym, windowKey, `safety abort: computed bet $${betAmount.toFixed(2)} exceeds $${maxBetCap} max-bet cap`);
     return;
   }
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1741,7 +1687,6 @@ async function _runBotTick(
         "[kalshi-bot] SKIP — coin had ≥3 slippage strikes in the previous window; clearing counter",
       );
       coinSlippageStrikes.delete(sym); // one-window penalty only — clear so W+2 is unaffected
-      setTickAbortReason(sym, windowKey, "slippage penalty: ≥3 unfair fills last window — sitting this window out");
       return;
     }
 
@@ -1755,12 +1700,10 @@ async function _runBotTick(
           { sym, liveBal: liveBal.toFixed(2), minAccountBalance: minBal },
           "[kalshi-bot] SAFETY ABORT — Kalshi account balance below minimum; trade cancelled",
         );
-        setTickAbortReason(sym, windowKey, `safety abort: account balance $${liveBal.toFixed(2)} below $${minBal} minimum`);
         return;
       }
     } catch (err) {
       logger.error({ err, sym }, "[kalshi-bot] SAFETY ABORT — could not fetch Kalshi balance before trade; trade cancelled");
-      setTickAbortReason(sym, windowKey, "safety abort: could not fetch account balance before trade");
       return;
     }
 
@@ -1772,7 +1715,6 @@ async function _runBotTick(
         { sym, openExposure: openExposure.toFixed(4), betAmount: betAmount.toFixed(4), maxTotalExposure: maxExposure },
         "[kalshi-bot] SAFETY ABORT — total open exposure would exceed cap; trade cancelled",
       );
-      setTickAbortReason(sym, windowKey, `safety abort: open exposure $${openExposure.toFixed(2)} + $${betAmount.toFixed(2)} bet exceeds $${maxExposure} cap`);
       return;
     }
   }
@@ -1794,7 +1736,6 @@ async function _runBotTick(
         { sym, secondsRemainingNow: Math.round(secondsRemainingNow), windowKey, hardFloorS },
         "[kalshi-bot] HARD FLOOR — aborting bet, insufficient time remaining in window",
       );
-      setTickAbortReason(sym, windowKey, `hard late-entry floor: only ${Math.round(secondsRemainingNow)}s left in window (< ${hardFloorS}s floor) at order time`);
       return;
     }
   }
@@ -1830,8 +1771,6 @@ async function _runBotTick(
         },
         "[kalshi-bot] SAFETY ABORT — pre-bet completeness gate failed; trade cancelled",
       );
-      setTickAbortReason(sym, windowKey,
-        `completeness gate: missing ${[noPrice && "price reference", noSignals && "model signals", noTarget && "Kalshi strike"].filter(Boolean).join(", ")} — trade cancelled`);
       return;
     }
   }
@@ -1875,8 +1814,6 @@ async function _runBotTick(
           { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), convictionMinEntryMinutes: _convMinEntry },
           "[kalshi-bot] conviction: min entry time not yet reached — skipping",
         );
-        setTickAbortReason(sym, windowKey,
-          `conviction: min entry wait (${_convMinEntry}min — ${(secondsElapsedNow / 60).toFixed(1)}min elapsed, price not in extreme bypass range)`);
         return;
       }
     }
@@ -1900,8 +1837,6 @@ async function _runBotTick(
       { sym, windowKey },
       "[kalshi-bot] extreme caution: YES entry blocked — bid was below zone floor earlier this window",
     );
-    setTickAbortReason(sym, windowKey,
-      "extreme caution: YES re-entry blocked — bid was below zone floor earlier this window");
     return;
   }
 
@@ -2011,7 +1946,6 @@ async function _runBotTick(
         { sym, direction, windowKey, expectedTicker },
         "[kalshi-bot] conviction live-price gate: orderbook timeout — skipping tick, will retry next second",
       );
-      setTickAbortReason(sym, windowKey, "orderbook timeout — retrying next tick");
       return;
     }
     if (obPrices.yesBid == null && obPrices.yesAsk == null) {
@@ -2068,7 +2002,6 @@ async function _runBotTick(
           { sym, direction, windowKey, expectedTicker, pollerTicker: pollerSnap.ticker },
           "[kalshi-bot] conviction live-price gate: poller ticker mismatch — skipping tick, will retry next second",
         );
-        setTickAbortReason(sym, windowKey, `poller ticker mismatch — expected ${expectedTicker}, got ${pollerSnap.ticker}`);
         return;
       }
 
@@ -2083,7 +2016,6 @@ async function _runBotTick(
           { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid },
           "[kalshi-bot] conviction live-price gate: empty book — one-sided poller quote, fail closed",
         );
-        setTickAbortReason(sym, windowKey, "empty book + one-sided poller quote — retrying next tick");
         return;
       }
 
@@ -2102,7 +2034,6 @@ async function _runBotTick(
           { sym, direction, windowKey, expectedTicker, pYesAsk, pYesBid, spread: spread.toFixed(3), maxSpread },
           "[kalshi-bot] conviction live-price gate: empty book — spread too wide (stale quote?), fail closed",
         );
-        setTickAbortReason(sym, windowKey, `empty book — spread ${(spread * 100).toFixed(1)}¢ > max ${(maxSpread * 100).toFixed(0)}¢ (stale quote?)`);
         return;
       }
 
@@ -2122,8 +2053,6 @@ async function _runBotTick(
           { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap, cooldownMs: CONVICTION_ABORT_COOLDOWN_MS },
           "[conviction-diag] tick-time price miss: empty book poller out of zone — abort cooldown set",
         );
-        setTickAbortReason(sym, windowKey,
-          `poller price ${(pollerRefPrice * 100).toFixed(1)}¢ outside zone [${(lockPrice * 100).toFixed(0)}¢–${(lockPriceCap * 100).toFixed(0)}¢]`);
         return;
       }
 
@@ -2168,7 +2097,6 @@ async function _runBotTick(
         { sym, direction, windowKey, expectedTicker, freshYesBid },
         "[kalshi-bot] conviction live-price gate: NO order aborted — freshYesAsk null (one-sided book), cannot confirm zone",
       );
-      setTickAbortReason(sym, windowKey, "NO order: one-sided book (no YES ask) — cannot confirm zone");
       return;
     }
 
@@ -2252,8 +2180,6 @@ async function _runBotTick(
         },
         "[conviction-diag] tick-time price miss: reversed below floor — abort cooldown set",
       );
-      setTickAbortReason(sym, windowKey,
-        `price ${freshRefPrice != null ? (freshRefPrice * 100).toFixed(1) + '¢' : '?'} reversed below ${direction} entry floor ${(lockPrice * 100).toFixed(0)}¢`);
       return;
     }
 
@@ -2277,8 +2203,6 @@ async function _runBotTick(
         },
         "[conviction-diag] tick-time price miss: price past cap — abort cooldown set",
       );
-      setTickAbortReason(sym, windowKey,
-        `${direction.toUpperCase()} ${(freshRefPrice * 100).toFixed(1)}¢ past entry cap ${(lockPriceCap * 100).toFixed(0)}¢ — entry window missed`);
       return;
     }
 
@@ -2332,8 +2256,6 @@ async function _runBotTick(
           },
           "[conviction-diag] tick-time price miss: NO cross-check YES ask bounced above target — abort cooldown set",
         );
-        setTickAbortReason(sym, windowKey,
-          `NO cross-check: YES ask ${(freshYesAsk * 100).toFixed(1)}¢ > bounce threshold ${(yesAskBounceThreshold * 100).toFixed(1)}¢ — price reversed`);
         return;
       }
     }
@@ -2383,8 +2305,6 @@ async function _runBotTick(
           },
           "[conviction-diag] tick-time price miss: YES cross-check bid below zone floor — abort cooldown set",
         );
-        setTickAbortReason(sym, windowKey,
-          `YES cross-check: bid ${(freshYesBid * 100).toFixed(1)}¢ below zone floor ${(lockPrice * 100).toFixed(0)}¢ — price reversed`);
         if (bidAbort.populateECSet) {
           extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
           logger.info(
@@ -2424,8 +2344,6 @@ async function _runBotTick(
           },
           "[conviction-diag] tick-time price miss: extreme caution NO ask complement above ceiling — abort cooldown set; YES re-entry blocked for rest of window",
         );
-        setTickAbortReason(sym, windowKey,
-          `extreme caution: NO ask ${(freshNoAsk * 100).toFixed(1)}¢ above ceiling ${(noAskCeiling * 100).toFixed(1)}¢ — YES re-entry blocked this window`);
         return;
       }
     }
@@ -2466,8 +2384,6 @@ async function _runBotTick(
       logger.warn({ sym, direction, expectedFillCost, targetBetSize }, "[kalshi-bot] conviction gate: fresh prices give contractCount<1 — skipping");
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       windowFailedFills.add(`${sym}:${windowKey}:${effectiveMode}`);
-      setTickAbortReason(sym, windowKey,
-        `bet size $${targetBetSize} too small for contract cost ${(expectedFillCost * 100).toFixed(0)}¢ — 0 contracts`);
       return;
     }
     // Post-gate safety re-check: the pre-gate maxBetSizeGuard used stale expectedFillCost
@@ -2489,8 +2405,6 @@ async function _runBotTick(
       );
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       windowFailedFills.add(`${sym}:${windowKey}:${effectiveMode}`);
-      setTickAbortReason(sym, windowKey,
-        `safety abort: sizing $${postGateCost.toFixed(2)} exceeds max bet cap $${maxBetCap}`);
       return;
     }
   }
@@ -2523,8 +2437,6 @@ async function _runBotTick(
         },
         "[kalshi-bot] conviction: adverse momentum — projected to cross strike before close — BLOCKED",
       );
-      setTickAbortReason(sym, windowKey,
-        `adverse momentum: projected to cross strike before close (velocity ${convTraj.velocity.toFixed(4)}/min)`);
       return;
     }
   }
@@ -2542,8 +2454,6 @@ async function _runBotTick(
         { sym, reason: traj.reason, velocity: traj.velocity.toFixed(2), currentMarginPct: traj.currentMarginPct.toFixed(3), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1), direction },
         "[kalshi-bot] trajectory gate (regular) — BLOCKED: bet skipped (price momentum too close to target)",
       );
-      setTickAbortReason(sym, windowKey,
-        `trajectory gate: price momentum too close to target (projected margin ${traj.projectedMarginPct.toFixed(3)}%)`);
       return;
     }
     logger.info(
@@ -2598,8 +2508,6 @@ async function _runBotTick(
         },
         "[kalshi-bot] conviction proximity re-check: price too close to strike — order aborted",
       );
-      setTickAbortReason(sym, windowKey,
-        `strike-proximity re-check: gap ${_prox.gapPct?.toFixed(3) ?? '?'}% < threshold ${_prox.effectiveThreshold.toFixed(3)}%`);
       return;
     }
     logger.info(
@@ -2673,10 +2581,6 @@ async function _runBotTick(
           ? "[kalshi-bot] conviction direction guard: NO usable price source (ticks+candles both <2 points) — failing CLOSED, order aborted"
           : "[kalshi-bot] conviction direction guard: price moving toward strike — order aborted",
       );
-      setTickAbortReason(sym, windowKey,
-        _noUsableSource
-          ? "direction guard: no usable price data (fail closed)"
-          : `direction guard: price moving toward strike (${_dir.fromPrice ?? '?'} → ${_dir.toPrice ?? '?'})`);
       return;
     }
     logger.info(
@@ -2736,8 +2640,6 @@ async function _runBotTick(
           },
           "[kalshi-bot] conviction candle-slope gate: sustained adverse trend — order aborted",
         );
-        setTickAbortReason(sym, windowKey,
-          `candle-slope gate: sustained adverse trend (slope ${_slope.slopePct?.toFixed(3) ?? '?'}% over ${_slope.lookback} candles)`);
         return;
       }
       logger.info(
@@ -2784,8 +2686,6 @@ async function _runBotTick(
         },
         "[kalshi-bot] pipeline direction guard: price moving toward strike — order aborted",
       );
-      setTickAbortReason(sym, windowKey,
-        `direction guard: price moving toward strike (slope ${_pDir.slopePrice?.toFixed(2) ?? "?"}/candle) — order aborted`);
       return;
     }
     logger.info(
@@ -2830,7 +2730,6 @@ async function _runBotTick(
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
     }
     if (boostBetSize != null) maxBetWindowToken.remaining++;
-    setTickAbortReason(sym, windowKey, "smart hours: current hour is silenced — order rejected at placement time");
     return;
   }
 
@@ -2854,8 +2753,6 @@ async function _runBotTick(
           convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         }
         if (boostBetSize != null) maxBetWindowToken.remaining++;
-        setTickAbortReason(sym, windowKey,
-          `smart hours: hour turned reduced (${qhFinal.reducedPct}%) — budget no longer buys 1 contract; order rejected at placement time`);
         return;
       }
       logger.warn(
@@ -2888,48 +2785,37 @@ async function _runBotTick(
 
   if (entryMode === "live") {
     try {
-      // ── ENTRY ORDER (IOC real-book / FOK poller-fallback) ───────────────────
+      // ── FOK/IOC ORDER (unified path for both empty-book and real-book) ──────
       // Kalshi does not support any GTC/resting time-in-force value — both
       // "gtc" and "good_till_cancelled" are rejected with a 400 oneof error.
+      // Market makers on Kalshi fill FOK orders reactively; an empty
+      // authenticated orderbook does NOT mean fills are unavailable.  The
+      // poller spread check (≤4¢ YES / ≤6¢ NO) at the live-price gate already
+      // confirmed a tight, in-zone quote from the market maker, so a FOK at
+      // orderLimitPrice will transact at that price.
       //
-      // Time-in-force selection (changed 2026-08-15 — the $10 sizing regression):
-      //   • Real-book (usedPollerFallback=false): IOC.  At 12–18 contracts an
-      //     all-or-nothing FOK is rejected with 409 insufficient_resting_volume
-      //     even when MOST contracts are available (e.g. 11 of 12).  IOC fills
-      //     whatever the book has at our limit and cancels the rest — the
-      //     partial-fill correction below tracks the position by ACTUAL fill
-      //     count.  The limit price still hard-caps the fill price, so zone
-      //     enforcement is unchanged.
-      //   • Empty-book (usedPollerFallback=true): FOK.  Market makers fill FOK
-      //     orders reactively even when the authenticated book appears empty —
-      //     IOC against a literally-empty book cancels instantly with 0 fills,
-      //     so FOK is required to trigger the reactive MM match.  The poller
-      //     spread check (≤4¢ YES / ≤6¢ NO) already confirmed a tight, in-zone
-      //     quote, so a FOK at orderLimitPrice transacts at that price.
-      //
-      // Both paths go through placeEntryOrderWithSizeFallback: a 409 volume
-      // rejection triggers ONE retry at half the contract count (min 1); a
-      // second rejection surfaces as a 0-fill result that feeds the existing
-      // zero-fill attempt counter below (up to 10 attempts per window in
-      // conviction) instead of throwing into the generic error path.
+      // Both paths use placeOrderWithRetry (FOK with limit price):
+      //   • Empty-book (usedPollerFallback=true): limit = zone-capped poller price.
+      //   • Real-book  (usedPollerFallback=false): limit = ask + 3¢ crossing buffer.
+      // 0-fill handling is identical: allow up to 2 attempts before window-block.
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
-      const entryTimeInForce: "fill_or_kill" | "immediate_or_cancel" =
-        usedPollerFallback ? "fill_or_kill" : "immediate_or_cancel";
-
       logger.info(
-        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback, timeInForce: entryTimeInForce },
-        `[kalshi-bot] conviction entry: placing ${entryTimeInForce === "fill_or_kill" ? "FOK" : "IOC"} order${usedPollerFallback ? " (poller-fallback path)" : ""}`,
+        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback },
+        `[kalshi-bot] conviction entry: placing FOK order${usedPollerFallback ? " (poller-fallback path)" : ""}`,
       );
 
-      const fokResult = await placeEntryOrderWithSizeFallback(
+      const fokResult = await placeOrderWithRetry(
         {
           ticker: expectedTicker,
           side: direction,
           action: "buy",
           count: contractCount,
           type: "market",
-          timeInForce: entryTimeInForce,
+          // Conviction entries use FOK (triggers reactive MM fills on Kalshi even
+          // when the authenticated book is empty).  All other modes use IOC so
+          // partial fills are accepted without needing all contracts simultaneously.
+          timeInForce: S.config.decisionMode === "conviction" ? "fill_or_kill" : "immediate_or_cancel",
           // Use the zone-capped/crossing-buffered limit price when available.
           // Falls back to midpoint mode (yesPrice + minReturnMultiple) only when
           // neither the poller nor the authenticated book supplied a price.
@@ -2964,8 +2850,6 @@ async function _runBotTick(
           );
           windowFailedFills.add(attemptKey);
           // Conviction lock intentionally left set — coin is blocked for rest of window.
-          setTickAbortReason(sym, windowKey,
-            `order returned 0 fills after ${attempts} attempts — book empty at our price; blocked for rest of window`);
         } else {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS, usedPollerFallback },
@@ -2976,119 +2860,22 @@ async function _runBotTick(
           if (S.config.decisionMode === "conviction") {
             convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
           }
-          setTickAbortReason(sym, windowKey,
-            `order returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying next tick`);
         }
         return;
       }
       result = fokResult;
 
-      // ── PARTIAL FILL CORRECTION + IOC REMAINDER RE-ATTEMPT ────────────────
+      // ── PARTIAL FILL CORRECTION ───────────────────────────────────────────
       // placeOrderWithRetry uses FOK/IOC: fills what the book has at our price
       // and cancels the rest.  result.filledCount is the ACTUAL number of
       // contracts filled — can be less than contractCount.
-      //
-      // Consistency fix (2026-08-15): a partial IOC fill used to be recorded
-      // as-is, so an operator-configured $10 bet could land as $4–7 depending
-      // on book depth at that instant.  Now, when the real-book IOC path fills
-      // only part of the requested size, we immediately re-submit the REMAINDER
-      // as ONE more IOC order at the SAME limit price (no price escalation).
-      // Books refresh within ~1s as market makers replenish, so a single
-      // same-price second shot usually completes the configured amount without
-      // hammering the book.  Whatever the second shot fills (including 0) is
-      // final — total actual fill is recorded, never retried further.
-      //
-      // HARD INVARIANT — at most TWO exchange orders per entry:
-      //   order #1 = the initial entry submission (or, if it was 409
-      //   volume-rejected, the helper's half-size fallback becomes order #2 and
-      //   the budget is spent).  decideRemainderAttempt (pure, unit-tested)
-      //   detects the fallback via attemptedCount < requestedCount and refuses
-      //   the remainder in that case, so a third submission is impossible.
-      // Other guards (all inside decideRemainderAttempt):
-      //   • real-book IOC path only (usedPollerFallback=false).  FOK empty-book
-      //     entries are all-or-nothing by design — no remainder can exist.
-      //   • remainder measured against attemptedCount (actual submitted size).
-      //   • fresh ≥3-min hard floor re-check (same rule as entry dispatch) so
-      //     the remainder cannot land dangerously late in the window.
+      // If we don't correct here we record the wrong position size.
       if (fokResult.filledCount > 0 && fokResult.filledCount < contractCount) {
-        const requestedCount = contractCount;
-        const firstFill      = fokResult.filledCount;
-        let totalFilled      = firstFill;
-
-        const _remWkMs    = new Date(windowKey + (windowKey.endsWith("Z") ? "" : ":00Z")).getTime();
-        const _remMinLeft = isNaN(_remWkMs) ? 0 : (15 - (Date.now() - _remWkMs) / 60000);
-
-        const remDecision = decideRemainderAttempt({
-          usedPollerFallback,
-          timeInForce: entryTimeInForce,
-          requestedCount,
-          attemptedCount: fokResult.attemptedCount,
-          filledCount: firstFill,
-          minutesRemaining: _remMinLeft,
-        });
-        const remainder = remDecision.remainder;
-
-        if (remDecision.attempt) {
-          logger.warn(
-            { sym, direction, requested: requestedCount, attempted: fokResult.attemptedCount, filled: firstFill, remainder, limitPrice: orderLimitPrice, minLeft: +_remMinLeft.toFixed(2) },
-            "[kalshi-bot] IOC partial fill — re-submitting remainder once at same limit price",
-          );
-          try {
-            // Single-attempt mode: disableHalfSizeRetry guarantees this places
-            // exactly ONE exchange order — a volume rejection is final (0 fills),
-            // never a second half-size submission.  Total order count per entry
-            // is therefore capped at 2 (initial + this remainder).
-            const remResult = await placeEntryOrderWithSizeFallback(
-              {
-                ticker: expectedTicker,
-                side: direction,
-                action: "buy",
-                count: remainder,
-                type: "market",
-                timeInForce: "immediate_or_cancel",
-                ...(orderLimitPrice != null
-                  ? { limitPrice: orderLimitPrice }
-                  : {
-                      yesPrice: yesPrice ?? undefined,
-                      minReturnMultiple: S.config.minReturnMultiple,
-                    }),
-              },
-              undefined,
-              { disableHalfSizeRetry: true },
-            );
-            if (remResult.filledCount > 0) {
-              totalFilled += remResult.filledCount;
-              // Weighted-average the fill price across both shots so P&L math
-              // reflects the true blended cost.
-              if (result.avgPrice != null && remResult.avgPrice != null) {
-                result = {
-                  ...result,
-                  avgPrice: (result.avgPrice * firstFill + remResult.avgPrice * remResult.filledCount) / totalFilled,
-                };
-              }
-              logger.info(
-                { sym, direction, firstFill, remainderFilled: remResult.filledCount, totalFilled, requested: requestedCount },
-                "[kalshi-bot] IOC remainder re-attempt filled — recording combined position",
-              );
-            } else {
-              logger.warn(
-                { sym, direction, firstFill, remainder, totalFilled },
-                "[kalshi-bot] IOC remainder re-attempt returned 0 fills — recording first fill only",
-              );
-            }
-          } catch (remErr) {
-            logger.warn(
-              { err: remErr, sym, direction, firstFill, remainder },
-              "[kalshi-bot] IOC remainder re-attempt failed (non-fatal) — recording first fill only",
-            );
-          }
-        } else {
-          logger.warn(
-            { sym, direction, requested: requestedCount, attempted: fokResult.attemptedCount, filled: firstFill, usedPollerFallback, skipReason: remDecision.skipReason, minLeft: +_remMinLeft.toFixed(2) },
-            "[kalshi-bot] partial fill — no remainder re-attempt; updating contractCount to actual fill",
-          );
-        }
-        contractCount = totalFilled;
+        logger.warn(
+          { sym, direction, requested: contractCount, filled: fokResult.filledCount },
+          "[kalshi-bot] FOK partial fill — updating contractCount to actual fill",
+        );
+        contractCount = fokResult.filledCount;
       }
 
       // ── FILL ACCOUNTING (both GTC and IOC paths) ───────────────────────────
@@ -3096,10 +2883,6 @@ async function _runBotTick(
       // accounting (post-fill zone check, emergency close, position recording).
       fillPrice = result.avgPrice ?? yesPrice;
       orderId   = result.orderId;
-
-      // Order filled — clear any stale tick-time abort reason from earlier ticks
-      // so the dashboard shows the placed bet, not a superseded abort.
-      clearTickAbort(tickAbortReasons, sym, windowKey);
 
       // Post-fill zone check (Layer 3 — hard guarantee).
       // Kalshi FOK BUY fills at any ask ≤ limit (no floor), so price "improvement"
@@ -3208,7 +2991,6 @@ async function _runBotTick(
                 { sym, direction, contractCount },
                 "[kalshi-bot] conviction catastrophic fill: position unwound via closePosition",
               );
-              setTickAbortReason(sym, windowKey, "catastrophic fill: order filled far outside conviction zone — position unwound immediately");
               return; // Fully closed — do NOT record as open.
             } catch (closeErr) {
               // closePosition threw (sell failed, exchange unavailable, etc.).
@@ -3239,7 +3021,6 @@ async function _runBotTick(
               }).catch((dbErr: unknown) => {
                 logger.warn({ err: dbErr, sym }, "[kalshi-bot] conviction catastrophic fill: entry persist error (non-fatal)");
               });
-              setTickAbortReason(sym, windowKey, "catastrophic fill: out-of-zone fill could not be unwound — tracked as open for retry");
               return; // Tracked as open; Phase 2 will close it.
             }
           } else {
@@ -3318,8 +3099,6 @@ async function _runBotTick(
       if (S.config.decisionMode === "conviction") {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       }
-      setTickAbortReason(sym, windowKey,
-        `order placement failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}`);
       return;
     }
   }
