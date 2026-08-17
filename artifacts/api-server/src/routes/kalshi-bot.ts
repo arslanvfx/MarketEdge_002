@@ -28,6 +28,7 @@ import {
   getWindowConditions,
   resetWindowConditions,
   reEvaluateSettledBets,
+  fixCommodityOutcomes,
   runQuietHoursAutoTune,
   recomputeAllSymbolQuietHours,
 } from "../lib/kalshi-bot";
@@ -1983,6 +1984,32 @@ router.post("/crypto/bot/re-evaluate-bets", async (req, res) => {
     const limitRaw = parseInt(String(req.query.limit ?? ""), 10);
     const limit = !isNaN(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 5000) : undefined;
     const result = await reEvaluateSettledBets({ since, limit });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/fix-commodity-outcomes — re-evaluate all WTI/GOLD/SILVER expired
+// bets using the Kalshi series-level settlement API and correct any that were
+// mis-evaluated (conservative loss committed before CF Benchmarks RTI published).
+// Idempotent — safe to call multiple times.
+router.post("/crypto/bot/fix-commodity-outcomes", async (req, res) => {
+  const clerkAuth = getAuth(req);
+  const adminId = process.env["BOT_ADMIN_CLERK_USER_ID"];
+  const hasClerkAuth = clerkAuth?.userId && (!adminId || clerkAuth.userId === adminId);
+  const clearPassword = process.env["CLEAR_LOGS_PASSWORD"];
+  const hasClearPassword = clearPassword && req.headers["x-clear-password"] === clearPassword;
+  if (!hasClerkAuth && !hasClearPassword) {
+    res.status(401).json({ error: "Unauthorized — sign in as admin or supply X-Clear-Password" });
+    return;
+  }
+  try {
+    const since = typeof req.query.since === "string" ? req.query.since : undefined;
+    const limitRaw = parseInt(String(req.query.limit ?? ""), 10);
+    const limit = !isNaN(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 5000) : undefined;
+    const result = await fixCommodityOutcomes({ since, limit });
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

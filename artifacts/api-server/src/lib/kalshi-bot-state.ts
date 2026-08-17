@@ -221,7 +221,7 @@ export const extremeCautionAbortedThisWindow = new Set<string>();
 // cleared on window transition (alongside convictionFiredThisWindow).
 // TTL: 10 s — long enough to outlast one poller cycle + bot-loop latency.
 export const convictionAbortCooldown = new Map<string, number>();
-export const CONVICTION_ABORT_COOLDOWN_MS = 10_000;
+export const CONVICTION_ABORT_COOLDOWN_MS = 5_000;
 // Per-coin rolling price ticks from the conviction 1 s poller.
 // Used by the direction guard to detect consecutive-seconds adverse movement.
 // Entries are pushed on every poller read and trimmed to the last 30.

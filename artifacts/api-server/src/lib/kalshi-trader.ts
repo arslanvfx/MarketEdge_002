@@ -250,6 +250,79 @@ export async function getPositions(): Promise<KalshiPosition[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Portfolio Fills
+// ---------------------------------------------------------------------------
+
+export interface KalshiFill {
+  fillId: string;
+  ticker: string;
+  side: "yes" | "no";
+  action: "buy" | "sell";
+  count: number;
+  /** YES price in 0–1 dollar format (e.g. 0.88 = 88 ¢). */
+  yesPrice: number;
+  createdTime: string;
+  tradeId: string;
+}
+
+/**
+ * Fetch fills from the authenticated Kalshi portfolio.
+ * Returns fills in reverse-chronological order (newest first).
+ * Use `ticker` to filter to a specific market; `cursor` to paginate.
+ *
+ * This is the account-level authoritative source for actual fills —
+ * combine with fetchKalshiMarketResult / fetchKalshiSettledMarkets to
+ * confirm win/loss for markets where GET /markets/{ticker} is slow to settle.
+ */
+export async function fetchPortfolioFills(opts: {
+  ticker?: string;
+  limit?: number;
+  cursor?: string;
+  /** ISO date string — converted to unix-ms for the API query param. */
+  minTs?: string;
+  maxTs?: string;
+} = {}): Promise<{ fills: KalshiFill[]; cursor: string | null }> {
+  const params = new URLSearchParams();
+  if (opts.ticker) params.set("ticker",  opts.ticker);
+  if (opts.limit)  params.set("limit",   String(opts.limit));
+  if (opts.cursor) params.set("cursor",  opts.cursor);
+  if (opts.minTs)  params.set("min_ts",  String(new Date(opts.minTs).getTime()));
+  if (opts.maxTs)  params.set("max_ts",  String(new Date(opts.maxTs).getTime()));
+  const qs = params.toString();
+
+  const data = await kalshiFetch<{
+    fills?: Array<{
+      fill_id?:      string;
+      ticker?:       string;
+      side?:         string;
+      action?:       string;
+      count?:        number;
+      yes_price?:    string | number;
+      no_price?:     string | number;
+      created_time?: string;
+      trade_id?:     string;
+    }>;
+    cursor?: string;
+  }>("GET", `/portfolio/fills${qs ? `?${qs}` : ""}`, undefined, 10_000);
+
+  const fills: KalshiFill[] = (data.fills ?? [])
+    .filter((f): f is typeof f & { fill_id: string; ticker: string } =>
+      typeof f.fill_id === "string" && typeof f.ticker === "string")
+    .map((f) => ({
+      fillId:      f.fill_id,
+      ticker:      f.ticker,
+      side:        f.side === "no" ? "no" : "yes",
+      action:      f.action === "sell" ? "sell" : "buy",
+      count:       typeof f.count === "number" ? f.count : 0,
+      yesPrice:    Number(f.yes_price ?? 0),
+      createdTime: f.created_time ?? "",
+      tradeId:     f.trade_id ?? "",
+    }));
+
+  return { fills, cursor: data.cursor ?? null };
+}
+
+// ---------------------------------------------------------------------------
 // Orders
 // ---------------------------------------------------------------------------
 

@@ -67,7 +67,7 @@ export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
 export { runBotTickForCoin } from "./kalshi-bot-tick";
 export { placeManualOrder, closeManualPosition, type ManualOrderResult } from "./kalshi-bot-manual";
 export { evalShadowBets } from "./kalshi-bot-shadow";
-export { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
+export { evalClosedBets, reEvaluateSettledBets, fixCommodityOutcomes } from "./kalshi-bot-eval";
 export {
   getWindowEvaluation, getPerformanceReport, getPausedCoinState,
   getCoinGuardState, clearAllPauses, getWindowConditions, resetWindowConditions,

@@ -55,6 +55,7 @@ import {
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 import { EVAL_DEFER_MS, fetchWindowClosePrice } from "./kalshi-bot-shadow";
+import { isPythProduct, COMMODITY_SYMBOLS } from "./market-defs";
 import { tagBotEntryTimingOutcomes, recoverBotEntryTimingSnapshots } from "./kalshi-bot-entry-timing";
 import { applyDirectionalOutcome } from "./kalshi-bot-directional-outcomes";
 import { recomputeSymbolQuietHours } from "./kalshi-bot-db";
@@ -229,6 +230,73 @@ export async function evalClosedBets(): Promise<void> {
               "[kalshi-bot] evalClosedBets: Kalshi market not yet settled — falling back to Coinbase candle",
             );
           }
+        }
+
+        // ── Step 1.5: Series-level settlement lookup ──────────────────────────
+        // When GET /markets/{ticker} returns unknown (slow-settling commodity RTI,
+        // ticker-format quirk) fetch the full settled-market list for this series
+        // and match the exact ticker.  More reliable for WTI, GOLD, SILVER where
+        // CF Benchmarks RTI can lag the window close by several minutes.
+        if (!kalshiSettled && row.ticker) {
+          const _seriesTk = row.ticker.split("-")[0]; // "KXWTI15M-26AUG261900-00" → "KXWTI15M"
+          if (_seriesTk) {
+            const _seriesMkts = await fetchKalshiSettledMarkets(_seriesTk, 200).catch(() => []);
+            const _seriesMatch = _seriesMkts.find(m => m.ticker === row.ticker);
+            if (_seriesMatch) {
+              const _seriesWon = row.direction === "yes" ? _seriesMatch.result === "yes" : _seriesMatch.result === "no";
+              outcome = _seriesWon ? "win" : "loss";
+              const ep = entryPrice; const n = count;
+              if (row.mode === "live") {
+                correctedPnl = _seriesWon
+                  ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+                  : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+              } else {
+                const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+                correctedPnl = _seriesWon ? betAmt * 0.50 : -betAmt;
+              }
+              logger.info(
+                { sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: _seriesMatch.result, direction: row.direction, outcome, pnl: correctedPnl },
+                "[kalshi-bot] evalClosedBets: settled via series-level Kalshi lookup (step 1.5)",
+              );
+              kalshiSettled = true;
+            }
+          }
+        }
+
+        // ── Commodity-specific defer ───────────────────────────────────────────
+        // For commodity markets (WTI/GOLD/SILVER) the Pyth spot price differs from
+        // CF Benchmarks RTI which Kalshi uses for settlement — comparing against a
+        // Pyth candle near the strike gives the wrong outcome.
+        // Defer within the 90-s window; commit conservative loss past it so the
+        // row never gets permanently stuck.  reEvaluateSettledBets + fixCommodityOutcomes
+        // auto-correct once Kalshi publishes the RTI result.
+        if (!kalshiSettled && isPythProduct(coin.product)) {
+          const _exitedAtRaw = row.exitedAt;
+          const _exitedAtDate = _exitedAtRaw instanceof Date ? _exitedAtRaw : _exitedAtRaw != null ? new Date(_exitedAtRaw as string) : null;
+          const _pastDefer = _exitedAtDate == null || _exitedAtDate <= deferCutoff;
+          if (!_pastDefer) {
+            logger.debug(
+              { sym: row.symbol, id: row.id, ticker: row.ticker },
+              "[kalshi-bot] evalClosedBets: commodity not yet settled by Kalshi — deferring (Pyth candle differs from RTI)",
+            );
+            continue;
+          }
+          // Past 90-s deferral window and Kalshi still hasn't published RTI.
+          // Commit conservative loss; reEvaluateSettledBets / fixCommodityOutcomes
+          // will flip it to the correct outcome once Kalshi settles.
+          const ep = entryPrice; const n = count;
+          const _cPnl = row.direction === "yes" ? -ep * n : -(1 - ep) * n;
+          logger.warn(
+            { sym: row.symbol, id: row.id, ticker: row.ticker ?? "(none)" },
+            "[kalshi-bot] evalClosedBets: commodity not settled after 90-s defer — committing conservative loss; fixCommodityOutcomes will auto-correct once Kalshi RTI publishes",
+          );
+          await withRetry(() =>
+            db.update(kalshiBotBetsTable)
+              .set({ outcome: "loss", pnl: String(_cPnl), evaluatedAt: new Date() })
+              .where(eq(kalshiBotBetsTable.id, row.id))
+          );
+          evaluated++;
+          continue;
         }
 
         if (!kalshiSettled) {
@@ -553,11 +621,26 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
 
       try {
         const settled = await fetchKalshiMarketResult(row.ticker);
-        if (settled.result !== "yes" && settled.result !== "no") continue; // not settled yet or API error
+        let _reEvalResult = settled.result;
+
+        // Fallback: series-level lookup when per-ticker result is unavailable.
+        // This is the primary fix for commodity markets (WTI/GOLD/SILVER) where
+        // GET /markets/{ticker} can return null while the series-level endpoint
+        // correctly shows the CF Benchmarks RTI settlement.
+        if (_reEvalResult !== "yes" && _reEvalResult !== "no") {
+          const _reSeries = row.ticker.split("-")[0]; // "KXWTI15M-..." → "KXWTI15M"
+          if (_reSeries) {
+            const _reMkts = await fetchKalshiSettledMarkets(_reSeries, 200).catch(() => []);
+            const _reMatch = _reMkts.find(m => m.ticker === row.ticker);
+            if (_reMatch) _reEvalResult = _reMatch.result;
+          }
+        }
+
+        if (_reEvalResult !== "yes" && _reEvalResult !== "no") continue; // not settled yet
 
         const won = row.direction === "yes"
-          ? settled.result === "yes"
-          : settled.result === "no";
+          ? _reEvalResult === "yes"
+          : _reEvalResult === "no";
         const correctOutcome: "win" | "loss" = won ? "win" : "loss";
 
         if (correctOutcome === row.outcome) continue; // already correct — no change needed
@@ -603,7 +686,7 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
         });
 
         logger.warn(
-          { id: row.id, sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: settled.result, direction: row.direction, oldOutcome: row.outcome, newOutcome: correctOutcome, oldPnl, newPnl },
+          { id: row.id, sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: _reEvalResult, direction: row.direction, oldOutcome: row.outcome, newOutcome: correctOutcome, oldPnl, newPnl },
           "[kalshi-bot] reEvaluateSettledBets: CORRECTED — outcome was wrong",
         );
       } catch (err) {
@@ -618,6 +701,136 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
     );
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] reEvaluateSettledBets: query error");
+  }
+
+  return result;
+}
+
+/**
+ * Re-evaluate ALL commodity (WTI/GOLD/SILVER) expired bets using the Kalshi
+ * series-level settlement API.  Corrects outcomes committed as conservative losses
+ * before the CF Benchmarks RTI result was published.  Idempotent — safe to call
+ * multiple times.
+ *
+ * Batches series API calls: one fetchKalshiSettledMarkets call per series covers
+ * all bets in that series, minimising API round-trips.
+ */
+export async function fixCommodityOutcomes(opts: { since?: string; limit?: number } = {}): Promise<{
+  checked: number;
+  corrected: number;
+  errors: number;
+  details: Array<{ id: string; symbol: string; windowKey: string; oldOutcome: string | null; newOutcome: string; oldPnl: string; newPnl: string }>;
+}> {
+  type FixDetail = { id: string; symbol: string; windowKey: string; oldOutcome: string | null; newOutcome: string; oldPnl: string; newPnl: string };
+  const result = { checked: 0, corrected: 0, errors: 0, details: [] as FixDetail[] };
+
+  if (COMMODITY_SYMBOLS.length === 0) return result;
+
+  const limitVal = opts.limit ?? 500;
+  try {
+    const whereClause = opts.since
+      ? and(
+          inArray(kalshiBotBetsTable.symbol, COMMODITY_SYMBOLS),
+          eq(kalshiBotBetsTable.action, "expired"),
+          isNotNull(kalshiBotBetsTable.exitedAt),
+          isNotNull(kalshiBotBetsTable.ticker),
+          sql`${kalshiBotBetsTable.windowKey} >= ${opts.since}`,
+        )
+      : and(
+          inArray(kalshiBotBetsTable.symbol, COMMODITY_SYMBOLS),
+          eq(kalshiBotBetsTable.action, "expired"),
+          isNotNull(kalshiBotBetsTable.exitedAt),
+          isNotNull(kalshiBotBetsTable.ticker),
+        );
+
+    const rows = await db
+      .select({
+        id:            kalshiBotBetsTable.id,
+        symbol:        kalshiBotBetsTable.symbol,
+        windowKey:     kalshiBotBetsTable.windowKey,
+        ticker:        kalshiBotBetsTable.ticker,
+        direction:     kalshiBotBetsTable.direction,
+        mode:          kalshiBotBetsTable.mode,
+        outcome:       kalshiBotBetsTable.outcome,
+        pnl:           kalshiBotBetsTable.pnl,
+        entryPrice:    kalshiBotBetsTable.entryPrice,
+        contractCount: kalshiBotBetsTable.contractCount,
+        betAmount:     kalshiBotBetsTable.betAmount,
+      })
+      .from(kalshiBotBetsTable)
+      .where(whereClause)
+      .orderBy(desc(kalshiBotBetsTable.windowKey))
+      .limit(limitVal);
+
+    logger.info({ count: rows.length, symbols: COMMODITY_SYMBOLS }, "[kalshi-bot] fixCommodityOutcomes: starting");
+
+    // One series fetch per unique series ticker covers all bets in that series.
+    const seriesCache = new Map<string, Awaited<ReturnType<typeof fetchKalshiSettledMarkets>>>();
+
+    for (const row of rows) {
+      if (!row.ticker || !row.direction) continue;
+      result.checked++;
+
+      try {
+        const seriesTk = row.ticker.split("-")[0]; // "KXWTI15M-26AUG..." → "KXWTI15M"
+        if (!seriesCache.has(seriesTk)) {
+          const mkts = await fetchKalshiSettledMarkets(seriesTk, 500).catch(() => []);
+          seriesCache.set(seriesTk, mkts);
+        }
+        const mkts = seriesCache.get(seriesTk) ?? [];
+        const match = mkts.find(m => m.ticker === row.ticker);
+        if (!match) continue; // not yet settled by Kalshi — skip
+
+        const won = row.direction === "yes" ? match.result === "yes" : match.result === "no";
+        const correctOutcome: "win" | "loss" = won ? "win" : "loss";
+
+        if (correctOutcome === row.outcome) continue; // already correct
+
+        const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
+        const count = row.contractCount ?? 1;
+        let correctedPnl: number | null = null;
+        if (entryPrice != null) {
+          const ep = entryPrice; const n = count;
+          if (row.mode === "live") {
+            correctedPnl = won
+              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          } else {
+            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+            correctedPnl = won ? betAmt * 0.50 : -betAmt;
+          }
+        }
+
+        const oldPnl = row.pnl != null ? String(row.pnl) : "null";
+        const newPnl = correctedPnl != null ? String(correctedPnl) : oldPnl;
+
+        await db
+          .update(kalshiBotBetsTable)
+          .set({
+            outcome: correctOutcome,
+            evaluatedAt: new Date(),
+            ...(correctedPnl != null ? { pnl: String(correctedPnl) } : {}),
+          })
+          .where(eq(kalshiBotBetsTable.id, row.id));
+
+        result.corrected++;
+        result.details.push({ id: row.id, symbol: row.symbol, windowKey: row.windowKey ?? "", oldOutcome: row.outcome, newOutcome: correctOutcome, oldPnl, newPnl });
+        logger.warn(
+          { id: row.id, sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: match.result, direction: row.direction, oldOutcome: row.outcome, newOutcome: correctOutcome, oldPnl, newPnl },
+          "[kalshi-bot] fixCommodityOutcomes: CORRECTED",
+        );
+      } catch (err) {
+        result.errors++;
+        logger.warn({ err, id: row.id, sym: row.symbol }, "[kalshi-bot] fixCommodityOutcomes: error on row");
+      }
+    }
+
+    logger.info(
+      { checked: result.checked, corrected: result.corrected, errors: result.errors },
+      "[kalshi-bot] fixCommodityOutcomes: complete",
+    );
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] fixCommodityOutcomes: query error");
   }
 
   return result;
