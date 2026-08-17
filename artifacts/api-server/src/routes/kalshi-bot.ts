@@ -986,12 +986,22 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       }
       const key = sym.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
       if (!key) continue;
+      // Preserve optional per-coin fields so saving one coin never silently
+      // wipes the auto-tune config or calibration timestamp.
+      const maybeNum = (field: string) => {
+        const val = v2[field];
+        return typeof val === "number" && isFinite(val) ? { [field]: val } : {};
+      };
       validated[key] = {
         enabled: typeof v2.enabled === "boolean" ? v2.enabled : true,
         silencedUtcHours: [],
         reducedBetUtcHours: {},
         ...(Object.keys(parsedSilencedByDow).length > 0 ? { silencedByDow: parsedSilencedByDow } : {}),
-        autoTuneEnabled: true,
+        autoTuneEnabled: typeof v2.autoTuneEnabled === "boolean" ? v2.autoTuneEnabled : true,
+        ...maybeNum("autoTuneIntervalHours"),
+        ...maybeNum("autoTuneDays"),
+        ...maybeNum("autoTuneThreshold"),
+        ...(typeof v2.calibratedAt === "string" ? { calibratedAt: v2.calibratedAt } : {}),
       };
     }
     partial.perSymbolQuietHours = validated;

@@ -28,29 +28,26 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
   const [calibrating, setCalibrating] = React.useState(false);
   const [calibrateMsg, setCalibrateMsg] = React.useState<string | null>(null);
   const [calibrateOk, setCalibrateOk] = React.useState(true);
-  const [applying, setApplying] = React.useState(false);
-  const [applyMsg, setApplyMsg] = React.useState<string | null>(null);
-  const [applyOk, setApplyOk] = React.useState(true);
-  const [autoSaving, setAutoSaving] = React.useState(false);
 
   // Always-current ref so tab-switch handler doesn't close over stale props
   const schedulesRef = React.useRef(perSymbolQuietHours);
   React.useEffect(() => { schedulesRef.current = perSymbolQuietHours; }, [perSymbolQuietHours]);
 
-  // Switch tab immediately (optimistic), then save in the background
+  // Switch tab immediately (optimistic). No background save here — individual cell
+  // changes are persisted by onSave callbacks inside QuietHoursGrid, so there is
+  // nothing extra to flush when the tab switches.
   const handleSymbolSwitch = React.useCallback((newSym: string) => {
     if (newSym === selectedSymbol) return;
     setSelectedSymbol(newSym);
-    // Fire-and-forget background save — non-fatal if it fails
-    setAutoSaving(true);
-    authPost("/crypto/bot/config", { perSymbolQuietHours: schedulesRef.current })
-      .catch(() => {})
-      .finally(() => setAutoSaving(false));
-  }, [selectedSymbol, authPost]);
+  }, [selectedSymbol]);
 
-  // Step 1 — Calibrate: query all bet history for every symbol and compute optimal schedules.
-  // Schedules are saved to DB immediately with enabled:true so Apply All Days isn't required afterward,
-  // but the user can still click it to re-apply/re-enable without re-running calibration.
+  // Calibrate & Apply All Markets — one click:
+  //   1. Server queries 90 days of bet history for every coin.
+  //   2. Server computes optimal silencedByDow schedules + saves to DB (server-side).
+  //   3. Client updates local draft with enabled:true for every calibrated coin.
+  //   NOTE: No second authPost here — the calibrate-all endpoint already persists
+  //         the full merged result (including skipped coins) on the server, so a
+  //         second PATCH would overwrite it with partial data and lose skipped coins.
   const handleCalibrateAll = React.useCallback(async () => {
     setCalibrating(true);
     setCalibrateMsg(null);
@@ -62,20 +59,17 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
         skippedSymbols?: string[];
       };
       if (result.perSymbolQuietHours && Object.keys(result.perSymbolQuietHours).length > 0) {
-        // Force enabled:true on every returned schedule so hours are enforced immediately
-        const withEnabled: Record<string, QuietHoursV2> = {};
+        // Update every calibrated coin's local draft with enabled:true.
+        // The server already saved everything; this just keeps the UI in sync.
         for (const [sym, schedule] of Object.entries(result.perSymbolQuietHours)) {
-          withEnabled[sym] = { ...schedule, enabled: true };
-          onChange(sym, withEnabled[sym]);
+          onChange(sym, { ...schedule, enabled: true });
         }
-        // Persist with enabled:true — this is the complete one-step flow
-        await authPost("/crypto/bot/config", { perSymbolQuietHours: withEnabled });
-        const n = result.calibratedSymbols?.length ?? Object.keys(withEnabled).length;
+        const n = result.calibratedSymbols?.length ?? Object.keys(result.perSymbolQuietHours).length;
         const skipped = result.skippedSymbols?.length ?? 0;
         setCalibrateOk(true);
         setCalibrateMsg(
           skipped > 0
-            ? `✓ ${n} coins · all days applied & saved · ${skipped} skipped`
+            ? `✓ ${n} coins applied & saved · ${skipped} skipped (not enough data)`
             : `✓ ${n} coins · all days applied & saved`
         );
       } else {
@@ -91,54 +85,16 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
     }
   }, [authPost, onChange]);
 
-  // Step 2 — Apply All Days: take whatever is already in the draft (from calibration or manual edits),
-  // enable every coin's schedule, and save — no re-calibration needed.
-  const handleApplyAll = React.useCallback(async () => {
-    setApplying(true);
-    setApplyMsg(null);
-    try {
-      const current = schedulesRef.current;
-      const hasAny = Object.values(current).some(s =>
-        (s.silencedByDow && Object.values(s.silencedByDow).some(h => Array.isArray(h) && h.length > 0)) ||
-        (s.silencedUtcHours && s.silencedUtcHours.length > 0)
-      );
-      if (!hasAny) {
-        setApplyOk(false);
-        setApplyMsg("No schedules found — run Calibrate All first");
-        setTimeout(() => setApplyMsg(null), 6_000);
-        return;
-      }
-      const enabled: Record<string, QuietHoursV2> = {};
-      for (const sym of PER_MARKET_SYMBOLS) {
-        if (current[sym]) {
-          enabled[sym] = { ...current[sym], enabled: true };
-          onChange(sym, enabled[sym]);
-        }
-      }
-      await authPost("/crypto/bot/config", { perSymbolQuietHours: { ...current, ...enabled } });
-      const count = Object.keys(enabled).length;
-      setApplyOk(true);
-      setApplyMsg(`✓ ${count} coins enabled & saved across all days`);
-    } catch {
-      setApplyOk(false);
-      setApplyMsg("Save failed");
-    } finally {
-      setApplying(false);
-      setTimeout(() => setApplyMsg(null), 8_000);
-    }
-  }, [authPost, onChange]);
-
   const schedule = perSymbolQuietHours[selectedSymbol] ?? { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} };
 
   return (
     <div className="flex flex-col gap-3">
-      {/* ── Top bar: two-step flow ── */}
-      <div className="flex flex-col gap-2">
+      {/* ── Top bar: one-click global action ── */}
+      <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Step 1: Calibrate */}
           <button
             onClick={handleCalibrateAll}
-            disabled={calibrating || applying}
+            disabled={calibrating}
             className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md border transition-all font-medium disabled:opacity-50 ${
               calibrateMsg
                 ? calibrateOk
@@ -146,43 +102,17 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
                   : "border-red-500/50 bg-red-500/10 text-red-400"
                 : "border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20"
             }`}
-            title="Query all bet history for all coins, compute the best quiet hours per day, apply and save — done in one click"
+            title="Analyze 90 days of bet history for every coin, compute the best quiet-hour windows for each day of the week, and save — all markets, all days, one click"
           >
             {calibrating
-              ? <><RefreshCw className="w-3 h-3 animate-spin" /> Calibrating…</>
+              ? <><RefreshCw className="w-3 h-3 animate-spin" /> Calibrating all markets…</>
               : calibrateMsg
               ? <><Zap className="w-3 h-3" /> {calibrateMsg}</>
-              : <><Zap className="w-3 h-3" /> Calibrate All Now</>}
+              : <><Zap className="w-3 h-3" /> Calibrate &amp; Apply All Markets</>}
           </button>
-
-          {/* Step 2: Apply All Days across all coins */}
-          <button
-            onClick={handleApplyAll}
-            disabled={applying || calibrating}
-            className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md border transition-all font-medium disabled:opacity-50 ${
-              applyMsg
-                ? applyOk
-                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
-                  : "border-red-500/50 bg-red-500/10 text-red-400"
-                : "border-violet-500/40 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20"
-            }`}
-            title="Enable the calibrated schedule for every coin across all days and save — use after Calibrate All, or to re-enable if you toggled coins off"
-          >
-            {applying
-              ? <><RefreshCw className="w-3 h-3 animate-spin" /> Applying…</>
-              : applyMsg
-              ? <><Save className="w-3 h-3" /> {applyMsg}</>
-              : <><Save className="w-3 h-3" /> Apply All Days (All Coins)</>}
-          </button>
-
-          {autoSaving && (
-            <span className="text-[10px] text-cyan-400/70 flex items-center gap-1">
-              <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Saving…
-            </span>
-          )}
         </div>
         <p className="text-[10px] text-muted-foreground/50 leading-snug">
-          <strong className="text-muted-foreground/70">Calibrate All Now</strong> — analyzes 90 days of bet history per coin, computes best quiet-hour windows for each day of week, applies &amp; saves everything at once. <strong className="text-muted-foreground/70">Apply All Days (All Coins)</strong> — re-enables and saves whatever schedules are already loaded (use after manually editing individual coins).
+          Analyzes 90 days of bet history per coin · computes best quiet-hour windows per day of week · applies &amp; saves across all markets at once. Use the grid below to fine-tune or override individual days.
         </p>
       </div>
 
@@ -2193,7 +2123,15 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       perSymbolQuietHours={merged.perSymbolQuietHours ?? {}}
                       onChange={(sym, v) => setConfigDraft(d => ({
                         ...d,
-                        perSymbolQuietHours: { ...(d.perSymbolQuietHours ?? {}), [sym]: v },
+                        perSymbolQuietHours: {
+                          // Always start from the full DB snapshot so switching coins
+                          // never silently drops other coins' schedules from the draft.
+                          ...(cfg?.perSymbolQuietHours ?? {}),
+                          // Overlay any in-flight draft changes made this session.
+                          ...(d.perSymbolQuietHours ?? {}),
+                          // Apply the change for this specific coin.
+                          [sym]: v,
+                        },
                       }))}
                       authPost={authPost}
                     />
