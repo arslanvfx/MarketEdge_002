@@ -82,7 +82,7 @@ export function ConditionsPanel({
   }
 
   const restrictionCount = !conditions ? 0 : [
-    !conditions.botEnabled,
+    conditions.botEnabled === false,
     conditions.botPaused,
     conditions.isInQuietHours,
     conditions.circuitBreakerActive,
@@ -157,10 +157,10 @@ export function ConditionsPanel({
           {/* ── Global conditions ── */}
           <div className="px-5 py-3 flex flex-wrap gap-2 border-b border-border/50">
             <ConditionChip
-              ok={conditions?.botEnabled && !conditions?.botPaused}
+              ok={(conditions?.botEnabled !== false) && !conditions?.botPaused}
               warn={conditions?.botPaused}
-              bad={!conditions?.botEnabled}
-              label={!conditions?.botEnabled ? "Bot disabled" : conditions?.botPaused ? "Paused" : "Enabled"}
+              bad={conditions?.botEnabled === false}
+              label={conditions?.botEnabled === false ? "Bot disabled" : conditions?.botPaused ? "Paused" : "Enabled"}
             />
             <ConditionChip
               ok={!conditions?.isInQuietHours}

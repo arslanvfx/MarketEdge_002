@@ -28,6 +28,9 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
   const [calibrating, setCalibrating] = React.useState(false);
   const [calibrateMsg, setCalibrateMsg] = React.useState<string | null>(null);
   const [calibrateOk, setCalibrateOk] = React.useState(true);
+  const [applying, setApplying] = React.useState(false);
+  const [applyMsg, setApplyMsg] = React.useState<string | null>(null);
+  const [applyOk, setApplyOk] = React.useState(true);
   const [autoSaving, setAutoSaving] = React.useState(false);
 
   // Always-current ref so tab-switch handler doesn't close over stale props
@@ -45,8 +48,9 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
       .finally(() => setAutoSaving(false));
   }, [selectedSymbol, authPost]);
 
-  // Calibrate All — queries all bet history for every symbol, applies hours, and saves immediately.
-  // No additional "Apply Suggested" or manual Save step is needed after this.
+  // Step 1 — Calibrate: query all bet history for every symbol and compute optimal schedules.
+  // Schedules are saved to DB immediately with enabled:true so Apply All Days isn't required afterward,
+  // but the user can still click it to re-apply/re-enable without re-running calibration.
   const handleCalibrateAll = React.useCallback(async () => {
     setCalibrating(true);
     setCalibrateMsg(null);
@@ -58,19 +62,21 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
         skippedSymbols?: string[];
       };
       if (result.perSymbolQuietHours && Object.keys(result.perSymbolQuietHours).length > 0) {
-        // Update every coin's schedule in the local draft
+        // Force enabled:true on every returned schedule so hours are enforced immediately
+        const withEnabled: Record<string, QuietHoursV2> = {};
         for (const [sym, schedule] of Object.entries(result.perSymbolQuietHours)) {
-          onChange(sym, schedule);
+          withEnabled[sym] = { ...schedule, enabled: true };
+          onChange(sym, withEnabled[sym]);
         }
-        // Immediately persist — calibration is the final step, no manual Save needed
-        await authPost("/crypto/bot/config", { perSymbolQuietHours: result.perSymbolQuietHours });
-        const n = result.calibratedSymbols?.length ?? Object.keys(result.perSymbolQuietHours).length;
+        // Persist with enabled:true — this is the complete one-step flow
+        await authPost("/crypto/bot/config", { perSymbolQuietHours: withEnabled });
+        const n = result.calibratedSymbols?.length ?? Object.keys(withEnabled).length;
         const skipped = result.skippedSymbols?.length ?? 0;
         setCalibrateOk(true);
         setCalibrateMsg(
           skipped > 0
-            ? `✓ ${n} coins calibrated & saved · ${skipped} skipped (insufficient data)`
-            : `✓ ${n} coins calibrated & saved`
+            ? `✓ ${n} coins · all days applied & saved · ${skipped} skipped`
+            : `✓ ${n} coins · all days applied & saved`
         );
       } else {
         setCalibrateOk(false);
@@ -85,38 +91,99 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
     }
   }, [authPost, onChange]);
 
+  // Step 2 — Apply All Days: take whatever is already in the draft (from calibration or manual edits),
+  // enable every coin's schedule, and save — no re-calibration needed.
+  const handleApplyAll = React.useCallback(async () => {
+    setApplying(true);
+    setApplyMsg(null);
+    try {
+      const current = schedulesRef.current;
+      const hasAny = Object.values(current).some(s =>
+        (s.silencedByDow && Object.values(s.silencedByDow).some(h => Array.isArray(h) && h.length > 0)) ||
+        (s.silencedUtcHours && s.silencedUtcHours.length > 0)
+      );
+      if (!hasAny) {
+        setApplyOk(false);
+        setApplyMsg("No schedules found — run Calibrate All first");
+        setTimeout(() => setApplyMsg(null), 6_000);
+        return;
+      }
+      const enabled: Record<string, QuietHoursV2> = {};
+      for (const sym of PER_MARKET_SYMBOLS) {
+        if (current[sym]) {
+          enabled[sym] = { ...current[sym], enabled: true };
+          onChange(sym, enabled[sym]);
+        }
+      }
+      await authPost("/crypto/bot/config", { perSymbolQuietHours: { ...current, ...enabled } });
+      const count = Object.keys(enabled).length;
+      setApplyOk(true);
+      setApplyMsg(`✓ ${count} coins enabled & saved across all days`);
+    } catch {
+      setApplyOk(false);
+      setApplyMsg("Save failed");
+    } finally {
+      setApplying(false);
+      setTimeout(() => setApplyMsg(null), 8_000);
+    }
+  }, [authPost, onChange]);
+
   const schedule = perSymbolQuietHours[selectedSymbol] ?? { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} };
 
   return (
     <div className="flex flex-col gap-3">
-      {/* ── Top bar: Calibrate All ── */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <button
-          onClick={handleCalibrateAll}
-          disabled={calibrating}
-          className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md border transition-all font-medium disabled:opacity-50 ${
-            calibrateMsg
-              ? calibrateOk
-                ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
-                : "border-red-500/50 bg-red-500/10 text-red-400"
-              : "border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20"
-          }`}
-          title="Query all bet history (paper + live) for all symbols and compute optimal quiet-hour schedules"
-        >
-          {calibrating
-            ? <><RefreshCw className="w-3 h-3 animate-spin" /> Calibrating all coins…</>
-            : calibrateMsg
-            ? <><Zap className="w-3 h-3" /> {calibrateMsg}</>
-            : <><Zap className="w-3 h-3" /> Calibrate All Now</>}
-        </button>
-        <span className="text-[10px] text-muted-foreground/50">
-          Pulls from all bet history (paper + live) · applies across all coins at once
-        </span>
-        {autoSaving && (
-          <span className="text-[10px] text-cyan-400/70 flex items-center gap-1">
-            <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Saving…
-          </span>
-        )}
+      {/* ── Top bar: two-step flow ── */}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Step 1: Calibrate */}
+          <button
+            onClick={handleCalibrateAll}
+            disabled={calibrating || applying}
+            className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md border transition-all font-medium disabled:opacity-50 ${
+              calibrateMsg
+                ? calibrateOk
+                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                  : "border-red-500/50 bg-red-500/10 text-red-400"
+                : "border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20"
+            }`}
+            title="Query all bet history for all coins, compute the best quiet hours per day, apply and save — done in one click"
+          >
+            {calibrating
+              ? <><RefreshCw className="w-3 h-3 animate-spin" /> Calibrating…</>
+              : calibrateMsg
+              ? <><Zap className="w-3 h-3" /> {calibrateMsg}</>
+              : <><Zap className="w-3 h-3" /> Calibrate All Now</>}
+          </button>
+
+          {/* Step 2: Apply All Days across all coins */}
+          <button
+            onClick={handleApplyAll}
+            disabled={applying || calibrating}
+            className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md border transition-all font-medium disabled:opacity-50 ${
+              applyMsg
+                ? applyOk
+                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                  : "border-red-500/50 bg-red-500/10 text-red-400"
+                : "border-violet-500/40 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20"
+            }`}
+            title="Enable the calibrated schedule for every coin across all days and save — use after Calibrate All, or to re-enable if you toggled coins off"
+          >
+            {applying
+              ? <><RefreshCw className="w-3 h-3 animate-spin" /> Applying…</>
+              : applyMsg
+              ? <><Save className="w-3 h-3" /> {applyMsg}</>
+              : <><Save className="w-3 h-3" /> Apply All Days (All Coins)</>}
+          </button>
+
+          {autoSaving && (
+            <span className="text-[10px] text-cyan-400/70 flex items-center gap-1">
+              <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Saving…
+            </span>
+          )}
+        </div>
+        <p className="text-[10px] text-muted-foreground/50 leading-snug">
+          <strong className="text-muted-foreground/70">Calibrate All Now</strong> — analyzes 90 days of bet history per coin, computes best quiet-hour windows for each day of week, applies &amp; saves everything at once. <strong className="text-muted-foreground/70">Apply All Days (All Coins)</strong> — re-enables and saves whatever schedules are already loaded (use after manually editing individual coins).
+        </p>
       </div>
 
       {/* ── Symbol tabs ── */}

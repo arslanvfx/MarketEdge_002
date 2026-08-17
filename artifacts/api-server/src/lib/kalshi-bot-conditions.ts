@@ -226,7 +226,7 @@ export function getWindowConditions(): BotConditionsSnapshot {
     windowKey: wk,
     mode: S.botMode,
     freeRunMode: S.config.freeRunMode ?? false,
-    botEnabled: S.config.enabled,
+    botEnabled: S.config.enabled ?? true,  // undefined in DB = enabled by default
     botPaused: S.paused,
     isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
     quietHoursStart: S.config.quietHoursStart,

@@ -513,7 +513,7 @@ export default function BotDashboard() {
 
   const statusLabel = () => {
     if (!status) return "Loading…";
-    if (!cfg?.enabled) return "Disabled";
+    if (merged.enabled === false) return "Disabled"; // only explicitly false = disabled; undefined/null = running
     if (status.paused) return "Paused";
     if (status.warmupSecondsRemaining !== null) return `Warming up · ${status.warmupSecondsRemaining}s`;
     if (status.openPositions.length > 0) return status.openPositions.length === 1 ? "Position Open" : `${status.openPositions.length} Positions Open`;
