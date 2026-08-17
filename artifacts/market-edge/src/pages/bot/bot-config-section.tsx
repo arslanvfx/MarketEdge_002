@@ -45,7 +45,8 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
       .finally(() => setAutoSaving(false));
   }, [selectedSymbol, authPost]);
 
-  // Calibrate All — queries all bet history (paper + live + dev) for every symbol at once
+  // Calibrate All — queries all bet history for every symbol, applies hours, and saves immediately.
+  // No additional "Apply Suggested" or manual Save step is needed after this.
   const handleCalibrateAll = React.useCallback(async () => {
     setCalibrating(true);
     setCalibrateMsg(null);
@@ -57,23 +58,30 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
         skippedSymbols?: string[];
       };
       if (result.perSymbolQuietHours && Object.keys(result.perSymbolQuietHours).length > 0) {
+        // Update every coin's schedule in the local draft
         for (const [sym, schedule] of Object.entries(result.perSymbolQuietHours)) {
           onChange(sym, schedule);
         }
+        // Immediately persist — calibration is the final step, no manual Save needed
+        await authPost("/crypto/bot/config", { perSymbolQuietHours: result.perSymbolQuietHours });
         const n = result.calibratedSymbols?.length ?? Object.keys(result.perSymbolQuietHours).length;
         const skipped = result.skippedSymbols?.length ?? 0;
         setCalibrateOk(true);
-        setCalibrateMsg(skipped > 0 ? `${n} calibrated, ${skipped} skipped (no data)` : `${n} coins calibrated`);
+        setCalibrateMsg(
+          skipped > 0
+            ? `✓ ${n} coins calibrated & saved · ${skipped} skipped (insufficient data)`
+            : `✓ ${n} coins calibrated & saved`
+        );
       } else {
         setCalibrateOk(false);
-        setCalibrateMsg("No coins had enough data (need ≥ 5 settled bets)");
+        setCalibrateMsg("No coins had enough data (need ≥ 5 settled bets each)");
       }
     } catch {
       setCalibrateOk(false);
       setCalibrateMsg("Calibration failed");
     } finally {
       setCalibrating(false);
-      setTimeout(() => setCalibrateMsg(null), 6_000);
+      setTimeout(() => setCalibrateMsg(null), 8_000);
     }
   }, [authPost, onChange]);
 
@@ -153,6 +161,13 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
         value={schedule}
         onChange={v => onChange(selectedSymbol, v)}
         symbolFilter={selectedSymbol}
+        onSave={updated => {
+          // "Apply All Days" was clicked — persist immediately, no manual Save needed
+          onChange(selectedSymbol, updated);
+          authPost("/crypto/bot/config", {
+            perSymbolQuietHours: { ...schedulesRef.current, [selectedSymbol]: updated },
+          }).catch(() => {});
+        }}
       />
     </div>
   );

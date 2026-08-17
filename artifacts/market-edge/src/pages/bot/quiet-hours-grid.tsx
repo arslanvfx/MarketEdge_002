@@ -271,9 +271,14 @@ interface QuietHoursGridProps {
   autoTuneLastChanges?: { silenced: number[]; unsilenced: number[] } | null;
   /** When set, the win-rate analysis is filtered to this symbol's bets only. */
   symbolFilter?: string;
+  /**
+   * When provided, called after "Apply All Days" writes all 7 days of silenced
+   * hours so the caller can immediately persist without a separate Save click.
+   */
+  onSave?: (updated: QuietHoursV2) => void;
 }
 
-export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges, symbolFilter }: QuietHoursGridProps) {
+export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges, symbolFilter, onSave }: QuietHoursGridProps) {
   const { getToken } = useAuth();
   const [days, setDays] = useState(14);
   const [targetWinRate, setTargetWinRate] = useState(85);
@@ -360,7 +365,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
       .map(s => s.utcHour);
   }
 
-  // ── Apply suggested to the selected day ───────────────────────────────────
+  // ── Apply suggested to the selected day only ──────────────────────────────
   function applySuggested() {
     if (!analysis) return;
     const hours = computeSuggestedHours(getActiveHourStats());
@@ -368,6 +373,33 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
     const newSilencedByDow = { ...(value.silencedByDow ?? {}), [dowStr]: hours };
     onChange({ ...value, silencedByDow: newSilencedByDow });
   }
+
+  // ── Apply suggested to ALL 7 days at once using hourStatsByDow ────────────
+  // Uses the per-DOW breakdown already in the analysis response — no extra
+  // fetches needed. Calls onSave immediately so the result persists without
+  // a manual Save click.
+  function applyAllDaysSuggested() {
+    if (!analysis?.hourStatsByDow) return;
+    const newSilencedByDow: Record<string, number[]> = {};
+    for (let d = 0; d < 7; d++) {
+      const dayStats = analysis.hourStatsByDow[String(d)] ?? [];
+      newSilencedByDow[String(d)] = computeSuggestedHours(dayStats);
+    }
+    const updated: QuietHoursV2 = {
+      ...value,
+      silencedByDow: { ...(value.silencedByDow ?? {}), ...newSilencedByDow },
+    };
+    onChange(updated);
+    onSave?.(updated);
+  }
+
+  // Total silenced hours across all days after applying all-day suggestion
+  const allDaysSuggestedCount = analysis?.hourStatsByDow
+    ? Object.values(analysis.hourStatsByDow).reduce(
+        (sum, dayStats) => sum + computeSuggestedHours(dayStats).length,
+        0,
+      )
+    : 0;
 
   // ── Toggle silence for the selected day only ──────────────────────────────
   // Always writes to silencedByDow; never touches the flat silencedUtcHours.
@@ -676,15 +708,25 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         </button>
 
         {analysis && (
-          <button
-            onClick={applySuggested}
-            className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg border border-amber-500/50 bg-amber-500/5 text-amber-400 hover:bg-amber-500/15 transition-colors font-medium"
-            title={`Silence ${suggestedHours.length} hour${suggestedHours.length !== 1 ? "s" : ""} on ${DOW_NAMES[selectedDow]} with <${targetWinRate}% win rate (≥5 bets)`}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            Apply suggested ({suggestedHours.length} hour{suggestedHours.length !== 1 ? "s" : ""})
-            <span className="ml-1 opacity-70">· {DOW_NAMES[selectedDow]} only</span>
-          </button>
+          <>
+            {/* Apply all 7 days at once — primary action */}
+            <button
+              onClick={applyAllDaysSuggested}
+              className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg border border-emerald-500/50 bg-emerald-500/5 text-emerald-400 hover:bg-emerald-500/15 transition-colors font-medium"
+              title={`Apply per-day win-rate suggestions to all 7 days at once and save (${allDaysSuggestedCount} total hour slots silenced)`}
+            >
+              <Zap className="w-3.5 h-3.5" />
+              Apply All Days ({allDaysSuggestedCount}h total)
+            </button>
+            {/* Apply current day only — secondary manual override */}
+            <button
+              onClick={applySuggested}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/70 hover:bg-amber-500/10 transition-colors"
+              title={`Silence ${suggestedHours.length} hour${suggestedHours.length !== 1 ? "s" : ""} on ${DOW_NAMES[selectedDow]} only`}
+            >
+              {DOW_NAMES[selectedDow]} only ({suggestedHours.length}h)
+            </button>
+          </>
         )}
 
         {error && <span className="text-xs text-red-400">{error}</span>}
