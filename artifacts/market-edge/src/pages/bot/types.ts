@@ -54,6 +54,8 @@ export interface BotConfig {
   quietHoursStart: number;
   quietHoursEnd: number;
   quietHoursV2?: QuietHoursV2;
+  quietHoursMode?: 'global' | 'per_market';
+  perSymbolQuietHours?: Record<string, QuietHoursV2>;
   maxConsecutiveLosses: number;
   circuitBreakerPauseWindows: number;
   enableDirectionCap: boolean;

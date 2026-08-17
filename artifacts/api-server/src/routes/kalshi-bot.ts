@@ -719,6 +719,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionCandleLookback,
     convictionCandleSlopeThresholdPct,
     convictionCandleAtrScaleEnabled,
+    quietHoursMode,
+    perSymbolQuietHours,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -746,6 +748,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     quietHoursStart?: number;
     quietHoursEnd?: number;
     quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: boolean; autoTuneDays?: number; autoTuneThreshold?: number; autoTuneIntervalHours?: number };
+    quietHoursMode?: 'global' | 'per_market';
+    perSymbolQuietHours?: Record<string, unknown>;
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
     enableDirectionCap?: boolean;
@@ -959,6 +963,37 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       ...(typeof v2.autoTuneThreshold === "number" && v2.autoTuneThreshold >= 50 && v2.autoTuneThreshold <= 100 ? { autoTuneThreshold: v2.autoTuneThreshold } : {}),
       ...(typeof v2.autoTuneIntervalHours === "number" && [1,2,4,6,12].includes(v2.autoTuneIntervalHours) ? { autoTuneIntervalHours: v2.autoTuneIntervalHours } : {}),
     };
+  }
+  if (quietHoursMode === "global" || quietHoursMode === "per_market") {
+    partial.quietHoursMode = quietHoursMode;
+  }
+  if (perSymbolQuietHours !== undefined && typeof perSymbolQuietHours === "object" && perSymbolQuietHours !== null) {
+    // Validate and sanitise each symbol's schedule — the entire object replaces the stored one,
+    // so the client must send all symbols (not just the one that changed).
+    const validated: NonNullable<typeof partial.perSymbolQuietHours> = {};
+    for (const [sym, rawV2] of Object.entries(perSymbolQuietHours as Record<string, unknown>)) {
+      if (!rawV2 || typeof rawV2 !== "object") continue;
+      const v2 = rawV2 as Record<string, unknown>;
+      const parsedSilencedByDow: Record<string, number[]> = {};
+      if (typeof v2.silencedByDow === "object" && v2.silencedByDow !== null) {
+        for (const [k, val] of Object.entries(v2.silencedByDow as Record<string, unknown>)) {
+          if (!/^[0-6]$/.test(k)) continue;
+          parsedSilencedByDow[k] = Array.isArray(val)
+            ? (val as unknown[]).filter((h): h is number => typeof h === "number" && h >= 0 && h <= 23)
+            : [];
+        }
+      }
+      const key = sym.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
+      if (!key) continue;
+      validated[key] = {
+        enabled: typeof v2.enabled === "boolean" ? v2.enabled : true,
+        silencedUtcHours: [],
+        reducedBetUtcHours: {},
+        ...(Object.keys(parsedSilencedByDow).length > 0 ? { silencedByDow: parsedSilencedByDow } : {}),
+        autoTuneEnabled: true,
+      };
+    }
+    partial.perSymbolQuietHours = validated;
   }
   if (typeof maxConsecutiveLosses === "number" && maxConsecutiveLosses >= 0 && maxConsecutiveLosses <= 10) {
     partial.maxConsecutiveLosses = maxConsecutiveLosses;
@@ -1483,6 +1518,9 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
     const days = Math.min(90, Math.max(1, parseInt(String(req.query.days ?? "14"), 10) || 14));
     const targetWinRate = Math.min(100, Math.max(0, parseFloat(String(req.query.targetWinRate ?? "85")) || 85));
     const dowRaw = String(req.query.dow ?? "all").trim().toLowerCase();
+    // ?symbol=BTC — restrict analysis to a single coin.  Validate to alphanumeric only.
+    const symbolRaw = req.query.symbol ? String(req.query.symbol).trim().toUpperCase() : null;
+    const symbolFilter = symbolRaw && /^[A-Z0-9]{1,10}$/.test(symbolRaw) ? symbolRaw : null;
 
     // Determine DOW filter clause and minimum bets threshold
     // EXTRACT(DOW …) returns 0=Sun … 6=Sat (same as JS getUTCDay())
@@ -1519,6 +1557,7 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
         AND outcome IN ('win', 'loss')
         AND archived_at IS NULL
         ${dowFilter ? sql.raw(`AND ${dowFilter}`) : sql.raw("")}
+        ${symbolFilter ? sql`AND symbol = ${symbolFilter}` : sql.raw("")}
       GROUP BY utc_hour
       ORDER BY utc_hour
     `);
@@ -1566,6 +1605,7 @@ router.get("/crypto/bot/quiet-hours-analysis", requireAuth, async (req, res) => 
       WHERE created_at >= NOW() - (${days} || ' days')::INTERVAL
         AND outcome IN ('win', 'loss')
         AND archived_at IS NULL
+        ${symbolFilter ? sql`AND symbol = ${symbolFilter}` : sql.raw("")}
       GROUP BY et_dow, utc_hour
       ORDER BY et_dow, utc_hour
     `);

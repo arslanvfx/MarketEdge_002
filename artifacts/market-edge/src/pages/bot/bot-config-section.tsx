@@ -7,6 +7,56 @@ import { QuietHoursGrid } from "./quiet-hours-grid";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 
 const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
+const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "GOLD", "SILVER", "WTI"];
+
+interface PerSymbolQuietHoursPanelProps {
+  perSymbolQuietHours: Record<string, QuietHoursV2>;
+  onChange: (sym: string, v: QuietHoursV2) => void;
+}
+
+function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange }: PerSymbolQuietHoursPanelProps) {
+  const [selectedSymbol, setSelectedSymbol] = React.useState(PER_MARKET_SYMBOLS[0]);
+  const schedule = perSymbolQuietHours[selectedSymbol] ?? { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} };
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Symbol tabs */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {PER_MARKET_SYMBOLS.map(sym => {
+          const symQhv2 = perSymbolQuietHours[sym];
+          const totalSilenced = symQhv2?.silencedByDow
+            ? Object.values(symQhv2.silencedByDow).reduce(
+                (acc: number, hrs) => acc + (Array.isArray(hrs) ? hrs.length : 0),
+                0,
+              )
+            : (symQhv2?.silencedUtcHours?.length ?? 0);
+          return (
+            <button
+              key={sym}
+              onClick={() => setSelectedSymbol(sym)}
+              className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                selectedSymbol === sym
+                  ? "bg-primary/15 text-primary border-primary/50 font-medium"
+                  : "bg-secondary/50 text-muted-foreground border-border hover:bg-secondary hover:text-foreground"
+              }`}
+            >
+              {sym}
+              {totalSilenced > 0 && (
+                <span className="ml-1 text-[9px] opacity-60">{totalSilenced}h</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      {/* QuietHoursGrid for the selected symbol */}
+      <QuietHoursGrid
+        value={schedule}
+        onChange={v => onChange(selectedSymbol, v)}
+        symbolFilter={selectedSymbol}
+      />
+    </div>
+  );
+}
 
 interface StabilityPreviewProps {
   minER: number;
@@ -1925,12 +1975,46 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
                 {/* ── Smart Quiet Hours V2 — visible in all modes ── */}
                 <div className="col-span-full">
-                  <QuietHoursGrid
-                    value={merged.quietHoursV2 ?? { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} }}
-                    onChange={(v: QuietHoursV2) => setConfigDraft(d => ({ ...d, quietHoursV2: v }))}
-                    autoTuneLastRunAt={status?.autoTuneQHLastRunAt}
-                    autoTuneLastChanges={status?.autoTuneQHLastChanges}
-                  />
+                  {/* Global / Per-Market mode toggle */}
+                  <div className="flex items-center gap-3 mb-3">
+                    <span className="text-xs font-medium text-muted-foreground">Quiet Hours Mode</span>
+                    <div className="flex gap-0.5 bg-secondary/50 rounded-md p-0.5">
+                      {(["global", "per_market"] as const).map(mode => (
+                        <button
+                          key={mode}
+                          onClick={() => setConfigDraft(d => ({ ...d, quietHoursMode: mode }))}
+                          className={`px-3 py-1 text-xs rounded transition-colors ${
+                            (merged.quietHoursMode ?? "global") === mode
+                              ? "bg-background text-foreground shadow-sm"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          {mode === "global" ? "Global" : "Per Market"}
+                        </button>
+                      ))}
+                    </div>
+                    {(merged.quietHoursMode ?? "global") === "per_market" && (
+                      <span className="text-[10px] text-muted-foreground/70">
+                        Auto-calibrated per coin from live bet history
+                      </span>
+                    )}
+                  </div>
+                  {(merged.quietHoursMode ?? "global") === "global" ? (
+                    <QuietHoursGrid
+                      value={merged.quietHoursV2 ?? { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} }}
+                      onChange={(v: QuietHoursV2) => setConfigDraft(d => ({ ...d, quietHoursV2: v }))}
+                      autoTuneLastRunAt={status?.autoTuneQHLastRunAt}
+                      autoTuneLastChanges={status?.autoTuneQHLastChanges}
+                    />
+                  ) : (
+                    <PerSymbolQuietHoursPanel
+                      perSymbolQuietHours={merged.perSymbolQuietHours ?? {}}
+                      onChange={(sym, v) => setConfigDraft(d => ({
+                        ...d,
+                        perSymbolQuietHours: { ...(d.perSymbolQuietHours ?? {}), [sym]: v },
+                      }))}
+                    />
+                  )}
                 </div>
 
                 {/* ── Legacy quiet hours (collapsed) ── */}

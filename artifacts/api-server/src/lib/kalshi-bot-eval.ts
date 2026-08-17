@@ -57,8 +57,33 @@ import {
 import { EVAL_DEFER_MS, fetchWindowClosePrice } from "./kalshi-bot-shadow";
 import { tagBotEntryTimingOutcomes, recoverBotEntryTimingSnapshots } from "./kalshi-bot-entry-timing";
 import { applyDirectionalOutcome } from "./kalshi-bot-directional-outcomes";
+import { recomputeSymbolQuietHours } from "./kalshi-bot-db";
 
 export { applyDirectionalOutcome } from "./kalshi-bot-directional-outcomes";
+
+/**
+ * Fetch a Kalshi market settlement result with automatic retries.
+ * A transient network failure or a market that hasn't yet published its result
+ * both return `result: "unknown"` on the first attempt — retrying a few times
+ * gives the Kalshi API time to settle before we fall back to the Coinbase candle,
+ * which can differ from the authoritative CF Benchmarks RTI price near the strike.
+ */
+async function fetchKalshiResultWithRetry(
+  ticker: string,
+  maxAttempts = 3,
+): Promise<Awaited<ReturnType<typeof fetchKalshiMarketResult>>> {
+  let last!: Awaited<ReturnType<typeof fetchKalshiMarketResult>>;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      last = await fetchKalshiMarketResult(ticker);
+      if (last.result === "yes" || last.result === "no") return last;
+    } catch (err) {
+      logger.warn({ ticker, attempt, err }, "[kalshi-eval] fetchKalshiMarketResult attempt failed");
+    }
+    if (attempt < maxAttempts) await new Promise<void>(r => setTimeout(r, 1_500));
+  }
+  return last ?? { result: "unknown" as const, status: "unknown" };
+}
 
 export async function evalClosedBets(): Promise<void> {
   const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
@@ -155,17 +180,29 @@ export async function evalClosedBets(): Promise<void> {
         //   3. cryptoPriceAtExit (live ticker captured at expiry — last resort).
         //   4. Full-loss fallback after 90-s deferral (ensures row never gets stuck).
         const coin = CRYPTO_COINS.find((c) => c.symbol === row.symbol);
-        if (!coin || !row.windowKey || row.direction == null) continue;
+        if (!coin || !row.windowKey || row.direction == null) {
+          logger.warn(
+            { id: row.id, sym: row.symbol, hasCoin: !!coin, hasWindowKey: !!row.windowKey, direction: row.direction },
+            "[kalshi-bot] evalClosedBets: skipping row — missing coin definition, windowKey, or direction",
+          );
+          continue;
+        }
 
         const strike = row.kalshiTarget != null ? parseFloat(String(row.kalshiTarget)) : null;
         const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
         const count = row.contractCount ?? 1;
-        if (strike == null || entryPrice == null) continue;
+        if (strike == null || entryPrice == null) {
+          logger.warn(
+            { id: row.id, sym: row.symbol, windowKey: row.windowKey, strike, entryPrice },
+            "[kalshi-bot] evalClosedBets: skipping row — missing strike or entryPrice; row may need manual correction",
+          );
+          continue;
+        }
 
         // ── Step 1: Kalshi settlement result (primary — no price comparison needed) ──
         let kalshiSettled = false;
         if (row.ticker) {
-          const settled = await fetchKalshiMarketResult(row.ticker);
+          const settled = await fetchKalshiResultWithRetry(row.ticker);
           if (settled.result === "yes" || settled.result === "no") {
             const won = row.direction === "yes"
               ? settled.result === "yes"
@@ -226,7 +263,53 @@ export async function evalClosedBets(): Promise<void> {
             }
 
             const fallbackPnl = row.pnl != null ? parseFloat(String(row.pnl)) : null;
-            if (fallbackPnl == null) continue;
+            if (fallbackPnl == null) {
+              // No stored P&L and no price source past the 90-s deferral window.
+              // Attempt one last Kalshi fetch before giving up.
+              if (row.ticker) {
+                const lastChance = await fetchKalshiResultWithRetry(row.ticker, 1).catch(() => null);
+                if (lastChance && (lastChance.result === "yes" || lastChance.result === "no")) {
+                  const won = row.direction === "yes" ? lastChance.result === "yes" : lastChance.result === "no";
+                  const rescueOutcome = won ? ("win" as const) : ("loss" as const);
+                  const ep = entryPrice;
+                  const n  = count;
+                  // Compute real P&L — same formula as the normal evaluation path below.
+                  const rescuePnl = row.mode === "live"
+                    ? (won
+                        ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+                        : (row.direction === "yes" ? -ep * n : -(1 - ep) * n))
+                    : (won ? ep * n * 0.5 : -(ep * n));
+                  logger.info(
+                    { sym: row.symbol, id: row.id, ticker: row.ticker, kalshiResult: lastChance.result, outcome: rescueOutcome },
+                    "[kalshi-bot] evalClosedBets: stuck row rescued by last-chance Kalshi retry",
+                  );
+                  await withRetry(() =>
+                    db.update(kalshiBotBetsTable)
+                      .set({ outcome: rescueOutcome, pnl: String(rescuePnl), evaluatedAt: new Date() })
+                      .where(eq(kalshiBotBetsTable.id, row.id))
+                  );
+                  evaluated++;
+                  continue;
+                }
+              }
+              // Kalshi not yet settled and no price data — commit conservative 'loss' so
+              // the row is NEVER permanently stuck.  reEvaluateSettledBets() auto-corrects
+              // once Kalshi publishes its final settlement result.
+              const ep = entryPrice;
+              const n  = count;
+              const conservativePnl = row.direction === "yes" ? -ep * n : -(1 - ep) * n;
+              logger.warn(
+                { sym: row.symbol, id: row.id, windowKey: row.windowKey, ticker: row.ticker ?? "(none)" },
+                "[kalshi-bot] evalClosedBets: no price data, no stored pnl, past 90-s defer — committing conservative loss; reEvaluateSettledBets will auto-correct once Kalshi settles",
+              );
+              await withRetry(() =>
+                db.update(kalshiBotBetsTable)
+                  .set({ outcome: "loss", pnl: String(conservativePnl), evaluatedAt: new Date() })
+                  .where(eq(kalshiBotBetsTable.id, row.id))
+              );
+              evaluated++;
+              continue;
+            }
             const fallbackOutcome: "win" | "loss" | "push" =
               fallbackPnl > 0 ? "win" : fallbackPnl < 0 ? "loss" : "push";
             logger.warn(
@@ -368,6 +451,11 @@ export async function evalClosedBets(): Promise<void> {
       }
 
       evaluated++;
+      // Trigger per-symbol quiet-hours schedule recompute when in per_market mode.
+      // Fire-and-forget: auto-calibration failures are non-fatal.
+      if (S.config.quietHoursMode === "per_market") {
+        recomputeSymbolQuietHours(row.symbol).catch(() => {});
+      }
 
       } catch (rowErr) {
         // DB write (or price fetch) failed for this row — log and continue so

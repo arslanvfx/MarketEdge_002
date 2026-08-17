@@ -1100,6 +1100,36 @@ export function resolveEntryQuietHoursDecision(
 }
 
 /**
+ * Per-symbol variant of resolveEntryQuietHoursDecision.
+ *
+ * When quietHoursMode === 'per_market' and the target symbol has its own enabled
+ * QuietHoursV2 schedule stored in perSymbolQuietHours, that schedule is used
+ * instead of the global quietHoursV2. Falls through to global behavior when:
+ *  - quietHoursMode is not 'per_market' (or is undefined → global)
+ *  - no per-symbol schedule is stored for this symbol
+ *  - the per-symbol schedule has enabled: false
+ *
+ * Callers in kalshi-bot-tick.ts use this at all three enforcement gates so
+ * that the per-symbol schedule is applied consistently at entry, sizing, and
+ * final pre-order checks.
+ */
+export function resolveEntryQuietHoursDecisionForSymbol(
+  config: Pick<BotConfig, "freeRunMode" | "quietHoursV2" | "quietHoursStart" | "quietHoursEnd" | "shadowPaperIgnoreQuietHours" | "quietHoursMode" | "perSymbolQuietHours">,
+  botMode: "paper" | "live",
+  symbol: string,
+  now: Date = new Date(),
+): EntryQuietHoursDecision {
+  if (config.quietHoursMode === "per_market") {
+    const symQhv2 = config.perSymbolQuietHours?.[symbol.toUpperCase()];
+    if (symQhv2?.enabled) {
+      const symConfig = { ...config, quietHoursV2: symQhv2 };
+      return resolveEntryQuietHoursDecision(symConfig, botMode, now);
+    }
+  }
+  return resolveEntryQuietHoursDecision(config, botMode, now);
+}
+
+/**
  * Merge auto-tune silence/unsilence deltas into the CURRENT silencedByDow map.
  *
  * Auto-tune computes its deltas from a config snapshot taken before an async
@@ -1207,6 +1237,8 @@ export interface BotConfig {
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
   quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
   quietHoursV2?: QuietHoursV2; // per-hour silence / reduced-bet controls (V2); takes precedence over legacy range when enabled
+  quietHoursMode?: 'global' | 'per_market'; // 'global' = single shared schedule (default); 'per_market' = each symbol uses its own auto-calibrated schedule
+  perSymbolQuietHours?: Record<string, QuietHoursV2>; // per-symbol V2 schedules — only active when quietHoursMode === 'per_market'
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
   circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
   // Directional balance filter: caps correlated exposure by limiting same-direction

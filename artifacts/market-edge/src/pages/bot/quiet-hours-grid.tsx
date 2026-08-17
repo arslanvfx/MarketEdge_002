@@ -269,9 +269,11 @@ interface QuietHoursGridProps {
   onChange: (v: QuietHoursV2) => void;
   autoTuneLastRunAt?: string | null;
   autoTuneLastChanges?: { silenced: number[]; unsilenced: number[] } | null;
+  /** When set, the win-rate analysis is filtered to this symbol's bets only. */
+  symbolFilter?: string;
 }
 
-export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges }: QuietHoursGridProps) {
+export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges, symbolFilter }: QuietHoursGridProps) {
   const { getToken } = useAuth();
   const [days, setDays] = useState(14);
   const [targetWinRate, setTargetWinRate] = useState(85);
@@ -327,7 +329,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
     try {
       const token = await getToken();
       const resp = await fetch(
-        `${API_BASE}/crypto/bot/quiet-hours-analysis?days=${days}&targetWinRate=${targetWinRate}&dow=${forDow}`,
+        `${API_BASE}/crypto/bot/quiet-hours-analysis?days=${days}&targetWinRate=${targetWinRate}&dow=${forDow}${symbolFilter ? `&symbol=${encodeURIComponent(symbolFilter)}` : ""}`,
         { headers: token ? { Authorization: `Bearer ${token}` } : {} },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

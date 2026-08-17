@@ -25,7 +25,7 @@ import {
   checkConvictionOneSidedBook,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
-  resolveEntryQuietHoursDecision,
+  resolveEntryQuietHoursDecision, resolveEntryQuietHoursDecisionForSymbol,
   applyPlacementTimeReducedPct,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
@@ -582,7 +582,7 @@ async function _runBotTick(
   // otherwise mask the current state.
   clearTickAbort(tickAbortReasons, sym, windowKey);
 
-  const qhEntry = resolveEntryQuietHoursDecision(S.config, S.botMode);
+  const qhEntry = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
   if (qhEntry.action === "block") {
     logger.info(
       { sym, windowKey, qhMode: qhEntry.qhMode, utcHour: qhEntry.utcHour, botMode: S.botMode, source: "tick-entry-gate" },
@@ -1628,7 +1628,7 @@ async function _runBotTick(
   // went through the loop — must use the rule for the hour the bet is actually
   // placed in.  The loop snapshot is kept as a fallback for safety (larger
   // reduction wins).
-  const qhSizing = resolveEntryQuietHoursDecision(S.config, S.botMode);
+  const qhSizing = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
   const effectiveReducedPct = (() => {
     const fresh = qhSizing.reducedPct;
     const snap  = S.quietHoursV2ReducedBet;
@@ -2819,7 +2819,7 @@ async function _runBotTick(
   // hour before reaching this point.  A live order must NEVER be placed during
   // a silenced hour — with the shadow bypass the entry is demoted to paper;
   // without it the entry is rejected outright.
-  const qhFinal = resolveEntryQuietHoursDecision(S.config, S.botMode);
+  const qhFinal = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
   if (qhFinal.action === "block") {
     logger.warn(
       { sym, windowKey, direction, qhMode: qhFinal.qhMode, utcHour: qhFinal.utcHour, botMode: S.botMode, source: "pre-order-final-gate" },

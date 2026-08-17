@@ -32,7 +32,7 @@ import {
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
 import {
-  computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
+  computePerformanceReport, runAutoTuneRules, decrementPausedCoins, computeSymbolQuietHoursV2,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
 } from "./kalshi-bot-performance";
 import {
@@ -913,6 +913,86 @@ const tickInFlight = new Set<string>();
  * Threshold default 84.5 % (user rule: "84.5 is okay, 84 is not").
  */
 const QH_MIN_BETS = 5;
+
+// ---------------------------------------------------------------------------
+// Per-symbol smart-hours auto-calibration
+// ---------------------------------------------------------------------------
+
+/** Rate-limit: skip per-symbol recompute when the same symbol ran within 5 min. */
+const _symQHLastRecomputedAt = new Map<string, number>();
+const _SYM_QH_RECOMPUTE_MIN_MS = 5 * 60_000;
+
+/**
+ * Recompute the per-symbol QuietHoursV2 schedule for one symbol from its
+ * settled bet history, then update S.config.perSymbolQuietHours and persist.
+ *
+ * Triggered automatically after each bet is evaluated when
+ * quietHoursMode === 'per_market'.  Rate-limited to once per 5 minutes per
+ * symbol so a single busy eval cycle never causes a DB storm.
+ */
+export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
+  const sym = symbol.toUpperCase();
+  const now = Date.now();
+  if (now - (_symQHLastRecomputedAt.get(sym) ?? 0) < _SYM_QH_RECOMPUTE_MIN_MS) return;
+  _symQHLastRecomputedAt.set(sym, now);
+
+  const qhv2 = S.config.quietHoursV2;
+  const threshold = qhv2?.autoTuneThreshold ?? 40; // 40% win-rate floor (vs 84.5% for global auto-tune)
+  const days = Math.min(90, Math.max(7, qhv2?.autoTuneDays ?? 30));
+
+  try {
+    const rows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        direction: kalshiBotBetsTable.direction,
+        pnl: kalshiBotBetsTable.pnl,
+        exitReason: kalshiBotBetsTable.exitReason,
+        createdAt: kalshiBotBetsTable.createdAt,
+        exitedAt: kalshiBotBetsTable.exitedAt,
+        signals: kalshiBotBetsTable.signals,
+        outcome: kalshiBotBetsTable.outcome,
+        isMaxBet: kalshiBotBetsTable.isMaxBet,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        and(
+          eq(kalshiBotBetsTable.symbol, sym),
+          sql`${kalshiBotBetsTable.outcome} IN ('win', 'loss')`,
+          sql`${kalshiBotBetsTable.createdAt} >= NOW() - (${days} || ' days')::INTERVAL`,
+          sql`archived_at IS NULL`,
+        ),
+      )
+      .orderBy(asc(kalshiBotBetsTable.createdAt))
+      .limit(500);
+
+    if (rows.length < 10) {
+      logger.debug({ sym, betCount: rows.length }, "[qh-per-symbol] insufficient data — skipping per-symbol recompute");
+      return;
+    }
+
+    const bets: SettledBetRecord[] = rows.map(r => ({
+      symbol: r.symbol,
+      direction: r.direction,
+      pnl: r.pnl,
+      exitReason: r.exitReason,
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+      exitedAt: r.exitedAt instanceof Date ? r.exitedAt.toISOString() : r.exitedAt != null ? String(r.exitedAt) : null,
+      signals: (r.signals as Record<string, unknown>) ?? null,
+      outcome: r.outcome,
+      isMaxBet: r.isMaxBet ?? false,
+    }));
+
+    const newQhv2 = computeSymbolQuietHoursV2(bets, threshold);
+    const current = S.config.perSymbolQuietHours ?? {};
+    await updateBotConfig({ perSymbolQuietHours: { ...current, [sym]: newQhv2 } });
+    logger.debug(
+      { sym, betCount: bets.length, threshold, days },
+      "[qh-per-symbol] per-symbol schedule recomputed",
+    );
+  } catch (err) {
+    logger.warn({ err, sym }, "[qh-per-symbol] recomputeSymbolQuietHours failed (non-fatal)");
+  }
+}
 
 export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise<void> {
   const qhv2 = S.config.quietHoursV2;

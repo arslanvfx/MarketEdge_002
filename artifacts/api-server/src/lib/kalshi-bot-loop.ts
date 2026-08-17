@@ -213,6 +213,7 @@ let _lastWinRateRefreshAt = 0;
 // is evaluated.  60 s is short enough to evaluate prior-window shadow bets
 // promptly and long enough not to stress the DB.
 let _lastShadowEvalAt = 0;
+let _lastReEvalAt = 0;
 async function refreshConvictionWinRates(): Promise<void> {
   const now = Date.now();
   if (now - _lastWinRateRefreshAt < 60 * 60 * 1000) return; // at most once per hour
@@ -458,6 +459,17 @@ export async function runBotLoopTick(): Promise<void> {
   if (_shadowNow - _lastShadowEvalAt >= 60_000) {
     _lastShadowEvalAt = _shadowNow;
     evalShadowBets().catch(() => {});
+  }
+
+  // Retroactively correct mis-evaluated bets using authoritative Kalshi settlement data.
+  // Rate-limited to once per 30 minutes to avoid hammering the Kalshi API.
+  const _reEvalNow = Date.now();
+  if (_reEvalNow - _lastReEvalAt >= 30 * 60_000) {
+    _lastReEvalAt = _reEvalNow;
+    reEvaluateSettledBets({
+      since: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+      limit: 100,
+    }).catch(() => {});
   }
 
   // Always run window-expiry check, even when S.paused or disabled.

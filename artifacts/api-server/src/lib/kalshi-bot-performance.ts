@@ -4,6 +4,8 @@
 // out so the functions are fully unit-testable.
 // ---------------------------------------------------------------------------
 
+import type { QuietHoursV2 } from "./kalshi-bot-engine-core";
+
 export interface SettledBetRecord {
   symbol: string;
   direction: string | null;
@@ -808,4 +810,86 @@ export function runAutoTuneRules(
   }
 
   return mutations;
+}
+
+// ---------------------------------------------------------------------------
+// computeSymbolQuietHoursV2 — per-symbol auto-calibrated quiet-hours schedule
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute a QuietHoursV2 schedule for a single symbol from its historical
+ * win/loss data. Called by the per-market smart-hours auto-calibration after
+ * each bet is evaluated, so the schedule stays current without a timer.
+ *
+ * DOW uses America/New_York (ET), matching the global auto-tune SQL query that
+ * uses `AT TIME ZONE 'America/New_York'`. Hour stays as UTC — silencedByDow
+ * stores UTC hours and the frontend converts them to ET for display.
+ *
+ * Every DOW 0–6 is always populated in silencedByDow so the per-DOW check is
+ * authoritative for every day and the flat silencedUtcHours fallback is never
+ * used (it is stored as an empty array).
+ *
+ * @param bets      Evaluated bets for this symbol (any chronological order)
+ * @param threshold Win-rate % below which an hour cell is silenced (default 40)
+ * @param minBets   Minimum bets in a DOW×hour cell to act on (default 5)
+ */
+export function computeSymbolQuietHoursV2(
+  bets: SettledBetRecord[],
+  threshold = 40,
+  minBets = 5,
+): QuietHoursV2 {
+  // ET DOW helper — mirrors the global auto-tune's AT TIME ZONE 'America/New_York'
+  const ET_DOW_NAMES_SYM = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  function getEtDowSym(d: Date): number {
+    try {
+      const name = d.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short" });
+      const idx = ET_DOW_NAMES_SYM.indexOf(name);
+      return idx >= 0 ? idx : d.getUTCDay();
+    } catch {
+      return d.getUTCDay();
+    }
+  }
+
+  // Aggregate wins/losses per ET-DOW × UTC-hour
+  const tally: Record<number, Record<number, { wins: number; losses: number }>> = {};
+  for (const b of bets) {
+    if (b.outcome !== "win" && b.outcome !== "loss") continue;
+    const ts = b.createdAt;
+    const d = ts instanceof Date ? ts : new Date(String(ts));
+    const dow = getEtDowSym(d);
+    const hour = d.getUTCHours();
+    if (!tally[dow]) tally[dow] = {};
+    if (!tally[dow][hour]) tally[dow][hour] = { wins: 0, losses: 0 };
+    if (b.outcome === "win") tally[dow][hour].wins++;
+    else tally[dow][hour].losses++;
+  }
+
+  // Build silencedByDow — populate ALL 7 days so DOW-first logic never falls
+  // through to the flat silencedUtcHours list for any day of the week.
+  const silencedByDow: Record<string, number[]> = {};
+  for (let dow = 0; dow < 7; dow++) {
+    const dayStats = tally[dow];
+    if (!dayStats) {
+      silencedByDow[String(dow)] = []; // no data → no silencing for this day
+      continue;
+    }
+    const silenced: number[] = [];
+    for (let h = 0; h < 24; h++) {
+      const cell = dayStats[h];
+      if (!cell) continue;
+      const total = cell.wins + cell.losses;
+      if (total < minBets) continue;
+      const wr = (cell.wins / total) * 100;
+      if (wr < threshold) silenced.push(h);
+    }
+    silencedByDow[String(dow)] = silenced;
+  }
+
+  return {
+    enabled: true,
+    silencedUtcHours: [],   // per-symbol uses silencedByDow exclusively
+    reducedBetUtcHours: {},
+    silencedByDow,
+    autoTuneEnabled: true,
+  };
 }
