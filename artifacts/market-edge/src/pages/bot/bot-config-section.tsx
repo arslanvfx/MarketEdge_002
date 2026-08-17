@@ -9,6 +9,52 @@ import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
+// ── Client-side quiet-hours state resolver (mirrors server resolveQuietHoursV2State exactly) ──
+function getEtDowClient(d: Date): number {
+  const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const idx = DOW.indexOf(d.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short" }));
+  return idx >= 0 ? idx : d.getUTCDay();
+}
+
+type CoinQHState =
+  | { mode: "no-schedule" }
+  | { mode: "active" }
+  | { mode: "silenced" }
+  | { mode: "reduced"; pct: number }
+  | { mode: "data-gathering"; amount: number };
+
+function resolveSymbolStateClient(
+  schedule: QuietHoursV2 | undefined,
+  now: Date,
+  dgEnabled: boolean,
+  dgCap: number,
+): CoinQHState {
+  if (!schedule?.enabled) return { mode: "no-schedule" };
+  const utcHour = now.getUTCHours();
+  const dowStr = String(getEtDowClient(now));
+  const hasDowSilence = schedule.silencedByDow != null && dowStr in schedule.silencedByDow;
+  const isSilenced = hasDowSilence
+    ? (schedule.silencedByDow![dowStr] ?? []).includes(utcHour)
+    : schedule.silencedUtcHours.includes(utcHour);
+  if (isSilenced) return { mode: "silenced" };
+  const hasDowReduced = schedule.reducedByDow != null && dowStr in schedule.reducedByDow;
+  const reduced = hasDowReduced
+    ? (schedule.reducedByDow![dowStr]?.[String(utcHour)] ?? null)
+    : (schedule.reducedBetUtcHours[String(utcHour)] ?? null);
+  if (reduced != null && reduced >= 1 && reduced <= 99) return { mode: "reduced", pct: reduced };
+  const dgHours = schedule.dataGatheringByDow?.[dowStr];
+  if (Array.isArray(dgHours) && dgHours.includes(utcHour)) {
+    const override = schedule.dataGatheringOverrides?.[dowStr]?.[String(utcHour)];
+    if (override) {
+      if (override.type === "percent") return { mode: "reduced", pct: override.pct };
+      return { mode: "data-gathering", amount: override.amount };
+    }
+    if (!dgEnabled) return { mode: "active" };
+    return { mode: "data-gathering", amount: dgCap };
+  }
+  return { mode: "active" };
+}
+
 function fmtCalAge(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   const h = Math.floor(ms / 3_600_000);
@@ -44,6 +90,13 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
   const saveDgEnabled = React.useCallback(async (val: boolean) => {
     try { await authPost("/crypto/bot/config", { dataGatheringEnabled: val }); } catch { /* ignore */ }
   }, [authPost]);
+
+  // Clock for status bar — re-evaluates every 30s
+  const [now, setNow] = React.useState(() => new Date());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Always-current ref so tab-switch handler doesn't close over stale props
   const schedulesRef = React.useRef(perSymbolQuietHours);
@@ -181,6 +234,64 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
           <span className="text-[10px] text-muted-foreground/40">· auto-saves · click cell to set per-window amount</span>
         </div>
       </div>
+
+      {/* ── Current market status bar ── */}
+      {(() => {
+        const states = PER_MARKET_SYMBOLS.map(sym => ({
+          sym,
+          state: resolveSymbolStateClient(perSymbolQuietHours[sym], now, dgEnabled, dgCap),
+        }));
+        const activeCount   = states.filter(s => s.state.mode === "active").length;
+        const silencedCount = states.filter(s => s.state.mode === "silenced").length;
+        const reducedCount  = states.filter(s => s.state.mode === "reduced").length;
+        const dgCount       = states.filter(s => s.state.mode === "data-gathering").length;
+        const noSchCount    = states.filter(s => s.state.mode === "no-schedule").length;
+        const utcLabel = now.toUTCString().slice(17, 22) + " UTC";
+        const etLabel  = now.toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true }) + " ET";
+        return (
+          <div className="rounded-lg border border-border/50 bg-secondary/20 p-2.5 flex flex-col gap-2">
+            {/* header row */}
+            <div className="flex items-center justify-between flex-wrap gap-1">
+              <span className="text-[11px] font-semibold text-foreground/80 flex items-center gap-1.5">
+                <Activity className="w-3 h-3 text-cyan-400" />
+                Market Status Right Now
+              </span>
+              <span className="text-[9px] text-muted-foreground/50 tabular-nums">{etLabel} · {utcLabel}</span>
+            </div>
+            {/* summary chips */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {activeCount > 0   && <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 font-medium">{activeCount} Active</span>}
+              {silencedCount > 0 && <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/25 font-medium">{silencedCount} Silenced</span>}
+              {reducedCount > 0  && <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/25 font-medium">{reducedCount} Reduced</span>}
+              {dgCount > 0       && <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-400 border border-violet-500/25 font-medium">{dgCount} Data-Gathering</span>}
+              {noSchCount > 0    && <span className="text-[10px] px-2 py-0.5 rounded-full bg-muted/50 text-muted-foreground border border-border font-medium">{noSchCount} No Schedule</span>}
+            </div>
+            {/* coin grid */}
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-1">
+              {states.map(({ sym, state }) => {
+                let bg = "", border = "", text = "", badge = "";
+                if (state.mode === "active") {
+                  bg = "bg-emerald-500/10"; border = "border-emerald-500/25"; text = "text-emerald-300"; badge = "Active";
+                } else if (state.mode === "silenced") {
+                  bg = "bg-red-500/10"; border = "border-red-500/25"; text = "text-red-400"; badge = "Silenced";
+                } else if (state.mode === "reduced") {
+                  bg = "bg-amber-500/10"; border = "border-amber-500/25"; text = "text-amber-300"; badge = `${state.pct}% size`;
+                } else if (state.mode === "data-gathering") {
+                  bg = "bg-violet-500/10"; border = "border-violet-500/25"; text = "text-violet-300"; badge = `$${state.amount} cap`;
+                } else {
+                  bg = "bg-muted/30"; border = "border-border/40"; text = "text-muted-foreground/50"; badge = "—";
+                }
+                return (
+                  <div key={sym} className={`flex items-center justify-between gap-1 rounded px-2 py-1 border ${bg} ${border}`}>
+                    <span className="text-[10px] font-semibold text-foreground/70">{sym}</span>
+                    <span className={`text-[9px] font-medium ${text}`}>{badge}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Symbol tabs ── */}
       <div className="flex items-center gap-1.5 flex-wrap">
