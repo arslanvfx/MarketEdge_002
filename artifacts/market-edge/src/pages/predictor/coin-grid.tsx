@@ -1,5 +1,5 @@
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, Sparkles, Minus } from "lucide-react";
+import { Bot, Sparkles, Minus, MoonStar } from "lucide-react";
 import type { CoinPrediction, CoinPrice, AutoPilotDecision } from "./types";
 import { computeBetSignal } from "./types";
 import { COIN_STYLE, COMMODITY_SYMBOLS, DIR, formatPct } from "./utils";
@@ -122,6 +122,12 @@ export function CoinGrid({
                     <div className="text-sm font-bold tabular-nums mb-1">
                       <LivePrice price={price} />
                     </div>
+                    {coin.marketClosed && (
+                      <div className="flex items-center gap-1 mb-1 text-[9px] font-semibold text-muted-foreground/70">
+                        <MoonStar className="w-2.5 h-2.5 shrink-0" />
+                        <span>Market closed</span>
+                      </div>
+                    )}
                     <Sparkline data={coin.sparkline} color={chg >= 0 ? "#34d399" : "#f87171"} />
                     {next && (
                       <div className={`mt-1.5 flex items-center gap-1 text-[10px] font-medium ${nd.color}`}>

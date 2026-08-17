@@ -897,7 +897,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </span>
                       <label className="flex flex-col gap-1.5">
                         <span className="text-xs text-muted-foreground">
-                          Global threshold <span className="font-mono text-sky-400">{(merged.strikeProximityMinPct ?? 0.30).toFixed(2)}%</span>
+                          Global threshold <span className="font-mono text-sky-400">{(merged.strikeProximityMinPct ?? 0.05).toFixed(2)}%</span>
+                          {(merged.strikeProximityMinPct ?? 0.05) > 0.05 && (
+                            <span className="ml-1.5 text-[10px] text-amber-400">⚠ above calibrated band (0.02–0.05%) — will block most conviction entries</span>
+                          )}
                         </span>
                         <input
                           type="number"
@@ -905,7 +908,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           max={2.00}
                           step={0.01}
                           className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground w-28"
-                          value={merged.strikeProximityMinPct ?? 0.30}
+                          value={merged.strikeProximityMinPct ?? 0.05}
                           onChange={e => {
                             const v = parseFloat(e.target.value);
                             if (!Number.isNaN(v) && v >= 0.01 && v <= 2.00) {
@@ -913,7 +916,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             }
                           }}
                         />
-                        <span className="text-[10px] text-muted-foreground/60">|livePrice − strike| / strike × 100. Applies to coins with no per-coin override. Default: 0.30%. Range: 0.01–2.00%.</span>
+                        <span className="text-[10px] text-muted-foreground/60">|livePrice − strike| / strike × 100. Applies to coins with no per-coin override. Calibrated band: 0.02–0.05% (conviction-zone gaps are naturally 0.01–0.06%). Default: 0.05%. Range: 0.01–2.00%.</span>
                       </label>
                       <div className="flex items-center justify-between mt-0.5">
                         <span className="text-xs text-muted-foreground">ATR Scale</span>
@@ -938,7 +941,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         // allowing typical conviction entries where gapPct is 0.001–0.04%.
                         const SUGGESTED: Record<string,number> = { BTC:0.005, ETH:0.005, XRP:0.010, BNB:0.010, SOL:0.005, DOGE:0.020, NEAR:0.020, HYPE:0.030, ZEC:0.030 };
                         const overrides: Record<string,number> = { ...(merged.strikeProximityMinPctOverrides ?? {}) };
-                        const globalThreshold = merged.strikeProximityMinPct ?? 0.30;
+                        const globalThreshold = merged.strikeProximityMinPct ?? 0.05;
                         return (
                           <div className="mt-2">
                             <div className="flex items-center justify-between mb-1.5">

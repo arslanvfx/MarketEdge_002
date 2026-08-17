@@ -51,6 +51,10 @@ export interface CoinPrediction {
   product: string;
   name: string;
   category?: "crypto" | "commodity";
+  /** True when a commodity's Pyth price feed is stale/closed (market hours).
+   *  The price shown is the last cached value. Bot entry gates still fail-closed
+   *  because they use getTicker() directly (not this cached field). */
+  marketClosed?: boolean;
   price: number;
   change24hPct: number;
   change1hPct: number;
