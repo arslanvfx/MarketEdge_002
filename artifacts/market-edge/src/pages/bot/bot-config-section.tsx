@@ -100,10 +100,10 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
             <select
               className="bg-background border border-border rounded-md px-2 py-1 text-[11px] text-foreground"
               value={calibrateThreshold}
-              onChange={e => setCalibrateThreshold(parseInt(e.target.value, 10))}
+              onChange={e => setCalibrateThreshold(parseFloat(e.target.value))}
               disabled={calibrating}
             >
-              {[70, 75, 80, 85, 90].map(t => (
+              {Array.from({ length: 31 }, (_, i) => parseFloat((90 - i * 0.5).toFixed(1))).map(t => (
                 <option key={t} value={t}>{t}% win rate</option>
               ))}
             </select>

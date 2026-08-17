@@ -1011,6 +1011,9 @@ export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): 
   // Default to 84.5 (matches global auto-tune default and the grid's Silence threshold UI).
   // Callers may pass an explicit threshold — the API route forwards the client's chosen value.
   const threshold = thresholdOverride ?? qhv2?.autoTuneThreshold ?? 84.5;
+  // Lower minBets so hours with 2+ bets still get silenced if they're below the threshold.
+  // The default of 5 was skipping low-sample cells the UI correctly flags as red.
+  const minBets = 2;
   const days = 90;
   const calibratedAt = new Date().toISOString();
 
@@ -1062,7 +1065,7 @@ export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): 
         isMaxBet:  r.isMaxBet ?? false,
       }));
 
-      const schedule = computeSymbolQuietHoursV2(bets, threshold);
+      const schedule = computeSymbolQuietHoursV2(bets, threshold, minBets);
       schedule.calibratedAt = calibratedAt;
       result[sym] = schedule;
       calibrated.push(sym);
