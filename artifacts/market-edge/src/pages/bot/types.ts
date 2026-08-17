@@ -16,6 +16,7 @@ export interface QuietHoursV2 {
   // Per-day-of-week overrides (JS getUTCDay(): "0"=Sun, "1"=Mon, …, "6"=Sat)
   silencedByDow?: Record<string, number[]>;               // dow → UTC hours silenced on that day only
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 that day only
+  calibratedAt?: string;  // ISO timestamp — set by Calibrate All
 }
 
 export interface QuietHoursHourStat {

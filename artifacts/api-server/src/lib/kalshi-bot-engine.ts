@@ -100,6 +100,7 @@ import {
   type CoinStreakEntry,
   type EntryQuietHoursDecision,
   type QuietHoursAutoTuneDelta,
+  type QuietHoursV2,
 } from "./kalshi-bot-engine-core";
 
 // Re-export constants and types so callers only import from this file.

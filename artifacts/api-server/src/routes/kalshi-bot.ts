@@ -29,6 +29,7 @@ import {
   resetWindowConditions,
   reEvaluateSettledBets,
   runQuietHoursAutoTune,
+  recomputeAllSymbolQuietHours,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -1441,6 +1442,17 @@ router.get("/crypto/bot/performance-report", (req, res) => {
       rawMode === "paper" || rawMode === "live" ? rawMode : getBotState().mode;
     const report = getPerformanceReport(filterMode);
     res.json({ report, pausedCoins: getPausedCoinState() });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/quiet-hours-calibrate-all — bulk-calibrate per-symbol schedules from all bet history
+router.post("/crypto/bot/quiet-hours-calibrate-all", requireAuth, async (_req, res) => {
+  try {
+    const result = await recomputeAllSymbolQuietHours();
+    res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

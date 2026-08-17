@@ -982,6 +982,8 @@ export interface QuietHoursV2 {
   silencedByDow?: Record<string, number[]>;              // dow → UTC hours to fully block on that day only
 
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 on that day only
+
+  calibratedAt?: string; // ISO timestamp — when recomputeAllSymbolQuietHours last ran for this coin
 }
 
 /**

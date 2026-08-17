@@ -9,18 +9,112 @@ import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "GOLD", "SILVER", "WTI"];
 
+function fmtCalAge(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const h = Math.floor(ms / 3_600_000);
+  if (h < 1) return "just now";
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
 interface PerSymbolQuietHoursPanelProps {
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   onChange: (sym: string, v: QuietHoursV2) => void;
+  authPost: (path: string, body: object) => Promise<unknown>;
 }
 
-function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange }: PerSymbolQuietHoursPanelProps) {
+function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: PerSymbolQuietHoursPanelProps) {
   const [selectedSymbol, setSelectedSymbol] = React.useState(PER_MARKET_SYMBOLS[0]);
+  const [calibrating, setCalibrating] = React.useState(false);
+  const [calibrateMsg, setCalibrateMsg] = React.useState<string | null>(null);
+  const [calibrateOk, setCalibrateOk] = React.useState(true);
+  const [autoSaving, setAutoSaving] = React.useState(false);
+
+  // Always-current ref so tab-switch handler doesn't close over stale props
+  const schedulesRef = React.useRef(perSymbolQuietHours);
+  React.useEffect(() => { schedulesRef.current = perSymbolQuietHours; }, [perSymbolQuietHours]);
+
+  // Auto-save all current schedules to the server when the user switches coin tabs
+  const handleSymbolSwitch = React.useCallback(async (newSym: string) => {
+    if (newSym === selectedSymbol) return;
+    setAutoSaving(true);
+    try {
+      await authPost("/crypto/bot/config", { perSymbolQuietHours: schedulesRef.current });
+    } catch {
+      // non-fatal — draft still has the data
+    } finally {
+      setAutoSaving(false);
+    }
+    setSelectedSymbol(newSym);
+  }, [selectedSymbol, authPost]);
+
+  // Calibrate All — queries all bet history (paper + live + dev) for every symbol at once
+  const handleCalibrateAll = React.useCallback(async () => {
+    setCalibrating(true);
+    setCalibrateMsg(null);
+    try {
+      const result = await authPost("/crypto/bot/quiet-hours-calibrate-all", {}) as {
+        ok?: boolean;
+        perSymbolQuietHours?: Record<string, QuietHoursV2>;
+        calibratedSymbols?: string[];
+        skippedSymbols?: string[];
+      };
+      if (result.perSymbolQuietHours && Object.keys(result.perSymbolQuietHours).length > 0) {
+        for (const [sym, schedule] of Object.entries(result.perSymbolQuietHours)) {
+          onChange(sym, schedule);
+        }
+        const n = result.calibratedSymbols?.length ?? Object.keys(result.perSymbolQuietHours).length;
+        const skipped = result.skippedSymbols?.length ?? 0;
+        setCalibrateOk(true);
+        setCalibrateMsg(skipped > 0 ? `${n} calibrated, ${skipped} skipped (no data)` : `${n} coins calibrated`);
+      } else {
+        setCalibrateOk(false);
+        setCalibrateMsg("No coins had enough data (need ≥ 5 settled bets)");
+      }
+    } catch {
+      setCalibrateOk(false);
+      setCalibrateMsg("Calibration failed");
+    } finally {
+      setCalibrating(false);
+      setTimeout(() => setCalibrateMsg(null), 6_000);
+    }
+  }, [authPost, onChange]);
+
   const schedule = perSymbolQuietHours[selectedSymbol] ?? { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} };
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Symbol tabs */}
+      {/* ── Top bar: Calibrate All ── */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={handleCalibrateAll}
+          disabled={calibrating}
+          className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md border transition-all font-medium disabled:opacity-50 ${
+            calibrateMsg
+              ? calibrateOk
+                ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                : "border-red-500/50 bg-red-500/10 text-red-400"
+              : "border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20"
+          }`}
+          title="Query all bet history (paper + live) for all symbols and compute optimal quiet-hour schedules"
+        >
+          {calibrating
+            ? <><RefreshCw className="w-3 h-3 animate-spin" /> Calibrating all coins…</>
+            : calibrateMsg
+            ? <><Zap className="w-3 h-3" /> {calibrateMsg}</>
+            : <><Zap className="w-3 h-3" /> Calibrate All Now</>}
+        </button>
+        <span className="text-[10px] text-muted-foreground/50">
+          Pulls from all bet history (paper + live) · applies across all coins at once
+        </span>
+        {autoSaving && (
+          <span className="text-[10px] text-cyan-400/70 flex items-center gap-1">
+            <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Saving…
+          </span>
+        )}
+      </div>
+
+      {/* ── Symbol tabs ── */}
       <div className="flex items-center gap-1.5 flex-wrap">
         {PER_MARKET_SYMBOLS.map(sym => {
           const symQhv2 = perSymbolQuietHours[sym];
@@ -30,25 +124,32 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange }: PerSymbolQu
                 0,
               )
             : (symQhv2?.silencedUtcHours?.length ?? 0);
+          const calAt = symQhv2?.calibratedAt;
           return (
             <button
               key={sym}
-              onClick={() => setSelectedSymbol(sym)}
-              className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+              onClick={() => handleSymbolSwitch(sym)}
+              className={`flex flex-col items-center gap-0 px-2.5 py-1 text-xs rounded-md border transition-colors ${
                 selectedSymbol === sym
                   ? "bg-primary/15 text-primary border-primary/50 font-medium"
                   : "bg-secondary/50 text-muted-foreground border-border hover:bg-secondary hover:text-foreground"
               }`}
             >
-              {sym}
-              {totalSilenced > 0 && (
-                <span className="ml-1 text-[9px] opacity-60">{totalSilenced}h</span>
+              <span>
+                {sym}
+                {totalSilenced > 0 && (
+                  <span className="ml-1 text-[9px] opacity-60">{totalSilenced}h</span>
+                )}
+              </span>
+              {calAt && (
+                <span className="text-[8px] opacity-45 leading-tight">{fmtCalAge(calAt)}</span>
               )}
             </button>
           );
         })}
       </div>
-      {/* QuietHoursGrid for the selected symbol */}
+
+      {/* ── QuietHoursGrid for the selected symbol ── */}
       <QuietHoursGrid
         value={schedule}
         onChange={v => onChange(selectedSymbol, v)}
@@ -2013,6 +2114,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         ...d,
                         perSymbolQuietHours: { ...(d.perSymbolQuietHours ?? {}), [sym]: v },
                       }))}
+                      authPost={authPost}
                     />
                   )}
                 </div>

@@ -15,7 +15,7 @@ import {
   applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, applyProximityCalibrationMigration, buildStreakSnapshot, restoreStreakState,
   applyQuietHoursAutoTuneDeltas,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
-  type DecisionMode, type CoinStreakEntry, type QuietHoursAutoTuneDelta,
+  type DecisionMode, type CoinStreakEntry, type QuietHoursAutoTuneDelta, type QuietHoursV2,
 } from "./kalshi-bot-engine";
 import {
   makeInitialExitState, runExitGuard, type ExitState, type GuardStates,
@@ -992,6 +992,93 @@ export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
   } catch (err) {
     logger.warn({ err, sym }, "[qh-per-symbol] recomputeSymbolQuietHours failed (non-fatal)");
   }
+}
+
+const _ALL_PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "GOLD", "SILVER", "WTI"];
+
+/**
+ * Force-recomputes quiet-hours schedules for ALL per-market symbols at once.
+ * Uses up to 90 days of history (paper + live + dev — no mode filter) and a lower
+ * minimum-bet threshold (5) so coins with sparser history still get a schedule.
+ * Bypasses the per-symbol rate-limit used by the incremental auto-trigger.
+ */
+export async function recomputeAllSymbolQuietHours(): Promise<{
+  perSymbolQuietHours: Record<string, QuietHoursV2>;
+  calibratedSymbols: string[];
+  skippedSymbols: string[];
+}> {
+  const qhv2 = S.config.quietHoursV2;
+  const threshold = qhv2?.autoTuneThreshold ?? 40;
+  const days = 90;
+  const calibratedAt = new Date().toISOString();
+
+  const result: Record<string, QuietHoursV2> = {};
+  const calibrated: string[] = [];
+  const skipped: string[] = [];
+
+  for (const sym of _ALL_PER_MARKET_SYMBOLS) {
+    try {
+      const rows = await db
+        .select({
+          symbol:    kalshiBotBetsTable.symbol,
+          direction: kalshiBotBetsTable.direction,
+          pnl:       kalshiBotBetsTable.pnl,
+          exitReason:kalshiBotBetsTable.exitReason,
+          createdAt: kalshiBotBetsTable.createdAt,
+          exitedAt:  kalshiBotBetsTable.exitedAt,
+          signals:   kalshiBotBetsTable.signals,
+          outcome:   kalshiBotBetsTable.outcome,
+          isMaxBet:  kalshiBotBetsTable.isMaxBet,
+        })
+        .from(kalshiBotBetsTable)
+        .where(
+          and(
+            eq(kalshiBotBetsTable.symbol, sym),
+            sql`${kalshiBotBetsTable.outcome} IN ('win', 'loss')`,
+            sql`${kalshiBotBetsTable.createdAt} >= NOW() - (${days} || ' days')::INTERVAL`,
+            sql`archived_at IS NULL`,
+          ),
+        )
+        .orderBy(asc(kalshiBotBetsTable.createdAt))
+        .limit(1000);
+
+      if (rows.length < 5) {
+        skipped.push(sym);
+        logger.debug({ sym, betCount: rows.length }, "[qh-calibrate-all] insufficient data — skipping");
+        continue;
+      }
+
+      const bets: SettledBetRecord[] = rows.map(r => ({
+        symbol:    r.symbol,
+        direction: r.direction,
+        pnl:       r.pnl,
+        exitReason:r.exitReason,
+        createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+        exitedAt:  r.exitedAt instanceof Date ? r.exitedAt.toISOString() : r.exitedAt != null ? String(r.exitedAt) : null,
+        signals:   (r.signals as Record<string, unknown>) ?? null,
+        outcome:   r.outcome,
+        isMaxBet:  r.isMaxBet ?? false,
+      }));
+
+      const schedule = computeSymbolQuietHoursV2(bets, threshold);
+      schedule.calibratedAt = calibratedAt;
+      result[sym] = schedule;
+      calibrated.push(sym);
+      // Bump rate-limit cache so per-symbol auto-trigger won't re-run immediately
+      _symQHLastRecomputedAt.set(sym, Date.now());
+    } catch (err) {
+      logger.warn({ err, sym }, "[qh-calibrate-all] failed for symbol (non-fatal)");
+      skipped.push(sym);
+    }
+  }
+
+  if (Object.keys(result).length > 0) {
+    const current = S.config.perSymbolQuietHours ?? {};
+    await updateBotConfig({ perSymbolQuietHours: { ...current, ...result } });
+  }
+
+  logger.info({ calibrated, skipped }, "[qh-calibrate-all] bulk calibration complete");
+  return { perSymbolQuietHours: result, calibratedSymbols: calibrated, skippedSymbols: skipped };
 }
 
 export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise<void> {
