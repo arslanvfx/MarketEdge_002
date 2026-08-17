@@ -280,7 +280,7 @@ interface QuietHoursGridProps {
 
 export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges, symbolFilter, onSave }: QuietHoursGridProps) {
   const { getToken } = useAuth();
-  const [days, setDays] = useState(14);
+  const [days, setDays] = useState(90); // match calibration window so all history is visible by default
   const [targetWinRate, setTargetWinRate] = useState(85);
   const [analysis, setAnalysis] = useState<QuietHoursAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
@@ -475,11 +475,15 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
             </span>
           )}
         </div>
-        <label className="flex items-center gap-2 cursor-pointer shrink-0">
-          <span className="text-xs text-muted-foreground">Enabled</span>
+        <label className="flex items-center gap-2 cursor-pointer shrink-0" title="When OFF, this coin's quiet-hour restrictions are bypassed and it can bet at any time">
+          <span className="text-xs text-muted-foreground">Enforce hours</span>
           <div
             className={`w-9 h-5 rounded-full transition-colors relative ${value.enabled ? "bg-cyan-500" : "bg-muted"}`}
-            onClick={() => onChange({ ...value, enabled: !value.enabled })}
+            onClick={() => {
+              const updated = { ...value, enabled: !value.enabled };
+              onChange(updated);
+              onSave?.(updated); // persist immediately — no manual Save click needed
+            }}
           >
             <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value.enabled ? "translate-x-4" : "translate-x-0.5"}`} />
           </div>
