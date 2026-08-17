@@ -69,6 +69,8 @@ function countDaySilenced(v2: QuietHoursV2, dow: number): number {
   return hasDow ? (v2.silencedByDow![dowStr] ?? []).length : v2.silencedUtcHours.length;
 }
 
+type DGCellOverride = { type: 'dollar'; amount: number } | { type: 'percent'; pct: number };
+
 interface HourCellProps {
   utcHour: number;
   mode: "silenced" | "reduced" | "active";
@@ -81,9 +83,12 @@ interface HourCellProps {
   isCurrentHour: boolean;
   isDataGathering?: boolean;
   dgCap?: number;
+  dgOverride?: DGCellOverride;
   onToggleSilence: (h: number) => void;
   onSetReducedPct: (h: number, pct: number) => void;
   onClearReducedPct: (h: number) => void;
+  onSetDgOverride: (h: number, override: DGCellOverride) => void;
+  onClearDgOverride: (h: number) => void;
 }
 
 function HourCell({
@@ -98,12 +103,17 @@ function HourCell({
   isCurrentHour,
   isDataGathering = false,
   dgCap = 1,
+  dgOverride,
   onToggleSilence,
   onSetReducedPct,
   onClearReducedPct,
+  onSetDgOverride,
+  onClearDgOverride,
 }: HourCellProps) {
   const [editingPct, setEditingPct] = useState(false);
   const [pctInput, setPctInput] = useState("");
+  const [editingDg, setEditingDg] = useState(false);
+  const [dgDollarInput, setDgDollarInput] = useState("");
 
   const estHour = utcToEst(utcHour);
   const h12 = estHour % 12 || 12;
@@ -135,15 +145,25 @@ function HourCell({
   const silencedOverlay = mode === "silenced" ? "opacity-50 saturate-0" : "";
   const currentRing = isCurrentHour ? "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background" : "";
   const reducedRing = reducedPct != null && mode !== "silenced" ? "ring-1 ring-amber-400/50" : "";
-  const dgRing = isDataGathering && mode !== "silenced" ? "ring-1 ring-violet-400/40" : "";
+  const dgIsPercent = dgOverride?.type === 'percent';
+  const dgRing = isDataGathering && mode !== "silenced"
+    ? (dgIsPercent ? "ring-1 ring-amber-400/50" : "ring-1 ring-violet-400/40")
+    : "";
 
   // Preset bet percentages (% of regular bet to use)
   const PRESETS = [75, 50, 25];
 
   return (
-    // Entire card is tappable to toggle silence/active
+    // DG cells open the override panel on click; other cells toggle silence
     <div
-      onClick={() => onToggleSilence(utcHour)}
+      onClick={() => {
+        if (isDataGathering && mode !== "silenced") {
+          setEditingDg(prev => !prev);
+          setEditingPct(false);
+        } else {
+          onToggleSilence(utcHour);
+        }
+      }}
       className={`cursor-pointer relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all select-none ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${reducedRing} ${dgRing}`}
     >
       {/* Top row: time label + mode icon + dot */}
@@ -153,9 +173,16 @@ function HourCell({
           {mode === "silenced" && <VolumeX className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
           {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
           {isDataGathering && mode !== "silenced" && (
-            <span className="text-[7px] font-mono font-bold text-violet-400 bg-violet-500/15 px-0.5 rounded leading-none border border-violet-500/30 shrink-0" title={`Sparse data — capped at $${dgCap}`}>
-              ${dgCap}
-            </span>
+            dgIsPercent ? (
+              <span className="text-[7px] font-mono font-bold text-amber-400 bg-amber-500/15 px-0.5 rounded leading-none border border-amber-500/30 shrink-0" title={`Data-gathering: ${dgOverride!.pct}% of regular bet`}>
+                {(dgOverride as { type: 'percent'; pct: number }).pct}%
+              </span>
+            ) : (
+              <span className="text-[7px] font-mono font-bold text-violet-400 bg-violet-500/15 px-0.5 rounded leading-none border border-violet-500/30 shrink-0"
+                title={`Sparse data — capped at $${dgOverride?.type === 'dollar' ? dgOverride.amount : dgCap}`}>
+                ${dgOverride?.type === 'dollar' ? dgOverride.amount : dgCap}
+              </span>
+            )
           )}
         </div>
         {tier !== "empty" && (
@@ -186,8 +213,75 @@ function HourCell({
         )}
       </div>
 
+      {/* DG override panel — shown when operator clicks a sparse-data cell */}
+      {isDataGathering && mode !== "silenced" && editingDg && (
+        <div className="mt-0.5" onClick={e => e.stopPropagation()}>
+          <div className="flex flex-col gap-1">
+            {/* Quick % buttons — picks percent of global bet, removes $ cap */}
+            <div className="flex items-center gap-0.5 flex-wrap">
+              <span className="text-[8px] text-muted-foreground/50 mr-0.5">%&nbsp;bet:</span>
+              {[25, 50, 75, 100].map(p => (
+                <button
+                  key={p}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => { onSetDgOverride(utcHour, { type: 'percent', pct: p }); setEditingDg(false); }}
+                  className={`text-[9px] px-1 py-0.5 rounded leading-none border transition-colors ${dgOverride?.type === 'percent' && (dgOverride as { type: 'percent'; pct: number }).pct === p ? "bg-amber-500/30 text-amber-200 border-amber-400/50" : "bg-amber-500/15 text-amber-300 border-amber-500/25 hover:bg-amber-500/30"}`}
+                >
+                  {p}%
+                </button>
+              ))}
+            </div>
+            {/* Custom $ amount — overrides global cap for this cell only */}
+            <div className="flex items-center gap-0.5">
+              <span className="text-[8px] text-violet-400 font-bold">$</span>
+              <input
+                autoFocus
+                type="number"
+                min={0.5}
+                max={50}
+                step={0.5}
+                className="w-12 text-[9px] bg-background border border-violet-500/40 rounded px-1 py-0.5 text-violet-300 focus:outline-none"
+                value={dgDollarInput}
+                placeholder={String(dgOverride?.type === 'dollar' ? (dgOverride as { type: 'dollar'; amount: number }).amount : dgCap)}
+                onChange={e => setDgDollarInput(e.target.value)}
+                onBlur={() => {
+                  const v = parseFloat(dgDollarInput);
+                  if (!isNaN(v) && v >= 0.5 && v <= 50) { onSetDgOverride(utcHour, { type: 'dollar', amount: v }); }
+                  setEditingDg(false);
+                }}
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    const v = parseFloat(dgDollarInput);
+                    if (!isNaN(v) && v >= 0.5 && v <= 50) { onSetDgOverride(utcHour, { type: 'dollar', amount: v }); }
+                    setEditingDg(false);
+                  }
+                  if (e.key === "Escape") setEditingDg(false);
+                }}
+              />
+              {dgOverride && (
+                <button
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => { onClearDgOverride(utcHour); setEditingDg(false); }}
+                  className="text-[9px] text-muted-foreground/40 hover:text-red-400 transition-colors ml-0.5"
+                  title="Reset to global cap"
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              )}
+              <button
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => setEditingDg(false)}
+                className="text-[9px] text-muted-foreground/30 hover:text-muted-foreground transition-colors ml-auto"
+              >
+                <X className="w-2 h-2" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Reduce section — stopPropagation so tapping here doesn't toggle the cell */}
-      {mode !== "silenced" && (
+      {mode !== "silenced" && !isDataGathering && (
         <div className="mt-0.5" onClick={e => e.stopPropagation()}>
           {editingPct ? (
             // Preset buttons + custom input (mobile-friendly)
@@ -256,6 +350,12 @@ function HourCell({
               +reduce
             </button>
           )}
+        </div>
+      )}
+      {/* Hint for DG cells not in edit mode */}
+      {isDataGathering && mode !== "silenced" && !editingDg && (
+        <div className="mt-0.5">
+          <span className="text-[8px] text-violet-400/50 leading-none">tap to set amount</span>
         </div>
       )}
     </div>
@@ -430,6 +530,40 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
     onChange({ ...value, reducedByDow: { ...(value.reducedByDow ?? {}), [dowStr]: rest } });
   }
 
+  // ── Data-gathering per-cell override controls ─────────────────────────────
+  function getDgOverride(h: number): DGCellOverride | undefined {
+    return value.dataGatheringOverrides?.[String(selectedDow)]?.[String(h)];
+  }
+
+  function setDgOverride(h: number, override: DGCellOverride) {
+    const dowStr = String(selectedDow);
+    const existing = value.dataGatheringOverrides?.[dowStr] ?? {};
+    const updated = {
+      ...value,
+      dataGatheringOverrides: {
+        ...(value.dataGatheringOverrides ?? {}),
+        [dowStr]: { ...existing, [String(h)]: override },
+      },
+    };
+    onChange(updated);
+    onSave?.(updated); // auto-save immediately — deliberate per-cell action
+  }
+
+  function clearDgOverride(h: number) {
+    const dowStr = String(selectedDow);
+    const existing = value.dataGatheringOverrides?.[dowStr] ?? {};
+    const { [String(h)]: _, ...rest } = existing;
+    const updated = {
+      ...value,
+      dataGatheringOverrides: {
+        ...(value.dataGatheringOverrides ?? {}),
+        [dowStr]: rest,
+      },
+    };
+    onChange(updated);
+    onSave?.(updated);
+  }
+
   function handleTabChange(dow: number) {
     setSelectedDow(dow);
     setAnalysis(null); // clear stale analysis so apply-suggested cannot use wrong-day data
@@ -558,9 +692,12 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
                     isCurrentHour={h === currentUtcHour}
                     isDataGathering={isDataGatheringHour(h, value, selectedDow)}
                     dgCap={dgCap}
+                    dgOverride={getDgOverride(h)}
                     onToggleSilence={toggleSilence}
                     onSetReducedPct={setReducedPct}
                     onClearReducedPct={clearReducedPct}
+                    onSetDgOverride={setDgOverride}
+                    onClearDgOverride={clearDgOverride}
                   />
                 );
               })}

@@ -985,6 +985,8 @@ export interface QuietHoursV2 {
 
   calibratedAt?: string; // ISO timestamp — when recomputeAllSymbolQuietHours last ran for this coin
   dataGatheringByDow?: Record<string, number[]>; // dow → UTC hours with < 2 historical bets (active but capped at dataGatheringBetCap)
+  /** Per-cell overrides: operator can set a custom $ cap or promote to a % of global bet (which removes the $ cap). */
+  dataGatheringOverrides?: Record<string, Record<string, { type: 'dollar'; amount: number } | { type: 'percent'; pct: number }>>;
 }
 
 /**
@@ -1014,7 +1016,7 @@ export function getEtDow(d: Date = new Date()): number {
 export function resolveQuietHoursV2State(
   qhv2: QuietHoursV2 | undefined,
   now: Date = new Date(),
-): { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number; isDataGathering?: boolean } {
+): { mode: "active" | "silenced" | "reduced"; reducedBetAmount?: number; utcHour: number; isDataGathering?: boolean; dgOverrideAmount?: number } {
   const utcHour = now.getUTCHours();
   if (!qhv2?.enabled) return { mode: "active", utcHour };
   const dowStr = String(getEtDow(now));
@@ -1033,9 +1035,20 @@ export function resolveQuietHoursV2State(
     return { mode: "reduced", reducedBetAmount: reduced, utcHour };
   }
 
-  // Data-gathering hours: < 2 historical bets — not silenced, but bot caps at dataGatheringBetCap.
+  // Data-gathering hours: 0 or sparse bets — not silenced, but bot caps at dataGatheringBetCap.
+  // Per-cell override: operator can set a custom $ amount or promote the hour to a % of global bet
+  // (% override removes the $ cap and treats the hour exactly like a reducedByDow entry).
   const dgHours = qhv2.dataGatheringByDow?.[dowStr];
   if (Array.isArray(dgHours) && dgHours.includes(utcHour)) {
+    const override = qhv2.dataGatheringOverrides?.[dowStr]?.[String(utcHour)];
+    if (override) {
+      if (override.type === 'percent') {
+        // Treat exactly like a reduced hour — no $ cap, just pct of global bet
+        return { mode: "reduced", reducedBetAmount: override.pct, utcHour };
+      }
+      // Custom dollar cap for this specific cell
+      return { mode: "active", isDataGathering: true, dgOverrideAmount: override.amount, utcHour };
+    }
     return { mode: "active", isDataGathering: true, utcHour };
   }
 
@@ -1073,6 +1086,8 @@ export interface EntryQuietHoursDecision {
   reducedPct: number | null;
   /** True when hour has < 2 historical bets — bot stays active but tick applies dataGatheringBetCap. */
   isDataGathering?: boolean;
+  /** Custom per-cell dollar cap (overrides global dataGatheringBetCap for this hour). */
+  dgOverrideAmount?: number;
   /** Which rule matched — for operator-facing logs. */
   qhMode: "active" | "silenced" | "reduced" | "legacy-silenced";
   utcHour: number;
@@ -1099,7 +1114,7 @@ export function resolveEntryQuietHoursDecision(
     if (st.mode === "reduced") {
       return { action: "proceed", qhMode: "reduced", ...base, reducedPct: st.reducedBetAmount ?? null };
     }
-    return { action: "proceed", qhMode: "active", ...base, isDataGathering: st.isDataGathering };
+    return { action: "proceed", qhMode: "active", ...base, isDataGathering: st.isDataGathering, dgOverrideAmount: st.dgOverrideAmount };
   }
 
   if (isInQuietHours(utcHour, config.quietHoursStart, config.quietHoursEnd)) {
@@ -1252,6 +1267,7 @@ export interface BotConfig {
   quietHoursMode?: 'global' | 'per_market'; // 'global' = single shared schedule (default); 'per_market' = each symbol uses its own auto-calibrated schedule
   perSymbolQuietHours?: Record<string, QuietHoursV2>; // per-symbol V2 schedules — only active when quietHoursMode === 'per_market'
   dataGatheringBetCap?: number; // $ cap applied to hours with ≤ 2 historical bets (default 1.00) — bot stays active but collects data at reduced risk
+  dataGatheringEnabled?: boolean; // master switch for the $ cap feature (default true); when false, sparse hours bet normally
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
   circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
   // Directional balance filter: caps correlated exposure by limiting same-direction

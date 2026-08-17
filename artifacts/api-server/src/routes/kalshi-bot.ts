@@ -723,6 +723,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionCandleAtrScaleEnabled,
     quietHoursMode,
     perSymbolQuietHours,
+    dataGatheringEnabled,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -752,6 +753,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     quietHoursV2?: { enabled?: boolean; silencedUtcHours?: unknown; reducedBetUtcHours?: unknown; silencedByDow?: unknown; reducedByDow?: unknown; autoTuneEnabled?: boolean; autoTuneDays?: number; autoTuneThreshold?: number; autoTuneIntervalHours?: number };
     quietHoursMode?: 'global' | 'per_market';
     perSymbolQuietHours?: Record<string, unknown>;
+    dataGatheringEnabled?: boolean;
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
     enableDirectionCap?: boolean;
@@ -995,6 +997,43 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
             : [];
         }
       }
+      // Per-cell data-gathering overrides: dow → utcHour → { type:'dollar', amount } | { type:'percent', pct }
+      type DGOverride = { type: 'dollar'; amount: number } | { type: 'percent'; pct: number };
+      const parsedDgOverrides: Record<string, Record<string, DGOverride>> = {};
+      if (typeof v2.dataGatheringOverrides === "object" && v2.dataGatheringOverrides !== null) {
+        for (const [k, hourMap] of Object.entries(v2.dataGatheringOverrides as Record<string, unknown>)) {
+          if (!/^[0-6]$/.test(k)) continue;
+          if (!hourMap || typeof hourMap !== "object") continue;
+          const parsedHours: Record<string, DGOverride> = {};
+          for (const [h, ov] of Object.entries(hourMap as Record<string, unknown>)) {
+            if (!/^\d+$/.test(h) || Number(h) > 23) continue;
+            if (!ov || typeof ov !== "object") continue;
+            const o = ov as Record<string, unknown>;
+            if (o.type === 'dollar' && typeof o.amount === 'number' && o.amount >= 0.5 && o.amount <= 50) {
+              parsedHours[h] = { type: 'dollar', amount: o.amount };
+            } else if (o.type === 'percent' && typeof o.pct === 'number' && o.pct >= 1 && o.pct <= 100) {
+              parsedHours[h] = { type: 'percent', pct: o.pct };
+            }
+          }
+          if (Object.keys(parsedHours).length > 0) parsedDgOverrides[k] = parsedHours;
+        }
+      }
+      // Per-symbol reducedByDow — inline parse (parseReducedByDow is scoped to the quietHoursV2 block above)
+      let parsedReducedByDow: Record<string, Record<string, number>> | undefined;
+      if (typeof v2.reducedByDow === "object" && v2.reducedByDow !== null) {
+        const rbd: Record<string, Record<string, number>> = {};
+        for (const [dk, hourMap] of Object.entries(v2.reducedByDow as Record<string, unknown>)) {
+          if (!/^[0-6]$/.test(dk)) continue;
+          if (!hourMap || typeof hourMap !== "object") continue;
+          const hours: Record<string, number> = {};
+          for (const [hk, pct] of Object.entries(hourMap as Record<string, unknown>)) {
+            if (!/^\d+$/.test(hk) || Number(hk) > 23) continue;
+            if (typeof pct === "number" && pct >= 1 && pct <= 99) hours[hk] = pct;
+          }
+          if (Object.keys(hours).length > 0) rbd[dk] = hours;
+        }
+        if (Object.keys(rbd).length > 0) parsedReducedByDow = rbd;
+      }
       const key = sym.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
       if (!key) continue;
       // Preserve optional per-coin fields so saving one coin never silently
@@ -1008,7 +1047,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
         silencedUtcHours: [],
         reducedBetUtcHours: {},
         ...(Object.keys(parsedSilencedByDow).length > 0 ? { silencedByDow: parsedSilencedByDow } : {}),
+        ...(parsedReducedByDow != null && Object.keys(parsedReducedByDow).length > 0 ? { reducedByDow: parsedReducedByDow } : {}),
         ...(Object.keys(parsedDataGatheringByDow).length > 0 ? { dataGatheringByDow: parsedDataGatheringByDow } : {}),
+        ...(Object.keys(parsedDgOverrides).length > 0 ? { dataGatheringOverrides: parsedDgOverrides } : {}),
         autoTuneEnabled: typeof v2.autoTuneEnabled === "boolean" ? v2.autoTuneEnabled : true,
         ...maybeNum("autoTuneIntervalHours"),
         ...maybeNum("autoTuneDays"),
@@ -1092,6 +1133,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof dataGatheringBetCap === "number" && dataGatheringBetCap >= 0.5 && dataGatheringBetCap <= 50) {
     partial.dataGatheringBetCap = dataGatheringBetCap;
   }
+  if (typeof dataGatheringEnabled === "boolean") partial.dataGatheringEnabled = dataGatheringEnabled;
   // Entry safety gate thresholds
   if (typeof consensusMinCents === "number" && consensusMinCents >= 0 && consensusMinCents <= 50) {
     partial.consensusMinCents = consensusMinCents;

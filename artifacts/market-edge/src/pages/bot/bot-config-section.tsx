@@ -22,9 +22,10 @@ interface PerSymbolQuietHoursPanelProps {
   onChange: (sym: string, v: QuietHoursV2) => void;
   authPost: (path: string, body: object) => Promise<unknown>;
   dgCap?: number;
+  dgEnabled?: boolean;
 }
 
-function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgCap: dgCapProp = 1 }: PerSymbolQuietHoursPanelProps) {
+function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgCap: dgCapProp = 1, dgEnabled: dgEnabledProp = true }: PerSymbolQuietHoursPanelProps) {
   const [selectedSymbol, setSelectedSymbol] = React.useState(PER_MARKET_SYMBOLS[0]);
   const [calibrating, setCalibrating] = React.useState(false);
   const [calibrateMsg, setCalibrateMsg] = React.useState<string | null>(null);
@@ -36,6 +37,12 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
   React.useEffect(() => { setDgCap(dgCapProp); }, [dgCapProp]);
   const saveDgCap = React.useCallback(async (cap: number) => {
     try { await authPost("/crypto/bot/config", { dataGatheringBetCap: cap }); } catch { /* ignore */ }
+  }, [authPost]);
+  // Master enable/disable for the data-gathering $ cap feature
+  const [dgEnabled, setDgEnabled] = React.useState(dgEnabledProp);
+  React.useEffect(() => { setDgEnabled(dgEnabledProp); }, [dgEnabledProp]);
+  const saveDgEnabled = React.useCallback(async (val: boolean) => {
+    try { await authPost("/crypto/bot/config", { dataGatheringEnabled: val }); } catch { /* ignore */ }
   }, [authPost]);
 
   // Always-current ref so tab-switch handler doesn't close over stale props
@@ -138,11 +145,11 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
         <p className="text-[10px] text-muted-foreground/50 leading-snug">
           Analyzes 90 days of bet history per coin · silences hours below the chosen win-rate threshold for each day of the week · applies &amp; saves across all markets at once.
         </p>
-        {/* ── Data-gathering dollar cap ── */}
-        <label className="flex items-center gap-2 text-[11px] text-muted-foreground/70 mt-0.5 flex-wrap">
+        {/* ── Data-gathering dollar cap + master toggle ── */}
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70 mt-0.5 flex-wrap">
           <DollarSign className="w-3 h-3 text-violet-400 shrink-0" />
           <span className="font-medium text-violet-300/80">Sparse hours bet cap</span>
-          <span className="text-[10px] text-muted-foreground/40">(cells with ≤ 2 bets stay active, capped at)</span>
+          <span className="text-[10px] text-muted-foreground/40">(no/sparse data cells active, capped at)</span>
           <span className="flex items-center gap-0.5">
             <span className="text-[10px] text-muted-foreground/50">$</span>
             <input
@@ -150,6 +157,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
               min={0.5}
               max={50}
               step={0.5}
+              disabled={!dgEnabled}
               value={dgCap}
               onChange={e => {
                 const v = parseFloat(e.target.value);
@@ -157,11 +165,21 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
               }}
               onBlur={() => saveDgCap(dgCap)}
               onKeyDown={e => { if (e.key === "Enter") saveDgCap(dgCap); }}
-              className="w-14 bg-background border border-violet-500/30 rounded px-1 py-0.5 text-[11px] text-violet-300 text-right focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+              className="w-14 bg-background border border-violet-500/30 rounded px-1 py-0.5 text-[11px] text-violet-300 text-right focus:outline-none focus:ring-1 focus:ring-violet-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
             />
           </span>
-          <span className="text-[10px] text-muted-foreground/40">· auto-saves on blur / Enter</span>
-        </label>
+          {/* Master on/off toggle — when OFF, sparse hours bet at normal size */}
+          <label className="flex items-center gap-1.5 cursor-pointer ml-1" title={dgEnabled ? "Data-gathering is ON — sparse cells are capped at the $ amount" : "Data-gathering is OFF — sparse cells bet normally with no $ restriction"}>
+            <div
+              className={`w-7 h-3.5 rounded-full relative transition-colors ${dgEnabled ? "bg-violet-500" : "bg-muted"}`}
+              onClick={() => { const v = !dgEnabled; setDgEnabled(v); saveDgEnabled(v); }}
+            >
+              <span className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white shadow transition-transform ${dgEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} />
+            </div>
+            <span className="text-[10px] text-muted-foreground/50">{dgEnabled ? "on" : "off"}</span>
+          </label>
+          <span className="text-[10px] text-muted-foreground/40">· auto-saves · click cell to set per-window amount</span>
+        </div>
       </div>
 
       {/* ── Symbol tabs ── */}
@@ -2184,6 +2202,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       }))}
                       authPost={authPost}
                       dgCap={merged.dataGatheringBetCap ?? 1}
+                      dgEnabled={merged.dataGatheringEnabled ?? true}
                     />
                   )}
                 </div>

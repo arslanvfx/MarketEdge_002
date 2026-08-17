@@ -873,15 +873,20 @@ export function computeSymbolQuietHoursV2(
   for (let dow = 0; dow < 7; dow++) {
     const dayStats = tally[dow];
     if (!dayStats) {
+      // No bets at all on this day — every hour is a data-gathering candidate
       silencedByDow[String(dow)] = [];
-      dataGatheringByDow[String(dow)] = [];
+      dataGatheringByDow[String(dow)] = Array.from({ length: 24 }, (_, i) => i);
       continue;
     }
     const silenced: number[] = [];
     const dataGathering: number[] = [];
     for (let h = 0; h < 24; h++) {
       const cell = dayStats[h];
-      if (!cell) continue; // zero bets — no opinion
+      if (!cell) {
+        // Zero bets ever in this hour — always flag for data-gathering cap
+        dataGathering.push(h);
+        continue;
+      }
       const total = cell.wins + cell.losses;
       if (total < minBets) {
         // Sparse data: flag for bet cap rather than silencing
