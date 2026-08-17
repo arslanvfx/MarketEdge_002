@@ -1002,13 +1002,15 @@ const _ALL_PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOG
  * minimum-bet threshold (5) so coins with sparser history still get a schedule.
  * Bypasses the per-symbol rate-limit used by the incremental auto-trigger.
  */
-export async function recomputeAllSymbolQuietHours(): Promise<{
+export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): Promise<{
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   calibratedSymbols: string[];
   skippedSymbols: string[];
 }> {
   const qhv2 = S.config.quietHoursV2;
-  const threshold = qhv2?.autoTuneThreshold ?? 40;
+  // Default to 84.5 (matches global auto-tune default and the grid's Silence threshold UI).
+  // Callers may pass an explicit threshold — the API route forwards the client's chosen value.
+  const threshold = thresholdOverride ?? qhv2?.autoTuneThreshold ?? 84.5;
   const days = 90;
   const calibratedAt = new Date().toISOString();
 

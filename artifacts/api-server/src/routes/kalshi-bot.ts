@@ -1459,9 +1459,14 @@ router.get("/crypto/bot/performance-report", (req, res) => {
 });
 
 // POST /crypto/bot/quiet-hours-calibrate-all — bulk-calibrate per-symbol schedules from all bet history
-router.post("/crypto/bot/quiet-hours-calibrate-all", requireAuth, async (_req, res) => {
+router.post("/crypto/bot/quiet-hours-calibrate-all", requireAuth, async (req, res) => {
   try {
-    const result = await recomputeAllSymbolQuietHours();
+    // Accept optional threshold from the client (matches the grid's Silence threshold UI).
+    // Defaults to 84.5 on the server when not provided.
+    const rawThreshold = (req.body as Record<string, unknown>)?.threshold;
+    const thresholdOverride = typeof rawThreshold === "number" && rawThreshold > 0 && rawThreshold <= 100
+      ? rawThreshold : undefined;
+    const result = await recomputeAllSymbolQuietHours(thresholdOverride);
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

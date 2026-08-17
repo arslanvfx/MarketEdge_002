@@ -28,6 +28,8 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
   const [calibrating, setCalibrating] = React.useState(false);
   const [calibrateMsg, setCalibrateMsg] = React.useState<string | null>(null);
   const [calibrateOk, setCalibrateOk] = React.useState(true);
+  // Threshold matches the grid's "Silence threshold" dropdown (default 85 = silence hours < 85% win rate)
+  const [calibrateThreshold, setCalibrateThreshold] = React.useState(85);
 
   // Always-current ref so tab-switch handler doesn't close over stale props
   const schedulesRef = React.useRef(perSymbolQuietHours);
@@ -43,7 +45,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
 
   // Calibrate & Apply All Markets — one click:
   //   1. Server queries 90 days of bet history for every coin.
-  //   2. Server computes optimal silencedByDow schedules + saves to DB (server-side).
+  //   2. Server computes optimal silencedByDow schedules using the chosen threshold + saves to DB.
   //   3. Client updates local draft with enabled:true for every calibrated coin.
   //   NOTE: No second authPost here — the calibrate-all endpoint already persists
   //         the full merged result (including skipped coins) on the server, so a
@@ -52,7 +54,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
     setCalibrating(true);
     setCalibrateMsg(null);
     try {
-      const result = await authPost("/crypto/bot/quiet-hours-calibrate-all", {}) as {
+      const result = await authPost("/crypto/bot/quiet-hours-calibrate-all", { threshold: calibrateThreshold }) as {
         ok?: boolean;
         perSymbolQuietHours?: Record<string, QuietHoursV2>;
         calibratedSymbols?: string[];
@@ -92,6 +94,21 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
       {/* ── Top bar: one-click global action ── */}
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Threshold selector — controls which hours get silenced (win rate below this → silenced) */}
+          <label className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[11px] text-muted-foreground">Silence below</span>
+            <select
+              className="bg-background border border-border rounded-md px-2 py-1 text-[11px] text-foreground"
+              value={calibrateThreshold}
+              onChange={e => setCalibrateThreshold(parseInt(e.target.value, 10))}
+              disabled={calibrating}
+            >
+              {[70, 75, 80, 85, 90].map(t => (
+                <option key={t} value={t}>{t}% win rate</option>
+              ))}
+            </select>
+          </label>
+
           <button
             onClick={handleCalibrateAll}
             disabled={calibrating}
@@ -102,7 +119,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
                   : "border-red-500/50 bg-red-500/10 text-red-400"
                 : "border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20"
             }`}
-            title="Analyze 90 days of bet history for every coin, compute the best quiet-hour windows for each day of the week, and save — all markets, all days, one click"
+            title={`Analyze 90 days of bet history for every coin, silence hours with <${calibrateThreshold}% win rate, and save — all markets, all days, one click`}
           >
             {calibrating
               ? <><RefreshCw className="w-3 h-3 animate-spin" /> Calibrating all markets…</>
@@ -112,7 +129,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
           </button>
         </div>
         <p className="text-[10px] text-muted-foreground/50 leading-snug">
-          Analyzes 90 days of bet history per coin · computes best quiet-hour windows per day of week · applies &amp; saves across all markets at once. Use the grid below to fine-tune or override individual days.
+          Analyzes 90 days of bet history per coin · silences hours below the chosen win-rate threshold for each day of the week · applies &amp; saves across all markets at once.
         </p>
       </div>
 
