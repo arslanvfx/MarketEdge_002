@@ -147,7 +147,9 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost }: P
       </div>
 
       {/* ── QuietHoursGrid for the selected symbol ── */}
+      {/* key forces a full remount on symbol change so the analysis re-fetches */}
       <QuietHoursGrid
+        key={selectedSymbol}
         value={schedule}
         onChange={v => onChange(selectedSymbol, v)}
         symbolFilter={selectedSymbol}
