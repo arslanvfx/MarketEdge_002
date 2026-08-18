@@ -222,6 +222,48 @@ export const extremeCautionAbortedThisWindow = new Set<string>();
 // TTL: 10 s — long enough to outlast one poller cycle + bot-loop latency.
 export const convictionAbortCooldown = new Map<string, number>();
 export const CONVICTION_ABORT_COOLDOWN_MS = 5_000;
+// Per-abort cooldown duration stored alongside convictionAbortCooldown.
+// Boundary-miss aborts ("price past cap" or "poller out of zone") use
+// CONVICTION_BOUNDARY_MISS_COOLDOWN_MS (2 s) so the bot retries quickly when
+// the price oscillates back into the zone.  Direction-reversal and cross-check
+// aborts keep the full CONVICTION_ABORT_COOLDOWN_MS (5 s).  Absent entries
+// default to CONVICTION_ABORT_COOLDOWN_MS at the read site.
+// Cleared on window transition alongside convictionAbortCooldown.
+export const convictionAbortCooldownMs = new Map<string, number>();
+export const CONVICTION_BOUNDARY_MISS_COOLDOWN_MS = 2_000;
+
+// Pre-warmed authenticated orderbook snapshot for coins at the conviction zone.
+// Populated by the conviction poller in the same poll cycle that detects zone
+// entry — so the live-price gate in runBotTickForCoin can skip its own Kalshi
+// API round-trip (0.5–2 s) and use the already-fetched data instead.
+// Cleared on window transition.  TTL matches the conviction price map (1.5 s).
+export interface ConvictionObSnapshot {
+  yesAsk: number | null;
+  yesBid: number | null;
+  fetchedAt: number;
+  /** Kalshi market ticker used for this fetch — must match expectedTicker
+   *  in the tick before the cache is consumed. */
+  ticker: string;
+}
+export const convictionObCache = new Map<string, ConvictionObSnapshot>(); // key = sym (upper-case)
+export const CONVICTION_OB_CACHE_TTL_MS = 1_500;
+
+// ---------------------------------------------------------------------------
+// Conviction zone-entry dispatch callback
+// ---------------------------------------------------------------------------
+// Injected at module-load time by kalshi-bot-loop.ts so the conviction poller
+// can fire a per-coin tick immediately on zone entry — eliminating the up-to-
+// 4.9-second gap between "zone detected" (1 s poller) and "order dispatched"
+// (5 s scheduler loop).  null until the callback is registered.
+// All gates (live-price check, direction guard, candle slope) still run inside
+// runBotTickForCoin — this only accelerates the dispatch timing.
+let _convictionZoneEntryFn: ((sym: string) => void) | null = null;
+export function setConvictionZoneEntryCallback(fn: (sym: string) => void): void {
+  _convictionZoneEntryFn = fn;
+}
+export function callConvictionZoneEntry(sym: string): void {
+  _convictionZoneEntryFn?.(sym);
+}
 // Per-coin rolling price ticks from the conviction 1 s poller.
 // Used by the direction guard to detect consecutive-seconds adverse movement.
 // Entries are pushed on every poller read and trimmed to the last 30.

@@ -31,7 +31,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S, convictionAbortCooldown, convictionFiredThisWindow, convictionPriceTicks } from "./kalshi-bot-state";
+import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
 import { deriveConvictionZone } from "./kalshi-bot-engine";
 import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
@@ -206,9 +206,78 @@ async function pollOnce(): Promise<void> {
 
       if (yesInZone || noInZone) {
         const cooldownKey = `${sym}:${windowKey}`;
-        const hadCooldown = convictionAbortCooldown.has(cooldownKey);
-        if (hadCooldown) {
+
+        // ── Abort-cooldown state ──────────────────────────────────────────────
+        // The tick sets convictionAbortCooldown after a live-price gate miss.
+        // We need to know both (a) whether a cooldown record exists and (b)
+        // whether it is still ACTIVE (not yet expired).  Using only .has()
+        // would treat an expired record as still-active and suppress dispatch.
+        const abortedAt        = convictionAbortCooldown.get(cooldownKey);
+        const storedCooldownMs = convictionAbortCooldownMs.get(cooldownKey) ?? CONVICTION_ABORT_COOLDOWN_MS;
+        const cooldownActive   = abortedAt != null && Date.now() - abortedAt < storedCooldownMs;
+
+        // Always clear the abort-cooldown record on zone re-entry so that the
+        // 5-second loop can retry on its next evaluation even if we do not
+        // dispatch here (e.g. because the cooldown is still active).
+        if (abortedAt != null) {
           convictionAbortCooldown.delete(cooldownKey);
+          if (cooldownActive) {
+            logger.info(
+              {
+                sym, windowKey,
+                yesAsk: yesAsk != null ? +yesAsk.toFixed(4) : null,
+                noAsk:  noAsk  != null ? +noAsk.toFixed(4)  : null,
+                lockPrice, lockPriceCap,
+                side: yesInZone ? "YES" : "NO",
+                remainingMs: Math.round(storedCooldownMs - (Date.now() - abortedAt)),
+              },
+              "[conviction-poller] zone entry — abort cooldown cleared (was active); loop will retry on next cycle",
+            );
+          }
+        }
+
+        // ── Pre-warm orderbook + immediate dispatch ───────────────────────────
+        // Dispatch the tick immediately (instead of waiting up to 4.9 s for the
+        // 5-second scheduler) ONLY when:
+        //   1. No bet has been placed for this coin this window.
+        //   2. There is no ACTIVE abort cooldown.  After a tick abort the
+        //      cooldown period is intentional rate-limiting; we respect it by
+        //      letting the 5-second loop handle the retry once the cooldown
+        //      expires naturally.  Dispatching every 1 s while a cooldown is
+        //      active would hammer the Kalshi OB API.
+        //   3. The bot is enabled and not paused.
+        // All standard gates (live-price, direction guard, candle slope, etc.)
+        // still run inside runBotTickForCoin — nothing is bypassed here.
+        if (
+          !convictionFiredThisWindow.has(cooldownKey) &&
+          !cooldownActive &&
+          S.config.enabled &&
+          !S.paused
+        ) {
+          // Pre-warm: fetch the authenticated orderbook now (same poll cycle)
+          // so the live-price gate in the tick can read it from convictionObCache
+          // and skip its own 0.5–2 s round-trip.
+          const pollerEntry = convictionPriceMap.get(sym);
+          if (pollerEntry?.ticker) {
+            try {
+              const ob = await fetchOrderbookPrices(pollerEntry.ticker);
+              if (ob !== null) {
+                // Cache the authenticated result.  Empty-book { yesAsk: null,
+                // yesBid: null } is a valid response and is cached.  We do NOT
+                // cache null (timeout/network error): the tick treats null as
+                // "retry later" and must not be misled by a stale failure.
+                convictionObCache.set(sym, {
+                  yesAsk:    ob.yesAsk,
+                  yesBid:    ob.yesBid,
+                  fetchedAt: Date.now(),
+                  ticker:    pollerEntry.ticker,
+                });
+              }
+            } catch {
+              // OB pre-fetch failed — the tick will fall back to its own call.
+            }
+          }
+
           logger.info(
             {
               sym, windowKey,
@@ -216,10 +285,13 @@ async function pollOnce(): Promise<void> {
               noAsk:  noAsk  != null ? +noAsk.toFixed(4)  : null,
               lockPrice, lockPriceCap,
               side: yesInZone ? "YES" : "NO",
+              obCached: convictionObCache.has(sym),
             },
-            "[conviction-poller] zone entry detected — cooldown cleared, Phase 3 will evaluate next tick",
+            "[conviction-poller] zone entry — dispatching tick immediately",
           );
+          callConvictionZoneEntry(sym);
         }
+        // ─────────────────────────────────────────────────────────────────────
       }
       // ─────────────────────────────────────────────────────────────────────
     }),

@@ -48,6 +48,7 @@ import {
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken, convictionDirectionGuardBlockedMap,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
+  convictionAbortCooldownMs, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS, setConvictionZoneEntryCallback, convictionObCache,
   maxBetCandidateForWindow, convictionPriceTicks, tickAbortReasons,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
@@ -77,6 +78,29 @@ import {
   loadCoinStreakStateFromDB, loadWindowBetCountsFromDB, loadRegimeCache,
   loadBorderProximityCache, getTimingAccuracy,
 } from "./kalshi-bot-db";
+
+// ---------------------------------------------------------------------------
+// Conviction zone-entry dispatch — poller shortcut
+// ---------------------------------------------------------------------------
+// Registered once at module load.  The 1 s conviction poller calls
+// callConvictionZoneEntry(sym) the moment it sees a coin's price enter the
+// [lockPrice, lockPriceCap] zone — eliminating the up-to-4.9 s wait for the
+// 5-second scheduler loop.  The dispatch is fire-and-forget; all gates still
+// run inside runBotTickForCoin (live-price check, direction guard, candle
+// slope, etc.) — nothing is bypassed.
+setConvictionZoneEntryCallback((sym: string) => {
+  if (!S.config.enabled || S.paused || S.dbDegradedSince !== null) return;
+  if (S.config.decisionMode !== "conviction") return;
+  const wk = currentWindowKey();
+  if (convictionFiredThisWindow.has(`${sym}:${wk}`)) return;
+  if (openPositions.has(sym)) return;
+  const kd = getKalshiCachedData(sym);
+  if (!kd?.ticker || kd.value === null || kd.yesPrice == null) return;
+  const pred = getCachedPrediction(sym);
+  runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []).catch((err) =>
+    logger.warn({ err, sym }, "[conviction-poller-dispatch] per-coin tick error (non-fatal)"),
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Bot loop — called from index.ts every 30 s
@@ -546,6 +570,8 @@ export async function runBotLoopTick(): Promise<void> {
     convictionFiredThisWindow.clear();
     extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();
+    convictionAbortCooldownMs.clear();
+    convictionObCache.clear();
     convictionEmergencyCloses.clear();
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
@@ -1474,10 +1500,14 @@ export async function runBotLoopTick(): Promise<void> {
     // rejected by live-price gate, released, dispatched again → zero bets).
     if (isConviction) {
       const abortedAt = convictionAbortCooldown.get(`${sym}:${windowKey}`);
-      if (abortedAt != null && Date.now() - abortedAt < CONVICTION_ABORT_COOLDOWN_MS) {
-        const remainingS = Math.ceil((CONVICTION_ABORT_COOLDOWN_MS - (Date.now() - abortedAt)) / 1_000);
+      // Use per-abort cooldown duration: boundary misses (price past cap or poller
+      // out of zone) use 2 s so the bot retries quickly on oscillation; direction
+      // reversals and cross-check aborts keep the full 5 s.
+      const thisCooldownMs = convictionAbortCooldownMs.get(`${sym}:${windowKey}`) ?? CONVICTION_ABORT_COOLDOWN_MS;
+      if (abortedAt != null && Date.now() - abortedAt < thisCooldownMs) {
+        const remainingS = Math.ceil((thisCooldownMs - (Date.now() - abortedAt)) / 1_000);
         logger.info(
-          { sym, windowKey, remainingS, cooldownMs: CONVICTION_ABORT_COOLDOWN_MS },
+          { sym, windowKey, remainingS, cooldownMs: thisCooldownMs },
           "[conviction-diag] tick-time price miss — cooldown active, suppressing dispatch",
         );
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: abort cooldown (${remainingS}s remaining)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });

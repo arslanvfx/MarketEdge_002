@@ -64,6 +64,7 @@ import {
   windowRandomizerUsedValues,
   convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
+  convictionAbortCooldownMs, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS, convictionObCache, CONVICTION_OB_CACHE_TTL_MS,
   tickAbortReasons,
   type CoinStabilityResult, type TrajectoryGateResult,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
@@ -1995,9 +1996,21 @@ async function _runBotTick(
     // the real best-bid/ask while the public market list can lag by minutes.
     // Always use the deterministically-computed ticker for the current window,
     // NOT freshData.ticker which may point to the already-published next window.
-    const obPrices = await fetchOrderbookPrices(expectedTicker).catch(() => null);
+    // Use pre-warmed orderbook cache when available (populated by the conviction
+    // poller in the same poll cycle that triggered this dispatch — saves 0.5–2 s
+    // of Kalshi API latency on the critical entry path).  Falls back to a fresh
+    // authenticated API call when the cache is absent, stale (>1.5 s), or for a
+    // mismatched ticker.  Caching null (timeout) is intentionally excluded: the
+    // tick treats null as "retry later" and must not serve a stale error.
+    const _cachedOb     = convictionObCache.get(sym);
+    const _obCacheFresh = _cachedOb != null
+      && Date.now() - _cachedOb.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
+      && _cachedOb.ticker === expectedTicker;
+    const obPrices: { yesAsk: number | null; yesBid: number | null } | null = _obCacheFresh && _cachedOb
+      ? { yesAsk: _cachedOb.yesAsk, yesBid: _cachedOb.yesBid }
+      : await fetchOrderbookPrices(expectedTicker).catch(() => null);
     logger.debug(
-      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker },
+      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker, obCacheHit: _obCacheFresh },
       "[kalshi-bot] conviction live-price gate: orderbook fetch for expected window ticker",
     );
 
@@ -2133,12 +2146,15 @@ async function _runBotTick(
       if (pollerRefPrice < lockPrice - 0.005 || pollerRefPrice > lockPriceCap + 0.005) {
         convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
         convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
+        // Boundary miss — use shorter 2 s cooldown so the bot retries quickly if
+        // the price oscillates back into the zone on the next poll cycle.
+        convictionAbortCooldownMs.set(`${sym}:${windowKey}`, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS);
         if (boostBetSize != null) {
           maxBetWindowToken.remaining++;
           logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (empty book, poller out of zone)");
         }
         logger.info(
-          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap, cooldownMs: CONVICTION_ABORT_COOLDOWN_MS },
+          { sym, direction, windowKey, pollerRefPrice, lockPrice, lockPriceCap, cooldownMs: CONVICTION_BOUNDARY_MISS_COOLDOWN_MS },
           "[conviction-diag] tick-time price miss: empty book poller out of zone — abort cooldown set",
         );
         setTickAbortReason(sym, windowKey,
@@ -2283,6 +2299,9 @@ async function _runBotTick(
       // Set abort cooldown to prevent immediate re-dispatch.
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
       convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
+      // Boundary miss — use shorter 2 s cooldown so the bot can re-enter quickly
+      // if the price pulls back into the zone from the far side of the cap.
+      convictionAbortCooldownMs.set(`${sym}:${windowKey}`, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS);
       if (boostBetSize != null) {
         maxBetWindowToken.remaining++;
         logger.info({ sym }, "[kalshi-bot] conviction live-price gate: max-bet token restored (price past cap)");
@@ -2292,7 +2311,7 @@ async function _runBotTick(
           sym, direction, windowKey,
           freshRefPrice: +freshRefPrice.toFixed(4),
           lockPrice, lockPriceCap,
-          cooldownMs: CONVICTION_ABORT_COOLDOWN_MS,
+          cooldownMs: CONVICTION_BOUNDARY_MISS_COOLDOWN_MS,
         },
         "[conviction-diag] tick-time price miss: price past cap — abort cooldown set",
       );
