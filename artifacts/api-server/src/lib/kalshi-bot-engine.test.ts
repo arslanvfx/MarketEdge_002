@@ -2783,10 +2783,12 @@ test("direction gate no-source: no ticks AND no candles → source='none'", () =
   assert.equal(r.sampleCount, 0);
 });
 
-test("direction gate no-source: stale ticks (outside time window) + no candles → source='none'", () => {
-  // Ticks exist but are all older than the guard's time window — the recent
-  // filter drops them, and with no candle fallback the source is 'none'.
-  const staleTs = Date.now() - 60_000; // 60 s old, window is ~7 s
+test("direction gate no-source: ticks older than trend window (>90 s) + no candles → source='none'", () => {
+  // Ticks exist but are older than BOTH the 7 s short window AND the 90 s
+  // trend window — neither check fires, candle fallback also absent → 'none'.
+  // (Previously the test used 60 s old ticks, but those are now within the
+  // 90 s trend window and DO produce a tick-sourced result.)
+  const staleTs = Date.now() - 100_000; // 100 s old — outside the 90 s trend window
   const r = computeConvictionDirectionGate({
     priceTicks: [
       { price: 100, ts: staleTs },
@@ -2797,6 +2799,63 @@ test("direction gate no-source: stale ticks (outside time window) + no candles �
   });
   assert.equal(r.blocked, false);
   assert.equal(r.source, "none");
+});
+
+// ── Poller-gap regression (HYPE Aug-18 2026) ─────────────────────────────────
+//
+// If the conviction poller's most recent tick is 8+ seconds old (one missed
+// poll), the 7 s short window has < 2 entries.  Previously the trend check was
+// nested inside `if (recent.length >= 2)`, so it was silently skipped and the
+// guard fell back to stale closed candles — missing the ongoing rise.
+// After the fix the trend check runs independently of the short window.
+
+test("direction gate NO poller-gap: 1 fresh tick + rising trend in 90 s window → BLOCKED", () => {
+  // Scenario: price rose from 13.80 → 14.30 over the last 60 s, then the
+  // poller had an 8 s gap so there is only 1 tick in the 7 s short window.
+  const now = Date.now();
+  const ticks: Array<{ price: number; ts: number }> = [
+    { price: 13.80, ts: now - 60_000 }, // 60 s ago — in 90 s trend window
+    { price: 13.90, ts: now - 45_000 },
+    { price: 14.00, ts: now - 30_000 },
+    { price: 14.20, ts: now - 15_000 },
+    { price: 14.30, ts: now - 8_100 },  // just outside 7 s short window
+    { price: 14.30, ts: now - 2_000 },  // only 1 tick inside short window
+  ];
+  const r = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no" });
+  assert.equal(r.source, "ticks", "should return tick source, not fall to candles");
+  assert.equal(r.blocked, true, "rising trend over 90 s must block NO entry even with only 1 fresh tick");
+  assert.ok(r.slopePrice !== null && r.slopePrice > 0,
+    `Expected positive (adverse for NO) slope, got ${r.slopePrice}`);
+});
+
+test("direction gate NO poller-gap: 1 fresh tick + falling trend in 90 s window → NOT blocked", () => {
+  // Same gap scenario but price is FALLING — favorable for NO, must not block.
+  const now = Date.now();
+  const ticks: Array<{ price: number; ts: number }> = [
+    { price: 14.30, ts: now - 60_000 },
+    { price: 14.10, ts: now - 40_000 },
+    { price: 13.90, ts: now - 20_000 },
+    { price: 13.80, ts: now - 8_100 }, // just outside short window
+    { price: 13.80, ts: now - 2_000 }, // only 1 tick inside short window
+  ];
+  const r = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no" });
+  assert.equal(r.source, "ticks");
+  assert.equal(r.blocked, false, "falling trend is favorable for NO — must not block");
+});
+
+test("direction gate poller-gap: 0 fresh ticks but rising trend in 90 s window → BLOCKED", () => {
+  // Complete 7 s gap (no ticks at all in the short window), but trend is clearly
+  // rising — trend check alone must block the NO entry.
+  const now = Date.now();
+  const ticks: Array<{ price: number; ts: number }> = [
+    { price: 13.80, ts: now - 80_000 },
+    { price: 14.00, ts: now - 50_000 },
+    { price: 14.20, ts: now - 20_000 },
+    { price: 14.30, ts: now - 10_000 }, // all outside the 7 s short window
+  ];
+  const r = computeConvictionDirectionGate({ priceTicks: ticks, direction: "no" });
+  assert.equal(r.source, "ticks", "trend check must return ticks source before falling to candles");
+  assert.equal(r.blocked, true, "rising trend with no fresh ticks must still block NO entry");
 });
 
 test("direction gate: ticks evaluated even when candles are missing (source='ticks')", () => {

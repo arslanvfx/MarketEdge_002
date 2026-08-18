@@ -1981,60 +1981,79 @@ export function computeConvictionDirectionGate(opts: {
 
   // ── Primary: second-level ticks ─────────────────────────────────────────
   if (priceTicks && priceTicks.length >= 2) {
-    const now       = Date.now();
-    const windowMs  = (reqSeconds + 3) * 1_000; // a few extra seconds of headroom
-    const sorted    = [...priceTicks].sort((a, b) => a.ts - b.ts);
-    const recent    = sorted.filter(t => now - t.ts <= windowMs);
+    const now      = Date.now();
+    const windowMs = (reqSeconds + 3) * 1_000; // a few extra seconds of headroom
+    const sorted   = [...priceTicks].sort((a, b) => a.ts - b.ts);
+    const recent   = sorted.filter(t => now - t.ts <= windowMs);
 
-    if (recent.length >= 2) {
-      // ── Short-horizon check (entry timing) ───────────────────────────────
-      // Compare oldest tick in the short window to newest.  A single neutral
-      // or bounce tick in the middle cannot mask a sustained adverse trend —
-      // only the net direction over the full window counts.
-      //   YES adverse = net falling (slopePrice < 0).
-      //   NO  adverse = net rising  (slopePrice > 0).
-      //   Flat (slopePrice === 0) is neutral — never blocks.
-      const fromPrice  = recent[0].price;
-      const toPrice    = recent[recent.length - 1].price;
-      const slopePrice = toPrice - fromPrice;
-      const shortBlocked = direction === "yes" ? slopePrice < 0 : slopePrice > 0;
+    // ── Short-horizon check (7 s window, entry timing) ───────────────────
+    // Compare oldest tick in the short window to newest.
+    //   YES adverse = net falling (slopePrice < 0).
+    //   NO  adverse = net rising  (slopePrice > 0).
+    //   Flat (slopePrice === 0) is neutral — never blocks.
+    let shortFromPrice:  number | null = null;
+    let shortToPrice:    number | null = null;
+    let shortSlopePrice: number | null = null;
+    let shortBlocked = false;
+    const hasShort = recent.length >= 2;
+    if (hasShort) {
+      shortFromPrice  = recent[0].price;
+      shortToPrice    = recent[recent.length - 1].price;
+      shortSlopePrice = shortToPrice - shortFromPrice;
+      shortBlocked    = direction === "yes" ? shortSlopePrice < 0 : shortSlopePrice > 0;
+    }
 
-      // ── Broader-horizon trend check (freefall detector) ──────────────────
-      // The short window above only sees the last few seconds.  A price in
-      // freefall toward the strike that goes flat for those few seconds at the
-      // instant of entry would pass the short check (slopePrice === 0) even
-      // though the larger recent move is clearly adverse.  Evaluate the net
-      // move over a broader recent horizon and block if IT is adverse — the
-      // most recent price is still `toPrice`, so a genuine reversal (price now
-      // above where it was, for YES) is not penalised.
-      let trendBlocked = false;
-      let trendFromPrice: number | null = null;
-      let trendSlopePrice: number | null = null;
-      if (trendSecs > 0) {
-        const trendMs   = trendSecs * 1_000;
-        const trendPool = sorted.filter(t => now - t.ts <= trendMs);
-        if (trendPool.length >= 2) {
-          trendFromPrice  = trendPool[0].price;
-          trendSlopePrice = toPrice - trendFromPrice;
-          trendBlocked = direction === "yes"
-            ? trendSlopePrice < 0
-            : trendSlopePrice > 0;
-        }
+    // ── Broader-horizon trend check (90 s window) — DECOUPLED ────────────
+    // Previously this block was nested inside `if (recent.length >= 2)`, so
+    // a single missed poller tick (>7 s gap) silently bypassed the trend
+    // check and fell through to stale closed candles.  Now the trend pool is
+    // computed independently: it only needs ≥2 ticks anywhere in trendSecs,
+    // regardless of whether the 7 s short window was fully populated.
+    //
+    // toPrice uses the short window's most-recent tick when available;
+    // otherwise falls back to the globally most-recent stored tick so the
+    // anchor point is always as fresh as possible.
+    let trendFromPrice:  number | null = null;
+    let trendSlopePrice: number | null = null;
+    let trendBlocked = false;
+    let trendPool: Array<{ price: number; ts: number }> = [];
+    let hasTrend = false;
+    if (trendSecs > 0) {
+      const trendMs = trendSecs * 1_000;
+      trendPool = sorted.filter(t => now - t.ts <= trendMs);
+      if (trendPool.length >= 2) {
+        const toPrice   = shortToPrice ?? sorted[sorted.length - 1].price;
+        trendFromPrice  = trendPool[0].price;
+        trendSlopePrice = toPrice - trendFromPrice;
+        trendBlocked    = direction === "yes"
+          ? trendSlopePrice < 0
+          : trendSlopePrice > 0;
+        hasTrend = true;
       }
+    }
 
+    // Return a tick-sourced result whenever at least one tick-based check
+    // ran.  Only fall through to closed candles when there are literally no
+    // ticks within the broad trend window (session start or a long outage).
+    if (hasShort || hasTrend) {
       const blocked = shortBlocked || trendBlocked;
-      // Surface whichever slope actually triggered the block so the diagnostic
-      // reflects the real reason (a flat short slope with an adverse trend
-      // slope must not log "slopePrice: 0 — OK").
+      // Surface whichever slope triggered the block (adverse trend slope
+      // must not be hidden behind a flat short slope in the logs).
+      const toPrice     = shortToPrice ?? sorted[sorted.length - 1].price;
       const reportFrom  = trendBlocked && !shortBlocked && trendFromPrice != null
-        ? trendFromPrice : fromPrice;
+        ? trendFromPrice  : (shortFromPrice  ?? trendFromPrice);
       const reportSlope = trendBlocked && !shortBlocked && trendSlopePrice != null
-        ? trendSlopePrice : slopePrice;
+        ? trendSlopePrice : (shortSlopePrice ?? trendSlopePrice);
       return {
         blocked, fromPrice: reportFrom, toPrice, slopePrice: reportSlope,
         consecutiveAdverseSeconds: 0,
-        source: "ticks", sampleCount: recent.length,
-        ageSpanMs: recent[recent.length - 1].ts - recent[0].ts,
+        source: "ticks",
+        sampleCount: hasShort ? recent.length : trendPool.length,
+        ageSpanMs: hasShort
+          ? recent[recent.length - 1].ts - recent[0].ts
+          : trendPool.length >= 2
+            ? trendPool[trendPool.length - 1].ts - trendPool[0].ts
+            : null,
       };
     }
   }
