@@ -307,6 +307,23 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
               )
             : (symQhv2?.silencedUtcHours?.length ?? 0);
           const calAt = symQhv2?.calibratedAt;
+
+          // Compute the symbol's current-hour status so the tab is tinted to match
+          // the "Market Status Right Now" row colors below.
+          const symState = resolveSymbolStateClient(symQhv2, now, dgEnabled, dgCap);
+          const unselectedClasses = (() => {
+            if (symState.mode === "silenced")
+              return "bg-red-500/10 text-red-400 border-red-500/25 hover:bg-red-500/15";
+            if (symState.mode === "reduced")
+              return "bg-amber-500/10 text-amber-300 border-amber-500/25 hover:bg-amber-500/15";
+            if (symState.mode === "data-gathering")
+              return "bg-violet-500/10 text-violet-300 border-violet-500/25 hover:bg-violet-500/15";
+            if (symState.mode === "active")
+              return "bg-emerald-500/10 text-emerald-300 border-emerald-500/25 hover:bg-emerald-500/15";
+            // no-schedule — neutral default
+            return "bg-secondary/50 text-muted-foreground border-border hover:bg-secondary hover:text-foreground";
+          })();
+
           return (
             <button
               key={sym}
@@ -314,7 +331,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
               className={`flex flex-col items-center gap-0 px-2.5 py-1 text-xs rounded-md border transition-colors ${
                 selectedSymbol === sym
                   ? "bg-primary/15 text-primary border-primary/50 font-medium"
-                  : "bg-secondary/50 text-muted-foreground border-border hover:bg-secondary hover:text-foreground"
+                  : unselectedClasses
               }`}
             >
               <span>

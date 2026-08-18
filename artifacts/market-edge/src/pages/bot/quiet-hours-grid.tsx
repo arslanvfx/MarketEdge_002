@@ -174,11 +174,11 @@ function HourCell({
           {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
           {isDataGathering && mode !== "silenced" && (
             dgIsPercent ? (
-              <span className="text-[7px] font-mono font-bold text-amber-400 bg-amber-500/15 px-0.5 rounded leading-none border border-amber-500/30 shrink-0" title={`Data-gathering: ${dgOverride!.pct}% of regular bet`}>
+              <span className="text-[10px] font-mono font-bold text-amber-400 bg-amber-500/15 px-1 py-px rounded leading-none border border-amber-500/30 shrink-0" title={`Data-gathering: ${dgOverride!.pct}% of regular bet`}>
                 {(dgOverride as { type: 'percent'; pct: number }).pct}%
               </span>
             ) : (
-              <span className="text-[7px] font-mono font-bold text-violet-400 bg-violet-500/15 px-0.5 rounded leading-none border border-violet-500/30 shrink-0"
+              <span className="text-[10px] font-mono font-bold text-violet-400 bg-violet-500/15 px-1 py-px rounded leading-none border border-violet-500/30 shrink-0"
                 title={`Sparse data — capped at $${dgOverride?.type === 'dollar' ? dgOverride.amount : dgCap}`}>
                 ${dgOverride?.type === 'dollar' ? dgOverride.amount : dgCap}
               </span>
