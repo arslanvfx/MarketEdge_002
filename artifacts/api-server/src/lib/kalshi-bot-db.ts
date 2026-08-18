@@ -993,6 +993,12 @@ export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
         ...current,
         [sym]: {
           ...(current[sym] ?? {}),
+          // Calibration produced a valid schedule — make sure it takes effect.
+          // Entries created purely by calibration previously had no `enabled`
+          // field, so resolveEntryQuietHoursDecisionForSymbol silently ignored
+          // them.  Preserve an explicit user opt-out (enabled === false);
+          // otherwise enable.
+          enabled: current[sym]?.enabled ?? true,
           // Calibration-owned schedule fields only:
           silencedByDow:      newQhv2.silencedByDow,
           dataGatheringByDow: newQhv2.dataGatheringByDow,
@@ -1107,6 +1113,11 @@ export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): 
     for (const [sym, cal] of Object.entries(result)) {
       const mergedEntry: QuietHoursV2 = {
         ...(current[sym] ?? {}),
+        // Calibration produced a valid schedule — make sure it takes effect.
+        // Preserve an explicit user opt-out (enabled === false); otherwise
+        // enable, because a schedule without enabled:true is silently ignored
+        // by resolveEntryQuietHoursDecisionForSymbol.
+        enabled: current[sym]?.enabled ?? true,
         // Calibration-owned schedule fields only:
         silencedByDow:       cal.silencedByDow,
         dataGatheringByDow:  cal.dataGatheringByDow,

@@ -974,8 +974,15 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.quietHoursMode = quietHoursMode;
   }
   if (perSymbolQuietHours !== undefined && typeof perSymbolQuietHours === "object" && perSymbolQuietHours !== null) {
-    // Validate and sanitise each symbol's schedule — the entire object replaces the stored one,
-    // so the client must send all symbols (not just the one that changed).
+    // Validate and sanitise each symbol's schedule, then MERGE over the stored
+    // map: symbols present in the submission are updated; symbols absent from
+    // the submission are preserved.  Within each submitted symbol, fields the
+    // client omits fall back to the stored entry — so a partial save can never
+    // silently wipe calibration data (silencedByDow, calibratedAt, ...) or
+    // user settings (reducedByDow, auto-tune options).  Previously the whole
+    // object was replaced, which erased calibrated schedules whenever the UI
+    // saved config with a stale or partial per-symbol map.
+    const storedPsqh = getBotState().config.perSymbolQuietHours ?? {};
     const validated: NonNullable<typeof partial.perSymbolQuietHours> = {};
     for (const [sym, rawV2] of Object.entries(perSymbolQuietHours as Record<string, unknown>)) {
       if (!rawV2 || typeof rawV2 !== "object") continue;
@@ -1037,28 +1044,66 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       }
       const key = sym.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
       if (!key) continue;
-      // Preserve optional per-coin fields so saving one coin never silently
-      // wipes the auto-tune config or calibration timestamp.
-      const maybeNum = (field: string) => {
+      const stored = storedPsqh[key];
+      // Per-field merge: a field the client submits wins; a field the client
+      // omits falls back to the stored entry; only then do defaults apply.
+      const maybeNum = (field: "autoTuneIntervalHours" | "autoTuneDays" | "autoTuneThreshold") => {
         const val = v2[field];
-        return typeof val === "number" && isFinite(val) ? { [field]: val } : {};
+        if (typeof val === "number" && isFinite(val)) return { [field]: val };
+        // autoTuneIntervalHours is persisted but not declared on QuietHoursV2 — index via a loose cast.
+        const storedVal = (stored as unknown as Record<string, unknown> | undefined)?.[field];
+        return typeof storedVal === "number" && isFinite(storedVal) ? { [field]: storedVal } : {};
       };
+      // Staleness guard for calibration-owned fields (silencedByDow,
+      // dataGatheringByDow, silencedUtcHours, calibratedAt): the client echoes
+      // back the full entry it loaded, so if a calibration run completed AFTER
+      // the client fetched config, the submitted copy of those fields predates
+      // the freshest schedule.  calibratedAt acts as the version stamp — when
+      // the stored entry carries a newer calibratedAt than the submission, the
+      // stored calibration-owned fields win.  User-owned fields (enabled,
+      // reducedByDow, dg overrides, auto-tune settings) still take the
+      // submitted values.
+      const storedCalTs = Date.parse(stored?.calibratedAt ?? "");
+      const submittedCalTs = Date.parse(typeof v2.calibratedAt === "string" ? v2.calibratedAt : "");
+      const clientCalStale = isFinite(storedCalTs) && (!isFinite(submittedCalTs) || submittedCalTs < storedCalTs);
+      // For map-valued fields, "submitted" means the raw key was present (even
+      // if it parses to empty — that is an explicit clear).  Absent → stored.
+      const silencedByDow = clientCalStale
+        ? stored?.silencedByDow
+        : (v2.silencedByDow !== undefined ? parsedSilencedByDow : stored?.silencedByDow);
+      const dataGatheringByDow = clientCalStale
+        ? stored?.dataGatheringByDow
+        : (v2.dataGatheringByDow !== undefined ? parsedDataGatheringByDow : stored?.dataGatheringByDow);
+      const reducedByDow = v2.reducedByDow !== undefined
+        ? parsedReducedByDow
+        : stored?.reducedByDow;
+      const dgOverrides = v2.dataGatheringOverrides !== undefined
+        ? parsedDgOverrides
+        : stored?.dataGatheringOverrides;
       validated[key] = {
-        enabled: typeof v2.enabled === "boolean" ? v2.enabled : true,
-        silencedUtcHours: [],
-        reducedBetUtcHours: {},
-        ...(Object.keys(parsedSilencedByDow).length > 0 ? { silencedByDow: parsedSilencedByDow } : {}),
-        ...(parsedReducedByDow != null && Object.keys(parsedReducedByDow).length > 0 ? { reducedByDow: parsedReducedByDow } : {}),
-        ...(Object.keys(parsedDataGatheringByDow).length > 0 ? { dataGatheringByDow: parsedDataGatheringByDow } : {}),
-        ...(Object.keys(parsedDgOverrides).length > 0 ? { dataGatheringOverrides: parsedDgOverrides } : {}),
-        autoTuneEnabled: typeof v2.autoTuneEnabled === "boolean" ? v2.autoTuneEnabled : true,
+        enabled: typeof v2.enabled === "boolean" ? v2.enabled : (stored?.enabled ?? true),
+        silencedUtcHours: !clientCalStale && Array.isArray(v2.silencedUtcHours)
+          ? (v2.silencedUtcHours as unknown[]).filter((h): h is number => typeof h === "number" && h >= 0 && h <= 23)
+          : (stored?.silencedUtcHours ?? []),
+        reducedBetUtcHours: stored?.reducedBetUtcHours ?? {},
+        ...(silencedByDow && Object.keys(silencedByDow).length > 0 ? { silencedByDow } : {}),
+        ...(reducedByDow && Object.keys(reducedByDow).length > 0 ? { reducedByDow } : {}),
+        ...(dataGatheringByDow && Object.keys(dataGatheringByDow).length > 0 ? { dataGatheringByDow } : {}),
+        ...(dgOverrides && Object.keys(dgOverrides).length > 0 ? { dataGatheringOverrides: dgOverrides } : {}),
+        autoTuneEnabled: typeof v2.autoTuneEnabled === "boolean" ? v2.autoTuneEnabled : (stored?.autoTuneEnabled ?? true),
         ...maybeNum("autoTuneIntervalHours"),
         ...maybeNum("autoTuneDays"),
         ...maybeNum("autoTuneThreshold"),
-        ...(typeof v2.calibratedAt === "string" ? { calibratedAt: v2.calibratedAt } : {}),
+        ...(clientCalStale
+          ? { calibratedAt: stored!.calibratedAt! }
+          : (typeof v2.calibratedAt === "string"
+            ? { calibratedAt: v2.calibratedAt }
+            : (stored?.calibratedAt ? { calibratedAt: stored.calibratedAt } : {}))),
       };
     }
-    partial.perSymbolQuietHours = validated;
+    // Merge over the stored map so symbols absent from this submission keep
+    // their existing (possibly calibrated) schedules.
+    partial.perSymbolQuietHours = { ...storedPsqh, ...validated };
   }
   if (typeof maxConsecutiveLosses === "number" && maxConsecutiveLosses >= 0 && maxConsecutiveLosses <= 10) {
     partial.maxConsecutiveLosses = maxConsecutiveLosses;

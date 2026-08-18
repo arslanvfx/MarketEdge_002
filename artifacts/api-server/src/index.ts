@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker, fetchCryptoPredictions } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
+import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, recomputeAllSymbolQuietHours, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
 import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -619,6 +619,29 @@ app.listen(port, (err) => {
       // No immediate startup run — firing on restart would overwrite manual config changes made
       // right before a restart and confuse operators who just applied per-day adjustments.
       setInterval(runQHAutoTune, 30 * 60_000);
+
+      // Per-symbol quiet-hours calibration (Smart Hours "per market" mode):
+      // recompute ALL symbols' schedules every 4 hours.  Without this, the
+      // only automatic trigger is bet evaluation — a catch-22 when the bot is
+      // silenced by quiet hours and never places bets, so calibration never
+      // discovers that windows have become available again.  First run fires
+      // on the first 30-min poll after startup (not immediately, matching the
+      // auto-tune rationale above).  Only touches calibration-owned fields.
+      let lastPerSymbolCalibrationAt = 0;
+      const PER_SYMBOL_CALIBRATION_INTERVAL_MS = 4 * 60 * 60_000;
+      const runPerSymbolCalibration = () => {
+        if (getBotState().config.quietHoursMode !== "per_market") return;
+        if (Date.now() - lastPerSymbolCalibrationAt < PER_SYMBOL_CALIBRATION_INTERVAL_MS) return;
+        lastPerSymbolCalibrationAt = Date.now();
+        recomputeAllSymbolQuietHours()
+          .then(({ calibratedSymbols, skippedSymbols }) =>
+            logger.info({ calibratedSymbols, skippedSymbols }, "[qh-per-symbol] scheduled bulk calibration complete"),
+          )
+          .catch(err =>
+            logger.warn({ err }, "[qh-per-symbol] scheduled bulk calibration failed (non-fatal)"),
+          );
+      };
+      setInterval(runPerSymbolCalibration, 30 * 60_000);
 
       // Bring up the stock trading vertical independently — a failure here must
       // never take down the crypto tracker or Kalshi bot above.
