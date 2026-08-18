@@ -257,12 +257,24 @@ export const CONVICTION_OB_CACHE_TTL_MS = 1_500;
 // (5 s scheduler loop).  null until the callback is registered.
 // All gates (live-price check, direction guard, candle slope) still run inside
 // runBotTickForCoin — this only accelerates the dispatch timing.
-let _convictionZoneEntryFn: ((sym: string) => void) | null = null;
-export function setConvictionZoneEntryCallback(fn: (sym: string) => void): void {
+// The poller passes the freshly-polled yesAsk/noAsk so the callback can
+// independently re-verify the price against the REAL configured zone
+// (deriveConvictionZone(floor, cap)) before dispatching — belt-and-suspenders
+// so a future poller zone drift cannot dispatch out-of-zone ticks again.
+let _convictionZoneEntryFn:
+  | ((sym: string, yesAsk: number | null, noAsk: number | null) => void)
+  | null = null;
+export function setConvictionZoneEntryCallback(
+  fn: (sym: string, yesAsk: number | null, noAsk: number | null) => void,
+): void {
   _convictionZoneEntryFn = fn;
 }
-export function callConvictionZoneEntry(sym: string): void {
-  _convictionZoneEntryFn?.(sym);
+export function callConvictionZoneEntry(
+  sym: string,
+  yesAsk: number | null,
+  noAsk: number | null,
+): void {
+  _convictionZoneEntryFn?.(sym, yesAsk, noAsk);
 }
 // Per-coin rolling price ticks from the conviction 1 s poller.
 // Used by the direction guard to detect consecutive-seconds adverse movement.

@@ -15,6 +15,7 @@ import {
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
+  deriveConvictionZone,
   shouldSuppressConvictionStopLoss,
   getEtDow,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
@@ -88,12 +89,31 @@ import {
 // 5-second scheduler loop.  The dispatch is fire-and-forget; all gates still
 // run inside runBotTickForCoin (live-price check, direction guard, candle
 // slope, etc.) — nothing is bypassed.
-setConvictionZoneEntryCallback((sym: string) => {
+setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: number | null) => {
   if (!S.config.enabled || S.paused || S.dbDegradedSince !== null) return;
   if (S.config.decisionMode !== "conviction") return;
   const wk = currentWindowKey();
   if (convictionFiredThisWindow.has(`${sym}:${wk}`)) return;
   if (openPositions.has(sym)) return;
+  // ── Real-zone sanity check (belt-and-suspenders) ──────────────────────────
+  // Re-verify the poller's price against the REAL configured zone, derived
+  // here independently with the two-arg (floor, cap) form.  If the poller's
+  // zone math ever drifts from the tick's again, this guard prevents the
+  // out-of-zone dispatch → abort → cooldown-clear loop that transiently sets
+  // convictionFiredThisWindow and starves the 5 s loop of genuine entries.
+  const { lockPrice, lockPriceCap } = deriveConvictionZone(
+    S.config.kalshiLockPrice    ?? 0.82,
+    S.config.kalshiLockPriceCap ?? 0.91,
+  );
+  const yesInRealZone = yesAsk != null && yesAsk >= lockPrice && yesAsk <= lockPriceCap;
+  const noInRealZone  = noAsk  != null && noAsk  >= lockPrice && noAsk  <= lockPriceCap;
+  if (!yesInRealZone && !noInRealZone) {
+    logger.warn(
+      { sym, yesAsk, noAsk, lockPrice, lockPriceCap },
+      "[conviction-poller-dispatch] poller zone disagrees with configured zone — dispatch suppressed",
+    );
+    return;
+  }
   const kd = getKalshiCachedData(sym);
   if (!kd?.ticker || kd.value === null || kd.yesPrice == null) return;
   const pred = getCachedPrediction(sym);

@@ -61,3 +61,12 @@ const cooldownActive = abortedAt != null && Date.now() - abortedAt < storedCoold
 - After an abort+cooldown, the loop (5s cycle) handles the retry; the poller dispatches again only on the next fresh zone entry after the cooldown expires.
 
 **Why:** Dispatching every 1s during an active cooldown would hammer the Kalshi OB API and defeat the rate-limiting intent.
+
+## Zone-mismatch regression (2026-08) — poller MUST use the two-arg zone form
+
+The poller originally derived its zone with the legacy single-arg `deriveConvictionZone(kalshiLockPrice)` (target−2¢..target+3¢ formula), while tick/loop/engine use the two-arg `deriveConvictionZone(kalshiLockPrice ?? 0.82, kalshiLockPriceCap ?? 0.91)` (verbatim floor/cap). The mismatch was harmless when the poller only cleared cooldowns, but once poller-triggered dispatch landed it dispatched ticks for prices OUTSIDE the real zone: every dispatch aborted, transiently set `convictionFiredThisWindow` (starving the 5 s loop of genuine entries), and the poller cleared the abort cooldown ~1 s later — zero bets in dev AND prod.
+
+**Rules:**
+- ANY zone derivation anywhere (poller, tick, loop, engine, post-fill check) must use the identical two-arg form with the identical `?? 0.82 / ?? 0.91` fallbacks. The single-arg overload exists only for legacy unit tests.
+- The dispatch callback in `kalshi-bot-loop.ts` re-derives the zone independently and suppresses dispatch (warn log "poller zone disagrees with configured zone") when neither the passed `yesAsk` nor `noAsk` is in the real zone — belt-and-suspenders so future poller drift cannot recreate the loop. Callback signature is `(sym, yesAsk, noAsk)`.
+- Verification signal: poller log `lockPrice/lockPriceCap` must match the tick's `window [XX–YY%]` diagnostics exactly.

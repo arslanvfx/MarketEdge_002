@@ -90,9 +90,16 @@ async function pollOnce(): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
 
   // Derive the conviction zone once per poll from the current config.
-  // Matches the derivation in kalshi-bot-tick.ts exactly.
-  const gateTarget   = S.config.kalshiLockPrice ?? 0.90;
-  const { lockPrice, lockPriceCap } = deriveConvictionZone(gateTarget);
+  // MUST use the two-argument (floor, cap) form — identical to the derivation
+  // in kalshi-bot-tick.ts and kalshi-bot-engine.ts.  The legacy single-arg
+  // form computes a different zone (target−2¢..target+3¢), which caused the
+  // poller to dispatch ticks for prices OUTSIDE the real zone: every dispatch
+  // aborted, transiently set convictionFiredThisWindow, and cleared the abort
+  // cooldown — killing all bets (2026-08 regression).
+  const { lockPrice, lockPriceCap } = deriveConvictionZone(
+    S.config.kalshiLockPrice    ?? 0.82,
+    S.config.kalshiLockPriceCap ?? 0.91,
+  );
 
   // Current 15-min window key — used to form the cooldown Map key.
   const nowMs     = Date.now();
@@ -289,7 +296,7 @@ async function pollOnce(): Promise<void> {
             },
             "[conviction-poller] zone entry — dispatching tick immediately",
           );
-          callConvictionZoneEntry(sym);
+          callConvictionZoneEntry(sym, yesAsk, noAsk);
         }
         // ─────────────────────────────────────────────────────────────────────
       }
