@@ -271,6 +271,12 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
       { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
     );
     if (!resp.ok) {
+      // Log the actual HTTP status so production failures are diagnosable.
+      const errBody = await resp.text().catch(() => "");
+      logger.warn(
+        { sym, status: resp.status, body: errBody.slice(0, 200) },
+        "[kalshi] fetchKalshiTarget: non-200 from Kalshi public API",
+      );
       // Do NOT nuke an existing ticker-bearing cache entry when forceRefresh
       // fails (e.g. transient 429/500).  The conviction poller calls
       // forceRefresh every 1 s; a single failed call must not clear the ticker
@@ -431,7 +437,11 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
     // valid cache entry — the market may have published on the previous tick.
     if (!targetTime && !forceRefresh) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
     return null;
-  } catch {
+  } catch (err) {
+    logger.warn(
+      { sym, err: err instanceof Error ? err.message : String(err) },
+      "[kalshi] fetchKalshiTarget: exception (network/timeout/parse error)",
+    );
     return null;
   }
 }
