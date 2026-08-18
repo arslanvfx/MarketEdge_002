@@ -507,11 +507,15 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
     if (visual === "silenced") {
       // Un-silence: remove from this day's DOW list only
       const newDow = currentDow.filter(x => x !== h);
-      onChange({ ...value, silencedByDow: { ...(value.silencedByDow ?? {}), [dowStr]: newDow } });
+      const updated = { ...value, silencedByDow: { ...(value.silencedByDow ?? {}), [dowStr]: newDow } };
+      onChange(updated);
+      onSave?.(updated); // persist immediately — same as DG overrides
     } else {
       // Silence: add to this day's DOW list
       if (!currentDow.includes(h)) {
-        onChange({ ...value, silencedByDow: { ...(value.silencedByDow ?? {}), [dowStr]: [...currentDow, h] } });
+        const updated = { ...value, silencedByDow: { ...(value.silencedByDow ?? {}), [dowStr]: [...currentDow, h] } };
+        onChange(updated);
+        onSave?.(updated); // persist immediately — same as DG overrides
       }
     }
   }
@@ -520,14 +524,18 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   function setReducedPct(h: number, pct: number) {
     const dowStr = String(selectedDow);
     const existing = value.reducedByDow?.[dowStr] ?? {};
-    onChange({ ...value, reducedByDow: { ...(value.reducedByDow ?? {}), [dowStr]: { ...existing, [String(h)]: pct } } });
+    const updated = { ...value, reducedByDow: { ...(value.reducedByDow ?? {}), [dowStr]: { ...existing, [String(h)]: pct } } };
+    onChange(updated);
+    onSave?.(updated); // persist immediately — same as DG overrides
   }
 
   function clearReducedPct(h: number) {
     const dowStr = String(selectedDow);
     const existing = value.reducedByDow?.[dowStr] ?? {};
     const { [String(h)]: _, ...rest } = existing;
-    onChange({ ...value, reducedByDow: { ...(value.reducedByDow ?? {}), [dowStr]: rest } });
+    const updated = { ...value, reducedByDow: { ...(value.reducedByDow ?? {}), [dowStr]: rest } };
+    onChange(updated);
+    onSave?.(updated); // persist immediately — same as DG overrides
   }
 
   // ── Data-gathering per-cell override controls ─────────────────────────────

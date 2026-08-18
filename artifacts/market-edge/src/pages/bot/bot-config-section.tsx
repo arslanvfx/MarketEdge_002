@@ -130,8 +130,11 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
       if (result.perSymbolQuietHours && Object.keys(result.perSymbolQuietHours).length > 0) {
         // Update every calibrated coin's local draft with enabled:true.
         // The server already saved everything; this just keeps the UI in sync.
+        // Belt-and-suspenders: merge returned schedule on top of the current local
+        // value so any user-owned field (autoTuneEnabled, autoTuneIntervalHours, etc.)
+        // that the API might not have echoed back is still preserved in the draft.
         for (const [sym, schedule] of Object.entries(result.perSymbolQuietHours)) {
-          onChange(sym, { ...schedule, enabled: true });
+          onChange(sym, { ...(perSymbolQuietHours[sym] ?? {}), ...schedule, enabled: true });
         }
         const n = result.calibratedSymbols?.length ?? Object.keys(result.perSymbolQuietHours).length;
         const skipped = result.skippedSymbols?.length ?? 0;
@@ -2293,6 +2296,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     <QuietHoursGrid
                       value={merged.quietHoursV2 ?? { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} }}
                       onChange={(v: QuietHoursV2) => setConfigDraft(d => ({ ...d, quietHoursV2: v }))}
+                      onSave={(v: QuietHoursV2) => {
+                        // Persist immediately — same pattern as per-symbol grid so silence
+                        // toggles and reduced-% edits don't require a separate Save click.
+                        setConfigDraft(d => ({ ...d, quietHoursV2: v }));
+                        authPost("/crypto/bot/config", { quietHoursV2: v }).catch(() => {});
+                      }}
                       autoTuneLastRunAt={status?.autoTuneQHLastRunAt}
                       autoTuneLastChanges={status?.autoTuneQHLastChanges}
                     />

@@ -984,7 +984,23 @@ export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
 
     const newQhv2 = computeSymbolQuietHoursV2(bets, threshold);
     const current = S.config.perSymbolQuietHours ?? {};
-    await updateBotConfig({ perSymbolQuietHours: { ...current, [sym]: newQhv2 } });
+    // Apply ONLY calibration-owned schedule fields so user-set fields (autoTuneEnabled,
+    // autoTuneIntervalHours, autoTuneDays, autoTuneThreshold, reducedByDow, DG overrides)
+    // are preserved.  computeSymbolQuietHoursV2 hard-codes autoTuneEnabled:true, so
+    // spreading the full result last would flip a user-disabled auto-tune back on.
+    await updateBotConfig({
+      perSymbolQuietHours: {
+        ...current,
+        [sym]: {
+          ...(current[sym] ?? {}),
+          // Calibration-owned schedule fields only:
+          silencedByDow:      newQhv2.silencedByDow,
+          dataGatheringByDow: newQhv2.dataGatheringByDow,
+          silencedUtcHours:   newQhv2.silencedUtcHours,
+          calibratedAt:       new Date().toISOString(),
+        },
+      },
+    });
     logger.debug(
       { sym, betCount: bets.length, threshold, days },
       "[qh-per-symbol] per-symbol schedule recomputed",
@@ -1077,13 +1093,37 @@ export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): 
     }
   }
 
+  // mergedResult holds the persisted (user-merged) schedules for each calibrated symbol.
+  // Declared in outer scope so it can be returned after the if-block.
+  const mergedResult: Record<string, QuietHoursV2> = {};
+
   if (Object.keys(result).length > 0) {
     const current = S.config.perSymbolQuietHours ?? {};
-    await updateBotConfig({ perSymbolQuietHours: { ...current, ...result } });
+    // Merge ONLY calibration-owned schedule fields so user-set fields (autoTuneEnabled,
+    // autoTuneIntervalHours, autoTuneDays, autoTuneThreshold, reducedByDow, DG overrides)
+    // are never overwritten.  computeSymbolQuietHoursV2 hard-codes autoTuneEnabled:true,
+    // so spreading the full result last would silently flip a user-disabled auto-tune back on.
+    const fullMerged: typeof current = { ...current };
+    for (const [sym, cal] of Object.entries(result)) {
+      const mergedEntry: QuietHoursV2 = {
+        ...(current[sym] ?? {}),
+        // Calibration-owned schedule fields only:
+        silencedByDow:       cal.silencedByDow,
+        dataGatheringByDow:  cal.dataGatheringByDow,
+        silencedUtcHours:    cal.silencedUtcHours,
+        ...(cal.calibratedAt != null ? { calibratedAt: cal.calibratedAt } : {}),
+      };
+      fullMerged[sym] = mergedEntry;
+      // Track only the calibrated entries (not the full psqh map) for the API response.
+      mergedResult[sym] = mergedEntry;
+    }
+    await updateBotConfig({ perSymbolQuietHours: fullMerged });
   }
 
   logger.info({ calibrated, skipped }, "[qh-calibrate-all] bulk calibration complete");
-  return { perSymbolQuietHours: result, calibratedSymbols: calibrated, skippedSymbols: skipped };
+  // Return the persisted merged schedules — not the raw calibration output — so the
+  // client draft stays in sync with what was actually saved to DB (user-owned fields intact).
+  return { perSymbolQuietHours: mergedResult, calibratedSymbols: calibrated, skippedSymbols: skipped };
 }
 
 export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise<void> {
