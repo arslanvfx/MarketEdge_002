@@ -404,7 +404,10 @@ test(`rule1: skips band with ≥${QUIET_HOURS_MIN_BETS} bets but bad pattern on 
     `rule1 must not fire when bad pattern appears on fewer than ${QUIET_HOURS_MIN_BAD_DAYS} days`);
 });
 
-test("rule2: per_coin_pause fires on ≥5 consecutive losses for a coin", () => {
+test("rule2: per_coin_pause is DISABLED — does not fire even on ≥5 consecutive losses", () => {
+  // Rule 2 was removed because per-coin pausing is now handled exclusively by
+  // applyStreakUpdate (kalshi-bot-guards.ts) which enforces window adjacency.
+  // The old report-based rule had no adjacency check.
   const report = makeReport({
     bySymbol: {
       BTC: { wins: 10, losses: 10, betCount: 20, winRate: 0.5, currentConsecutiveLosses: 5 },
@@ -412,9 +415,7 @@ test("rule2: per_coin_pause fires on ≥5 consecutive losses for a coin", () => 
   });
   const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
   const r2 = mutations.find(m => m.ruleName === "per_coin_pause");
-  assert.ok(r2, "per_coin_pause should fire");
-  assert.equal(r2.pauseCoin?.symbol, "BTC");
-  assert.equal(r2.pauseCoin?.windows, 4);
+  assert.equal(r2, undefined, "per_coin_pause rule is disabled — should never fire");
 });
 
 test("rule2: per_coin_pause skips coin that is already paused", () => {
@@ -513,7 +514,8 @@ test("circuitBreakerTriggers is zero when no streak reaches threshold", () => {
   assert.equal(report.circuitBreakerTriggers, 0);
 });
 
-test("all three rules can fire simultaneously", () => {
+test("active rules can fire simultaneously (rule1 + rule3; rule2 disabled)", () => {
+  // Rule 2 (per_coin_pause) is disabled — only rule1 and rule3 should fire.
   const report = makeReport({
     totalBets: 50,
     last30WinRate: 0.45,
@@ -526,9 +528,9 @@ test("all three rules can fire simultaneously", () => {
     byHourBandDow: makeBandDow("20-22", QUIET_HOURS_MIN_BAD_DAYS),
   });
   const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
-  assert.ok(mutations.find(m => m.ruleName === "quiet_hours_expand"));
-  assert.ok(mutations.find(m => m.ruleName === "per_coin_pause"));
-  assert.ok(mutations.find(m => m.ruleName === "confidence_floor_raise"));
+  assert.ok(mutations.find(m => m.ruleName === "quiet_hours_expand"), "rule1 must still fire");
+  assert.equal(mutations.find(m => m.ruleName === "per_coin_pause"), undefined, "rule2 must NOT fire (disabled)");
+  assert.ok(mutations.find(m => m.ruleName === "confidence_floor_raise"), "rule3 must still fire");
 });
 
 // ---------------------------------------------------------------------------
@@ -808,10 +810,11 @@ test("edge case: consecutive losses cross symbol boundaries — per-coin pause m
     "per_coin_pause must not fire — no individual coin has ≥5 consecutive losses");
 });
 
-test("edge case: consecutive losses cross symbols — only the qualifying coin triggers pause", () => {
-  // ETH has 4 losses then a win (streak resets to 0).
-  // BTC then runs 5 straight losses.
-  // Only BTC should be paused.
+test("edge case: consecutive losses across symbols — auto-tune no longer triggers per-coin pauses (rule2 disabled)", () => {
+  // Rule 2 (per_coin_pause) is disabled — per-coin pausing is now handled exclusively
+  // by applyStreakUpdate in kalshi-bot-guards.ts with window-adjacency enforcement.
+  // This test confirms the performance report still correctly tracks streaks, but
+  // auto-tune never generates a pauseCoin mutation regardless of streak length.
   const bets = [
     makeBet({ symbol: "ETH", outcome: "loss" }),
     makeBet({ symbol: "ETH", outcome: "loss" }),
@@ -826,14 +829,14 @@ test("edge case: consecutive losses cross symbols — only the qualifying coin t
   ];
 
   const report = computePerformanceReport(bets, NOW);
-  assert.equal(report.bySymbol["BTC"]?.currentConsecutiveLosses, 5);
+  assert.equal(report.bySymbol["BTC"]?.currentConsecutiveLosses, 5,
+    "report still tracks streak for observability");
   assert.equal(report.bySymbol["ETH"]?.currentConsecutiveLosses, 0,
     "ETH streak should be 0 after the win reset");
 
   const mutations = runAutoTuneRules(report, DEFAULT_CONFIG, new Map());
   const pauses = mutations.filter(m => m.ruleName === "per_coin_pause");
-  assert.equal(pauses.length, 1, "exactly one coin should be paused");
-  assert.equal(pauses[0].pauseCoin?.symbol, "BTC", "BTC should be the paused coin");
+  assert.equal(pauses.length, 0, "rule2 is disabled — no pauseCoin mutations must be generated");
 });
 
 test("edge case: all 200 bets are pushes — zero settled bets, no rules fire", () => {

@@ -499,8 +499,9 @@ export async function evalClosedBets(): Promise<void> {
         const updatedStreak = applyStreakUpdate(
           existingStreak,
           finalPnl,
-          S.config.coinStreakLossLimit ?? 3,
-          S.config.coinStreakPauseWindows ?? 4,
+          S.config.coinStreakLossLimit ?? 2,
+          S.config.coinStreakPauseWindows ?? 2,
+          row.windowKey ?? "",
           Date.now(),
         );
         if (updatedStreak.pauseUntilWindowKey && !existingStreak.pauseUntilWindowKey) {

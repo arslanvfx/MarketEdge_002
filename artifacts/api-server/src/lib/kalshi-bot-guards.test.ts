@@ -352,100 +352,198 @@ test("applyDailyLossUpdate/wiring: kalshi-bot.ts closePosition calls applyDailyL
 // ===========================================================================
 // closePosition helpers — applyStreakUpdate
 //
-//   On a loss: increment consecutiveLosses; arm pause when limit reached.
-//   On a win:  reset consecutiveLosses=0 and clear pauseUntilWindowKey.
+//   On a loss (adjacent window): increment consecutiveLosses; arm pause when
+//                                 limit reached.
+//   On a loss (non-adjacent):    reset streak to 1 (fresh start).
+//   On a win:                    reset consecutiveLosses=0 and clear pause.
+//
+// "Consecutive" means the two losses fell in back-to-back 15-min windows.
+// Losses hours apart do NOT count as consecutive.
 // ===========================================================================
 
 const FRESH: CoinStreakState = { consecutiveLosses: 0, pauseUntilWindowKey: null };
+// NOW corresponds to UTC 12:00 — matches WIN_KEY when parsed as UTC.
 const NOW = new Date("2026-07-03T12:00:00Z").getTime();
+const WIN_KEY = "2026-07-03T12:00"; // current window key for all streak tests
 
 test("streak: win from fresh state → streak stays at 0, no pause", () => {
-  const result = applyStreakUpdate(FRESH, 0.50, 3, 2, NOW);
+  const result = applyStreakUpdate(FRESH, 0.50, 3, 2, WIN_KEY, NOW);
   assert.equal(result.consecutiveLosses, 0);
   assert.equal(result.pauseUntilWindowKey, null);
 });
 
 test("streak: win with existing loss streak → streak reset to 0", () => {
   const state: CoinStreakState = { consecutiveLosses: 2, pauseUntilWindowKey: null };
-  const result = applyStreakUpdate(state, 0.50, 3, 2, NOW);
+  const result = applyStreakUpdate(state, 0.50, 3, 2, WIN_KEY, NOW);
   assert.equal(result.consecutiveLosses, 0);
   assert.equal(result.pauseUntilWindowKey, null);
 });
 
 test("streak: win clears an active pause", () => {
   const state: CoinStreakState = { consecutiveLosses: 0, pauseUntilWindowKey: "2026-07-03T13:30" };
-  const result = applyStreakUpdate(state, 1.00, 3, 2, NOW);
+  const result = applyStreakUpdate(state, 1.00, 3, 2, WIN_KEY, NOW);
   assert.equal(result.pauseUntilWindowKey, null, "win must clear any active pause");
   assert.equal(result.consecutiveLosses, 0);
 });
 
-test("streak: single loss increments counter, no pause yet", () => {
-  const result = applyStreakUpdate(FRESH, -0.50, 3, 2, NOW);
+test("streak: single loss (no prior lastLossWindowKey) → streak=1, no pause", () => {
+  const result = applyStreakUpdate(FRESH, -0.50, 3, 2, WIN_KEY, NOW);
   assert.equal(result.consecutiveLosses, 1);
   assert.equal(result.pauseUntilWindowKey, null);
+  assert.equal(result.lastLossWindowKey, WIN_KEY, "lastLossWindowKey must be set to current window");
 });
 
-test("streak: losses below limit → no pause triggered", () => {
-  const state: CoinStreakState = { consecutiveLosses: 1, pauseUntilWindowKey: null };
-  const result = applyStreakUpdate(state, -0.50, 3, 2, NOW);
+test("streak: losses below limit → no pause triggered (adjacent windows)", () => {
+  const state: CoinStreakState = { consecutiveLosses: 1, pauseUntilWindowKey: null, lastLossWindowKey: "2026-07-03T11:45" };
+  const result = applyStreakUpdate(state, -0.50, 3, 2, WIN_KEY, NOW); // WIN_KEY is 15 min after lastLoss
   assert.equal(result.consecutiveLosses, 2);
   assert.equal(result.pauseUntilWindowKey, null);
 });
 
-test("streak: loss that reaches the limit → pause armed, counter reset", () => {
-  const state: CoinStreakState = { consecutiveLosses: 2, pauseUntilWindowKey: null };
-  const result = applyStreakUpdate(state, -0.50, 3, 2, NOW);
+test("streak: loss that reaches the limit (adjacent windows) → pause armed, counter reset", () => {
+  const state: CoinStreakState = { consecutiveLosses: 2, pauseUntilWindowKey: null, lastLossWindowKey: "2026-07-03T11:45" };
+  const result = applyStreakUpdate(state, -0.50, 3, 2, WIN_KEY, NOW);
   assert.equal(result.consecutiveLosses, 0, "counter must reset after pause is armed");
   assert.ok(result.pauseUntilWindowKey !== null, "pauseUntilWindowKey must be set");
-  // pauseUntilWindowKey should be 2 windows (30 min) after NOW
-  const expected = new Date(NOW + 2 * 15 * 60_000).toISOString().slice(0, 16);
+  // pauseUntilWindowKey = WIN_KEY + 2 windows (30 min)
+  const expected = new Date(new Date(WIN_KEY).getTime() + 2 * 15 * 60_000).toISOString().slice(0, 16);
   assert.equal(result.pauseUntilWindowKey, expected);
+  assert.equal(result.lastLossWindowKey, undefined, "lastLossWindowKey must be cleared when pause arms");
 });
 
 test("streak: loss that exceeds limit on first hit → pause armed (limit=1)", () => {
-  const result = applyStreakUpdate(FRESH, -1.00, 1, 3, NOW);
+  const result = applyStreakUpdate(FRESH, -1.00, 1, 3, WIN_KEY, NOW);
   assert.equal(result.consecutiveLosses, 0);
-  const expected = new Date(NOW + 3 * 15 * 60_000).toISOString().slice(0, 16);
+  const expected = new Date(new Date(WIN_KEY).getTime() + 3 * 15 * 60_000).toISOString().slice(0, 16);
   assert.equal(result.pauseUntilWindowKey, expected);
 });
 
 test("streak: pause already active → second loss does NOT re-arm another pause", () => {
   // Already paused from a prior streak; loss count climbing again
-  const state: CoinStreakState = { consecutiveLosses: 2, pauseUntilWindowKey: "2026-07-03T13:00" };
-  const result = applyStreakUpdate(state, -0.50, 3, 2, NOW);
+  const state: CoinStreakState = { consecutiveLosses: 2, pauseUntilWindowKey: "2026-07-03T13:00", lastLossWindowKey: "2026-07-03T11:45" };
+  const result = applyStreakUpdate(state, -0.50, 3, 2, WIN_KEY, NOW);
   // Limit would be reached (2+1 = 3 >= 3), but pauseUntilWindowKey is already set
   assert.equal(result.consecutiveLosses, 3, "counter incremented");
   assert.equal(result.pauseUntilWindowKey, "2026-07-03T13:00", "existing pause must NOT be overwritten");
 });
 
 test("streak: limit = 0 disables pause arming", () => {
-  const state: CoinStreakState = { consecutiveLosses: 99, pauseUntilWindowKey: null };
-  const result = applyStreakUpdate(state, -1.00, 0, 2, NOW);
+  // Use lastLossWindowKey so the adjacent-window check extends the streak rather than
+  // resetting to 1 (the no-key path always starts fresh to protect against stale DB state).
+  const prevWindowKey = "2026-07-03T11:45";
+  const state: CoinStreakState = { consecutiveLosses: 99, pauseUntilWindowKey: null, lastLossWindowKey: prevWindowKey };
+  const result = applyStreakUpdate(state, -1.00, 0, 2, WIN_KEY, NOW);
   assert.equal(result.pauseUntilWindowKey, null, "limit=0 must never arm a pause");
   assert.equal(result.consecutiveLosses, 100);
 });
 
 test("streak: does not mutate the input state object", () => {
   const state: CoinStreakState = { consecutiveLosses: 2, pauseUntilWindowKey: null };
-  applyStreakUpdate(state, -0.50, 3, 2, NOW);
+  applyStreakUpdate(state, -0.50, 3, 2, WIN_KEY, NOW);
   assert.equal(state.consecutiveLosses, 2, "input state must be unchanged");
 });
 
-// Wiring check: kalshi-bot.ts must call applyStreakUpdate in closePosition
-test("streak/wiring: kalshi-bot.ts closePosition calls applyStreakUpdate", () => {
+// ---------------------------------------------------------------------------
+// Adjacency tests — the critical new behavior
+// ---------------------------------------------------------------------------
+
+test("streak/adjacency: two losses in back-to-back windows (limit=2) → pause triggered", () => {
+  // Loss 1: window T
+  const afterLoss1 = applyStreakUpdate(FRESH, -0.50, 2, 2, "2026-07-03T12:00", NOW);
+  assert.equal(afterLoss1.consecutiveLosses, 1);
+  assert.equal(afterLoss1.pauseUntilWindowKey, null, "one loss must not pause");
+
+  // Loss 2: window T+15 (adjacent)
+  const afterLoss2 = applyStreakUpdate(afterLoss1, -0.50, 2, 2, "2026-07-03T12:15", NOW);
+  assert.equal(afterLoss2.consecutiveLosses, 0, "counter resets when pause arms");
+  assert.ok(afterLoss2.pauseUntilWindowKey !== null, "pause must be armed after 2 adjacent losses");
+  const expected = new Date(new Date("2026-07-03T12:15").getTime() + 2 * 15 * 60_000).toISOString().slice(0, 16);
+  assert.equal(afterLoss2.pauseUntilWindowKey, expected, "pause ends 2 windows after the triggering window");
+});
+
+test("streak/adjacency: two losses with a window gap between them → NO pause (streak resets to 1)", () => {
+  // Loss 1: window T
+  const afterLoss1 = applyStreakUpdate(FRESH, -0.50, 2, 2, "2026-07-03T12:00", NOW);
+  assert.equal(afterLoss1.consecutiveLosses, 1);
+
+  // Loss 2: window T+30 (one window gap — NOT adjacent)
+  const afterLoss2 = applyStreakUpdate(afterLoss1, -0.50, 2, 2, "2026-07-03T12:30", NOW);
+  assert.equal(afterLoss2.consecutiveLosses, 1, "streak must reset to 1 when gap > 15 min");
+  assert.equal(afterLoss2.pauseUntilWindowKey, null, "no pause — losses were not adjacent");
+});
+
+test("streak/adjacency: two losses 2 hours apart → NO pause", () => {
+  // Loss 1: window T
+  const afterLoss1 = applyStreakUpdate(FRESH, -0.50, 2, 2, "2026-07-03T10:00", NOW);
+  // Loss 2: window T+2h (far apart)
+  const afterLoss2 = applyStreakUpdate(afterLoss1, -0.50, 2, 2, "2026-07-03T12:00", NOW);
+  assert.equal(afterLoss2.consecutiveLosses, 1, "non-adjacent loss must reset streak to 1");
+  assert.equal(afterLoss2.pauseUntilWindowKey, null, "no pause for non-adjacent losses");
+});
+
+test("streak/adjacency: win between two losses resets streak — no pause even if adjacent", () => {
+  // Loss at T
+  const afterLoss1 = applyStreakUpdate(FRESH, -0.50, 2, 2, "2026-07-03T12:00", NOW);
+  // Win at T+15
+  const afterWin = applyStreakUpdate(afterLoss1, 0.50, 2, 2, "2026-07-03T12:15", NOW);
+  assert.equal(afterWin.consecutiveLosses, 0);
+  assert.equal(afterWin.lastLossWindowKey, undefined, "win must clear lastLossWindowKey");
+  // Loss at T+30 (adjacent to T+15, but streak was reset by win)
+  const afterLoss2 = applyStreakUpdate(afterWin, -0.50, 2, 2, "2026-07-03T12:30", NOW);
+  assert.equal(afterLoss2.consecutiveLosses, 1, "streak starts fresh after win");
+  assert.equal(afterLoss2.pauseUntilWindowKey, null, "no pause — streak was reset by win");
+});
+
+test("streak/adjacency: three consecutive adjacent losses with limit=2 → pause on 2nd, 3rd does not re-arm", () => {
+  const s1 = applyStreakUpdate(FRESH, -1.00, 2, 2, "2026-07-03T12:00", NOW);
+  assert.equal(s1.consecutiveLosses, 1);
+
+  const s2 = applyStreakUpdate(s1, -1.00, 2, 2, "2026-07-03T12:15", NOW);
+  assert.equal(s2.consecutiveLosses, 0, "pause armed on 2nd adjacent loss");
+  assert.ok(s2.pauseUntilWindowKey !== null);
+
+  // 3rd adjacent loss while already paused — counter climbs but pause not re-armed
+  const s3 = applyStreakUpdate(s2, -1.00, 2, 2, "2026-07-03T12:30", NOW);
+  assert.equal(s3.pauseUntilWindowKey, s2.pauseUntilWindowKey, "existing pause must not be overwritten");
+});
+
+// Wiring check: kalshi-bot-eval.ts must call applyStreakUpdate with windowKey
+test("streak/wiring: kalshi-bot-eval.ts calls applyStreakUpdate with coinStreakLossLimit and windowKey", () => {
+  const src = readSrc("kalshi-bot-eval.ts");
+  assert.ok(
+    src.includes("applyStreakUpdate("),
+    "evalClosedBets must delegate streak tracking to applyStreakUpdate",
+  );
+  assert.ok(
+    src.includes("config.coinStreakLossLimit ?? 2"),
+    "applyStreakUpdate call must pass coinStreakLossLimit with default 2",
+  );
+  assert.ok(
+    src.includes("config.coinStreakPauseWindows ?? 2"),
+    "applyStreakUpdate call must pass coinStreakPauseWindows with default 2",
+  );
+  assert.ok(
+    src.includes("row.windowKey"),
+    "applyStreakUpdate must receive the bet's windowKey for adjacency checking",
+  );
+});
+
+test("streak/wiring: kalshi-bot-close.ts calls applyStreakUpdate with pos.windowKey and default 2", () => {
+  // The close path (mid-window early exits) must supply pos.windowKey as the
+  // currentWindowKey argument so adjacency is checked against the correct 15-min
+  // window rather than wall-clock time.
   const src = readSrc("kalshi-bot-close.ts");
   assert.ok(
     src.includes("applyStreakUpdate("),
     "closePosition must delegate streak tracking to applyStreakUpdate",
   );
-  // And the correct arguments should be present near each other in the source
   assert.ok(
-    src.includes("config.coinStreakLossLimit ?? 3"),
-    "applyStreakUpdate call must pass coinStreakLossLimit",
+    src.includes("coinStreakLossLimit ?? 2"),
+    "closePosition applyStreakUpdate call must use default 2, not the stale default 3",
   );
   assert.ok(
-    src.includes("config.coinStreakPauseWindows ?? 2"),
-    "applyStreakUpdate call must pass coinStreakPauseWindows",
+    src.includes("pos.windowKey"),
+    "closePosition must pass pos.windowKey (not Date.now()) as currentWindowKey for adjacency checking",
   );
 });
 

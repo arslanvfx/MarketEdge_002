@@ -1689,7 +1689,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   minAccountBalance: 5.00,
   maxTotalExposure: 5.00,
   maxDailyLossPerCoin: 3.00,
-  coinStreakLossLimit: 3,
+  coinStreakLossLimit: 2,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 10,
   minReturnMultiple: 1.45,
@@ -2527,6 +2527,8 @@ export function computeDynamicBetSize(
 export interface CoinStreakEntry {
   consecutiveLosses: number;
   pauseUntilWindowKey: string | null;
+  /** ISO window key of the most recent loss — used to enforce adjacency. */
+  lastLossWindowKey?: string;
 }
 
 /**
@@ -2571,6 +2573,7 @@ export function restoreStreakState(
     out.set(sym.toUpperCase(), {
       consecutiveLosses: entry.consecutiveLosses ?? 0,
       pauseUntilWindowKey: effectivePause,
+      lastLossWindowKey: entry.lastLossWindowKey,
     });
     if (pauseKey !== null && effectivePause === null) {
       clearedSyms.push(sym.toUpperCase());

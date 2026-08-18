@@ -253,8 +253,9 @@ export async function closePosition(
     const updated = applyStreakUpdate(
       existing,
       pnl,
-      S.config.coinStreakLossLimit ?? 3,
+      S.config.coinStreakLossLimit ?? 2,
       S.config.coinStreakPauseWindows ?? 2,
+      pos.windowKey ?? "",   // windowKey of the closed bet — drives adjacency check
       Date.now(),
     );
     if (updated.pauseUntilWindowKey && !existing.pauseUntilWindowKey) {

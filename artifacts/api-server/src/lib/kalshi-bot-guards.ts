@@ -255,45 +255,87 @@ export function applyDailyLossUpdate(
 export interface CoinStreakState {
   consecutiveLosses: number;
   pauseUntilWindowKey: string | null;
+  /** ISO window key of the most recent loss — used to enforce window adjacency. */
+  lastLossWindowKey?: string;
+}
+
+/**
+ * Returns true when `curKey` is exactly one 15-minute window after `prevKey`.
+ * Losses are only "consecutive" when they fall in back-to-back windows.
+ */
+function isAdjacentWindow(prevKey: string, curKey: string): boolean {
+  const prev = new Date(prevKey).getTime();
+  const cur  = new Date(curKey).getTime();
+  return cur - prev === 15 * 60_000;
 }
 
 /**
  * Returns updated per-coin streak state after a position closes.
  *
  * On a loss:
- *   - Increments consecutiveLosses.
+ *   - A loss only increments `consecutiveLosses` when it is in the window
+ *     immediately following the previous loss (gap = exactly 15 min).
+ *     A gap larger than one window (losses hours apart) resets the counter
+ *     to 1 — treating the new loss as the start of a fresh streak.
  *   - When the limit is reached and no pause is already active, arms a new
- *     pause (pauseUntilWindowKey = now + pauseWindows × 15 min) and resets
- *     the counter so the NEXT N-loss streak can trigger a fresh pause.
+ *     pause ending `pauseWindows` × 15 min after `currentWindowKey`, then
+ *     resets the counter so the NEXT N-loss streak can trigger a fresh pause.
  *
- * On a win:
- *   - Resets consecutiveLosses to 0 and clears any pending pause.
+ * On a win (pnl >= 0):
+ *   - Resets consecutiveLosses to 0, clears lastLossWindowKey, and clears
+ *     any pending pause.
  *
- * `now` is passed in (milliseconds since epoch) so callers can inject a fixed
- * timestamp in tests without mocking Date.
+ * `currentWindowKey` — ISO "YYYY-MM-DDTHH:mm" window in which the bet settled.
+ * `now` — milliseconds since epoch; kept for backward-compat (tests inject it).
  */
 export function applyStreakUpdate(
   existing: CoinStreakState,
   pnl: number,
   coinStreakLossLimit: number,
   coinStreakPauseWindows: number,
+  currentWindowKey: string,
   now: number,
 ): CoinStreakState {
   if (pnl >= 0) {
-    return { consecutiveLosses: 0, pauseUntilWindowKey: null };
+    return { consecutiveLosses: 0, pauseUntilWindowKey: null, lastLossWindowKey: undefined };
   }
 
-  const updated: CoinStreakState = { ...existing };
-  updated.consecutiveLosses++;
+  const limit = coinStreakLossLimit ?? 2;
+  const pauseWindows = coinStreakPauseWindows ?? 2;
 
-  const limit = coinStreakLossLimit ?? 3;
-  const pauseWindows = coinStreakPauseWindows ?? 4;
+  // Determine whether this loss continues the current streak or starts a new one.
+  // Only losses in immediately adjacent windows (exactly 15 min apart) are consecutive.
+  //
+  // When lastLossWindowKey is absent (fresh state OR restored from an old DB row
+  // written before adjacency tracking was added), always start at 1 regardless of
+  // the stored consecutiveLosses count.  This prevents stale non-adjacent counts
+  // from chaining into an immediate pause on the very first post-deploy loss.
+  let newLosses: number;
+  if (!existing.lastLossWindowKey) {
+    // No prior window recorded — always start a fresh streak at 1.
+    newLosses = 1;
+  } else if (isAdjacentWindow(existing.lastLossWindowKey, currentWindowKey)) {
+    // Adjacent window — extend the streak.
+    newLosses = existing.consecutiveLosses + 1;
+  } else {
+    // Gap detected — reset to 1 (this loss starts a fresh streak).
+    newLosses = 1;
+  }
+
+  const updated: CoinStreakState = {
+    ...existing,
+    consecutiveLosses: newLosses,
+    lastLossWindowKey: currentWindowKey,
+  };
 
   if (limit > 0 && updated.consecutiveLosses >= limit && !updated.pauseUntilWindowKey) {
-    const pauseMs = pauseWindows * 15 * 60_000;
-    const pauseUntil = new Date(now + pauseMs).toISOString().slice(0, 16);
+    // Compute pause end from the window key (deterministic, not wall-clock dependent).
+    const pauseUntil = new Date(
+      new Date(currentWindowKey).getTime() + pauseWindows * 15 * 60_000,
+    ).toISOString().slice(0, 16);
     updated.pauseUntilWindowKey = pauseUntil;
     updated.consecutiveLosses = 0;
+    updated.lastLossWindowKey = undefined; // fresh slate after pause arms
   }
 
   return updated;

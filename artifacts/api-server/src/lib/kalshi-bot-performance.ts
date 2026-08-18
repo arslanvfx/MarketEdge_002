@@ -721,27 +721,14 @@ export function runAutoTuneRules(
     break;
   }
 
-  // Rule 2 — Per-coin auto-pause
-  // A coin with ≥ 5 current consecutive losses (not already paused) gets
-  // suspended for 4 windows.
-  // Guarded by PER_COIN_PAUSE_COOLDOWN_MS (1 hour) so a manual "Clear pauses"
-  // action — which writes a synthetic log entry — actually takes effect for
-  // at least 4 windows before the rule can re-fire. Without this guard, clearing
-  // the pausedCoins map immediately causes the next auto-tune tick to re-pause
-  // the same coin (consecutive losses are still in the DB history).
-  if (!isOnCooldown("per_coin_pause", PER_COIN_PAUSE_COOLDOWN_MS)) {
-    for (const [sym, stats] of Object.entries(report.bySymbol)) {
-      if (stats.currentConsecutiveLosses >= 5 && !currentPausedCoins.has(sym)) {
-        mutations.push({
-          ruleName: "per_coin_pause",
-          oldValue: "active",
-          newValue: "paused:4windows",
-          triggerReason: `${sym}: ${stats.currentConsecutiveLosses} consecutive losses`,
-          pauseCoin: { symbol: sym, windows: 4 },
-        });
-      }
-    }
-  }
+  // Rule 2 — Per-coin auto-pause (DISABLED)
+  // Previously: ≥5 consecutive losses → 4-window pause via pausedCoins Map.
+  // Removed because per-coin streak pausing is now handled exclusively by
+  // applyStreakUpdate (kalshi-bot-guards.ts), which enforces true window
+  // adjacency (losses must be in back-to-back 15-min windows) and a 2-window
+  // pause duration.  The old report-based rule had no adjacency check and ran
+  // independently, causing markets to be paused for 2+ hours from losses that
+  // were hours apart.
 
   // Rule 3 — Confidence-floor temporary raise
   // Overall win rate over last 30 bets < 55% → raise floor for exactly 3 windows,
