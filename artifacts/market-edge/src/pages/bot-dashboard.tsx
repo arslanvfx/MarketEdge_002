@@ -178,20 +178,6 @@ export default function BotDashboard() {
     refetchInterval: status?.mode === "live" ? 30_000 : false,
   });
 
-  // ── Sync draft with backend ───────────────────────────────────────────────
-  // When the backend config changes (e.g. server restart resets to defaults),
-  // clear any stale local draft so the UI always reflects reality.
-  const prevCfgRef = useRef<BotConfig | undefined>(undefined);
-  useEffect(() => {
-    const cfg = status?.config;
-    if (!cfg) return;
-    const prev = prevCfgRef.current;
-    if (prev && JSON.stringify(prev) !== JSON.stringify(cfg)) {
-      setConfigDraft({});
-    }
-    prevCfgRef.current = cfg;
-  }, [status?.config]);
-
   // Sync the history/stats view mode when the bot's active mode changes so the
   // user always sees their current session's data by default.
   const prevBotMode = useRef<"paper" | "live" | undefined>(undefined);

@@ -13,6 +13,9 @@ import {
   QUIET_HOURS_MIN_BETS,
   QUIET_HOURS_MIN_BETS_PER_DAY,
   QUIET_HOURS_MIN_BAD_DAYS,
+  PER_MARKET_QUIET_HOURS_MIN_BETS,
+  computeSymbolQuietHoursV2,
+  mergeCalibratedSymbolQuietHours,
   type SettledBetRecord,
   type PerformanceReport,
   type AutoTuneBotConfig,
@@ -916,4 +919,72 @@ test(`threshold boundary: two bad bands at 149 and 150 bets — only the 150-bet
   assert.ok(r1, "rule1 should fire for the 14-16 band (meets both thresholds)");
   assert.ok(r1.triggerReason.includes("14-16"),
     "trigger reason must cite 14-16, not the under-threshold 18-20 band");
+});
+
+test("per-market Smart Hours uses three settled bets as the shared calibration minimum", () => {
+  assert.equal(PER_MARKET_QUIET_HOURS_MIN_BETS, 3);
+});
+
+test("per-market Smart Hours puts every zero-history cell in data gathering", () => {
+  const schedule = computeSymbolQuietHoursV2([], 85);
+  for (let dow = 0; dow < 7; dow++) {
+    assert.deepEqual(schedule.silencedByDow?.[String(dow)], []);
+    assert.deepEqual(
+      schedule.dataGatheringByDow?.[String(dow)],
+      Array.from({ length: 24 }, (_, hour) => hour),
+    );
+  }
+});
+
+test("per-market Smart Hours keeps cells with one or two bets in data gathering", () => {
+  const createdAt = "2026-08-17T15:15:00.000Z"; // Monday ET, UTC hour 15
+  for (const count of [1, 2]) {
+    const bets = Array.from({ length: count }, () =>
+      makeBet({ createdAt, outcome: "loss" }));
+    const schedule = computeSymbolQuietHoursV2(bets, 85);
+    assert.equal(schedule.dataGatheringByDow?.["1"]?.includes(15), true);
+    assert.equal(schedule.silencedByDow?.["1"]?.includes(15), false);
+  }
+});
+
+test("per-market Smart Hours allows the third settled bet to calibrate the cell", () => {
+  const createdAt = "2026-08-17T15:15:00.000Z"; // Monday ET, UTC hour 15
+  const bets = Array.from({ length: 3 }, () =>
+    makeBet({ createdAt, outcome: "loss" }));
+  const schedule = computeSymbolQuietHoursV2(bets, 85);
+  assert.equal(schedule.dataGatheringByDow?.["1"]?.includes(15), false);
+  assert.equal(schedule.silencedByDow?.["1"]?.includes(15), true);
+});
+
+test("per-market recalibration preserves manual percentage and dollar limits", () => {
+  const current = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "1": [10] },
+    dataGatheringByDow: { "1": [15, 16] },
+    reducedByDow: { "1": { "11": 40 } },
+    dataGatheringOverrides: {
+      "1": {
+        "15": { type: "percent" as const, pct: 25 },
+        "16": { type: "dollar" as const, amount: 2 },
+      },
+    },
+    calibratedAt: "2026-08-19T14:00:00.000Z",
+  };
+  const calibrated = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "1": [] },
+    dataGatheringByDow: { "1": [16] },
+    calibratedAt: "2026-08-19T15:00:00.000Z",
+  };
+
+  const merged = mergeCalibratedSymbolQuietHours(current, calibrated);
+  assert.deepEqual(merged.silencedByDow, calibrated.silencedByDow);
+  assert.deepEqual(merged.dataGatheringByDow, calibrated.dataGatheringByDow);
+  assert.deepEqual(merged.reducedByDow, current.reducedByDow);
+  assert.deepEqual(merged.dataGatheringOverrides, current.dataGatheringOverrides);
+  assert.equal(merged.calibratedAt, calibrated.calibratedAt);
 });

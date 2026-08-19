@@ -250,6 +250,22 @@ test("resolveQuietHoursV2State: disabled → active regardless of rules", () => 
   assert.equal(resolveQuietHoursV2State(qhv2, new Date("2026-08-10T01:30:00Z")).mode, "active");
 });
 
+test("resolveQuietHoursV2State: data-gathering percentage remains enforced after a cell becomes active", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    dataGatheringByDow: { "1": [] },
+    dataGatheringOverrides: {
+      "1": { "15": { type: "percent", pct: 35 } },
+    },
+  };
+  const st = resolveQuietHoursV2State(qhv2, new Date("2026-08-10T15:30:00Z"));
+  assert.equal(st.mode, "reduced");
+  assert.equal(st.reducedBetAmount, 35);
+  assert.notEqual(st.isDataGathering, true);
+});
+
 // ---------------------------------------------------------------------------
 // Placement-time entry gate (resolveEntryQuietHoursDecision) — the tick-level,
 // path-independent Smart Hours check.  Regression for the direct-dispatch

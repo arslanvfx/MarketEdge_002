@@ -33,11 +33,13 @@ import {
 } from "./crypto";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins, computeSymbolQuietHoursV2,
+  mergeCalibratedSymbolQuietHours, PER_MARKET_QUIET_HOURS_MIN_BETS,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
 } from "./kalshi-bot-performance";
 import {
   persistCoinStreakState, loadCoinStreakState, type StreakDbStore,
 } from "./kalshi-bot-streak-db";
+import { AsyncSerialQueue } from "./async-serial-queue";
 import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
@@ -56,15 +58,24 @@ import {
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 
-// Persist the current config + mode to the bot_config DB row.
+const _botConfigPersistenceQueue = new AsyncSerialQueue();
+
+async function _persistCurrentBotConfig(): Promise<Record<string, unknown>> {
+  const snapshot = { ...S.config, mode: S.botMode } as Record<string, unknown>;
+  await withRetry(() => db.execute(sql`
+    INSERT INTO bot_config (id, config, updated_at)
+    VALUES ('default', ${JSON.stringify(snapshot)}::jsonb, NOW())
+    ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+  `));
+  return snapshot;
+}
+
+// Persist the current config + mode to the bot_config DB row. All config
+// writers share one queue so an older slow write can never finish last and
+// erase a newer operator change.
 export async function _persistModeToConfig(): Promise<void> {
   try {
-    const snapshot = { ...S.config, mode: S.botMode } as Record<string, unknown>;
-    await withRetry(() => db.execute(sql`
-      INSERT INTO bot_config (id, config, updated_at)
-      VALUES ('default', ${JSON.stringify(snapshot)}::jsonb, NOW())
-      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-    `));
+    await _botConfigPersistenceQueue.run(_persistCurrentBotConfig);
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] failed to persist mode to DB (non-fatal)");
   }
@@ -965,11 +976,6 @@ export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
       .orderBy(asc(kalshiBotBetsTable.createdAt))
       .limit(500);
 
-    if (rows.length < 10) {
-      logger.debug({ sym, betCount: rows.length }, "[qh-per-symbol] insufficient data — skipping per-symbol recompute");
-      return;
-    }
-
     const bets: SettledBetRecord[] = rows.map(r => ({
       symbol: r.symbol,
       direction: r.direction,
@@ -982,7 +988,12 @@ export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
       isMaxBet: r.isMaxBet ?? false,
     }));
 
-    const newQhv2 = computeSymbolQuietHoursV2(bets, threshold);
+    const newQhv2 = computeSymbolQuietHoursV2(
+      bets,
+      threshold,
+      PER_MARKET_QUIET_HOURS_MIN_BETS,
+    );
+    newQhv2.calibratedAt = new Date().toISOString();
     const current = S.config.perSymbolQuietHours ?? {};
     // Apply ONLY calibration-owned schedule fields so user-set fields (autoTuneEnabled,
     // autoTuneIntervalHours, autoTuneDays, autoTuneThreshold, reducedByDow, DG overrides)
@@ -991,20 +1002,7 @@ export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
     await updateBotConfig({
       perSymbolQuietHours: {
         ...current,
-        [sym]: {
-          ...(current[sym] ?? {}),
-          // Calibration produced a valid schedule — make sure it takes effect.
-          // Entries created purely by calibration previously had no `enabled`
-          // field, so resolveEntryQuietHoursDecisionForSymbol silently ignored
-          // them.  Preserve an explicit user opt-out (enabled === false);
-          // otherwise enable.
-          enabled: current[sym]?.enabled ?? true,
-          // Calibration-owned schedule fields only:
-          silencedByDow:      newQhv2.silencedByDow,
-          dataGatheringByDow: newQhv2.dataGatheringByDow,
-          silencedUtcHours:   newQhv2.silencedUtcHours,
-          calibratedAt:       new Date().toISOString(),
-        },
+        [sym]: mergeCalibratedSymbolQuietHours(current[sym], newQhv2),
       },
     });
     logger.debug(
@@ -1021,7 +1019,7 @@ const _ALL_PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOG
 /**
  * Force-recomputes quiet-hours schedules for ALL per-market symbols at once.
  * Uses up to 90 days of history (paper + live + dev — no mode filter) and a lower
- * minimum-bet threshold (5) so coins with sparser history still get a schedule.
+ * three-bet calibration threshold so zero-to-two-bet cells stay data-gathering.
  * Bypasses the per-symbol rate-limit used by the incremental auto-trigger.
  */
 export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): Promise<{
@@ -1033,9 +1031,9 @@ export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): 
   // Default to 84.5 (matches global auto-tune default and the grid's Silence threshold UI).
   // Callers may pass an explicit threshold — the API route forwards the client's chosen value.
   const threshold = thresholdOverride ?? qhv2?.autoTuneThreshold ?? 84.5;
-  // Lower minBets so hours with 2+ bets still get silenced if they're below the threshold.
-  // The default of 5 was skipping low-sample cells the UI correctly flags as red.
-  const minBets = 2;
+  // Zero through two bets remain active under the data-collection cap.
+  // The third settled bet is the first sample size eligible for calibration.
+  const minBets = PER_MARKET_QUIET_HOURS_MIN_BETS;
   const days = 90;
   const calibratedAt = new Date().toISOString();
 
@@ -1068,12 +1066,6 @@ export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): 
         )
         .orderBy(asc(kalshiBotBetsTable.createdAt))
         .limit(1000);
-
-      if (rows.length < 5) {
-        skipped.push(sym);
-        logger.debug({ sym, betCount: rows.length }, "[qh-calibrate-all] insufficient data — skipping");
-        continue;
-      }
 
       const bets: SettledBetRecord[] = rows.map(r => ({
         symbol:    r.symbol,
@@ -1111,19 +1103,7 @@ export async function recomputeAllSymbolQuietHours(thresholdOverride?: number): 
     // so spreading the full result last would silently flip a user-disabled auto-tune back on.
     const fullMerged: typeof current = { ...current };
     for (const [sym, cal] of Object.entries(result)) {
-      const mergedEntry: QuietHoursV2 = {
-        ...(current[sym] ?? {}),
-        // Calibration produced a valid schedule — make sure it takes effect.
-        // Preserve an explicit user opt-out (enabled === false); otherwise
-        // enable, because a schedule without enabled:true is silently ignored
-        // by resolveEntryQuietHoursDecisionForSymbol.
-        enabled: current[sym]?.enabled ?? true,
-        // Calibration-owned schedule fields only:
-        silencedByDow:       cal.silencedByDow,
-        dataGatheringByDow:  cal.dataGatheringByDow,
-        silencedUtcHours:    cal.silencedUtcHours,
-        ...(cal.calibratedAt != null ? { calibratedAt: cal.calibratedAt } : {}),
-      };
+      const mergedEntry = mergeCalibratedSymbolQuietHours(current[sym], cal);
       fullMerged[sym] = mergedEntry;
       // Track only the calibrated entries (not the full psqh map) for the API response.
       mergedResult[sym] = mergedEntry;
@@ -1249,15 +1229,12 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
     else modeSpecific.liveDecisionMode = partial.decisionMode;
   }
   S.config = { ...S.config, ...partial, ...modeSpecific };
-  const snapshot = { ...S.config };
+  let snapshot = { ...S.config };
   let persisted = false;
   try {
-    const stored = { ...snapshot, mode: S.botMode } as Record<string, unknown>;
-    await withRetry(() => db.execute(sql`
-      INSERT INTO bot_config (id, config, updated_at)
-      VALUES ('default', ${JSON.stringify(stored)}::jsonb, NOW())
-      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-    `));
+    const stored = await _botConfigPersistenceQueue.run(_persistCurrentBotConfig);
+    const { mode: _persistedMode, ...persistedConfig } = stored;
+    snapshot = persistedConfig as unknown as BotConfig;
     persisted = true;
   } catch (err) {
     logger.error({ err }, "[kalshi-bot] failed to persist config to DB");

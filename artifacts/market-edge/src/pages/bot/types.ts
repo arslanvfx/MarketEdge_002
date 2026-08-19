@@ -16,7 +16,7 @@ export interface QuietHoursV2 {
   // Per-day-of-week overrides (JS getUTCDay(): "0"=Sun, "1"=Mon, …, "6"=Sat)
   silencedByDow?: Record<string, number[]>;               // dow → UTC hours silenced on that day only
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 that day only
-  dataGatheringByDow?: Record<string, number[]>;          // dow → UTC hours with < 2 bets (active but capped)
+  dataGatheringByDow?: Record<string, number[]>;          // dow → UTC hours with ≤2 bets (active but capped)
   /** Per-cell overrides: operator can set a custom $ cap or promote to % of global bet (removes $ cap). */
   dataGatheringOverrides?: Record<string, Record<string, { type: 'dollar'; amount: number } | { type: 'percent'; pct: number }>>;
   calibratedAt?: string;  // ISO timestamp — set by Calibrate All

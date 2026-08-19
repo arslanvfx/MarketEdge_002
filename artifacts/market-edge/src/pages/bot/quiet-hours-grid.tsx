@@ -32,15 +32,17 @@ function hourMode(h: number, v2: QuietHoursV2, dow: number): "silenced" | "reduc
 
   // ── Reduced check ──
   const hasDowReduced = v2.reducedByDow != null && dowStr in v2.reducedByDow;
-  const isReduced = hasDowReduced
+  const dgOverride = v2.dataGatheringOverrides?.[dowStr]?.[String(h)];
+  const isReduced = (hasDowReduced
     ? v2.reducedByDow![dowStr]?.[String(h)] != null
-    : v2.reducedBetUtcHours[String(h)] != null;
+    : v2.reducedBetUtcHours[String(h)] != null)
+    || dgOverride?.type === "percent";
   if (isReduced) return "reduced";
 
   return "active";
 }
 
-/** Returns true when the hour is in the data-gathering list for this day (< 2 bets). */
+/** Returns true when the hour is in the data-gathering list for this day (≤2 bets). */
 function isDataGatheringHour(h: number, v2: QuietHoursV2, dow: number): boolean {
   const dgHours = v2.dataGatheringByDow?.[String(dow)];
   return Array.isArray(dgHours) && dgHours.includes(h);
@@ -58,8 +60,12 @@ function hasDowEntry(v2: QuietHoursV2, dow: number): boolean {
 function effectiveReducedPct(h: number, v2: QuietHoursV2, dow: number): number | undefined {
   const dowStr = String(dow);
   const hasDowReduced = v2.reducedByDow != null && dowStr in v2.reducedByDow;
-  if (hasDowReduced) return v2.reducedByDow![dowStr]?.[String(h)];
-  return v2.reducedBetUtcHours[String(h)];
+  const configured = hasDowReduced
+    ? v2.reducedByDow![dowStr]?.[String(h)]
+    : v2.reducedBetUtcHours[String(h)];
+  if (configured != null) return configured;
+  const override = v2.dataGatheringOverrides?.[dowStr]?.[String(h)];
+  return override?.type === "percent" ? override.pct : undefined;
 }
 
 /** Count silenced + reduced hours configured for a specific day. */
@@ -524,7 +530,23 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   function setReducedPct(h: number, pct: number) {
     const dowStr = String(selectedDow);
     const existing = value.reducedByDow?.[dowStr] ?? {};
-    const updated = { ...value, reducedByDow: { ...(value.reducedByDow ?? {}), [dowStr]: { ...existing, [String(h)]: pct } } };
+    const dgForDay = value.dataGatheringOverrides?.[dowStr] ?? {};
+    const { [String(h)]: existingDg, ...remainingDg } = dgForDay;
+    const updated = {
+      ...value,
+      reducedByDow: {
+        ...(value.reducedByDow ?? {}),
+        [dowStr]: { ...existing, [String(h)]: pct },
+      },
+      ...(existingDg?.type === "percent"
+        ? {
+            dataGatheringOverrides: {
+              ...(value.dataGatheringOverrides ?? {}),
+              [dowStr]: remainingDg,
+            },
+          }
+        : {}),
+    };
     onChange(updated);
     onSave?.(updated); // persist immediately — same as DG overrides
   }
@@ -532,6 +554,13 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   function clearReducedPct(h: number) {
     const dowStr = String(selectedDow);
     const existing = value.reducedByDow?.[dowStr] ?? {};
+    if (!(String(h) in existing)) {
+      const dgOverride = getDgOverride(h);
+      if (dgOverride?.type === "percent") {
+        clearDgOverride(h);
+        return;
+      }
+    }
     const { [String(h)]: _, ...rest } = existing;
     const updated = { ...value, reducedByDow: { ...(value.reducedByDow ?? {}), [dowStr]: rest } };
     onChange(updated);

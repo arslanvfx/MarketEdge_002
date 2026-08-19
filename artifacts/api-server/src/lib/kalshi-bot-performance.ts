@@ -6,6 +6,9 @@
 
 import type { QuietHoursV2 } from "./kalshi-bot-engine-core";
 
+/** 0–2 settled bets stay in data collection; the third bet unlocks calibration. */
+export const PER_MARKET_QUIET_HOURS_MIN_BETS = 3;
+
 export interface SettledBetRecord {
   symbol: string;
   direction: string | null;
@@ -818,12 +821,12 @@ export function runAutoTuneRules(
  *
  * @param bets      Evaluated bets for this symbol (any chronological order)
  * @param threshold Win-rate % below which an hour cell is silenced (default 40)
- * @param minBets   Minimum bets in a DOW×hour cell to act on (default 5)
+ * @param minBets   Minimum bets in a DOW×hour cell to act on (default 3)
  */
 export function computeSymbolQuietHoursV2(
   bets: SettledBetRecord[],
   threshold = 40,
-  minBets = 5,
+  minBets = PER_MARKET_QUIET_HOURS_MIN_BETS,
 ): QuietHoursV2 {
   // ET DOW helper — mirrors the global auto-tune's AT TIME ZONE 'America/New_York'
   const ET_DOW_NAMES_SYM = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -853,8 +856,7 @@ export function computeSymbolQuietHoursV2(
 
   // Build silencedByDow and dataGatheringByDow — populate ALL 7 days.
   // silencedByDow: hours with ≥ minBets bets AND win rate < threshold → fully blocked.
-  // dataGatheringByDow: hours with 1 – (minBets-1) bets → active but capped at dataGatheringBetCap.
-  // Hours with zero bets are left out of both lists (no data = no opinion).
+  // dataGatheringByDow: hours with 0 – (minBets-1) bets → active but capped at dataGatheringBetCap.
   const silencedByDow: Record<string, number[]> = {};
   const dataGatheringByDow: Record<string, number[]> = {};
   for (let dow = 0; dow < 7; dow++) {
@@ -894,5 +896,25 @@ export function computeSymbolQuietHoursV2(
     silencedByDow,
     dataGatheringByDow,
     autoTuneEnabled: true,
+  };
+}
+
+/**
+ * Merge a computed schedule over the freshest stored per-market schedule.
+ * Calibration owns only silence/data-collection classification and its stamp;
+ * operator fields such as reduced percentages and per-cell overrides survive.
+ */
+export function mergeCalibratedSymbolQuietHours(
+  current: QuietHoursV2 | undefined,
+  calibrated: QuietHoursV2,
+): QuietHoursV2 {
+  return {
+    ...calibrated,
+    ...(current ?? {}),
+    enabled: current?.enabled ?? true,
+    silencedByDow: calibrated.silencedByDow,
+    dataGatheringByDow: calibrated.dataGatheringByDow,
+    silencedUtcHours: calibrated.silencedUtcHours,
+    ...(calibrated.calibratedAt != null ? { calibratedAt: calibrated.calibratedAt } : {}),
   };
 }

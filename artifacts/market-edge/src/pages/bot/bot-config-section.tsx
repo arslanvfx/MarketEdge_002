@@ -37,14 +37,17 @@ function resolveSymbolStateClient(
     ? (schedule.silencedByDow![dowStr] ?? []).includes(utcHour)
     : schedule.silencedUtcHours.includes(utcHour);
   if (isSilenced) return { mode: "silenced" };
+  const cellOverride = schedule.dataGatheringOverrides?.[dowStr]?.[String(utcHour)];
   const hasDowReduced = schedule.reducedByDow != null && dowStr in schedule.reducedByDow;
-  const reduced = hasDowReduced
+  const configuredReduction = hasDowReduced
     ? (schedule.reducedByDow![dowStr]?.[String(utcHour)] ?? null)
     : (schedule.reducedBetUtcHours[String(utcHour)] ?? null);
+  const reduced = configuredReduction
+    ?? (cellOverride?.type === "percent" ? cellOverride.pct : null);
   if (reduced != null && reduced >= 1 && reduced <= 99) return { mode: "reduced", pct: reduced };
   const dgHours = schedule.dataGatheringByDow?.[dowStr];
   if (Array.isArray(dgHours) && dgHours.includes(utcHour)) {
-    const override = schedule.dataGatheringOverrides?.[dowStr]?.[String(utcHour)];
+    const override = cellOverride;
     if (override) {
       if (override.type === "percent") return { mode: "reduced", pct: override.pct };
       return { mode: "data-gathering", amount: override.amount };
@@ -53,6 +56,38 @@ function resolveSymbolStateClient(
     return { mode: "data-gathering", amount: dgCap };
   }
   return { mode: "active" };
+}
+
+function mergePerSymbolQuietHoursForDisplay(
+  server: Record<string, QuietHoursV2>,
+  draft: Record<string, QuietHoursV2>,
+): Record<string, QuietHoursV2> {
+  const result = { ...server };
+  for (const [sym, draftSchedule] of Object.entries(draft)) {
+    const serverSchedule = server[sym];
+    if (!serverSchedule) {
+      result[sym] = draftSchedule;
+      continue;
+    }
+    const serverCalibratedAt = Date.parse(serverSchedule.calibratedAt ?? "");
+    const draftCalibratedAt = Date.parse(draftSchedule.calibratedAt ?? "");
+    const serverCalibrationIsNewer =
+      Number.isFinite(serverCalibratedAt)
+      && (!Number.isFinite(draftCalibratedAt) || serverCalibratedAt > draftCalibratedAt);
+    result[sym] = {
+      ...serverSchedule,
+      ...draftSchedule,
+      ...(serverCalibrationIsNewer
+        ? {
+            silencedByDow: serverSchedule.silencedByDow,
+            dataGatheringByDow: serverSchedule.dataGatheringByDow,
+            silencedUtcHours: serverSchedule.silencedUtcHours,
+            calibratedAt: serverSchedule.calibratedAt,
+          }
+        : {}),
+    };
+  }
+  return result;
 }
 
 function fmtCalAge(iso: string): string {
@@ -141,12 +176,12 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
         setCalibrateOk(true);
         setCalibrateMsg(
           skipped > 0
-            ? `✓ ${n} coins applied & saved · ${skipped} skipped (not enough data)`
+            ? `✓ ${n} markets applied & saved · ${skipped} failed`
             : `✓ ${n} coins · all days applied & saved`
         );
       } else {
         setCalibrateOk(false);
-        setCalibrateMsg("No coins had enough data (need ≥ 5 settled bets each)");
+        setCalibrateMsg("No markets could be calibrated");
       }
     } catch {
       setCalibrateOk(false);
@@ -497,6 +532,13 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
   const [proximityCalibMsg, setProximityCalibMsg] = React.useState<string | null>(null);
   const [proximityExpanded, setProximityExpanded] = React.useState(false);
   const [perMarketConvictionExpanded, setPerMarketConvictionExpanded] = React.useState(false);
+  const visiblePerSymbolQuietHours = React.useMemo(
+    () => mergePerSymbolQuietHoursForDisplay(
+      cfg?.perSymbolQuietHours ?? {},
+      configDraft.perSymbolQuietHours ?? {},
+    ),
+    [cfg?.perSymbolQuietHours, configDraft.perSymbolQuietHours],
+  );
 
   async function runReEvaluate() {
     setReEvalState({ loading: true, msg: null });
@@ -2426,7 +2468,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </div>
                     {(merged.quietHoursMode ?? "global") === "per_market" && (
                       <span className="text-[10px] text-muted-foreground/70">
-                        Auto-calibrated per coin from live bet history
+                        Auto-calibrated hourly per coin from live bet history
                       </span>
                     )}
                   </div>
@@ -2445,7 +2487,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     />
                   ) : (
                     <PerSymbolQuietHoursPanel
-                      perSymbolQuietHours={merged.perSymbolQuietHours ?? {}}
+                      perSymbolQuietHours={visiblePerSymbolQuietHours}
                       onChange={(sym, v) => setConfigDraft(d => ({
                         ...d,
                         perSymbolQuietHours: {

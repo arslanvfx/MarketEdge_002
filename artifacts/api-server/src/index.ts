@@ -14,6 +14,7 @@ import { initResearchFromDB } from "./lib/stock/research";
 import { runBotCycle as runStockBotCycle, initDecisionLogFromDB } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
 import { initAiSpend } from "./lib/ai-spend";
+import { scheduleAtTopOfEveryUtcHour } from "./lib/kalshi-quiet-hours-scheduler";
 
 const rawPort = process.env["PORT"];
 
@@ -620,28 +621,24 @@ app.listen(port, (err) => {
       // right before a restart and confuse operators who just applied per-day adjustments.
       setInterval(runQHAutoTune, 30 * 60_000);
 
-      // Per-symbol quiet-hours calibration (Smart Hours "per market" mode):
-      // recompute ALL symbols' schedules every 4 hours.  Without this, the
-      // only automatic trigger is bet evaluation — a catch-22 when the bot is
-      // silenced by quiet hours and never places bets, so calibration never
-      // discovers that windows have become available again.  First run fires
-      // on the first 30-min poll after startup (not immediately, matching the
-      // auto-tune rationale above).  Only touches calibration-owned fields.
-      let lastPerSymbolCalibrationAt = 0;
-      const PER_SYMBOL_CALIBRATION_INTERVAL_MS = 4 * 60 * 60_000;
-      const runPerSymbolCalibration = () => {
+      // Per-symbol Smart Hours calibration runs at every exact UTC hour
+      // boundary. It does not fire immediately on restart and the scheduler
+      // skips overlapping runs when a slow DB query crosses a boundary.
+      scheduleAtTopOfEveryUtcHour(async () => {
         if (getBotState().config.quietHoursMode !== "per_market") return;
-        if (Date.now() - lastPerSymbolCalibrationAt < PER_SYMBOL_CALIBRATION_INTERVAL_MS) return;
-        lastPerSymbolCalibrationAt = Date.now();
-        recomputeAllSymbolQuietHours()
-          .then(({ calibratedSymbols, skippedSymbols }) =>
-            logger.info({ calibratedSymbols, skippedSymbols }, "[qh-per-symbol] scheduled bulk calibration complete"),
-          )
-          .catch(err =>
-            logger.warn({ err }, "[qh-per-symbol] scheduled bulk calibration failed (non-fatal)"),
+        try {
+          const { calibratedSymbols, skippedSymbols } = await recomputeAllSymbolQuietHours();
+          logger.info(
+            { calibratedSymbols, skippedSymbols },
+            "[qh-per-symbol] hourly bulk calibration complete",
           );
-      };
-      setInterval(runPerSymbolCalibration, 30 * 60_000);
+        } catch (err) {
+          logger.warn(
+            { err },
+            "[qh-per-symbol] hourly bulk calibration failed (non-fatal)",
+          );
+        }
+      });
 
       // Bring up the stock trading vertical independently — a failure here must
       // never take down the crypto tracker or Kalshi bot above.

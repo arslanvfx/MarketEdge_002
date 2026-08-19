@@ -984,7 +984,7 @@ export interface QuietHoursV2 {
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 on that day only
 
   calibratedAt?: string; // ISO timestamp — when recomputeAllSymbolQuietHours last ran for this coin
-  dataGatheringByDow?: Record<string, number[]>; // dow → UTC hours with < 2 historical bets (active but capped at dataGatheringBetCap)
+  dataGatheringByDow?: Record<string, number[]>; // dow → UTC hours with ≤2 historical bets (active but capped at dataGatheringBetCap)
   /** Per-cell overrides: operator can set a custom $ cap or promote to a % of global bet (which removes the $ cap). */
   dataGatheringOverrides?: Record<string, Record<string, { type: 'dollar'; amount: number } | { type: 'percent'; pct: number }>>;
 }
@@ -1027,10 +1027,15 @@ export function resolveQuietHoursV2State(
     : qhv2.silencedUtcHours.includes(utcHour);
   if (isSilenced) return { mode: "silenced", utcHour };
 
+  const cellOverride = qhv2.dataGatheringOverrides?.[dowStr]?.[String(utcHour)];
   const hasDowReduced = qhv2.reducedByDow != null && dowStr in qhv2.reducedByDow;
-  const reduced = hasDowReduced
+  const configuredReduction = hasDowReduced
     ? (qhv2.reducedByDow![dowStr]?.[String(utcHour)] ?? null)
     : (qhv2.reducedBetUtcHours[String(utcHour)] ?? null);
+  // A percentage chosen while a cell was data-gathering is an operator-owned
+  // limit. Keep enforcing it after calibration promotes that cell to active.
+  const reduced = configuredReduction
+    ?? (cellOverride?.type === "percent" ? cellOverride.pct : null);
   if (reduced != null && reduced >= 1 && reduced <= 99) {
     return { mode: "reduced", reducedBetAmount: reduced, utcHour };
   }
@@ -1040,7 +1045,7 @@ export function resolveQuietHoursV2State(
   // (% override removes the $ cap and treats the hour exactly like a reducedByDow entry).
   const dgHours = qhv2.dataGatheringByDow?.[dowStr];
   if (Array.isArray(dgHours) && dgHours.includes(utcHour)) {
-    const override = qhv2.dataGatheringOverrides?.[dowStr]?.[String(utcHour)];
+    const override = cellOverride;
     if (override) {
       if (override.type === 'percent') {
         // Treat exactly like a reduced hour — no $ cap, just pct of global bet
@@ -1084,7 +1089,7 @@ export interface EntryQuietHoursDecision {
   forcedPaper: boolean;
   /** Reduced-bet percentage (1–99) to apply at sizing, or null. */
   reducedPct: number | null;
-  /** True when hour has < 2 historical bets — bot stays active but tick applies dataGatheringBetCap. */
+  /** True when hour has ≤2 historical bets — bot stays active but tick applies dataGatheringBetCap. */
   isDataGathering?: boolean;
   /** Custom per-cell dollar cap (overrides global dataGatheringBetCap for this hour). */
   dgOverrideAmount?: number;
