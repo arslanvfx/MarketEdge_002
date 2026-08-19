@@ -69,6 +69,11 @@ import {
   clampProximityToCalibratedBand,
   PROXIMITY_GLOBAL_MAX_PCT,
   getEffectiveProximityThreshold,
+  getEffectiveConvictionZone,
+  getConvictionMinEntryMinute,
+  mergePerMarketConvictionConfig,
+  isValidConvictionZoneBounds,
+  PER_MARKET_CONVICTION_SYMBOLS,
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
   computeAdverseMomentumGate,
@@ -163,6 +168,12 @@ export {
   computeStrikeProximityGate,
   // Per-coin proximity threshold helper and calibrated suggestions.
   getEffectiveProximityThreshold,
+  // Per-market conviction zone + min-entry helpers.
+  getEffectiveConvictionZone,
+  getConvictionMinEntryMinute,
+  mergePerMarketConvictionConfig,
+  isValidConvictionZoneBounds,
+  PER_MARKET_CONVICTION_SYMBOLS,
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   // BotConfig types and defaults live in the zero-dependency core module so
   // they can be imported by unit tests without pulling in ./crypto.
@@ -512,9 +523,10 @@ function _makeBotDecisionInner(
     // Floor and cap are independently configurable; derive the zone from both.
     // When both fields are set, deriveConvictionZone passes them through verbatim
     // (independent-fields mode).  Falls back to 0.82/0.91 if not yet migrated.
+    const cvZoneRaw = getEffectiveConvictionZone(sym, config);
     const cvZone    = deriveConvictionZone(
-      config.kalshiLockPrice    ?? 0.82,
-      config.kalshiLockPriceCap ?? 0.91,
+      cvZoneRaw.lockPrice,
+      cvZoneRaw.lockPriceCap,
     );
     // Pull the live orderbook ask/bid from the Kalshi cache so the conviction
     // trigger uses what you actually PAY (the ask), not the mid-price.

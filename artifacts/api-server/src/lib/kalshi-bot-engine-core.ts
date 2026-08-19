@@ -1259,6 +1259,13 @@ export interface BotConfig {
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
+  // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
+  // Any field left undefined falls through to the matching global setting.
+  //   lockPrice      — entry floor (overrides kalshiLockPrice)
+  //   lockPriceCap   — entry cap   (overrides kalshiLockPriceCap)
+  //   minEntryMinute — don't enter until this many minutes have elapsed; 0 = no per-market restriction
+  //                    falls through to convictionMinEntryMinutes when not set per-market
+  perMarketConvictionConfig?: Record<string, { lockPrice?: number; lockPriceCap?: number; minEntryMinute?: number }>;
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
@@ -2317,6 +2324,119 @@ export function getEffectiveProximityThreshold(sym: string, config: BotConfig): 
   const override = config.strikeProximityMinPctOverrides?.[sym];
   if (override != null && override > 0) return override;
   return config.strikeProximityMinPct ?? 0.05;
+}
+
+/**
+ * getEffectiveConvictionZone — resolve the entry zone [lockPrice, lockPriceCap]
+ * for a given symbol, using the per-market override when set and falling through
+ * to the global kalshiLockPrice / kalshiLockPriceCap when not.
+ *
+ * MUST use the two-argument deriveConvictionZone(floor, cap) form downstream —
+ * callers are responsible for passing the returned values to deriveConvictionZone.
+ */
+export function getEffectiveConvictionZone(
+  sym: string,
+  config: BotConfig,
+): { lockPrice: number; lockPriceCap: number } {
+  const ov = config.perMarketConvictionConfig?.[sym];
+  return {
+    lockPrice:    ov?.lockPrice    ?? config.kalshiLockPrice    ?? 0.82,
+    lockPriceCap: ov?.lockPriceCap ?? config.kalshiLockPriceCap ?? 0.91,
+  };
+}
+
+/**
+ * getConvictionMinEntryMinute — resolve the "don't enter before X minutes
+ * elapsed" value for a given symbol.
+ *
+ * Priority:
+ *   1. perMarketConvictionConfig[sym].minEntryMinute — when explicitly set
+ *      (even if 0, which means "no per-market restriction for this market
+ *      even if the global convictionMinEntryMinutes is non-zero")
+ *   2. config.convictionMinEntryMinutes — global fallback
+ *   3. 0 — no restriction
+ *
+ * Callers should skip entry when minutesElapsed < result (and result > 0),
+ * subject to the same early-bypass logic as the global gate.
+ */
+export function getConvictionMinEntryMinute(sym: string, config: BotConfig): number {
+  const ov = config.perMarketConvictionConfig?.[sym];
+  if (ov != null && ov.minEntryMinute != null) return ov.minEntryMinute;
+  return config.convictionMinEntryMinutes ?? 0;
+}
+
+export type PerMarketConvictionOverride = {
+  lockPrice?: number;
+  lockPriceCap?: number;
+  minEntryMinute?: number;
+};
+
+export function isValidConvictionZoneBounds(lockPrice: number, lockPriceCap: number): boolean {
+  return Number.isFinite(lockPrice) && Number.isFinite(lockPriceCap) && lockPrice <= lockPriceCap;
+}
+
+export const PER_MARKET_CONVICTION_SYMBOLS = [
+  "BTC", "ETH", "XRP", "HYPE", "BNB", "SOL",
+  "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI",
+] as const;
+
+/**
+ * Merge and validate the user-editable per-market map.
+ *
+ * A null/non-object value is an explicit deletion tombstone. Missing fields on
+ * an object clear that field from the stored override. The resulting zone is
+ * checked against the supplied global fallback values, so a floor-only or
+ * cap-only override cannot create an inverted effective zone.
+ */
+export function mergePerMarketConvictionConfig(
+  submitted: Record<string, unknown>,
+  stored: Record<string, PerMarketConvictionOverride>,
+  globalFloor: number,
+  globalCap: number,
+): Record<string, PerMarketConvictionOverride> {
+  const allowed = new Set<string>(PER_MARKET_CONVICTION_SYMBOLS);
+  const result: Record<string, PerMarketConvictionOverride> = { ...stored };
+
+  for (const [rawKey, rawValue] of Object.entries(submitted)) {
+    const key = rawKey.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
+    if (!allowed.has(key)) continue;
+    if (rawValue == null || typeof rawValue !== "object") {
+      delete result[key];
+      continue;
+    }
+
+    const previous = stored[key] ?? {};
+    const candidate: PerMarketConvictionOverride = { ...previous };
+    const value = rawValue as Record<string, unknown>;
+
+    if (typeof value.lockPrice === "number" && value.lockPrice >= 0.50 && value.lockPrice <= 0.98) {
+      candidate.lockPrice = +value.lockPrice.toFixed(4);
+    } else if (value.lockPrice == null) {
+      delete candidate.lockPrice;
+    }
+    if (typeof value.lockPriceCap === "number" && value.lockPriceCap >= 0.51 && value.lockPriceCap <= 0.99) {
+      candidate.lockPriceCap = +value.lockPriceCap.toFixed(4);
+    } else if (value.lockPriceCap == null) {
+      delete candidate.lockPriceCap;
+    }
+    if (typeof value.minEntryMinute === "number" && value.minEntryMinute >= 0 && value.minEntryMinute <= 13) {
+      candidate.minEntryMinute = Math.round(value.minEntryMinute);
+    } else if (value.minEntryMinute == null) {
+      delete candidate.minEntryMinute;
+    }
+
+    const effectiveFloor = candidate.lockPrice ?? globalFloor;
+    const effectiveCap = candidate.lockPriceCap ?? globalCap;
+    if (effectiveFloor > effectiveCap) {
+      throw new Error(
+        `Invalid conviction entry zone for ${key}: floor ${Math.round(effectiveFloor * 100)}¢ exceeds cap ${Math.round(effectiveCap * 100)}¢.`,
+      );
+    }
+    if (Object.keys(candidate).length > 0) result[key] = candidate;
+    else delete result[key];
+  }
+
+  return result;
 }
 
 /**

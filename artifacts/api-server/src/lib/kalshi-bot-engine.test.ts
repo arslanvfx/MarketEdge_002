@@ -60,6 +60,10 @@ import {
   deriveConvictionZone,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
+  getEffectiveConvictionZone,
+  getConvictionMinEntryMinute,
+  mergePerMarketConvictionConfig,
+  isValidConvictionZoneBounds,
   checkConvictionOneSidedBook,
   shouldSuppressConvictionStopLoss,
   type BotConfig,
@@ -96,6 +100,62 @@ function inp(overrides: Partial<CorePairInputs> = {}): CorePairInputs {
     ...overrides,
   };
 }
+
+test("per-market conviction zone and wait settings fall back to global values", () => {
+  const config = {
+    ...DEFAULT_BOT_CONFIG,
+    kalshiLockPrice: 0.82,
+    kalshiLockPriceCap: 0.91,
+    convictionMinEntryMinutes: 3,
+    perMarketConvictionConfig: {
+      GOLD: { lockPrice: 0.84, lockPriceCap: 0.90, minEntryMinute: 12 },
+    },
+  } satisfies BotConfig;
+
+  assert.deepEqual(getEffectiveConvictionZone("GOLD", config), { lockPrice: 0.84, lockPriceCap: 0.90 });
+  assert.deepEqual(getEffectiveConvictionZone("BTC", config), { lockPrice: 0.82, lockPriceCap: 0.91 });
+  assert.equal(getConvictionMinEntryMinute("GOLD", config), 12);
+  assert.equal(getConvictionMinEntryMinute("BTC", config), 3);
+});
+
+test("global conviction bounds reject floor-only, cap-only, and simultaneous inverted updates", () => {
+  assert.equal(isValidConvictionZoneBounds(0.95, 0.91), false); // floor-only update
+  assert.equal(isValidConvictionZoneBounds(0.82, 0.80), false); // cap-only update
+  assert.equal(isValidConvictionZoneBounds(0.95, 0.90), false); // both changed
+  assert.equal(isValidConvictionZoneBounds(0.84, 0.90), true);
+});
+
+test("per-market config merge honors deletion tombstones and rejects inverted effective zones", () => {
+  const stored = {
+    GOLD: { lockPrice: 0.84, lockPriceCap: 0.90, minEntryMinute: 12 },
+    SILVER: { lockPrice: 0.83, lockPriceCap: 0.91 },
+  };
+
+  const merged = mergePerMarketConvictionConfig({ GOLD: null, SILVER: { lockPrice: 0.83, lockPriceCap: null } }, stored, 0.82, 0.91);
+  assert.equal(merged.GOLD, undefined);
+  assert.deepEqual(merged.SILVER, { lockPrice: 0.83 });
+  assert.throws(
+    () => mergePerMarketConvictionConfig({ WTI: { lockPrice: 0.95 } }, stored, 0.82, 0.91),
+    /WTI.*exceeds cap/,
+  );
+});
+
+test("per-market config merge revalidates stored overrides when global bounds change", () => {
+  const stored = {
+    GOLD: { lockPrice: 0.95 },
+    SILVER: { lockPriceCap: 0.86 },
+  };
+
+  assert.throws(
+    () => mergePerMarketConvictionConfig(
+      { GOLD: { lockPrice: 0.95 }, SILVER: { lockPriceCap: 0.86 } },
+      stored,
+      0.82,
+      0.91,
+    ),
+    /GOLD.*exceeds cap/,
+  );
+});
 
 // ---------------------------------------------------------------------------
 // PIPELINE: Gate 1 — all three models required

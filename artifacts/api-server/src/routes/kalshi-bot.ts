@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, mergePerMarketConvictionConfig, isValidConvictionZoneBounds, type BetProfile } from "../lib/kalshi-bot-engine";
 import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
@@ -725,6 +725,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     quietHoursMode,
     perSymbolQuietHours,
     dataGatheringEnabled,
+    perMarketConvictionConfig,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -755,6 +756,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     quietHoursMode?: 'global' | 'per_market';
     perSymbolQuietHours?: Record<string, unknown>;
     dataGatheringEnabled?: boolean;
+    perMarketConvictionConfig?: Record<string, unknown>;
     maxConsecutiveLosses?: number;
     circuitBreakerPauseWindows?: number;
     enableDirectionCap?: boolean;
@@ -1180,6 +1182,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.dataGatheringBetCap = dataGatheringBetCap;
   }
   if (typeof dataGatheringEnabled === "boolean") partial.dataGatheringEnabled = dataGatheringEnabled;
+
   // Entry safety gate thresholds
   if (typeof consensusMinCents === "number" && consensusMinCents >= 0 && consensusMinCents <= 50) {
     partial.consensusMinCents = consensusMinCents;
@@ -1215,11 +1218,77 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof priceBufferPct === "number" && priceBufferPct >= 0 && priceBufferPct <= 5) {
     partial.priceBufferPct = priceBufferPct;
   }
+  const currentGlobalFloor = getBotState().config.kalshiLockPrice ?? 0.82;
+  const currentGlobalCap = getBotState().config.kalshiLockPriceCap ?? 0.91;
+  const nextGlobalFloor =
+    typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99
+      ? kalshiLockPrice
+      : currentGlobalFloor;
+  const nextGlobalCap =
+    typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97
+      ? kalshiLockPriceCap
+      : currentGlobalCap;
+  if (!isValidConvictionZoneBounds(nextGlobalFloor, nextGlobalCap)) {
+    return res.status(400).json({
+      error: `Conviction entry floor (${Math.round(nextGlobalFloor * 100)}¢) cannot exceed cap (${Math.round(nextGlobalCap * 100)}¢).`,
+    });
+  }
   if (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) {
     partial.kalshiLockPrice = kalshiLockPrice;
   }
   if (typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97) {
     partial.kalshiLockPriceCap = kalshiLockPriceCap;
+  }
+
+  // Per-market conviction entry overrides (lockPrice, lockPriceCap, minEntryMinute per symbol).
+  // Revalidate the complete resulting map on every update that changes either
+  // global bound, not only when the per-market map is present in the request.
+  // This prevents a global cap/floor edit from leaving a stored market zone inverted.
+  const hasValidGlobalZoneUpdate =
+    (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) ||
+    (typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97);
+  if (
+    (perMarketConvictionConfig !== undefined && typeof perMarketConvictionConfig === "object" && perMarketConvictionConfig !== null) ||
+    hasValidGlobalZoneUpdate
+  ) {
+    const currentConfig = getBotState().config;
+    const storedPmcc = currentConfig.perMarketConvictionConfig ?? {};
+    const submittedPmcc: Record<string, unknown> = { ...storedPmcc };
+
+    if (perMarketConvictionConfig !== undefined && typeof perMarketConvictionConfig === "object" && perMarketConvictionConfig !== null) {
+      // Overlay each submitted symbol onto its stored entry before validation.
+      // This makes omitted fields mean "unchanged" for partial API callers while
+      // preserving null tombstones for explicit deletion.
+      for (const [rawKey, rawValue] of Object.entries(perMarketConvictionConfig as Record<string, unknown>)) {
+        const key = rawKey.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
+        if (rawValue != null && typeof rawValue === "object") {
+          submittedPmcc[key] = { ...(storedPmcc[key] ?? {}), ...(rawValue as Record<string, unknown>) };
+        } else {
+          submittedPmcc[key] = rawValue;
+        }
+      }
+    }
+
+    const effectiveGlobalFloor =
+      typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99
+        ? kalshiLockPrice
+        : currentConfig.kalshiLockPrice ?? 0.82;
+    const effectiveGlobalCap =
+      typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97
+        ? kalshiLockPriceCap
+        : currentConfig.kalshiLockPriceCap ?? 0.91;
+    try {
+      partial.perMarketConvictionConfig = mergePerMarketConvictionConfig(
+        submittedPmcc,
+        storedPmcc,
+        effectiveGlobalFloor,
+        effectiveGlobalCap,
+      );
+    } catch (error) {
+      return res.status(400).json({
+        error: error instanceof Error ? error.message : "Invalid per-market conviction entry zone.",
+      });
+    }
   }
   if (typeof strikeProximityMinPct === "number" && strikeProximityMinPct >= 0.01 && strikeProximityMinPct <= 2.00) {
     partial.strikeProximityMinPct = strikeProximityMinPct;

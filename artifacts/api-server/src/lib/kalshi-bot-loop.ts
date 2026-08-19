@@ -16,6 +16,8 @@ import {
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
   deriveConvictionZone,
+  getEffectiveConvictionZone,
+  getConvictionMinEntryMinute,
   shouldSuppressConvictionStopLoss,
   getEtDow,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
@@ -96,14 +98,14 @@ setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: numbe
   if (convictionFiredThisWindow.has(`${sym}:${wk}`)) return;
   if (openPositions.has(sym)) return;
   // ── Real-zone sanity check (belt-and-suspenders) ──────────────────────────
-  // Re-verify the poller's price against the REAL configured zone, derived
-  // here independently with the two-arg (floor, cap) form.  If the poller's
-  // zone math ever drifts from the tick's again, this guard prevents the
-  // out-of-zone dispatch → abort → cooldown-clear loop that transiently sets
-  // convictionFiredThisWindow and starves the 5 s loop of genuine entries.
+  // Re-verify the poller's price against the REAL configured zone for THIS
+  // symbol, using per-market overrides when present (same two-arg form that
+  // kalshi-conviction-poller uses).  Per-market overrides let GOLD/SILVER/WTI
+  // use a different zone than BTC without the poller and loop disagreeing.
+  const _cbZoneRaw = getEffectiveConvictionZone(sym, S.config);
   const { lockPrice, lockPriceCap } = deriveConvictionZone(
-    S.config.kalshiLockPrice    ?? 0.82,
-    S.config.kalshiLockPriceCap ?? 0.91,
+    _cbZoneRaw.lockPrice,
+    _cbZoneRaw.lockPriceCap,
   );
   const yesInRealZone = yesAsk != null && yesAsk >= lockPrice && yesAsk <= lockPriceCap;
   const noInRealZone  = noAsk  != null && noAsk  >= lockPrice && noAsk  <= lockPriceCap;
@@ -1551,7 +1553,8 @@ export async function runBotLoopTick(): Promise<void> {
       // Minimum entry wait: block dispatch until N minutes have elapsed.
       // Bypassed when extreme-price bypass is enabled and the live YES price
       // is at a configured extreme — mirrors the tick.ts gate exactly.
-      const convMinEntryMin = S.config.convictionMinEntryMinutes ?? 0;
+      // Use per-market override when set; falls through to global convictionMinEntryMinutes.
+      const convMinEntryMin = getConvictionMinEntryMinute(sym, S.config);
       if (convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
         const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
         const _bypassFloor = S.config.convictionEarlyBypassThreshold ?? 0.81;

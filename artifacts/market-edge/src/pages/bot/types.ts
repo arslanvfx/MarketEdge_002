@@ -124,8 +124,14 @@ export interface BotConfig {
   proximityLatePctOverrides?: Record<string, number>;
   convictionDailyLossLimit?: number;
   convictionMaxDailySpend?: number;
+  convictionStopLossFloor?: number;
   convictionStopLossActivationMinute?: number;
   convictionMinEntryMinutes?: number;
+  perMarketConvictionConfig?: Record<string, {
+    lockPrice?: number;
+    lockPriceCap?: number;
+    minEntryMinute?: number;
+  } | null>;
   convictionBoostBetSize?: number;
   convictionBoostProbability?: number;
   convictionBoostMinWinRate?: number;

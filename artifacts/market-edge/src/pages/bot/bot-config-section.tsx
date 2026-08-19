@@ -468,6 +468,7 @@ interface BotConfigSectionProps {
   saving: boolean;
   saveConfig: () => Promise<void>;
   persistMsg: "saved" | "failed" | "error" | null;
+  persistError: string | null;
   status: BotStatus | undefined;
   activeMode: "paper" | "live";
   presetsData: { presets: Partial<Record<string, object>> } | undefined;
@@ -487,7 +488,7 @@ type CalibrateResult = Record<string, {
   late:  { n: number; mean: number | null; stdDev: number | null; suggested: number | null };
 }>;
 
-export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, status, activeMode, presetsData, modeDefaults, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
+export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, persistError, status, activeMode, presetsData, modeDefaults, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
   const hasDraft = Object.keys(configDraft).length > 0;
   const [defaultsAppliedFor, setDefaultsAppliedFor] = React.useState<string | null>(null);
   const [reEvalState, setReEvalState] = React.useState<{ loading: boolean; msg: string | null }>({ loading: false, msg: null });
@@ -495,6 +496,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
   const [proximityCalibResult, setProximityCalibResult] = React.useState<CalibrateResult | null>(null);
   const [proximityCalibMsg, setProximityCalibMsg] = React.useState<string | null>(null);
   const [proximityExpanded, setProximityExpanded] = React.useState(false);
+  const [perMarketConvictionExpanded, setPerMarketConvictionExpanded] = React.useState(false);
 
   async function runReEvaluate() {
     setReEvalState({ loading: true, msg: null });
@@ -511,6 +513,20 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
     }
   }
   const isConviction = (merged.decisionMode ?? "classic") === "conviction";
+  const convictionFloor = configDraft.kalshiLockPrice ?? merged.kalshiLockPrice ?? 0.82;
+  const convictionCap = configDraft.kalshiLockPriceCap ?? merged.kalshiLockPriceCap ?? 0.91;
+  const convictionGlobalZoneInvalid = isConviction && convictionFloor > convictionCap;
+  const convictionOverrides = {
+    ...(merged.perMarketConvictionConfig ?? {}),
+    ...(configDraft.perMarketConvictionConfig ?? {}),
+  };
+  const invalidPerMarketSymbols = isConviction
+    ? PER_MARKET_SYMBOLS.filter(sym => {
+        const ov = convictionOverrides[sym];
+        if (!ov) return false;
+        return (ov.lockPrice ?? convictionFloor) > (ov.lockPriceCap ?? convictionCap);
+      })
+    : [];
   return (
     <>
         {/* ── Config Settings ── */}
@@ -998,8 +1014,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       Bot re-checks every 5 seconds so a cross at any point in the window is caught quickly.
                     </span>
                     {(() => {
-                      const floor = merged.kalshiLockPrice    ?? 0.82;
-                      const cap   = merged.kalshiLockPriceCap ?? 0.91;
+                       const floor = convictionFloor;
+                       const cap   = convictionCap;
                       const floorYes = Math.round(floor * 100);
                       const capYes   = Math.round(cap   * 100);
                       const floorNo  = Math.round((1 - cap)   * 100);
@@ -1038,6 +1054,111 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                               Maximum allowed Kalshi YES price. Above this the margin is too thin — bet is skipped. Entry zone: <span className="text-violet-400/80">{floorYes}¢–{capYes}¢ YES</span> · <span className="text-violet-400/60">{floorNo}¢–{capNo}¢ NO</span>.
                             </span>
                           </label>
+                        </div>
+                      );
+                    })()}
+                    {convictionGlobalZoneInvalid && (
+                      <div role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[11px] text-red-300">
+                        Entry Floor cannot exceed Entry Cap. Lower the floor or raise the cap before saving.
+                      </div>
+                    )}
+
+                    {/* Per-market conviction entry overrides */}
+                    {(() => {
+                      // Keep pending edits visible while the server-backed `merged`
+                      // config is still unchanged. Null values are draft tombstones.
+                      const overrides = convictionOverrides;
+                      const updateOverride = (
+                        sym: string,
+                        field: "lockPrice" | "lockPriceCap" | "minEntryMinute",
+                        raw: string,
+                      ) => {
+                        const current = overrides[sym] ?? {};
+                        const next = { ...current };
+                        if (raw === "") {
+                          delete next[field];
+                        } else {
+                          const value = field === "minEntryMinute" ? parseInt(raw, 10) : parseFloat(raw);
+                          if (!Number.isNaN(value)) next[field] = value;
+                        }
+                        const nextMap = { ...overrides };
+                        // Send a tombstone when the final field is cleared. The
+                        // server merges partial maps, so omitting the key would
+                        // otherwise leave the old DB override in place forever.
+                        if (Object.keys(next).length === 0) nextMap[sym] = null;
+                        else nextMap[sym] = next;
+                        setConfigDraft(d => ({ ...d, perMarketConvictionConfig: nextMap }));
+                      };
+                      return (
+                        <div className="mt-1 rounded-lg border border-cyan-500/20 bg-cyan-500/5">
+                          <button
+                            type="button"
+                            onClick={() => setPerMarketConvictionExpanded(v => !v)}
+                            className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left hover:bg-cyan-500/5"
+                          >
+                            <span className="text-xs font-medium text-cyan-300">
+                              Per-Market Entry Settings
+                            </span>
+                            {perMarketConvictionExpanded
+                              ? <ChevronUp className="w-3.5 h-3.5 text-cyan-400" />
+                              : <ChevronDown className="w-3.5 h-3.5 text-cyan-400" />}
+                          </button>
+                          {perMarketConvictionExpanded && (
+                            <div className="border-t border-cyan-500/15 px-3 py-2.5 flex flex-col gap-2">
+                              <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                                Optional overrides for each market. Blank fields use the global conviction settings.
+                                The wait value is the earliest window minute allowed, so 12 means the last 3 minutes only.
+                              </p>
+                              {invalidPerMarketSymbols.length > 0 && (
+                                <div role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[11px] text-red-300">
+                                  Invalid entry zone for {invalidPerMarketSymbols.join(", ")}. Floor must not exceed cap; fix these rows before saving.
+                                </div>
+                              )}
+                              <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-x-2 gap-y-1.5 items-center text-[10px]">
+                                <span className="text-muted-foreground/50">Market</span>
+                                <span className="text-muted-foreground/50">Floor</span>
+                                <span className="text-muted-foreground/50">Cap</span>
+                                <span className="text-muted-foreground/50">Wait until</span>
+                                {PER_MARKET_SYMBOLS.map(sym => {
+                                  const ov = overrides[sym] ?? {};
+                                  const floorPlaceholder = String(Math.round((merged.kalshiLockPrice ?? 0.82) * 100));
+                                  const capPlaceholder = String(Math.round((merged.kalshiLockPriceCap ?? 0.91) * 100));
+                                  return (
+                                    <React.Fragment key={sym}>
+                                      <span className="font-semibold text-foreground/75">{sym}</span>
+                                      <input
+                                        type="number" min={50} max={98} step={1}
+                                        placeholder={`${floorPlaceholder}¢`}
+                                        value={ov.lockPrice == null ? "" : Math.round(ov.lockPrice * 100)}
+                                        onChange={e => updateOverride(sym, "lockPrice", e.target.value === "" ? "" : String(parseFloat(e.target.value) / 100))}
+                                        className="w-full min-w-0 bg-background border border-border/60 rounded px-1.5 py-1 text-[11px] text-foreground"
+                                        aria-label={`${sym} entry floor in cents`}
+                                      />
+                                      <input
+                                        type="number" min={51} max={99} step={1}
+                                        placeholder={`${capPlaceholder}¢`}
+                                        value={ov.lockPriceCap == null ? "" : Math.round(ov.lockPriceCap * 100)}
+                                        onChange={e => updateOverride(sym, "lockPriceCap", e.target.value === "" ? "" : String(parseFloat(e.target.value) / 100))}
+                                        className="w-full min-w-0 bg-background border border-border/60 rounded px-1.5 py-1 text-[11px] text-foreground"
+                                        aria-label={`${sym} entry cap in cents`}
+                                      />
+                                      <input
+                                        type="number" min={0} max={13} step={1}
+                                        placeholder="0"
+                                        value={ov.minEntryMinute == null ? "" : ov.minEntryMinute}
+                                        onChange={e => updateOverride(sym, "minEntryMinute", e.target.value)}
+                                        className="w-full min-w-0 bg-background border border-border/60 rounded px-1.5 py-1 text-[11px] text-foreground"
+                                        aria-label={`${sym} minimum entry minute`}
+                                      />
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </div>
+                              <p className="text-[10px] text-muted-foreground/50">
+                                Example: GOLD wait until 12 = no GOLD entry before T+12m; all regular safeguards, including Smart Quiet Hours, still run.
+                              </p>
+                            </div>
+                          )}
                         </div>
                       );
                     })()}
@@ -3081,7 +3202,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
               })()}
 
               <div className="flex items-center gap-2 pt-2 border-t border-border">
-                <Button size="sm" disabled={!hasDraft || saving} onClick={saveConfig} className="gap-1">
+                <Button size="sm" disabled={!hasDraft || saving || convictionGlobalZoneInvalid || invalidPerMarketSymbols.length > 0} onClick={saveConfig} className="gap-1">
                   {saving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
                   {saving ? "Saving…" : "Save Configuration"}
                 </Button>
@@ -3092,7 +3213,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-xs text-emerald-400">✓ Settings saved</span>
                 )}
                 {persistMsg === "failed" && (
-                  <span className="text-xs text-yellow-400">⚠ Applied (not persisted)</span>
+                  <span className="text-xs text-red-300">⚠ {persistError ?? "Settings were not saved"}</span>
                 )}
               </div>
 

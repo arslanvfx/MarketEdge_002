@@ -108,6 +108,7 @@ export default function BotDashboard() {
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
+  const [persistError, setPersistError] = useState<string | null>(null);
   const [perfOpen, setPerfOpen] = useState(true);
   const [tuneLogOpen, setTuneLogOpen] = useState(true);
   const [histPage, setHistPage] = useState(0);
@@ -446,8 +447,18 @@ export default function BotDashboard() {
 
   async function saveConfig() {
     setSaving(true);
+    setPersistError(null);
     try {
-      const result = await authPost("/crypto/bot/config", configDraft) as { ok: boolean; persisted: boolean };
+      const result = await authPost("/crypto/bot/config", configDraft) as { ok?: boolean; persisted?: boolean; error?: string };
+      if (result.ok === false || result.error) {
+        setPersistMsg("failed");
+        setPersistError(result.error ?? "Settings were rejected");
+        setTimeout(() => {
+          setPersistMsg(null);
+          setPersistError(null);
+        }, 5000);
+        return;
+      }
       setConfigDraft({});
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["bot-status"] }),
@@ -457,6 +468,7 @@ export default function BotDashboard() {
       setTimeout(() => setPersistMsg(null), 3000);
     } catch (err) {
       setPersistMsg("failed");
+      setPersistError(err instanceof Error ? err.message : "Request failed");
       setTimeout(() => setPersistMsg(null), 4000);
       console.error("[saveConfig] failed:", err);
     } finally {
@@ -712,6 +724,7 @@ export default function BotDashboard() {
           saving={saving}
           saveConfig={saveConfig}
           persistMsg={persistMsg}
+           persistError={persistError}
           status={status}
           activeMode={activeMode}
           presetsData={presetsData}

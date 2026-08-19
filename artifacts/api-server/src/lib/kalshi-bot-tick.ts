@@ -14,6 +14,7 @@ import {
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   deriveConvictionZone,
+  getEffectiveConvictionZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
   computeConvictionCandleSlopeGate,
@@ -25,6 +26,7 @@ import {
   checkConvictionOneSidedBook,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
+  getConvictionMinEntryMinute,
   resolveEntryQuietHoursDecision, resolveEntryQuietHoursDecisionForSymbol,
   applyPlacementTimeReducedPct,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
@@ -714,9 +716,10 @@ async function _runBotTick(
   // for the minWindowEntryMinutes guard above.
   if (S.config.proximityGuardEnabled) {
     // Derive the same zone floor used by the engine so the bypass is in sync.
+    const _proximityZone = getEffectiveConvictionZone(sym, S.config);
     const convZoneFloor = deriveConvictionZone(
-      S.config.kalshiLockPrice    ?? 0.82,
-      S.config.kalshiLockPriceCap ?? 0.91,
+      _proximityZone.lockPrice,
+      _proximityZone.lockPriceCap,
     ).lockPrice;
     const proximityIsConvictionExtreme =
       S.config.decisionMode === "conviction" &&
@@ -1867,7 +1870,8 @@ async function _runBotTick(
   // in config), entry is allowed immediately — that's an outsized move that
   // justifies jumping the queue.  Any price within the normal zone waits.
   if (S.config.decisionMode === "conviction") {
-    const _convMinEntry = S.config.convictionMinEntryMinutes ?? 0;
+    // Use per-market override when set; falls through to global convictionMinEntryMinutes.
+    const _convMinEntry = getConvictionMinEntryMinute(sym, S.config);
     if (_convMinEntry > 0 && secondsElapsedNow < _convMinEntry * 60) {
       const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
       const _bypassFloor = S.config.convictionEarlyBypassThreshold ?? 0.81;
@@ -1985,9 +1989,10 @@ async function _runBotTick(
     // shared with the engine, the conviction poller, and the post-fill check.
     // Target 92¢ → zone [90¢, 95¢]. Below the floor: price can flip, too
     // risky. Above the cap: margin too small, not worth the entry.
+    const _effectiveZone = getEffectiveConvictionZone(sym, S.config);
     const { lockPrice, lockPriceCap } = deriveConvictionZone(
-      S.config.kalshiLockPrice    ?? 0.82,
-      S.config.kalshiLockPriceCap ?? 0.91,
+      _effectiveZone.lockPrice,
+      _effectiveZone.lockPriceCap,
     );
     // expectedTicker already computed above (hoisted). Re-used here for OB fetch.
 
@@ -3148,9 +3153,10 @@ async function _runBotTick(
       // Loop guard: convictionEmergencyCloses caps closes at 2 per coin/window;
       // after 2 the once-per-window lock stays set so re-entry cannot happen.
       if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
+        const _postFillZone = getEffectiveConvictionZone(sym, S.config);
         const { lockPrice: _lp, lockPriceCap: _lpCap } = deriveConvictionZone(
-          S.config.kalshiLockPrice    ?? 0.82,
-          S.config.kalshiLockPriceCap ?? 0.91,
+          _postFillZone.lockPrice,
+          _postFillZone.lockPriceCap,
         );
         // Kalshi always returns avgPrice in YES-side terms.
         // For YES bets: fill price IS avgPrice.

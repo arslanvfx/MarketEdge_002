@@ -32,7 +32,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
 import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
-import { deriveConvictionZone } from "./kalshi-bot-engine";
+import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
 import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
 
@@ -89,17 +89,13 @@ let pollerHandle: ReturnType<typeof setInterval> | null = null;
 async function pollOnce(): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
 
-  // Derive the conviction zone once per poll from the current config.
-  // MUST use the two-argument (floor, cap) form — identical to the derivation
-  // in kalshi-bot-tick.ts and kalshi-bot-engine.ts.  The legacy single-arg
-  // form computes a different zone (target−2¢..target+3¢), which caused the
-  // poller to dispatch ticks for prices OUTSIDE the real zone: every dispatch
-  // aborted, transiently set convictionFiredThisWindow, and cleared the abort
-  // cooldown — killing all bets (2026-08 regression).
-  const { lockPrice, lockPriceCap } = deriveConvictionZone(
-    S.config.kalshiLockPrice    ?? 0.82,
-    S.config.kalshiLockPriceCap ?? 0.91,
-  );
+  // NOTE: the conviction zone is now derived PER SYMBOL inside the per-symbol
+  // callback via getEffectiveConvictionZone(sym, S.config) — see the
+  // "Zone-entry detection" block below.  Per-market overrides
+  // (perMarketConvictionConfig) allow each coin/commodity to use a different
+  // [lockPrice, lockPriceCap] while still sharing the same 1-second poll.
+  // The two-argument deriveConvictionZone(floor, cap) form is still used
+  // downstream — the single-arg form must never be used here.
 
   // Current 15-min window key — used to form the cooldown Map key.
   const nowMs     = Date.now();
@@ -207,6 +203,17 @@ async function pollOnce(): Promise<void> {
       // no_ask_dollars and yes_bid_dollars independently; noAsk is faster to
       // reflect real-time NO pricing than the 1−yesBid complement.
       const noAsk = cachedNoAsk ?? (yesBid != null ? 1 - yesBid : null);
+
+      // Derive the conviction zone for THIS symbol.  Per-market overrides in
+      // perMarketConvictionConfig take priority over the global settings; if no
+      // override is set the global kalshiLockPrice/kalshiLockPriceCap apply.
+      // MUST use the two-argument deriveConvictionZone(floor, cap) form to stay
+      // consistent with kalshi-bot-tick.ts and the dispatch-callback sanity check.
+      const _symZoneRaw = getEffectiveConvictionZone(sym, S.config);
+      const { lockPrice, lockPriceCap } = deriveConvictionZone(
+        _symZoneRaw.lockPrice,
+        _symZoneRaw.lockPriceCap,
+      );
 
       const yesInZone = yesAsk != null && yesAsk >= lockPrice && yesAsk <= lockPriceCap;
       const noInZone  = noAsk  != null && noAsk  >= lockPrice && noAsk  <= lockPriceCap;
