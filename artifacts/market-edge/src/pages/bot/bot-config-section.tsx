@@ -1118,18 +1118,28 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         const current = overrides[sym] ?? {};
                         const next = { ...current };
                         if (raw === "") {
-                          delete next[field];
+                          // Explicit field tombstone. Omitting the field means
+                          // "unchanged" to the API, while null means "clear and
+                          // use the matching global setting".
+                          next[field] = null;
                         } else {
                           const value = field === "minEntryMinute" ? parseInt(raw, 10) : parseFloat(raw);
                           if (!Number.isNaN(value)) next[field] = value;
                         }
                         const nextMap = { ...overrides };
-                        // Send a tombstone when the final field is cleared. The
-                        // server merges partial maps, so omitting the key would
-                        // otherwise leave the old DB override in place forever.
-                        if (Object.keys(next).length === 0) nextMap[sym] = null;
+                        // Collapse an all-cleared object to a full-row tombstone.
+                        if (Object.values(next).every(value => value == null)) nextMap[sym] = null;
                         else nextMap[sym] = next;
                         setConfigDraft(d => ({ ...d, perMarketConvictionConfig: nextMap }));
+                      };
+                      const clearMarketOverride = (sym: string) => {
+                        setConfigDraft(d => ({
+                          ...d,
+                          perMarketConvictionConfig: {
+                            ...overrides,
+                            [sym]: null,
+                          },
+                        }));
                       };
                       return (
                         <div className="mt-1 rounded-lg border border-cyan-500/20 bg-cyan-500/5">
@@ -1156,13 +1166,15 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                   Invalid entry zone for {invalidPerMarketSymbols.join(", ")}. Floor must not exceed cap; fix these rows before saving.
                                 </div>
                               )}
-                              <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-x-2 gap-y-1.5 items-center text-[10px]">
+                              <div className="grid grid-cols-[auto_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]">
                                 <span className="text-muted-foreground/50">Market</span>
                                 <span className="text-muted-foreground/50">Floor</span>
                                 <span className="text-muted-foreground/50">Cap</span>
                                 <span className="text-muted-foreground/50">Wait until</span>
+                                <span className="text-muted-foreground/50">Reset</span>
                                 {PER_MARKET_SYMBOLS.map(sym => {
                                   const ov = overrides[sym] ?? {};
+                                  const hasOverride = Object.values(ov).some(value => value != null);
                                   const floorPlaceholder = String(Math.round((merged.kalshiLockPrice ?? 0.82) * 100));
                                   const capPlaceholder = String(Math.round((merged.kalshiLockPriceCap ?? 0.91) * 100));
                                   return (
@@ -1192,12 +1204,22 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                         className="w-full min-w-0 bg-background border border-border/60 rounded px-1.5 py-1 text-[11px] text-foreground"
                                         aria-label={`${sym} minimum entry minute`}
                                       />
+                                      <button
+                                        type="button"
+                                        onClick={() => clearMarketOverride(sym)}
+                                        disabled={!hasOverride}
+                                        className="rounded border border-cyan-500/25 bg-cyan-500/5 px-1.5 py-1 text-[9px] text-cyan-300 transition-colors hover:bg-cyan-500/15 disabled:cursor-not-allowed disabled:opacity-30"
+                                        aria-label={`Use global defaults for ${sym}`}
+                                        title={`Clear all ${sym} entry overrides and use global defaults`}
+                                      >
+                                        Use global
+                                      </button>
                                     </React.Fragment>
                                   );
                                 })}
                               </div>
                               <p className="text-[10px] text-muted-foreground/50">
-                                Example: GOLD wait until 12 = no GOLD entry before T+12m; all regular safeguards, including Smart Quiet Hours, still run.
+                                Blank one field to use its global value, or choose Use global to clear the whole market row. Example: GOLD wait until 12 = no GOLD entry before T+12m.
                               </p>
                             </div>
                           )}

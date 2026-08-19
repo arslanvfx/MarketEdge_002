@@ -435,22 +435,33 @@ export default function BotDashboard() {
     setSaving(true);
     setPersistError(null);
     try {
-      const result = await authPost("/crypto/bot/config", configDraft) as { ok?: boolean; persisted?: boolean; error?: string };
-      if (result.ok === false || result.error) {
+      const result = await authPost("/crypto/bot/config", configDraft) as {
+        ok?: boolean;
+        persisted?: boolean;
+        config?: BotConfig;
+        error?: string;
+      };
+      if (result.ok === false || result.error || result.persisted !== true || !result.config) {
         setPersistMsg("failed");
-        setPersistError(result.error ?? "Settings were rejected");
+        setPersistError(result.error ?? "Settings were not persisted. Your changes are still available to retry.");
         setTimeout(() => {
           setPersistMsg(null);
           setPersistError(null);
         }, 5000);
         return;
       }
+      // Make the canonical persisted config visible immediately. The subsequent
+      // invalidation remains the freshness path for fields changed by other
+      // actors, but it no longer creates a stale flash after this save.
+      qc.setQueryData<BotStatus>(["bot-status"], current => (
+        current ? { ...current, config: result.config! } : current
+      ));
       setConfigDraft({});
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["bot-status"] }),
         qc.invalidateQueries({ queryKey: ["bot-coin-guard-state"] }),
       ]);
-      setPersistMsg(result.persisted ? "saved" : "failed");
+      setPersistMsg("saved");
       setTimeout(() => setPersistMsg(null), 3000);
     } catch (err) {
       setPersistMsg("failed");

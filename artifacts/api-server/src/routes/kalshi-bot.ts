@@ -1253,21 +1253,18 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   ) {
     const currentConfig = getBotState().config;
     const storedPmcc = currentConfig.perMarketConvictionConfig ?? {};
-    const submittedPmcc: Record<string, unknown> = { ...storedPmcc };
-
-    if (perMarketConvictionConfig !== undefined && typeof perMarketConvictionConfig === "object" && perMarketConvictionConfig !== null) {
-      // Overlay each submitted symbol onto its stored entry before validation.
-      // This makes omitted fields mean "unchanged" for partial API callers while
-      // preserving null tombstones for explicit deletion.
-      for (const [rawKey, rawValue] of Object.entries(perMarketConvictionConfig as Record<string, unknown>)) {
-        const key = rawKey.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
-        if (rawValue != null && typeof rawValue === "object") {
-          submittedPmcc[key] = { ...(storedPmcc[key] ?? {}), ...(rawValue as Record<string, unknown>) };
-        } else {
-          submittedPmcc[key] = rawValue;
-        }
-      }
-    }
+    // The merge helper owns patch semantics:
+    //   omitted field = unchanged
+    //   null field    = clear that field
+    //   null market   = clear the entire market row
+    // When only a global bound changes, submit the stored map itself so every
+    // effective per-market zone is revalidated against the new fallback.
+    const submittedPmcc: Record<string, unknown> =
+      perMarketConvictionConfig !== undefined
+      && typeof perMarketConvictionConfig === "object"
+      && perMarketConvictionConfig !== null
+        ? perMarketConvictionConfig as Record<string, unknown>
+        : storedPmcc;
 
     const effectiveGlobalFloor =
       typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99

@@ -127,15 +127,56 @@ test("global conviction bounds reject floor-only, cap-only, and simultaneous inv
   assert.equal(isValidConvictionZoneBounds(0.84, 0.90), true);
 });
 
-test("per-market config merge honors deletion tombstones and rejects inverted effective zones", () => {
+test("per-market config merge saves partial updates without changing omitted fields", () => {
   const stored = {
     GOLD: { lockPrice: 0.84, lockPriceCap: 0.90, minEntryMinute: 12 },
     SILVER: { lockPrice: 0.83, lockPriceCap: 0.91 },
   };
 
-  const merged = mergePerMarketConvictionConfig({ GOLD: null, SILVER: { lockPrice: 0.83, lockPriceCap: null } }, stored, 0.82, 0.91);
+  const merged = mergePerMarketConvictionConfig(
+    {
+      GOLD: { minEntryMinute: 10 },
+      SILVER: { lockPrice: 0.85 },
+    },
+    stored,
+    0.82,
+    0.91,
+  );
+  assert.deepEqual(merged.GOLD, { lockPrice: 0.84, lockPriceCap: 0.90, minEntryMinute: 10 });
+  assert.deepEqual(merged.SILVER, { lockPrice: 0.85, lockPriceCap: 0.91 });
+});
+
+test("per-market config merge honors field and full-row deletion tombstones", () => {
+  const stored = {
+    GOLD: { lockPrice: 0.84, lockPriceCap: 0.90, minEntryMinute: 12 },
+    SILVER: { lockPrice: 0.83, lockPriceCap: 0.91 },
+    WTI: { minEntryMinute: 11 },
+  };
+
+  const merged = mergePerMarketConvictionConfig(
+    {
+      GOLD: null,
+      SILVER: { lockPriceCap: null },
+      WTI: { minEntryMinute: null },
+    },
+    stored,
+    0.82,
+    0.91,
+  );
   assert.equal(merged.GOLD, undefined);
   assert.deepEqual(merged.SILVER, { lockPrice: 0.83 });
+  assert.equal(merged.WTI, undefined);
+});
+
+test("per-market config merge rejects invalid values and inverted effective zones", () => {
+  const stored = {
+    GOLD: { lockPrice: 0.84, lockPriceCap: 0.90, minEntryMinute: 12 },
+  };
+
+  assert.throws(
+    () => mergePerMarketConvictionConfig({ GOLD: { minEntryMinute: "12" } }, stored, 0.82, 0.91),
+    /minimum entry minute/,
+  );
   assert.throws(
     () => mergePerMarketConvictionConfig({ WTI: { lockPrice: 0.95 } }, stored, 0.82, 0.91),
     /WTI.*exceeds cap/,

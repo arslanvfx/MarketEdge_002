@@ -2508,10 +2508,11 @@ export const PER_MARKET_CONVICTION_SYMBOLS = [
 /**
  * Merge and validate the user-editable per-market map.
  *
- * A null/non-object value is an explicit deletion tombstone. Missing fields on
- * an object clear that field from the stored override. The resulting zone is
- * checked against the supplied global fallback values, so a floor-only or
- * cap-only override cannot create an inverted effective zone.
+ * A null market value is an explicit full-row deletion tombstone. Within an
+ * object, an omitted field means "leave unchanged" and an explicit null means
+ * "clear this field back to the global fallback". The resulting zone is checked
+ * against the supplied global fallback values, so a floor-only or cap-only
+ * override cannot create an inverted effective zone.
  */
 export function mergePerMarketConvictionConfig(
   submitted: Record<string, unknown>,
@@ -2525,29 +2526,45 @@ export function mergePerMarketConvictionConfig(
   for (const [rawKey, rawValue] of Object.entries(submitted)) {
     const key = rawKey.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 10);
     if (!allowed.has(key)) continue;
-    if (rawValue == null || typeof rawValue !== "object") {
+    if (rawValue === null) {
       delete result[key];
       continue;
+    }
+    if (typeof rawValue !== "object" || Array.isArray(rawValue)) {
+      throw new Error(`Invalid conviction entry override for ${key}.`);
     }
 
     const previous = stored[key] ?? {};
     const candidate: PerMarketConvictionOverride = { ...previous };
     const value = rawValue as Record<string, unknown>;
+    const hasField = (field: string) => Object.prototype.hasOwnProperty.call(value, field);
 
-    if (typeof value.lockPrice === "number" && value.lockPrice >= 0.50 && value.lockPrice <= 0.98) {
-      candidate.lockPrice = +value.lockPrice.toFixed(4);
-    } else if (value.lockPrice == null) {
-      delete candidate.lockPrice;
+    if (hasField("lockPrice")) {
+      if (value.lockPrice === null) {
+        delete candidate.lockPrice;
+      } else if (typeof value.lockPrice === "number" && value.lockPrice >= 0.50 && value.lockPrice <= 0.98) {
+        candidate.lockPrice = +value.lockPrice.toFixed(4);
+      } else {
+        throw new Error(`Invalid conviction entry floor for ${key}.`);
+      }
     }
-    if (typeof value.lockPriceCap === "number" && value.lockPriceCap >= 0.51 && value.lockPriceCap <= 0.99) {
-      candidate.lockPriceCap = +value.lockPriceCap.toFixed(4);
-    } else if (value.lockPriceCap == null) {
-      delete candidate.lockPriceCap;
+    if (hasField("lockPriceCap")) {
+      if (value.lockPriceCap === null) {
+        delete candidate.lockPriceCap;
+      } else if (typeof value.lockPriceCap === "number" && value.lockPriceCap >= 0.51 && value.lockPriceCap <= 0.99) {
+        candidate.lockPriceCap = +value.lockPriceCap.toFixed(4);
+      } else {
+        throw new Error(`Invalid conviction entry cap for ${key}.`);
+      }
     }
-    if (typeof value.minEntryMinute === "number" && value.minEntryMinute >= 0 && value.minEntryMinute <= 13) {
-      candidate.minEntryMinute = Math.round(value.minEntryMinute);
-    } else if (value.minEntryMinute == null) {
-      delete candidate.minEntryMinute;
+    if (hasField("minEntryMinute")) {
+      if (value.minEntryMinute === null) {
+        delete candidate.minEntryMinute;
+      } else if (typeof value.minEntryMinute === "number" && value.minEntryMinute >= 0 && value.minEntryMinute <= 13) {
+        candidate.minEntryMinute = Math.round(value.minEntryMinute);
+      } else {
+        throw new Error(`Invalid conviction minimum entry minute for ${key}.`);
+      }
     }
 
     const effectiveFloor = candidate.lockPrice ?? globalFloor;

@@ -110,3 +110,4 @@
 - [Commodity 15-min markets via Pyth](commodity-markets-pyth.md) — GOLD/SILVER/WTI defs in pure market-defs.ts; PYTH: prefix routes all fetchers; spot >60s old throws (fail closed); WTI uses Commodities.USOILSPOT not PYTHOIL
 - [Tick-abort overlay + IOC remainder](tick-abort-overlay.md) — every new tick-time abort must call setTickAbortReason or dashboard shows stale loop reason; conviction partial IOC fills get exactly ONE same-price remainder retry
 - [Async entry reservation ownership](async-entry-reservation-ownership.md) — lock/token cleanup must be idempotent and keyed to what that tick claimed, never mutable global mode after awaits
+- [Bot config patch semantics](bot-config-patch-semantics.md) — partial settings updates preserve omitted fields, clear explicit nulls, and adopt the server-returned canonical config only after persistence succeeds

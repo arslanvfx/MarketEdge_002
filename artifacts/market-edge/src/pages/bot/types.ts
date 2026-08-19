@@ -128,9 +128,9 @@ export interface BotConfig {
   convictionStopLossActivationMinute?: number;
   convictionMinEntryMinutes?: number;
   perMarketConvictionConfig?: Record<string, {
-    lockPrice?: number;
-    lockPriceCap?: number;
-    minEntryMinute?: number;
+    lockPrice?: number | null;
+    lockPriceCap?: number | null;
+    minEntryMinute?: number | null;
   } | null>;
   convictionBoostBetSize?: number;
   convictionBoostProbability?: number;
