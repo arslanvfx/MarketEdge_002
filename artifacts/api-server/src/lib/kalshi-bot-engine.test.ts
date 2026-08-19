@@ -62,6 +62,8 @@ import {
   getEffectiveProximityThreshold,
   getEffectiveConvictionZone,
   getConvictionMinEntryMinute,
+  evaluateConvictionPollerFallback,
+  releaseEntryReservationOwnership,
   mergePerMarketConvictionConfig,
   isValidConvictionZoneBounds,
   checkConvictionOneSidedBook,
@@ -155,6 +157,141 @@ test("per-market config merge revalidates stored overrides when global bounds ch
     ),
     /GOLD.*exceeds cap/,
   );
+});
+
+test("conviction timeout fallback accepts a fresh, matching, tight GOLD NO quote in its per-market zone", () => {
+  const result = evaluateConvictionPollerFallback({
+    source: "orderbook_timeout",
+    direction: "no",
+    snapshot: {
+      yesAsk: 0.26,
+      yesBid: 0.25,
+      fetchedAt: 9_250,
+      ticker: "KXGOLD15M-26AUG190015-15",
+    },
+    expectedTicker: "KXGOLD15M-26AUG190015-15",
+    nowMs: 10_000,
+    maxAgeMs: 1_500,
+    lockPrice: 0.72,
+    lockPriceCap: 0.86,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.reason, "accepted");
+  assert.equal(result.refPrice, 0.75);
+  assert.equal(result.source, "orderbook_timeout");
+});
+
+test("conviction empty-book fallback uses the same guarded validator", () => {
+  const result = evaluateConvictionPollerFallback({
+    source: "empty_book",
+    direction: "yes",
+    snapshot: {
+      yesAsk: 0.84,
+      yesBid: 0.82,
+      fetchedAt: 9_500,
+      ticker: "KXGOLD15M-26AUG190015-15",
+    },
+    expectedTicker: "KXGOLD15M-26AUG190015-15",
+    nowMs: 10_000,
+    maxAgeMs: 1_500,
+    lockPrice: 0.72,
+    lockPriceCap: 0.86,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.reason, "accepted");
+  assert.equal(result.source, "empty_book");
+});
+
+test("conviction poller fallback rejects unavailable, stale, and wrong-window snapshots", () => {
+  const base = {
+    source: "orderbook_timeout" as const,
+    direction: "no" as const,
+    expectedTicker: "KXGOLD15M-26AUG190015-15",
+    nowMs: 10_000,
+    maxAgeMs: 1_500,
+    lockPrice: 0.72,
+    lockPriceCap: 0.86,
+  };
+
+  assert.equal(evaluateConvictionPollerFallback({ ...base, snapshot: null }).reason, "missing_snapshot");
+  assert.equal(evaluateConvictionPollerFallback({
+    ...base,
+    snapshot: { yesAsk: 0.26, yesBid: 0.25, fetchedAt: 8_499, ticker: base.expectedTicker },
+  }).reason, "stale_snapshot");
+  assert.equal(evaluateConvictionPollerFallback({
+    ...base,
+    snapshot: { yesAsk: 0.26, yesBid: 0.25, fetchedAt: 9_500, ticker: "KXGOLD15M-NEXT-WINDOW" },
+  }).reason, "ticker_mismatch");
+});
+
+test("conviction poller fallback rejects one-sided, invalid, and wide-spread quotes", () => {
+  const base = {
+    source: "orderbook_timeout" as const,
+    direction: "no" as const,
+    expectedTicker: "KXGOLD15M-26AUG190015-15",
+    nowMs: 10_000,
+    maxAgeMs: 1_500,
+    lockPrice: 0.72,
+    lockPriceCap: 0.86,
+  };
+
+  assert.equal(evaluateConvictionPollerFallback({
+    ...base,
+    snapshot: { yesAsk: 0.26, yesBid: null, fetchedAt: 9_500, ticker: base.expectedTicker },
+  }).reason, "one_sided_quote");
+  assert.equal(evaluateConvictionPollerFallback({
+    ...base,
+    snapshot: { yesAsk: 1.2, yesBid: 0.25, fetchedAt: 9_500, ticker: base.expectedTicker },
+  }).reason, "invalid_quote");
+  assert.equal(evaluateConvictionPollerFallback({
+    ...base,
+    snapshot: { yesAsk: 0.32, yesBid: 0.25, fetchedAt: 9_500, ticker: base.expectedTicker },
+  }).reason, "wide_spread");
+});
+
+test("conviction poller fallback rejects a tight quote outside the effective per-market zone", () => {
+  const result = evaluateConvictionPollerFallback({
+    source: "orderbook_timeout",
+    direction: "no",
+    snapshot: {
+      yesAsk: 0.31,
+      yesBid: 0.30,
+      fetchedAt: 9_500,
+      ticker: "KXGOLD15M-26AUG190015-15",
+    },
+    expectedTicker: "KXGOLD15M-26AUG190015-15",
+    nowMs: 10_000,
+    maxAgeMs: 1_500,
+    lockPrice: 0.72,
+    lockPriceCap: 0.86,
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "out_of_zone");
+  assert.equal(result.refPrice, 0.70);
+});
+
+test("entry reservation cleanup survives a conviction-to-pipeline mode switch and releases exactly once", () => {
+  // A conviction tick claimed both reservations, then an awaited request gave
+  // the operator time to switch modes before a later guard rejected the entry.
+  let currentMode: "conviction" | "pipeline" = "conviction";
+  let ownership = {
+    maxBetTokenReserved: true,
+    convictionLockClaimed: true,
+  };
+  currentMode = "pipeline";
+
+  const first = releaseEntryReservationOwnership(ownership);
+  ownership = first.nextOwnership;
+  assert.equal(currentMode, "pipeline");
+  assert.equal(first.restoreMaxBetToken, true);
+  assert.equal(first.releaseConvictionLock, true);
+
+  const second = releaseEntryReservationOwnership(ownership);
+  assert.equal(second.restoreMaxBetToken, false);
+  assert.equal(second.releaseConvictionLock, false);
 });
 
 // ---------------------------------------------------------------------------

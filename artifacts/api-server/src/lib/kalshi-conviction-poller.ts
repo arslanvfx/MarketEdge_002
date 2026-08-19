@@ -37,7 +37,7 @@ import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
 
 const POLL_INTERVAL_MS = 1_000;
-const LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
+export const CONVICTION_LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
 const HEALTH_LOG_INTERVAL_MS = 60_000; // periodic tick-feed health summary
 
 // ── Fresh-tick feed health tracking ─────────────────────────────────────────
@@ -338,10 +338,19 @@ async function pollOnce(): Promise<void> {
  * Callers must fall back to getKalshiCachedData when this returns null.
  */
 export function getConvictionLivePrice(sym: string): ConvictionLivePrice | null {
-  const entry = convictionPriceMap.get(sym.toUpperCase());
+  const entry = getConvictionLivePriceSnapshot(sym);
   if (!entry) return null;
-  if (Date.now() - entry.fetchedAt > LIVE_PRICE_TTL_MS) return null;
+  if (Date.now() - entry.fetchedAt > CONVICTION_LIVE_PRICE_TTL_MS) return null;
   return entry;
+}
+
+/**
+ * Returns the most recent poller snapshot without filtering on age.
+ * Safety gates use this to distinguish "unavailable" from "present but stale"
+ * and then enforce CONVICTION_LIVE_PRICE_TTL_MS themselves.
+ */
+export function getConvictionLivePriceSnapshot(sym: string): ConvictionLivePrice | null {
+  return convictionPriceMap.get(sym.toUpperCase()) ?? null;
 }
 
 /**

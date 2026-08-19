@@ -2365,6 +2365,126 @@ export function getConvictionMinEntryMinute(sym: string, config: BotConfig): num
   return config.convictionMinEntryMinutes ?? 0;
 }
 
+export type ConvictionPollerFallbackSource = "empty_book" | "orderbook_timeout";
+export type ConvictionPollerFallbackReason =
+  | "accepted"
+  | "missing_snapshot"
+  | "stale_snapshot"
+  | "ticker_mismatch"
+  | "invalid_quote"
+  | "one_sided_quote"
+  | "wide_spread"
+  | "out_of_zone";
+
+export interface ConvictionPollerFallbackSnapshot {
+  yesAsk: number | null;
+  yesBid: number | null;
+  fetchedAt: number;
+  ticker?: string;
+}
+
+export interface ConvictionPollerFallbackResult {
+  accepted: boolean;
+  reason: ConvictionPollerFallbackReason;
+  source: ConvictionPollerFallbackSource;
+  ageMs: number | null;
+  spread: number | null;
+  maxSpread: number;
+  refPrice: number | null;
+}
+
+export interface EntryReservationOwnership {
+  maxBetTokenReserved: boolean;
+  convictionLockClaimed: boolean;
+}
+
+export interface EntryReservationRelease {
+  restoreMaxBetToken: boolean;
+  releaseConvictionLock: boolean;
+  nextOwnership: EntryReservationOwnership;
+}
+
+/**
+ * Compute one idempotent release of the reservations owned by an entry tick.
+ * Deliberately has no decision-mode input: ownership survives mode changes
+ * while the tick is awaiting balance, orderbook, or order requests.
+ */
+export function releaseEntryReservationOwnership(
+  ownership: EntryReservationOwnership,
+): EntryReservationRelease {
+  return {
+    restoreMaxBetToken: ownership.maxBetTokenReserved,
+    releaseConvictionLock: ownership.convictionLockClaimed,
+    nextOwnership: {
+      maxBetTokenReserved: false,
+      convictionLockClaimed: false,
+    },
+  };
+}
+
+/**
+ * Validate whether the public poller's current-window quote is safe to use
+ * when the authenticated orderbook is empty or temporarily unavailable.
+ *
+ * This is intentionally stricter than the poller's zone-entry trigger:
+ * exact ticker match, explicit freshness, both sides present, a tight spread,
+ * and the effective per-market zone must all pass. Downstream direction,
+ * quiet-hours, exposure, order-limit, and post-fill guards still apply.
+ */
+export function evaluateConvictionPollerFallback(opts: {
+  source: ConvictionPollerFallbackSource;
+  direction: "yes" | "no";
+  snapshot: ConvictionPollerFallbackSnapshot | null;
+  expectedTicker: string;
+  nowMs: number;
+  maxAgeMs: number;
+  lockPrice: number;
+  lockPriceCap: number;
+  zoneTolerance?: number;
+}): ConvictionPollerFallbackResult {
+  const maxSpread = opts.direction === "yes" ? 0.04 : 0.06;
+  const base = {
+    source: opts.source,
+    maxSpread,
+  };
+  if (!opts.snapshot) {
+    return { ...base, accepted: false, reason: "missing_snapshot", ageMs: null, spread: null, refPrice: null };
+  }
+
+  const ageMs = opts.nowMs - opts.snapshot.fetchedAt;
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > opts.maxAgeMs) {
+    return { ...base, accepted: false, reason: "stale_snapshot", ageMs, spread: null, refPrice: null };
+  }
+  if (!opts.snapshot.ticker || opts.snapshot.ticker !== opts.expectedTicker) {
+    return { ...base, accepted: false, reason: "ticker_mismatch", ageMs, spread: null, refPrice: null };
+  }
+
+  const { yesAsk, yesBid } = opts.snapshot;
+  if (yesAsk == null || yesBid == null) {
+    return { ...base, accepted: false, reason: "one_sided_quote", ageMs, spread: null, refPrice: null };
+  }
+  if (
+    !Number.isFinite(yesAsk) || !Number.isFinite(yesBid)
+    || yesAsk <= 0 || yesAsk >= 1
+    || yesBid <= 0 || yesBid >= 1
+  ) {
+    return { ...base, accepted: false, reason: "invalid_quote", ageMs, spread: null, refPrice: null };
+  }
+
+  const spread = yesAsk - yesBid;
+  if (spread < 0 || spread > maxSpread) {
+    return { ...base, accepted: false, reason: "wide_spread", ageMs, spread, refPrice: null };
+  }
+
+  const refPrice = opts.direction === "yes" ? yesAsk : 1 - yesBid;
+  const tolerance = opts.zoneTolerance ?? 0.005;
+  if (refPrice < opts.lockPrice - tolerance || refPrice > opts.lockPriceCap + tolerance) {
+    return { ...base, accepted: false, reason: "out_of_zone", ageMs, spread, refPrice };
+  }
+
+  return { ...base, accepted: true, reason: "accepted", ageMs, spread, refPrice };
+}
+
 export type PerMarketConvictionOverride = {
   lockPrice?: number;
   lockPriceCap?: number;

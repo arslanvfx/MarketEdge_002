@@ -367,6 +367,35 @@ test("betting-path/wiring: kalshi-bot.ts sizes then applies the hard cap (in tha
   assert.ok(contractIdx < capIdx, "the maxBetSize cap must run AFTER the sizing/contract math");
 
   // The cap must abort the trade (return) when it fires.
-  const capBlock = src.slice(capIdx, capIdx + 600);
+  // Keep enough source context for cleanup/logging that may run before return.
+  const capBlock = src.slice(capIdx, capIdx + 800);
   assert.ok(capBlock.includes("return"), "the maxBetSize guard must return (abort) when it fires");
+});
+
+test("conviction cleanup releases only the lock owned by the current tick, even if mode changes", () => {
+  const src = fs.readFileSync(path.join(__dirname, "kalshi-bot-tick.ts"), "utf8");
+
+  assert.ok(
+    src.includes("let entryReservationOwnership: EntryReservationOwnership"),
+    "each tick must track reservation ownership locally",
+  );
+  assert.ok(
+    src.includes("convictionFiredThisWindow.add(`${sym}:${windowKey}`);")
+      && src.includes("convictionLockClaimed: true,"),
+    "the tick must record ownership immediately after acquiring the lock",
+  );
+
+  const cleanupStart = src.indexOf("const releaseConvictionEntryReservation");
+  const cleanupEnd = src.indexOf("// Stat regime boost", cleanupStart);
+  const cleanup = src.slice(cleanupStart, cleanupEnd);
+  assert.ok(cleanup.includes("releaseEntryReservationOwnership(entryReservationOwnership)"), "cleanup must key off local ownership");
+  assert.ok(!cleanup.includes('S.config.decisionMode === "conviction"'), "cleanup must not depend on mutable global mode");
+
+  const pipelineGuardStart = src.indexOf("// ── Pipeline direction guard");
+  const pipelineGuardEnd = src.indexOf("[kalshi-bot] placing bet", pipelineGuardStart);
+  const pipelineGuard = src.slice(pipelineGuardStart, pipelineGuardEnd);
+  assert.ok(
+    pipelineGuard.includes('releaseConvictionEntryReservation("pipeline direction guard")'),
+    "the post-mode-switch pipeline guard must release the conviction tick's owned reservations",
+  );
 });
