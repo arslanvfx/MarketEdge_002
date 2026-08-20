@@ -71,7 +71,7 @@ import {
 import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition, persistBetRecord } from "./kalshi-bot-close";
-import { runHighValueScalpScan } from "./kalshi-high-value-scalper";
+// runHighValueScalpForCoin is now driven by the conviction poller's 1 s cycle.
 import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-tick";
 import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import {
@@ -679,10 +679,9 @@ export async function runBotLoopTick(): Promise<void> {
   // the bot is disabled or paused.
   refreshTrajectoryForAllCoins();
 
-  // This scanner has intentionally independent enablement and risk limits. It
-  // must run even when the ordinary bot is paused or disabled, because it does
-  // not reuse normal signals, quiet-hours, or ordinary-entry restrictions.
-  await runHighValueScalpScan();
+  // High-value scalp detection is now driven by the conviction poller's 1 s
+  // fresh-price cycle (runHighValueScalpForCoin called from pollOnce()).
+  // No bot-loop-tick scan needed — prices are always fresh from the poller.
 
   if (!S.config.enabled || S.paused) return;
 

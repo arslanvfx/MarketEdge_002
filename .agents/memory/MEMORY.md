@@ -115,3 +115,4 @@
 - [Scalper NO-bet sizing bug](scalper-no-sizing-bug.md) — eligibility.price IS the ask cost for both sides; never do `1-price` for NO in costPerContract (that inverts it → 9× over-sizing)
 - [Scalper fetchKalshiTarget bypass bug](scalper-fetch-target-bug.md) — scalper must NOT call fetchKalshiTarget(sym, targetTime); bypasses cache, triggers 429, normal loop poisons cache to null → silent exit every tick; read kalshiTargetCache directly instead
 - [Per-symbol smart hours scheduler guard](per-symbol-qh-scheduler-guard.md) — hourly calibration silently bails when quietHoursMode!=="per_market"; fix: also run when perSymbolQuietHours has entries
+- [High-value scalp architecture](high-value-scalp-arch.md) — scalp detection is poller-driven (1s fresh price in pollOnce), NOT bot-loop tick; runHighValueScalpForCoin accepts fresh prices directly; syncConvictionPoller starts on highValueScalpEnabled

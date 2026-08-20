@@ -1,23 +1,20 @@
 // ---------------------------------------------------------------------------
 // High-value scalping
 //
-// Same workflow as regular conviction bets — same conviction-poller price
-// cache, same order placement (placeEntryOrderWithSizeFallback), same bet
-// persistence (persistBetRecord).  The only difference: this fires in the
-// configured final window (default 6 min) when the winning-side contract
-// ask is inside the configured price band (default 90–95¢), bypassing the
-// normal model-signal gates.
+// Driven by the conviction poller's 1-second fresh-price cycle, not the bot
+// loop tick.  When the poller detects a coin's YES ask (or NO ask complement)
+// inside the configured price band (default 90–95¢) during the configured
+// final window (default last 120 s), it calls runHighValueScalpForCoin()
+// directly with the just-fetched prices — no cache staleness possible.
 //
-// The scan runs serially across all coins every tick (no parallel Promise.all)
-// so each coin sees the updated spend/exposure totals from coins checked
-// before it — no reservation ledger needed.
+// Order placement follows the same IOC path as regular conviction bets.
+// Out-of-band fills (exchange race between final-check and fill) are closed
+// immediately rather than held for "normal management".
 // ---------------------------------------------------------------------------
 
 import { logger } from "./logger";
 import { kalshiTargetCache } from "./crypto-kalshi";
-import { KALSHI_SERIES } from "./crypto";
-import { getConvictionLivePrice } from "./kalshi-conviction-poller";
-import { getCachedKalshiBalance, invalidateBalanceCache, placeEntryOrderWithSizeFallback } from "./kalshi-trader";
+import { getCachedKalshiBalance, invalidateBalanceCache, placeEntryOrderWithSizeFallback, placeOrder } from "./kalshi-trader";
 import { makeInitialExitState } from "./kalshi-bot-exit";
 import { persistBetRecord } from "./kalshi-bot-close";
 import {
@@ -71,27 +68,42 @@ function scalpDecision(side: HighValueScalpSide): BotDecision {
   };
 }
 
-async function scanSymbol(sym: string, now: number): Promise<void> {
+/**
+ * Execute a high-value scalp for one symbol using freshly-fetched prices.
+ *
+ * Called directly from the conviction poller the moment a scalp-band price
+ * is detected (same pattern as conviction zone dispatch).  The `prices`
+ * argument is the just-fetched Kalshi quote — guaranteed ≤ 1 s old — so
+ * there is no stale-cache risk on the initial eligibility check.
+ *
+ * Fire-and-forget safe: `highValueScalpFiredThisWindow.add(firedKey)` is
+ * called synchronously before the first await, so concurrent poller ticks
+ * cannot race into a double-fill.
+ */
+export async function runHighValueScalpForCoin(
+  sym: string,
+  prices: { yesAsk: number | null; yesBid: number | null; noAsk?: number | null },
+  now: number = Date.now(),
+): Promise<void> {
   const config = S.config;
   const timing = currentWindowTiming(now);
   const mode = S.botMode;
   const firedKey = `${sym}:${timing.windowKey}:${mode}`;
 
-  // One scalp per coin per window per mode — checked before any awaits.
+  // One scalp per coin per window per mode — synchronous guard before any awaits.
   if (highValueScalpFiredThisWindow.has(firedKey)) return;
 
   // Per-coin override: paused coin is skipped entirely.
   const coinOverride = config.highValueScalpCoinOverrides?.[sym];
   if (coinOverride?.paused) return;
 
-  // Per-coin timing gate: if a tighter entry window is configured for this coin,
-  // apply it before the eligibility check (global window already passed above).
+  // Per-coin timing gate: if a tighter entry window is configured for this
+  // coin, apply it before the eligibility check.
   if (coinOverride?.maxSecondsRemaining != null && timing.secondsRemaining > coinOverride.maxSecondsRemaining) return;
 
-  // Read from the shared kalshiTargetCache that the conviction poller and
-  // normal bot loop keep fresh.  Never call fetchKalshiTarget with a
-  // targetTime here — that bypasses the cache and causes 429s that poison
-  // the cache to null for all callers.
+  // Read from the shared kalshiTargetCache for market ticker and strike value.
+  // Never call fetchKalshiTarget with a targetTime here — that bypasses the
+  // cache and causes 429s that poison the cache to null for all callers.
   const market = kalshiTargetCache.get(sym);
   if (!market?.ticker || market.value == null) return;
 
@@ -101,23 +113,19 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
     if (Math.abs(marketCloseMs - timing.closeAt) > 8 * 60_000) return;
   }
 
-  // Price from the conviction poller cache — the same source the MarketEdge
-  // UI shows and the regular conviction tick uses.  No separate API call.
-  const pollerPrice = getConvictionLivePrice(sym);
-  const scanYesAsk = pollerPrice?.yesAsk ?? null;
-  const rawYesBid  = pollerPrice?.yesBid ?? null;
-  const scanYesBid = rawYesBid ?? (pollerPrice?.noAsk != null ? +(1 - pollerPrice.noAsk).toFixed(2) : null);
+  // Use the fresh prices passed in by the poller — no cache reads here.
+  const scanYesAsk = prices.yesAsk;
+  const rawYesBid  = prices.yesBid ?? null;
+  const scanYesBid = rawYesBid ?? (prices.noAsk != null ? +(1 - prices.noAsk).toFixed(2) : null);
 
   const eligibility = evaluateHighValueScalpEligibility({
     yesAsk: scanYesAsk,
     yesBid: scanYesBid,
-    secondsRemaining: currentWindowTiming().secondsRemaining,
+    secondsRemaining: timing.secondsRemaining,
     config,
     activePosition: openPositions.get(sym) ?? null,
   });
   if (!eligibility.eligible || !eligibility.side || eligibility.price == null) {
-    // Only log when a position exists and is being blocked — otherwise this
-    // fires for every coin on every tick and floods the log.
     if (eligibility.reason && eligibility.reason !== "winning side outside scalp band"
         && eligibility.reason !== "outside final scalp window"
         && eligibility.reason !== "missing or crossed two-sided quote") {
@@ -131,8 +139,7 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   // Per-coin budget overrides the global bet amount when set.
   const budget = (coinOverride?.maxBetSize ?? config.highValueScalpBetAmount) ?? 25;
   // eligibility.price IS the ask price for the selected side (YES ask for YES,
-  // NO ask = 1-yesBid for NO).  Do not invert it — that would compute the
-  // complementary side's price and cause 9× over-sizing on NO bets.
+  // NO ask = 1-yesBid for NO).  Do not invert it.
   const costPerContractScan = eligibility.price;
   if (Math.floor(budget / costPerContractScan) < 1) {
     logger.warn({ sym, budget, price: eligibility.price }, "[high-value-scalp] skipped — budget cannot buy one contract");
@@ -166,11 +173,13 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   }
 
   // Final price re-check immediately before order submission.
-  // Same poller source — no separate orderbook call needed.
-  const finalPollerPrice = getConvictionLivePrice(sym);
-  const finalYesAsk = finalPollerPrice?.yesAsk ?? null;
-  const finalRawYesBid = finalPollerPrice?.yesBid ?? null;
-  const finalYesBid = finalRawYesBid ?? (finalPollerPrice?.noAsk != null ? +(1 - finalPollerPrice.noAsk).toFixed(2) : null);
+  // Read from the shared kalshiTargetCache — the conviction poller just
+  // force-refreshed it in the same 1 s poll cycle, so this is the freshest
+  // available Kalshi quote without making an extra API call.
+  const finalEntry = kalshiTargetCache.get(sym);
+  const finalYesAsk = finalEntry?.yesAsk ?? null;
+  const finalRawYesBid = finalEntry?.yesBid ?? null;
+  const finalYesBid = finalRawYesBid ?? (finalEntry?.noAsk != null ? +(1 - finalEntry.noAsk).toFixed(2) : null);
   const finalEligibility = evaluateHighValueScalpEligibility({
     yesAsk: finalYesAsk,
     yesBid: finalYesBid,
@@ -184,13 +193,12 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   }
   logger.info({ sym, windowKey: timing.windowKey, side: finalEligibility.side, price: finalEligibility.price }, "[high-value-scalp] confirmed — placing order");
 
-  // Same reasoning as costPerContractScan: eligibility.price IS the ask cost
-  // for the selected side — do not invert it for NO bets.
+  // Same reasoning as costPerContractScan: eligibility.price IS the ask cost.
   const costPerContract = finalEligibility.price;
   const contracts = Math.floor(budget / costPerContract);
   if (contracts < 1) return;
 
-  // Mark fired before the await so concurrent ticks (if any) see it immediately.
+  // Mark fired before the await so concurrent dispatch (if any) sees it immediately.
   highValueScalpFiredThisWindow.add(firedKey);
 
   let filledCount = contracts;
@@ -222,10 +230,40 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
     return;
   }
 
+  const min = config.highValueScalpMinPrice ?? 0.90;
+  const max = config.highValueScalpMaxPrice ?? 0.95;
   const actualSpend = filledCount * (finalEligibility.side === "yes" ? fillYesPrice : 1 - fillYesPrice);
   const actualSidePrice = finalEligibility.side === "yes" ? fillYesPrice : 1 - fillYesPrice;
-  if (actualSidePrice < (config.highValueScalpMinPrice ?? 0.90) || actualSidePrice > (config.highValueScalpMaxPrice ?? 0.95)) {
-    logger.error({ sym, side: finalEligibility.side, actualSidePrice }, "[high-value-scalp] out-of-band fill; holding for normal management");
+
+  // Out-of-band fill guard: if the exchange filled at a price outside the
+  // configured band (race between final-check and fill), close immediately.
+  // The fresh-price dispatch makes this very unlikely, but we handle it
+  // defensively rather than holding an unintended position.
+  if (mode === "live" && (actualSidePrice < min || actualSidePrice > max)) {
+    logger.warn(
+      { sym, side: finalEligibility.side, actualSidePrice, min, max, filledCount },
+      "[high-value-scalp] out-of-band fill — attempting immediate close",
+    );
+    try {
+      await placeOrder({
+        ticker: market.ticker,
+        side: finalEligibility.side,
+        action: "sell",
+        count: filledCount,
+        type: "market",
+        timeInForce: "immediate_or_cancel",
+        limitPrice: actualSidePrice,
+      });
+      logger.warn({ sym, actualSidePrice }, "[high-value-scalp] out-of-band position closed successfully");
+      highValueScalpFiredThisWindow.delete(firedKey); // allow retry if price returns to band
+      return;
+    } catch (closeErr) {
+      logger.error(
+        { closeErr, sym, actualSidePrice },
+        "[high-value-scalp] out-of-band close failed — persisting for manual management",
+      );
+      // Fall through to persist so the operator can see and manage the position.
+    }
   }
 
   const decision = scalpDecision(finalEligibility.side);
@@ -281,7 +319,7 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
       direction: finalEligibility.side, action: "high_value_scalp",
       signals: {
         highValueScalp: true, highValueScalpAmount: actualSpend,
-        price: actualSidePrice, maxSecondsRemaining: config.highValueScalpMaxSecondsRemaining ?? 360,
+        price: actualSidePrice, maxSecondsRemaining: config.highValueScalpMaxSecondsRemaining ?? 120,
       },
       entryPrice: fillYesPrice, entryYesPrice: fillYesPrice, kalshiTarget: market.value,
       contractCount: filledCount, betAmount: actualSpend, mode,
@@ -294,14 +332,13 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   logger.info({ sym, windowKey: timing.windowKey, side: finalEligibility.side, filledCount, actualSpend, stacked: Boolean(active) }, "[high-value-scalp] confirmed fill");
 }
 
-/** Scan all Kalshi-backed markets. Safe to call on every ordinary bot-loop tick. */
+/** Scan all Kalshi-backed markets using the current conviction price cache.
+ * @deprecated Scalp detection is now driven by the conviction poller's
+ * 1-second fresh-price cycle via runHighValueScalpForCoin().  This wrapper
+ * is kept for callers that may reference it but is a no-op when the poller
+ * is running. */
 export async function runHighValueScalpScan(): Promise<void> {
-  if (!S.config.highValueScalpEnabled || S.dbDegradedSince !== null) return;
-  const now = Date.now();
-  const timing = currentWindowTiming(now);
-  if (!isHighValueScalpWindowOpen(timing.secondsRemaining, S.config)) return;
-  // Serial scan: each coin sees updated caps from coins checked before it.
-  for (const sym of Object.keys(KALSHI_SERIES)) {
-    await scanSymbol(sym, now);
-  }
+  // No-op: the conviction poller calls runHighValueScalpForCoin() directly
+  // on every fresh price update, so bot-loop-tick-based scanning is redundant
+  // and would only introduce a second stale-cache read path.
 }

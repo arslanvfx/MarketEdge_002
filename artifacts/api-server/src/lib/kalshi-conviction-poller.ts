@@ -31,7 +31,9 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
+import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache, highValueScalpFiredThisWindow } from "./kalshi-bot-state";
+import { runHighValueScalpForCoin } from "./kalshi-high-value-scalper";
+import { isHighValueScalpWindowOpen } from "./kalshi-high-value-scalper-policy";
 import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
 import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
@@ -117,6 +119,9 @@ async function pollOnce(): Promise<void> {
   const windowCloseTime = new Date(
     Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) + 15 * 60_000,
   );
+  // Seconds remaining in the current window — used for scalp-window detection
+  // and passed to runHighValueScalpForCoin so it uses a consistent timestamp.
+  const secondsRemaining = Math.max(0, Math.floor((windowCloseTime.getTime() - nowMs) / 1000));
 
   await Promise.allSettled(
     syms.map(async (sym) => {
@@ -193,16 +198,49 @@ async function pollOnce(): Promise<void> {
       // zone strictly).  No order is placed by the poller — it only removes
       // the 10 s throttle delay that would otherwise cause a brief zone visit
       // to be missed entirely.
-      if (convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
-        // Already bet this coin this window — nothing to do.
-        return;
-      }
-
       const { yesAsk, yesBid, noAsk: cachedNoAsk } = convictionPriceMap.get(sym) ?? { yesAsk: null, yesBid: null, noAsk: null };
       // Prefer noAsk (from no_ask_dollars) directly — the Kalshi API updates
       // no_ask_dollars and yes_bid_dollars independently; noAsk is faster to
       // reflect real-time NO pricing than the 1−yesBid complement.
       const noAsk = cachedNoAsk ?? (yesBid != null ? 1 - yesBid : null);
+
+      // ── Scalp-band detection ─────────────────────────────────────────────
+      // Runs on EVERY 1 s poll using the just-fetched fresh price, independent
+      // of whether a conviction bet has already fired this window.  The scalp
+      // stacks on top of an existing conviction position, so it MUST NOT be
+      // gated by convictionFiredThisWindow.  Same fire-and-forget pattern as
+      // callConvictionZoneEntry() — order placement lives in the scalper module.
+      if (S.config.highValueScalpEnabled && isHighValueScalpWindowOpen(secondsRemaining, S.config)) {
+        const scalpMode = S.botMode;
+        const scalpFiredKey = `${sym}:${windowKey}:${scalpMode}`;
+        const coinOvr = S.config.highValueScalpCoinOverrides?.[sym];
+        const perCoinSecs = coinOvr?.maxSecondsRemaining;
+        if (
+          !coinOvr?.paused &&
+          (perCoinSecs == null || secondsRemaining <= perCoinSecs) &&
+          !highValueScalpFiredThisWindow.has(scalpFiredKey) &&
+          S.config.enabled
+        ) {
+          const scalpMin = S.config.highValueScalpMinPrice ?? 0.90;
+          const scalpMax = S.config.highValueScalpMaxPrice ?? 0.95;
+          const yesInBand = yesAsk != null && yesAsk >= scalpMin && yesAsk <= scalpMax;
+          const noInBand  = noAsk  != null && noAsk  >= scalpMin && noAsk  <= scalpMax;
+          if (yesInBand !== noInBand) {
+            logger.info(
+              { sym, windowKey, yesAsk, noAsk, scalpMin, scalpMax, side: yesInBand ? "YES" : "NO", secondsRemaining },
+              "[high-value-scalp] poller detected scalp-band entry — dispatching",
+            );
+            runHighValueScalpForCoin(sym, { yesAsk, yesBid, noAsk }, nowMs)
+              .catch(err => logger.warn({ err, sym }, "[high-value-scalp] poller-triggered execution failed (non-fatal)"));
+          }
+        }
+      }
+      // ────────────────────────────────────────────────────────────────────
+
+      if (convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
+        // Already bet this coin this window — nothing to do.
+        return;
+      }
 
       // Derive the conviction zone for THIS symbol.  Per-market overrides in
       // perMarketConvictionConfig take priority over the global settings; if no
@@ -387,7 +425,9 @@ export function stopConvictionPoller(): void {
  * at startup after loadBotConfigFromDB.
  */
 export function syncConvictionPoller(): void {
-  if (S.config.decisionMode === "conviction") {
+  // Start the poller when conviction mode is active OR when high-value
+  // scalping is enabled — both features rely on the 1 s fresh-price cycle.
+  if (S.config.decisionMode === "conviction" || S.config.highValueScalpEnabled) {
     startConvictionPoller();
   } else {
     stopConvictionPoller();
