@@ -1044,78 +1044,131 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
 
                 {/* High-value scalping is intentionally independent of decision mode. */}
-                <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <span className="text-xs font-medium text-amber-300 flex items-center gap-1.5">
-                        <Zap className="w-3 h-3" />
-                        High-Value Scalping
-                      </span>
-                      <p className="mt-1 text-[11px] text-muted-foreground/80 leading-relaxed">
-                        A separate price-only scanner for the final minutes. It ignores normal bot signals, pauses, and market filters, but requires a fresh two-sided Kalshi quote and keeps its own exposure and daily-spend caps.
+                <section className="col-span-2 overflow-hidden rounded-2xl border border-amber-400/35 bg-gradient-to-br from-amber-400/[0.10] via-amber-500/[0.05] to-transparent shadow-[0_0_35px_rgba(251,191,36,0.05)]">
+                  <div className="flex flex-wrap items-start justify-between gap-4 border-b border-amber-400/15 bg-amber-400/[0.04] px-4 py-3.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-400/15 text-amber-300">
+                          <Zap className="h-4 w-4" />
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-bold text-amber-100">High-Value Scalping</h3>
+                          <p className="text-[10px] font-medium uppercase tracking-[0.13em] text-amber-300/70">Late-window price execution</p>
+                        </div>
+                      </div>
+                      <p className="mt-2 max-w-3xl text-[11px] leading-relaxed text-muted-foreground">
+                        Price leads every decision here. The scanner checks each configured market every second in the final window and ignores normal model, quiet-hour, and market-filter gates. Only fresh pricing, confirmed fills, and your independent limits remain.
                       </p>
                     </div>
                     <button
                       type="button"
                       aria-pressed={merged.highValueScalpEnabled ?? false}
                       onClick={() => setConfigDraft(d => ({ ...d, highValueScalpEnabled: !(merged.highValueScalpEnabled ?? false) }))}
-                      className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      className={`flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs font-bold shadow-sm transition-colors ${
                         (merged.highValueScalpEnabled ?? false)
-                          ? "border-amber-400/60 bg-amber-400/15 text-amber-200"
-                          : "border-border bg-background text-muted-foreground"
+                          ? "border-emerald-400/50 bg-emerald-400/15 text-emerald-200"
+                          : "border-border bg-background/80 text-muted-foreground hover:border-amber-400/40 hover:text-amber-200"
                       }`}
                     >
-                      {(merged.highValueScalpEnabled ?? false) ? "Enabled" : "Disabled"}
+                      <span className={`h-2 w-2 rounded-full ${(merged.highValueScalpEnabled ?? false) ? "bg-emerald-300 animate-pulse" : "bg-muted-foreground/60"}`} />
+                      {(merged.highValueScalpEnabled ?? false) ? "Scalper active" : "Scalper disabled"}
                     </button>
                   </div>
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[10px] text-muted-foreground">Winning-side min (¢)</span>
-                      <input type="number" min={50} max={99} step={1}
-                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
-                        value={Math.round((merged.highValueScalpMinPrice ?? 0.90) * 100)}
-                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMinPrice: parseFloat(e.target.value) / 100 }))} />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[10px] text-muted-foreground">Winning-side max (¢)</span>
-                      <input type="number" min={51} max={99} step={1}
-                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
-                        value={Math.round((merged.highValueScalpMaxPrice ?? 0.95) * 100)}
-                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxPrice: parseFloat(e.target.value) / 100 }))} />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[10px] text-muted-foreground">Final minutes</span>
-                      <input type="number" min={1} max={10} step={1}
-                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
-                        value={merged.highValueScalpMaxMinutesRemaining ?? 2}
-                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxMinutesRemaining: parseInt(e.target.value) }))} />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[10px] text-muted-foreground">Per order ($)</span>
-                      <input type="number" min={0.5} max={500} step={0.5}
-                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
-                        value={merged.highValueScalpBetAmount ?? 25}
-                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpBetAmount: parseFloat(e.target.value) }))} />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[10px] text-muted-foreground">Open exposure cap ($)</span>
-                      <input type="number" min={0.5} max={5000} step={1}
-                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
-                        value={merged.highValueScalpMaxOpenExposure ?? 100}
-                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxOpenExposure: parseFloat(e.target.value) }))} />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[10px] text-muted-foreground">Daily spend cap ($)</span>
-                      <input type="number" min={0.5} max={10000} step={1}
-                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
-                        value={merged.highValueScalpMaxDailySpend ?? 100}
-                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxDailySpend: parseFloat(e.target.value) }))} />
-                    </label>
+
+                  <div className="grid gap-3 p-4 lg:grid-cols-[1.25fr_1fr_1fr]">
+                    <div className="rounded-xl border border-amber-400/20 bg-background/35 p-3">
+                      <div className="mb-3 flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">Winning contract band</span>
+                        <span className="rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-mono text-amber-300">{Math.round((merged.highValueScalpMinPrice ?? 0.90) * 100)}–{Math.round((merged.highValueScalpMaxPrice ?? 0.95) * 100)}¢</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Minimum</span>
+                          <div className="relative">
+                            <input type="number" min={50} max={99} step={1}
+                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pr-7 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              value={Math.round((merged.highValueScalpMinPrice ?? 0.90) * 100)}
+                              onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMinPrice: v / 100 })); }} />
+                            <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-xs text-muted-foreground">¢</span>
+                          </div>
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Maximum</span>
+                          <div className="relative">
+                            <input type="number" min={51} max={99} step={1}
+                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pr-7 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              value={Math.round((merged.highValueScalpMaxPrice ?? 0.95) * 100)}
+                              onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxPrice: v / 100 })); }} />
+                            <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-xs text-muted-foreground">¢</span>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-amber-400/20 bg-background/35 p-3">
+                      <span className="mb-3 block text-[10px] font-bold uppercase tracking-wider text-amber-200">Entry cadence</span>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Final minutes</span>
+                          <input type="number" min={1} max={10} step={1}
+                            className="w-full rounded-lg border border-border bg-background px-2.5 py-2 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                            value={merged.highValueScalpMaxMinutesRemaining ?? 2}
+                            onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxMinutesRemaining: Math.round(v) })); }} />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Per order</span>
+                          <div className="relative">
+                            <input type="number" min={0.5} max={500} step={0.5}
+                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              value={merged.highValueScalpBetAmount ?? 25}
+                              onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpBetAmount: v })); }} />
+                            <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
+                          </div>
+                        </label>
+                      </div>
+                      <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/75">Checks every second while this window is active. A final fresh quote is taken immediately before the order.</p>
+                    </div>
+
+                    <div className="rounded-xl border border-amber-400/20 bg-background/35 p-3">
+                      <span className="mb-3 block text-[10px] font-bold uppercase tracking-wider text-amber-200">Independent limits</span>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Open exposure</span>
+                          <div className="relative">
+                            <input type="number" min={0.5} max={5000} step={1}
+                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              value={merged.highValueScalpMaxOpenExposure ?? 100}
+                              onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxOpenExposure: v })); }} />
+                            <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
+                          </div>
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[10px] text-muted-foreground">Daily spend</span>
+                          <div className="relative">
+                            <input type="number" min={0.5} max={10000} step={1}
+                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              value={merged.highValueScalpMaxDailySpend ?? 100}
+                              onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxDailySpend: v })); }} />
+                            <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
+                          </div>
+                        </label>
+                      </div>
+                      <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/75">Separate from normal bets. One confirmed scalp per market per 15-minute window; same-side fills may stack.</p>
+                    </div>
                   </div>
-                  <span className="text-[10px] text-muted-foreground/65">
-                    At most one confirmed scalp order per market per 15-minute window. Same-direction add-ons are allowed only while the contract remains inside this band; an opposite active position blocks the scalp.
-                  </span>
-                </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-400/15 bg-background/20 px-4 py-3">
+                    <span className="text-[10px] text-muted-foreground">Settings are written to the bot configuration and restored when the server restarts.</span>
+                    <div className="flex items-center gap-2">
+                      {persistMsg === "saved" && <span className="text-[10px] font-medium text-emerald-400">Saved and synchronized</span>}
+                      {persistMsg === "failed" && <span className="text-[10px] font-medium text-red-400">Save failed — settings were not changed</span>}
+                      <button type="button" onClick={saveConfig} disabled={!hasDraft || saving}
+                        className="rounded-lg bg-amber-400 px-3 py-1.5 text-[11px] font-bold text-amber-950 shadow-sm transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-45">
+                        {saving ? "Saving…" : hasDraft ? "Save scalp settings" : "All settings saved"}
+                      </button>
+                    </div>
+                  </div>
+                </section>
 
                 {/* Conviction Settings */}
                 {isConviction && (

@@ -13,8 +13,8 @@ interface TransactionLogProps {
   totalBets: number;
   historyMode: "paper" | "live";
   setHistoryMode: React.Dispatch<React.SetStateAction<"paper" | "live">>;
-  histSourceFilter: "all" | "bot" | "manual" | "skips";
-  setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual" | "skips">>;
+  histSourceFilter: "all" | "bot" | "manual" | "scalps" | "skips";
+  setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual" | "scalps" | "skips">>;
   activeMode: "paper" | "live";
 }
 
@@ -40,15 +40,16 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 </button>
               ))}
             </div>
-            {/* Source filter — All / Bot / Manual / Skips */}
+            {/* Source filter — scalps get their own audit view */}
             <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
-              {(["all", "bot", "manual", "skips"] as const).map(s => (
+              {(["all", "bot", "manual", "scalps", "skips"] as const).map(s => (
                 <button
                   key={s}
                   onClick={() => { setHistSourceFilter(s); setHistPage(0); }}
                   className={`px-2.5 py-1 transition-colors capitalize ${
                     histSourceFilter === s
                       ? s === "manual"  ? "bg-purple-500/20 text-purple-300"
+                      : s === "scalps"  ? "bg-amber-500/20 text-amber-200"
                       : s === "skips"   ? "bg-orange-500/20 text-orange-300"
                       : "bg-muted text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -104,12 +105,16 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const xp = r.exitPrice != null ? parseFloat(r.exitPrice) : null;
                 const isShadow = r.action === "shadow";
                 const isSkip = r.action === "skip";
-                const isOpen = r.action === "bet";
+                const sigs = r.signals as Record<string, unknown> | null;
+                const isScalp = r.source === "high_value_scalp"
+                  || r.action === "high_value_scalp"
+                  || r.action === "high_value_scalp_add"
+                  || sigs?.highValueScalp === true;
+                const isOpen = (r.action === "bet" || r.action === "high_value_scalp" || r.action === "high_value_scalp_add") && !r.exitedAt;
                 const isEmergencyClose = r.exitReason === "conviction_catastrophic_fill";
                 const isPendingEval = !isOpen && !isShadow && !isSkip && r.outcome == null;
                 const isWin = r.outcome === "win";
                 const isLoss = r.outcome === "loss";
-                const sigs = r.signals as Record<string, unknown> | null;
                 const closePx = sigs?.closePriceAtEval as number | null ?? null;
                 const endPx = closePx ?? (r.cryptoPriceAtExit != null ? parseFloat(r.cryptoPriceAtExit) : null);
                 const strike = r.kalshiTarget != null ? parseFloat(r.kalshiTarget) : null;
@@ -120,7 +125,9 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const mlAbove = sigs?.mlAbove as boolean | null ?? null;
                 const agreementTarget = sigs?.agreementTarget as string | null ?? null;
 
-                const cardBg = isShadow
+                const cardBg = isScalp
+                  ? "border-amber-400/35 bg-amber-500/[0.07]"
+                  : isShadow
                   ? "border-violet-500/20 bg-violet-950/5"
                   : isSkip
                     ? "border-orange-500/20 bg-orange-950/5"
@@ -148,6 +155,12 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           {r.direction === "yes" ? "ABOVE" : "BELOW"}
                         </span>
                       )}
+
+                       {isScalp && (
+                         <span className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-200 border border-amber-400/25">
+                           <Zap className="w-3 h-3" /> High-Value Scalp
+                         </span>
+                       )}
 
                       {isShadow ? (
                         <>
@@ -291,7 +304,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     </div>
 
                     {/* Key metrics grid */}
-                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
+                    <div className={`grid grid-cols-3 ${isScalp ? "sm:grid-cols-7" : "sm:grid-cols-6"} gap-2 mb-3`}>
                       <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
                         <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Strike</div>
                         <div className="text-xs font-semibold font-mono">{fmtCrypto(r.kalshiTarget)}</div>
@@ -346,6 +359,18 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
 
+                      {isScalp && (() => {
+                        const scalpSpend = Number(sigs?.highValueScalpAmount ?? r.betAmount ?? 0);
+                        const addCount = Number(sigs?.highValueScalpAddCount ?? 1);
+                        return (
+                          <div className="bg-amber-400/10 border border-amber-400/15 rounded-lg p-2.5 col-span-1">
+                            <div className="text-[9px] uppercase tracking-wide text-amber-200/80 mb-0.5">Scalp spend</div>
+                            <div className="text-xs font-bold font-mono text-amber-100">{scalpSpend > 0 ? fmt$(scalpSpend) : "—"}</div>
+                            <div className="text-[9px] text-amber-200/65 mt-0.5">{addCount} confirmed fill{addCount === 1 ? "" : "s"}</div>
+                          </div>
+                        );
+                      })()}
+
                       <div className={`rounded-lg p-2.5 col-span-1 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
                         <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">P&L</div>
                         <div className={`text-sm font-bold font-mono ${pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
@@ -363,6 +388,9 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </span>
                       )}
                       <span className="font-mono">{wkToEst(r.windowKey)} EST</span>
+                      {isScalp && (
+                        <span className="text-amber-200/80">· price-led scalp placed {fmtDateTime(r.createdAt)}</span>
+                      )}
                       {(() => {
                         const conf = sigs?.confidence as number | null ?? sigs?.statConfidence as number | null ?? null;
                         return conf != null ? (

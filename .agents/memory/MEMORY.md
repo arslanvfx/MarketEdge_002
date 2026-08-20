@@ -111,3 +111,4 @@
 - [Tick-abort overlay + IOC remainder](tick-abort-overlay.md) — every new tick-time abort must call setTickAbortReason or dashboard shows stale loop reason; conviction partial IOC fills get exactly ONE same-price remainder retry
 - [Async entry reservation ownership](async-entry-reservation-ownership.md) — lock/token cleanup must be idempotent and keyed to what that tick claimed, never mutable global mode after awaits
 - [Bot config patch semantics](bot-config-patch-semantics.md) — partial settings updates preserve omitted fields, clear explicit nulls, and adopt the server-returned canonical config only after persistence succeeds
+- [High-value scalp operating model](high-value-scalp-operating-model.md) — price-led late-window entries run each normal tick and intentionally bypass ordinary gates; retain only fresh-quote, fill, conflict, and independent-cap safeguards

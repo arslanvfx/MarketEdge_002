@@ -30,11 +30,10 @@ import {
 import { highValueScalpReservationLedger } from "./kalshi-high-value-scalper-ledger";
 export { evaluateHighValueScalpEligibility } from "./kalshi-high-value-scalper-policy";
 
-// Bounded per-market cadence. The final execution quote remains freshly fetched
-// immediately before order submission; this only prevents repeated scans from
-// amplifying ordinary loop traffic into a Kalshi API burst.
-const lastScalpQuoteScanAt = new Map<string, number>();
-const SCALP_MARKET_SCAN_INTERVAL_MS = 10_000;
+// The bot loop runs once per second. Scalp eligibility uses every normal loop
+// tick during its short final-window range so a qualifying quote is not missed.
+// Target data remains cached and only a qualifying quote receives the second,
+// immediate pre-submit orderbook verification.
 
 function modeSpend(mode: BotMode): Map<string, number> {
   return mode === "live" ? liveHighValueScalpDailySpend : paperHighValueScalpDailySpend;
@@ -76,10 +75,6 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   const mode = S.botMode;
   const reservationKey = `${sym}:${timing.windowKey}:${mode}`;
   if (highValueScalpReservations.has(reservationKey) || highValueScalpFiredThisWindow.has(reservationKey)) return;
-  const quoteScanKey = `${sym}:${timing.windowKey}`;
-  if (now - (lastScalpQuoteScanAt.get(quoteScanKey) ?? 0) < SCALP_MARKET_SCAN_INTERVAL_MS) return;
-  lastScalpQuoteScanAt.set(quoteScanKey, now);
-
   // Claim before the first await. Any abort releases this exact key.
   highValueScalpReservations.add(reservationKey);
   let budgetReserved = false;
