@@ -98,10 +98,17 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
     // The poller runs every 1 s and its TTL is 1.5 s, which is fresh enough to
     // detect a 90–95¢ zone entry.  A second fresh orderbook fetch is still
     // required immediately before order placement (see below).
+    //
+    // yesBid can be null even when yesAsk is present (Kalshi's no_ask_dollars
+    // and no_bid_dollars are populated independently).  When yesBid is missing,
+    // synthesize it from the poller's direct noAsk field (1 − noAsk).  Without
+    // this, the policy null-check at "missing or crossed two-sided quote" kills
+    // every scan tick even when yesAsk is clearly in the 90–95¢ band.
     const orderbook = await fetchOrderbookPrices(market.ticker);
     const pollerPrice = getConvictionLivePrice(sym);
     const scanYesAsk = orderbook?.yesAsk ?? pollerPrice?.yesAsk ?? null;
-    const scanYesBid = orderbook?.yesBid ?? pollerPrice?.yesBid ?? null;
+    const rawYesBid  = orderbook?.yesBid ?? pollerPrice?.yesBid ?? null;
+    const scanYesBid = rawYesBid ?? (pollerPrice?.noAsk != null ? +(1 - pollerPrice.noAsk).toFixed(2) : null);
     const priceSource = orderbook?.yesAsk != null || orderbook?.yesBid != null ? "orderbook" : pollerPrice != null ? "poller" : "none";
     const eligibility = evaluateHighValueScalpEligibility({
       yesAsk: scanYesAsk,
@@ -151,11 +158,12 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
 
     // Re-fetch immediately before order submission so price moves during the
     // reservation / balance checks don't result in a stale fill.  Same
-    // orderbook-then-poller fallback as the scan above.
+    // orderbook-then-poller fallback and yesBid synthesis as the scan above.
     const finalBook = await fetchOrderbookPrices(market.ticker);
     const finalPollerPrice = getConvictionLivePrice(sym);
     const finalYesAsk = finalBook?.yesAsk ?? finalPollerPrice?.yesAsk ?? null;
-    const finalYesBid = finalBook?.yesBid ?? finalPollerPrice?.yesBid ?? null;
+    const finalRawYesBid = finalBook?.yesBid ?? finalPollerPrice?.yesBid ?? null;
+    const finalYesBid = finalRawYesBid ?? (finalPollerPrice?.noAsk != null ? +(1 - finalPollerPrice.noAsk).toFixed(2) : null);
     const finalPriceSource = finalBook?.yesAsk != null || finalBook?.yesBid != null ? "orderbook" : finalPollerPrice != null ? "poller" : "none";
     const finalEligibility = evaluateHighValueScalpEligibility({
       yesAsk: finalYesAsk,
