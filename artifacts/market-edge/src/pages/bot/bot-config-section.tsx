@@ -1076,7 +1076,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </div>
                       </div>
                       <p className="mt-2 min-w-0 max-w-3xl break-words whitespace-normal text-[11px] leading-relaxed text-muted-foreground">
-                        Price leads every decision here. The scanner checks each configured market every second in the final window and ignores normal model, quiet-hour, and market-filter gates. Only fresh pricing, confirmed fills, and your independent limits remain.
+                        Same workflow as regular conviction bets — same price feed, same order placement. Fires in the configured final window when the winning-side contract ask lands in the price band. Model signals, quiet hours, and market filters are bypassed.
                       </p>
                     </div>
                     <button
@@ -1171,29 +1171,55 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
                     <div className="min-w-0 rounded-xl border border-amber-400/20 bg-background/35 p-3">
                       <span className="mb-3 block text-[10px] font-bold uppercase tracking-wider text-amber-200">Independent limits</span>
-                      <div className="grid grid-cols-2 gap-2">
-                        <label className="flex flex-col gap-1">
-                          <span className="text-[10px] text-muted-foreground">Open exposure</span>
-                          <div className="relative">
+                      <div className="flex flex-col gap-2">
+                        {/* Open exposure cap */}
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-muted-foreground">Open exposure</span>
+                            <button
+                              type="button"
+                              onClick={() => setConfigDraft(d => ({
+                                ...d,
+                                highValueScalpMaxOpenExposure: merged.highValueScalpMaxOpenExposure === null ? 800 : null,
+                              }))}
+                              className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${merged.highValueScalpMaxOpenExposure === null ? "bg-amber-400/20 text-amber-300" : "bg-muted/40 text-muted-foreground hover:text-amber-300"}`}
+                            >
+                              {merged.highValueScalpMaxOpenExposure === null ? "No cap ✓" : "No cap"}
+                            </button>
+                          </div>
+                          <div className={`relative transition-opacity ${merged.highValueScalpMaxOpenExposure === null ? "pointer-events-none opacity-30" : ""}`}>
                             <input type="number" min={0.5} max={5000} step={1}
                               className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
-                              value={merged.highValueScalpMaxOpenExposure ?? 100}
+                              value={merged.highValueScalpMaxOpenExposure ?? 800}
                               onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxOpenExposure: v })); }} />
                             <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
                           </div>
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span className="text-[10px] text-muted-foreground">Daily spend</span>
-                          <div className="relative">
+                        </div>
+                        {/* Daily spend cap */}
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-muted-foreground">Daily spend</span>
+                            <button
+                              type="button"
+                              onClick={() => setConfigDraft(d => ({
+                                ...d,
+                                highValueScalpMaxDailySpend: merged.highValueScalpMaxDailySpend === null ? 2000 : null,
+                              }))}
+                              className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${merged.highValueScalpMaxDailySpend === null ? "bg-amber-400/20 text-amber-300" : "bg-muted/40 text-muted-foreground hover:text-amber-300"}`}
+                            >
+                              {merged.highValueScalpMaxDailySpend === null ? "No cap ✓" : "No cap"}
+                            </button>
+                          </div>
+                          <div className={`relative transition-opacity ${merged.highValueScalpMaxDailySpend === null ? "pointer-events-none opacity-30" : ""}`}>
                             <input type="number" min={0.5} max={10000} step={1}
                               className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
-                              value={merged.highValueScalpMaxDailySpend ?? 100}
+                              value={merged.highValueScalpMaxDailySpend ?? 2000}
                               onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxDailySpend: v })); }} />
                             <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
                           </div>
-                        </label>
+                        </div>
                       </div>
-                      <p className="mt-3 min-w-0 break-words whitespace-normal text-[10px] leading-relaxed text-muted-foreground/75">Separate from normal bets. One confirmed scalp per market per 15-minute window; same-side fills may stack.</p>
+                      <p className="mt-3 min-w-0 break-words whitespace-normal text-[10px] leading-relaxed text-muted-foreground/75">Separate from normal bets. One scalp per market per 15-min window; same-side fills may stack.</p>
                     </div>
                   </div>
 

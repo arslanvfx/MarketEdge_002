@@ -7,7 +7,7 @@ import {
 } from "./kalshi-high-value-scalper-policy.ts";
 import { isRecoverableOpenPositionAction, restoreHighValueScalpMetadata } from "./kalshi-high-value-scalper-recovery.ts";
 import { buildHighValueScalpEntryUpdate } from "./kalshi-high-value-scalper-persistence.ts";
-import { HighValueScalpReservationLedger } from "./kalshi-high-value-scalper-ledger.ts";
+
 
 const config = {
   highValueScalpMinPrice: 0.90,
@@ -99,19 +99,6 @@ test("high-value scalp add-on persistence only changes entry accounting", () => 
   assert.equal("action" in update, false);
 });
 
-test("high-value scalp reservations prevent concurrent markets from oversubscribing either cap", () => {
-  const ledger = new HighValueScalpReservationLedger();
-  const base = {
-    mode: "paper" as const, amount: 25, currentExposure: 0, maxExposure: 40,
-    currentDailySpend: 0, maxDailySpend: 40,
-  };
-  assert.equal(ledger.tryReserve({ ...base, key: "BTC" }), true);
-  assert.equal(ledger.tryReserve({ ...base, key: "ETH" }), false);
-  assert.equal(ledger.reservedAmount("paper"), 25);
-  ledger.release("BTC");
-  assert.equal(ledger.tryReserve({ ...base, key: "ETH" }), true);
-
-  const dailyLedger = new HighValueScalpReservationLedger();
-  assert.equal(dailyLedger.tryReserve({ ...base, key: "BTC", maxExposure: 100, maxDailySpend: 30 }), true);
-  assert.equal(dailyLedger.tryReserve({ ...base, key: "ETH", maxExposure: 100, maxDailySpend: 30 }), false);
-});
+// Cap enforcement is now handled by direct numeric checks in scanSymbol rather
+// than a separate reservation ledger.  The scan runs serially so each coin
+// sees the correct accumulated exposure before deciding to bet.

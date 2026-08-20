@@ -203,10 +203,8 @@ export const windowTotalBets = new Map<string, number>();
 export const windowBetDetails = new Map<string, { direction: "yes" | "no"; confidence: number }>();
 export const windowDirectionCounts = new Map<"yes" | "no", number>();
 export const windowFailedFills = new Set<string>();
-// High-value scalp reservations are intentionally separate from ordinary
-// conviction locks. They are keyed by symbol/window/mode so a concurrent loop
-// or poller cadence cannot buy the same late-window opportunity twice.
-export const highValueScalpReservations = new Set<string>();
+// Tracks coins that have already had a scalp fired this window (sym:windowKey:mode).
+// Prevents double-bets. Cleared on window transition in the bot loop.
 export const highValueScalpFiredThisWindow = new Set<string>();
 export const paperHighValueScalpDailySpend = new Map<string, number>();
 export const liveHighValueScalpDailySpend = new Map<string, number>();

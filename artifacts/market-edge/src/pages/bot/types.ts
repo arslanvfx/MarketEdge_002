@@ -130,8 +130,8 @@ export interface BotConfig {
   highValueScalpMaxMinutesRemaining?: number;
   highValueScalpMaxSecondsRemaining?: number;
   highValueScalpBetAmount?: number;
-  highValueScalpMaxOpenExposure?: number;
-  highValueScalpMaxDailySpend?: number;
+  highValueScalpMaxOpenExposure?: number | null;
+  highValueScalpMaxDailySpend?: number | null;
   convictionStopLossFloor?: number;
   convictionStopLossActivationMinute?: number;
   convictionMinEntryMinutes?: number;

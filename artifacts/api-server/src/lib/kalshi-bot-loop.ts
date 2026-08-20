@@ -56,7 +56,7 @@ import {
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
-  highValueScalpReservations, highValueScalpFiredThisWindow,
+  highValueScalpFiredThisWindow,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
@@ -599,7 +599,6 @@ export async function runBotLoopTick(): Promise<void> {
     convictionEmergencyCloses.clear();
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
-    highValueScalpReservations.clear();
     highValueScalpFiredThisWindow.clear();
     tickAbortReasons.clear();
     coinStabilityCache.clear();

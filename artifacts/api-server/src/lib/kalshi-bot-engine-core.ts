@@ -1272,8 +1272,8 @@ export interface BotConfig {
   highValueScalpMaxMinutesRemaining?: number; // legacy whole-minute fallback (default 2)
   highValueScalpMaxSecondsRemaining?: number; // only eligible with this many seconds left (default 120)
   highValueScalpBetAmount?: number;      // dollar budget per scalp order (default $25)
-  highValueScalpMaxOpenExposure?: number; // gross open scalp exposure cap (default $100)
-  highValueScalpMaxDailySpend?: number;   // gross daily scalp spend cap (default $100)
+  highValueScalpMaxOpenExposure?: number | null; // gross open scalp exposure cap; null = no cap
+  highValueScalpMaxDailySpend?: number | null;   // gross daily scalp spend cap; null = no cap
   // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
   // Any field left undefined falls through to the matching global setting.
   //   lockPrice      — entry floor (overrides kalshiLockPrice)
@@ -1734,11 +1734,11 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   highValueScalpEnabled: false,
   highValueScalpMinPrice: 0.90,
   highValueScalpMaxPrice: 0.95,
-  highValueScalpMaxMinutesRemaining: 2,
-  highValueScalpMaxSecondsRemaining: 120,
+  highValueScalpMaxMinutesRemaining: 6,
+  highValueScalpMaxSecondsRemaining: 360,
   highValueScalpBetAmount: 25,
-  highValueScalpMaxOpenExposure: 100,
-  highValueScalpMaxDailySpend: 100,
+  highValueScalpMaxOpenExposure: 800,
+  highValueScalpMaxDailySpend: 2000,
   convictionBoostBetSize: undefined,
   convictionBoostProbability: 0.25,
   convictionBoostMinWinRate: 0.70,

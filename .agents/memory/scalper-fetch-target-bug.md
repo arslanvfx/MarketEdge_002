@@ -1,33 +1,33 @@
 ---
-name: High-value scalper fetchKalshiTarget bypass bug
-description: The scalper's call to fetchKalshiTarget(sym, targetTime) bypasses the cache and causes 429-induced cache poisoning that silently kills every scan.
+name: Scalper price source and window timing
+description: How the high-value scalper gets prices and how the scan window is calibrated; includes all bugs fixed that caused zero bets after initial launch.
 ---
 
-# Root cause
+## Rule
+The high-value scalper MUST use `getConvictionLivePrice(sym)` (the conviction poller cache) as the **exclusive** price source for both the initial scan phase and the final pre-submit price check. It must NEVER call `fetchOrderbookPrices` during the scan or final check.
 
-`scanSymbol` was calling `fetchKalshiTarget(sym, new Date(timing.closeAt))` with `targetTime` set.
+## Why
+Three bugs caused zero bets after initial launch:
 
-`fetchKalshiTarget` has two code paths:
-- `!targetTime` → uses TTL cache, only fetches if stale
-- `targetTime` → **bypasses cache entirely**, always makes a live API call
+1. **`fetchKalshiTarget(sym, targetTime)` bypass** — passing `targetTime` skips the shared cache and makes a live API call per tick. During busy end-of-window periods, 429s cause the normal bot loop's handler to write `{ value: null }` into `kalshiTargetCache`. The scalper then reads back `value=null` → silent exit. Fix: read `kalshiTargetCache.get(sym)` directly (no `fetchKalshiTarget` call at all from the scalper).
 
-During the busy end-of-window period, the normal bot loop is already hammering the Kalshi API every tick for all 12 coins. These calls return 429 frequently. The normal bot loop's own 429 handler (line 285 in crypto-kalshi.ts) writes `{ value: null, at: Date.now() }` into the cache (NO ticker, NULL value). Then the scalper's `fetchKalshiTarget(sym, targetTime)` ALSO hits 429 but since `targetTime` is set, it does NOT update the cache. The scalper then reads `kalshiTargetCache.get(sym)` and sees `{ value: null }` from the normal loop's 429 handler → `market.value == null` → silent return. Every coin. Every tick. Every window.
+2. **Orderbook returns different prices than poller** — `fetchOrderbookPrices` consistently returns crossed quotes, 429 errors, or prices that diverge from what the conviction poller (and MarketEdge UI) shows. Using it as primary source in the scan caused coins the user could SEE at 90-95% to be rejected as "outside band" or "crossed quote".
 
-# Fix
+3. **Final pre-submit check also used orderbook** — even after the scan correctly identified a coin as eligible (via poller), the final check called `fetchOrderbookPrices` again and overrode the poller with wrong prices, rejecting valid bets at the last step.
 
-Removed the `fetchKalshiTarget(sym, new Date(timing.closeAt))` call entirely from `scanSymbol`. The scalper now reads `kalshiTargetCache` directly — the same shared cache the conviction poller and normal bot loop keep fresh every 1-5 seconds. Added a `closeTime` window-validation check to reject pre-published next-window markets (Kalshi pre-publishes ~10 min early).
+## How to Apply
+- `scanSymbol` scan phase: `const pollerPrice = getConvictionLivePrice(sym)` only. No `fetchOrderbookPrices`.
+- `scanSymbol` final pre-submit check: same — poller only. No `fetchOrderbookPrices`.
+- `fetchOrderbookPrices` is NOT imported in `kalshi-high-value-scalper.ts`.
+- `fetchKalshiTarget` is NOT called from the scalper.
 
-**Why:** The scalper should be a READER of the shared cache, not a writer. It runs in the last 2 minutes when the API is under the most load. Making extra uncached API calls during that period is the worst time to do it.
+## Window timing
+The scalp band is 90-95% YES/NO. Empirically, coins transit this band at ~9 minutes into a 15-minute window (secondsRemaining ≈ 360). By 2 minutes remaining (secondsRemaining=120), coins are at 98-99%. Therefore:
+- `highValueScalpMaxSecondsRemaining` must be **360** (not 120).
+- DB default row (`id='default'`) must have this value.
+- Code default in `kalshi-bot-engine-core.ts` must also be 360.
 
-# Three compounding bugs (all now fixed)
-
-1. Empty authenticated orderbook → null prices → fell back to nothing (fixed: conviction poller fallback)
-2. `yesBid` missing when `no_ask_dollars` absent → policy null-check rejects (fixed: synthesize from `noAsk`)  
-3. `fetchKalshiTarget(targetTime)` → bypasses cache → 429 → normal loop's 429 poisons cache to null value → silent exit before eligibility (fixed: remove the call, read cache directly)
-4. All skip logs were DEBUG-level → invisible (fixed: INFO with priceSource field)
-
-# Cache window validation
-
-After removing the targetTime call, added a closeTime guard to prevent using a pre-published next-window market:
-- `Math.abs(market.closeTime - timing.closeAt) > 8*60*1000` → skip with log
-- If `market.closeTime` absent → skip validation (429-set entries have no closeTime but also no ticker/value → caught by existing null check)
+## Daily cap
+- `highValueScalpMaxDailySpend` default raised to **$2000** (DB + code). The original $1000 was consumed by the initial working window (8-10 bets × ~$100).
+- `highValueScalpMaxOpenExposure` default raised to **$800** (was $100).
+- Daily spend is tracked in-memory only (`paperHighValueScalpDailySpend` / `liveHighValueScalpDailySpend`) and resets on server restart.
