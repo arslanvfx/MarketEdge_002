@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import { logger } from "./logger";
-import { fetchKalshiTarget, fetchOrderbookPrices, kalshiTargetCache } from "./crypto-kalshi";
+import { fetchOrderbookPrices, kalshiTargetCache } from "./crypto-kalshi";
 import { KALSHI_SERIES } from "./crypto";
 import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import { getCachedKalshiBalance, invalidateBalanceCache, placeEntryOrderWithSizeFallback } from "./kalshi-trader";
@@ -85,11 +85,30 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
     if (budgetReserved) highValueScalpReservationLedger.release(reservationKey);
   };
   try {
-    // Reuse the normal target cache; force-refreshing every market per bot tick
-    // during the final window would throttle the shared Kalshi endpoint.
-    await fetchKalshiTarget(sym, new Date(timing.closeAt));
+    // Read directly from the shared kalshiTargetCache that the conviction poller
+    // and normal bot loop already keep fresh every 1–5 s.
+    //
+    // Do NOT call fetchKalshiTarget here with a targetTime.  Passing targetTime
+    // bypasses the cache entirely and makes a live API call on every tick.  During
+    // the busy end-of-window period those calls return 429.  The normal bot loop's
+    // 429 handler then writes { value: null } into the cache (the !targetTime &&
+    // !forceRefresh branch), and the scalper reads back value=null → silent exit.
     const market = kalshiTargetCache.get(sym);
-    if (!market?.ticker || market.value == null) return;
+    // Validate that the cached market is for the current window, not the next one
+    // (Kalshi pre-publishes the next window ~10 min early; off-by-one window kills
+    // the eligibility check against stale prices).
+    const closeAtMs = timing.closeAt;
+    if (market?.closeTime) {
+      const marketCloseMs = new Date(market.closeTime).getTime();
+      if (Math.abs(marketCloseMs - closeAtMs) > 8 * 60_000) {
+        logger.info({ sym, marketClose: market.closeTime, expectedClose: new Date(closeAtMs).toISOString() }, "[high-value-scalp] cached market is for wrong window — skipping");
+        return;
+      }
+    }
+    if (!market?.ticker || market.value == null) {
+      logger.info({ sym, ticker: market?.ticker ?? null, value: market?.value ?? null, closeAt: new Date(closeAtMs).toISOString() }, "[high-value-scalp] no market data — skipping");
+      return;
+    }
 
     // Initial eligibility scan: prefer a fresh authenticated orderbook, but fall
     // back to the conviction poller's cached price when the book is empty.
@@ -308,5 +327,7 @@ export async function runHighValueScalpScan(): Promise<void> {
   const now = Date.now();
   const timing = currentWindowTiming(now);
   if (!isHighValueScalpWindowOpen(timing.secondsRemaining, S.config)) return;
+  // This fires on every tick during the final 120s — confirms the scan is alive.
+  logger.info({ windowKey: timing.windowKey, secondsRemaining: timing.secondsRemaining }, "[high-value-scalp] window open — scanning all symbols");
   await Promise.allSettled(Object.keys(KALSHI_SERIES).map((sym) => scanSymbol(sym, now)));
 }
