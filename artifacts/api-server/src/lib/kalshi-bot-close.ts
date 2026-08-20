@@ -139,12 +139,8 @@ export async function closePosition(
   // For mid-window exits: pnl = (exitYesPrice - entryYesPrice) × contractCount
   //   YES bet profits when exitYesPrice > entryYesPrice
   //   NO  bet profits when exitYesPrice < entryYesPrice (they go inverse)
-  // For expiry: TEMP paper simulation uses fixed return rate (see PAPER_WIN_RETURN_RATE).
-  //   In live mode this path is replaced by evalClosedBets using real candle data.
-
-  // Paper win return rate: configurable via S.config.paperWinReturnRate.
-  // Default 0.50 = 50¢ profit per $1 bet. Change in Bot Configuration panel.
-  const PAPER_WIN_RETURN_RATE = S.config.paperWinReturnRate ?? 0.50;
+  // For expiry: both paper and live use real Kalshi contract math.
+  //   evalClosedBets will later override with the authoritative Kalshi settlement result.
 
   let pnl = 0;
   if (fillPrice !== null) {

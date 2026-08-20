@@ -107,8 +107,9 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
 
     const active = openPositions.get(sym);
     const budget = config.highValueScalpBetAmount ?? 25;
-    if (Math.floor(budget / eligibility.price) < 1) {
-      logger.warn({ sym, budget, price: eligibility.price }, "[high-value-scalp] skipped — configured budget cannot buy one contract");
+    const eligibilityCostPerContract = eligibility.side === "yes" ? eligibility.price : 1 - eligibility.price;
+    if (Math.floor(budget / eligibilityCostPerContract) < 1) {
+      logger.warn({ sym, budget, price: eligibility.price, side: eligibility.side }, "[high-value-scalp] skipped — configured budget cannot buy one contract");
       return;
     }
     const openCap = config.highValueScalpMaxOpenExposure ?? 100;
@@ -153,7 +154,9 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
     }
     // Recompute contract count from the final fresh price so an adverse quote
     // move cannot spend beyond the amount atomically reserved above.
-    const contracts = Math.floor(budget / finalEligibility.price);
+    // For NO bets the cost per contract is (1 − yesPrice), not yesPrice itself.
+    const costPerContract = finalEligibility.side === "yes" ? finalEligibility.price : 1 - finalEligibility.price;
+    const contracts = Math.floor(budget / costPerContract);
     if (contracts < 1) return;
 
     let filledCount = contracts;
