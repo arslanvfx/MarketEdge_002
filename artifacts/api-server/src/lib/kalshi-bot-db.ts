@@ -50,6 +50,7 @@ import {
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
+  paperHighValueScalpDailySpend, liveHighValueScalpDailySpend,
   REGIME_AGAINST_PENALTY_FALLBACK, CONTRARIAN_LIVE_REGIME_PENALTY,
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX, WINDOW_ENTRY_BUFFER_S,
@@ -57,6 +58,10 @@ import {
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
+import {
+  isRecoverableOpenPositionAction,
+  restoreHighValueScalpMetadata,
+} from "./kalshi-high-value-scalper-recovery";
 
 const _botConfigPersistenceQueue = new AsyncSerialQueue();
 
@@ -246,6 +251,34 @@ export async function loadDailyPnlFromDB(): Promise<void> {
     S.dailyPnl = pnlSum;
     S.dailyLossCount = lossCount;
     S.dailyDate = today;
+
+    // High-value scalp spend has an independent daily cap. Restore it from
+    // entry-side metadata rather than closed P&L so a restart cannot reopen
+    // this risk budget while late-window positions are still live.
+    const scalpRows = await db
+      .select({
+        betAmount: kalshiBotBetsTable.betAmount,
+        signals: kalshiBotBetsTable.signals,
+      })
+      .from(kalshiBotBetsTable)
+      .where(and(
+        isNull(kalshiBotBetsTable.archivedAt),
+        eq(kalshiBotBetsTable.mode, S.botMode),
+        eq(kalshiBotBetsTable.source, "high_value_scalp"),
+        sql`DATE(${kalshiBotBetsTable.createdAt} AT TIME ZONE 'UTC') = ${today}`,
+      ));
+    let scalpSpend = 0;
+    for (const row of scalpRows) {
+      const signals = (row.signals ?? {}) as Record<string, unknown>;
+      const trackedAmount = Number(signals.highValueScalpAmount);
+      scalpSpend += Number.isFinite(trackedAmount)
+        ? trackedAmount
+        : (Number(row.betAmount) || 0);
+    }
+    const scalpSpendMap = S.botMode === "live"
+      ? liveHighValueScalpDailySpend
+      : paperHighValueScalpDailySpend;
+    scalpSpendMap.set(today, scalpSpend);
 
     // Restore consecutive-loss streak and recent Kalshi strike prices from recent bets.
     // Both are needed on startup: streak → circuit-breaker restore; strikes → momentum filter.
@@ -596,7 +629,7 @@ export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }
 
 /**
  * Recover an open position from the DB after a server restart.
- * Looks for the most recent 'bet' row with no exitedAt within the last 24 hours
+ * Looks for recent open ordinary or high-value-scalp rows with no exitedAt
  * (24h covers midnight-UTC boundaries so a position opened late in one day is
  * still found on a post-midnight restart). If found:
  *   - Window still active → restores the position into openPositions so the
@@ -615,7 +648,7 @@ export async function loadOpenPositionFromDB(): Promise<void> {
       .where(
         and(
           isNull(kalshiBotBetsTable.exitedAt),
-          eq(kalshiBotBetsTable.action, "bet"),
+          inArray(kalshiBotBetsTable.action, ["bet", "high_value_scalp", "high_value_scalp_add"]),
           sql`${kalshiBotBetsTable.createdAt} >= NOW() - INTERVAL '24 hours'`,
         ),
       )
@@ -630,6 +663,10 @@ export async function loadOpenPositionFromDB(): Promise<void> {
     let restored = 0;
 
     for (const row of rows) {
+      if (!isRecoverableOpenPositionAction(row.action)) continue;
+      // Rows are newest-first; preserve the newest still-open record for each
+      // symbol rather than letting a stale duplicate overwrite it.
+      if (openPositions.has(row.symbol)) continue;
       // Validate required fields before reconstructing in-memory position.
       if (
         !row.direction ||
@@ -657,6 +694,11 @@ export async function loadOpenPositionFromDB(): Promise<void> {
       const entryYesPrice = parseFloat(String(row.entryPrice));
       const direction = row.direction as "yes" | "no";
 
+      const scalpMetadata = restoreHighValueScalpMetadata({
+        action: row.action,
+        source: row.source,
+        signals: row.signals,
+      });
       openPositions.set(row.symbol, {
         id: row.id,
         symbol: row.symbol,
@@ -681,11 +723,12 @@ export async function loadOpenPositionFromDB(): Promise<void> {
         // Recover the mode the position was opened in so its exit uses a real
         // sell order when it was a live bet, regardless of the current mode.
         entryMode: row.mode === "live" ? "live" : "paper",
-        // Infer source from ID prefix (manual:...) or persisted signals flag so
-        // closeManualPosition still works correctly after a server restart.
-        source: row.id.startsWith("manual:") || (row.signals as Record<string, unknown> | null)?.["manual"] === true
-          ? "manual"
-          : "bot",
+        // Source and scalp attribution must be durable: on a restart the
+        // recovered position contributes to the independent scalp exposure cap
+        // and is managed/expired by the same close path as a live position.
+        source: row.id.startsWith("manual:") ? "manual" : scalpMetadata.source,
+        highValueScalpAmount: scalpMetadata.highValueScalpAmount,
+        highValueScalpAddCount: scalpMetadata.highValueScalpAddCount,
         entrySignals: (() => {
           const s = row.signals as Record<string, unknown> | null;
           if (!s) return undefined;

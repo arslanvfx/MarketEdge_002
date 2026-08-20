@@ -2,6 +2,7 @@ import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@wo
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
+import { buildHighValueScalpEntryUpdate } from "./kalshi-high-value-scalper-persistence";
 import {
   checkMaxBetSizeGuard, checkDailyLossGuard, checkStreakPauseGuard,
   checkSlippageStrikeGuard, checkWindowMonitorReadyGuard, checkBalanceGuard,
@@ -399,9 +400,14 @@ export interface BetRecordArgs {
   // Bot mode (paper/live) captured at entry. Falls back to the global S.botMode
   // when omitted (e.g. skip/warmup rows). Prevents mid-fill flips mislabeling rows.
   mode?: BotMode;
-  // Originating source: "bot" (automated loop) | "manual" (dashboard button).
+  // Originating source: ordinary automated loop, dashboard manual order, or
+  // the isolated late-window high-value scalp scanner.
   // Omitting defaults to "bot" in the DB insert.
-  source?: "bot" | "manual";
+  source?: "bot" | "manual" | "high_value_scalp";
+  // Used only when a high-value scalp is folded into an existing same-direction
+  // position. This updates entry-side accounting without creating a second
+  // independently-closed row for the same exchange position.
+  entryUpdate?: boolean;
   // Kalshi YES contract price (0–1) at decision time — used for conviction threshold analysis.
   entryYesPrice?: number | null;
   // True when the stability gate + probability roll upgraded this bet to max size.
@@ -433,6 +439,27 @@ export async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> 
   try {
     const id = args.existingId ?? args.insertId ?? `${args.symbol}:${args.windowKey}:${Date.now()}`;
     if (args.existingId) {
+      if (args.entryUpdate) {
+        // A same-direction scalp add-on changes only the entry accounting of
+        // an already-open position. It must never reuse the exit upsert below:
+        // assigning exitedAt here would orphan a live exchange position after
+        // restart and allow a duplicate scalp.
+        const updatedRows = await db
+          .update(kalshiBotBetsTable)
+          .set(buildHighValueScalpEntryUpdate({
+            signals: args.signals as Record<string, unknown>,
+            entryPrice: args.entryPrice,
+            entryYesPrice: args.entryYesPrice ?? null,
+            contractCount: args.contractCount,
+            betAmount: args.betAmount,
+            source: args.source ?? "high_value_scalp",
+          }))
+          .where(eq(kalshiBotBetsTable.id, id))
+          .returning({ id: kalshiBotBetsTable.id });
+        if (updatedRows.length !== 1) {
+          throw new Error(`High-value scalp add-on could not find open record ${id}`);
+        }
+      } else {
       // Exit / expiry update. Use a race-safe upsert (INSERT … ON CONFLICT DO UPDATE)
       // instead of a plain UPDATE so the bet is never silently lost when the window
       // expires before the entry INSERT has committed to the DB.
@@ -487,6 +514,7 @@ export async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> 
             exitedAt,
           },
         });
+      }
     } else {
       // Insert new record (bet entry, skip, warmup)
       await db.insert(kalshiBotBetsTable).values({

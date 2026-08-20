@@ -124,6 +124,13 @@ export interface BotConfig {
   proximityLatePctOverrides?: Record<string, number>;
   convictionDailyLossLimit?: number;
   convictionMaxDailySpend?: number;
+  highValueScalpEnabled?: boolean;
+  highValueScalpMinPrice?: number;
+  highValueScalpMaxPrice?: number;
+  highValueScalpMaxMinutesRemaining?: number;
+  highValueScalpBetAmount?: number;
+  highValueScalpMaxOpenExposure?: number;
+  highValueScalpMaxDailySpend?: number;
   convictionStopLossFloor?: number;
   convictionStopLossActivationMinute?: number;
   convictionMinEntryMinutes?: number;
@@ -220,7 +227,10 @@ export interface OpenPosition {
   unrealizedPnl: number | null;
   guardStates: GuardStates | null;
   guardReason: string | null;
-  source?: "bot" | "manual";
+  source?: "bot" | "manual" | "high_value_scalp";
+  highValueScalpAmount?: number;
+  highValueScalpAddCount?: number;
+  decisionMode?: DecisionMode;
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
 }
 

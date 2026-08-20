@@ -1264,6 +1264,15 @@ export interface BotConfig {
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
+  // High-value scalp: isolated late-window price-only execution path. These
+  // settings never participate in the regular bot decision pipeline.
+  highValueScalpEnabled?: boolean;
+  highValueScalpMinPrice?: number;       // winning-side ask floor, 0–1 (default .90)
+  highValueScalpMaxPrice?: number;       // winning-side ask cap, 0–1 (default .95)
+  highValueScalpMaxMinutesRemaining?: number; // only eligible with this many minutes left (default 2)
+  highValueScalpBetAmount?: number;      // dollar budget per scalp order (default $25)
+  highValueScalpMaxOpenExposure?: number; // gross open scalp exposure cap (default $100)
+  highValueScalpMaxDailySpend?: number;   // gross daily scalp spend cap (default $100)
   // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
   // Any field left undefined falls through to the matching global setting.
   //   lockPrice      — entry floor (overrides kalshiLockPrice)
@@ -1719,6 +1728,15 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionCatastrophicFillThresholdCents: 15,
   convictionMinEntryMinutes: 0,
   convictionMaxDailySpend: undefined,
+  // High-value scalping is deliberately opt-in. It has independent limits so
+  // enabling it does not require loosening the normal bot's conservative caps.
+  highValueScalpEnabled: false,
+  highValueScalpMinPrice: 0.90,
+  highValueScalpMaxPrice: 0.95,
+  highValueScalpMaxMinutesRemaining: 2,
+  highValueScalpBetAmount: 25,
+  highValueScalpMaxOpenExposure: 100,
+  highValueScalpMaxDailySpend: 100,
   convictionBoostBetSize: undefined,
   convictionBoostProbability: 0.25,
   convictionBoostMinWinRate: 0.70,

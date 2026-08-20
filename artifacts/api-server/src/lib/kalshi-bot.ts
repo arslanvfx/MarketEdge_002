@@ -65,6 +65,7 @@ export {
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
 export { runBotTickForCoin } from "./kalshi-bot-tick";
+export { runHighValueScalpScan, evaluateHighValueScalpEligibility } from "./kalshi-high-value-scalper";
 export { placeManualOrder, closeManualPosition, type ManualOrderResult } from "./kalshi-bot-manual";
 export { evalShadowBets } from "./kalshi-bot-shadow";
 export { evalClosedBets, reEvaluateSettledBets, fixCommodityOutcomes } from "./kalshi-bot-eval";

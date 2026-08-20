@@ -56,6 +56,7 @@ import {
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
+  highValueScalpReservations, highValueScalpFiredThisWindow,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
@@ -70,6 +71,7 @@ import {
 import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition, persistBetRecord } from "./kalshi-bot-close";
+import { runHighValueScalpScan } from "./kalshi-high-value-scalper";
 import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-tick";
 import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import {
@@ -597,6 +599,8 @@ export async function runBotLoopTick(): Promise<void> {
     convictionEmergencyCloses.clear();
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
+    highValueScalpReservations.clear();
+    highValueScalpFiredThisWindow.clear();
     tickAbortReasons.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
@@ -675,6 +679,11 @@ export async function runBotLoopTick(): Promise<void> {
   // so the UI and gate always have current velocity/projection data, even when
   // the bot is disabled or paused.
   refreshTrajectoryForAllCoins();
+
+  // This scanner has intentionally independent enablement and risk limits. It
+  // must run even when the ordinary bot is paused or disabled, because it does
+  // not reuse normal signals, quiet-hours, or ordinary-entry restrictions.
+  await runHighValueScalpScan();
 
   if (!S.config.enabled || S.paused) return;
 

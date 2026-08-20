@@ -40,7 +40,11 @@ export interface OpenPosition {
   entryDecision: BotDecision;
   phase2Activated: boolean;
   entryMode: BotMode;
-  source?: "bot" | "manual";
+  source?: "bot" | "manual" | "high_value_scalp";
+  /** Gross portion of this position that originated from a high-value scalp. */
+  highValueScalpAmount?: number;
+  /** Number of confirmed scalp fills folded into this position. */
+  highValueScalpAddCount?: number;
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
   /** ID of a mirrored paper-mode DB record created when shadowPaperBets is enabled in live mode. */
   shadowPaperId?: string;
@@ -199,6 +203,13 @@ export const windowTotalBets = new Map<string, number>();
 export const windowBetDetails = new Map<string, { direction: "yes" | "no"; confidence: number }>();
 export const windowDirectionCounts = new Map<"yes" | "no", number>();
 export const windowFailedFills = new Set<string>();
+// High-value scalp reservations are intentionally separate from ordinary
+// conviction locks. They are keyed by symbol/window/mode so a concurrent loop
+// or poller cadence cannot buy the same late-window opportunity twice.
+export const highValueScalpReservations = new Set<string>();
+export const highValueScalpFiredThisWindow = new Set<string>();
+export const paperHighValueScalpDailySpend = new Map<string, number>();
+export const liveHighValueScalpDailySpend = new Map<string, number>();
 export const windowZeroFillAttempts = new Map<string, number>();
 // Per-window randomizer de-duplication: tracks which dollar amounts the
 // randomizer has already picked for each coin in the current window.
@@ -467,6 +478,8 @@ export function resetDailyIfNeeded(): void {
     S.dailySpendAmount = 0;
     paperCoinDailyLoss.clear();
     liveCoinDailyLoss.clear();
+    paperHighValueScalpDailySpend.clear();
+    liveHighValueScalpDailySpend.clear();
   }
 }
 

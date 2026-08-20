@@ -1043,6 +1043,80 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </div>
 
 
+                {/* High-value scalping is intentionally independent of decision mode. */}
+                <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <span className="text-xs font-medium text-amber-300 flex items-center gap-1.5">
+                        <Zap className="w-3 h-3" />
+                        High-Value Scalping
+                      </span>
+                      <p className="mt-1 text-[11px] text-muted-foreground/80 leading-relaxed">
+                        A separate price-only scanner for the final minutes. It ignores normal bot signals, pauses, and market filters, but requires a fresh two-sided Kalshi quote and keeps its own exposure and daily-spend caps.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-pressed={merged.highValueScalpEnabled ?? false}
+                      onClick={() => setConfigDraft(d => ({ ...d, highValueScalpEnabled: !(merged.highValueScalpEnabled ?? false) }))}
+                      className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        (merged.highValueScalpEnabled ?? false)
+                          ? "border-amber-400/60 bg-amber-400/15 text-amber-200"
+                          : "border-border bg-background text-muted-foreground"
+                      }`}
+                    >
+                      {(merged.highValueScalpEnabled ?? false) ? "Enabled" : "Disabled"}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-muted-foreground">Winning-side min (¢)</span>
+                      <input type="number" min={50} max={99} step={1}
+                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
+                        value={Math.round((merged.highValueScalpMinPrice ?? 0.90) * 100)}
+                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMinPrice: parseFloat(e.target.value) / 100 }))} />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-muted-foreground">Winning-side max (¢)</span>
+                      <input type="number" min={51} max={99} step={1}
+                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
+                        value={Math.round((merged.highValueScalpMaxPrice ?? 0.95) * 100)}
+                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxPrice: parseFloat(e.target.value) / 100 }))} />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-muted-foreground">Final minutes</span>
+                      <input type="number" min={1} max={10} step={1}
+                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
+                        value={merged.highValueScalpMaxMinutesRemaining ?? 2}
+                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxMinutesRemaining: parseInt(e.target.value) }))} />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-muted-foreground">Per order ($)</span>
+                      <input type="number" min={0.5} max={500} step={0.5}
+                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
+                        value={merged.highValueScalpBetAmount ?? 25}
+                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpBetAmount: parseFloat(e.target.value) }))} />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-muted-foreground">Open exposure cap ($)</span>
+                      <input type="number" min={0.5} max={5000} step={1}
+                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
+                        value={merged.highValueScalpMaxOpenExposure ?? 100}
+                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxOpenExposure: parseFloat(e.target.value) }))} />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-muted-foreground">Daily spend cap ($)</span>
+                      <input type="number" min={0.5} max={10000} step={1}
+                        className="bg-background border border-border rounded-md px-2 py-1.5 text-sm text-foreground"
+                        value={merged.highValueScalpMaxDailySpend ?? 100}
+                        onChange={e => setConfigDraft(d => ({ ...d, highValueScalpMaxDailySpend: parseFloat(e.target.value) }))} />
+                    </label>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground/65">
+                    At most one confirmed scalp order per market per 15-minute window. Same-direction add-ons are allowed only while the contract remains inside this band; an opposite active position blocks the scalp.
+                  </span>
+                </div>
+
                 {/* Conviction Settings */}
                 {isConviction && (
                   <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-violet-500/20 bg-violet-500/5 p-3">

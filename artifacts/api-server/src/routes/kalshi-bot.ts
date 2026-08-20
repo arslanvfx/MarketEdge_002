@@ -692,6 +692,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionDailyLossLimit,
     convictionMinEntryMinutes,
     convictionMaxDailySpend,
+    highValueScalpEnabled,
+    highValueScalpMinPrice,
+    highValueScalpMaxPrice,
+    highValueScalpMaxMinutesRemaining,
+    highValueScalpBetAmount,
+    highValueScalpMaxOpenExposure,
+    highValueScalpMaxDailySpend,
     convictionBoostBetSize,
     convictionBoostProbability,
     convictionBoostMinWinRate,
@@ -805,6 +812,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionDailyLossLimit?: number;
     convictionMinEntryMinutes?: number;
     convictionMaxDailySpend?: number;
+    highValueScalpEnabled?: boolean;
+    highValueScalpMinPrice?: number;
+    highValueScalpMaxPrice?: number;
+    highValueScalpMaxMinutesRemaining?: number;
+    highValueScalpBetAmount?: number;
+    highValueScalpMaxOpenExposure?: number;
+    highValueScalpMaxDailySpend?: number;
     convictionBoostBetSize?: number;
     convictionBoostProbability?: number;
     convictionBoostMinWinRate?: number;
@@ -1323,6 +1337,40 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionMaxDailySpend === "number" && convictionMaxDailySpend >= 0) {
     partial.convictionMaxDailySpend = convictionMaxDailySpend > 0 ? convictionMaxDailySpend : undefined;
+  }
+  // High-value scalping is a separate price-only execution path. Validate its
+  // full effective band together so a partial update cannot leave it inverted.
+  const activeScalpConfig = getBotState().config;
+  const nextScalpMin = typeof highValueScalpMinPrice === "number"
+    ? highValueScalpMinPrice
+    : (activeScalpConfig.highValueScalpMinPrice ?? 0.90);
+  const nextScalpMax = typeof highValueScalpMaxPrice === "number"
+    ? highValueScalpMaxPrice
+    : (activeScalpConfig.highValueScalpMaxPrice ?? 0.95);
+  if (
+    (typeof highValueScalpMinPrice === "number" || typeof highValueScalpMaxPrice === "number") &&
+    !(nextScalpMin >= 0.50 && nextScalpMax <= 0.99 && nextScalpMin <= nextScalpMax)
+  ) {
+    return res.status(400).json({ error: "High-value scalp minimum price must be between 50¢ and 99¢ and cannot exceed its maximum price." });
+  }
+  if (typeof highValueScalpEnabled === "boolean") partial.highValueScalpEnabled = highValueScalpEnabled;
+  if (typeof highValueScalpMinPrice === "number" && highValueScalpMinPrice >= 0.50 && highValueScalpMinPrice <= 0.99) {
+    partial.highValueScalpMinPrice = +highValueScalpMinPrice.toFixed(2);
+  }
+  if (typeof highValueScalpMaxPrice === "number" && highValueScalpMaxPrice >= 0.51 && highValueScalpMaxPrice <= 0.99) {
+    partial.highValueScalpMaxPrice = +highValueScalpMaxPrice.toFixed(2);
+  }
+  if (typeof highValueScalpMaxMinutesRemaining === "number" && highValueScalpMaxMinutesRemaining >= 1 && highValueScalpMaxMinutesRemaining <= 10) {
+    partial.highValueScalpMaxMinutesRemaining = Math.round(highValueScalpMaxMinutesRemaining);
+  }
+  if (typeof highValueScalpBetAmount === "number" && highValueScalpBetAmount >= 0.5 && highValueScalpBetAmount <= 500) {
+    partial.highValueScalpBetAmount = +highValueScalpBetAmount.toFixed(2);
+  }
+  if (typeof highValueScalpMaxOpenExposure === "number" && highValueScalpMaxOpenExposure >= 0.5 && highValueScalpMaxOpenExposure <= 5000) {
+    partial.highValueScalpMaxOpenExposure = +highValueScalpMaxOpenExposure.toFixed(2);
+  }
+  if (typeof highValueScalpMaxDailySpend === "number" && highValueScalpMaxDailySpend >= 0.5 && highValueScalpMaxDailySpend <= 10000) {
+    partial.highValueScalpMaxDailySpend = +highValueScalpMaxDailySpend.toFixed(2);
   }
   // 0 = disabled; > 0 enables boost for that dollar amount
   if (typeof convictionBoostBetSize === "number" && convictionBoostBetSize >= 0) {
