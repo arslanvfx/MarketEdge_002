@@ -3378,6 +3378,28 @@ async function _runBotTick(
     entryYesPrice: yesPrice,
     // Max-bet flag: true when the stability gate + probability roll upgraded this bet.
     isMaxBet: boostBetSize != null,
+  }).catch((dbErr: unknown) => {
+    // CRITICAL: the order was filled on Kalshi but the DB write failed.
+    // The position is tracked in openPositions (in memory) but will be LOST
+    // on server restart.  Log all fill details so the operator can reconcile
+    // against Kalshi's order history manually.
+    logger.error(
+      {
+        err: dbErr,
+        sym, direction, windowKey,
+        ticker: expectedTicker,
+        insertId: id,
+        contractCount,
+        betAmount: actualBetAmount,
+        fillPrice,
+        orderId,
+        entryYesPrice: yesPrice,
+        decisionMode: S.config.decisionMode,
+        mode: entryMode,
+      },
+      "[kalshi-bot] CRITICAL: bet filled on Kalshi but DB persist failed — " +
+      "position is live in memory but will be lost on restart; reconcile against Kalshi order history",
+    );
   });
 
   // Shadow paper bet: when live mode is active and shadowPaperBets is enabled,

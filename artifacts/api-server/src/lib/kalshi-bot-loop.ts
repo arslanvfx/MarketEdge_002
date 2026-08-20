@@ -56,7 +56,7 @@ import {
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
-  highValueScalpFiredThisWindow,
+  highValueScalpFiredThisWindow, convictionDispatchInFlight,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
@@ -93,7 +93,7 @@ import {
 // 5-second scheduler loop.  The dispatch is fire-and-forget; all gates still
 // run inside runBotTickForCoin (live-price check, direction guard, candle
 // slope, etc.) — nothing is bypassed.
-setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: number | null) => {
+setConvictionZoneEntryCallback(async (sym: string, yesAsk: number | null, noAsk: number | null) => {
   if (!S.config.enabled || S.paused || S.dbDegradedSince !== null) return;
   if (S.config.decisionMode !== "conviction") return;
   const wk = currentWindowKey();
@@ -121,7 +121,12 @@ setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: numbe
   const kd = getKalshiCachedData(sym);
   if (!kd?.ticker || kd.value === null || kd.yesPrice == null) return;
   const pred = getCachedPrediction(sym);
-  runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []).catch((err) =>
+  // Await the tick so callConvictionZoneEntry (and therefore the poller's
+  // convictionDispatchInFlight lock) is not released until the full tick —
+  // including order placement and convictionFiredThisWindow — has settled.
+  // The .catch() ensures the async callback itself never throws (which would
+  // leave the lock held forever via the poller's try/finally).
+  await runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []).catch((err) =>
     logger.warn({ err, sym }, "[conviction-poller-dispatch] per-coin tick error (non-fatal)"),
   );
 });
@@ -592,6 +597,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowZeroFillAttempts.clear();
     windowRandomizerUsedValues.clear();
     convictionFiredThisWindow.clear();
+    convictionDispatchInFlight.clear(); // clear per-window dispatch locks alongside bet-fired locks
     extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();
     convictionAbortCooldownMs.clear();

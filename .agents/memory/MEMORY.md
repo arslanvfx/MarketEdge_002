@@ -116,3 +116,4 @@
 - [Scalper fetchKalshiTarget bypass bug](scalper-fetch-target-bug.md) — scalper must NOT call fetchKalshiTarget(sym, targetTime); bypasses cache, triggers 429, normal loop poisons cache to null → silent exit every tick; read kalshiTargetCache directly instead
 - [Per-symbol smart hours scheduler guard](per-symbol-qh-scheduler-guard.md) — hourly calibration silently bails when quietHoursMode!=="per_market"; fix: also run when perSymbolQuietHours has entries
 - [High-value scalp architecture](high-value-scalp-arch.md) — scalp detection is poller-driven (1s fresh price in pollOnce), NOT bot-loop tick; runHighValueScalpForCoin accepts fresh prices directly; syncConvictionPoller starts on highValueScalpEnabled
+- [Conviction concurrent dispatch fix](conviction-concurrent-dispatch.md) — convictionDispatchInFlight must be set synchronously (before any await) in pollOnce(); prevents 17 simultaneous Kalshi orders per window; cleared after callConvictionZoneEntry fires

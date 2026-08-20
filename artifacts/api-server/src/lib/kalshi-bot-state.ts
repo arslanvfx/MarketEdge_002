@@ -219,6 +219,14 @@ export const windowRandomizerUsedValues = new Map<string, Set<number>>();
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
+// Keyed by `sym:windowKey`.  Set SYNCHRONOUSLY before the OB pre-warm `await` in
+// pollOnce() so subsequent 1-second poll ticks see the lock immediately and skip
+// dispatch.  Prevents the race condition where multiple concurrent OB pre-warm awaits
+// all complete at once and each calls callConvictionZoneEntry independently (which
+// was causing 17 simultaneous orders for the same coin in the same window).
+// Cleared after callConvictionZoneEntry fires so abort-cooldown retry can re-enter,
+// and bulk-cleared on window transition alongside convictionFiredThisWindow.
+export const convictionDispatchInFlight = new Set<string>();
 // Tracks `sym:windowKey` pairs where a YES conviction bet was aborted because the
 // YES bid was below the zone floor.  When extremeCautionEnabled=true, any subsequent
 // YES entry attempt for that coin+window is blocked immediately.  Cleared on window
@@ -271,19 +279,24 @@ export const CONVICTION_OB_CACHE_TTL_MS = 1_500;
 // (deriveConvictionZone(floor, cap)) before dispatching — belt-and-suspenders
 // so a future poller zone drift cannot dispatch out-of-zone ticks again.
 let _convictionZoneEntryFn:
-  | ((sym: string, yesAsk: number | null, noAsk: number | null) => void)
+  | ((sym: string, yesAsk: number | null, noAsk: number | null) => Promise<void>)
   | null = null;
 export function setConvictionZoneEntryCallback(
-  fn: (sym: string, yesAsk: number | null, noAsk: number | null) => void,
+  fn: (sym: string, yesAsk: number | null, noAsk: number | null) => Promise<void>,
 ): void {
   _convictionZoneEntryFn = fn;
 }
-export function callConvictionZoneEntry(
+/** Calls the registered zone-entry callback and returns a Promise that resolves
+ *  only after the per-coin tick (and all its async gates) has completed.
+ *  The caller MUST await this so that convictionDispatchInFlight is not cleared
+ *  prematurely — if the lock is released before convictionFiredThisWindow is set,
+ *  a subsequent 1-second poll can re-acquire it and start a duplicate dispatch. */
+export async function callConvictionZoneEntry(
   sym: string,
   yesAsk: number | null,
   noAsk: number | null,
-): void {
-  _convictionZoneEntryFn?.(sym, yesAsk, noAsk);
+): Promise<void> {
+  await _convictionZoneEntryFn?.(sym, yesAsk, noAsk);
 }
 // Per-coin rolling price ticks from the conviction 1 s poller.
 // Used by the direction guard to detect consecutive-seconds adverse movement.

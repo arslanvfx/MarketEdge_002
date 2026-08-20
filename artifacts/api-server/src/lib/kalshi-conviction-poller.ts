@@ -31,7 +31,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache, highValueScalpFiredThisWindow } from "./kalshi-bot-state";
+import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionDispatchInFlight, convictionPriceTicks, callConvictionZoneEntry, convictionObCache, highValueScalpFiredThisWindow } from "./kalshi-bot-state";
 import { runHighValueScalpForCoin } from "./kalshi-high-value-scalper";
 import { isHighValueScalpWindowOpen } from "./kalshi-high-value-scalper-policy";
 import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
@@ -306,6 +306,31 @@ async function pollOnce(): Promise<void> {
           S.config.enabled &&
           !S.paused
         ) {
+          // ── Concurrent-dispatch guard ──────────────────────────────────────
+          // The OB pre-warm below is an `await` that yields the event loop.
+          // Without this lock every subsequent 1-second poll tick passes the
+          // convictionFiredThisWindow check (bet not placed yet → still empty)
+          // and queues its own concurrent dispatch.  When the OB cache is warm
+          // all queued ticks unblock at once and each independently calls
+          // callConvictionZoneEntry, resulting in multiple simultaneous orders
+          // for the same coin in the same window (confirmed: 17 orders in prod).
+          //
+          // Setting inFlightKey SYNCHRONOUSLY before the first await means
+          // subsequent poll ticks bail here immediately and never reach the await,
+          // so only one dispatch is in flight per sym:windowKey at any time.
+          //
+          // The lock is cleared AFTER callConvictionZoneEntry fires so that
+          // abort-cooldown retries can re-enter on the next cooldown expiry.
+          // convictionFiredThisWindow (set inside _runBotTick after the bet is
+          // recorded) is the durable "already bet" guard; this lock only covers
+          // the brief window between the start of OB pre-warm and dispatch.
+          const inFlightKey = `${sym}:${windowKey}`;
+          if (convictionDispatchInFlight.has(inFlightKey)) {
+            return; // Another dispatch already in flight — bail immediately
+          }
+          convictionDispatchInFlight.add(inFlightKey); // synchronous — blocks next tick instantly
+          // ──────────────────────────────────────────────────────────────────
+
           // Pre-warm: fetch the authenticated orderbook now (same poll cycle)
           // so the live-price gate in the tick can read it from convictionObCache
           // and skip its own 0.5–2 s round-trip.
@@ -341,7 +366,20 @@ async function pollOnce(): Promise<void> {
             },
             "[conviction-poller] zone entry — dispatching tick immediately",
           );
-          callConvictionZoneEntry(sym, yesAsk, noAsk);
+          // await so the lock is held for the FULL duration of the tick.
+          // Without await, callConvictionZoneEntry returns immediately (fire-and-
+          // forget), the finally clears the lock, and the next 1-second poll can
+          // re-acquire it and start a duplicate dispatch before convictionFiredThisWindow
+          // is set inside the tick — reproducing the 17-orders race condition.
+          // The callback is async and its .catch() is internal so this never throws.
+          try {
+            await callConvictionZoneEntry(sym, yesAsk, noAsk);
+          } finally {
+            // Clear the in-flight lock so abort-cooldown retry can re-enter on
+            // the next poll cycle.  convictionFiredThisWindow (set inside _runBotTick
+            // after a bet is confirmed) is the durable guard from here onward.
+            convictionDispatchInFlight.delete(inFlightKey);
+          }
         }
         // ─────────────────────────────────────────────────────────────────────
       }
