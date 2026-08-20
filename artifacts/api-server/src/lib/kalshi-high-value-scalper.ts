@@ -9,6 +9,7 @@
 import { logger } from "./logger";
 import { fetchKalshiTarget, fetchOrderbookPrices, kalshiTargetCache } from "./crypto-kalshi";
 import { KALSHI_SERIES } from "./crypto";
+import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import { getCachedKalshiBalance, invalidateBalanceCache, placeEntryOrderWithSizeFallback } from "./kalshi-trader";
 import { makeInitialExitState } from "./kalshi-bot-exit";
 import { persistBetRecord } from "./kalshi-bot-close";
@@ -90,20 +91,30 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
     const market = kalshiTargetCache.get(sym);
     if (!market?.ticker || market.value == null) return;
 
-    // Orderbook validation is deliberately required here; a cache/poller quote
-    // is never sufficient for this strict late-window path.
+    // Initial eligibility scan: prefer a fresh authenticated orderbook, but fall
+    // back to the conviction poller's cached price when the book is empty.
+    // Market makers rarely post resting orders, so the authenticated book is
+    // consistently null — without this fallback the scalper never triggers.
+    // The poller runs every 1 s and its TTL is 1.5 s, which is fresh enough to
+    // detect a 90–95¢ zone entry.  A second fresh orderbook fetch is still
+    // required immediately before order placement (see below).
     const orderbook = await fetchOrderbookPrices(market.ticker);
+    const pollerPrice = getConvictionLivePrice(sym);
+    const scanYesAsk = orderbook?.yesAsk ?? pollerPrice?.yesAsk ?? null;
+    const scanYesBid = orderbook?.yesBid ?? pollerPrice?.yesBid ?? null;
+    const priceSource = orderbook?.yesAsk != null || orderbook?.yesBid != null ? "orderbook" : pollerPrice != null ? "poller" : "none";
     const eligibility = evaluateHighValueScalpEligibility({
-      yesAsk: orderbook?.yesAsk ?? null,
-      yesBid: orderbook?.yesBid ?? null,
+      yesAsk: scanYesAsk,
+      yesBid: scanYesBid,
       secondsRemaining: currentWindowTiming().secondsRemaining,
       config,
       activePosition: openPositions.get(sym) ?? null,
     });
     if (!eligibility.eligible || !eligibility.side || eligibility.price == null) {
-      logger.debug({ sym, windowKey: timing.windowKey, reason: eligibility.reason }, "[high-value-scalp] skipped");
+      logger.info({ sym, windowKey: timing.windowKey, reason: eligibility.reason, priceSource, scanYesAsk, scanYesBid }, "[high-value-scalp] skipped");
       return;
     }
+    logger.info({ sym, windowKey: timing.windowKey, side: eligibility.side, price: eligibility.price, priceSource }, "[high-value-scalp] eligible — proceeding to reservation");
 
     const active = openPositions.get(sym);
     const budget = config.highValueScalpBetAmount ?? 25;
@@ -138,20 +149,26 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
       }
     }
 
-    // The price can move while balance checks run; require a second fresh,
-    // two-sided quote and evaluate again immediately before order submission.
+    // Re-fetch immediately before order submission so price moves during the
+    // reservation / balance checks don't result in a stale fill.  Same
+    // orderbook-then-poller fallback as the scan above.
     const finalBook = await fetchOrderbookPrices(market.ticker);
+    const finalPollerPrice = getConvictionLivePrice(sym);
+    const finalYesAsk = finalBook?.yesAsk ?? finalPollerPrice?.yesAsk ?? null;
+    const finalYesBid = finalBook?.yesBid ?? finalPollerPrice?.yesBid ?? null;
+    const finalPriceSource = finalBook?.yesAsk != null || finalBook?.yesBid != null ? "orderbook" : finalPollerPrice != null ? "poller" : "none";
     const finalEligibility = evaluateHighValueScalpEligibility({
-      yesAsk: finalBook?.yesAsk ?? null,
-      yesBid: finalBook?.yesBid ?? null,
+      yesAsk: finalYesAsk,
+      yesBid: finalYesBid,
       secondsRemaining: currentWindowTiming().secondsRemaining,
       config,
       activePosition: openPositions.get(sym) ?? null,
     });
     if (!finalEligibility.eligible || finalEligibility.side !== eligibility.side || finalEligibility.price == null) {
-      logger.info({ sym, windowKey: timing.windowKey, reason: finalEligibility.reason }, "[high-value-scalp] final quote rejected");
+      logger.info({ sym, windowKey: timing.windowKey, reason: finalEligibility.reason, finalPriceSource }, "[high-value-scalp] final quote rejected");
       return;
     }
+    logger.info({ sym, windowKey: timing.windowKey, side: finalEligibility.side, price: finalEligibility.price, finalPriceSource }, "[high-value-scalp] final quote confirmed — placing order");
     // Recompute contract count from the final fresh price so an adverse quote
     // move cannot spend beyond the amount atomically reserved above.
     // For NO bets the cost per contract is (1 − yesPrice), not yesPrice itself.
