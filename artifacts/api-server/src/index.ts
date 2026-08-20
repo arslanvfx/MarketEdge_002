@@ -631,14 +631,15 @@ app.listen(port, (err) => {
       // Per-symbol Smart Hours calibration runs at every exact UTC hour
       // boundary. It does not fire immediately on restart and the scheduler
       // skips overlapping runs when a slow DB query crosses a boundary.
+      //
+      // No quietHoursMode guard here — recomputeAllSymbolQuietHours() is
+      // mode-agnostic: it queries historical bets for all coins, skips any
+      // with fewer than 3 settled bets, and writes computed schedules back to
+      // config.  It is safe to call every hour in any quiet-hours mode.
+      // A mode guard caused the scheduler to silently bail every hour when
+      // quietHoursMode was "global", forcing manual re-calibration each hour.
       scheduleAtTopOfEveryUtcHour(async () => {
-        const cfg = getBotState().config;
-        // Run if per_market mode is active, OR if per-symbol schedules have
-        // already been calibrated (keep them fresh even while mode is 'global').
-        // Without this, the scheduler silently skips every hour when quietHoursMode
-        // is 'global', even though the user has per-coin data they expect to be updated.
-        const hasPerSymbol = Object.keys(cfg.perSymbolQuietHours ?? {}).length > 0;
-        if (cfg.quietHoursMode !== "per_market" && !hasPerSymbol) return;
+        logger.info("[qh-per-symbol] running hourly bulk calibration");
         try {
           const { calibratedSymbols, skippedSymbols } = await recomputeAllSymbolQuietHours();
           logger.info(
