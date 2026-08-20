@@ -196,6 +196,18 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
     if (active) {
       const oldCount = active.contractCount;
       const totalCount = oldCount + filledCount;
+
+      // Capture original position state BEFORE mutation so the hybrid history
+      // card can display both the original bet and the scalp layer separately.
+      const originalEntry = {
+        contractCount: active.contractCount,
+        entryYesPrice: active.entryYesPrice,
+        betAmount: active.betAmount,
+        openedAt: active.openedAt,
+        direction: active.direction,
+        decisionMode: (active.entryDecision?.signals as Record<string, unknown> | undefined)?.decisionMode ?? null,
+      };
+
       active.entryYesPrice = ((active.entryYesPrice * oldCount) + (fillYesPrice * filledCount)) / totalCount;
       active.contractCount = totalCount;
       active.betAmount += actualSpend;
@@ -209,6 +221,17 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
           ...(active.entryDecision.signals as unknown as Record<string, unknown>),
           highValueScalp: true, highValueScalpAddCount: active.highValueScalpAddCount,
           highValueScalpAmount: active.highValueScalpAmount,
+          // Snapshot of the original position BEFORE the scalp was folded in —
+          // used by the frontend to render a hybrid history card.
+          originalEntry,
+          // Details of the scalp layer itself — what was added and when.
+          scalpLayer: {
+            contractCount: filledCount,
+            entryYesPrice: fillYesPrice,
+            betAmount: actualSpend,
+            addedAt: Date.now(),
+            side: finalEligibility.side,
+          },
         },
         entryPrice: active.entryYesPrice, kalshiTarget: active.kalshiTarget,
         contractCount: active.contractCount, betAmount: active.betAmount,

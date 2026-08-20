@@ -303,81 +303,189 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       <span className="ml-auto text-xs text-muted-foreground">{fmtDateTime(r.createdAt)}</span>
                     </div>
 
-                    {/* Key metrics grid */}
-                    <div className={`grid grid-cols-3 ${isScalp ? "sm:grid-cols-7" : "sm:grid-cols-6"} gap-2 mb-3`}>
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Strike</div>
-                        <div className="text-xs font-semibold font-mono">{fmtCrypto(r.kalshiTarget)}</div>
-                      </div>
+                    {/* Key metrics grid — hybrid layout when a scalp stacked on an existing position */}
+                    {(() => {
+                      const origEntry = sigs?.originalEntry as { contractCount?: number; entryYesPrice?: number; betAmount?: number; openedAt?: number; direction?: string; decisionMode?: string } | null ?? null;
+                      const scalpLayer = sigs?.scalpLayer as { contractCount?: number; entryYesPrice?: number; betAmount?: number; addedAt?: number; side?: string } | null ?? null;
+                      const isHybrid = isScalp && origEntry != null && scalpLayer != null;
 
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">
-                          {closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
+                      // ── Shared cells used by both layouts ──────────────────────────
+                      const strikeCell = (
+                        <div className="bg-background/40 rounded-lg p-2.5">
+                          <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Strike</div>
+                          <div className="text-xs font-semibold font-mono">{fmtCrypto(r.kalshiTarget)}</div>
                         </div>
-                        <div className="text-xs font-semibold font-mono flex items-center gap-1">
-                          {endPx != null ? (
-                            <>
-                              {fmtCrypto(endPx)}
-                              {endAboveStrike !== null && (
-                                <span className={endAboveStrike ? "text-emerald-400" : "text-red-400"}>
-                                  {endAboveStrike ? <ArrowUp className="w-3 h-3 inline" /> : <ArrowDown className="w-3 h-3 inline" />}
-                                </span>
-                              )}
-                            </>
-                          ) : "—"}
+                      );
+                      const endPriceCell = (
+                        <div className="bg-background/40 rounded-lg p-2.5">
+                          <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">
+                            {closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
+                          </div>
+                          <div className="text-xs font-semibold font-mono flex items-center gap-1">
+                            {endPx != null ? (
+                              <>
+                                {fmtCrypto(endPx)}
+                                {endAboveStrike !== null && (
+                                  <span className={endAboveStrike ? "text-emerald-400" : "text-red-400"}>
+                                    {endAboveStrike ? <ArrowUp className="w-3 h-3 inline" /> : <ArrowDown className="w-3 h-3 inline" />}
+                                  </span>
+                                )}
+                              </>
+                            ) : "—"}
+                          </div>
+                          {closePx == null && endPx != null && (
+                            <div className="text-[9px] text-muted-foreground mt-0.5">at exit</div>
+                          )}
                         </div>
-                        {closePx == null && endPx != null && (
-                          <div className="text-[9px] text-muted-foreground mt-0.5">at exit</div>
-                        )}
-                      </div>
+                      );
+                      const exitCell = (
+                        <div className="bg-background/40 rounded-lg p-2.5">
+                          <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Exit</div>
+                          <div className="text-xs font-mono">
+                            {xp != null ? `${(xp * 100).toFixed(0)}¢ YES` : isOpen ? <span className="text-sky-400 text-[9px]">in play…</span> : "—"}
+                          </div>
+                        </div>
+                      );
+                      const pnlCell = (
+                        <div className={`rounded-lg p-2.5 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
+                          <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">P&L</div>
+                          <div className={`text-sm font-bold font-mono ${pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                            {pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
+                          </div>
+                        </div>
+                      );
 
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Entry</div>
-                        <div className="text-xs font-mono">
-                          {ep != null ? (
-                            <span>{(ep * 100).toFixed(0)}¢ YES · {((1 - ep) * 100).toFixed(0)}¢ NO</span>
-                          ) : "—"}
-                        </div>
-                      </div>
-
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Exit</div>
-                        <div className="text-xs font-mono">
-                          {xp != null ? `${(xp * 100).toFixed(0)}¢ YES` : isOpen ? <span className="text-sky-400 text-[9px]">in play…</span> : "—"}
-                        </div>
-                      </div>
-
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Size</div>
-                        <div className="text-xs font-semibold">
-                          {r.contractCount ?? "—"} @ {(() => {
-                            const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
-                            if (ep == null) return r.betAmount ? fmt$(parseFloat(r.betAmount)) : "—";
-                            const costPerContract = r.direction === "no" ? 1 - ep : ep;
-                            return `${(costPerContract * 100).toFixed(0)}¢`;
-                          })()}
-                        </div>
-                      </div>
-
-                      {isScalp && (() => {
-                        const scalpSpend = Number(sigs?.highValueScalpAmount ?? r.betAmount ?? 0);
-                        const addCount = Number(sigs?.highValueScalpAddCount ?? 1);
+                      if (isHybrid) {
+                        // ── Hybrid card: original bet section + scalp layer section ──
+                        const origDir = (origEntry.direction ?? r.direction) as "yes" | "no" | null | undefined;
+                        const origEp = origEntry.entryYesPrice ?? null;
+                        const origCost = origEp != null ? (origDir === "no" ? 1 - origEp : origEp) : null;
+                        const scalpEp = scalpLayer.entryYesPrice ?? null;
+                        const scalpSide = (scalpLayer.side ?? r.direction) as "yes" | "no" | null | undefined;
+                        const scalpCost = scalpEp != null ? (scalpSide === "no" ? 1 - scalpEp : scalpEp) : null;
+                        const origDm = (origEntry.decisionMode ?? r.decisionMode ?? "bot") as string;
+                        const origDmLabel: Record<string, string> = {
+                          conviction: "Conviction", ml_gate: "ML Gate", consensus: "Consensus", unanimous: "Unanimous", classic: "Classic",
+                        };
                         return (
-                          <div className="bg-amber-400/10 border border-amber-400/15 rounded-lg p-2.5 col-span-1">
-                            <div className="text-[9px] uppercase tracking-wide text-amber-200/80 mb-0.5">Scalp spend</div>
-                            <div className="text-xs font-bold font-mono text-amber-100">{scalpSpend > 0 ? fmt$(scalpSpend) : "—"}</div>
-                            <div className="text-[9px] text-amber-200/65 mt-0.5">{addCount} confirmed fill{addCount === 1 ? "" : "s"}</div>
+                          <div className="space-y-1.5 mb-3">
+                            {/* Row 1: Strike | End Price | Exit | P&L */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                              {strikeCell}
+                              {endPriceCell}
+                              {exitCell}
+                              {pnlCell}
+                            </div>
+                            {/* Row 2: Original bet breakdown */}
+                            <div className="rounded-lg border border-border/50 bg-background/30 p-2.5">
+                              <div className="text-[9px] font-bold uppercase tracking-wide text-muted-foreground mb-1.5 flex items-center gap-1">
+                                <span className="text-sky-400/80">Original</span>
+                                <span className="text-muted-foreground/60">·</span>
+                                <span>{origDmLabel[origDm] ?? origDm}</span> bet
+                              </div>
+                              <div className="grid grid-cols-3 gap-1.5">
+                                <div>
+                                  <div className="text-[9px] text-muted-foreground mb-0.5">Entry</div>
+                                  <div className="text-xs font-mono">
+                                    {origEp != null ? `${(origEp * 100).toFixed(0)}¢ YES · ${((1 - origEp) * 100).toFixed(0)}¢ NO` : "—"}
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="text-[9px] text-muted-foreground mb-0.5">Size</div>
+                                  <div className="text-xs font-semibold font-mono">
+                                    {origEntry.contractCount ?? "—"}{origCost != null ? ` @ ${(origCost * 100).toFixed(0)}¢` : ""}
+                                  </div>
+                                  {origEntry.betAmount != null && (
+                                    <div className="text-[9px] text-muted-foreground mt-0.5">{fmt$(origEntry.betAmount)}</div>
+                                  )}
+                                </div>
+                                <div>
+                                  <div className="text-[9px] text-muted-foreground mb-0.5">Placed</div>
+                                  <div className="text-[10px] text-muted-foreground/80">
+                                    {origEntry.openedAt ? fmtDateTime(new Date(origEntry.openedAt).toISOString()) : fmtDateTime(r.createdAt)}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            {/* Row 3: Scalp layer breakdown */}
+                            <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.07] p-2.5">
+                              <div className="text-[9px] font-bold uppercase tracking-wide text-amber-300/80 mb-1.5 flex items-center gap-1">
+                                <Zap className="w-2.5 h-2.5 text-amber-300" /> Scalp layer added
+                              </div>
+                              <div className="grid grid-cols-4 gap-1.5">
+                                <div>
+                                  <div className="text-[9px] text-amber-200/70 mb-0.5">Side</div>
+                                  <div className={`text-xs font-bold ${scalpSide === "yes" ? "text-emerald-300" : "text-red-300"}`}>
+                                    {scalpSide === "yes" ? "YES" : "NO"}
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="text-[9px] text-amber-200/70 mb-0.5">Entry</div>
+                                  <div className="text-xs font-mono text-amber-100">
+                                    {scalpCost != null ? `${(scalpCost * 100).toFixed(0)}¢` : "—"}
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="text-[9px] text-amber-200/70 mb-0.5">Contracts</div>
+                                  <div className="text-xs font-semibold font-mono text-amber-100">
+                                    {scalpLayer.contractCount ?? "—"}
+                                  </div>
+                                  {scalpLayer.betAmount != null && (
+                                    <div className="text-[9px] text-amber-200/60 mt-0.5 font-bold">{fmt$(scalpLayer.betAmount)}</div>
+                                  )}
+                                </div>
+                                <div>
+                                  <div className="text-[9px] text-amber-200/70 mb-0.5">Added at</div>
+                                  <div className="text-[10px] text-amber-200/70">
+                                    {scalpLayer.addedAt ? fmtDateTime(new Date(scalpLayer.addedAt).toISOString()) : "—"}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
                           </div>
                         );
-                      })()}
+                      }
 
-                      <div className={`rounded-lg p-2.5 col-span-1 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">P&L</div>
-                        <div className={`text-sm font-bold font-mono ${pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                          {pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
+                      // ── Standard layout (no hybrid) ─────────────────────────────
+                      return (
+                        <div className={`grid grid-cols-3 ${isScalp ? "sm:grid-cols-7" : "sm:grid-cols-6"} gap-2 mb-3`}>
+                          {strikeCell}
+                          {endPriceCell}
+                          <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
+                            <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Entry</div>
+                            <div className="text-xs font-mono">
+                              {ep != null ? (
+                                <span>{(ep * 100).toFixed(0)}¢ YES · {((1 - ep) * 100).toFixed(0)}¢ NO</span>
+                              ) : "—"}
+                            </div>
+                          </div>
+                          {exitCell}
+                          <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
+                            <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Size</div>
+                            <div className="text-xs font-semibold">
+                              {r.contractCount ?? "—"} @ {(() => {
+                                const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
+                                if (ep == null) return r.betAmount ? fmt$(parseFloat(r.betAmount)) : "—";
+                                const costPerContract = r.direction === "no" ? 1 - ep : ep;
+                                return `${(costPerContract * 100).toFixed(0)}¢`;
+                              })()}
+                            </div>
+                          </div>
+                          {isScalp && (() => {
+                            const scalpSpend = Number(sigs?.highValueScalpAmount ?? r.betAmount ?? 0);
+                            const addCount = Number(sigs?.highValueScalpAddCount ?? 1);
+                            return (
+                              <div className="bg-amber-400/10 border border-amber-400/15 rounded-lg p-2.5 col-span-1">
+                                <div className="text-[9px] uppercase tracking-wide text-amber-200/80 mb-0.5">Scalp spend</div>
+                                <div className="text-xs font-bold font-mono text-amber-100">{scalpSpend > 0 ? fmt$(scalpSpend) : "—"}</div>
+                                <div className="text-[9px] text-amber-200/65 mt-0.5">{addCount} confirmed fill{addCount === 1 ? "" : "s"}</div>
+                              </div>
+                            );
+                          })()}
+                          {pnlCell}
                         </div>
-                      </div>
-                    </div>
+                      );
+                    })()}
 
                     {/* Footer row */}
                     <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">
@@ -388,9 +496,20 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </span>
                       )}
                       <span className="font-mono">{wkToEst(r.windowKey)} EST</span>
-                      {isScalp && (
-                        <span className="text-amber-200/80">· price-led scalp placed {fmtDateTime(r.createdAt)}</span>
-                      )}
+                      {isScalp && (() => {
+                        const sl = sigs?.scalpLayer as { addedAt?: number } | null ?? null;
+                        const origEnt = sigs?.originalEntry as { openedAt?: number } | null ?? null;
+                        if (origEnt && sl?.addedAt) {
+                          // Hybrid: show original bet time + when the scalp layer was stacked
+                          return (
+                            <>
+                              <span className="text-muted-foreground/70">· original bet {fmtDateTime(r.createdAt)}</span>
+                              <span className="text-amber-200/80">· scalp layer added {fmtDateTime(new Date(sl.addedAt).toISOString())}</span>
+                            </>
+                          );
+                        }
+                        return <span className="text-amber-200/80">· price-led scalp placed {fmtDateTime(r.createdAt)}</span>;
+                      })()}
                       {(() => {
                         const conf = sigs?.confidence as number | null ?? sigs?.statConfidence as number | null ?? null;
                         return conf != null ? (
