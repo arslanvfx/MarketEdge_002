@@ -19,6 +19,7 @@ import {
   clearBetHistoryOld,
   getBotLogicPerformance,
   getBacktestModes,
+  getScalpStats,
   getConvictionThresholdAnalysis,
   getConvictionStabilityAnalysis,
   clearAllPauses,
@@ -1743,6 +1744,20 @@ router.get("/crypto/bot/logic-performance", async (req, res) => {
     const resetAt = filterMode === "live" ? (cfgL.liveStatsResetAt ?? null) : filterMode === "paper" ? (cfgL.paperStatsResetAt ?? null) : null;
     const modes = await getBotLogicPerformance(filterMode, resetAt);
     res.json({ modes });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/scalp-stats?mode=paper|live — win/loss breakdown for high-value scalp bets
+router.get("/crypto/bot/scalp-stats", async (req, res) => {
+  const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as "paper" | "live" : undefined;
+  const cfg = getBotState().config;
+  const resetAt = mode === "live" ? (cfg.liveStatsResetAt ?? null) : mode === "paper" ? (cfg.paperStatsResetAt ?? null) : null;
+  try {
+    const data = await getScalpStats(mode, resetAt);
+    res.json(data);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

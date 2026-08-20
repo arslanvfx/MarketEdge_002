@@ -40,6 +40,7 @@ export {
   getConvictionThresholdAnalysis,
   getConvictionStabilityAnalysis,
   getBotGapAnalytics,
+  getScalpStats,
 } from "./kalshi-bot-analytics";
 export type { GapBandRow, GapAnalyticsResult } from "./kalshi-bot-analytics";
 export type {
@@ -51,6 +52,8 @@ export type {
   StabilityThresholdRow,
   StabilityDimensionAnalysis,
   ConvictionStabilityAnalysis,
+  ScalpCoinStats,
+  ScalpStatsResult,
 } from "./kalshi-bot-analytics";
 
 // ---------------------------------------------------------------------------
@@ -60,8 +63,9 @@ export type { BotMode, BotStatus, OpenPosition, OpenPositionDisplay, BotStateSna
 export {
   loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB,
-  loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, clearBetHistoryOld,
-  updateBotConfig, runQuietHoursAutoTune, recomputeAllSymbolQuietHours,
+  loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, fixPaperPnlHistorical,
+  clearBetHistoryOld, updateBotConfig, runQuietHoursAutoTune,
+  recomputeAllSymbolQuietHours,
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
 export { runBotTickForCoin } from "./kalshi-bot-tick";

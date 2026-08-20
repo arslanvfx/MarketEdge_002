@@ -567,6 +567,34 @@ export async function fixLiveExpiredPnlHistorical(): Promise<void> {
   }
 }
 
+/**
+ * Correct all paper-mode bet P&L records that were written with the old flat
+ * PAPER_WIN_RETURN_RATE (50%) rather than real Kalshi contract math.
+ * Safe to run on every startup: only updates rows where outcome AND entry data
+ * are both present, so rows already on real math are unchanged in value.
+ */
+export async function fixPaperPnlHistorical(): Promise<void> {
+  try {
+    const updated = await db.execute(sql`
+      UPDATE kalshi_bot_bets
+      SET pnl = CASE
+        WHEN direction = 'yes' AND outcome = 'win'  THEN (1 - entry_price::numeric) * contract_count
+        WHEN direction = 'yes' AND outcome = 'loss' THEN (-entry_price::numeric) * contract_count
+        WHEN direction = 'no'  AND outcome = 'win'  THEN entry_price::numeric * contract_count
+        WHEN direction = 'no'  AND outcome = 'loss' THEN (-(1 - entry_price::numeric)) * contract_count
+        ELSE pnl
+      END
+      WHERE mode = 'paper'
+        AND outcome IN ('win', 'loss')
+        AND entry_price IS NOT NULL
+        AND contract_count IS NOT NULL
+    `);
+    logger.info({ rowCount: updated.rowCount }, "[kalshi-bot] fixPaperPnlHistorical: corrected paper P&L to real contract math");
+  } catch (err) {
+    logger.warn({ err }, "[kalshi-bot] fixPaperPnlHistorical: failed (non-fatal)");
+  }
+}
+
 export async function loadPaperBalanceFromDB(): Promise<void> {
   if (S.botMode === "live") {
     // Live mode: balance is fetched from Kalshi on demand; skip DB computation.

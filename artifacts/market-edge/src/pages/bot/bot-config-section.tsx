@@ -525,6 +525,25 @@ type CalibrateResult = Record<string, {
 
 export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, saving, saveConfig, persistMsg, persistError, status, activeMode, presetsData, modeDefaults, savingPreset, savePreset, presetMsg, backtestData, configOpen, setConfigOpen, authPost, qc }: BotConfigSectionProps) {
   const hasDraft = Object.keys(configDraft).length > 0;
+
+  // High-value scalp stats
+  type ScalpCoinStats = {
+    symbol: string; wins: number; losses: number; pushes: number; total: number;
+    winRate: number | null; totalSpend: number; netPnl: number; avgFillPrice: number | null;
+  };
+  type ScalpStatsResult = {
+    overall: { wins: number; losses: number; pushes: number; total: number; winRate: number | null; totalSpend: number; netPnl: number };
+    byCoin: ScalpCoinStats[];
+    openCount: number;
+    lastUpdated: string;
+  };
+  const { data: scalpStats, isLoading: scalpStatsLoading, refetch: refetchScalpStats } = useQuery<ScalpStatsResult>({
+    queryKey: ["scalp-stats", activeMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/scalp-stats?mode=${activeMode}`).then(r => r.json()),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
   const [defaultsAppliedFor, setDefaultsAppliedFor] = React.useState<string | null>(null);
   const [reEvalState, setReEvalState] = React.useState<{ loading: boolean; msg: string | null }>({ loading: false, msg: null });
   const [proximityCalibrating, setProximityCalibrating] = React.useState(false);
@@ -1176,6 +1195,120 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </div>
                       <p className="mt-3 min-w-0 break-words whitespace-normal text-[10px] leading-relaxed text-muted-foreground/75">Separate from normal bets. One confirmed scalp per market per 15-minute window; same-side fills may stack.</p>
                     </div>
+                  </div>
+
+                  {/* ── Scalp Statistics ──────────────────────────────── */}
+                  <div className="border-t border-amber-400/15 px-4 pb-4 pt-3">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <BarChart3 className="h-3.5 w-3.5 text-amber-300/70" />
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">Performance</span>
+                        {scalpStats && (
+                          <span className="rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-mono text-amber-300/80">
+                            {scalpStats.overall.total} settled
+                            {scalpStats.openCount > 0 && ` · ${scalpStats.openCount} open`}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => refetchScalpStats()}
+                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/60 hover:text-amber-300 transition-colors"
+                        title="Refresh scalp stats"
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                      </button>
+                    </div>
+
+                    {scalpStatsLoading && (
+                      <p className="text-[10px] text-muted-foreground/60">Loading stats…</p>
+                    )}
+
+                    {!scalpStatsLoading && scalpStats && scalpStats.overall.total === 0 && (
+                      <p className="text-[10px] text-muted-foreground/60">No settled scalp bets yet for {activeMode} mode.</p>
+                    )}
+
+                    {!scalpStatsLoading && scalpStats && scalpStats.overall.total > 0 && (() => {
+                      const o = scalpStats.overall;
+                      const pnlColor = o.netPnl > 0 ? "text-emerald-400" : o.netPnl < 0 ? "text-red-400" : "text-muted-foreground";
+                      const wrPct = o.winRate != null ? Math.round(o.winRate * 100) : null;
+                      return (
+                        <div className="flex flex-col gap-3">
+                          {/* Overall summary strip */}
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            {[
+                              {
+                                label: "Win rate",
+                                value: wrPct != null ? `${wrPct}%` : "—",
+                                sub: `${o.wins}W · ${o.losses}L`,
+                                color: wrPct != null
+                                  ? wrPct >= 60 ? "text-emerald-400" : wrPct >= 45 ? "text-amber-300" : "text-red-400"
+                                  : "text-muted-foreground",
+                              },
+                              {
+                                label: "Net P&L",
+                                value: `${o.netPnl >= 0 ? "+" : ""}$${o.netPnl.toFixed(2)}`,
+                                sub: `$${o.totalSpend.toFixed(2)} spent`,
+                                color: pnlColor,
+                              },
+                              {
+                                label: "Settled bets",
+                                value: String(o.total),
+                                sub: `${o.pushes > 0 ? `${o.pushes} push` : "no pushes"}`,
+                                color: "text-foreground",
+                              },
+                              {
+                                label: "Avg per bet",
+                                value: o.total > 0 ? `${o.netPnl >= 0 ? "+" : ""}$${(o.netPnl / o.total).toFixed(2)}` : "—",
+                                sub: "net P&L",
+                                color: o.total > 0 && o.netPnl / o.total >= 0 ? "text-emerald-400" : "text-red-400",
+                              },
+                            ].map(s => (
+                              <div key={s.label} className="rounded-lg border border-amber-400/10 bg-background/30 p-2.5">
+                                <p className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground/70">{s.label}</p>
+                                <p className={`mt-0.5 text-sm font-bold tabular-nums ${s.color}`}>{s.value}</p>
+                                <p className="text-[9px] text-muted-foreground/50">{s.sub}</p>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Per-coin table */}
+                          {scalpStats.byCoin.length > 1 && (
+                            <div className="overflow-x-auto rounded-lg border border-amber-400/10">
+                              <table className="w-full text-[10px]">
+                                <thead>
+                                  <tr className="border-b border-amber-400/10 bg-amber-400/[0.04]">
+                                    <th className="px-3 py-2 text-left font-semibold text-amber-200/80">Coin</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-amber-200/80">W / L</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-amber-200/80">Win %</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-amber-200/80">Net P&L</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-amber-200/80">Spent</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-amber-200/80">Avg fill</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {scalpStats.byCoin.map((c, i) => {
+                                    const wr = c.winRate != null ? Math.round(c.winRate * 100) : null;
+                                    const wrClass = wr == null ? "text-muted-foreground/50" : wr >= 60 ? "text-emerald-400" : wr >= 45 ? "text-amber-300" : "text-red-400";
+                                    const pnlClass = c.netPnl > 0 ? "text-emerald-400" : c.netPnl < 0 ? "text-red-400" : "text-muted-foreground";
+                                    return (
+                                      <tr key={c.symbol} className={`${i % 2 === 0 ? "" : "bg-amber-400/[0.02]"} border-b border-amber-400/5 last:border-0`}>
+                                        <td className="px-3 py-1.5 font-semibold text-foreground">{c.symbol}</td>
+                                        <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">{c.wins}<span className="text-muted-foreground/40"> / </span>{c.losses}</td>
+                                        <td className={`px-3 py-1.5 text-right tabular-nums font-semibold ${wrClass}`}>{wr != null ? `${wr}%` : "—"}</td>
+                                        <td className={`px-3 py-1.5 text-right tabular-nums font-semibold ${pnlClass}`}>{c.netPnl >= 0 ? "+" : ""}${c.netPnl.toFixed(2)}</td>
+                                        <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground/70">${c.totalSpend.toFixed(2)}</td>
+                                        <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground/70">{c.avgFillPrice != null ? `${Math.round(c.avgFillPrice * 100)}¢` : "—"}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-400/15 bg-background/20 px-4 py-3">
@@ -3280,23 +3413,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         onChange={e => setConfigDraft(d => ({ ...d, paperStartingBalance: parseFloat(e.target.value) }))} />
                       <span className="text-[10px] text-muted-foreground/70">
                         Balance when the wallet is reset.
-                      </span>
-                    </label>
-
-                    {/* Win Return Rate */}
-                    <label className="flex flex-col gap-1.5">
-                      <span className="text-xs text-muted-foreground">
-                        Win Profit Rate ({((merged.paperWinReturnRate ?? 0.5) * 100).toFixed(0)}%)
-                      </span>
-                      <input type="range" min={0.05} max={1.0} step={0.05}
-                        className="mt-1"
-                        value={merged.paperWinReturnRate ?? 0.5}
-                        onChange={e => setConfigDraft(d => ({ ...d, paperWinReturnRate: parseFloat(e.target.value) }))} />
-                      <div className="flex justify-between text-[10px] text-muted-foreground/60">
-                        <span>5%</span><span>100%</span>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70">
-                        Profit returned as % of bet on a win (e.g. 50% → +$0.50 per $1 bet).
                       </span>
                     </label>
 

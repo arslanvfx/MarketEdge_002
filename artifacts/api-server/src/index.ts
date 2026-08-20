@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker, fetchCryptoPredictions } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, recomputeAllSymbolQuietHours, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
+import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, recomputeAllSymbolQuietHours, fixLiveExpiredPnlHistorical, fixPaperPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
 import { pool, startPoolPinger } from "@workspace/db";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
@@ -507,8 +507,15 @@ app.listen(port, (err) => {
         logger.warn({ err }, "[kalshi-bot] window bet counts restore failed (non-fatal)"),
       );
       await fixLiveExpiredPnlHistorical().catch((err) =>
-        logger.warn({ err }, "[kalshi-bot] historical P&L fix failed (non-fatal)"),
+        logger.warn({ err }, "[kalshi-bot] historical live P&L fix failed (non-fatal)"),
       );
+      await fixPaperPnlHistorical().catch((err) =>
+        logger.warn({ err }, "[kalshi-bot] historical paper P&L fix failed (non-fatal)"),
+      );
+      // Reload daily P&L and paper balance after corrections so in-memory state
+      // reflects the corrected numbers without a full server restart.
+      await loadDailyPnlFromDB().catch(() => {});
+      await loadPaperBalanceFromDB().catch(() => {});
 
       // Re-evaluate all historical expired bets against Kalshi's authoritative
       // settlement result (RTI).  Corrects any bets that were mis-evaluated

@@ -161,27 +161,22 @@ export async function closePosition(
     if (lastCoinPrice !== null) {
       const priceAboveStrike = lastCoinPrice >= strike;
       const won = pos.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
-      if (pos.entryMode === "live") {
-        // Real contract P&L: each contract pays $1.00 (win) or $0.00 (loss)
-        // YES cost = entryYesPrice/contract → profit = (1 − entry) × n   or loss = −entry × n
-        // NO  cost = (1 − entry)/contract  → profit = entry × n           or loss = −(1 − entry) × n
+      {
+        // Real contract P&L for both paper and live:
+        //   YES cost = entryYesPrice/contract → win profit = (1 − entry) × n, loss = −entry × n
+        //   NO  cost = (1 − entry)/contract  → win profit = entry × n,       loss = −(1 − entry) × n
         const ep = pos.entryYesPrice;
         const n  = pos.contractCount;
         pnl = won
           ? (pos.direction === "yes" ? (1 - ep) * n : ep * n)
           : (pos.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-      } else {
-        // Paper simulation: fixed win rate
-        pnl = won ? pos.betAmount * PAPER_WIN_RETURN_RATE : -pos.betAmount;
       }
     } else {
-      // No price data — book conservatively as full loss
-      if (pos.entryMode === "live") {
+      // No price data — book conservatively as full loss (real contract math)
+      {
         const ep = pos.entryYesPrice;
         const n  = pos.contractCount;
         pnl = pos.direction === "yes" ? -ep * n : -(1 - ep) * n;
-      } else {
-        pnl = -pos.betAmount;
       }
     }
   }
@@ -314,12 +309,9 @@ export async function closePosition(
     });
 
     // Shadow paper bet: close the mirrored paper record with the same outcome.
-    // pnl for paper uses the fixed simulation rate (not real contract math).
+    // Uses the same real contract math as the live record.
     if (pos.shadowPaperId) {
-      const PAPER_WIN_RATE = S.config.paperWinReturnRate ?? 0.50;
-      const paperPnl = isExpiry
-        ? (pnl >= 0 ? pos.betAmount * PAPER_WIN_RATE : -pos.betAmount)
-        : pnl; // mid-window price-delta PnL is equivalent for paper
+      const paperPnl = pnl; // real contract math is now used for both modes
       persistBetRecord({
         symbol: pos.symbol,
         windowKey: pos.windowKey,

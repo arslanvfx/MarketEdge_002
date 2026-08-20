@@ -871,3 +871,121 @@ export async function getBotGapAnalytics(filterMode?: BotMode, resetAt?: string 
     return { bands: [], byCoin: {}, totalBets: 0, lastUpdated: new Date().toISOString() };
   }
 }
+
+// ---------------------------------------------------------------------------
+// High-value scalp statistics
+// ---------------------------------------------------------------------------
+
+export interface ScalpCoinStats {
+  symbol: string;
+  wins: number;
+  losses: number;
+  pushes: number;
+  total: number;
+  winRate: number | null;   // null when no settled bets
+  totalSpend: number;
+  netPnl: number;
+  avgFillPrice: number | null;
+}
+
+export interface ScalpStatsResult {
+  overall: Omit<ScalpCoinStats, "symbol" | "avgFillPrice">;
+  byCoin: ScalpCoinStats[];
+  openCount: number;
+  lastUpdated: string;
+}
+
+export async function getScalpStats(filterMode?: BotMode, resetAt?: string | null): Promise<ScalpStatsResult> {
+  const empty = (): ScalpStatsResult => ({
+    overall: { wins: 0, losses: 0, pushes: 0, total: 0, winRate: null, totalSpend: 0, netPnl: 0 },
+    byCoin: [],
+    openCount: 0,
+    lastUpdated: new Date().toISOString(),
+  });
+  try {
+    // Settled rows (has an outcome)
+    const rows = await db
+      .select({
+        symbol: kalshiBotBetsTable.symbol,
+        outcome: kalshiBotBetsTable.outcome,
+        betAmount: kalshiBotBetsTable.betAmount,
+        pnl: kalshiBotBetsTable.pnl,
+        entryPrice: kalshiBotBetsTable.entryPrice,
+      })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`
+          source = 'high_value_scalp'
+          AND archived_at IS NULL
+          ${filterMode ? sql`AND mode = ${filterMode}` : sql``}
+          ${resetAt ? sql`AND created_at >= ${resetAt}::timestamptz` : sql``}
+          AND outcome IN ('win', 'loss', 'push')
+        `
+      );
+
+    // Open (no outcome yet)
+    const openRows = await db
+      .select({ id: kalshiBotBetsTable.id })
+      .from(kalshiBotBetsTable)
+      .where(
+        sql`
+          source = 'high_value_scalp'
+          AND archived_at IS NULL
+          ${filterMode ? sql`AND mode = ${filterMode}` : sql``}
+          AND outcome IS NULL
+          AND exited_at IS NULL
+        `
+      );
+
+    const coinMap = new Map<string, ScalpCoinStats>();
+
+    for (const r of rows) {
+      const sym = (r.symbol ?? "UNKNOWN").toUpperCase();
+      if (!coinMap.has(sym)) {
+        coinMap.set(sym, {
+          symbol: sym, wins: 0, losses: 0, pushes: 0, total: 0,
+          winRate: null, totalSpend: 0, netPnl: 0, avgFillPrice: null,
+        });
+      }
+      const entry = coinMap.get(sym)!;
+      const spend = r.betAmount != null ? parseFloat(String(r.betAmount)) : 0;
+      const pnl   = r.pnl      != null ? parseFloat(String(r.pnl))       : 0;
+      const price = r.entryPrice != null ? parseFloat(String(r.entryPrice)) : null;
+      entry.totalSpend += spend;
+      entry.netPnl     += pnl;
+      entry.total      += 1;
+      if (r.outcome === "win")  entry.wins   += 1;
+      if (r.outcome === "loss") entry.losses += 1;
+      if (r.outcome === "push") entry.pushes += 1;
+      if (price != null) {
+        entry.avgFillPrice = entry.avgFillPrice == null
+          ? price
+          : (entry.avgFillPrice * (entry.total - 1) + price) / entry.total;
+      }
+    }
+
+    const byCoin = [...coinMap.values()]
+      .map(c => ({ ...c, winRate: c.wins + c.losses > 0 ? c.wins / (c.wins + c.losses) : null }))
+      .sort((a, b) => b.total - a.total || a.symbol.localeCompare(b.symbol));
+
+    const overall = byCoin.reduce(
+      (acc, c) => ({
+        wins: acc.wins + c.wins,
+        losses: acc.losses + c.losses,
+        pushes: acc.pushes + c.pushes,
+        total: acc.total + c.total,
+        winRate: null as null,
+        totalSpend: acc.totalSpend + c.totalSpend,
+        netPnl: acc.netPnl + c.netPnl,
+      }),
+      { wins: 0, losses: 0, pushes: 0, total: 0, winRate: null as null, totalSpend: 0, netPnl: 0 },
+    );
+    overall.winRate = overall.wins + overall.losses > 0
+      ? overall.wins / (overall.wins + overall.losses)
+      : null;
+
+    return { overall, byCoin, openCount: openRows.length, lastUpdated: new Date().toISOString() };
+  } catch {
+    return empty();
+  }
+}
