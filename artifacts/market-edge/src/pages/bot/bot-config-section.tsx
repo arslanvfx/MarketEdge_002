@@ -1333,8 +1333,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           type="button"
                           onClick={async () => {
                             if (!confirm("Reset scalp performance stats? This clears the win/loss history shown here without deleting any bet data.")) return;
-                            await authPost("/crypto/bot/reset-scalp-stats", {});
-                            refetchScalpStats();
+                            try {
+                              await authPost("/crypto/bot/reset-scalp-stats", {});
+                              refetchScalpStats();
+                            } catch (e) {
+                              alert("Reset failed: " + (e instanceof Error ? e.message : String(e)));
+                            }
                           }}
                           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/50 hover:text-red-400 transition-colors"
                           title="Reset scalp stats"
