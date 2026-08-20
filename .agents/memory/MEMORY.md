@@ -112,4 +112,5 @@
 - [Async entry reservation ownership](async-entry-reservation-ownership.md) — lock/token cleanup must be idempotent and keyed to what that tick claimed, never mutable global mode after awaits
 - [Bot config patch semantics](bot-config-patch-semantics.md) — partial settings updates preserve omitted fields, clear explicit nulls, and adopt the server-returned canonical config only after persistence succeeds
 - [High-value scalp operating model](high-value-scalp-operating-model.md) — price-led late-window entries run each normal tick and intentionally bypass ordinary gates; retain only fresh-quote, fill, conflict, and independent-cap safeguards
+- [Scalper NO-bet sizing bug](scalper-no-sizing-bug.md) — eligibility.price IS the ask cost for both sides; never do `1-price` for NO in costPerContract (that inverts it → 9× over-sizing)
 - [Scalper fetchKalshiTarget bypass bug](scalper-fetch-target-bug.md) — scalper must NOT call fetchKalshiTarget(sym, targetTime); bypasses cache, triggers 429, normal loop poisons cache to null → silent exit every tick; read kalshiTargetCache directly instead

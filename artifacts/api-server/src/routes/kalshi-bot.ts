@@ -820,8 +820,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     highValueScalpMaxMinutesRemaining?: number;
     highValueScalpMaxSecondsRemaining?: number;
     highValueScalpBetAmount?: number;
-    highValueScalpMaxOpenExposure?: number;
-    highValueScalpMaxDailySpend?: number;
+    highValueScalpMaxOpenExposure?: number | null;
+    highValueScalpMaxDailySpend?: number | null;
     convictionBoostBetSize?: number;
     convictionBoostProbability?: number;
     convictionBoostMinWinRate?: number;
@@ -1381,10 +1381,14 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof highValueScalpBetAmount === "number" && highValueScalpBetAmount >= 0.5 && highValueScalpBetAmount <= 500) {
     partial.highValueScalpBetAmount = +highValueScalpBetAmount.toFixed(2);
   }
-  if (typeof highValueScalpMaxOpenExposure === "number" && highValueScalpMaxOpenExposure >= 0.5 && highValueScalpMaxOpenExposure <= 5000) {
+  if (highValueScalpMaxOpenExposure === null) {
+    partial.highValueScalpMaxOpenExposure = null;
+  } else if (typeof highValueScalpMaxOpenExposure === "number" && highValueScalpMaxOpenExposure >= 0.5 && highValueScalpMaxOpenExposure <= 5000) {
     partial.highValueScalpMaxOpenExposure = +highValueScalpMaxOpenExposure.toFixed(2);
   }
-  if (typeof highValueScalpMaxDailySpend === "number" && highValueScalpMaxDailySpend >= 0.5 && highValueScalpMaxDailySpend <= 10000) {
+  if (highValueScalpMaxDailySpend === null) {
+    partial.highValueScalpMaxDailySpend = null;
+  } else if (typeof highValueScalpMaxDailySpend === "number" && highValueScalpMaxDailySpend >= 0.5 && highValueScalpMaxDailySpend <= 10000) {
     partial.highValueScalpMaxDailySpend = +highValueScalpMaxDailySpend.toFixed(2);
   }
   // 0 = disabled; > 0 enables boost for that dollar amount

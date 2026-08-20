@@ -121,7 +121,10 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   logger.info({ sym, windowKey: timing.windowKey, side: eligibility.side, price: eligibility.price }, "[high-value-scalp] eligible — checking caps");
 
   const budget = config.highValueScalpBetAmount ?? 25;
-  const costPerContractScan = eligibility.side === "yes" ? eligibility.price : 1 - eligibility.price;
+  // eligibility.price IS the ask price for the selected side (YES ask for YES,
+  // NO ask = 1-yesBid for NO).  Do not invert it — that would compute the
+  // complementary side's price and cause 9× over-sizing on NO bets.
+  const costPerContractScan = eligibility.price;
   if (Math.floor(budget / costPerContractScan) < 1) {
     logger.warn({ sym, budget, price: eligibility.price }, "[high-value-scalp] skipped — budget cannot buy one contract");
     return;
@@ -172,7 +175,9 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   }
   logger.info({ sym, windowKey: timing.windowKey, side: finalEligibility.side, price: finalEligibility.price }, "[high-value-scalp] confirmed — placing order");
 
-  const costPerContract = finalEligibility.side === "yes" ? finalEligibility.price : 1 - finalEligibility.price;
+  // Same reasoning as costPerContractScan: eligibility.price IS the ask cost
+  // for the selected side — do not invert it for NO bets.
+  const costPerContract = finalEligibility.price;
   const contracts = Math.floor(budget / costPerContract);
   if (contracts < 1) return;
 
