@@ -632,7 +632,13 @@ app.listen(port, (err) => {
       // boundary. It does not fire immediately on restart and the scheduler
       // skips overlapping runs when a slow DB query crosses a boundary.
       scheduleAtTopOfEveryUtcHour(async () => {
-        if (getBotState().config.quietHoursMode !== "per_market") return;
+        const cfg = getBotState().config;
+        // Run if per_market mode is active, OR if per-symbol schedules have
+        // already been calibrated (keep them fresh even while mode is 'global').
+        // Without this, the scheduler silently skips every hour when quietHoursMode
+        // is 'global', even though the user has per-coin data they expect to be updated.
+        const hasPerSymbol = Object.keys(cfg.perSymbolQuietHours ?? {}).length > 0;
+        if (cfg.quietHoursMode !== "per_market" && !hasPerSymbol) return;
         try {
           const { calibratedSymbols, skippedSymbols } = await recomputeAllSymbolQuietHours();
           logger.info(
