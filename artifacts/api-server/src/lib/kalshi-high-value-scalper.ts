@@ -80,6 +80,14 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
   // One scalp per coin per window per mode — checked before any awaits.
   if (highValueScalpFiredThisWindow.has(firedKey)) return;
 
+  // Per-coin override: paused coin is skipped entirely.
+  const coinOverride = config.highValueScalpCoinOverrides?.[sym];
+  if (coinOverride?.paused) return;
+
+  // Per-coin timing gate: if a tighter entry window is configured for this coin,
+  // apply it before the eligibility check (global window already passed above).
+  if (coinOverride?.maxSecondsRemaining != null && timing.secondsRemaining > coinOverride.maxSecondsRemaining) return;
+
   // Read from the shared kalshiTargetCache that the conviction poller and
   // normal bot loop keep fresh.  Never call fetchKalshiTarget with a
   // targetTime here — that bypasses the cache and causes 429s that poison
@@ -120,7 +128,8 @@ async function scanSymbol(sym: string, now: number): Promise<void> {
 
   logger.info({ sym, windowKey: timing.windowKey, side: eligibility.side, price: eligibility.price }, "[high-value-scalp] eligible — checking caps");
 
-  const budget = config.highValueScalpBetAmount ?? 25;
+  // Per-coin budget overrides the global bet amount when set.
+  const budget = (coinOverride?.maxBetSize ?? config.highValueScalpBetAmount) ?? 25;
   // eligibility.price IS the ask price for the selected side (YES ask for YES,
   // NO ask = 1-yesBid for NO).  Do not invert it — that would compute the
   // complementary side's price and cause 9× over-sizing on NO bets.

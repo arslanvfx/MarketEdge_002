@@ -1274,6 +1274,15 @@ export interface BotConfig {
   highValueScalpBetAmount?: number;      // dollar budget per scalp order (default $25)
   highValueScalpMaxOpenExposure?: number | null; // gross open scalp exposure cap; null = no cap
   highValueScalpMaxDailySpend?: number | null;   // gross daily scalp spend cap; null = no cap
+  // Per-coin scalp overrides — each field falls through to the global setting when omitted.
+  highValueScalpCoinOverrides?: Record<string, {
+    paused?: boolean;             // skip this coin entirely for scalping
+    maxBetSize?: number;          // per-coin dollar budget (overrides highValueScalpBetAmount)
+    maxSecondsRemaining?: number; // per-coin entry window (overrides highValueScalpMaxSecondsRemaining)
+  }>;
+  // Independent scalp stats reset timestamps (separate from the main bot stats reset).
+  paperScalpStatsResetAt?: string | null;
+  liveScalpStatsResetAt?: string | null;
   // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
   // Any field left undefined falls through to the matching global setting.
   //   lockPrice      — entry floor (overrides kalshiLockPrice)
@@ -1739,6 +1748,9 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   highValueScalpBetAmount: 25,
   highValueScalpMaxOpenExposure: 800,
   highValueScalpMaxDailySpend: 2000,
+  highValueScalpCoinOverrides: {},
+  paperScalpStatsResetAt: null,
+  liveScalpStatsResetAt: null,
   convictionBoostBetSize: undefined,
   convictionBoostProbability: 0.25,
   convictionBoostMinWinRate: 0.70,

@@ -1223,6 +1223,98 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </div>
                   </div>
 
+                  {/* ── Per-Coin Scalp Overrides ──────────────────────── */}
+                  {(() => {
+                    const COINS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
+                    const scalpOverrides = (merged.highValueScalpCoinOverrides ?? {}) as Record<string, { paused?: boolean; maxBetSize?: number; maxSecondsRemaining?: number }>;
+                    const globalBet = merged.highValueScalpBetAmount ?? 25;
+                    const globalSecs = merged.highValueScalpMaxSecondsRemaining ?? ((merged.highValueScalpMaxMinutesRemaining ?? 6) * 60);
+                    return (
+                      <div className="border-t border-amber-400/15 px-4 py-3">
+                        <div className="mb-2 flex items-center gap-2">
+                          <Sliders className="h-3.5 w-3.5 text-amber-300/70" />
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">Per-Coin Overrides</span>
+                        </div>
+                        <div className="overflow-hidden rounded-xl border border-amber-400/15">
+                          {COINS.map((coin, i) => {
+                            const ov = scalpOverrides[coin] ?? {};
+                            const isPaused = ov.paused === true;
+                            const perBet = ov.maxBetSize;
+                            const perSecs = ov.maxSecondsRemaining;
+                            const perM = perSecs != null ? Math.floor(perSecs / 60) : null;
+                            const perS = perSecs != null ? perSecs % 60 : null;
+                            const updateOverride = (update: Partial<{ paused: boolean; maxBetSize: number | undefined; maxSecondsRemaining: number | undefined }>) =>
+                              setConfigDraft(d => {
+                                const cur = { ...(d.highValueScalpCoinOverrides ?? merged.highValueScalpCoinOverrides ?? {}) } as typeof scalpOverrides;
+                                const next = { ...cur, [coin]: { ...cur[coin], ...update } };
+                                if (update.maxBetSize === undefined) delete next[coin].maxBetSize;
+                                if (update.maxSecondsRemaining === undefined) delete next[coin].maxSecondsRemaining;
+                                if (!next[coin].paused && next[coin].maxBetSize == null && next[coin].maxSecondsRemaining == null) delete next[coin];
+                                return { ...d, highValueScalpCoinOverrides: next };
+                              });
+                            return (
+                              <div key={coin} className={`flex flex-wrap items-center gap-2 px-3 py-2 ${i > 0 ? "border-t border-amber-400/8" : ""} ${isPaused ? "bg-red-500/5" : ""}`}>
+                                <span className={`w-10 shrink-0 text-xs font-mono font-semibold ${isPaused ? "text-muted-foreground/35 line-through" : "text-amber-100"}`}>{coin}</span>
+                                <button type="button"
+                                  onClick={() => updateOverride({ paused: !isPaused })}
+                                  className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[10px] transition-colors ${isPaused ? "border-red-500/40 bg-red-500/10 text-red-400" : "border-border text-muted-foreground hover:border-amber-400/40 hover:text-amber-200"}`}
+                                >
+                                  <Pause className="h-2.5 w-2.5" />
+                                  {isPaused ? "Paused" : "Pause"}
+                                </button>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[9px] text-muted-foreground/50">$</span>
+                                  <input type="number" min={0.5} max={5000} step={0.5}
+                                    placeholder={`${globalBet}`}
+                                    value={perBet != null ? perBet : ""}
+                                    className="w-14 appearance-none rounded border border-amber-400/15 bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground/30 focus:border-amber-400/50 outline-none"
+                                    onChange={e => { const v = e.target.value === "" ? undefined : parseFloat(e.target.value); updateOverride({ maxBetSize: v }); }}
+                                  />
+                                  {perBet != null && <span className="text-[9px] text-amber-300/60">{perBet < globalBet ? "\u2193" : "\u2191"}</span>}
+                                </div>
+                                <div className="ml-auto flex items-center gap-1">
+                                  <span className="text-[9px] text-muted-foreground/50">window</span>
+                                  <input type="number" min={0} max={15} step={1}
+                                    placeholder={`${Math.floor(globalSecs / 60)}`}
+                                    value={perM != null ? perM : ""}
+                                    className="w-9 appearance-none rounded border border-amber-400/15 bg-background px-1 py-1 text-[11px] text-center text-foreground placeholder:text-muted-foreground/30 focus:border-amber-400/50 outline-none"
+                                    onChange={e => {
+                                      const mins = e.target.value === "" ? null : Math.max(0, Math.min(15, Math.round(Number(e.target.value))));
+                                      const curS = perSecs != null ? perSecs % 60 : 0;
+                                      const total = mins != null ? (mins * 60 + curS) : undefined;
+                                      updateOverride({ maxSecondsRemaining: total });
+                                    }}
+                                  />
+                                  <span className="text-[9px] text-muted-foreground/40">m</span>
+                                  <input type="number" min={0} max={59} step={1}
+                                    placeholder={`${globalSecs % 60}`}
+                                    value={perS != null ? perS : ""}
+                                    className="w-9 appearance-none rounded border border-amber-400/15 bg-background px-1 py-1 text-[11px] text-center text-foreground placeholder:text-muted-foreground/30 focus:border-amber-400/50 outline-none"
+                                    onChange={e => {
+                                      const secs = e.target.value === "" ? null : Math.max(0, Math.min(59, Math.round(Number(e.target.value))));
+                                      const curM = perSecs != null ? Math.floor(perSecs / 60) : 0;
+                                      const total = secs != null ? (curM * 60 + secs) : undefined;
+                                      updateOverride({ maxSecondsRemaining: total });
+                                    }}
+                                  />
+                                  <span className="text-[9px] text-muted-foreground/40">s</span>
+                                  {perSecs != null && (
+                                    <span className={`text-[9px] font-mono ${perSecs < globalSecs ? "text-amber-300/70" : "text-muted-foreground/40"}`}>
+                                      {perSecs < globalSecs ? "\u2193" : "="}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <p className="mt-2 text-[9px] text-muted-foreground/50">
+                          Pause blocks this coin from scalping. $ overrides the per-order budget. Window overrides how early the scalper starts (e.g. 1m 30s = only last 90 sec). Blank = use global. Save to apply.
+                        </p>
+                      </div>
+                    );
+                  })()}
+
                   {/* ── Scalp Statistics ──────────────────────────────── */}
                   <div className="border-t border-amber-400/15 px-4 pb-4 pt-3">
                     <div className="mb-3 flex items-center justify-between gap-2">
@@ -1236,14 +1328,29 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           </span>
                         )}
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => refetchScalpStats()}
-                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/60 hover:text-amber-300 transition-colors"
-                        title="Refresh scalp stats"
-                      >
-                        <RefreshCw className="h-3 w-3" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!confirm("Reset scalp performance stats? This clears the win/loss history shown here without deleting any bet data.")) return;
+                            await authPost("/crypto/bot/reset-scalp-stats", {});
+                            refetchScalpStats();
+                          }}
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/50 hover:text-red-400 transition-colors"
+                          title="Reset scalp stats"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Reset
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => refetchScalpStats()}
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/60 hover:text-amber-300 transition-colors"
+                          title="Refresh scalp stats"
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                        </button>
+                      </div>
                     </div>
 
                     {scalpStatsLoading && (

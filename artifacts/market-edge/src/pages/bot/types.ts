@@ -132,6 +132,13 @@ export interface BotConfig {
   highValueScalpBetAmount?: number;
   highValueScalpMaxOpenExposure?: number | null;
   highValueScalpMaxDailySpend?: number | null;
+  highValueScalpCoinOverrides?: Record<string, {
+    paused?: boolean;
+    maxBetSize?: number;
+    maxSecondsRemaining?: number;
+  }>;
+  paperScalpStatsResetAt?: string | null;
+  liveScalpStatsResetAt?: string | null;
   convictionStopLossFloor?: number;
   convictionStopLossActivationMinute?: number;
   convictionMinEntryMinutes?: number;

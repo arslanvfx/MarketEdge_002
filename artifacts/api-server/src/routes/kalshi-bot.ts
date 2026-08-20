@@ -701,6 +701,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     highValueScalpBetAmount,
     highValueScalpMaxOpenExposure,
     highValueScalpMaxDailySpend,
+    highValueScalpCoinOverrides,
     convictionBoostBetSize,
     convictionBoostProbability,
     convictionBoostMinWinRate,
@@ -822,6 +823,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     highValueScalpBetAmount?: number;
     highValueScalpMaxOpenExposure?: number | null;
     highValueScalpMaxDailySpend?: number | null;
+    highValueScalpCoinOverrides?: Record<string, { paused?: boolean; maxBetSize?: number; maxSecondsRemaining?: number }>;
     convictionBoostBetSize?: number;
     convictionBoostProbability?: number;
     convictionBoostMinWinRate?: number;
@@ -1391,6 +1393,18 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   } else if (typeof highValueScalpMaxDailySpend === "number" && highValueScalpMaxDailySpend >= 0.5 && highValueScalpMaxDailySpend <= 10000) {
     partial.highValueScalpMaxDailySpend = +highValueScalpMaxDailySpend.toFixed(2);
   }
+  if (highValueScalpCoinOverrides !== undefined && highValueScalpCoinOverrides !== null && typeof highValueScalpCoinOverrides === "object" && !Array.isArray(highValueScalpCoinOverrides)) {
+    const validated: Record<string, { paused?: boolean; maxBetSize?: number; maxSecondsRemaining?: number }> = {};
+    for (const [sym, ov] of Object.entries(highValueScalpCoinOverrides)) {
+      if (!sym || typeof ov !== "object" || ov === null) continue;
+      const entry: { paused?: boolean; maxBetSize?: number; maxSecondsRemaining?: number } = {};
+      if (typeof ov.paused === "boolean") entry.paused = ov.paused;
+      if (typeof ov.maxBetSize === "number" && ov.maxBetSize >= 0.5 && ov.maxBetSize <= 5000) entry.maxBetSize = +ov.maxBetSize.toFixed(2);
+      if (typeof ov.maxSecondsRemaining === "number" && ov.maxSecondsRemaining >= 1 && ov.maxSecondsRemaining <= 900) entry.maxSecondsRemaining = Math.round(ov.maxSecondsRemaining);
+      if (Object.keys(entry).length > 0) validated[sym] = entry;
+    }
+    partial.highValueScalpCoinOverrides = validated;
+  }
   // 0 = disabled; > 0 enables boost for that dollar amount
   if (typeof convictionBoostBetSize === "number" && convictionBoostBetSize >= 0) {
     partial.convictionBoostBetSize = convictionBoostBetSize > 0 ? convictionBoostBetSize : undefined;
@@ -1758,7 +1772,8 @@ router.get("/crypto/bot/logic-performance", async (req, res) => {
 router.get("/crypto/bot/scalp-stats", async (req, res) => {
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as "paper" | "live" : undefined;
   const cfg = getBotState().config;
-  const resetAt = mode === "live" ? (cfg.liveStatsResetAt ?? null) : mode === "paper" ? (cfg.paperStatsResetAt ?? null) : null;
+  // Use scalp-specific reset timestamps (independent from the main bot stats reset).
+  const resetAt = mode === "live" ? (cfg.liveScalpStatsResetAt ?? null) : mode === "paper" ? (cfg.paperScalpStatsResetAt ?? null) : null;
   try {
     const data = await getScalpStats(mode, resetAt);
     res.json(data);
@@ -2243,6 +2258,19 @@ router.get("/crypto/bot/time-analytics", async (_req, res) => {
 
     const totalBets = data.reduce((s: number, r: { total: number }) => s + r.total, 0);
     res.json({ rows: data, totalBets, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/reset-scalp-stats — reset only the scalp performance stats
+// (independent from the main bot stats; preserves all other performance views)
+router.post("/crypto/bot/reset-scalp-stats", requireAuth, async (_req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const { config } = await updateBotConfig({ paperScalpStatsResetAt: now, liveScalpStatsResetAt: now });
+    res.json({ ok: true, paperScalpStatsResetAt: config.paperScalpStatsResetAt, liveScalpStatsResetAt: config.liveScalpStatsResetAt });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
