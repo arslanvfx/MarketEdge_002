@@ -128,6 +128,7 @@ export interface BotConfig {
   highValueScalpMinPrice?: number;
   highValueScalpMaxPrice?: number;
   highValueScalpMaxMinutesRemaining?: number;
+  highValueScalpMaxSecondsRemaining?: number;
   highValueScalpBetAmount?: number;
   highValueScalpMaxOpenExposure?: number;
   highValueScalpMaxDailySpend?: number;

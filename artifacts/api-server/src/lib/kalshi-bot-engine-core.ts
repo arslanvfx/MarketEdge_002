@@ -1269,7 +1269,8 @@ export interface BotConfig {
   highValueScalpEnabled?: boolean;
   highValueScalpMinPrice?: number;       // winning-side ask floor, 0–1 (default .90)
   highValueScalpMaxPrice?: number;       // winning-side ask cap, 0–1 (default .95)
-  highValueScalpMaxMinutesRemaining?: number; // only eligible with this many minutes left (default 2)
+  highValueScalpMaxMinutesRemaining?: number; // legacy whole-minute fallback (default 2)
+  highValueScalpMaxSecondsRemaining?: number; // only eligible with this many seconds left (default 120)
   highValueScalpBetAmount?: number;      // dollar budget per scalp order (default $25)
   highValueScalpMaxOpenExposure?: number; // gross open scalp exposure cap (default $100)
   highValueScalpMaxDailySpend?: number;   // gross daily scalp spend cap (default $100)
@@ -1734,6 +1735,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   highValueScalpMinPrice: 0.90,
   highValueScalpMaxPrice: 0.95,
   highValueScalpMaxMinutesRemaining: 2,
+  highValueScalpMaxSecondsRemaining: 120,
   highValueScalpBetAmount: 25,
   highValueScalpMaxOpenExposure: 100,
   highValueScalpMaxDailySpend: 100,

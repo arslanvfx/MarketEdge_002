@@ -696,6 +696,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     highValueScalpMinPrice,
     highValueScalpMaxPrice,
     highValueScalpMaxMinutesRemaining,
+    highValueScalpMaxSecondsRemaining,
     highValueScalpBetAmount,
     highValueScalpMaxOpenExposure,
     highValueScalpMaxDailySpend,
@@ -816,6 +817,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     highValueScalpMinPrice?: number;
     highValueScalpMaxPrice?: number;
     highValueScalpMaxMinutesRemaining?: number;
+    highValueScalpMaxSecondsRemaining?: number;
     highValueScalpBetAmount?: number;
     highValueScalpMaxOpenExposure?: number;
     highValueScalpMaxDailySpend?: number;
@@ -1362,6 +1364,18 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof highValueScalpMaxMinutesRemaining === "number" && highValueScalpMaxMinutesRemaining >= 1 && highValueScalpMaxMinutesRemaining <= 10) {
     partial.highValueScalpMaxMinutesRemaining = Math.round(highValueScalpMaxMinutesRemaining);
+  }
+  if (
+    highValueScalpMaxSecondsRemaining !== undefined
+    && (typeof highValueScalpMaxSecondsRemaining !== "number"
+      || !Number.isFinite(highValueScalpMaxSecondsRemaining)
+      || highValueScalpMaxSecondsRemaining < 1
+      || highValueScalpMaxSecondsRemaining > 600)
+  ) {
+    return res.status(400).json({ error: "High-value scalp final window must be between 1 second and 10 minutes." });
+  }
+  if (typeof highValueScalpMaxSecondsRemaining === "number") {
+    partial.highValueScalpMaxSecondsRemaining = Math.round(highValueScalpMaxSecondsRemaining);
   }
   if (typeof highValueScalpBetAmount === "number" && highValueScalpBetAmount >= 0.5 && highValueScalpBetAmount <= 500) {
     partial.highValueScalpBetAmount = +highValueScalpBetAmount.toFixed(2);

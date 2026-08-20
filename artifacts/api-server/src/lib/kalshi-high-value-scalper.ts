@@ -25,6 +25,7 @@ import {
 import type { BotDecision } from "./kalshi-bot-engine";
 import {
   evaluateHighValueScalpEligibility,
+  isHighValueScalpWindowOpen,
   type HighValueScalpSide,
 } from "./kalshi-high-value-scalper-policy";
 import { highValueScalpReservationLedger } from "./kalshi-high-value-scalper-ledger";
@@ -255,6 +256,6 @@ export async function runHighValueScalpScan(): Promise<void> {
   if (!S.config.highValueScalpEnabled || S.dbDegradedSince !== null) return;
   const now = Date.now();
   const timing = currentWindowTiming(now);
-  if (timing.secondsRemaining > (S.config.highValueScalpMaxMinutesRemaining ?? 2) * 60) return;
+  if (!isHighValueScalpWindowOpen(timing.secondsRemaining, S.config)) return;
   await Promise.allSettled(Object.keys(KALSHI_SERIES).map((sym) => scanSymbol(sym, now)));
 }

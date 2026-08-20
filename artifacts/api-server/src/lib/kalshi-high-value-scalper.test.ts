@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateHighValueScalpEligibility } from "./kalshi-high-value-scalper-policy.ts";
+import {
+  evaluateHighValueScalpEligibility,
+  highValueScalpMaxSecondsRemaining,
+  isHighValueScalpWindowOpen,
+} from "./kalshi-high-value-scalper-policy.ts";
 import { isRecoverableOpenPositionAction, restoreHighValueScalpMetadata } from "./kalshi-high-value-scalper-recovery.ts";
 import { buildHighValueScalpEntryUpdate } from "./kalshi-high-value-scalper-persistence.ts";
 import { HighValueScalpReservationLedger } from "./kalshi-high-value-scalper-ledger.ts";
@@ -36,6 +40,33 @@ test("high-value scalp rejects early, stale-shaped, and opposite-position quotes
     yesAsk: 0.92, yesBid: 0.90, secondsRemaining: 60, config,
     activePosition: { direction: "no" },
   }).eligible, false);
+});
+
+test("high-value scalp supports a precise 1 minute 30 second final window", () => {
+  const result = evaluateHighValueScalpEligibility({
+    yesAsk: 0.92, yesBid: 0.90, secondsRemaining: 90,
+    config: {
+      highValueScalpMinPrice: 0.90,
+      highValueScalpMaxPrice: 0.95,
+      highValueScalpMaxSecondsRemaining: 90,
+    },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(evaluateHighValueScalpEligibility({
+    yesAsk: 0.92, yesBid: 0.90, secondsRemaining: 91,
+    config: {
+      highValueScalpMinPrice: 0.90,
+      highValueScalpMaxPrice: 0.95,
+      highValueScalpMaxSecondsRemaining: 90,
+    },
+  }).eligible, false);
+});
+
+test("high-value scalp scanner gate honors a configured window above two minutes", () => {
+  const config = { highValueScalpMaxSecondsRemaining: 150 };
+  assert.equal(highValueScalpMaxSecondsRemaining(config), 150);
+  assert.equal(isHighValueScalpWindowOpen(150, config), true);
+  assert.equal(isHighValueScalpWindowOpen(151, config), false);
 });
 
 test("high-value scalp rows remain recoverable and retain their cap attribution after restart", () => {

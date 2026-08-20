@@ -10,6 +10,25 @@ export interface HighValueScalpEligibility {
   reason: string | null;
 }
 
+export type HighValueScalpTimingConfig = Pick<
+  BotConfig,
+  "highValueScalpMaxMinutesRemaining" | "highValueScalpMaxSecondsRemaining"
+>;
+
+export function highValueScalpMaxSecondsRemaining(config: HighValueScalpTimingConfig): number {
+  return config.highValueScalpMaxSecondsRemaining
+    ?? (config.highValueScalpMaxMinutesRemaining ?? 2) * 60;
+}
+
+export function isHighValueScalpWindowOpen(
+  secondsRemaining: number,
+  config: HighValueScalpTimingConfig,
+): boolean {
+  return Number.isFinite(secondsRemaining)
+    && secondsRemaining > 0
+    && secondsRemaining <= highValueScalpMaxSecondsRemaining(config);
+}
+
 /**
  * Pure quote and position policy for the isolated high-value scalp scanner.
  * It deliberately receives no model inputs or normal bot guard state.
@@ -18,13 +37,12 @@ export function evaluateHighValueScalpEligibility(input: {
   yesAsk: number | null;
   yesBid: number | null;
   secondsRemaining: number;
-  config: Pick<BotConfig, "highValueScalpMinPrice" | "highValueScalpMaxPrice" | "highValueScalpMaxMinutesRemaining">;
+  config: Pick<BotConfig, "highValueScalpMinPrice" | "highValueScalpMaxPrice" | "highValueScalpMaxMinutesRemaining" | "highValueScalpMaxSecondsRemaining">;
   activePosition?: Pick<OpenPosition, "direction"> | null;
 }): HighValueScalpEligibility {
   const min = input.config.highValueScalpMinPrice ?? 0.90;
   const max = input.config.highValueScalpMaxPrice ?? 0.95;
-  const maxRemainingSeconds = (input.config.highValueScalpMaxMinutesRemaining ?? 2) * 60;
-  if (!Number.isFinite(input.secondsRemaining) || input.secondsRemaining <= 0 || input.secondsRemaining > maxRemainingSeconds) {
+  if (!isHighValueScalpWindowOpen(input.secondsRemaining, input.config)) {
     return { eligible: false, side: null, price: null, reason: "outside final scalp window" };
   }
   if (input.yesAsk == null || input.yesBid == null || input.yesAsk <= 0 || input.yesBid <= 0 || input.yesBid > input.yesAsk) {

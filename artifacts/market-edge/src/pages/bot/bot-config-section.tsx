@@ -1044,7 +1044,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
 
                 {/* High-value scalping is intentionally independent of decision mode. */}
-                <section className="col-span-2 overflow-hidden rounded-2xl border border-amber-400/35 bg-gradient-to-br from-amber-400/[0.10] via-amber-500/[0.05] to-transparent shadow-[0_0_35px_rgba(251,191,36,0.05)]">
+                <section className="col-span-2 min-w-0 overflow-hidden rounded-2xl border border-amber-400/35 bg-gradient-to-br from-amber-400/[0.10] via-amber-500/[0.05] to-transparent shadow-[0_0_35px_rgba(251,191,36,0.05)]">
                   <div className="flex flex-wrap items-start justify-between gap-4 border-b border-amber-400/15 bg-amber-400/[0.04] px-4 py-3.5">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -1056,7 +1056,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <p className="text-[10px] font-medium uppercase tracking-[0.13em] text-amber-300/70">Late-window price execution</p>
                         </div>
                       </div>
-                      <p className="mt-2 max-w-3xl text-[11px] leading-relaxed text-muted-foreground">
+                      <p className="mt-2 min-w-0 max-w-3xl break-words whitespace-normal text-[11px] leading-relaxed text-muted-foreground">
                         Price leads every decision here. The scanner checks each configured market every second in the final window and ignores normal model, quiet-hour, and market-filter gates. Only fresh pricing, confirmed fills, and your independent limits remain.
                       </p>
                     </div>
@@ -1075,8 +1075,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </button>
                   </div>
 
-                  <div className="grid gap-3 p-4 lg:grid-cols-[1.25fr_1fr_1fr]">
-                    <div className="rounded-xl border border-amber-400/20 bg-background/35 p-3">
+                  <div className="grid min-w-0 gap-3 p-4 xl:grid-cols-[1.1fr_1.2fr_1.2fr]">
+                    <div className="min-w-0 rounded-xl border border-amber-400/20 bg-background/35 p-3">
                       <div className="mb-3 flex items-center justify-between">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">Winning contract band</span>
                         <span className="rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-mono text-amber-300">{Math.round((merged.highValueScalpMinPrice ?? 0.90) * 100)}–{Math.round((merged.highValueScalpMaxPrice ?? 0.95) * 100)}¢</span>
@@ -1086,7 +1086,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <span className="text-[10px] text-muted-foreground">Minimum</span>
                           <div className="relative">
                             <input type="number" min={50} max={99} step={1}
-                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pr-7 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 pr-7 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
                               value={Math.round((merged.highValueScalpMinPrice ?? 0.90) * 100)}
                               onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMinPrice: v / 100 })); }} />
                             <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-xs text-muted-foreground">¢</span>
@@ -1096,7 +1096,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <span className="text-[10px] text-muted-foreground">Maximum</span>
                           <div className="relative">
                             <input type="number" min={51} max={99} step={1}
-                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pr-7 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 pr-7 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
                               value={Math.round((merged.highValueScalpMaxPrice ?? 0.95) * 100)}
                               onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxPrice: v / 100 })); }} />
                             <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-xs text-muted-foreground">¢</span>
@@ -1105,38 +1105,59 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-amber-400/20 bg-background/35 p-3">
+                    <div className="min-w-0 rounded-xl border border-amber-400/20 bg-background/35 p-3">
                       <span className="mb-3 block text-[10px] font-bold uppercase tracking-wider text-amber-200">Entry cadence</span>
                       <div className="grid grid-cols-2 gap-2">
                         <label className="flex flex-col gap-1">
                           <span className="text-[10px] text-muted-foreground">Final minutes</span>
-                          <input type="number" min={1} max={10} step={1}
-                            className="w-full rounded-lg border border-border bg-background px-2.5 py-2 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
-                            value={merged.highValueScalpMaxMinutesRemaining ?? 2}
-                            onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxMinutesRemaining: Math.round(v) })); }} />
+                          <input type="number" min={0} max={10} step={1}
+                            className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                            value={Math.floor((merged.highValueScalpMaxSecondsRemaining ?? ((merged.highValueScalpMaxMinutesRemaining ?? 2) * 60)) / 60)}
+                            onChange={e => {
+                              const v = Number(e.target.value);
+                              if (Number.isFinite(v)) {
+                                const currentSeconds = (merged.highValueScalpMaxSecondsRemaining ?? ((merged.highValueScalpMaxMinutesRemaining ?? 2) * 60)) % 60;
+                                const total = (Math.max(0, Math.min(10, Math.round(v))) * 60) + currentSeconds;
+                                setConfigDraft(d => ({ ...d, highValueScalpMaxSecondsRemaining: total > 0 ? total : 1 }));
+                              }
+                            }} />
                         </label>
                         <label className="flex flex-col gap-1">
-                          <span className="text-[10px] text-muted-foreground">Per order</span>
-                          <div className="relative">
-                            <input type="number" min={0.5} max={500} step={0.5}
-                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
-                              value={merged.highValueScalpBetAmount ?? 25}
-                              onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpBetAmount: v })); }} />
-                            <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
-                          </div>
+                          <span className="text-[10px] text-muted-foreground">Final seconds</span>
+                          <input type="number" min={0} max={59} step={1}
+                            className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                            value={(merged.highValueScalpMaxSecondsRemaining ?? ((merged.highValueScalpMaxMinutesRemaining ?? 2) * 60)) % 60}
+                            onChange={e => {
+                              const v = Number(e.target.value);
+                              if (Number.isFinite(v)) {
+                                const currentTotal = merged.highValueScalpMaxSecondsRemaining ?? ((merged.highValueScalpMaxMinutesRemaining ?? 2) * 60);
+                                const total = (Math.floor(currentTotal / 60) * 60) + Math.max(0, Math.min(59, Math.round(v)));
+                                setConfigDraft(d => ({ ...d, highValueScalpMaxSecondsRemaining: total > 0 ? total : 1 }));
+                              }
+                            }} />
                         </label>
                       </div>
-                      <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/75">Checks every second while this window is active. A final fresh quote is taken immediately before the order.</p>
+                      <label className="mt-2 flex flex-col gap-1">
+                        <span className="text-[10px] text-muted-foreground">Per order</span>
+                        <div className="relative">
+                          <input type="number" min={0.5} max={500} step={0.5}
+                            className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                            value={merged.highValueScalpBetAmount ?? 25}
+                            onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpBetAmount: v })); }} />
+                          <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
+                        </div>
+                      </label>
+                      <p className="mt-3 min-w-0 break-words whitespace-normal text-[10px] leading-relaxed text-muted-foreground/75">Checks every second while this window is active. A final fresh quote is taken immediately before the order.</p>
                     </div>
 
-                    <div className="rounded-xl border border-amber-400/20 bg-background/35 p-3">
+                    <div className="min-w-0 rounded-xl border border-amber-400/20 bg-background/35 p-3">
                       <span className="mb-3 block text-[10px] font-bold uppercase tracking-wider text-amber-200">Independent limits</span>
                       <div className="grid grid-cols-2 gap-2">
                         <label className="flex flex-col gap-1">
                           <span className="text-[10px] text-muted-foreground">Open exposure</span>
                           <div className="relative">
                             <input type="number" min={0.5} max={5000} step={1}
-                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
                               value={merged.highValueScalpMaxOpenExposure ?? 100}
                               onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxOpenExposure: v })); }} />
                             <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
@@ -1146,14 +1167,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           <span className="text-[10px] text-muted-foreground">Daily spend</span>
                           <div className="relative">
                             <input type="number" min={0.5} max={10000} step={1}
-                              className="w-full rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
+                              className="min-w-0 w-full appearance-none rounded-lg border border-border bg-background px-2.5 py-2 pl-6 text-sm font-semibold text-foreground outline-none transition focus:border-amber-400/60"
                               value={merged.highValueScalpMaxDailySpend ?? 100}
                               onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v)) setConfigDraft(d => ({ ...d, highValueScalpMaxDailySpend: v })); }} />
                             <span className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-xs text-muted-foreground">$</span>
                           </div>
                         </label>
                       </div>
-                      <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/75">Separate from normal bets. One confirmed scalp per market per 15-minute window; same-side fills may stack.</p>
+                      <p className="mt-3 min-w-0 break-words whitespace-normal text-[10px] leading-relaxed text-muted-foreground/75">Separate from normal bets. One confirmed scalp per market per 15-minute window; same-side fills may stack.</p>
                     </div>
                   </div>
 
