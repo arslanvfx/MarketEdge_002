@@ -1299,7 +1299,14 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
     if (S.botMode === "paper") modeSpecific.paperDecisionMode = partial.decisionMode;
     else modeSpecific.liveDecisionMode = partial.decisionMode;
   }
+  // Reset test-mode spend counter when the cap is newly toggled on so each
+  // test session starts from $0 regardless of previous sessions today.
+  const prevTestEnabled = S.config.testHardCapEnabled;
   S.config = { ...S.config, ...partial, ...modeSpecific };
+  if (partial.testHardCapEnabled === true && !prevTestEnabled) {
+    S.testModeSpentAmount = 0;
+    logger.info({ cap: S.config.testHardCapTotal ?? 4.00 }, "[kalshi-bot] test hard-cap enabled — session spend counter reset to $0.00");
+  }
   let snapshot = { ...S.config };
   let persisted = false;
   try {

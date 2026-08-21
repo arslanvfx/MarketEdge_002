@@ -142,6 +142,7 @@ export function getBotState(): BotStateSnapshot {
     dailyPnl: S.dailyPnl,
     dailyLossCount: S.dailyLossCount,
     dailySpendAmount: S.dailySpendAmount,
+    testModeSpentAmount: S.testModeSpentAmount,
     dailyDate: S.dailyDate,
     accountBalance: S.accountBalance,
     lastUpdatedAt: new Date().toISOString(),

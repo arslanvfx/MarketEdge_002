@@ -186,6 +186,10 @@ export interface BotConfig {
   strikeProximityAtrScale?: boolean;
   strikeProximityMinPctOverrides?: Record<string, number>;
   lockPrice082Migrated?: boolean;
+  // Test hard-cap mode
+  testHardCapEnabled?: boolean;
+  testHardCapPerBet?: number;
+  testHardCapTotal?: number;
 }
 
 export interface TrajectoryGateResult {
@@ -251,7 +255,7 @@ export interface GuardStates {
 export interface BotStatus {
   mode: "paper" | "live"; status: string; paused: boolean;
   config: BotConfig; openPositions: OpenPosition[];
-  dailyPnl: number; dailySpendAmount: number; accountBalance: number | null;
+  dailyPnl: number; dailySpendAmount: number; testModeSpentAmount?: number; accountBalance: number | null;
   warmupSecondsRemaining: number | null; configured: boolean;
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;

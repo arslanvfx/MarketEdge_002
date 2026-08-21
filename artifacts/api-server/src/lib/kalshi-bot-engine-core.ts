@@ -1264,6 +1264,17 @@ export interface BotConfig {
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
+
+  // ── TEST HARD-CAP MODE ─────────────────────────────────────────────────────
+  // Safety mode for live testing after code changes.  When enabled:
+  //   • Every bet (conviction, scalper, regular) is capped to testHardCapPerBet ($)
+  //   • Once session total spend reaches testHardCapTotal, ALL new entries are blocked
+  // Toggling on resets the session spend counter to $0.
+  // This runs at the order-placement layer and cannot be bypassed by any config.
+  testHardCapEnabled?: boolean;    // master toggle (default false = off)
+  testHardCapPerBet?: number;      // max $ per individual bet (default 1.00)
+  testHardCapTotal?: number;       // total $ session ceiling before all entries stop (default 4.00)
+
   // High-value scalp: isolated late-window price-only execution path. These
   // settings never participate in the regular bot decision pipeline.
   highValueScalpEnabled?: boolean;

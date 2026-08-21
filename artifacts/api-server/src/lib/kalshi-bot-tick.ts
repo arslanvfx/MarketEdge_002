@@ -2878,6 +2878,33 @@ async function _runBotTick(
       // conviction) instead of throwing into the generic error path.
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
+      // ── TEST HARD-CAP MODE ─────────────────────────────────────────────────
+      // Runs immediately before every live order submission.  Cannot be bypassed
+      // by any other config flag, randomizer, or dynamic-sizing logic.
+      if (S.config.testHardCapEnabled && effectiveMode === "live") {
+        const perBetCap = S.config.testHardCapPerBet  ?? 1.00;
+        const totalCap  = S.config.testHardCapTotal    ?? 4.00;
+        if (S.testModeSpentAmount >= totalCap) {
+          logger.warn(
+            { sym, spent: +S.testModeSpentAmount.toFixed(2), cap: totalCap },
+            "[kalshi-bot] TEST HARD-CAP: session ceiling reached — all live entries blocked",
+          );
+          releaseConvictionEntryReservation("test hard-cap: session total ceiling reached");
+          setTickAbortReason(sym, windowKey,
+            `TEST MODE BLOCKED: $${S.testModeSpentAmount.toFixed(2)} of $${totalCap} session ceiling reached`);
+          return;
+        }
+        const cappedCount = Math.max(1, Math.floor(perBetCap / expectedFillCost));
+        if (cappedCount < contractCount) {
+          logger.info(
+            { sym, originalCount: contractCount, cappedCount, perBetCap, costPerContract: +expectedFillCost.toFixed(4) },
+            "[kalshi-bot] TEST HARD-CAP: capping contract count to enforce per-bet $ limit",
+          );
+          contractCount = cappedCount;
+        }
+      }
+      // ──────────────────────────────────────────────────────────────────────
+
       const entryTimeInForce: "fill_or_kill" | "immediate_or_cancel" =
         usedPollerFallback ? "fill_or_kill" : "immediate_or_cancel";
       const pollerFallbackLabel =
@@ -3463,6 +3490,13 @@ async function _runBotTick(
   // Only live entries consume real capital — paper bypass entries must not affect this counter.
   if (entryMode === "live") {
     S.dailySpendAmount += actualBetAmount;
+    if (S.config.testHardCapEnabled) {
+      S.testModeSpentAmount += actualBetAmount;
+      logger.info(
+        { sym, bet: +actualBetAmount.toFixed(2), sessionTotal: +S.testModeSpentAmount.toFixed(2), cap: S.config.testHardCapTotal ?? 4.00 },
+        "[kalshi-bot] TEST HARD-CAP: session spend updated",
+      );
+    }
   }
   // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
   // Mode-aware: paper and live each have their own counter (effectiveMode matches entryMode here).

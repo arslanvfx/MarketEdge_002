@@ -156,6 +156,9 @@ export const S = {
   dailyPnl: 0,
   dailyLossCount: 0,
   dailySpendAmount: 0,
+  // Accumulated gross spend while testHardCapEnabled is on.  Reset to 0 whenever
+  // testHardCapEnabled is toggled on so each test session starts from $0.
+  testModeSpentAmount: 0,
   dailyDate: new Date().toISOString().slice(0, 10),
   accountBalance: null as number | null,
   cbState: { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 } as CircuitBreakerState,

@@ -204,8 +204,24 @@ export async function runHighValueScalpForCoin(
 
   // Same reasoning as costPerContractScan: eligibility.price IS the ask cost.
   const costPerContract = finalEligibility.price;
-  const contracts = Math.floor(budget / costPerContract);
+  let contracts = Math.floor(budget / costPerContract);
   if (contracts < 1) return;
+
+  // ── TEST HARD-CAP MODE ────────────────────────────────────────────────────
+  if (config.testHardCapEnabled && mode === "live") {
+    const perBetCap = config.testHardCapPerBet ?? 1.00;
+    const totalCap  = config.testHardCapTotal  ?? 4.00;
+    if (S.testModeSpentAmount >= totalCap) {
+      logger.warn({ sym, spent: +S.testModeSpentAmount.toFixed(2), cap: totalCap }, "[high-value-scalp] TEST HARD-CAP: session ceiling reached — blocked");
+      return;
+    }
+    const cappedContracts = Math.max(1, Math.floor(perBetCap / costPerContract));
+    if (cappedContracts < contracts) {
+      logger.info({ sym, original: contracts, capped: cappedContracts, perBetCap }, "[high-value-scalp] TEST HARD-CAP: capping contracts to per-bet $ limit");
+      contracts = cappedContracts;
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   let filledCount = contracts;
   let fillYesPrice = finalEligibility.side === "yes" ? finalEligibility.price : 1 - finalEligibility.price;
@@ -238,6 +254,10 @@ export async function runHighValueScalpForCoin(
   const max = config.highValueScalpMaxPrice ?? 0.95;
   const actualSpend = filledCount * (finalEligibility.side === "yes" ? fillYesPrice : 1 - fillYesPrice);
   const actualSidePrice = finalEligibility.side === "yes" ? fillYesPrice : 1 - fillYesPrice;
+  if (config.testHardCapEnabled && mode === "live") {
+    S.testModeSpentAmount += actualSpend;
+    logger.info({ sym, spend: +actualSpend.toFixed(2), sessionTotal: +S.testModeSpentAmount.toFixed(2), cap: config.testHardCapTotal ?? 4.00 }, "[high-value-scalp] TEST HARD-CAP: session spend updated");
+  }
 
   // Out-of-band fill guard: if the exchange filled at a price outside the
   // configured band (race between final-check and fill), close immediately.

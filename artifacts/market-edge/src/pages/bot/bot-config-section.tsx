@@ -835,6 +835,68 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </div>
                 </>)}
 
+                {/* ── TEST HARD-CAP MODE ────────────────────────────────── */}
+                <div className="col-span-full border-t border-red-500/30 pt-3 -mt-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-red-400 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5" /> Test Hard-Cap Mode
+                    </span>
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <span className="text-[10px] text-muted-foreground">{(merged.testHardCapEnabled ?? false) ? "ON" : "OFF"}</span>
+                      <div
+                        className={`relative w-9 h-5 rounded-full transition-colors ${(merged.testHardCapEnabled ?? false) ? "bg-red-500" : "bg-muted"}`}
+                        onClick={() => setConfigDraft(d => ({ ...d, testHardCapEnabled: !(merged.testHardCapEnabled ?? false) }))}
+                      >
+                        <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(merged.testHardCapEnabled ?? false) ? "translate-x-4" : "translate-x-0"}`} />
+                      </div>
+                    </label>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/60 mt-0.5">
+                    Hard-locks every live bet to $1 max and stops all entries once the session total is hit — regardless of any other setting.
+                    Toggling ON resets the session counter to $0.
+                  </p>
+                  {(merged.testHardCapEnabled ?? false) && status && (
+                    <div className="mt-2 p-2 rounded bg-red-950/40 border border-red-500/30">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] font-semibold text-red-300">Session spend</span>
+                        <span className="text-[10px] font-mono text-red-300">
+                          ${(status.testModeSpentAmount ?? 0).toFixed(2)} / ${(merged.testHardCapTotal ?? 4).toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="w-full bg-red-950/60 rounded-full h-1.5">
+                        <div
+                          className="bg-red-500 h-1.5 rounded-full transition-all"
+                          style={{ width: `${Math.min(100, ((status.testModeSpentAmount ?? 0) / (merged.testHardCapTotal ?? 4)) * 100)}%` }}
+                        />
+                      </div>
+                      {(status.testModeSpentAmount ?? 0) >= (merged.testHardCapTotal ?? 4) && (
+                        <p className="text-[10px] text-red-400 mt-1 font-semibold">⛔ Session ceiling reached — all live entries blocked. Toggle off+on to reset.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Per-bet cap and total ceiling — visible only when test mode is enabled */}
+                {(merged.testHardCapEnabled ?? false) && (<>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Max $ per bet</span>
+                  <input type="number" min={0.50} max={10} step={0.50}
+                    className="bg-background border border-red-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.testHardCapPerBet ?? 1.00}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setConfigDraft(d => ({ ...d, testHardCapPerBet: v })); }} />
+                  <span className="text-[10px] text-muted-foreground/60">Each bet is capped to this amount before the order is sent</span>
+                </label>
+
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">Session ceiling ($)</span>
+                  <input type="number" min={1} max={50} step={1}
+                    className="bg-background border border-red-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
+                    value={merged.testHardCapTotal ?? 4.00}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setConfigDraft(d => ({ ...d, testHardCapTotal: v })); }} />
+                  <span className="text-[10px] text-muted-foreground/60">All entries stop once total session spend hits this ceiling</span>
+                </label>
+                </>)}
+
                 {/* ── Live Mode Guards ─────────────────────────────────── */}
                 <div className="col-span-full border-t border-amber-500/20 pt-3 -mt-1">
                   <span className="text-xs font-semibold text-amber-400/90 flex items-center gap-1.5">
