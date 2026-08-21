@@ -12,6 +12,7 @@ interface ActivePositionsProps {
 
 export function ActivePositions({ openPosList, closeManualError, closingManualSym, closeManualPos, openManualOrder }: ActivePositionsProps) {
   if (openPosList.length === 0) return null;
+  const scalperCardClass = "border-amber-400/65 bg-amber-300/[0.12] shadow-[inset_0_1px_0_rgba(253,230,138,0.14),0_10px_30px_rgba(217,119,6,0.08)]";
   return (
           <div className="space-y-3">
             {openPosList.length > 1 && (
@@ -36,17 +37,17 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
               return (
               <div key={pos.id} className={`border rounded-xl p-5 ${
                 isScalper
-                  ? "border-amber-500/45 bg-amber-950/10"
+                   ? scalperCardClass
                   : pos.direction === "yes"
                     ? "border-emerald-500/40 bg-emerald-950/20"
                     : "border-red-500/40 bg-red-950/20"
               }`}>
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3 flex-wrap">
-                    <div className={`text-2xl font-black ${pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
+                     <div className={`text-2xl font-black ${isScalper ? "text-amber-50" : pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
                       {pos.symbol}
                     </div>
-                    <span className={`text-sm font-bold px-3 py-1 rounded-full ${pos.direction === "yes" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300"}`}>
+                     <span className={`text-sm font-bold px-3 py-1 rounded-full ${isScalper ? "bg-amber-200/20 text-amber-50" : pos.direction === "yes" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300"}`}>
                       {pos.direction === "yes" ? "▲ YES" : "▼ NO"}
                     </span>
                     {isManual && (
@@ -102,7 +103,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 text-sm mb-4">
-                  {(isScalper ? [
+                   {(isScalper ? [
                     { label: `${pos.direction.toUpperCase()} Fill`, value: fmtPct(winningContractCost) },
                     { label: "YES Fill", value: fmtPct(pos.entryYesPrice) },
                     { label: "NO Fill", value: fmtPct(1 - pos.entryYesPrice) },
@@ -121,10 +122,10 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                     { label: "Bet Size", value: fmt$(pos.betAmount) },
                     { label: "Ticker", value: pos.ticker },
                     { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
-                  ]).map(({ label, value }) => (
-                    <div key={label} className="bg-background/30 rounded-lg p-2.5">
-                      <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">{label}</div>
-                      <div className="font-semibold text-foreground text-sm">{value}</div>
+                   ]).map(({ label, value }) => (
+                     <div key={label} className={`rounded-lg p-2.5 ${isScalper ? "border border-amber-200/10 bg-black/15" : "bg-background/30"}`}>
+                       <div className={`text-[10px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/55" : "text-muted-foreground"}`}>{label}</div>
+                       <div className={`font-semibold text-sm ${isScalper ? "text-amber-50" : "text-foreground"}`}>{value}</div>
                     </div>
                   ))}
                 </div>

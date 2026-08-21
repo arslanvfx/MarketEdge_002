@@ -4,6 +4,7 @@ import type { HistoryRecord } from "./types";
 import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtDuration, wkToEst } from "./utils";
 
 const HIST_PAGE_SIZE = 20;
+const SCALPER_CARD_CLASS = "border-amber-400/65 bg-amber-300/[0.12] ring-1 ring-inset ring-amber-500/40 shadow-[inset_0_1px_0_rgba(253,230,138,0.14),0_10px_30px_rgba(217,119,6,0.08)]";
 
 interface TransactionLogProps {
   pagedBets: HistoryRecord[];
@@ -122,8 +123,10 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const mlAbove = sigs?.mlAbove as boolean | null ?? null;
                 const agreementTarget = sigs?.agreementTarget as string | null ?? null;
 
-                const cardBg = isShadow
-                  ? "border-violet-500/20 bg-violet-950/5"
+                 const cardBg = isScalper
+                   ? SCALPER_CARD_CLASS
+                   : isShadow
+                   ? "border-violet-500/20 bg-violet-950/5"
                   : isSkip
                     ? "border-orange-500/20 bg-orange-950/5"
                     : isOpen
@@ -138,8 +141,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                               ? "border-amber-500/20 bg-amber-950/5"
                               : "border-border bg-card/60";
 
-                return (
-                  <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg} ${isScalper ? "ring-1 ring-inset ring-amber-500/35" : ""}`}>
+                 return (
+                   <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
                     {/* Card header */}
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <span className="text-base font-black tracking-tight text-foreground">{r.symbol}</span>
@@ -252,7 +255,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       )}
 
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
+                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isScalper ? "bg-amber-100/15 text-amber-50" : r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
                         {r.mode?.toUpperCase()}
                       </span>
 
@@ -299,13 +302,13 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
 
                     {/* Key metrics grid */}
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">{isScalper ? "Order" : "Strike"}</div>
-                        <div className="text-xs font-semibold font-mono">{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-200/10 bg-black/15" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/55" : "text-muted-foreground"}`}>{isScalper ? "Order" : "Strike"}</div>
+                         <div className={`text-xs font-semibold font-mono ${isScalper ? "text-amber-50" : ""}`}>{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
                       </div>
 
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-200/10 bg-black/15" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/55" : "text-muted-foreground"}`}>
                           {isScalper ? "Settlement" : closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
                         </div>
                         <div className="text-xs font-semibold font-mono flex items-center gap-1">
@@ -329,8 +332,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         )}
                       </div>
 
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Entry</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-200/10 bg-black/15" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/55" : "text-muted-foreground"}`}>Entry</div>
                         <div className="text-xs font-mono">
                           {ep != null ? (
                             <span>{(ep * 100).toFixed(0)}¢ YES · {((1 - ep) * 100).toFixed(0)}¢ NO</span>
@@ -338,8 +341,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
 
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">{isScalper ? "Result" : "Exit"}</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-200/10 bg-black/15" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/55" : "text-muted-foreground"}`}>{isScalper ? "Result" : "Exit"}</div>
                         <div className="text-xs font-mono">
                           {isScalper
                             ? (sigs?.settlementResult as string | null ?? (isOpen ? <span className="text-amber-300 text-[9px]">in play…</span> : "—"))
@@ -351,8 +354,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
 
-                      <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Size</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-200/10 bg-black/15" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/55" : "text-muted-foreground"}`}>Size</div>
                         <div className="text-xs font-semibold">
                           {r.contractCount ?? "—"} @ {(() => {
                             const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;

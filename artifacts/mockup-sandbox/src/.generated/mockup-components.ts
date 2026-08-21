@@ -5,5 +5,6 @@ export const modules: ModuleMap = {
   "./components/mockups/crypto-predictor/CardDeck.tsx": () => import("../components/mockups/crypto-predictor/CardDeck.tsx"),
   "./components/mockups/crypto-predictor/Glassmorphism.tsx": () => import("../components/mockups/crypto-predictor/Glassmorphism.tsx"),
   "./components/mockups/crypto-predictor/Synthwave.tsx": () => import("../components/mockups/crypto-predictor/Synthwave.tsx"),
-  "./components/mockups/crypto-predictor/Terminal.tsx": () => import("../components/mockups/crypto-predictor/Terminal.tsx")
+  "./components/mockups/crypto-predictor/Terminal.tsx": () => import("../components/mockups/crypto-predictor/Terminal.tsx"),
+  "./components/mockups/scalper-yellow-treatment/ScalperYellowTreatment.tsx": () => import("../components/mockups/scalper-yellow-treatment/ScalperYellowTreatment.tsx")
 };
