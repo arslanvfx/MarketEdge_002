@@ -31,6 +31,8 @@ import { CoinSignalBoard } from "./bot/coin-signal-board";
 import { KalshiLiveTickerPanel } from "./bot/kalshi-live-ticker-panel";
 import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 import { GapAnalyticsPanel } from "./bot/gap-analytics-panel";
+import { BotScalperPanel } from "./bot/bot-scalper-panel";
+import { ScalpTransactionLog } from "./bot/scalp-transaction-log";
 import type { GapAnalyticsResult } from "./bot/types";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
@@ -713,6 +715,7 @@ export default function BotDashboard() {
         />
         <PerCoinGuard coinGuardData={coinGuardData} />
         <WindowEvalTable evaluation={evaluation} openPosList={openPosList} openManualOrder={openManualOrder} />
+        <BotScalperPanel activeMode={activeMode} authPost={authPost} />
         <BotConfigSection
           cfg={cfg}
           merged={merged}
@@ -823,6 +826,13 @@ export default function BotDashboard() {
           setHistSourceFilter={setHistSourceFilter}
           activeMode={activeMode}
         />
+        
+        <ScalpTransactionLog
+          activeMode={activeMode}
+          historyMode={historyMode}
+          regularHistory={history}
+        />
+        
         <PerformanceInsights
           perfReportData={perfReportData}
           statsData={statsData}

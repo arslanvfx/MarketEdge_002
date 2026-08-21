@@ -6,6 +6,7 @@ import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
 import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, recomputeAllSymbolQuietHours, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
 import { pool, startPoolPinger } from "@workspace/db";
+import { initScalper } from "./lib/kalshi-scalper-service";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt, lastScanTime } from "./lib/stock/scanner";
@@ -639,6 +640,11 @@ app.listen(port, (err) => {
           );
         }
       });
+
+      // Bring up the isolated Kalshi scalper — fully independent of the regular bot.
+      initScalper().catch((err) =>
+        logger.warn({ err }, "[kalshi-scalper] startup failed (non-fatal)"),
+      );
 
       // Bring up the stock trading vertical independently — a failure here must
       // never take down the crypto tracker or Kalshi bot above.

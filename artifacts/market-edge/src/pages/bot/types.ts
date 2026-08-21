@@ -221,6 +221,7 @@ export interface OpenPosition {
   guardStates: GuardStates | null;
   guardReason: string | null;
   source?: "bot" | "manual";
+  decisionMode?: string;
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
 }
 
@@ -525,3 +526,106 @@ export interface CoinGuardState {
   coins: CoinGuardEntry[];
   maxDailyLossPerCoin: number;
 }
+
+export interface ScalperConfig {
+  enabled: boolean;
+  mode: "paper" | "live";
+  globalBandMin: number;
+  globalBandMax: number;
+  finalWindowSeconds: number;
+  budgetDollars: number;
+  dailyCapDollars: number | null;
+  openCapDollars: number | null;
+  freefallGuardEnabled: boolean;
+  freefallLookbackSeconds: number;
+  freefallThresholdPct: number;
+  circuitBreaker: boolean;
+  circuitBreakerReason: string | null;
+  perMarketOverrides: Array<{
+    symbol: string;
+    paused?: boolean;
+    minBand?: number | null;
+    maxBand?: number | null;
+    windowSeconds?: number | null;
+    budgetDollars?: number | null;
+  }>;
+}
+
+export interface ScalperStatusMarket {
+  symbol: string;
+  state: string;
+  effectiveBandMin: number;
+  effectiveBandMax: number;
+  effectiveWindowSeconds: number;
+  effectiveBudgetDollars: number;
+  lastAsk: number | null;
+  secondsRemaining: number | null;
+  freefallBlocked: boolean;
+  reason: string | null;
+}
+
+export interface ScalperStatus {
+  config: ScalperConfig;
+  circuitBreaker: boolean;
+  circuitBreakerReason: string | null;
+  mode: "paper" | "live";
+  totalReservationsToday: number;
+  openSpend: number;
+  dailySpend: number;
+  recentOrders: any[];
+  incidents: any[];
+  lastScanAt: string | null;
+  lastError: string | null;
+  markets: ScalperStatusMarket[];
+}
+
+export interface ScalpOrder {
+  id: string;
+  mode: "paper" | "live";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  side: "yes" | "no";
+  entryYesPrice: number;
+  contractCount: number;
+  budgetSpent: number;
+  orderId: string | null;
+  filledCount: number;
+  avgFillPrice: number | null;
+  limitPrice: number;
+  status: string;
+  error: string | null;
+  settlementResult: string | null;
+  outcome: "win" | "loss" | "open" | null;
+  pnl: number | null;
+  incidentId: string | null;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+export interface ScalperPerformanceBySymbol {
+  symbol: string;
+  orders: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  pnl: number;
+  spent: number;
+  avgFillPrice: number | null;
+}
+
+export interface ScalperPerformance {
+  mode: "paper" | "live";
+  totalOrders: number;
+  filledOrders: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  totalPnl: number;
+  totalSpent: number;
+  avgFillPrice: number | null;
+  bySymbol: ScalperPerformanceBySymbol[];
+}
+
