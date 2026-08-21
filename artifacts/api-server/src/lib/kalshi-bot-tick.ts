@@ -3278,13 +3278,20 @@ async function _runBotTick(
       // Invalidate the cached balance so the next entry guard fetches a fresh value.
       invalidateBalanceCache();
     } catch (err) {
-      logger.error({ err, sym }, "[kalshi-bot] order placement failed");
-      // Release conviction lock so the next tick can retry if the error is transient
-      // (e.g. network timeout, 429 rate-limit).  Permanent failures (e.g. invalid
-      // ticker, account suspended) will keep throwing and the window will expire.
-      releaseConvictionEntryReservation("order placement failed");
+      logger.error({ err, sym }, "[kalshi-bot] order placement failed — coin blocked for rest of window");
+      // DO NOT release convictionFiredThisWindow here.  We already sent a real
+      // order to Kalshi before reaching this catch — a network timeout, 429, or
+      // any other error after the HTTP request was dispatched does NOT mean the
+      // order was rejected.  Kalshi may have filled it.  Retrying after a
+      // placement error is dangerous: if the order went through we'd be doubling
+      // our position on every retry.  This was the root cause of 20+ SILVER
+      // duplicate orders ($80 loss): the catch cleared the lock, the 1-second
+      // poller immediately re-dispatched, and each retry placed another real order.
+      // Block the coin for the rest of the window.  The operator can check Kalshi
+      // order history to reconcile.  If the error was transient and the order
+      // genuinely failed, the next window will re-enter normally.
       setTickAbortReason(sym, windowKey,
-        `order placement failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}`);
+        `order placement failed (coin blocked): ${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}`);
       return;
     }
   }

@@ -16,6 +16,13 @@ description: Root cause and fix for multiple simultaneous Kalshi orders placed i
 3. In `kalshi-bot-loop.ts` window-transition cleanup: call `convictionDispatchInFlight.clear()` alongside `convictionFiredThisWindow.clear()`.
 4. `convictionFiredThisWindow` (set inside `_runBotTick` after a bet is recorded) is the durable guard; `convictionDispatchInFlight` only covers the brief window between OB pre-warm start and dispatch completion.
 
+## Conviction bot "order placement failed" retry — the REAL cause of 20+ SILVER bets
+`catch (err)` at the end of the IOC/FOK placement block (kalshi-bot-tick.ts) previously called `releaseConvictionEntryReservation("order placement failed")`, clearing `convictionFiredThisWindow`. Rationale was "retry on transient errors". But we already dispatched an HTTP request to Kalshi before hitting the catch — a network timeout or 429 does NOT mean Kalshi rejected the order. Retrying = doubling position on every retry. With a 1-second poller, 20 retries in 20 seconds = 20 real Kalshi orders.
+
+**Fix (applied):** Removed `releaseConvictionEntryReservation` from the catch block entirely. Placement errors now block the coin for the rest of the window. The operator must check Kalshi order history to reconcile. Normal entry resumes next window.
+
+**Rule:** Never retry after an order that was already dispatched to the exchange. The outcome is ambiguous. Fail closed.
+
 ## Root cause of 20+ duplicate SILVER bets (deeper bug)
 The `scalpDispatchInFlight` lock was a correct but INCOMPLETE fix. The real killer was inside `runHighValueScalpForCoin`:
 - `highValueScalpFiredThisWindow.add(firedKey)` was set AFTER the `await getCachedKalshiBalance()` call (line ~166), not before it — so the "synchronous before any await" comment in the docstring was wrong
