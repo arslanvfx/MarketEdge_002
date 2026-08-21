@@ -1583,14 +1583,14 @@ async function _executeScalpAttempt(
   }
 
   // ── Size the order STRICTLY within the durable reserved budget ─────────────
-  // Contract count = floor(reservedBudget / cappedWinningAsk); worst-case
-  // exposure (count * cappedWinningAsk) is guaranteed <= reservedBudget.
+  // Contract count = floor(reservedBudget / maxWinningCost); worst-case
+  // exposure at the band-capped IOC limit is guaranteed <= reservedBudget.
   const sized = sizeOrderWithinReservedBudget(reservedBudget, winningAsk, snapshot.bandMax);
   if (!sized.ok) {
     await updateReservationStatus(mode, symbol, windowKey, "skipped", sized.reason ?? "sizing_failed", true);
     return;
   }
-  const { contractCount, cappedWinningAsk, maxExposure } = sized;
+  const { contractCount, maxWinningCost, maxExposure } = sized;
 
   // ── FINAL live balance check against ACTUAL worst-case submit exposure ─────
   if (mode === "live") {
@@ -1605,7 +1605,7 @@ async function _executeScalpAttempt(
     }
     if (balanceResult.availableBalance < maxExposure) {
       logger.warn(
-        { symbol, available: balanceResult.availableBalance, maxExposure, contractCount, cappedWinningAsk },
+        { symbol, available: balanceResult.availableBalance, maxExposure, contractCount, maxWinningCost },
         "[kalshi-scalper] insufficient balance for worst-case exposure (final) — re-arming",
       );
       await updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance_final", true);
@@ -1629,10 +1629,11 @@ async function _executeScalpAttempt(
     return;
   }
 
-  // Compute limitPrice for placeOrder (always YES-side)
-  const limitPrice = computeLimitPrice(effectiveSide, cappedWinningAsk);
-  // entry_yes_price = the YES-side price at entry
-  const entryYesPrice = effectiveSide === "yes" ? cappedWinningAsk : 1 - cappedWinningAsk;
+  // Use the pinned band ceiling as a marketable IOC boundary, not the transient
+  // quote. Kalshi may price-improve inside this hard maximum winning cost.
+  const limitPrice = computeLimitPrice(effectiveSide, snapshot.bandMax);
+  // Preserve the authoritative observed quote separately for diagnostics.
+  const entryYesPrice = effectiveSide === "yes" ? winningAsk : 1 - winningAsk;
 
   // ── Place order or simulate ───────────────────────────────────────────────
   const orderId_pre = mode === "paper" ? `paper-${crypto.randomUUID()}` : null;
@@ -1689,11 +1690,12 @@ async function _executeScalpAttempt(
       await updateReservationStatus(mode, symbol, windowKey, "skipped", finalReasonPaper, true);
       return;
     }
-    // Paper: simulate full fill at capped winning ask; avgFillPrice is YES-side
+    // Paper: simulate price improvement at the authoritative observed quote;
+    // avgFillPrice remains YES-side while limitPrice records the hard IOC cap.
     filledCount = contractCount;
-    avgFillPrice = effectiveSide === "yes" ? cappedWinningAsk : 1 - cappedWinningAsk;
+    avgFillPrice = entryYesPrice;
     logger.info(
-      { symbol, side: effectiveSide, count: contractCount, winningAsk: cappedWinningAsk, limitPrice, avgFillPrice, windowKey },
+      { symbol, side: effectiveSide, count: contractCount, observedWinningAsk: winningAsk, maxWinningCost, limitPrice, avgFillPrice, windowKey },
       "[kalshi-scalper] PAPER order simulated",
     );
   } else {
@@ -1739,7 +1741,7 @@ async function _executeScalpAttempt(
       avgFillPrice = result.avgFillPrice; // YES-side fraction or null
       orderId = result.orderId;
       logger.info(
-        { symbol, side: effectiveSide, contractCount, outcome: result.outcome, reason: result.reason, filledCount: result.filledCount, avgFillPrice, limitPrice, windowKey },
+        { symbol, side: effectiveSide, contractCount, outcome: result.outcome, reason: result.reason, filledCount: result.filledCount, avgFillPrice, observedWinningAsk: winningAsk, maxWinningCost, limitPrice, windowKey },
         "[kalshi-scalper] LIVE order submitted (strict)",
       );
     } catch (err) {
@@ -2189,6 +2191,10 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
         reason: attempt.reason ?? null,
         reservedBudget: attempt.reservedBudget,
         submissionCount: attempt.submissionCount,
+        side: attempt.latestSide ?? null,
+        observedWinningAsk: attempt.observedWinningAsk ?? null,
+        executionWinningLimit: attempt.executionWinningLimit ?? null,
+        submittedLimitPrice: attempt.submittedLimitPrice ?? null,
         retryEligible: !retry.terminal,
         retryState:
           attempt.status === "claimed"

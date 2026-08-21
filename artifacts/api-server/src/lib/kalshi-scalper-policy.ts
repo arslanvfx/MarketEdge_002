@@ -13,9 +13,10 @@
 //   YES ask in [bandMin, bandMax]  → buy YES, winningContractCost = yesAsk
 //   NO  ask in [bandMin, bandMax]  → buy NO,  winningContractCost = noAsk
 //
-// At placeOrder boundary ONLY:
-//   YES: limitPrice (YES-side) = winningAsk  (= yesAsk)
-//   NO:  limitPrice (YES-side) = 1 - noAsk   (= yesBid, the NO cost complement)
+// At placeOrder boundary ONLY, use the configured band ceiling as the worst
+// acceptable winning-contract cost. Kalshi may price-improve inside that cap:
+//   YES: limitPrice (YES-side) = bandMax
+//   NO:  limitPrice (YES-side) = 1 - bandMax
 //
 // avgFillPrice from placeOrder is always YES-side fraction.
 //   YES winning contract cost at fill = avgFillPrice
@@ -113,21 +114,23 @@ export function selectScalpSide(
 }
 
 /**
- * Compute the YES-side limitPrice to pass to placeOrder for a given side and winningAsk.
- *   YES: limitPrice = winningAsk (already YES-side)
- *   NO:  limitPrice = 1 - winningAsk  (complement: noAsk = 1 - yesBid → yesBid = 1 - noAsk)
+ * Compute the marketable YES-side IOC limit from the configured maximum
+ * winning-contract cost. Kalshi price-improves fills, so this is a hard
+ * worst-acceptable boundary rather than the transient observed quote.
+ *
+ *   YES: highest acceptable YES cost = maxWinningCost
+ *   NO:  lowest acceptable YES price = 1 - maxWinningCost
  */
-export function computeLimitPrice(side: "yes" | "no", winningAsk: number): number {
-  // Round to cent precision (Kalshi only accepts prices at 1-cent resolution).
-  // Use Math.round to avoid floating-point accumulation errors (e.g. 1-0.93 ≈ 0.07000000000000006).
-  // YES: floor (never pay more than the ask)
-  // NO:  round (complement of winningAsk; tiny fp errors resolved by rounding)
-  if (side === "yes") {
-    return Math.max(0.01, Math.min(0.99, Math.floor(winningAsk * 100) / 100));
-  } else {
-    const yesSide = 1 - winningAsk;
-    return Math.max(0.01, Math.min(0.99, Math.round(yesSide * 100) / 100));
-  }
+export function computeLimitPrice(side: "yes" | "no", maxWinningCost: number): number {
+  // Quantize the winning cost down to a whole cent so the actual executable cap
+  // never exceeds configuration. Deriving the NO complement from integer cents
+  // avoids 1 - 0.95 floating-point drift accidentally becoming 0.06.
+  const maxWinningCents = Math.max(
+    1,
+    Math.min(99, Math.floor(maxWinningCost * 100 + 1e-9)),
+  );
+  const yesSideCents = side === "yes" ? maxWinningCents : 100 - maxWinningCents;
+  return yesSideCents / 100;
 }
 
 /**
@@ -690,18 +693,19 @@ export function compareRiskSnapshot(
 
 /**
  * Worst-case actual submit exposure for a limit IOC buy: contractCount priced
- * at the capped winning ask. This is the maximum dollars that could be spent if
+ * at the maximum winning cost. This is the maximum dollars that could be spent if
  * the whole order fills at the limit.
  */
-export function maxSubmitExposure(contractCount: number, cappedWinningAsk: number): number {
+export function maxSubmitExposure(contractCount: number, maxWinningCost: number): number {
   if (!Number.isFinite(contractCount) || contractCount <= 0) return 0;
-  if (!Number.isFinite(cappedWinningAsk) || cappedWinningAsk <= 0) return 0;
-  return contractCount * cappedWinningAsk;
+  if (!Number.isFinite(maxWinningCost) || maxWinningCost <= 0) return 0;
+  return contractCount * maxWinningCost;
 }
 
 export interface SizedOrderResult {
   contractCount: number;
-  cappedWinningAsk: number;
+  /** Cent-quantized worst acceptable winning-contract cost. */
+  maxWinningCost: number;
   maxExposure: number;
   /** true when a submittable order (>=1 contract) fits within reservedBudget. */
   ok: boolean;
@@ -711,8 +715,8 @@ export interface SizedOrderResult {
 /**
  * Size an order strictly within the durable reserved budget.
  *
- * Contract count = floor(reservedBudget / cappedWinningAsk), so the worst-case
- * exposure (count * cappedWinningAsk) is guaranteed <= reservedBudget. Includes
+ * Contract count = floor(reservedBudget / maxWinningCost), so the worst-case
+ * exposure at the band-capped IOC limit is guaranteed <= reservedBudget. Includes
  * an explicit post-condition assertion so sizing can NEVER exceed the reserved
  * amount even under odd rounding.
  */
@@ -722,20 +726,22 @@ export function sizeOrderWithinReservedBudget(
   bandMax: number,
 ): SizedOrderResult {
   const fail = (reason: string): SizedOrderResult => ({
-    contractCount: 0, cappedWinningAsk: 0, maxExposure: 0, ok: false, reason,
+    contractCount: 0, maxWinningCost: 0, maxExposure: 0, ok: false, reason,
   });
 
   if (!Number.isFinite(reservedBudget) || reservedBudget <= 0) return fail("reserved_budget_invalid");
   if (!Number.isFinite(winningAsk) || winningAsk <= 0 || winningAsk >= 1) return fail("winning_ask_invalid");
-  if (!Number.isFinite(bandMax) || bandMax <= 0 || bandMax >= 1) return fail("band_max_invalid");
+  if (!Number.isFinite(bandMax) || bandMax < 0.01 || bandMax >= 1) return fail("band_max_invalid");
+  if (winningAsk > bandMax + 1e-9) return fail("winning_ask_above_band_max");
 
-  // Never submit above the configured band maximum.
-  const cappedWinningAsk = Math.min(winningAsk, bandMax);
+  // Size against the same cent-quantized worst-case winning cost used by the
+  // actual IOC limit—not the transient quote that selected the candidate.
+  const maxWinningCost = computeLimitPrice("yes", bandMax);
 
-  const contractCount = computeContractCount(reservedBudget, cappedWinningAsk);
+  const contractCount = computeContractCount(reservedBudget, maxWinningCost);
   if (contractCount < 1) return fail("contract_count_zero");
 
-  const maxExposure = maxSubmitExposure(contractCount, cappedWinningAsk);
+  const maxExposure = maxSubmitExposure(contractCount, maxWinningCost);
 
   // Hard post-condition: exposure must not exceed the reserved budget. If it
   // somehow does (impossible with floor division, but assert defensively), fail
@@ -744,7 +750,7 @@ export function sizeOrderWithinReservedBudget(
     return fail("exposure_exceeds_reserved_budget");
   }
 
-  return { contractCount, cappedWinningAsk, maxExposure, ok: true, reason: null };
+  return { contractCount, maxWinningCost, maxExposure, ok: true, reason: null };
 }
 
 // ---------------------------------------------------------------------------

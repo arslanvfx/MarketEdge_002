@@ -83,8 +83,8 @@ function makeSignedHeaders(method: string, path: string): Record<string, string>
 export interface ScalpSubmitParams {
   ticker: string;
   side: "yes" | "no";
-  // Exact YES-side limit price as a fraction (0.01–0.99). Provided by the caller
-  // (the service already computed and clamped it). Sent at cent resolution.
+  // Hard YES-side IOC boundary as a fraction (0.01–0.99). The caller derives it
+  // from the pinned band ceiling; Kalshi may price-improve inside this limit.
   limitPrice: number;
   // Integer contract count (> 0).
   count: number;
@@ -101,7 +101,7 @@ export interface ScalpSubmitParams {
  *   - action is always BUY
  *   - side "yes"  → book "bid"   (acquire YES exposure)
  *     side "no"   → book "ask"   (acquire NO exposure)
- *   - price is the exact YES-side limitPrice at cent resolution
+ *   - price is the hard YES-side limitPrice at cent resolution
  *   - count is the integer contract count
  *   - time_in_force = "immediate_or_cancel"
  *   - self_trade_prevention_type = "taker_at_cross"

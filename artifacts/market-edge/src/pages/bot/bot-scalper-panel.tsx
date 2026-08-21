@@ -845,6 +845,9 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 const isFilled = attempt.status === "filled";
                 const isUnsafe = attempt.status === "unknown" || attempt.status === "error";
                 const isZeroFill = attempt.status === "zero_fill";
+                const executionPricing = attempt.observedWinningAsk != null && attempt.executionWinningLimit != null
+                  ? `${(attempt.observedWinningAsk * 100).toFixed(1).replace(/\.0$/, "")}¢ quote → ${(attempt.executionWinningLimit * 100).toFixed(1).replace(/\.0$/, "")}¢ ${attempt.mode === "live" ? "IOC" : "sim"} cap`
+                  : null;
                 return (
                   <div
                     key={attempt.id}
@@ -862,6 +865,14 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                     }`}>
                       {describeScalperAttempt(attempt)}
                     </span>
+                    {executionPricing && (
+                      <span
+                        className="text-[10px] text-amber-200/75 font-mono whitespace-nowrap"
+                        title={`Latest ${attempt.mode === "live" ? "submitted" : "simulated"} ${attempt.side?.toUpperCase() ?? ""} quote and worst acceptable winning-contract cost`}
+                      >
+                        {executionPricing}
+                      </span>
+                    )}
                     {isZeroFill && (
                       <span className="text-[10px] text-muted-foreground">
                         {attempt.retryEligible

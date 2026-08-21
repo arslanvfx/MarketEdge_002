@@ -98,6 +98,14 @@ export interface ScalpReservation {
   reservedBudget: number;
   /** Durable count of live IOC submissions for this symbol/window. */
   submissionCount: number;
+  /** Latest confirmed live outcome side, or simulated paper side. */
+  latestSide?: "yes" | "no";
+  /** Authoritative winning-contract quote for that submission/simulation. */
+  observedWinningAsk?: number;
+  /** Worst winning-contract cost for that proven submission/simulation. */
+  executionWinningLimit?: number;
+  /** Raw YES-side limit from a confirmed live outcome (live only). */
+  submittedLimitPrice?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +129,7 @@ export interface ScalpOrder {
   windowKey: string;
   ticker: string;
   side: "yes" | "no";
-  /** YES-side price we used when computing count (= winningAsk for YES, 1-winningAsk for NO) */
+  /** YES-side authoritative quote observed immediately before submission. */
   entryYesPrice: number;
   contractCount: number;
   /** Actual $ cost spent = winningContractCost * filledCount */

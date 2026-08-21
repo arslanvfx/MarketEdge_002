@@ -113,25 +113,45 @@ describe("selectScalpSide", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeLimitPrice", () => {
-  it("YES: limitPrice = winningAsk (floored to cent)", () => {
-    // winningAsk = 0.95 → floor(95) / 100 = 0.95
+  it("YES: uses the configured maximum winning cost", () => {
     assert.equal(computeLimitPrice("yes", 0.95), 0.95);
   });
 
-  it("YES: floors to cent (0.954 → 0.95)", () => {
+  it("YES: quantizes down so the limit never exceeds configuration", () => {
     assert.equal(computeLimitPrice("yes", 0.954), 0.95);
   });
 
-  it("NO: limitPrice = 1 - winningAsk (ceiled to cent)", () => {
-    // noAsk=0.93 → yesSide = 1 - 0.93 = 0.07 → ceil(7) / 100 = 0.07
-    assert.equal(computeLimitPrice("no", 0.93), 0.07);
+  it("NO: uses the symmetric YES-side complement of the winning-cost cap", () => {
+    assert.equal(computeLimitPrice("no", 0.95), 0.05);
   });
 
-  it("NO canonical: yesAsk=0.05 → noAsk=0.93 → limitPrice=0.07 (YES-side)", () => {
-    // noAsk = 0.93, limitPrice for placeOrder (YES-side) = 1 - 0.93 = 0.07
-    const noAsk = 0.93;
-    const limitPrice = computeLimitPrice("no", noAsk);
-    assert.equal(limitPrice, 0.07);
+  it("NO: non-cent configuration remains inside the configured cap", () => {
+    const limitPrice = computeLimitPrice("no", 0.955);
+    assert.equal(limitPrice, 0.05);
+    assert.ok(1 - limitPrice <= 0.955);
+  });
+
+  it("YES remains marketable after a one-cent in-band quote move", () => {
+    const observedWinningAsk = 0.92;
+    const movedWinningAsk = observedWinningAsk + 0.01;
+    const limitPrice = computeLimitPrice("yes", 0.95);
+    assert.ok(limitPrice >= movedWinningAsk);
+  });
+
+  it("NO remains marketable after the symmetric one-cent in-band move", () => {
+    const observedNoAsk = 0.92;
+    const movedNoAsk = observedNoAsk + 0.01;
+    const movedYesBid = 1 - movedNoAsk;
+    const yesSideLimit = computeLimitPrice("no", 0.95);
+    assert.ok(yesSideLimit <= movedYesBid);
+  });
+
+  it("allows Kalshi price improvement inside the hard execution cap", () => {
+    const limitPrice = computeLimitPrice("yes", 0.95);
+    const improvedFill = 0.92;
+    assert.ok(improvedFill < limitPrice);
+    assert.equal(winningCostFromFill("yes", improvedFill), improvedFill);
+    assert.equal(isFillWithinBand("yes", improvedFill, 0.91, 0.95), true);
   });
 
   it("clamps to [0.01, 0.99]", () => {
@@ -326,9 +346,9 @@ describe("validateOrderbookQuote", () => {
     assert.ok(match);
     assert.equal(match.side, "no");
     assert.ok(Math.abs(match.winningAsk - 0.93) < 0.0001);
-    // limitPrice = 1 - noAsk = 0.07 (YES-side for placeOrder)
-    const lp = computeLimitPrice("no", match.winningAsk);
-    assert.equal(lp, 0.07);
+    // With a 0.98 band cap, the marketable NO limit is YES-side 0.02.
+    const lp = computeLimitPrice("no", 0.98);
+    assert.equal(lp, 0.02);
     // P&L on NO win: payout = avgFillPrice (YES-side = 0.07)
     const pnl = computeScalpPnl("live", "no", 1, 0.07, "no");
     assert.ok(Math.abs(pnl - 0.07) < 0.0001, `NO win pnl expected +0.07 got ${pnl}`);
@@ -1062,13 +1082,14 @@ describe("NO contract end-to-end", () => {
     assert.equal(match.side, "no");
     assert.ok(Math.abs(match.winningAsk - 0.93) < 0.0001, `winningAsk expected ~0.93 got ${match.winningAsk}`);
 
-    // STEP 3: Contract count
-    const count = computeContractCount(2.00, match.winningAsk);
-    assert.equal(count, 2); // floor(2.00 / 0.93) = 2
+    // STEP 3: Contract count uses the worst acceptable cost, not the quote.
+    const sized = sizeOrderWithinReservedBudget(2.00, match.winningAsk, 0.98);
+    assert.equal(sized.ok, true);
+    assert.equal(sized.contractCount, 2);
 
-    // STEP 4: limitPrice (YES-side for placeOrder)
-    const limitPrice = computeLimitPrice("no", match.winningAsk);
-    assert.equal(limitPrice, 0.07); // 1 - 0.93 = 0.07 (ceiled to cent)
+    // STEP 4: limitPrice accepts any in-band NO cost up to 0.98.
+    const limitPrice = computeLimitPrice("no", 0.98);
+    assert.equal(limitPrice, 0.02);
 
     // STEP 5: Winning-contract cost from fill (avgFillPrice=0.07, YES-side)
     const wc = winningCostFromFill("no", 0.07);
@@ -1258,23 +1279,33 @@ describe("maxSubmitExposure", () => {
 });
 
 describe("sizeOrderWithinReservedBudget", () => {
-  it("sizes count = floor(reserved / cappedAsk) and exposure <= reserved", () => {
-    // reserved=2, ask=0.9 → floor(2/0.9)=2 → exposure=1.8 <= 2
+  it("sizes against the worst acceptable band cost, not the observed quote", () => {
+    // observed=0.90, cap=0.98 → floor(2/0.98)=2 → exposure=1.96 <= 2
     const r = sizeOrderWithinReservedBudget(2, 0.9, 0.98);
     assert.equal(r.ok, true);
     assert.equal(r.contractCount, 2);
-    assert.equal(r.cappedWinningAsk, 0.9);
+    assert.equal(r.maxWinningCost, 0.98);
     assert.ok(r.maxExposure <= 2, `exposure ${r.maxExposure} must be <= 2`);
-    assert.ok(Math.abs(r.maxExposure - 1.8) < 1e-9);
+    assert.ok(Math.abs(r.maxExposure - 1.96) < 1e-9);
   });
 
-  it("caps the ask at bandMax before sizing", () => {
-    // ask 0.99 above bandMax 0.95 → cappedAsk=0.95; reserved=2 → floor(2/0.95)=2
+  it("fails closed if an out-of-band quote reaches sizing", () => {
     const r = sizeOrderWithinReservedBudget(2, 0.99, 0.95);
-    assert.equal(r.ok, true);
-    assert.equal(r.cappedWinningAsk, 0.95);
-    assert.equal(r.contractCount, 2);
-    assert.ok(r.maxExposure <= 2);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, "winning_ask_above_band_max");
+  });
+
+  it("keeps YES and NO order counts inside a 95-cent execution cap", () => {
+    const yes = sizeOrderWithinReservedBudget(5, 0.92, 0.95);
+    const no = sizeOrderWithinReservedBudget(5, 0.91, 0.95);
+    assert.equal(yes.contractCount, 5);
+    assert.equal(no.contractCount, 5);
+    assert.equal(yes.maxWinningCost, 0.95);
+    assert.equal(no.maxWinningCost, 0.95);
+    assert.equal(computeLimitPrice("yes", yes.maxWinningCost), 0.95);
+    assert.equal(computeLimitPrice("no", no.maxWinningCost), 0.05);
+    assert.ok(yes.maxExposure <= 5);
+    assert.ok(no.maxExposure <= 5);
   });
 
   it("EXPOSURE NEVER EXCEEDS reserved across a sweep of budgets/asks", () => {
@@ -1284,7 +1315,7 @@ describe("sizeOrderWithinReservedBudget", () => {
         if (r.ok) {
           assert.ok(
             r.maxExposure <= reserved + 1e-9,
-            `exposure ${r.maxExposure} exceeded reserved ${reserved} (count=${r.contractCount} ask=${r.cappedWinningAsk})`,
+            `exposure ${r.maxExposure} exceeded reserved ${reserved} (count=${r.contractCount} cap=${r.maxWinningCost})`,
           );
           assert.ok(r.contractCount >= 1);
         }
@@ -1293,7 +1324,7 @@ describe("sizeOrderWithinReservedBudget", () => {
   });
 
   it("reserved too small for one contract => not ok (contract_count_zero)", () => {
-    // reserved=0.5, ask=0.9 → floor(0.5/0.9)=0
+    // reserved=0.5, cap=0.98 → floor(0.5/0.98)=0
     const r = sizeOrderWithinReservedBudget(0.5, 0.9, 0.98);
     assert.equal(r.ok, false);
     assert.equal(r.reason, "contract_count_zero");
@@ -1651,6 +1682,22 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(!/\+\s*\(SELECT COUNT/.test(countSql), "must not add matching order and reservation rows");
   });
 
+  it("recent execution diagnostics exclude never-submitted and in-flight intents", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const db = readFileSync(join(here, "kalshi-scalper-db.ts"), "utf8");
+    const start = db.indexOf("export async function getRecentScalpReservations");
+    const end = db.indexOf("// Atomic finalize-and-release", start);
+    const recent = db.slice(start, end);
+    const lateralStart = recent.indexOf("LEFT JOIN LATERAL");
+    const lateralEnd = recent.indexOf(") latest_order ON TRUE", lateralStart);
+    const latestProvenOrder = recent.slice(lateralStart, lateralEnd);
+    assert.match(latestProvenOrder, /o\.status IN \('filled', 'zero_fill'\)/);
+    assert.match(latestProvenOrder, /o\.status = 'paper'/);
+    assert.ok(!latestProvenOrder.includes("'submitting'"));
+    assert.ok(!latestProvenOrder.includes("'skipped'"));
+    assert.ok(!latestProvenOrder.includes("'unknown'"));
+  });
+
   it("reconciled fills preserve out-of-band breaker safety before releasing reservations", () => {
     const start = idx("async function _applyScalpReconciliation");
     const end = svc.indexOf("async function _evaluateCandidate", start);
@@ -1784,6 +1831,19 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(sized < place, "sizing must precede submit");
     // reservedBudget is snapshot.budgetDollars
     assert.match(svc, /const reservedBudget = snapshot\.budgetDollars/);
+  });
+
+  it("uses the pinned band ceiling for IOC limit while retaining the authoritative quote", () => {
+    assert.match(svc, /const limitPrice = computeLimitPrice\(effectiveSide, snapshot\.bandMax\)/);
+    assert.match(
+      svc,
+      /const entryYesPrice = effectiveSide === "yes" \? winningAsk : 1 - winningAsk/,
+    );
+    assert.match(
+      svc,
+      /avgFillPrice = entryYesPrice/,
+      "paper fills should model price improvement at the observed quote",
+    );
   });
 
   it("FINAL balance check uses worst-case maxExposure before order intent/submit", () => {

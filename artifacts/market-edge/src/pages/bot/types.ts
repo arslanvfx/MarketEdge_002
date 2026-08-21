@@ -638,6 +638,10 @@ export interface ScalperAttempt {
   reason: string | null;
   reservedBudget: number;
   submissionCount: number;
+  side: "yes" | "no" | null;
+  observedWinningAsk: number | null;
+  executionWinningLimit: number | null;
+  submittedLimitPrice: number | null;
   retryEligible: boolean;
   retryState: "ready" | "cooldown" | "in_flight" | "terminal";
   retryAfterMs: number | null;

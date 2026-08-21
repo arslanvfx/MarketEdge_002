@@ -625,6 +625,9 @@ export async function getRecentScalpReservations(opts: {
     const res = await client.query(
       `SELECT r.id, r.mode, r.symbol, r.window_key, r.ticker, r.status, r.reason,
                r.reserved_budget, r.created_at, r.attempted_at,
+               latest_order.side AS latest_side,
+               latest_order.entry_yes_price AS latest_entry_yes_price,
+               latest_order.limit_price AS latest_limit_price,
                (SELECT COUNT(*)::int
                   FROM kalshi_scalp_orders o
                   WHERE o.mode = r.mode
@@ -632,28 +635,63 @@ export async function getRecentScalpReservations(opts: {
                     AND o.window_key = r.window_key
                     AND o.status IN ('filled', 'zero_fill', 'submitting', 'unknown')) AS submission_count
        FROM kalshi_scalp_reservations r
+       LEFT JOIN LATERAL (
+         SELECT o.side, o.entry_yes_price, o.limit_price
+         FROM kalshi_scalp_orders o
+         WHERE o.mode = r.mode
+           AND o.symbol = r.symbol
+           AND o.window_key = r.window_key
+           AND (
+             (r.mode = 'live' AND o.status IN ('filled', 'zero_fill'))
+             OR (r.mode = 'paper' AND o.status = 'paper')
+           )
+         ORDER BY o.created_at DESC
+         LIMIT 1
+       ) latest_order ON TRUE
        ${where}
        ORDER BY r.attempted_at DESC
        LIMIT $${idx}`,
       params,
     );
-    return res.rows.map((row) => ({
-      id: String(row["id"]),
-      mode: String(row["mode"]) as ScalpMode,
-      symbol: String(row["symbol"]),
-      windowKey: String(row["window_key"]),
-      ticker: String(row["ticker"]),
-      status: String(row["status"]) as ScalpReservation["status"],
-      reason: row["reason"] != null ? String(row["reason"]) : undefined,
-      reservedBudget: Number(row["reserved_budget"] ?? 0),
-      submissionCount: Number(row["submission_count"] ?? 0),
-      createdAt: row["created_at"] instanceof Date
-        ? row["created_at"]
-        : new Date(String(row["created_at"])),
-      attemptedAt: row["attempted_at"] instanceof Date
-        ? row["attempted_at"]
-        : new Date(String(row["attempted_at"])),
-    }));
+    return res.rows.map((row) => {
+      const latestSide = row["latest_side"] === "yes" || row["latest_side"] === "no"
+        ? row["latest_side"] as "yes" | "no"
+        : undefined;
+      const entryYesPrice = row["latest_entry_yes_price"] != null
+        ? Number(row["latest_entry_yes_price"])
+        : null;
+      const submittedLimitPrice = row["latest_limit_price"] != null
+        ? Number(row["latest_limit_price"])
+        : null;
+      const observedWinningAsk = latestSide && entryYesPrice != null && Number.isFinite(entryYesPrice)
+        ? (latestSide === "yes" ? entryYesPrice : 1 - entryYesPrice)
+        : undefined;
+      const executionWinningLimit = latestSide && submittedLimitPrice != null && Number.isFinite(submittedLimitPrice)
+        ? (latestSide === "yes" ? submittedLimitPrice : 1 - submittedLimitPrice)
+        : undefined;
+      const mode = String(row["mode"]) as ScalpMode;
+      return {
+        id: String(row["id"]),
+        mode,
+        symbol: String(row["symbol"]),
+        windowKey: String(row["window_key"]),
+        ticker: String(row["ticker"]),
+        status: String(row["status"]) as ScalpReservation["status"],
+        reason: row["reason"] != null ? String(row["reason"]) : undefined,
+        reservedBudget: Number(row["reserved_budget"] ?? 0),
+        submissionCount: Number(row["submission_count"] ?? 0),
+        latestSide,
+        observedWinningAsk,
+        executionWinningLimit,
+        submittedLimitPrice: mode === "live" ? submittedLimitPrice ?? undefined : undefined,
+        createdAt: row["created_at"] instanceof Date
+          ? row["created_at"]
+          : new Date(String(row["created_at"])),
+        attemptedAt: row["attempted_at"] instanceof Date
+          ? row["attempted_at"]
+          : new Date(String(row["attempted_at"])),
+      };
+    });
   } finally {
     client.release();
   }
