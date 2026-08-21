@@ -282,6 +282,7 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
     freefallGuardEnabled: typeof raw["freefallGuardEnabled"] === "boolean" ? raw["freefallGuardEnabled"] : defaults.freefallGuardEnabled,
     freefallLookbackSeconds: typeof raw["freefallLookbackSeconds"] === "number" ? raw["freefallLookbackSeconds"] : defaults.freefallLookbackSeconds,
     freefallThresholdPct: typeof raw["freefallThresholdPct"] === "number" ? raw["freefallThresholdPct"] : defaults.freefallThresholdPct,
+    circuitBreakerEnabled: typeof raw["circuitBreakerEnabled"] === "boolean" ? raw["circuitBreakerEnabled"] : defaults.circuitBreakerEnabled,
     circuitBreaker: typeof raw["circuitBreaker"] === "boolean" ? raw["circuitBreaker"] : defaults.circuitBreaker,
     circuitBreakerReason: typeof raw["circuitBreakerReason"] === "string" ? raw["circuitBreakerReason"] : (raw["circuitBreakerReason"] === null ? null : defaults.circuitBreakerReason),
     perMarketOverrides: Array.isArray(raw["perMarketOverrides"])

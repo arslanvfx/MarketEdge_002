@@ -540,6 +540,7 @@ export interface ScalperConfig {
   freefallGuardEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
+  circuitBreakerEnabled: boolean;
   circuitBreaker: boolean;
   circuitBreakerReason: string | null;
   perMarketOverrides: Array<{
@@ -569,6 +570,7 @@ export interface ScalperStatus {
   config: ScalperConfig;
   circuitBreaker: boolean;
   circuitBreakerReason: string | null;
+  circuitBreakerMessage: string;
   mode: "paper" | "live";
   totalReservationsToday: number;
   openSpend: number;

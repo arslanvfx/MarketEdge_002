@@ -30,6 +30,8 @@ import {
   validateOrderbookQuote,
   validateScalpConfigPartial,
   parseScalpConfigPatch,
+  describeScalpCircuitBreakerReason,
+  preserveNewerScalpBreakerState,
   resolveEffectiveParams,
   evaluateScalpReservationRetry,
   SCALP_AUTH_RETRY_COOLDOWN_MS,
@@ -1334,6 +1336,14 @@ describe("parseScalpConfigPatch", () => {
     assert.deepEqual(r.ok && r.value, { enabled: false });
   });
 
+  it("accepts a real circuit-breaker enforcement boolean and rejects coercion", () => {
+    assert.deepEqual(
+      parseScalpConfigPatch({ circuitBreakerEnabled: false }),
+      { ok: true, value: { circuitBreakerEnabled: false } },
+    );
+    assert.equal(parseScalpConfigPatch({ circuitBreakerEnabled: "false" }).ok, false);
+  });
+
   it("rejects freefallGuardEnabled non-boolean", () => {
     const r = parseScalpConfigPatch({ freefallGuardEnabled: 1 });
     assert.equal(r.ok, false);
@@ -1478,6 +1488,47 @@ describe("parseScalpConfigPatch", () => {
 
   it("empty object is a valid no-op patch", () => {
     assert.deepEqual(parseScalpConfigPatch({}), { ok: true, value: {} });
+  });
+});
+
+describe("describeScalpCircuitBreakerReason", () => {
+  it("explains an out-of-band fill in plain English", () => {
+    assert.equal(
+      describeScalpCircuitBreakerReason("fill_outside_band:BTC:yes:cost=0.9912:band=[0.91,0.98]"),
+      "BTC YES filled at 99.12¢, outside your allowed 91¢–98¢ range.",
+    );
+  });
+
+  it("explains uncertain order outcomes without exposing machine codes", () => {
+    const message = describeScalpCircuitBreakerReason("scalp_submit_threw:ETH:2026-08-21T15:30");
+    assert.equal(message, "Kalshi did not confirm whether the ETH order was accepted or filled.");
+    assert.doesNotMatch(message, /scalp_submit_threw|_/);
+  });
+
+  it("uses a readable fallback for legacy or unknown reasons", () => {
+    const message = describeScalpCircuitBreakerReason("legacy_internal_code");
+    assert.match(message, /live-order safety problem/i);
+    assert.doesNotMatch(message, /legacy_internal_code|_/);
+  });
+});
+
+describe("preserveNewerScalpBreakerState", () => {
+  it("allows an intentional reset when no newer event occurred", () => {
+    const proposed = { enabled: true, circuitBreaker: false, circuitBreakerReason: null };
+    const latest = { circuitBreaker: true, circuitBreakerReason: "old_event" };
+    assert.deepEqual(
+      preserveNewerScalpBreakerState(proposed, latest, 4, 4),
+      proposed,
+    );
+  });
+
+  it("preserves a breaker event that arrived during an async config save", () => {
+    const proposed = { enabled: false, circuitBreaker: false, circuitBreakerReason: null };
+    const latest = { circuitBreaker: true, circuitBreakerReason: "new_event" };
+    assert.deepEqual(
+      preserveNewerScalpBreakerState(proposed, latest, 4, 5),
+      { enabled: false, circuitBreaker: true, circuitBreakerReason: "new_event" },
+    );
   });
 });
 

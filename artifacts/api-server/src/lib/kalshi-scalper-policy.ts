@@ -1181,7 +1181,74 @@ export function validateScalpConfigPartial(
 // errors. It is the single source of truth for what an operator POST may change.
 // ---------------------------------------------------------------------------
 
-/** Operator-settable fields only. Internal breaker fields are NOT allowed. */
+/**
+ * Convert the server-owned breaker reason code into operator-facing language.
+ * Never expose raw machine strings in the dashboard; unknown legacy values get
+ * a safe generic explanation instead.
+ */
+export function describeScalpCircuitBreakerReason(reason: string | null): string {
+  if (!reason) {
+    return "The Scalper recorded a safety event, but no additional details were available.";
+  }
+
+  if (reason === "submitting_order_found_after_restart") {
+    return "The Scalper restarted while a live order was still being submitted, so it could not confirm whether that order filled.";
+  }
+
+  const outsideBand = reason.match(
+    /^fill_outside_band:([^:]+):(yes|no):cost=([0-9.]+):band=\[([0-9.]+),([0-9.]+)\]$/,
+  );
+  if (outsideBand) {
+    const [, symbol, side, costText, minText, maxText] = outsideBand;
+    const cost = Number(costText) * 100;
+    const min = Number(minText) * 100;
+    const max = Number(maxText) * 100;
+    const cents = (value: number): string =>
+      `${value.toFixed(2).replace(/\.?0+$/, "")}¢`;
+    return `${symbol} ${side.toUpperCase()} filled at ${cents(cost)}, outside your allowed ${cents(min)}–${cents(max)} range.`;
+  }
+
+  if (reason.startsWith("scalp_submit_threw:")) {
+    const symbol = reason.split(":")[1] || "live";
+    return `Kalshi did not confirm whether the ${symbol} order was accepted or filled.`;
+  }
+
+  if (reason.startsWith("unknown_confirmed_exposure:")) {
+    const symbol = reason.split(":")[1] || "live";
+    return `Kalshi reported that the ${symbol} order filled, but the Scalper could not verify its fill price.`;
+  }
+
+  if (reason.startsWith("post_submit_persist_failed:")) {
+    const symbol = reason.split(":")[2] || "live";
+    return `The ${symbol} order reached Kalshi, but the Scalper could not safely save its final result.`;
+  }
+
+  return "The Scalper detected a live-order safety problem that it could not verify automatically. Review recent incidents before continuing.";
+}
+
+/**
+ * A breaker event that happens during an async config write must win over the
+ * write's stale proposed latch fields. When the version is unchanged, explicit
+ * reset behavior is preserved.
+ */
+export function preserveNewerScalpBreakerState<T extends {
+  circuitBreaker: boolean;
+  circuitBreakerReason: string | null;
+}>(
+  proposed: T,
+  latest: Pick<T, "circuitBreaker" | "circuitBreakerReason">,
+  versionAtStart: number,
+  latestVersion: number,
+): T {
+  if (latestVersion === versionAtStart) return proposed;
+  return {
+    ...proposed,
+    circuitBreaker: latest.circuitBreaker,
+    circuitBreakerReason: latest.circuitBreakerReason,
+  };
+}
+
+/** Operator-settable fields only. Internal breaker state fields are NOT allowed. */
 export interface ScalpPerMarketOverridePatch {
   symbol: string;
   paused?: boolean;
@@ -1203,6 +1270,7 @@ export interface ScalpConfigPatch {
   freefallGuardEnabled?: boolean;
   freefallLookbackSeconds?: number;
   freefallThresholdPct?: number;
+  circuitBreakerEnabled?: boolean;
   perMarketOverrides?: ScalpPerMarketOverridePatch[];
 }
 
@@ -1210,8 +1278,9 @@ export type ParseScalpConfigResult =
   | { ok: true; value: ScalpConfigPatch }
   | { ok: false; errors: string[] };
 
-// Allowlist of top-level operator fields. circuitBreaker / circuitBreakerReason
-// are DELIBERATELY excluded — the breaker resets only via its dedicated route.
+// Allowlist of top-level operator fields. The enforcement toggle is operator
+// owned; latched circuitBreaker / circuitBreakerReason remain server-owned and
+// reset only via the dedicated route.
 const ALLOWED_TOP_LEVEL_FIELDS = new Set<string>([
   "enabled",
   "mode",
@@ -1224,6 +1293,7 @@ const ALLOWED_TOP_LEVEL_FIELDS = new Set<string>([
   "freefallGuardEnabled",
   "freefallLookbackSeconds",
   "freefallThresholdPct",
+  "circuitBreakerEnabled",
   "perMarketOverrides",
 ]);
 
@@ -1246,7 +1316,7 @@ function isFiniteNumber(v: unknown): v is number {
  *
  * Rejects (never coerces):
  *   - unknown top-level keys (incl. circuitBreaker / circuitBreakerReason)
- *   - enabled / freefallGuardEnabled that are not real booleans
+ *   - enabled / freefallGuardEnabled / circuitBreakerEnabled that are not booleans
  *   - mode that is not exactly "paper" | "live"
  *   - numeric fields that are not finite JSON numbers, or out of range
  *   - nullable caps that are anything other than number | null
@@ -1283,6 +1353,10 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   if (has("freefallGuardEnabled")) {
     if (typeof body["freefallGuardEnabled"] !== "boolean") errors.push("freefallGuardEnabled must be a boolean");
     else out.freefallGuardEnabled = body["freefallGuardEnabled"];
+  }
+  if (has("circuitBreakerEnabled")) {
+    if (typeof body["circuitBreakerEnabled"] !== "boolean") errors.push("circuitBreakerEnabled must be a boolean");
+    else out.circuitBreakerEnabled = body["circuitBreakerEnabled"];
   }
 
   // ── mode (exact string) ──

@@ -28,6 +28,9 @@ export interface ScalpConfig {
   freefallGuardEnabled: boolean;    // default true
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;     // % adverse underlying move that blocks entry
+  /** Operator control for whether a latched breaker halts new attempts.
+   *  Trigger state/reason are always recorded even when enforcement is off. */
+  circuitBreakerEnabled: boolean;
   circuitBreaker: boolean;
   circuitBreakerReason: string | null; // why the breaker tripped
   perMarketOverrides: ScalpPerMarketOverride[];
@@ -45,6 +48,7 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   freefallGuardEnabled: true,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
+  circuitBreakerEnabled: true,
   circuitBreaker: false,
   circuitBreakerReason: null,
   perMarketOverrides: [],

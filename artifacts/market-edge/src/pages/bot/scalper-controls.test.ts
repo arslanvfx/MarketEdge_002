@@ -29,6 +29,17 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /\(\["paper", "live"\] as const\)\.map/);
   });
 
+  it("offers independent circuit-breaker protection with a risk warning", () => {
+    assert.match(panelSource, /switch-scalper-circuit-breaker/);
+    assert.match(panelSource, /Circuit-breaker protection is off/);
+    assert.match(panelSource, /will no longer pause new Scalper attempts/);
+  });
+
+  it("shows the server's plain-English circuit-breaker explanation instead of its raw code", () => {
+    assert.match(panelSource, /statusData\?\.circuitBreakerMessage/);
+    assert.doesNotMatch(panelSource, /\{merged\.circuitBreakerReason/);
+  });
+
   it("uses signed-in access without a separate secret or role-claim step", () => {
     assert.match(panelSource, /Signed-in access verified/);
     assert.doesNotMatch(panelSource, /\/crypto\/scalper\/admin\/claim/);

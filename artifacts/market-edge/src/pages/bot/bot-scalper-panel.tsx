@@ -18,7 +18,7 @@ interface ScalperCapability {
   message: string | null;
 }
 
-type MutationName = "enable" | "mode" | "save" | "reset";
+type MutationName = "enable" | "breaker" | "mode" | "save" | "reset";
 type Notice = { kind: "success" | "error"; text: string };
 
 export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
@@ -170,6 +170,23 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     );
   }
 
+  async function toggleCircuitBreakerProtection(): Promise<void> {
+    const next = !(merged.circuitBreakerEnabled ?? true);
+    if (
+      !next
+      && !window.confirm(
+        "Turn off Scalper circuit-breaker protection? Safety events and reasons will still be recorded, but they will no longer pause new Scalper attempts.",
+      )
+    ) {
+      return;
+    }
+    await applyConfigPatch(
+      { circuitBreakerEnabled: next },
+      "breaker",
+      next ? "Scalper circuit-breaker protection enabled" : "Scalper circuit-breaker protection disabled",
+    );
+  }
+
   async function setScalperMode(mode: "paper" | "live"): Promise<void> {
     if (mode === scalperMode) return;
     await applyConfigPatch(
@@ -267,6 +284,26 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           <button
             type="button"
             role="switch"
+            data-testid="switch-scalper-circuit-breaker"
+            aria-checked={merged.circuitBreakerEnabled !== false}
+            aria-label="Enable or disable Scalper circuit-breaker protection"
+            onClick={toggleCircuitBreakerProtection}
+            disabled={!canManage || mutationBusy !== null}
+            className="flex flex-col items-start gap-1 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="text-[9px] uppercase font-bold tracking-widest text-muted-foreground">Circuit Breaker</span>
+            <span className="flex items-center gap-2">
+              <span className={`relative h-5 w-9 rounded-full transition-colors ${merged.circuitBreakerEnabled !== false ? "bg-emerald-500" : "bg-red-500"}`}>
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${merged.circuitBreakerEnabled !== false ? "translate-x-4.5" : "translate-x-0.5"}`} />
+              </span>
+              <span className={`text-xs font-bold ${merged.circuitBreakerEnabled !== false ? "text-emerald-400" : "text-red-300"}`}>
+                {mutationBusy === "breaker" ? "Saving…" : merged.circuitBreakerEnabled !== false ? "Protected" : "Off"}
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            role="switch"
             aria-checked={Boolean(merged.enabled)}
             aria-label="Enable or disable the Scalper"
             onClick={toggleMaster}
@@ -309,6 +346,18 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
             ? <AlertTriangle className="w-4 h-4 shrink-0" />
             : <CheckCircle2 className="w-4 h-4 shrink-0" />}
           {notice.text}
+        </div>
+      )}
+
+      {merged.circuitBreakerEnabled === false && (
+        <div
+          data-testid="warning-scalper-circuit-breaker-disabled"
+          className="px-5 py-3 border-b border-amber-500/30 bg-amber-500/10 text-amber-200 flex items-start gap-2 text-xs"
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            Circuit-breaker protection is off. The Scalper will keep recording safety events and their reasons, but those events will not pause new attempts.
+          </span>
         </div>
       )}
 
@@ -381,10 +430,20 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       )}
 
       {merged.circuitBreaker && (
-        <div className="bg-red-500/10 border-b border-red-500/30 px-5 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3 text-red-400 text-sm font-semibold">
+        <div className={`${merged.circuitBreakerEnabled !== false ? "bg-red-500/10 border-red-500/30" : "bg-amber-500/10 border-amber-500/30"} border-b px-5 py-3 flex items-center justify-between gap-4`}>
+          <div className={`flex items-start gap-3 ${merged.circuitBreakerEnabled !== false ? "text-red-300" : "text-amber-200"}`}>
             <AlertTriangle className="w-5 h-5" />
-            Circuit Breaker Tripped! Scalper is halted. ({merged.circuitBreakerReason || "Unknown reason"})
+            <div>
+              <div className="text-sm font-semibold">
+                {merged.circuitBreakerEnabled !== false
+                  ? "Circuit breaker triggered — Scalper paused"
+                  : "Circuit-breaker event recorded — Scalper still running"}
+              </div>
+              <div data-testid="text-scalper-circuit-breaker-reason" className="text-xs mt-0.5 opacity-90 font-normal">
+                {statusData?.circuitBreakerMessage
+                  ?? "The Scalper recorded a safety event, but no additional details were available."}
+              </div>
+            </div>
           </div>
           <button
             onClick={resetCircuitBreaker}

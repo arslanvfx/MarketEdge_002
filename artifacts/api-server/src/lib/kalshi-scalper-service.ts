@@ -35,6 +35,8 @@ import {
   compareRiskSnapshot,
   sizeOrderWithinReservedBudget,
   evaluateScalpReservationRetry,
+  describeScalpCircuitBreakerReason,
+  preserveNewerScalpBreakerState,
   SCALP_AUTH_RETRY_COOLDOWN_MS,
   SCALP_MAX_CONCURRENT_CANDIDATES,
   SCALP_MAX_SUBMISSIONS_PER_WINDOW,
@@ -76,6 +78,9 @@ import {
 // ---------------------------------------------------------------------------
 
 let _config: ScalpConfig = { ...DEFAULT_SCALP_CONFIG };
+let _configMutationTail: Promise<void> = Promise.resolve();
+let _breakerVersion = 0;
+let _breakerPersistRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let _running = false;
 let _scanInterval: ReturnType<typeof setInterval> | null = null;
 let _lastScanAt: number | null = null;
@@ -181,19 +186,134 @@ function getRegularBotMode(): string | null {
 // Circuit breaker — always set in-memory first, then persist
 // ---------------------------------------------------------------------------
 
-async function _tripCircuitBreaker(reason: string): Promise<void> {
-  // Set in-memory immediately (fail-closed) before any async persist
-  _config = { ..._config, circuitBreaker: true, circuitBreakerReason: reason };
-  logger.error({ reason }, "[kalshi-scalper] CIRCUIT BREAKER TRIPPED — halting new scalp attempts");
-  // Persist — never swallow failures silently
-  try {
-    await saveScalpConfigToDB(_config);
-  } catch (persistErr) {
-    // Keep in-memory breaker true; log loudly
-    logger.error(
-      { persistErr, reason },
-      "[kalshi-scalper] CRITICAL: circuit breaker persist FAILED — breaker still active in memory",
+function _isCircuitBreakerBlocking(): boolean {
+  return _config.circuitBreaker && _config.circuitBreakerEnabled;
+}
+
+async function _persistScalpConfigWithRetry(config: ScalpConfig): Promise<void> {
+  const maxAttempts = 4;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await saveScalpConfigToDB(config);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 200));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Serialize all persistent Scalper config writes. A breaker trip still updates
+ * memory synchronously, then its monotonically increasing version forces any
+ * in-flight stale config write to preserve the newest latch and reason.
+ */
+function _enqueueScalpConfigMutation(
+  build: (current: ScalpConfig) => ScalpConfig | Promise<ScalpConfig>,
+  resetPreflight: boolean,
+): Promise<ScalpConfig> {
+  const execute = async (): Promise<ScalpConfig> => {
+    const breakerVersionAtStart = _breakerVersion;
+    let next = await build(_config);
+
+    // A trip can happen while an async builder (for example reset validation)
+    // is running. Preserve it before the first persistent write.
+    next = preserveNewerScalpBreakerState(
+      next,
+      _config,
+      breakerVersionAtStart,
+      _breakerVersion,
     );
+    await _persistScalpConfigWithRetry(next);
+
+    // A trip can also happen while the DB write itself is in flight. Persist
+    // the winning latch before exposing the mutation result.
+    const finalConfig = preserveNewerScalpBreakerState(
+      next,
+      _config,
+      breakerVersionAtStart,
+      _breakerVersion,
+    );
+    if (
+      finalConfig.circuitBreaker !== next.circuitBreaker
+      || finalConfig.circuitBreakerReason !== next.circuitBreakerReason
+    ) {
+      await _persistScalpConfigWithRetry(finalConfig);
+    }
+
+    _config = finalConfig;
+    if (resetPreflight) _resetPreflightState();
+    return { ..._config };
+  };
+
+  const result = _configMutationTail.then(execute, execute);
+  _configMutationTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+function _scheduleBreakerPersistenceRetry(): void {
+  if (_breakerPersistRetryTimer || !_config.circuitBreaker) return;
+  _breakerPersistRetryTimer = setTimeout(() => {
+    _breakerPersistRetryTimer = null;
+    if (!_config.circuitBreaker) return;
+    const latestVersion = _breakerVersion;
+    void _enqueueScalpConfigMutation(
+      (current) => {
+        if (!current.circuitBreaker || _breakerVersion !== latestVersion) {
+          return current;
+        }
+        return {
+          ...current,
+          circuitBreaker: true,
+          circuitBreakerReason: _config.circuitBreakerReason,
+        };
+      },
+      false,
+    ).catch((persistErr) => {
+      logger.error(
+        { persistErr, breakerVersion: _breakerVersion },
+        "[kalshi-scalper] circuit-breaker persistence retry failed — will retry",
+      );
+      _scheduleBreakerPersistenceRetry();
+    });
+  }, 5_000);
+}
+
+async function _tripCircuitBreaker(reason: string): Promise<void> {
+  // Always retain the event and reason, even when the operator has disabled
+  // enforcement. Re-enabling protection will immediately respect this latch.
+  const eventVersion = ++_breakerVersion;
+  _config = { ..._config, circuitBreaker: true, circuitBreakerReason: reason };
+  logger.error(
+    { reason, enforced: _config.circuitBreakerEnabled },
+    _config.circuitBreakerEnabled
+      ? "[kalshi-scalper] CIRCUIT BREAKER TRIPPED — halting new scalp attempts"
+      : "[kalshi-scalper] circuit-breaker event recorded — enforcement disabled, scans continue",
+  );
+  // Persist through the serialized writer. If a newer event arrived before
+  // this queued operation began, leave its reason untouched.
+  try {
+    await _enqueueScalpConfigMutation(
+      (current) => _breakerVersion === eventVersion
+        ? { ...current, circuitBreaker: true, circuitBreakerReason: reason }
+        : current,
+      false,
+    );
+  } catch (persistErr) {
+    // Keep in-memory breaker true and retry in the background until the
+    // transient DB failure clears.
+    logger.error(
+      { persistErr, reason, eventVersion },
+      "[kalshi-scalper] CRITICAL: circuit breaker persist FAILED — breaker active in memory; durable retry scheduled",
+    );
+    _scheduleBreakerPersistenceRetry();
   }
 }
 
@@ -206,7 +326,12 @@ export async function initScalper(): Promise<void> {
   _config = await loadScalpConfigFromDB();
   _resetPreflightState();
   logger.info(
-    { enabled: _config.enabled, mode: _config.mode, circuitBreaker: _config.circuitBreaker },
+    {
+      enabled: _config.enabled,
+      mode: _config.mode,
+      circuitBreakerEnabled: _config.circuitBreakerEnabled,
+      circuitBreaker: _config.circuitBreaker,
+    },
     "[kalshi-scalper] initialized",
   );
 
@@ -288,64 +413,67 @@ export function getScalpConfig(): ScalpConfig {
  * Apply a partial update. Persists the merged canonical config BEFORE replacing
  * in-memory. Validates both the partial input and the effective merged config.
  * Preserves explicit null values (dailyCapDollars/openCapDollars).
- * Never allows overwriting circuitBreaker via this path.
+ * Never allows overwriting server-owned circuitBreaker state via this path.
  */
 /**
  * Merge a STRICTLY-PARSED, normalized config patch into the live config.
  *
  * The patch MUST already have been produced by parseScalpConfigPatch (typed,
  * range-checked, allowlisted). This function does no coercion; it only merges
- * present fields. circuitBreaker / circuitBreakerReason are never touched here
- * (breaker resets only via resetCircuitBreaker).
+ * present fields. The operator-owned enforcement toggle may change here;
+ * circuitBreaker / circuitBreakerReason reset only via resetCircuitBreaker.
  */
 export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpConfig> {
-  // Normalize parsed per-market overrides (number|null) into the stored
-  // ScalpPerMarketOverride shape. Explicit null CLEARS that field (dropped);
-  // absent fields are simply not set. The overrides array is fully replaced.
-  let mergedOverrides = _config.perMarketOverrides;
-  if (patch.perMarketOverrides !== undefined) {
-    mergedOverrides = patch.perMarketOverrides.map((ov): ScalpPerMarketOverride => {
-      const norm: ScalpPerMarketOverride = { symbol: ov.symbol };
-      if (ov.paused !== undefined) norm.paused = ov.paused;
-      if (typeof ov.minBand === "number") norm.minBand = ov.minBand;        // null → cleared
-      if (typeof ov.maxBand === "number") norm.maxBand = ov.maxBand;        // null → cleared
-      if (typeof ov.windowSeconds === "number") norm.windowSeconds = ov.windowSeconds;
-      if (typeof ov.budgetDollars === "number") norm.budgetDollars = ov.budgetDollars;
-      return norm;
-    });
-  }
+  const updated = await _enqueueScalpConfigMutation((current) => {
+    // Normalize parsed per-market overrides from the freshest serialized
+    // config. Explicit null clears that override field.
+    let mergedOverrides = current.perMarketOverrides;
+    if (patch.perMarketOverrides !== undefined) {
+      mergedOverrides = patch.perMarketOverrides.map((ov): ScalpPerMarketOverride => {
+        const norm: ScalpPerMarketOverride = { symbol: ov.symbol };
+        if (ov.paused !== undefined) norm.paused = ov.paused;
+        if (typeof ov.minBand === "number") norm.minBand = ov.minBand;
+        if (typeof ov.maxBand === "number") norm.maxBand = ov.maxBand;
+        if (typeof ov.windowSeconds === "number") norm.windowSeconds = ov.windowSeconds;
+        if (typeof ov.budgetDollars === "number") norm.budgetDollars = ov.budgetDollars;
+        return norm;
+      });
+    }
 
-  // Build the merged config (never touch circuitBreaker / circuitBreakerReason here)
-  const merged: ScalpConfig = {
-    ..._config,
-    enabled: patch.enabled !== undefined ? patch.enabled : _config.enabled,
-    mode: patch.mode !== undefined ? patch.mode : _config.mode,
-    globalBandMin: patch.globalBandMin !== undefined ? patch.globalBandMin : _config.globalBandMin,
-    globalBandMax: patch.globalBandMax !== undefined ? patch.globalBandMax : _config.globalBandMax,
-    finalWindowSeconds: patch.finalWindowSeconds !== undefined ? patch.finalWindowSeconds : _config.finalWindowSeconds,
-    budgetDollars: patch.budgetDollars !== undefined ? patch.budgetDollars : _config.budgetDollars,
-    dailyCapDollars: patch.dailyCapDollars !== undefined ? patch.dailyCapDollars : _config.dailyCapDollars,
-    openCapDollars: patch.openCapDollars !== undefined ? patch.openCapDollars : _config.openCapDollars,
-    freefallGuardEnabled: patch.freefallGuardEnabled !== undefined ? patch.freefallGuardEnabled : _config.freefallGuardEnabled,
-    freefallLookbackSeconds: patch.freefallLookbackSeconds !== undefined ? patch.freefallLookbackSeconds : _config.freefallLookbackSeconds,
-    freefallThresholdPct: patch.freefallThresholdPct !== undefined ? patch.freefallThresholdPct : _config.freefallThresholdPct,
-    perMarketOverrides: mergedOverrides,
-    // Preserve circuit breaker state
-    circuitBreaker: _config.circuitBreaker,
-    circuitBreakerReason: _config.circuitBreakerReason,
-  };
+    const merged: ScalpConfig = {
+      ...current,
+      enabled: patch.enabled !== undefined ? patch.enabled : current.enabled,
+      mode: patch.mode !== undefined ? patch.mode : current.mode,
+      globalBandMin: patch.globalBandMin !== undefined ? patch.globalBandMin : current.globalBandMin,
+      globalBandMax: patch.globalBandMax !== undefined ? patch.globalBandMax : current.globalBandMax,
+      finalWindowSeconds: patch.finalWindowSeconds !== undefined ? patch.finalWindowSeconds : current.finalWindowSeconds,
+      budgetDollars: patch.budgetDollars !== undefined ? patch.budgetDollars : current.budgetDollars,
+      dailyCapDollars: patch.dailyCapDollars !== undefined ? patch.dailyCapDollars : current.dailyCapDollars,
+      openCapDollars: patch.openCapDollars !== undefined ? patch.openCapDollars : current.openCapDollars,
+      freefallGuardEnabled: patch.freefallGuardEnabled !== undefined ? patch.freefallGuardEnabled : current.freefallGuardEnabled,
+      freefallLookbackSeconds: patch.freefallLookbackSeconds !== undefined ? patch.freefallLookbackSeconds : current.freefallLookbackSeconds,
+      freefallThresholdPct: patch.freefallThresholdPct !== undefined ? patch.freefallThresholdPct : current.freefallThresholdPct,
+      circuitBreakerEnabled: patch.circuitBreakerEnabled !== undefined ? patch.circuitBreakerEnabled : current.circuitBreakerEnabled,
+      perMarketOverrides: mergedOverrides,
+      circuitBreaker: current.circuitBreaker,
+      circuitBreakerReason: current.circuitBreakerReason,
+    };
 
-  // Cross-field: effective global band must remain valid after merge.
-  if (merged.globalBandMin >= merged.globalBandMax) {
-    throw new Error("Invalid scalp config: globalBandMin must be less than globalBandMax");
-  }
+    if (merged.globalBandMin >= merged.globalBandMax) {
+      throw new Error("Invalid scalp config: globalBandMin must be less than globalBandMax");
+    }
+    return merged;
+  }, true);
 
-  // Persist BEFORE replacing in-memory
-  await saveScalpConfigToDB(merged);
-  _config = merged;
-  _resetPreflightState();
-  logger.info({ enabled: _config.enabled, mode: _config.mode }, "[kalshi-scalper] config updated");
-  return { ..._config };
+  logger.info(
+    {
+      enabled: updated.enabled,
+      mode: updated.mode,
+      circuitBreakerEnabled: updated.circuitBreakerEnabled,
+    },
+    "[kalshi-scalper] config updated",
+  );
+  return updated;
 }
 
 /** Error thrown when a breaker reset is refused due to unresolved live attempts. */
@@ -363,23 +491,30 @@ export class UnresolvedAttemptsError extends Error {
 }
 
 export async function resetCircuitBreaker(): Promise<ScalpConfig> {
-  // REFUSE while any unresolved live attempt exists — an operator must
-  // authoritatively reconcile (out-of-band) before resuming. Fail-closed.
-  const unresolved = await countUnresolvedLiveAttempts();
-  if (unresolved > 0) {
-    const details = await getUnresolvedLiveAttempts();
-    logger.error(
-      { unresolved },
-      "[kalshi-scalper] circuit breaker reset REFUSED — unresolved live attempts require reconciliation",
-    );
-    throw new UnresolvedAttemptsError(unresolved, details);
+  const resetRequestedAtVersion = _breakerVersion;
+  const updated = await _enqueueScalpConfigMutation(async (current) => {
+    // REFUSE while any unresolved live attempt exists — an operator must
+    // authoritatively reconcile (out-of-band) before resuming. Fail-closed.
+    const unresolved = await countUnresolvedLiveAttempts();
+    if (unresolved > 0) {
+      const details = await getUnresolvedLiveAttempts();
+      logger.error(
+        { unresolved },
+        "[kalshi-scalper] circuit breaker reset REFUSED — unresolved live attempts require reconciliation",
+      );
+      throw new UnresolvedAttemptsError(unresolved, details);
+    }
+    if (_breakerVersion !== resetRequestedAtVersion) {
+      throw new Error("A new Scalper safety event occurred while the reset was being checked. Review the latest reason before resetting again.");
+    }
+    return { ...current, circuitBreaker: false, circuitBreakerReason: null };
+  }, true);
+
+  if (updated.circuitBreaker) {
+    throw new Error("A new Scalper safety event occurred while the reset was being saved. Review the latest reason before resetting again.");
   }
-  const updated = { ..._config, circuitBreaker: false, circuitBreakerReason: null };
-  await saveScalpConfigToDB(updated);
-  _config = updated;
-  _resetPreflightState();
   logger.info("[kalshi-scalper] circuit breaker reset");
-  return { ..._config };
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +715,7 @@ async function _runPreflight(
 
   const marketStatuses = targets.map((target): ScalpPreflightMarketStatusInternal => {
     let reason: string | null = null;
-    if (_config.circuitBreaker) {
+    if (_isCircuitBreakerBlocking()) {
       reason = "circuit_breaker_active";
     } else if (mode === "live" && balance.error) {
       reason = "balance_unavailable";
@@ -748,7 +883,7 @@ async function _doScanTick(): Promise<void> {
   }
 
   _maybeStartPreflight(wk, Date.now());
-  if (_config.circuitBreaker) {
+  if (_isCircuitBreakerBlocking()) {
     _preflightStatus = {
       ..._preflightStatus,
       state: "blocked",
@@ -1015,7 +1150,8 @@ async function _evaluateCandidate(
  *
  * Re-resolves the freshest `_config` + effective params and re-compares the
  * IMMUTABLE pinned snapshot; also requires: not disabled (via snapshot.enabled
- * diff), circuit breaker still false, and the current window/identity still
+  * diff), circuit-breaker enforcement not blocking, and the current
+  * window/identity still
  * matching the reservation. Returns a machine reason string on ANY change, or
  * null when it is safe to proceed.
  */
@@ -1025,8 +1161,8 @@ function _finalRiskValidationSync(
   symbol: string,
   ticker: string,
 ): string | null {
-  // Breaker must still be off.
-  if (_config.circuitBreaker) return "breaker_before_submit";
+  // A latched breaker blocks only while operator enforcement is enabled.
+  if (_isCircuitBreakerBlocking()) return "breaker_before_submit";
 
   // Window identity must still be current.
   const wkNow = currentWindowKey();
@@ -1081,7 +1217,7 @@ async function _executeScalpAttempt(
   // Identity, authenticated quote, balance, and fresh Freefall sample are
   // warmed concurrently. Every result remains mandatory and fail-closed.
 
-  if (_config.circuitBreaker) {
+  if (_isCircuitBreakerBlocking()) {
     await updateReservationStatus(mode, symbol, windowKey, "skipped", "breaker_before_submit", true);
     return;
   }
@@ -1792,6 +1928,7 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
     config: { ..._config },
     circuitBreaker: _config.circuitBreaker,
     circuitBreakerReason: _config.circuitBreakerReason,
+    circuitBreakerMessage: describeScalpCircuitBreakerReason(_config.circuitBreakerReason),
     mode,
     totalReservationsToday: todayRes,
     openSpend,
