@@ -147,9 +147,17 @@ function HourCell({
     empty: "", // no dot for empty cells
   };
 
-  // Silenced cells: strong visual indicator (dark overlay + muted tones)
-  const silencedOverlay = mode === "silenced" ? "opacity-50 saturate-0" : "";
-  const currentRing = isCurrentHour ? "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background" : "";
+  const isSilenced = mode === "silenced";
+  // Trading state owns the cell treatment. Historical performance colors are
+  // useful context, but must never make a silenced window look active.
+  const cellStateStyle = isSilenced
+    ? "bg-background/60 border-red-500/55 shadow-[inset_0_0_18px_rgba(239,68,68,0.06)]"
+    : tierStyles[tier];
+  const currentRing = isCurrentHour
+    ? isSilenced
+      ? "ring-2 ring-red-500/75 ring-offset-1 ring-offset-background"
+      : "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background"
+    : "";
   const reducedRing = reducedPct != null && mode !== "silenced" ? "ring-1 ring-amber-400/50" : "";
   const dgIsPercent = dgOverride?.type === 'percent';
   const dgRing = isDataGathering && mode !== "silenced"
@@ -170,13 +178,19 @@ function HourCell({
           onToggleSilence(utcHour);
         }
       }}
-      className={`cursor-pointer relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all select-none ${tierStyles[tier]} ${silencedOverlay} ${currentRing} ${reducedRing} ${dgRing}`}
+      title={isSilenced ? `${estLabel}: SILENCED — click to activate` : `${estLabel}: ${mode}`}
+      className={`cursor-pointer relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all select-none ${cellStateStyle} ${currentRing} ${reducedRing} ${dgRing}`}
     >
       {/* Top row: time label + mode icon + dot */}
       <div className="flex items-center justify-between gap-1">
         <div className="flex items-center gap-1 min-w-0">
           <span className="text-[9px] sm:text-[10px] font-mono text-foreground/70 leading-none shrink-0">{estLabel}</span>
-          {mode === "silenced" && <VolumeX className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
+          {mode === "silenced" && (
+            <>
+              <VolumeX className="w-2.5 h-2.5 text-red-400 shrink-0" />
+              <span className="text-[8px] font-bold tracking-wide text-red-300/90 leading-none">OFF</span>
+            </>
+          )}
           {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
           {isDataGathering && mode !== "silenced" && (
             dgIsPercent ? (
@@ -191,18 +205,18 @@ function HourCell({
             )
           )}
         </div>
-        {tier !== "empty" && (
+        {tier !== "empty" && !isSilenced && (
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor[tier]}`} />
         )}
       </div>
 
       {/* Win rate */}
-      <div className={`text-[10px] sm:text-[11px] font-semibold leading-none ${winRateColor[tier]}`}>
+      <div className={`text-[10px] sm:text-[11px] font-semibold leading-none ${isSilenced ? "text-foreground/45" : winRateColor[tier]}`}>
         {winRatePct != null ? `${winRatePct}%` : "—"}
       </div>
 
       {/* Win / loss record */}
-      <div className="text-[9px] leading-none">
+      <div className={`text-[9px] leading-none ${isSilenced ? "opacity-45 saturate-50" : ""}`}>
         {totalBets > 0 ? (
           <span className="flex items-center gap-0.5">
             <span className="text-emerald-400/70">{wins}W</span>
@@ -690,7 +704,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0" /> ≥85% win rate</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0" /> 75–84%</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-400 shrink-0" /> &lt;75%</span>
-        <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-slate-400 shrink-0" /> Silenced (tap to toggle)</span>
+        <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-red-400 shrink-0" /> Silenced = red OFF cell (tap to toggle)</span>
         <span className="flex items-center gap-1.5"><TrendingDown className="w-3 h-3 text-amber-400 shrink-0" /> Reduced bets</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded bg-muted/30 border border-border/30 shrink-0" /> No data yet</span>
         <span className="flex items-center gap-1.5"><DollarSign className="w-3 h-3 text-violet-400 shrink-0" /> Sparse data (capped)</span>
