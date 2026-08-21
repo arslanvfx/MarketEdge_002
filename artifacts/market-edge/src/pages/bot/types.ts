@@ -220,7 +220,8 @@ export interface OpenPosition {
   unrealizedPnl: number | null;
   guardStates: GuardStates | null;
   guardReason: string | null;
-  source?: "bot" | "manual";
+  source?: "bot" | "manual" | "scalper";
+  mode?: "paper" | "live";
   decisionMode?: string;
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
 }
@@ -572,11 +573,25 @@ export interface ScalperStatus {
   totalReservationsToday: number;
   openSpend: number;
   dailySpend: number;
-  recentOrders: any[];
+  recentOrders: ScalpOrder[];
+  recentAttempts: ScalperAttempt[];
   incidents: any[];
   lastScanAt: string | null;
   lastError: string | null;
   markets: ScalperStatusMarket[];
+}
+
+export interface ScalperAttempt {
+  id: string;
+  mode: "paper" | "live";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  status: "claimed" | "filled" | "zero_fill" | "error" | "skipped" | "unknown";
+  reason: string | null;
+  reservedBudget: number;
+  createdAt: string;
+  attemptedAt: string;
 }
 
 export interface ScalpOrder {

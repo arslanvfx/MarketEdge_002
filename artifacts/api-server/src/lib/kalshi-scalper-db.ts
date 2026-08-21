@@ -13,6 +13,7 @@ import {
   type ScalpOrderStatus,
   type ScalpIncident,
   type ScalpMode,
+  type ScalpReservation,
 } from "./kalshi-scalper-types.ts";
 
 // ---------------------------------------------------------------------------
@@ -456,6 +457,52 @@ export async function countTodayReservations(mode: ScalpMode): Promise<number> {
       [mode],
     );
     return Number(res.rows[0]?.cnt ?? 0);
+  } finally {
+    client.release();
+  }
+}
+
+export async function getRecentScalpReservations(opts: {
+  mode?: ScalpMode;
+  limit?: number;
+}): Promise<ScalpReservation[]> {
+  const client = await pool.connect();
+  try {
+    const params: unknown[] = [];
+    const conditions: string[] = [];
+    let idx = 1;
+    if (opts.mode) {
+      conditions.push(`mode = $${idx++}`);
+      params.push(opts.mode);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = Math.max(1, Math.min(opts.limit ?? 20, 100));
+    params.push(limit);
+    const res = await client.query(
+      `SELECT id, mode, symbol, window_key, ticker, status, reason,
+              reserved_budget, created_at, attempted_at
+       FROM kalshi_scalp_reservations
+       ${where}
+       ORDER BY attempted_at DESC
+       LIMIT $${idx}`,
+      params,
+    );
+    return res.rows.map((row) => ({
+      id: String(row["id"]),
+      mode: String(row["mode"]) as ScalpMode,
+      symbol: String(row["symbol"]),
+      windowKey: String(row["window_key"]),
+      ticker: String(row["ticker"]),
+      status: String(row["status"]) as ScalpReservation["status"],
+      reason: row["reason"] != null ? String(row["reason"]) : undefined,
+      reservedBudget: Number(row["reserved_budget"] ?? 0),
+      createdAt: row["created_at"] instanceof Date
+        ? row["created_at"]
+        : new Date(String(row["created_at"])),
+      attemptedAt: row["attempted_at"] instanceof Date
+        ? row["attempted_at"]
+        : new Date(String(row["attempted_at"])),
+    }));
   } finally {
     client.release();
   }

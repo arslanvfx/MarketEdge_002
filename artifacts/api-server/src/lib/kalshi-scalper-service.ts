@@ -55,6 +55,7 @@ import {
   getSubmittingScalpOrders,
   getUnsettledScalpOrders,
   getScalpOrders,
+  getRecentScalpReservations,
   getTodayScalpSpend,
   getOpenScalpSpend,
   countUnresolvedLiveAttempts,
@@ -1335,10 +1336,11 @@ function serializeScalpOrder(o: ScalpOrder) {
 export async function getScalpStatus(requestedMode?: ScalpMode) {
   const mode = requestedMode ?? _config.mode;
   const wk = currentWindowKey() ?? "";
-  const [dailySpend, openSpend, recentOrders, incidents, todayRes] = await Promise.all([
+  const [dailySpend, openSpend, recentOrders, recentAttempts, incidents, todayRes] = await Promise.all([
     getTodayScalpSpend(mode),
     getOpenScalpSpend(mode),
     getScalpOrders({ mode, limit: 20 }),
+    getRecentScalpReservations({ mode, limit: 20 }),
     getScalpIncidents(10),
     countTodayReservations(mode),
   ]);
@@ -1354,6 +1356,18 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
     openSpend,
     dailySpend,
     recentOrders: recentOrders.map(serializeScalpOrder),
+    recentAttempts: recentAttempts.map((attempt) => ({
+      id: attempt.id,
+      mode: attempt.mode,
+      symbol: attempt.symbol,
+      windowKey: attempt.windowKey,
+      ticker: attempt.ticker,
+      status: attempt.status,
+      reason: attempt.reason ?? null,
+      reservedBudget: attempt.reservedBudget,
+      createdAt: attempt.createdAt.toISOString(),
+      attemptedAt: attempt.attemptedAt.toISOString(),
+    })),
     incidents,
     // ISO string | null (not epoch)
     lastScanAt: _lastScanAt != null ? new Date(_lastScanAt).toISOString() : null,

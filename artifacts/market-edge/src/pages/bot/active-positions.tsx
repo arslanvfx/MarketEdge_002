@@ -28,9 +28,19 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
             )}
             {openPosList.map((pos) => {
               const isManual = pos.source === "manual" || pos.id.startsWith("manual:");
+              const isScalper = pos.source === "scalper";
               const isClosing = closingManualSym === pos.symbol;
+              const winningContractCost = pos.direction === "yes"
+                ? pos.entryYesPrice
+                : 1 - pos.entryYesPrice;
               return (
-              <div key={pos.id} className={`border rounded-xl p-5 ${pos.direction === "yes" ? "border-emerald-500/40 bg-emerald-950/20" : "border-red-500/40 bg-red-950/20"}`}>
+              <div key={pos.id} className={`border rounded-xl p-5 ${
+                isScalper
+                  ? "border-amber-500/45 bg-amber-950/10"
+                  : pos.direction === "yes"
+                    ? "border-emerald-500/40 bg-emerald-950/20"
+                    : "border-red-500/40 bg-red-950/20"
+              }`}>
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3 flex-wrap">
                     <div className={`text-2xl font-black ${pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
@@ -44,16 +54,34 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                         MANUAL
                       </span>
                     )}
+                    {isScalper && (
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/35 tracking-wide">
+                        SCALPER
+                      </span>
+                    )}
+                    {isScalper && pos.mode && (
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        pos.mode === "live"
+                          ? "bg-red-500/15 text-red-400"
+                          : "bg-yellow-500/15 text-yellow-400"
+                      }`}>
+                        {pos.mode.toUpperCase()}
+                      </span>
+                    )}
                     <span className="text-xs text-muted-foreground">
                       Opened {new Date(pos.openedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                     </span>
                   </div>
                   <div className="flex items-start gap-3">
                     <div className="text-right">
-                      <div className="text-xs text-muted-foreground">Unrealized P&L</div>
-                      <div className={`text-lg font-bold ${(pos.unrealizedPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {fmt$(pos.unrealizedPnl)}
-                      </div>
+                      <div className="text-xs text-muted-foreground">{isScalper ? "Settlement" : "Unrealized P&L"}</div>
+                      {isScalper ? (
+                        <div className="text-sm font-bold text-amber-300">Pending</div>
+                      ) : (
+                        <div className={`text-lg font-bold ${(pos.unrealizedPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          {fmt$(pos.unrealizedPnl)}
+                        </div>
+                      )}
                     </div>
                     {isManual && (
                       <button
@@ -74,7 +102,15 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 text-sm mb-4">
-                  {[
+                  {(isScalper ? [
+                    { label: `${pos.direction.toUpperCase()} Fill`, value: fmtPct(winningContractCost) },
+                    { label: "YES Fill", value: fmtPct(pos.entryYesPrice) },
+                    { label: "NO Fill", value: fmtPct(1 - pos.entryYesPrice) },
+                    { label: "Contracts Filled", value: String(pos.contractCount) },
+                    { label: "Spend", value: fmt$(pos.betAmount) },
+                    { label: "Ticker", value: pos.ticker },
+                    { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
+                  ] : [
                     { label: "Strike Price", value: fmtCrypto(pos.kalshiTarget) },
                     { label: "Crypto @ Entry", value: fmtCrypto(pos.cryptoPriceAtEntry) },
                     { label: "Entry Yes%", value: fmtPct(pos.entryYesPrice) },
@@ -85,7 +121,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                     { label: "Bet Size", value: fmt$(pos.betAmount) },
                     { label: "Ticker", value: pos.ticker },
                     { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
-                  ].map(({ label, value }) => (
+                  ]).map(({ label, value }) => (
                     <div key={label} className="bg-background/30 rounded-lg p-2.5">
                       <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">{label}</div>
                       <div className="font-semibold text-foreground text-sm">{value}</div>

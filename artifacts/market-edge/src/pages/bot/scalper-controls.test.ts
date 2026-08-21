@@ -18,6 +18,11 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /scalper\/performance\?mode=\$\{scalperMode\}/);
   });
 
+  it("labels in-band scanner results as preliminary candidates", () => {
+    assert.match(panelSource, /in-band scan is only a preliminary candidate/i);
+    assert.match(panelSource, /candidate ·/);
+  });
+
   it("renders an explicit enable switch and Paper/Live controls", () => {
     assert.match(panelSource, /role="switch"/);
     assert.match(panelSource, /Enable Scalper/);

@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, BotStepEntry, ConvictionThresholdData } from "./bot/types";
+import type { BotStatus, BotConfig, HistoryRecord, LogicModeStats, BacktestModeStats, AutoTuneLogEntry, BotStats, PerformanceReport, CoinGuardState, OpenPosition, WindowEval, BotConditionsSnapshot, BotStepEntry, ConvictionThresholdData, ScalpOrder } from "./bot/types";
 import { API_BASE, fmt$, fmtPct, fmtCrypto, wkToEst, utcToEst, ET_LABEL } from "./bot/utils";
 import { ConditionsPanel, ClearPausesButton } from "./bot/conditions-panel";
 import { BotHeader } from "./bot/bot-header";
@@ -32,7 +32,7 @@ import { KalshiLiveTickerPanel } from "./bot/kalshi-live-ticker-panel";
 import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 import { GapAnalyticsPanel } from "./bot/gap-analytics-panel";
 import { BotScalperPanel } from "./bot/bot-scalper-panel";
-import { ScalpTransactionLog } from "./bot/scalp-transaction-log";
+import { normalizeScalpOrders } from "./bot/scalper-ledger";
 import { readApiResponse } from "./bot/api-response";
 import type { GapAnalyticsResult } from "./bot/types";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
@@ -119,7 +119,7 @@ export default function BotDashboard() {
   // Defaults to the active bot mode but can be toggled independently so the
   // user can browse paper history while live or vice versa.
   const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
-  const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual" | "skips">("all");
+  const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual" | "scalper" | "skips">("all");
   const [reEvalState, setReEvalState] = useState<{ loading: boolean; msg: string | null; ok: boolean }>({ loading: false, msg: null, ok: false });
 
   // ── Close manual position state ──────────────────────────────────────────
@@ -196,6 +196,12 @@ export default function BotDashboard() {
   const { data: historyData } = useQuery<{ history: HistoryRecord[] }>({
     queryKey: ["bot-all-history", historyMode],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=500&mode=${historyMode}`).then(r => r.json()),
+    refetchInterval: 15_000,
+  });
+
+  const { data: scalpHistoryData } = useQuery<{ orders: ScalpOrder[] }>({
+    queryKey: ["bot-scalper-history", "all"],
+    queryFn: () => fetch(`${API_BASE}/crypto/scalper/history?limit=500`).then(r => r.json()),
     refetchInterval: 15_000,
   });
 
@@ -506,7 +512,12 @@ export default function BotDashboard() {
   const cfg = status?.config;
   const merged = { ...cfg, ...configDraft } as BotConfig;
   const hasDraft = Object.keys(configDraft).length > 0;
-  const history = historyData?.history ?? [];
+  const normalizedScalps = normalizeScalpOrders(scalpHistoryData?.orders ?? []);
+  const regularHistory = historyData?.history ?? [];
+  const history = [
+    ...regularHistory,
+    ...normalizedScalps.history.filter(record => record.mode === historyMode),
+  ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   const bets = history.filter(r => {
     const isSkipAction = r.action === "skip";
 
@@ -520,7 +531,12 @@ export default function BotDashboard() {
     if (histSourceFilter === "manual") {
       return r.source === "manual" || (r.signals as Record<string, unknown> | null)?.manual === true;
     }
-    if (histSourceFilter === "bot") return r.source !== "manual" && (r.signals as Record<string, unknown> | null)?.manual !== true;
+    if (histSourceFilter === "scalper") return r.source === "scalper";
+    if (histSourceFilter === "bot") {
+      return r.source !== "manual"
+        && r.source !== "scalper"
+        && (r.signals as Record<string, unknown> | null)?.manual !== true;
+    }
     return true; // "all"
   });
 
@@ -530,7 +546,8 @@ export default function BotDashboard() {
   const pagedBets = bets.slice(clampedHistPage * HIST_PAGE_SIZE, (clampedHistPage + 1) * HIST_PAGE_SIZE);
   const evaluation = evalData?.evaluation ?? [];
   const stats = statsData;
-  const openPosList = status?.openPositions ?? [];
+  const regularOpenPosList = status?.openPositions ?? [];
+  const openPosList = [...regularOpenPosList, ...normalizedScalps.positions];
   const pnl = status?.dailyPnl ?? 0;
   const winRate = (stats?.totalBets ?? 0) > 0 ? Math.round((stats!.wins / stats!.totalBets) * 100) : 0;
 
@@ -539,7 +556,7 @@ export default function BotDashboard() {
     if (merged.enabled === false) return "Disabled"; // only explicitly false = disabled; undefined/null = running
     if (status.paused) return "Paused";
     if (status.warmupSecondsRemaining !== null) return `Warming up · ${status.warmupSecondsRemaining}s`;
-    if (status.openPositions.length > 0) return status.openPositions.length === 1 ? "Position Open" : `${status.openPositions.length} Positions Open`;
+    if (openPosList.length > 0) return openPosList.length === 1 ? "Position Open" : `${openPosList.length} Positions Open`;
     if (status.status === "daily_limit_hit") return "Daily Limit Hit";
     return "Watching Markets";
   };
@@ -726,7 +743,7 @@ export default function BotDashboard() {
           openManualOrder={openManualOrder}
         />
         <PerCoinGuard coinGuardData={coinGuardData} />
-        <WindowEvalTable evaluation={evaluation} openPosList={openPosList} openManualOrder={openManualOrder} />
+        <WindowEvalTable evaluation={evaluation} openPosList={regularOpenPosList} openManualOrder={openManualOrder} />
         <BotScalperPanel authPost={scalperAuthPost} />
         <BotConfigSection
           cfg={cfg}
@@ -838,13 +855,6 @@ export default function BotDashboard() {
           setHistSourceFilter={setHistSourceFilter}
           activeMode={activeMode}
         />
-        
-        <ScalpTransactionLog
-          activeMode={activeMode}
-          historyMode={historyMode}
-          regularHistory={history}
-        />
-        
         <PerformanceInsights
           perfReportData={perfReportData}
           statsData={statsData}

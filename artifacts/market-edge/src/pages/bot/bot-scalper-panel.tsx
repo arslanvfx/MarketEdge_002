@@ -2,8 +2,9 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
-import { API_BASE, fmt$, fmtPct } from "./utils";
+import { API_BASE, fmt$, fmtPct, fmtDateTime } from "./utils";
 import type { ScalperConfig, ScalperStatus, ScalperPerformance } from "./types";
+import { describeScalperAttempt } from "./scalper-ledger";
 
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
@@ -312,7 +313,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       )}
 
       <div className="p-5 text-xs text-muted-foreground/80 leading-relaxed border-b border-border bg-card/40 flex items-center justify-between">
-        <span>Same workflow as regular conviction bets — same price feed, same order placement. Fires in the configured final window when the winning-side contract ask lands in the price band. Model signals, quiet hours, and market filters are bypassed.</span>
+        <span>An in-band scan is only a preliminary candidate. Immediately before ordering, the Scalper fetches a fresh authenticated quote and rechecks the configured band, risk caps, and IOC liquidity. The final quote can move outside the band or fill zero contracts; only confirmed fills appear in Active Positions and Transaction History.</span>
         
         {/* Status Indicators */}
         {statusData && (
@@ -567,8 +568,8 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                                   FREEFALL
                                 </span>
                               )}
-                              <span className="text-[9px] text-muted-foreground/50 w-24 text-right truncate" title={statusInfo.reason || statusInfo.state}>
-                                {statusInfo.state === 'active' ? (statusInfo.lastAsk !== null ? `${Math.round(statusInfo.lastAsk * 100)}¢` : "Scanning...") : statusInfo.state}
+                              <span className="text-[9px] text-muted-foreground/50 w-28 text-right truncate" title={statusInfo.reason || "Preliminary scan only; a fresh authenticated quote is checked before ordering."}>
+                                {statusInfo.state === 'active' ? (statusInfo.lastAsk !== null ? `candidate · ${Math.round(statusInfo.lastAsk * 100)}¢` : "Scanning...") : statusInfo.state}
                               </span>
                             </div>
                           )}
@@ -597,6 +598,52 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           </div>
         )}
         </fieldset>
+
+        {(statusData?.recentAttempts?.length ?? 0) > 0 && (
+          <div className="mt-8 border-t border-amber-500/20 pt-6">
+            <div className="flex items-center gap-2 mb-3">
+              <Target className="w-4 h-4 text-amber-500/70" />
+              <h3 className="text-xs font-bold text-amber-500/70 tracking-widest uppercase">Recent candidate checks</h3>
+              <span className="text-[10px] text-muted-foreground">Operational outcomes, not all completed bets</span>
+            </div>
+            <div className="space-y-2">
+              {statusData!.recentAttempts.slice(0, 8).map((attempt) => {
+                const isFilled = attempt.status === "filled";
+                const isUnsafe = attempt.status === "unknown" || attempt.status === "error";
+                const isZeroFill = attempt.status === "zero_fill";
+                return (
+                  <div
+                    key={attempt.id}
+                    className="flex items-center gap-3 rounded-lg border border-border bg-background/40 px-3 py-2 text-xs"
+                  >
+                    <span className="font-bold text-foreground w-12">{attempt.symbol}</span>
+                    <span className={`font-semibold ${
+                      isFilled
+                        ? "text-emerald-400"
+                        : isUnsafe
+                          ? "text-red-400"
+                          : isZeroFill
+                            ? "text-sky-400"
+                            : "text-amber-300"
+                    }`}>
+                      {describeScalperAttempt(attempt)}
+                    </span>
+                    <span className={`ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                      attempt.mode === "live"
+                        ? "bg-red-500/15 text-red-400"
+                        : "bg-yellow-500/15 text-yellow-400"
+                    }`}>
+                      {attempt.mode.toUpperCase()}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                      {fmtDateTime(attempt.attemptedAt)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Performance Section */}
         {perfData && (

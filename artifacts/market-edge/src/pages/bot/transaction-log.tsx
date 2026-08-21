@@ -13,8 +13,8 @@ interface TransactionLogProps {
   totalBets: number;
   historyMode: "paper" | "live";
   setHistoryMode: React.Dispatch<React.SetStateAction<"paper" | "live">>;
-  histSourceFilter: "all" | "bot" | "manual" | "skips";
-  setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual" | "skips">>;
+  histSourceFilter: "all" | "bot" | "manual" | "scalper" | "skips";
+  setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual" | "scalper" | "skips">>;
   activeMode: "paper" | "live";
 }
 
@@ -40,15 +40,16 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 </button>
               ))}
             </div>
-            {/* Source filter — All / Bot / Manual / Skips */}
+            {/* Source filter — All / Bot / Manual / Scalper / Skips */}
             <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
-              {(["all", "bot", "manual", "skips"] as const).map(s => (
+              {(["all", "bot", "manual", "scalper", "skips"] as const).map(s => (
                 <button
                   key={s}
                   onClick={() => { setHistSourceFilter(s); setHistPage(0); }}
                   className={`px-2.5 py-1 transition-colors capitalize ${
                     histSourceFilter === s
                       ? s === "manual"  ? "bg-purple-500/20 text-purple-300"
+                      : s === "scalper" ? "bg-amber-500/20 text-amber-300"
                       : s === "skips"   ? "bg-orange-500/20 text-orange-300"
                       : "bg-muted text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -105,6 +106,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const isShadow = r.action === "shadow";
                 const isSkip = r.action === "skip";
                 const isOpen = r.action === "bet";
+                const isScalper = r.source === "scalper";
                 const isEmergencyClose = r.exitReason === "conviction_catastrophic_fill";
                 const isPendingEval = !isOpen && !isShadow && !isSkip && r.outcome == null;
                 const isWin = r.outcome === "win";
@@ -137,7 +139,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                               : "border-border bg-card/60";
 
                 return (
-                  <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
+                  <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg} ${isScalper ? "ring-1 ring-inset ring-amber-500/35" : ""}`}>
                     {/* Card header */}
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <span className="text-base font-black tracking-tight text-foreground">{r.symbol}</span>
@@ -260,9 +262,14 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           MANUAL
                         </span>
                       )}
+                      {isScalper && (
+                        <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          <Zap className="w-2.5 h-2.5" /> SCALPER
+                        </span>
+                      )}
 
                       {/* Decision mode badge */}
-                      {(() => {
+                      {!isScalper && (() => {
                         const dm = r.decisionMode ?? "classic";
                         const meta: Record<string, { label: string; cls: string }> = {
                           classic:          { label: "Classic",      cls: "bg-sky-500/10 text-sky-400/80" },
@@ -293,16 +300,20 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     {/* Key metrics grid */}
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
                       <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Strike</div>
-                        <div className="text-xs font-semibold font-mono">{fmtCrypto(r.kalshiTarget)}</div>
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">{isScalper ? "Order" : "Strike"}</div>
+                        <div className="text-xs font-semibold font-mono">{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
                       </div>
 
                       <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
                         <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">
-                          {closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
+                          {isScalper ? "Settlement" : closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
                         </div>
                         <div className="text-xs font-semibold font-mono flex items-center gap-1">
-                          {endPx != null ? (
+                          {isScalper ? (
+                            <span className={isOpen ? "text-amber-300" : isWin ? "text-emerald-400" : "text-red-400"}>
+                              {isOpen ? "Pending" : isWin ? "Won" : "Lost"}
+                            </span>
+                          ) : endPx != null ? (
                             <>
                               {fmtCrypto(endPx)}
                               {endAboveStrike !== null && (
@@ -328,9 +339,15 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       </div>
 
                       <div className="bg-background/40 rounded-lg p-2.5 col-span-1">
-                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Exit</div>
+                        <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">{isScalper ? "Result" : "Exit"}</div>
                         <div className="text-xs font-mono">
-                          {xp != null ? `${(xp * 100).toFixed(0)}¢ YES` : isOpen ? <span className="text-sky-400 text-[9px]">in play…</span> : "—"}
+                          {isScalper
+                            ? (sigs?.settlementResult as string | null ?? (isOpen ? <span className="text-amber-300 text-[9px]">in play…</span> : "—"))
+                            : xp != null
+                              ? `${(xp * 100).toFixed(0)}¢ YES`
+                              : isOpen
+                                ? <span className="text-sky-400 text-[9px]">in play…</span>
+                                : "—"}
                         </div>
                       </div>
 
@@ -406,6 +423,11 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       )}
                       {isPendingEval && (
                         <span className="text-amber-400/70">· awaiting window close price</span>
+                      )}
+                      {isScalper && (
+                        <span className="text-amber-400/70">
+                          · confirmed fill{typeof sigs?.status === "string" ? ` · ${sigs.status}` : ""}
+                        </span>
                       )}
                       {/* Strike-proximity gap — how far the crypto price was from the Kalshi strike when the bet was placed */}
                       {!isSkip && !isShadow && (() => {
