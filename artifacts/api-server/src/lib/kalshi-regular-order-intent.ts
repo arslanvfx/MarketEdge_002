@@ -224,6 +224,13 @@ export async function claimRegularOrderIntent(
 /**
  * Resolve an intent to a DEFINITE outcome (filled / zero_fill / skipped) and
  * release its reservation. NEVER use this for an indeterminate outcome.
+ *
+ * The confirmed-fill resolve is the durable proof that a reserved live intent
+ * actually filled, so it MUST land: a transient DB failure is retried a small
+ * bounded number of times, and a zero-row update (the intent row is missing —
+ * never expected on the happy path) is surfaced by throwing so the caller can
+ * log it as a fail-closed anomaly rather than silently leaving a stranded
+ * reservation.
  */
 export async function resolveRegularOrderIntent(params: {
   clientOrderId: string;
@@ -234,21 +241,40 @@ export async function resolveRegularOrderIntent(params: {
   orderId?: string | null;
 }): Promise<void> {
   await ensureMigrated();
-  const client = await pool.connect();
-  try {
-    await client.query(
-      `UPDATE kalshi_regular_order_intents
-       SET status = $1, reason = $2, filled_count = $3, avg_fill_price = $4,
-           order_id = COALESCE($5, order_id), resolved_at = NOW()
-       WHERE client_order_id = $6`,
-      [
-        params.status, params.reason ?? null, params.filledCount ?? null,
-        params.avgFillPrice ?? null, params.orderId ?? null, params.clientOrderId,
-      ],
-    );
-  } finally {
-    client.release();
+  const MAX_ATTEMPTS = 4;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `UPDATE kalshi_regular_order_intents
+         SET status = $1, reason = $2, filled_count = $3, avg_fill_price = $4,
+             order_id = COALESCE($5, order_id), resolved_at = NOW()
+         WHERE client_order_id = $6`,
+        [
+          params.status, params.reason ?? null, params.filledCount ?? null,
+          params.avgFillPrice ?? null, params.orderId ?? null, params.clientOrderId,
+        ],
+      );
+      if ((res.rowCount ?? 0) === 0) {
+        // No row matched — the intent row is missing (e.g. never persisted, or
+        // already deleted). This is unexpected on the confirmed-fill path; do
+        // NOT swallow it — surface a fail-closed anomaly to the caller.
+        throw new Error(
+          `resolveRegularOrderIntent matched zero rows for client_order_id=${params.clientOrderId} (status=${params.status})`,
+        );
+      }
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, attempt * 500));
+      }
+    } finally {
+      client.release();
+    }
   }
+  throw lastErr;
 }
 
 /**
@@ -405,6 +431,165 @@ export async function markRegularExitIntentUnknown(params: {
        WHERE client_order_id = $2`,
       [params.reason, params.clientOrderId],
     );
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// RECONCILIATION
+//
+// A confirmed live fill is proved durable ONLY once its intent row moves to
+// status='filled'. The scoping bug in kalshi-bot-tick.ts left every confirmed
+// live fill stranded at status='reserved', which keeps its window blocked and
+// eventually blocks the symbol across later windows.
+//
+// This restart/periodic-safe repair changes ONLY status='reserved' intents to
+// filled when an AUTHORITATIVE matching kalshi_bot_bets row exists for the same
+// live mode / symbol / window / ticker / side and was persisted within 30
+// seconds after the intent. It copies contract_count and entry_price onto the
+// intent as fill metadata. Filled bet rows later transition from action='bet'
+// to action='expired' or an exit action, so all confirmed position lifecycle
+// states are accepted.
+//
+// FAIL-CLOSED GUARANTEES (unchanged from the durable design):
+//   • status='unknown' rows are NEVER touched — indeterminate exposure stays
+//     blocked pending manual/authoritative reconciliation.
+//   • Only 'reserved' rows with a proven matching bet are repaired. A reserved
+//     row with no matching bet is left blocked (its POST outcome is unproven).
+//   • Paper is never involved — this only inspects mode='live' rows.
+// ---------------------------------------------------------------------------
+
+export interface RegularIntentReconcileResult {
+  scanned: number;      // reserved live intents inspected
+  reconciled: number;   // reserved → filled repairs applied
+  unmatched: number;    // reserved intents with no authoritative bet (left blocked)
+}
+
+/**
+ * Repair reserved live intents that a confirmed local fill left stranded.
+ *
+ * Matches each reserved live intent to the earliest authoritative filled-bet
+ * lifecycle row. The match requires source='bot', live mode, same
+ * symbol/window/ticker/side, a valid positive contract count no greater than
+ * the requested count, a valid entry price, and persistence within 30 seconds
+ * after the intent. Source matching plus the narrow time window distinguishes
+ * the bot fill from manual or unrelated same-window activity.
+ * When a match exists, flips the intent to status='filled', copying
+ * contract_count and entry_price as fill metadata and validating that exactly
+ * the expected row was affected. Rows with no matching bet are left untouched
+ * (still blocked). status='unknown' rows are excluded.
+ */
+export async function reconcileReservedRegularIntents(): Promise<RegularIntentReconcileResult> {
+  await ensureMigrated();
+  const client = await pool.connect();
+  const result: RegularIntentReconcileResult = { scanned: 0, reconciled: 0, unmatched: 0 };
+  try {
+    // Only reserved LIVE intents are candidates. 'unknown' is deliberately
+    // excluded so indeterminate exposure stays fail-closed.
+    const candidates = await client.query(
+      `SELECT client_order_id, symbol, window_key, ticker, side,
+              requested_count, created_at
+       FROM kalshi_regular_order_intents
+       WHERE mode = 'live' AND status = 'reserved'
+       ORDER BY created_at ASC`,
+    );
+    result.scanned = candidates.rows.length;
+
+    for (const row of candidates.rows as Array<{
+      client_order_id: string;
+      symbol: string;
+      window_key: string;
+      ticker: string;
+      side: string;
+      requested_count: number;
+      created_at: Date;
+    }>) {
+      // Authoritative match: the earliest confirmed position lifecycle row this
+      // fill persisted locally. The action changes after exit/settlement, so
+      // match stable fill evidence rather than requiring action='bet'.
+      const bet = await client.query(
+        `SELECT id, contract_count, entry_price
+         FROM kalshi_bot_bets
+         WHERE mode = 'live'
+           AND source = 'bot'
+           AND action IN ('bet', 'expired', 'exit', 'late_recovery_exit')
+           AND symbol = $1 AND window_key = $2
+           AND ticker = $3 AND direction = $4
+           AND contract_count > 0 AND contract_count <= $5
+           AND entry_price > 0 AND entry_price < 1
+           AND created_at >= $6
+           AND created_at <= $6 + INTERVAL '30 seconds'
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [
+          row.symbol,
+          row.window_key,
+          row.ticker,
+          row.side,
+          row.requested_count,
+          row.created_at,
+        ],
+      );
+      if (bet.rows.length === 0) {
+        // No authoritative fill row — the POST outcome is unproven. Leave the
+        // reservation blocked; a genuinely dead/unknown attempt must not be
+        // silently released here.
+        result.unmatched += 1;
+        continue;
+      }
+
+      const betRow = bet.rows[0] as {
+        id: string;
+        contract_count: number | null;
+        entry_price: string | number | null;
+      };
+      // Only touch this exact reserved row — the WHERE status='reserved' guard
+      // means a concurrent resolve that already flipped it cannot be clobbered.
+      const upd = await client.query(
+        `UPDATE kalshi_regular_order_intents
+         SET status = 'filled',
+             reason = COALESCE(reason, 'reconciled: authoritative bet row present'),
+             filled_count = COALESCE($2, filled_count),
+             avg_fill_price = COALESCE($3, avg_fill_price),
+             resolved_at = NOW()
+         WHERE client_order_id = $1 AND status = 'reserved'`,
+        [
+          row.client_order_id,
+          betRow.contract_count ?? null,
+          betRow.entry_price != null ? Number(betRow.entry_price) : null,
+        ],
+      );
+      if ((upd.rowCount ?? 0) === 1) {
+        result.reconciled += 1;
+        logger.info(
+          {
+            clientOrderId: row.client_order_id,
+            symbol: row.symbol,
+            windowKey: row.window_key,
+            side: row.side,
+            betId: betRow.id,
+            filledCount: betRow.contract_count ?? null,
+          },
+          "[kalshi-regular-intent] reconciled stranded reserved intent → filled (authoritative bet present)",
+        );
+      } else {
+        // The row was flipped concurrently (e.g. resolveRegularOrderIntent ran
+        // between the SELECT and this UPDATE). Not an error — nothing stranded.
+        logger.debug(
+          { clientOrderId: row.client_order_id, symbol: row.symbol, windowKey: row.window_key },
+          "[kalshi-regular-intent] reconcile skipped — reserved intent no longer reserved (concurrent resolve)",
+        );
+      }
+    }
+
+    if (result.reconciled > 0 || result.unmatched > 0) {
+      logger.info(
+        { scanned: result.scanned, reconciled: result.reconciled, unmatched: result.unmatched },
+        "[kalshi-regular-intent] reserved-intent reconciliation pass complete",
+      );
+    }
+    return result;
   } finally {
     client.release();
   }

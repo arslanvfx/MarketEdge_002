@@ -19,6 +19,7 @@ import {
   getEffectiveConvictionZone,
   getConvictionMinEntryMinute,
   shouldSuppressConvictionStopLoss,
+  shouldApplyLoopGlobalQuietHours,
   getEtDow,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
@@ -1014,9 +1015,17 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   // Quiet-hours gate: skip new entries during the configured UTC hour range.
-  // When quietHoursV2 is enabled, skip this legacy gate entirely — V2 handles
-  // all hour-based gating below (with per-hour silence, reduced-bet, or pass-through).
-  if (!S.config.freeRunMode && !(S.config.quietHoursV2?.enabled) && isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd)) {
+  // quietHoursV2 is the AUTHORITATIVE Smart Hours master switch: whenever a V2
+  // config is PRESENT (enabled OR disabled) this legacy gate is skipped entirely.
+  // When enabled, V2 handles all hour-based gating below; when disabled, ALL
+  // schedule enforcement is off (no legacy fallback). The legacy range applies
+  // only for old configs that never adopted V2 (quietHoursV2 == null).
+  if (
+    !S.config.freeRunMode
+    && shouldApplyLoopGlobalQuietHours(S.config)
+    && S.config.quietHoursV2 == null
+    && isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd)
+  ) {
     // shadowPaperIgnoreQuietHours bypass: when the flag is on and the bot is live,
     // activate the narrow bypass flag so new entries in this tick are treated as
     // paper-only.  S.botMode is NOT changed — position management (closes, exits)
@@ -1065,7 +1074,11 @@ export async function runBotLoopTick(): Promise<void> {
   // "every day" overrides so existing configs are 100% backward compatible.
   {
     const qhv2 = S.config.quietHoursV2;
-    if (!S.config.freeRunMode && qhv2?.enabled) {
+    if (
+      !S.config.freeRunMode
+      && shouldApplyLoopGlobalQuietHours(S.config)
+      && qhv2?.enabled
+    ) {
       const nowDate = new Date();
       const nowUTCHour = nowDate.getUTCHours();
       // Day-of-week resolved in ET (America/New_York), NOT UTC.  The UI grid's

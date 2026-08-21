@@ -9,6 +9,7 @@
 
 import { describe, it, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 
 const RUN_DB_TESTS = !!process.env["DATABASE_URL"] && process.env["REGULAR_DB_TEST"] === "1";
 
@@ -24,7 +25,12 @@ if (RUN_DB_TESTS) {
 
 describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set REGULAR_DB_TEST=1 with DATABASE_URL" : false }, () => {
   let mod: typeof import("./kalshi-regular-order-intent.ts");
-  let pool: { connect: () => Promise<{ query: (sql: string) => Promise<unknown>; release: () => void }> };
+  let pool: {
+    connect: () => Promise<{
+      query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>;
+      release: () => void;
+    }>;
+  };
   const MODE = "live" as const;
 
   async function cleanup(): Promise<void> {
@@ -32,6 +38,37 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     try {
       await c.query(`DELETE FROM kalshi_regular_order_intents WHERE window_key LIKE 'DBTEST-%'`);
       await c.query(`DELETE FROM kalshi_regular_exit_intents WHERE window_key LIKE 'DBTEST-%'`);
+      await c.query(`DELETE FROM kalshi_bot_bets WHERE window_key LIKE 'DBTEST-%'`);
+    } finally {
+      c.release();
+    }
+  }
+
+  // Insert an authoritative live 'bet' row so reconciliation can prove a fill.
+  // `offsetMs` shifts created_at relative to now (negative = before).
+  async function insertLiveBet(opts: {
+    symbol: string;
+    windowKey: string;
+    contractCount: number;
+    entryPrice: number;
+    offsetMs?: number;
+    action?: "bet" | "expired";
+    source?: "bot" | "manual";
+  }): Promise<void> {
+    const c = await pool.connect();
+    try {
+      await c.query(
+        `INSERT INTO kalshi_bot_bets
+           (id, symbol, window_key, ticker, direction, action, mode, source,
+            entry_price, contract_count, kalshi_target, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'live',$7,$8,$9,$10, NOW() + ($11 || ' milliseconds')::interval)`,
+        [
+          randomUUID(), opts.symbol, opts.windowKey, "KXBTC-TEST", "yes",
+          opts.action ?? "bet", opts.source ?? "bot", String(opts.entryPrice),
+          opts.contractCount, "60000",
+          String(opts.offsetMs ?? 0),
+        ],
+      );
     } finally {
       c.release();
     }
@@ -99,6 +136,18 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     assert.equal((await mod.claimRegularOrderIntent(key("cid-z2", wk))).claimed, true);
   });
 
+  it("resolve detects a missing intent row instead of reporting success", async () => {
+    await assert.rejects(
+      mod.resolveRegularOrderIntent({
+        clientOrderId: "cid-does-not-exist",
+        status: "filled",
+        filledCount: 1,
+        avgFillPrice: 0.5,
+      }),
+      /matched zero rows/,
+    );
+  });
+
   it("shared per-window cap is atomic across different symbols", async () => {
     const wk = "DBTEST-CAP";
     const a = await mod.claimRegularOrderIntent({ ...key("cid-cap1", wk), maxOrdersPerWindow: 1 });
@@ -111,6 +160,114 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     assert.equal(a.claimed, true);
     assert.equal(b.claimed, false);
     assert.equal(b.reason, "window_order_cap_reached");
+  });
+
+  async function readIntent(clientOrderId: string): Promise<{
+    status: string;
+    filled_count: number | null;
+    avg_fill_price: string | null;
+  } | null> {
+    const c = await pool.connect();
+    try {
+      const r = await c.query(
+        `SELECT status, filled_count, avg_fill_price
+         FROM kalshi_regular_order_intents WHERE client_order_id = $1`,
+        [clientOrderId],
+      );
+      return (r.rows[0] as {
+        status: string;
+        filled_count: number | null;
+        avg_fill_price: string | null;
+      }) ?? null;
+    } finally {
+      c.release();
+    }
+  }
+
+  it("reconciliation flips a stranded reserved intent to filled when an authoritative bet exists", async () => {
+    const wk = "DBTEST-RECON";
+    // Simulate the scoping bug: intent claimed (reserved) but never resolved to
+    // filled even though the fill persisted a bet row.
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-recon1", wk))).claimed, true);
+    await insertLiveBet({ symbol: "BTC", windowKey: wk, contractCount: 4, entryPrice: 0.63, offsetMs: 50 });
+
+    const res = await mod.reconcileReservedRegularIntents();
+    assert.equal(res.reconciled >= 1, true, "at least one reserved intent reconciled");
+
+    const after = await readIntent("cid-recon1");
+    assert.ok(after);
+    assert.equal(after!.status, "filled");
+    assert.equal(after!.filled_count, 4, "contract_count copied as fill metadata");
+    assert.equal(Number(after!.avg_fill_price), 0.63, "entry_price copied as fill metadata");
+    // A restart cannot duplicate confirmed exposure — same-window re-claim denied.
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-recon2", wk))).claimed, false);
+  });
+
+  it("reconciliation recognizes a confirmed bet after settlement changes its action to expired", async () => {
+    const wk = "DBTEST-RECON-EXPIRED";
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-recon-expired", wk))).claimed, true);
+    await insertLiveBet({
+      symbol: "BTC",
+      windowKey: wk,
+      contractCount: 1,
+      entryPrice: 0.81,
+      offsetMs: 50,
+      action: "expired",
+    });
+
+    const res = await mod.reconcileReservedRegularIntents();
+    assert.equal(res.reconciled >= 1, true);
+    assert.equal((await readIntent("cid-recon-expired"))?.status, "filled");
+  });
+
+  it("reconciliation leaves an UNMATCHED reserved intent blocked (no authoritative bet)", async () => {
+    const wk = "DBTEST-RECON-NOBET";
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-nobet1", wk))).claimed, true);
+
+    const res = await mod.reconcileReservedRegularIntents();
+    assert.equal(res.unmatched >= 1, true, "reserved intent with no bet counted as unmatched");
+
+    const after = await readIntent("cid-nobet1");
+    assert.ok(after);
+    assert.equal(after!.status, "reserved", "unmatched reserved stays reserved (blocked)");
+    // Still blocks re-entry for the symbol/window.
+    assert.equal(await mod.hasUnresolvedRegularIntent(MODE, "BTC", wk), true);
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-nobet2", wk))).claimed, false);
+  });
+
+  it("reconciliation leaves UNKNOWN intents untouched even when a bet exists", async () => {
+    const wk = "DBTEST-RECON-UNK";
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-unk1", wk))).claimed, true);
+    await mod.markRegularOrderIntentUnknown({ clientOrderId: "cid-unk1", reason: "transport_or_timeout" });
+    // Even a matching bet row must not release fail-closed unknown exposure.
+    await insertLiveBet({ symbol: "BTC", windowKey: wk, contractCount: 2, entryPrice: 0.5, offsetMs: 50 });
+
+    await mod.reconcileReservedRegularIntents();
+
+    const after = await readIntent("cid-unk1");
+    assert.ok(after);
+    assert.equal(after!.status, "unknown", "unknown stays unknown — never reconciled");
+    assert.equal(await mod.hasUnresolvedRegularIntent(MODE, "BTC", wk), true);
+  });
+
+  it("reconciliation does not treat a matching manual bet as proof of the bot intent", async () => {
+    const wk = "DBTEST-RECON-MANUAL";
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-manual1", wk))).claimed, true);
+    await insertLiveBet({
+      symbol: "BTC",
+      windowKey: wk,
+      contractCount: 1,
+      entryPrice: 0.81,
+      offsetMs: 50,
+      source: "manual",
+    });
+
+    await mod.reconcileReservedRegularIntents();
+
+    const after = await readIntent("cid-manual1");
+    assert.ok(after);
+    assert.equal(after!.status, "reserved");
+    assert.equal(await mod.hasUnresolvedRegularIntent(MODE, "BTC", wk), true);
   });
 
   it("exit intent blocks a second close submission after an unknown result", async () => {

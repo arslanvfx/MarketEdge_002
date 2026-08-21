@@ -1072,8 +1072,15 @@ export function resolveQuietHoursV2State(
  *
  * Semantics (mirrors the loop gates exactly so they can never disagree):
  *  - freeRunMode          → proceed, no restrictions.
- *  - V2 enabled           → resolveQuietHoursV2State decides (ET-day + UTC-hour).
- *  - V2 disabled          → legacy quietHoursStart/End range decides.
+ *  - V2 present + enabled  → resolveQuietHoursV2State decides (ET-day + UTC-hour).
+ *  - V2 present + disabled → Smart Hours is the authoritative master switch:
+ *                            ALL schedule enforcement is off, so the entry
+ *                            proceeds active. It does NOT fall back to the
+ *                            legacy quietHoursStart/End range — a disabled
+ *                            master must disable every restriction with no
+ *                            hidden legacy fallback.
+ *  - V2 absent            → legacy quietHoursStart/End range decides (only for
+ *                            old configs that never adopted V2).
  *  - Silenced hour        → block ALL new entries (paper included) UNLESS
  *                           shadowPaperIgnoreQuietHours is on AND the bot is
  *                           live — then the entry proceeds demoted to paper
@@ -1108,7 +1115,14 @@ export function resolveEntryQuietHoursDecision(
   if (config.freeRunMode) return { action: "proceed", qhMode: "active", ...base };
 
   const qhv2 = config.quietHoursV2;
-  if (qhv2?.enabled) {
+  // Smart Hours is the authoritative master switch. When a V2 config is present
+  // at all, its `enabled` flag decides whether ANY schedule enforcement runs.
+  if (qhv2 != null) {
+    if (!qhv2.enabled) {
+      // Master OFF → all schedule enforcement is disabled. Proceed active with
+      // NO legacy fallback: a disabled master must silence every restriction.
+      return { action: "proceed", qhMode: "active", ...base };
+    }
     const st = resolveQuietHoursV2State(qhv2, now);
     if (st.mode === "silenced") {
       if (config.shadowPaperIgnoreQuietHours && botMode === "live") {
@@ -1128,6 +1142,7 @@ export function resolveEntryQuietHoursDecision(
     return { action: "proceed", qhMode: "active", ...base, isDataGathering: st.isDataGathering, dgOverrideAmount: st.dgOverrideAmount };
   }
 
+  // Legacy fallback: only reached when no V2 config exists at all (old configs).
   if (isInQuietHours(utcHour, config.quietHoursStart, config.quietHoursEnd)) {
     if (config.shadowPaperIgnoreQuietHours && botMode === "live") {
       return { action: "proceed", qhMode: "legacy-silenced", ...base, entryMode: "paper", forcedPaper: true };
@@ -1138,14 +1153,32 @@ export function resolveEntryQuietHoursDecision(
 }
 
 /**
+ * The loop may use the global schedule as an early-return optimization only in
+ * global mode. Per-market mode must always reach each symbol's placement-time
+ * resolver; otherwise a global silence/reduction can override a missing,
+ * disabled, or differently configured symbol schedule.
+ */
+export function shouldApplyLoopGlobalQuietHours(
+  config: Pick<BotConfig, "quietHoursMode">,
+): boolean {
+  return config.quietHoursMode !== "per_market";
+}
+
+/**
  * Per-symbol variant of resolveEntryQuietHoursDecision.
  *
- * When quietHoursMode === 'per_market' and the target symbol has its own enabled
- * QuietHoursV2 schedule stored in perSymbolQuietHours, that schedule is used
- * instead of the global quietHoursV2. Falls through to global behavior when:
- *  - quietHoursMode is not 'per_market' (or is undefined → global)
- *  - no per-symbol schedule is stored for this symbol
- *  - the per-symbol schedule has enabled: false
+ * The global `quietHoursV2.enabled` flag is the authoritative master switch for
+ * per-market mode too — it decides whether ANY per-symbol enforcement runs:
+ *  - Master OFF (quietHoursV2 present, enabled=false) → every symbol proceeds
+ *    active. Per-symbol schedules are NOT consulted, and there is no legacy
+ *    fallback. Disabling Smart Hours disables all schedule enforcement.
+ *  - Master ON (quietHoursV2.enabled=true) → the symbol's own schedule applies:
+ *      · an enabled per-symbol schedule is enforced (fail-closed).
+ *      · a missing OR disabled per-symbol schedule proceeds active — it does
+ *        NOT fall through to the global schedule or the legacy range.
+ *
+ * When quietHoursMode is not 'per_market' (or undefined → global) the global
+ * resolveEntryQuietHoursDecision handles the config directly.
  *
  * Callers in kalshi-bot-tick.ts use this at all three enforcement gates so
  * that the per-symbol schedule is applied consistently at entry, sizing, and
@@ -1158,11 +1191,40 @@ export function resolveEntryQuietHoursDecisionForSymbol(
   now: Date = new Date(),
 ): EntryQuietHoursDecision {
   if (config.quietHoursMode === "per_market") {
+    if (config.freeRunMode) return resolveEntryQuietHoursDecision(config, botMode, now);
+
+    const globalMaster = config.quietHoursV2;
+    // Master OFF is authoritative: disable all per-symbol enforcement, proceed
+    // active with no fallback to per-symbol/global/legacy rules.
+    if (globalMaster != null && !globalMaster.enabled) {
+      const utcHour = now.getUTCHours();
+      return {
+        action: "proceed",
+        qhMode: "active",
+        entryMode: botMode,
+        forcedPaper: false,
+        reducedPct: null,
+        utcHour,
+      };
+    }
+
+    // Master ON (or an old config with no global V2): the per-symbol schedule is
+    // authoritative for this coin. A missing/disabled symbol schedule proceeds
+    // active rather than falling through to the global or legacy rules.
     const symQhv2 = config.perSymbolQuietHours?.[symbol.toUpperCase()];
     if (symQhv2?.enabled) {
       const symConfig = { ...config, quietHoursV2: symQhv2 };
       return resolveEntryQuietHoursDecision(symConfig, botMode, now);
     }
+    const utcHour = now.getUTCHours();
+    return {
+      action: "proceed",
+      qhMode: "active",
+      entryMode: botMode,
+      forcedPaper: false,
+      reducedPct: null,
+      utcHour,
+    };
   }
   return resolveEntryQuietHoursDecision(config, botMode, now);
 }
@@ -1282,9 +1344,9 @@ export interface BotConfig {
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
   quietHoursEnd: number;     // UTC hour (0-23) when quiet period ends (default 18); set equal to start to disable
-  quietHoursV2?: QuietHoursV2; // per-hour silence / reduced-bet controls (V2); takes precedence over legacy range when enabled
-  quietHoursMode?: 'global' | 'per_market'; // 'global' = single shared schedule (default); 'per_market' = each symbol uses its own auto-calibrated schedule
-  perSymbolQuietHours?: Record<string, QuietHoursV2>; // per-symbol V2 schedules — only active when quietHoursMode === 'per_market'
+  quietHoursV2?: QuietHoursV2; // per-hour silence / reduced-bet controls (V2). Its `enabled` flag is the AUTHORITATIVE Smart Hours master switch: when present and enabled it is enforced; when present and disabled ALL schedule enforcement is off (no legacy fallback). The legacy range applies only when this field is entirely absent (old configs).
+  quietHoursMode?: 'global' | 'per_market'; // 'global' = single shared schedule (default); 'per_market' = each symbol uses its own auto-calibrated schedule. The global quietHoursV2.enabled master gates per-market enforcement too — master OFF disables every per-symbol schedule.
+  perSymbolQuietHours?: Record<string, QuietHoursV2>; // per-symbol V2 schedules — only consulted when quietHoursMode === 'per_market' AND the global quietHoursV2 master is enabled. A missing/disabled symbol schedule proceeds active (no global/legacy fallback).
   smartHoursCalibratedUtcHour?: string; // durable per-hour marker: ISO "YYYY-MM-DDTHH" of the last UTC hour Smart Hours calibration succeeded. Used to skip duplicate runs and drive restart catch-up.
   dataGatheringBetCap?: number; // $ cap applied to hours with ≤ 2 historical bets (default 1.00)
   dataGatheringEnabled?: boolean; // master switch (default true); when false, sparse hours are blocked rather than promoted to normal bets

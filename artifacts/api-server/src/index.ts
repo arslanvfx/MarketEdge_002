@@ -16,6 +16,7 @@ import { runBotCycle as runStockBotCycle, initDecisionLogFromDB } from "./lib/st
 import { alpacaConfigured } from "./lib/stock/alpaca";
 import { initAiSpend } from "./lib/ai-spend";
 import { scheduleAtTopOfEveryUtcHour } from "./lib/kalshi-quiet-hours-scheduler";
+import { reconcileReservedRegularIntents } from "./lib/kalshi-regular-order-intent";
 
 const rawPort = process.env["PORT"];
 
@@ -511,6 +512,22 @@ app.listen(port, (err) => {
         logger.warn({ err }, "[kalshi-bot] historical P&L fix failed (non-fatal)"),
       );
 
+      // Durable regular-order intent repair. A confirmed live fill is
+      // proved durable only once its intent row is status='filled'; a prior
+      // scoping bug left confirmed fills stranded at status='reserved'. Repair
+      // any such rows once at startup (after migrations + state load), then poll
+      // at a low frequency so a restart or a mid-flight crash cannot leave a
+      // symbol/window blocked indefinitely. Fail-closed 'unknown' rows and
+      // unmatched reserved rows are left untouched.
+      await reconcileReservedRegularIntents().catch((err) =>
+        logger.warn({ err }, "[kalshi-regular-intent] startup reconciliation failed (non-fatal)"),
+      );
+      setInterval(() => {
+        reconcileReservedRegularIntents().catch((err) =>
+          logger.warn({ err }, "[kalshi-regular-intent] periodic reconciliation failed (non-fatal)"),
+        );
+      }, 5 * 60_000);
+
       // Re-evaluate all historical expired bets against Kalshi's authoritative
       // settlement result (RTI).  Corrects any bets that were mis-evaluated
       // using Coinbase candle close prices, which can differ from Kalshi's RTI
@@ -625,10 +642,9 @@ app.listen(port, (err) => {
       // Per-symbol Smart Hours calibration runs at every exact UTC hour
       // boundary. Restart catch-up below closes the mid-hour blind spot, and
       // the shared operation skips overlap with a manual run.
-      // The hourly run funnels through the SAME shared operation as the manual
-      // "Calibrate & Apply All Markets" button: force-enables every calibrated
-      // symbol, preserves operator fields, and stamps a durable per-UTC-hour
-      // marker so a restart can catch up exactly once.
+      // The hourly run uses the same serialized schedule computation as the
+      // manual action, but deliberately preserves the visible Smart Hours
+      // master state so an operator's intentional OFF choice is not reversed.
       scheduleAtTopOfEveryUtcHour(async () => {
         try {
           const result = await runSmartHoursCalibration({ queueIfBusy: true });

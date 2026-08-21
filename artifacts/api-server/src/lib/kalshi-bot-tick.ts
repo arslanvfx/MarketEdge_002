@@ -2792,6 +2792,15 @@ async function _runBotTick(
   let fillPrice = yesPrice; // paper fill
   let orderId: string | null = null;
 
+  // ── DURABLE INTENT LIFECYCLE (live mode only) ────────────────────────────
+  // These MUST live at function scope, not inside the `if (entryMode === "live")`
+  // block, because the confirmed-fill resolve below runs AFTER persistBetRecord
+  // (outside that block). Leaving them block-scoped left every confirmed live
+  // fill stuck at status='reserved'. Paper mode never sets _intentClaimed, so it
+  // stays fully isolated from this durable table.
+  const _intentReservationId = crypto.randomUUID();
+  let _intentClaimed = false;
+
   // ── FINAL SMART HOURS CHECK — immediately before order placement ─────────
   // Authoritative, fail-closed re-resolution at the moment the order would be
   // submitted.  Catches (a) entry paths that bypassed the loop gates entirely,
@@ -2866,8 +2875,8 @@ async function _runBotTick(
     // double-enter, and so an indeterminate POST outcome leaves a durable
     // record that blocks re-entry until reconciliation. Live mode ONLY —
     // paper never touches this table (paper behavior stays isolated).
-    const _intentReservationId = crypto.randomUUID();
-    let _intentClaimed = false;
+    // (_intentReservationId / _intentClaimed are declared at function scope so
+    //  the confirmed-fill resolve after persistBetRecord can reference them.)
     try {
       const claim = await claimRegularOrderIntent({
         clientOrderId: _intentReservationId,

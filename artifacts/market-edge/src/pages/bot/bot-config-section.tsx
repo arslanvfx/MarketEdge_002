@@ -100,13 +100,23 @@ function fmtCalAge(iso: string): string {
 
 interface PerSymbolQuietHoursPanelProps {
   perSymbolQuietHours: Record<string, QuietHoursV2>;
+  masterEnabled: boolean;
   onChange: (sym: string, v: QuietHoursV2) => void;
+  onCalibrationApplied?: () => void;
   authPost: (path: string, body: object) => Promise<unknown>;
   dgCap?: number;
   dgEnabled?: boolean;
 }
 
-function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgCap: dgCapProp = 1, dgEnabled: dgEnabledProp = true }: PerSymbolQuietHoursPanelProps) {
+function PerSymbolQuietHoursPanel({
+  perSymbolQuietHours,
+  masterEnabled,
+  onChange,
+  onCalibrationApplied,
+  authPost,
+  dgCap: dgCapProp = 1,
+  dgEnabled: dgEnabledProp = true,
+}: PerSymbolQuietHoursPanelProps) {
   const [selectedSymbol, setSelectedSymbol] = React.useState(PER_MARKET_SYMBOLS[0]);
   const [calibrating, setCalibrating] = React.useState(false);
   const [calibrateMsg, setCalibrateMsg] = React.useState<string | null>(null);
@@ -171,6 +181,10 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
         for (const [sym, schedule] of Object.entries(result.perSymbolQuietHours)) {
           onChange(sym, { ...(perSymbolQuietHours[sym] ?? {}), ...schedule, enabled: true });
         }
+        // The manual endpoint enables the authoritative per-market master after
+        // schedules are applied. Mirror that persisted state in the local draft
+        // immediately so the visible On/Off control cannot remain stale.
+        onCalibrationApplied?.();
         const n = result.calibratedSymbols?.length ?? Object.keys(result.perSymbolQuietHours).length;
         const skipped = result.skippedSymbols?.length ?? 0;
         setCalibrateOk(true);
@@ -190,7 +204,7 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
       setCalibrating(false);
       setTimeout(() => setCalibrateMsg(null), 8_000);
     }
-  }, [authPost, onChange]);
+  }, [authPost, onChange, onCalibrationApplied, perSymbolQuietHours]);
 
   const schedule = perSymbolQuietHours[selectedSymbol] ?? { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} };
 
@@ -277,7 +291,9 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
       {(() => {
         const states = PER_MARKET_SYMBOLS.map(sym => ({
           sym,
-          state: resolveSymbolStateClient(perSymbolQuietHours[sym], now, dgEnabled, dgCap),
+          state: masterEnabled
+            ? resolveSymbolStateClient(perSymbolQuietHours[sym], now, dgEnabled, dgCap)
+            : { mode: "active" as const },
         }));
         const activeCount   = states.filter(s => s.state.mode === "active").length;
         const silencedCount = states.filter(s => s.state.mode === "silenced").length;
@@ -345,7 +361,9 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
 
           // Compute the symbol's current-hour status so the tab is tinted to match
           // the "Market Status Right Now" row colors below.
-          const symState = resolveSymbolStateClient(symQhv2, now, dgEnabled, dgCap);
+          const symState: CoinQHState = masterEnabled
+            ? resolveSymbolStateClient(symQhv2, now, dgEnabled, dgCap)
+            : { mode: "active" };
           const unselectedClasses = (() => {
             if (symState.mode === "silenced")
               return "bg-red-500/10 text-red-400 border-red-500/25 hover:bg-red-500/15";
@@ -2508,24 +2526,98 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       autoTuneLastChanges={status?.autoTuneQHLastChanges}
                     />
                   ) : (
-                    <PerSymbolQuietHoursPanel
-                      perSymbolQuietHours={visiblePerSymbolQuietHours}
-                      onChange={(sym, v) => setConfigDraft(d => ({
-                        ...d,
-                        perSymbolQuietHours: {
-                          // Always start from the full DB snapshot so switching coins
-                          // never silently drops other coins' schedules from the draft.
-                          ...(cfg?.perSymbolQuietHours ?? {}),
-                          // Overlay any in-flight draft changes made this session.
-                          ...(d.perSymbolQuietHours ?? {}),
-                          // Apply the change for this specific coin.
-                          [sym]: v,
-                        },
-                      }))}
-                      authPost={authPost}
-                      dgCap={merged.dataGatheringBetCap ?? 1}
-                      dgEnabled={merged.dataGatheringEnabled ?? true}
-                    />
+                    <>
+                      {/* Master Smart Hours switch — the global quietHoursV2.enabled
+                          flag is the AUTHORITATIVE master for per-market mode too.
+                          When OFF, NO per-symbol schedule is enforced (all coins trade
+                          the full clock); when ON, each coin's own enabled schedule
+                          applies. Surfaced here so operators can see at a glance whether
+                          their per-market schedules are actually being enforced.
+                          Saves immediately — same pattern as the grids. */}
+                      {(() => {
+                        const masterOn = merged.quietHoursV2?.enabled ?? false;
+                        const setMaster = (enabled: boolean) => {
+                          const next: QuietHoursV2 = {
+                            ...(merged.quietHoursV2 ?? { silencedUtcHours: [], reducedBetUtcHours: {} }),
+                            enabled,
+                          };
+                          setConfigDraft(d => ({ ...d, quietHoursV2: next }));
+                          authPost("/crypto/bot/config", { quietHoursV2: next }).catch(() => {});
+                        };
+                        return (
+                          <div
+                            className="flex items-center justify-between gap-3 mb-3 rounded-md border border-border bg-secondary/30 px-3 py-2"
+                            data-testid="container-per-market-master"
+                          >
+                            <div className="flex flex-col">
+                              <span className="text-xs font-medium text-foreground" data-testid="text-per-market-master-label">
+                                Smart Hours enforcement
+                              </span>
+                              <span
+                                className="text-[10px] text-muted-foreground/70"
+                                data-testid="status-per-market-master"
+                              >
+                                {masterOn
+                                  ? "On — each coin's schedule is enforced"
+                                  : "Off — all coins trade the full clock (per-coin schedules are NOT enforced)"}
+                              </span>
+                            </div>
+                            <div className="flex gap-0.5 bg-secondary/50 rounded-md p-0.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setMaster(true)}
+                                data-testid="button-per-market-master-on"
+                                className={`px-3 py-1 text-xs rounded transition-colors ${
+                                  masterOn ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                                }`}
+                              >
+                                On
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setMaster(false)}
+                                data-testid="button-per-market-master-off"
+                                className={`px-3 py-1 text-xs rounded transition-colors ${
+                                  !masterOn ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                                }`}
+                              >
+                                Off
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      <PerSymbolQuietHoursPanel
+                        perSymbolQuietHours={visiblePerSymbolQuietHours}
+                        masterEnabled={merged.quietHoursV2?.enabled ?? false}
+                        onChange={(sym, v) => setConfigDraft(d => ({
+                          ...d,
+                          perSymbolQuietHours: {
+                            // Always start from the full DB snapshot so switching coins
+                            // never silently drops other coins' schedules from the draft.
+                            ...(cfg?.perSymbolQuietHours ?? {}),
+                            // Overlay any in-flight draft changes made this session.
+                            ...(d.perSymbolQuietHours ?? {}),
+                            // Apply the change for this specific coin.
+                            [sym]: v,
+                          },
+                        }))}
+                        onCalibrationApplied={() => setConfigDraft(d => ({
+                          ...d,
+                          quietHoursV2: {
+                            ...(merged.quietHoursV2 ?? {
+                              enabled: false,
+                              silencedUtcHours: [],
+                              reducedBetUtcHours: {},
+                            }),
+                            enabled: true,
+                          },
+                        }))}
+                        authPost={authPost}
+                        dgCap={merged.dataGatheringBetCap ?? 1}
+                        dgEnabled={merged.dataGatheringEnabled ?? true}
+                      />
+                    </>
                   )}
                 </div>
 

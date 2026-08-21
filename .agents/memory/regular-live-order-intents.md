@@ -11,4 +11,8 @@ description: Fail-closed rules for regular Kalshi entry and exit submissions whe
 
 **How to apply:** Unknown/reserved entries block that symbol across later windows; unknown exits block further closes for that position. Shared window caps must be claimed atomically. Confirmed entry intents transition only after the local position is durable. Live entries and exits must not use same-tick size or remainder resubmissions.
 
+**Recovery rule:** Automatically repair only `reserved` entries with strong local proof of the same bot fill: bot source, matching live symbol/window/ticker/side, valid count/price, and a tightly bounded post-intent timestamp. Never auto-reconcile `unknown` or manual-source activity. Do not depend on the bet row still having its original entry action because settlement and exits change that lifecycle field.
+
+**Why:** Confirmed fills can be locally durable even if intent finalization fails, but a loose match can misclassify unrelated manual activity and release a reservation whose exchange outcome is still uncertain.
+
 **Price rule:** Enforce known acceptable quotes immediately before POST and treat a fill that contradicts the submitted limit as unknown. A legitimate buy-limit price improvement below an entry band is held; never immediately sell it merely for being cheaper than the strategy’s entry floor.

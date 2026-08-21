@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_BOT_CONFIG,
   isInQuietHours,
+  shouldApplyLoopGlobalQuietHours,
   type BotConfig,
   type QuietHoursV2,
 } from "./kalshi-bot-engine-core.ts";
@@ -36,8 +37,9 @@ function simulateQuietHoursGate(
 ): "legacy-blocked" | "v2-silenced" | "v2-reduced" | "active" {
   const freeRun = config.freeRunMode ?? false;
 
-  // Legacy gate — skipped entirely when V2 is enabled
-  if (!freeRun && !(config.quietHoursV2?.enabled) && isInQuietHours(utcHour, config.quietHoursStart, config.quietHoursEnd)) {
+  // Legacy gate — compatibility only for configs that never adopted V2.
+  // A present-but-disabled V2 object is the authoritative Smart Hours OFF state.
+  if (!freeRun && config.quietHoursV2 == null && isInQuietHours(utcHour, config.quietHoursStart, config.quietHoursEnd)) {
     return "legacy-blocked";
   }
 
@@ -73,16 +75,26 @@ function applyReducedBetCap(
 // Tests — V2 precedence over legacy gate
 // ---------------------------------------------------------------------------
 
-test("quiet-hours v2 precedence: legacy gate fires when V2 is disabled", () => {
-  // Legacy range 08:00–16:00 UTC, V2 disabled
+test("quiet-hours v2 precedence: legacy gate fires only when V2 is absent", () => {
+  // Legacy range 08:00–16:00 UTC on an old config with no V2 object.
+  const cfg: BotConfig = {
+    ...DEFAULT_BOT_CONFIG,
+    quietHoursStart: 8,
+    quietHoursEnd: 16,
+    quietHoursV2: undefined,
+  };
+  // UTC hour 10 is inside the legacy range
+  assert.equal(simulateQuietHoursGate(cfg, 10), "legacy-blocked");
+});
+
+test("quiet-hours v2 precedence: disabled V2 master bypasses legacy", () => {
   const cfg: BotConfig = {
     ...DEFAULT_BOT_CONFIG,
     quietHoursStart: 8,
     quietHoursEnd: 16,
     quietHoursV2: { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} },
   };
-  // UTC hour 10 is inside the legacy range
-  assert.equal(simulateQuietHoursGate(cfg, 10), "legacy-blocked");
+  assert.equal(simulateQuietHoursGate(cfg, 10), "active");
 });
 
 test("quiet-hours v2 precedence: legacy gate is bypassed when V2 is enabled", () => {
@@ -147,6 +159,12 @@ test("quiet-hours v2 precedence: freeRunMode bypasses both legacy and V2", () =>
   };
   // All hours silenced in V2 and legacy — freeRun overrides everything
   assert.equal(simulateQuietHoursGate(cfg, 12), "active");
+});
+
+test("loop quiet-hours optimization runs only in global mode", () => {
+  assert.equal(shouldApplyLoopGlobalQuietHours({ quietHoursMode: "global" }), true);
+  assert.equal(shouldApplyLoopGlobalQuietHours({ quietHoursMode: undefined }), true);
+  assert.equal(shouldApplyLoopGlobalQuietHours({ quietHoursMode: "per_market" }), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -275,7 +293,7 @@ test("resolveQuietHoursV2State: data-gathering percentage remains enforced after
 // a silenced hour regardless of dispatch path.
 // ---------------------------------------------------------------------------
 
-import { resolveEntryQuietHoursDecision, applyQuietHoursAutoTuneDeltas, applyPlacementTimeReducedPct } from "./kalshi-bot-engine-core.ts";
+import { resolveEntryQuietHoursDecision, resolveEntryQuietHoursDecisionForSymbol, applyQuietHoursAutoTuneDeltas, applyPlacementTimeReducedPct } from "./kalshi-bot-engine-core.ts";
 
 // Monday 2026-08-10 15:30 UTC = Monday 11:30 AM EDT (ET dow = 1, UTC hour 15).
 const MON_11AM_ET = new Date("2026-08-10T15:30:00Z");
@@ -370,9 +388,10 @@ test("entry gate: hour-boundary transition — reduced at :59, silenced at :00 n
   assert.equal(after.action, "block", "crossing into a silenced hour must block at placement time");
 });
 
-test("entry gate: legacy range enforced when V2 disabled — bypass demotes to paper", () => {
+test("entry gate: legacy range enforced only when V2 is ABSENT — bypass demotes to paper", () => {
+  // V2 config entirely absent (old config) is the only case that falls back to legacy.
   const cfg = qhCfg(
-    { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} },
+    undefined,
     { quietHoursStart: 14, quietHoursEnd: 18, shadowPaperIgnoreQuietHours: true },
   );
   const d = resolveEntryQuietHoursDecision(cfg, "live", MON_11AM_ET);
@@ -381,12 +400,26 @@ test("entry gate: legacy range enforced when V2 disabled — bypass demotes to p
   assert.equal(d.qhMode, "legacy-silenced");
 });
 
-test("entry gate: legacy range blocks without the bypass flag", () => {
+test("entry gate: legacy range blocks without the bypass flag (V2 absent)", () => {
+  const cfg = qhCfg(
+    undefined,
+    { quietHoursStart: 14, quietHoursEnd: 18 },
+  );
+  assert.equal(resolveEntryQuietHoursDecision(cfg, "live", MON_11AM_ET).action, "block");
+});
+
+test("entry gate: disabled Smart Hours master bypasses the legacy range entirely", () => {
+  // V2 present but disabled = authoritative master OFF. A legacy range that WOULD
+  // silence this hour must NOT be applied — disabling Smart Hours disables ALL
+  // schedule enforcement with no hidden legacy fallback.
   const cfg = qhCfg(
     { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} },
     { quietHoursStart: 14, quietHoursEnd: 18 },
   );
-  assert.equal(resolveEntryQuietHoursDecision(cfg, "live", MON_11AM_ET).action, "block");
+  const d = resolveEntryQuietHoursDecision(cfg, "live", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+  assert.equal(d.qhMode, "active");
 });
 
 test("entry gate: freeRunMode bypasses everything", () => {
@@ -560,4 +593,157 @@ test("entry gate + rescale integration: hour boundary active→reduced between s
   assert.equal(atPlacement.reducedPct, 25);
   const submitted = applyPlacementTimeReducedPct(sizedCount, atSizing.reducedPct, atPlacement.reducedPct);
   assert.equal(submitted, 2, "submitted count must honour the placement-time 25% cap");
+});
+
+// ---------------------------------------------------------------------------
+// Per-market entry gate (resolveEntryQuietHoursDecisionForSymbol) — the global
+// quietHoursV2.enabled flag is the AUTHORITATIVE master switch for per_market
+// mode too. Master OFF disables ALL per-symbol enforcement (no per-symbol,
+// global, or legacy fallback). Master ON enforces the symbol's own schedule;
+// a missing/disabled symbol schedule proceeds active.
+// ---------------------------------------------------------------------------
+
+// A per-symbol schedule that silences Monday 15:00 UTC for BTC.
+const BTC_SILENCED_SCHEDULE: QuietHoursV2 = {
+  enabled: true,
+  silencedUtcHours: [],
+  reducedBetUtcHours: {},
+  silencedByDow: { "1": [15] },
+};
+
+test("per-market: master OFF bypasses an enabled symbol schedule → proceeds active", () => {
+  const cfg = qhCfg(
+    { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} }, // global master OFF
+    {
+      quietHoursMode: "per_market",
+      perSymbolQuietHours: { BTC: BTC_SILENCED_SCHEDULE }, // would silence, but master is off
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+  assert.equal(d.qhMode, "active");
+});
+
+test("per-market: master OFF also bypasses the legacy range (no hidden fallback)", () => {
+  const cfg = qhCfg(
+    { enabled: false, silencedUtcHours: [], reducedBetUtcHours: {} },
+    {
+      quietHoursMode: "per_market",
+      quietHoursStart: 14,
+      quietHoursEnd: 18, // legacy would silence 15:00 UTC
+      perSymbolQuietHours: {},
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.qhMode, "active");
+});
+
+test("per-market: master ON enforces the symbol's own silenced schedule → blocks live", () => {
+  const cfg = qhCfg(
+    { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} }, // global master ON
+    {
+      quietHoursMode: "per_market",
+      perSymbolQuietHours: { BTC: BTC_SILENCED_SCHEDULE },
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "block");
+  assert.equal(d.qhMode, "silenced");
+});
+
+test("per-market: master ON + shadow bypass demotes the symbol's silenced live entry to paper", () => {
+  const cfg = qhCfg(
+    { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} },
+    {
+      quietHoursMode: "per_market",
+      shadowPaperIgnoreQuietHours: true,
+      perSymbolQuietHours: { BTC: BTC_SILENCED_SCHEDULE },
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "paper");
+  assert.equal(d.forcedPaper, true);
+});
+
+test("per-market: master ON but symbol schedule MISSING → proceeds active (no global/legacy fallback)", () => {
+  const cfg = qhCfg(
+    { enabled: true, silencedUtcHours: [15], reducedBetUtcHours: {} }, // global would silence 15:00
+    {
+      quietHoursMode: "per_market",
+      quietHoursStart: 14,
+      quietHoursEnd: 18, // legacy would silence too
+      perSymbolQuietHours: { ETH: BTC_SILENCED_SCHEDULE }, // nothing for BTC
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+  assert.equal(d.qhMode, "active");
+});
+
+test("per-market: master ON but symbol schedule DISABLED → proceeds active", () => {
+  const cfg = qhCfg(
+    { enabled: true, silencedUtcHours: [15], reducedBetUtcHours: {} },
+    {
+      quietHoursMode: "per_market",
+      perSymbolQuietHours: {
+        BTC: { enabled: false, silencedUtcHours: [15], reducedBetUtcHours: {}, silencedByDow: { "1": [15] } },
+      },
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+  assert.equal(d.qhMode, "active");
+});
+
+test("per-market: master ON enforces the symbol's reduced schedule", () => {
+  const cfg = qhCfg(
+    { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} },
+    {
+      quietHoursMode: "per_market",
+      perSymbolQuietHours: {
+        BTC: {
+          enabled: true,
+          silencedUtcHours: [],
+          reducedBetUtcHours: {},
+          reducedByDow: { "1": { "15": 25 } },
+        },
+      },
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.reducedPct, 25);
+  assert.equal(d.qhMode, "reduced");
+});
+
+test("per-market: freeRunMode bypasses everything even with an enabled symbol schedule", () => {
+  const cfg = qhCfg(
+    { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} },
+    {
+      freeRunMode: true,
+      quietHoursMode: "per_market",
+      perSymbolQuietHours: { BTC: BTC_SILENCED_SCHEDULE },
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "BTC", MON_11AM_ET);
+  assert.equal(d.action, "proceed");
+  assert.equal(d.entryMode, "live");
+});
+
+test("per-market: symbol lookup is case-insensitive (uppercased)", () => {
+  const cfg = qhCfg(
+    { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} },
+    {
+      quietHoursMode: "per_market",
+      perSymbolQuietHours: { BTC: BTC_SILENCED_SCHEDULE },
+    },
+  );
+  const d = resolveEntryQuietHoursDecisionForSymbol(cfg, "live", "btc", MON_11AM_ET);
+  assert.equal(d.action, "block");
+  assert.equal(d.qhMode, "silenced");
 });

@@ -1146,6 +1146,9 @@ export async function recomputeAllSymbolQuietHours(
 async function _runSmartHoursCalibrationInner(opts?: {
   thresholdOverride?: number;
   nowMs?: number;
+  /** Explicit manual "Apply" actions may turn on the per-market master.
+   * Automatic recalibration must preserve an operator's intentional OFF state. */
+  activateMaster?: boolean;
 }): Promise<{
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   calibratedSymbols: string[];
@@ -1153,12 +1156,43 @@ async function _runSmartHoursCalibrationInner(opts?: {
 }> {
   const nowMs = opts?.nowMs ?? Date.now();
   const result = await recomputeAllSymbolQuietHours(opts?.thresholdOverride, { forceEnable: true });
+  const isCompleteRun = result.calibratedSymbols.length > 0 && result.skippedSymbols.length === 0;
+  const shouldActivateMaster =
+    opts?.activateMaster === true
+    && result.calibratedSymbols.length > 0
+    && S.config.quietHoursMode === "per_market"
+    && S.config.quietHoursV2?.enabled !== true;
+  const configPatch = {
+    ...(shouldActivateMaster
+      ? {
+          quietHoursV2: {
+            ...(S.config.quietHoursV2 ?? {
+              enabled: false,
+              silencedUtcHours: [],
+              reducedBetUtcHours: {},
+            }),
+            enabled: true,
+          },
+        }
+      : {}),
+    ...(isCompleteRun && S.config.smartHoursCalibratedUtcHour !== utcHourMarker(nowMs)
+      ? { smartHoursCalibratedUtcHour: utcHourMarker(nowMs) }
+      : {}),
+  };
+
+  if (Object.keys(configPatch).length > 0) {
+    await updateBotConfig(configPatch);
+  }
+  if (shouldActivateMaster) {
+    logger.info(
+      { calibratedSymbols: result.calibratedSymbols },
+      "[qh-per-symbol] manual calibration applied schedules and enabled Smart Hours master",
+    );
+  }
+
   // Stamp only a complete run. The manual endpoint may still return partial
   // results, but a restart in the same hour should retry any skipped market
   // rather than treating an incomplete automatic pass as fully calibrated.
-  if (result.calibratedSymbols.length > 0 && result.skippedSymbols.length === 0 && S.config.smartHoursCalibratedUtcHour !== utcHourMarker(nowMs)) {
-    await updateBotConfig({ smartHoursCalibratedUtcHour: utcHourMarker(nowMs) });
-  }
   return result;
 }
 
@@ -1174,6 +1208,9 @@ let _smartHoursCalibrationRerunRequested = false;
 export async function runSmartHoursCalibration(opts?: {
   thresholdOverride?: number;
   nowMs?: number;
+  /** Turn on the per-market Smart Hours master after applying at least one
+   * schedule. Reserved for the explicit manual "Calibrate & Apply" action. */
+  activateMaster?: boolean;
   /** Automatic callers set this so a boundary that arrives during another run
    * is queued once instead of dropping the new UTC hour. */
   queueIfBusy?: boolean;
@@ -1199,6 +1236,7 @@ export async function runSmartHoursCalibration(opts?: {
       // stamped for the latest hour, not the hour when the prior run began.
       result = await _runSmartHoursCalibrationInner({
         thresholdOverride: opts?.thresholdOverride,
+        activateMaster: opts?.activateMaster,
       });
     }
     return { skipped: false, ...result };
