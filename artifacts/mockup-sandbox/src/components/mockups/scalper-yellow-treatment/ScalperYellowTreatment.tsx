@@ -1,13 +1,13 @@
 import { Activity, ArrowDown, ArrowUp, Clock, Zap } from "lucide-react";
 
 const yellowShell =
-  "border border-amber-300/80 bg-gradient-to-br from-yellow-300/[0.18] via-amber-300/[0.11] to-orange-400/[0.18] shadow-[inset_0_1px_0_rgba(255,251,235,0.24),0_12px_34px_rgba(245,158,11,0.14)]";
+  "border border-yellow-200/90 bg-gradient-to-br from-yellow-300 via-amber-300 to-orange-400 text-amber-950 shadow-[inset_0_1px_0_rgba(255,251,235,0.55),0_12px_34px_rgba(245,158,11,0.24)]";
 
 function Metric({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
   return (
     <div className={`rounded-lg border border-amber-200/10 bg-black/15 p-2.5 ${wide ? "sm:col-span-2" : ""}`}>
-      <div className="mb-0.5 text-[9px] uppercase tracking-[0.14em] text-amber-100/55">{label}</div>
-      <div className="font-mono text-xs font-semibold text-amber-50">{value}</div>
+      <div className="mb-0.5 text-[9px] uppercase tracking-[0.14em] text-amber-950/65">{label}</div>
+      <div className="font-mono text-xs font-semibold text-amber-950">{value}</div>
     </div>
   );
 }
@@ -17,19 +17,19 @@ function ActiveScalperCard() {
     <section className={`rounded-xl p-5 text-amber-50 ${yellowShell}`}>
       <div className="mb-4 flex items-start justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
-          <div className="text-2xl font-black tracking-tight text-amber-50">NEAR</div>
-          <span className="flex items-center gap-1 rounded-full bg-amber-200/20 px-3 py-1 text-sm font-bold text-amber-50">
+          <div className="text-2xl font-black tracking-tight text-amber-950">NEAR</div>
+          <span className="flex items-center gap-1 rounded-full bg-amber-950/15 px-3 py-1 text-sm font-bold text-amber-950">
             <ArrowDown className="h-3.5 w-3.5" /> NO
           </span>
-          <span className="rounded-full border border-amber-200/30 bg-amber-100/15 px-2 py-0.5 text-xs font-bold tracking-wide text-amber-50">
+          <span className="rounded-full border border-amber-950/25 bg-amber-950/15 px-2 py-0.5 text-xs font-bold tracking-wide text-amber-950">
             SCALPER
           </span>
           <span className="rounded bg-red-400/15 px-1.5 py-0.5 text-[10px] font-bold text-red-200">LIVE</span>
-          <span className="text-xs text-amber-100/60">Opened 02:28:15 AM</span>
+          <span className="text-xs text-amber-950/65">Opened 02:28:15 AM</span>
         </div>
         <div className="text-right">
-          <div className="text-xs text-amber-100/55">Settlement</div>
-          <div className="text-sm font-bold text-amber-100">Pending</div>
+          <div className="text-xs text-amber-950/65">Settlement</div>
+          <div className="text-sm font-bold text-amber-950">Pending</div>
         </div>
       </div>
 
@@ -43,8 +43,8 @@ function ActiveScalperCard() {
       </div>
       <div className="mt-2 grid grid-cols-2 gap-2">
         <Metric label="Window" value="2:15 AM EST" />
-        <div className="flex items-end justify-end rounded-lg border border-dashed border-amber-200/15 p-2.5 text-right text-[11px] text-amber-100/55">
-          <span className="flex items-center gap-1"><Activity className="h-3 w-3 text-amber-200/70" /> Waiting for settlement</span>
+        <div className="flex items-end justify-end rounded-lg border border-dashed border-amber-950/20 p-2.5 text-right text-[11px] text-amber-950/65">
+          <span className="flex items-center gap-1"><Activity className="h-3 w-3 text-amber-950/70" /> Waiting for settlement</span>
         </div>
       </div>
     </section>
@@ -55,15 +55,15 @@ function HistoryScalperCard() {
   return (
     <section className={`rounded-xl p-4 text-amber-50 ${yellowShell}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className="text-base font-black tracking-tight">NEAR</span>
-        <span className="flex items-center gap-0.5 rounded-full bg-amber-200/20 px-2 py-0.5 text-xs font-bold text-amber-50">
+        <span className="text-base font-black tracking-tight text-amber-950">NEAR</span>
+        <span className="flex items-center gap-0.5 rounded-full bg-amber-950/15 px-2 py-0.5 text-xs font-bold text-amber-950">
           <ArrowDown className="h-3 w-3" /> BELOW
         </span>
-        <span className="flex items-center gap-1 rounded-full border border-amber-200/30 bg-amber-100/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-50">
+        <span className="flex items-center gap-1 rounded-full border border-amber-950/25 bg-amber-950/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-950">
           <Zap className="h-2.5 w-2.5" /> SCALPER
         </span>
-        <span className="rounded bg-amber-100/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-100">PAPER</span>
-        <span className="ml-auto flex items-center gap-1 text-xs text-amber-100/60">
+        <span className="rounded bg-amber-950/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-950">PAPER</span>
+        <span className="ml-auto flex items-center gap-1 text-xs text-amber-950/65">
           <Clock className="h-3 w-3" /> Aug 21, 2:28 AM
         </span>
       </div>
@@ -79,7 +79,7 @@ function HistoryScalperCard() {
           <div className="font-mono text-sm font-bold text-emerald-300">+$0.06</div>
         </div>
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-amber-100/60">
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-amber-950/65">
         <span className="font-mono">2:15 AM EST</span>
         <span className="font-semibold text-emerald-300">· confirmed fill</span>
         <span>· settled normally</span>
