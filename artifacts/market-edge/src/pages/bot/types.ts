@@ -540,6 +540,8 @@ export interface ScalperConfig {
   freefallGuardEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
+  targetProximityGuardEnabled: boolean;
+  targetProximityThresholdPct: number;
   circuitBreakerEnabled: boolean;
   circuitBreaker: boolean;
   circuitBreakerReason: string | null;
@@ -563,6 +565,8 @@ export interface ScalperStatusMarket {
   lastAsk: number | null;
   secondsRemaining: number | null;
   freefallBlocked: boolean;
+  targetProximityBlocked: boolean;
+  targetDistancePct: number | null;
   reason: string | null;
 }
 

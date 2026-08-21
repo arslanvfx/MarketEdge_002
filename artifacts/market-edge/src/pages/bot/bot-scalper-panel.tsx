@@ -686,6 +686,53 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           </div>
         </div>
 
+        <div className="bg-background/50 border border-amber-500/20 rounded-lg p-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="rounded-md bg-amber-500/10 p-2 text-amber-400">
+                <Target className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-[10px] font-bold text-amber-500/70 uppercase tracking-widest">Target Distance Guard</div>
+                <p className="text-[10px] text-muted-foreground mt-1 max-w-xl leading-relaxed">
+                  Stay out when the fresh underlying price is within the configured distance of the Kalshi target, regardless of which side is in band.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4 shrink-0">
+              <label className={`flex items-center gap-2 ${!merged.targetProximityGuardEnabled ? "opacity-50" : ""}`}>
+                <span className="text-[10px] text-muted-foreground">Minimum distance</span>
+                <div className="relative w-24">
+                  <input
+                    type="number"
+                    min={0.01}
+                    max={10}
+                    step={0.01}
+                    value={merged.targetProximityThresholdPct}
+                    onChange={e => handleConfigChange("targetProximityThresholdPct", parseFloat(e.target.value) || 0)}
+                    disabled={!merged.targetProximityGuardEnabled}
+                    data-testid="input-scalper-target-proximity-threshold"
+                    className="w-full bg-background border border-border rounded-md pl-3 pr-7 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50 disabled:cursor-not-allowed"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs">%</span>
+                </div>
+              </label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={merged.targetProximityGuardEnabled}
+                data-testid="switch-scalper-target-proximity"
+                onClick={() => handleConfigChange("targetProximityGuardEnabled", !merged.targetProximityGuardEnabled)}
+                className={`w-10 h-5 rounded-full relative transition-colors ${merged.targetProximityGuardEnabled ? "bg-amber-500" : "bg-muted"}`}
+                title="Toggle Target Distance Guard"
+              >
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${merged.targetProximityGuardEnabled ? "translate-x-5" : "translate-x-0.5"}`} />
+                <span className="sr-only">Target Distance Guard</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div>
           <div className="flex items-center gap-2 mb-3">
             <Settings2 className="w-4 h-4 text-amber-500/70" />
@@ -698,6 +745,11 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                   const pm = merged.perMarketOverrides?.find(m => m.symbol === sym) || { symbol: sym };
                   const isPaused = pm.paused ?? false;
                   const statusInfo = statusData?.markets.find(m => m.symbol === sym);
+                  const statusLabel = statusInfo?.state === "active"
+                    ? (statusInfo.lastAsk !== null ? `candidate · ${Math.round(statusInfo.lastAsk * 100)}¢` : "Scanning...")
+                    : statusInfo?.state === "guarded"
+                      ? `blocked · ${readableReason(statusInfo.reason)}`
+                      : statusInfo?.state;
                   
                   return (
                     <tr key={sym} className={`border-b border-border/40 last:border-0 hover:bg-muted/10 transition-colors ${isPaused ? "bg-red-500/5" : ""}`}>
@@ -802,8 +854,18 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                                   FREEFALL
                                 </span>
                               )}
+                              {statusInfo.targetProximityBlocked && (
+                                <span
+                                  className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-300"
+                                  title={statusInfo.targetDistancePct != null
+                                    ? `Target distance ${(statusInfo.targetDistancePct).toFixed(3)}%`
+                                    : "Target distance unavailable"}
+                                >
+                                  TARGET
+                                </span>
+                              )}
                               <span className="text-[9px] text-muted-foreground/50 w-28 text-right truncate" title={statusInfo.reason || "Preliminary scan only; a fresh authenticated quote is checked before ordering."}>
-                                {statusInfo.state === 'active' ? (statusInfo.lastAsk !== null ? `candidate · ${Math.round(statusInfo.lastAsk * 100)}¢` : "Scanning...") : statusInfo.state}
+                                {statusLabel}
                               </span>
                             </div>
                           )}

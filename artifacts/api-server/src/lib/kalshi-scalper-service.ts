@@ -31,6 +31,8 @@ import {
   winningCostFromFill,
   validateOrderbookQuote,
   checkFreefallGuard,
+  checkTargetProximityGuard,
+  resolveScalpMarketState,
   computeScalpPnl,
   isFillWithinBand,
   classifyPlaceOrderResult,
@@ -473,6 +475,8 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
       freefallGuardEnabled: patch.freefallGuardEnabled !== undefined ? patch.freefallGuardEnabled : current.freefallGuardEnabled,
       freefallLookbackSeconds: patch.freefallLookbackSeconds !== undefined ? patch.freefallLookbackSeconds : current.freefallLookbackSeconds,
       freefallThresholdPct: patch.freefallThresholdPct !== undefined ? patch.freefallThresholdPct : current.freefallThresholdPct,
+      targetProximityGuardEnabled: patch.targetProximityGuardEnabled !== undefined ? patch.targetProximityGuardEnabled : current.targetProximityGuardEnabled,
+      targetProximityThresholdPct: patch.targetProximityThresholdPct !== undefined ? patch.targetProximityThresholdPct : current.targetProximityThresholdPct,
       circuitBreakerEnabled: patch.circuitBreakerEnabled !== undefined ? patch.circuitBreakerEnabled : current.circuitBreakerEnabled,
       perMarketOverrides: mergedOverrides,
       circuitBreaker: current.circuitBreaker,
@@ -490,6 +494,8 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
       enabled: updated.enabled,
       mode: updated.mode,
       circuitBreakerEnabled: updated.circuitBreakerEnabled,
+      targetProximityGuardEnabled: updated.targetProximityGuardEnabled,
+      targetProximityThresholdPct: updated.targetProximityThresholdPct,
     },
     "[kalshi-scalper] config updated",
   );
@@ -1422,14 +1428,14 @@ async function _executeScalpAttempt(
   const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
   const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
     fetchKalshiTarget(symbol, new Date(closeTime), true).then(
-      () => ({ ok: true as const, error: null as unknown }),
+      (target) => ({ ok: true as const, target, error: null as unknown }),
       (error) => ({ ok: false as const, error }),
     ),
     fetchOrderbookPrices(ticker).then(
       (orderbook) => ({ ok: true as const, orderbook }),
       (error) => ({ ok: false as const, orderbook: null, error }),
     ),
-    snapshot.freefallGuardEnabled
+    snapshot.freefallGuardEnabled || snapshot.targetProximityGuardEnabled
       ? coin
         ? _collectPriceSample(coin.symbol, coin.product)
         : Promise.resolve(false)
@@ -1540,6 +1546,51 @@ async function _executeScalpAttempt(
 
   const effectiveSide = match2.side;
   const winningAsk = match2.winningAsk;
+
+  // ── FINAL TARGET PROXIMITY GUARD — authoritative and side-independent ─────
+  // The target came from the force-refresh above and the live underlying sample
+  // was fetched concurrently. If either input is unavailable, the enabled guard
+  // cannot prove the entry safe and fails closed.
+  if (snapshot.targetProximityGuardEnabled) {
+    if (!coin) {
+      await updateReservationStatus(mode, symbol, windowKey, "skipped", "target_proximity_unavailable_no_product", true);
+      _rememberReservationOutcome(attemptKey, "skipped", "target_proximity_unavailable_no_product", priorSubmittedOrders);
+      return;
+    }
+    if (!freshSampleResult) {
+      logger.info(
+        { symbol, side: effectiveSide },
+        "[kalshi-scalper] target proximity sample fetch failed — unavailable, skipping (fail-closed)",
+      );
+      await updateReservationStatus(mode, symbol, windowKey, "skipped", "target_proximity_unavailable_fetch_failed", true);
+      _rememberReservationOutcome(attemptKey, "skipped", "target_proximity_unavailable_fetch_failed", priorSubmittedOrders);
+      return;
+    }
+    const samplesFinal = _priceSamples.get(symbol) ?? [];
+    const latestSample = samplesFinal[samplesFinal.length - 1];
+    const proximityFinal = checkTargetProximityGuard(
+      latestSample?.price,
+      Number(identityResult.target),
+      snapshot.targetProximityThresholdPct,
+    );
+    if (!proximityFinal.evaluable || proximityFinal.blocked) {
+      logger.info(
+        {
+          symbol,
+          side: effectiveSide,
+          evaluable: proximityFinal.evaluable,
+          reason: proximityFinal.reason,
+          distancePct: proximityFinal.distancePct,
+          thresholdPct: snapshot.targetProximityThresholdPct,
+        },
+        "[kalshi-scalper] target proximity guard skip (final boundary)",
+      );
+      const proximityReason = proximityFinal.reason ?? "target_proximity_blocked_final";
+      await updateReservationStatus(mode, symbol, windowKey, "skipped", proximityReason, true);
+      _rememberReservationOutcome(attemptKey, "skipped", proximityReason, priorSubmittedOrders);
+      return;
+    }
+  }
 
   // ── FINAL FREEFALL GUARD — authoritative, at the exact pre-submit boundary ─
   // Fail closed: an AUTHORITATIVE fresh sample is REQUIRED. A failed fresh fetch
@@ -2067,6 +2118,8 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         : false;
 
       let freefallBlocked = false;
+      let targetProximityBlocked = false;
+      let targetDistancePct: number | null = null;
       let reason: string | null = null;
       const match = yesAsk != null || noAsk != null
         ? selectScalpSide(yesAsk, noAsk, params.bandMin, params.bandMax)
@@ -2088,13 +2141,30 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         reason = ff.reason;
       }
 
-      // state: 'active' when it's a live in-window in-band candidate.
-      let state: ScalpMarketStatus["state"];
-      if (params.paused) { state = "paused"; reason = reason ?? "paused"; }
-      else if (yesAsk == null && noAsk == null) { state = "no_quote"; reason = reason ?? "no_quote"; }
-      else if (!match) { state = "out_of_band"; reason = reason ?? "out_of_band"; }
-      else if (inWindow) { state = "active"; }
-      else { state = "ready"; reason = reason ?? "awaiting_final_window"; }
+      if (match && _config.targetProximityGuardEnabled && inWindow) {
+        const samples = _priceSamples.get(sym) ?? [];
+        const latestSample = samples[samples.length - 1];
+        const proximity = checkTargetProximityGuard(
+          latestSample?.price,
+          Number(cached?.value),
+          _config.targetProximityThresholdPct,
+        );
+        targetProximityBlocked = proximity.blocked || !proximity.evaluable;
+        targetDistancePct = proximity.distancePct;
+        reason = reason ?? proximity.reason;
+      }
+
+      const state = resolveScalpMarketState({
+        paused: params.paused,
+        hasQuote: yesAsk != null || noAsk != null,
+        hasMatch: match != null,
+        inWindow,
+        guardBlocked: freefallBlocked || targetProximityBlocked,
+      });
+      if (state === "paused") reason = reason ?? "paused";
+      else if (state === "no_quote") reason = reason ?? "no_quote";
+      else if (state === "out_of_band") reason = reason ?? "out_of_band";
+      else if (state === "ready") reason = reason ?? "awaiting_final_window";
 
       return {
         symbol: sym,
@@ -2106,6 +2176,8 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         lastAsk,
         secondsRemaining: secondsRemaining != null ? Math.round(secondsRemaining) : null,
         freefallBlocked,
+        targetProximityBlocked,
+        targetDistancePct,
         reason,
       };
     });

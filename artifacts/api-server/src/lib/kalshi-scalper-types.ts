@@ -28,6 +28,10 @@ export interface ScalpConfig {
   freefallGuardEnabled: boolean;    // default true
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;     // % adverse underlying move that blocks entry
+  /** Block entries when the fresh underlying is within this percentage of the
+   *  force-refreshed Kalshi target. Independent of the contract-price band. */
+  targetProximityGuardEnabled: boolean;
+  targetProximityThresholdPct: number;
   /** Operator control for whether a latched breaker halts new attempts.
    *  Trigger state/reason are always recorded even when enforcement is off. */
   circuitBreakerEnabled: boolean;
@@ -48,6 +52,8 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   freefallGuardEnabled: true,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
+  targetProximityGuardEnabled: true,
+  targetProximityThresholdPct: 0.05,
   circuitBreakerEnabled: true,
   circuitBreaker: false,
   circuitBreakerReason: null,
@@ -216,7 +222,7 @@ export interface ScalpPerformance {
  *  (yesAsk for YES-in-band, noAsk for NO-in-band) or null. */
 export interface ScalpMarketStatus {
   symbol: string;
-  state: "active" | "ready" | "out_of_band" | "paused" | "no_quote";
+  state: "active" | "guarded" | "ready" | "out_of_band" | "paused" | "no_quote";
   effectiveBandMin: number;
   effectiveBandMax: number;
   effectiveWindowSeconds: number;
@@ -224,5 +230,7 @@ export interface ScalpMarketStatus {
   lastAsk: number | null;
   secondsRemaining: number | null;
   freefallBlocked: boolean;
+  targetProximityBlocked: boolean;
+  targetDistancePct: number | null;
   reason: string | null;
 }

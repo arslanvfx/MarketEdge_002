@@ -31,7 +31,7 @@
 // P&L (paper): identical economics to live (no arbitrary discount).
 // ---------------------------------------------------------------------------
 
-import type { ScalpConfig, EffectiveScalpParams, ValidatedQuote } from "./kalshi-scalper-types.ts";
+import type { ScalpConfig, EffectiveScalpParams, ScalpMarketStatus, ValidatedQuote } from "./kalshi-scalper-types.ts";
 
 // ---------------------------------------------------------------------------
 // Effective params resolution
@@ -256,7 +256,10 @@ export function evaluateScalpReservationRetry(input: {
     const reason = input.reason ?? "";
     if (QUICK_RETRY_SKIP_REASONS.has(reason)) {
       cooldownMs = SCALP_AUTH_RETRY_COOLDOWN_MS;
-    } else if (reason.startsWith("freefall_")) {
+    } else if (
+      reason.startsWith("freefall_") ||
+      reason.startsWith("target_proximity_")
+    ) {
       cooldownMs = SCALP_GUARD_RETRY_COOLDOWN_MS;
     } else if (
       reason === "insufficient_balance_final" ||
@@ -339,6 +342,10 @@ export interface FreefallGuardResult {
   reason: string | null;
   /** Magnitude of adverse move as a percentage over the lookback window. */
   adverseMovePct: number;
+  /** Adverse oldest-to-newest move retained from the original guard. */
+  endpointAdverseMovePct: number;
+  /** Adverse recent-extreme-to-newest move used to catch sharp reversals. */
+  reversalAdverseMovePct: number;
   samplesUsed: number;
 }
 
@@ -390,6 +397,8 @@ export function checkFreefallGuard(
     blocked: false,
     reason,
     adverseMovePct: 0,
+    endpointAdverseMovePct: 0,
+    reversalAdverseMovePct: 0,
     samplesUsed,
   });
 
@@ -408,6 +417,12 @@ export function checkFreefallGuard(
   // (1) Need at least 2 valid samples to compute a delta at all.
   if (relevant.length < 2) {
     return unavailable("freefall_unavailable_no_samples", relevant.length);
+  }
+
+  for (let index = 1; index < relevant.length; index += 1) {
+    if (relevant[index].at <= relevant[index - 1].at) {
+      return unavailable("freefall_unavailable_out_of_order", relevant.length);
+    }
   }
 
   const oldest = relevant[0];
@@ -433,21 +448,104 @@ export function checkFreefallGuard(
 
   const priceChangePct = ((newest.price - oldest.price) / oldest.price) * 100;
 
-  // Adverse move magnitude (positive = adverse movement for this side):
-  //   YES: falling is adverse → priceChangePct < 0 → magnitude = -priceChangePct
-  //   NO:  rising  is adverse → priceChangePct > 0 → magnitude =  priceChangePct
-  const adverseMovePct = side === "yes" ? -priceChangePct : priceChangePct;
-  const blocked = adverseMovePct >= thresholdPct;
+  // Keep the original endpoint check, but also measure the latest price from
+  // the most adverse recent extreme. This catches rise→peak→fall for YES and
+  // fall→trough→rise for NO even when the full-window net move still looks safe.
+  const endpointAdverseMovePct = Math.max(
+    0,
+    side === "yes" ? -priceChangePct : priceChangePct,
+  );
+  const recentExtreme = side === "yes"
+    ? Math.max(...relevant.map((sample) => sample.price))
+    : Math.min(...relevant.map((sample) => sample.price));
+  const reversalAdverseMovePct = Math.max(
+    0,
+    side === "yes"
+      ? ((recentExtreme - newest.price) / recentExtreme) * 100
+      : ((newest.price - recentExtreme) / recentExtreme) * 100,
+  );
+  const endpointBlocked = endpointAdverseMovePct >= thresholdPct;
+  const reversalBlocked = reversalAdverseMovePct >= thresholdPct;
+  const blocked = endpointBlocked || reversalBlocked;
+  const adverseMovePct = Math.max(endpointAdverseMovePct, reversalAdverseMovePct);
 
   return {
     evaluable: true,
     blocked,
-    reason: blocked
+    reason: endpointBlocked
       ? (side === "yes" ? "freefall_adverse_falling" : "freefall_adverse_rising")
+      : reversalBlocked
+        ? (side === "yes" ? "freefall_adverse_reversal_falling" : "freefall_adverse_reversal_rising")
       : null,
     adverseMovePct,
+    endpointAdverseMovePct,
+    reversalAdverseMovePct,
     samplesUsed: relevant.length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Target Proximity Guard
+// ---------------------------------------------------------------------------
+
+export interface TargetProximityGuardResult {
+  /** False means the enabled guard cannot prove the entry safe. */
+  evaluable: boolean;
+  blocked: boolean;
+  reason: string | null;
+  /** Absolute live-vs-target distance as a percentage of the Kalshi target. */
+  distancePct: number | null;
+}
+
+/**
+ * Block when the fresh underlying price is too close to the force-refreshed
+ * Kalshi target. This guard is side-independent: when the outcome is nearly
+ * balanced around the strike, the Scalper stays away entirely.
+ */
+export function checkTargetProximityGuard(
+  livePrice: number | null | undefined,
+  kalshiTarget: number | null | undefined,
+  thresholdPct: number,
+): TargetProximityGuardResult {
+  const unavailable = (reason: string): TargetProximityGuardResult => ({
+    evaluable: false,
+    blocked: false,
+    reason,
+    distancePct: null,
+  });
+
+  if (!Number.isFinite(livePrice) || (livePrice ?? 0) <= 0) {
+    return unavailable("target_proximity_unavailable_live_price");
+  }
+  if (!Number.isFinite(kalshiTarget) || (kalshiTarget ?? 0) <= 0) {
+    return unavailable("target_proximity_unavailable_target");
+  }
+  if (!Number.isFinite(thresholdPct) || thresholdPct <= 0) {
+    return unavailable("target_proximity_unavailable_threshold");
+  }
+
+  const distancePct = (Math.abs(livePrice! - kalshiTarget!) / kalshiTarget!) * 100;
+  const blocked = distancePct <= thresholdPct;
+  return {
+    evaluable: true,
+    blocked,
+    reason: blocked ? "target_proximity_too_close" : null,
+    distancePct,
+  };
+}
+
+export function resolveScalpMarketState(input: {
+  paused: boolean;
+  hasQuote: boolean;
+  hasMatch: boolean;
+  inWindow: boolean;
+  guardBlocked: boolean;
+}): ScalpMarketStatus["state"] {
+  if (input.paused) return "paused";
+  if (!input.hasQuote) return "no_quote";
+  if (!input.hasMatch) return "out_of_band";
+  if (input.inWindow && input.guardBlocked) return "guarded";
+  return input.inWindow ? "active" : "ready";
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +669,9 @@ export interface ExecutionRiskSnapshot {
   freefallGuardEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
+  // Target proximity guard config
+  targetProximityGuardEnabled: boolean;
+  targetProximityThresholdPct: number;
   // Enablement
   enabled: boolean;
 }
@@ -584,6 +685,8 @@ export interface RiskConfigLike {
   freefallGuardEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
+  targetProximityGuardEnabled: boolean;
+  targetProximityThresholdPct: number;
 }
 
 /** Minimal shape of the effective-params fields the snapshot depends on. */
@@ -621,6 +724,8 @@ export function buildExecutionRiskSnapshot(
     freefallGuardEnabled: config.freefallGuardEnabled,
     freefallLookbackSeconds: config.freefallLookbackSeconds,
     freefallThresholdPct: config.freefallThresholdPct,
+    targetProximityGuardEnabled: config.targetProximityGuardEnabled,
+    targetProximityThresholdPct: config.targetProximityThresholdPct,
     enabled: config.enabled,
   });
 }
@@ -683,6 +788,8 @@ export function compareRiskSnapshot(
   if (currentConfig.freefallGuardEnabled !== snapshot.freefallGuardEnabled) changed.push("freefallGuardEnabled");
   if (!eqNum(currentConfig.freefallLookbackSeconds, snapshot.freefallLookbackSeconds)) changed.push("freefallLookbackSeconds");
   if (!eqNum(currentConfig.freefallThresholdPct, snapshot.freefallThresholdPct)) changed.push("freefallThresholdPct");
+  if (currentConfig.targetProximityGuardEnabled !== snapshot.targetProximityGuardEnabled) changed.push("targetProximityGuardEnabled");
+  if (!eqNum(currentConfig.targetProximityThresholdPct, snapshot.targetProximityThresholdPct)) changed.push("targetProximityThresholdPct");
 
   return {
     unchanged: changed.length === 0,
@@ -1132,6 +1239,12 @@ export function validateScalpConfigPartial(
     const v = Number(c["freefallThresholdPct"]);
     if (!Number.isFinite(v) || v <= 0) errors.push("freefallThresholdPct must be > 0");
   }
+  if (c["targetProximityThresholdPct"] != null) {
+    const v = Number(c["targetProximityThresholdPct"]);
+    if (!Number.isFinite(v) || v <= 0 || v > 10) {
+      errors.push("targetProximityThresholdPct must be > 0 and ≤ 10");
+    }
+  }
 
   if (c["perMarketOverrides"] != null) {
     if (!Array.isArray(c["perMarketOverrides"])) {
@@ -1299,6 +1412,8 @@ export interface ScalpConfigPatch {
   freefallGuardEnabled?: boolean;
   freefallLookbackSeconds?: number;
   freefallThresholdPct?: number;
+  targetProximityGuardEnabled?: boolean;
+  targetProximityThresholdPct?: number;
   circuitBreakerEnabled?: boolean;
   perMarketOverrides?: ScalpPerMarketOverridePatch[];
 }
@@ -1322,6 +1437,8 @@ const ALLOWED_TOP_LEVEL_FIELDS = new Set<string>([
   "freefallGuardEnabled",
   "freefallLookbackSeconds",
   "freefallThresholdPct",
+  "targetProximityGuardEnabled",
+  "targetProximityThresholdPct",
   "circuitBreakerEnabled",
   "perMarketOverrides",
 ]);
@@ -1383,6 +1500,10 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
     if (typeof body["freefallGuardEnabled"] !== "boolean") errors.push("freefallGuardEnabled must be a boolean");
     else out.freefallGuardEnabled = body["freefallGuardEnabled"];
   }
+  if (has("targetProximityGuardEnabled")) {
+    if (typeof body["targetProximityGuardEnabled"] !== "boolean") errors.push("targetProximityGuardEnabled must be a boolean");
+    else out.targetProximityGuardEnabled = body["targetProximityGuardEnabled"];
+  }
   if (has("circuitBreakerEnabled")) {
     if (typeof body["circuitBreakerEnabled"] !== "boolean") errors.push("circuitBreakerEnabled must be a boolean");
     else out.circuitBreakerEnabled = body["circuitBreakerEnabled"];
@@ -1396,7 +1517,7 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
 
   // ── Numeric fields (real finite numbers, in range) ──
   const numField = (
-    key: "globalBandMin" | "globalBandMax" | "finalWindowSeconds" | "budgetDollars" | "freefallLookbackSeconds" | "freefallThresholdPct",
+    key: "globalBandMin" | "globalBandMax" | "finalWindowSeconds" | "budgetDollars" | "freefallLookbackSeconds" | "freefallThresholdPct" | "targetProximityThresholdPct",
     ok: (v: number) => boolean,
     msg: string,
   ): void => {
@@ -1411,6 +1532,7 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   numField("budgetDollars", (v) => v > 0 && v <= 1000, "budgetDollars must be a number > 0 and ≤ 1000");
   numField("freefallLookbackSeconds", (v) => v >= 1 && v <= 600, "freefallLookbackSeconds must be a number 1-600");
   numField("freefallThresholdPct", (v) => v > 0, "freefallThresholdPct must be a number > 0");
+  numField("targetProximityThresholdPct", (v) => v > 0 && v <= 10, "targetProximityThresholdPct must be a number > 0 and ≤ 10");
 
   // ── Nullable caps (number | null only) ──
   const capField = (key: "dailyCapDollars" | "openCapDollars"): void => {

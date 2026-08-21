@@ -18,6 +18,8 @@ import {
   isFillWithinBand,
   isInFinalWindow,
   checkFreefallGuard,
+  checkTargetProximityGuard,
+  resolveScalpMarketState,
   checkDailyCap,
   checkOpenCap,
   evaluateCapDecision,
@@ -421,10 +423,16 @@ describe("evaluateScalpReservationRetry", () => {
     assert.equal(ready.retryAfterMs, 0);
   });
 
-  it("uses slower retries for Freefall and balance readiness", () => {
+  it("uses slower retries for guard and balance readiness", () => {
     const freefall = evaluateScalpReservationRetry({
       status: "skipped",
       reason: "freefall_unavailable_fetch_failed",
+      elapsedMs: 0,
+      submittedOrders: 0,
+    });
+    const targetProximity = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "target_proximity_too_close",
       elapsedMs: 0,
       submittedOrders: 0,
     });
@@ -435,6 +443,8 @@ describe("evaluateScalpReservationRetry", () => {
       submittedOrders: 0,
     });
     assert.equal(freefall.retryAfterMs, SCALP_GUARD_RETRY_COOLDOWN_MS);
+    assert.equal(targetProximity.retryAfterMs, SCALP_GUARD_RETRY_COOLDOWN_MS);
+    assert.equal(targetProximity.terminal, false);
     assert.equal(balance.retryAfterMs, SCALP_BALANCE_RETRY_COOLDOWN_MS);
   });
 
@@ -529,6 +539,26 @@ describe("checkFreefallGuard", () => {
     assert.equal(result.reason, null);
   });
 
+  it("blocks YES after a sharp peak-to-latest reversal even when the endpoint move is favorable", () => {
+    const samples = makeSamples([100, 103, 106, 104]);
+    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 1.5);
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_adverse_reversal_falling");
+    assert.equal(result.endpointAdverseMovePct, 0);
+    assert.ok(result.reversalAdverseMovePct > 1.8);
+  });
+
+  it("blocks NO after a sharp trough-to-latest reversal even when the endpoint move is favorable", () => {
+    const samples = makeSamples([100, 97, 94, 96]);
+    const result = checkFreefallGuard(samples, "no", nowMs, lookbackMs, 1.5);
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_adverse_reversal_rising");
+    assert.equal(result.endpointAdverseMovePct, 0);
+    assert.ok(result.reversalAdverseMovePct > 2);
+  });
+
   // ── Fail-closed unavailability ─────────────────────────────────────────────
 
   it("startup / NO samples → unavailable (not evaluable, not blocked, not clear)", () => {
@@ -580,12 +610,77 @@ describe("checkFreefallGuard", () => {
     assert.equal(result.samplesUsed, 1);
   });
 
+  it("out-of-order samples are unavailable rather than producing a misleading clear", () => {
+    const samples: FreefallSample[] = [
+      { price: 100, at: nowMs - 28_000 },
+      { price: 101, at: nowMs - 1_000 },
+      { price: 99, at: nowMs - 2_000 },
+    ];
+    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 0.5);
+    assert.equal(result.evaluable, false);
+    assert.equal(result.reason, "freefall_unavailable_out_of_order");
+  });
+
   it("full coverage, fresh, clear move below threshold → evaluable & not blocked", () => {
     const samples = makeSamples([100, 100.1, 100.05, 100.2]); // tiny move
     const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 5);
     assert.equal(result.evaluable, true);
     assert.equal(result.blocked, false);
     assert.equal(result.reason, null);
+  });
+});
+
+describe("checkTargetProximityGuard", () => {
+  it("blocks either side's opportunity when live price is inside the configured target buffer", () => {
+    const result = checkTargetProximityGuard(1.8861, 1.8862, 0.05);
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "target_proximity_too_close");
+    assert.ok((result.distancePct ?? Infinity) < 0.01);
+  });
+
+  it("blocks exactly at the threshold boundary", () => {
+    const result = checkTargetProximityGuard(100.05, 100, 0.05);
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+  });
+
+  it("allows a price safely beyond the configured target buffer", () => {
+    const result = checkTargetProximityGuard(100.2, 100, 0.05);
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.reason, null);
+  });
+
+  it("fails closed when live price, target, or threshold is invalid", () => {
+    for (const result of [
+      checkTargetProximityGuard(null, 100, 0.05),
+      checkTargetProximityGuard(100, null, 0.05),
+      checkTargetProximityGuard(100, 100, 0),
+      checkTargetProximityGuard(NaN, 100, 0.05),
+    ]) {
+      assert.equal(result.evaluable, false);
+      assert.equal(result.blocked, false);
+      assert.ok(result.reason?.startsWith("target_proximity_unavailable"));
+    }
+  });
+});
+
+describe("resolveScalpMarketState", () => {
+  const base = {
+    paused: false,
+    hasQuote: true,
+    hasMatch: true,
+    inWindow: true,
+    guardBlocked: false,
+  };
+
+  it("marks an in-window in-band market guarded when any safety guard blocks", () => {
+    assert.equal(resolveScalpMarketState({ ...base, guardBlocked: true }), "guarded");
+  });
+
+  it("only marks a safe in-window in-band market active", () => {
+    assert.equal(resolveScalpMarketState(base), "active");
   });
 });
 
@@ -1122,6 +1217,8 @@ const baseCfg = (): RiskConfigLike => ({
   freefallGuardEnabled: true,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
+  targetProximityGuardEnabled: true,
+  targetProximityThresholdPct: 0.05,
 });
 const baseParams = (): RiskParamsLike => ({
   bandMin: 0.91,
@@ -1137,7 +1234,7 @@ describe("buildExecutionRiskSnapshot", () => {
     const s = buildExecutionRiskSnapshot(baseCfg(), { ...baseParams(), budgetDollars: 3.5 }, baseIdentity());
     assert.equal(s.budgetDollars, 3.5);
   });
-  it("captures caps, band, window, freefall, identity, mode, enabled", () => {
+  it("captures caps, band, window, guards, identity, mode, enabled", () => {
     const s = buildExecutionRiskSnapshot(baseCfg(), baseParams(), baseIdentity());
     assert.equal(s.dailyCapDollars, 100);
     assert.equal(s.openCapDollars, 50);
@@ -1147,6 +1244,8 @@ describe("buildExecutionRiskSnapshot", () => {
     assert.equal(s.freefallGuardEnabled, true);
     assert.equal(s.freefallLookbackSeconds, 30);
     assert.equal(s.freefallThresholdPct, 0.5);
+    assert.equal(s.targetProximityGuardEnabled, true);
+    assert.equal(s.targetProximityThresholdPct, 0.05);
     assert.equal(s.ticker, "T-1");
     assert.equal(s.closeTime, "2025-01-01T00:00:00Z");
     assert.equal(s.mode, "live");
@@ -1219,6 +1318,14 @@ describe("compareRiskSnapshot (fail-closed diff)", () => {
   it("freefall threshold change => rejected", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallThresholdPct: 0.7 }, baseParams(), baseIdentity());
     assert.ok(d.changedFields.includes("freefallThresholdPct"));
+  });
+  it("target proximity toggle change => rejected", () => {
+    const d = compareRiskSnapshot(snap(), { ...baseCfg(), targetProximityGuardEnabled: false }, baseParams(), baseIdentity());
+    assert.ok(d.changedFields.includes("targetProximityGuardEnabled"));
+  });
+  it("target proximity threshold change => rejected", () => {
+    const d = compareRiskSnapshot(snap(), { ...baseCfg(), targetProximityThresholdPct: 0.1 }, baseParams(), baseIdentity());
+    assert.ok(d.changedFields.includes("targetProximityThresholdPct"));
   });
 
   it("enabled toggle => rejected", () => {
@@ -1391,6 +1498,14 @@ describe("parseScalpConfigPatch", () => {
     assert.ok(errsOf(r).some((e) => e.includes("freefallGuardEnabled")));
   });
 
+  it("accepts a real target proximity toggle and rejects coercion", () => {
+    assert.deepEqual(
+      parseScalpConfigPatch({ targetProximityGuardEnabled: false }),
+      { ok: true, value: { targetProximityGuardEnabled: false } },
+    );
+    assert.equal(parseScalpConfigPatch({ targetProximityGuardEnabled: "false" }).ok, false);
+  });
+
   it("rejects invalid mode", () => {
     const r = parseScalpConfigPatch({ mode: "PAPER" });
     assert.equal(r.ok, false);
@@ -1424,17 +1539,21 @@ describe("parseScalpConfigPatch", () => {
     assert.equal(parseScalpConfigPatch({ budgetDollars: 1001 }).ok, false);
     assert.equal(parseScalpConfigPatch({ freefallLookbackSeconds: 601 }).ok, false);
     assert.equal(parseScalpConfigPatch({ freefallThresholdPct: 0 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 0 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 10.01 }).ok, false);
   });
 
   it("accepts valid in-range numbers and returns them typed", () => {
     const r = parseScalpConfigPatch({
       globalBandMin: 0.9, globalBandMax: 0.97, finalWindowSeconds: 100,
       budgetDollars: 3, freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
+      targetProximityThresholdPct: 0.05,
     });
     assert.equal(r.ok, true);
     assert.deepEqual(r.ok && r.value, {
       globalBandMin: 0.9, globalBandMax: 0.97, finalWindowSeconds: 100,
       budgetDollars: 3, freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
+      targetProximityThresholdPct: 0.05,
     });
   });
 
@@ -1822,6 +1941,18 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(finalFf < place, "final freefall guard must precede submit");
     // It must use the pinned snapshot freefall config.
     assert.match(svc, /snapshot\.freefallLookbackSeconds \* 1000,\s*\n?\s*snapshot\.freefallThresholdPct/);
+  });
+
+  it("FINAL target proximity guard uses fresh inputs before order intent and submit", () => {
+    const finalProximity = idx("FINAL TARGET PROXIMITY GUARD");
+    const intent = idx("insertScalpOrderIntent(orderRecord)");
+    const place = idx("await placeScalpOrderStrict(");
+    assert.ok(finalProximity >= 0, "final target proximity guard block must exist");
+    assert.ok(finalProximity < intent, "target proximity guard must precede order intent");
+    assert.ok(finalProximity < place, "target proximity guard must precede submit");
+    assert.match(svc, /identityResult\.target/);
+    assert.match(svc, /snapshot\.targetProximityThresholdPct/);
+    assert.match(svc, /snapshot\.freefallGuardEnabled \|\| snapshot\.targetProximityGuardEnabled/);
   });
 
   it("order sizing goes through sizeOrderWithinReservedBudget (reserved amount)", () => {

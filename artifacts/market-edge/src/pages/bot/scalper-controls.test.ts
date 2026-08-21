@@ -35,6 +35,20 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /will no longer pause new Scalper attempts/);
   });
 
+  it("offers a configurable Target Distance Guard", () => {
+    assert.match(panelSource, /Target Distance Guard/);
+    assert.match(panelSource, /switch-scalper-target-proximity/);
+    assert.match(panelSource, /input-scalper-target-proximity-threshold/);
+    assert.match(panelSource, /targetProximityGuardEnabled/);
+    assert.match(panelSource, /targetProximityThresholdPct/);
+    assert.match(panelSource, /regardless of which side is in band/i);
+  });
+
+  it("does not label a guard-blocked market as an active candidate", () => {
+    assert.match(panelSource, /statusInfo\?\.state === "guarded"/);
+    assert.match(panelSource, /blocked · \$\{readableReason\(statusInfo\.reason\)\}/);
+  });
+
   it("shows the server's plain-English circuit-breaker explanation instead of its raw code", () => {
     assert.match(panelSource, /statusData\?\.circuitBreakerMessage/);
     assert.doesNotMatch(panelSource, /\{merged\.circuitBreakerReason/);
