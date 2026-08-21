@@ -16,6 +16,20 @@ description: Root cause and fix for multiple simultaneous Kalshi orders placed i
 3. In `kalshi-bot-loop.ts` window-transition cleanup: call `convictionDispatchInFlight.clear()` alongside `convictionFiredThisWindow.clear()`.
 4. `convictionFiredThisWindow` (set inside `_runBotTick` after a bet is recorded) is the durable guard; `convictionDispatchInFlight` only covers the brief window between OB pre-warm start and dispatch completion.
 
+## Root cause of 20+ duplicate SILVER bets (deeper bug)
+The `scalpDispatchInFlight` lock was a correct but INCOMPLETE fix. The real killer was inside `runHighValueScalpForCoin`:
+- `highValueScalpFiredThisWindow.add(firedKey)` was set AFTER the `await getCachedKalshiBalance()` call (line ~166), not before it — so the "synchronous before any await" comment in the docstring was wrong
+- Lines 221, 229, 258: `highValueScalpFiredThisWindow.delete(firedKey)` was called on EVERY failure (zero fills, thrown error, out-of-band fill) to "allow retry next tick"
+- Combined: lock released via `.finally()` + guard deleted on failure = both cleared simultaneously → next 1-second poll re-dispatched a real order
+- SILVER was in the scalp band for 20+ seconds with IOC orders failing → 20+ real orders placed → $80 loss
+
+**Correct fix (applied):**
+1. `highValueScalpFiredThisWindow.add(firedKey)` moved to the very first line after the `has()` check — BEFORE any await
+2. All three `highValueScalpFiredThisWindow.delete(firedKey)` calls REMOVED — failed attempts block the coin for the rest of the window (same as FOK cooldown in conviction bot)
+3. No "retry next tick" via poller — if retry is ever needed, it must be an internal retry loop inside the function
+
+**Rule:** Never delete a window-scoped "fired this window" guard to allow external retry. External retry = unbounded re-dispatch for the entire time the condition is met.
+
 ## Scalper has the same race — scalpDispatchInFlight
 The HIGH-VALUE SCALPER has an identical race in the same `pollOnce()` loop. `runHighValueScalpForCoin` is async; `highValueScalpFiredThisWindow` only sets after the fill. Without a lock, 4 concurrent 1-second polls each placed a 6-contract XRP order (4 × ~$5.35 = $21.37 total at 8:13pm ET).
 

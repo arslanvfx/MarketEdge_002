@@ -90,8 +90,17 @@ export async function runHighValueScalpForCoin(
   const mode = S.botMode;
   const firedKey = `${sym}:${timing.windowKey}:${mode}`;
 
-  // One scalp per coin per window per mode — synchronous guard before any awaits.
+  // One scalp per coin per window per mode.
+  // MUST be checked AND set synchronously here — before ANY await — so that
+  // concurrent poller ticks racing in before the first await all see it set.
+  // Do NOT delete this key on failure; clearing it to allow "retry next tick"
+  // was the direct cause of 20+ duplicate SILVER orders ($80 loss): every
+  // failed IOC cleared the guard, so each subsequent 1-second poll re-dispatched
+  // a real order for as long as the price stayed in band.
+  // If an order attempt fails (0 fills or error), the coin is blocked for the
+  // rest of the window — same semantics as the conviction bot's FOK cooldown.
   if (highValueScalpFiredThisWindow.has(firedKey)) return;
+  highValueScalpFiredThisWindow.add(firedKey); // synchronous — before any await
 
   // Per-coin override: paused coin is skipped entirely.
   const coinOverride = config.highValueScalpCoinOverrides?.[sym];
@@ -198,9 +207,6 @@ export async function runHighValueScalpForCoin(
   const contracts = Math.floor(budget / costPerContract);
   if (contracts < 1) return;
 
-  // Mark fired before the await so concurrent dispatch (if any) sees it immediately.
-  highValueScalpFiredThisWindow.add(firedKey);
-
   let filledCount = contracts;
   let fillYesPrice = finalEligibility.side === "yes" ? finalEligibility.price : 1 - finalEligibility.price;
 
@@ -217,16 +223,14 @@ export async function runHighValueScalpForCoin(
         limitPrice,
       });
       if (result.filledCount <= 0 || result.avgPrice == null) {
-        logger.info({ sym, windowKey: timing.windowKey, contracts }, "[high-value-scalp] order returned zero fills");
-        highValueScalpFiredThisWindow.delete(firedKey); // allow retry next tick
+        logger.info({ sym, windowKey: timing.windowKey, contracts }, "[high-value-scalp] order returned zero fills — coin blocked for rest of window");
         return;
       }
       filledCount = result.filledCount;
       fillYesPrice = result.avgPrice;
     }
   } catch (err) {
-    logger.warn({ err, sym, windowKey: timing.windowKey }, "[high-value-scalp] order error; will retry next tick");
-    highValueScalpFiredThisWindow.delete(firedKey);
+    logger.warn({ err, sym, windowKey: timing.windowKey }, "[high-value-scalp] order error — coin blocked for rest of window");
     return;
   }
 
@@ -254,8 +258,7 @@ export async function runHighValueScalpForCoin(
         timeInForce: "immediate_or_cancel",
         limitPrice: actualSidePrice,
       });
-      logger.warn({ sym, actualSidePrice }, "[high-value-scalp] out-of-band position closed successfully");
-      highValueScalpFiredThisWindow.delete(firedKey); // allow retry if price returns to band
+      logger.warn({ sym, actualSidePrice }, "[high-value-scalp] out-of-band position closed — coin blocked for rest of window");
       return;
     } catch (closeErr) {
       logger.error(
