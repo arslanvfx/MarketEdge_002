@@ -22,12 +22,12 @@ function ScalperMetricIcon({ label }: { label: string }) {
           : label.includes("Fill")
             ? ShoppingCart
             : Zap;
-  return <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />;
+  return <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/75" />;
 }
 
 export function ActivePositions({ openPosList, closeManualError, closingManualSym, closeManualPos, openManualOrder }: ActivePositionsProps) {
   if (openPosList.length === 0) return null;
-  const scalperCardClass = "border-amber-200/25 bg-[linear-gradient(135deg,#111419_0%,#2d2419_46%,#9a5a1d_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,251,235,0.18),0_14px_38px_rgba(180,115,35,0.2)]";
+  const scalperCardClass = "border-amber-200/20 bg-[linear-gradient(135deg,#111419_0%,#24231f_56%,#5b4a2d_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,251,235,0.14),0_14px_38px_rgba(149,112,47,0.14)]";
   return (
           <div className="space-y-3">
             {openPosList.length > 1 && (

@@ -2,13 +2,13 @@ import type { LucideIcon } from "lucide-react";
 import { Activity, ArrowDown, BarChart3, CheckCircle2, Clock, DollarSign, FileText, Layers, ShoppingCart, Trophy, Zap } from "lucide-react";
 
 const yellowShell =
-  "border border-amber-200/25 bg-[linear-gradient(135deg,#111419_0%,#2d2419_46%,#9a5a1d_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,251,235,0.18),0_14px_38px_rgba(180,115,35,0.2)]";
+  "border border-amber-200/20 bg-[linear-gradient(135deg,#111419_0%,#24231f_56%,#5b4a2d_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,251,235,0.14),0_14px_38px_rgba(149,112,47,0.14)]";
 
 function Metric({ label, value, icon: Icon, wide = false }: { label: string; value: string; icon?: LucideIcon; wide?: boolean }) {
   return (
     <div className={`rounded-lg border border-amber-100/15 bg-black/30 p-2.5 ${wide ? "sm:col-span-2" : ""}`}>
       <div className="flex items-start gap-1.5">
-        {Icon && <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />}
+        {Icon && <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/75" />}
         <div>
           <div className="mb-0.5 text-[9px] uppercase tracking-[0.14em] text-amber-100/70">{label}</div>
           <div className="font-mono text-xs font-semibold text-amber-50">{value}</div>
@@ -82,7 +82,7 @@ function HistoryScalperCard() {
         <Metric icon={BarChart3} label="Size" value="3 @ 98¢" />
         <div className="rounded-lg bg-emerald-400/10 p-2.5">
           <div className="mb-0.5 flex items-center gap-1.5 text-[9px] uppercase tracking-[0.14em] text-amber-100/70">
-            <BarChart3 className="h-3.5 w-3.5 text-amber-300" /> P&L
+            <BarChart3 className="h-3.5 w-3.5 text-amber-300/75" /> P&L
           </div>
           <div className="font-mono text-sm font-bold text-emerald-300">+$0.06</div>
         </div>

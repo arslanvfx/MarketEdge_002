@@ -4,7 +4,7 @@ import type { HistoryRecord } from "./types";
 import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtDuration, wkToEst } from "./utils";
 
 const HIST_PAGE_SIZE = 20;
-const SCALPER_CARD_CLASS = "border-amber-200/25 bg-[linear-gradient(135deg,#111419_0%,#2d2419_46%,#9a5a1d_100%)] text-amber-50 ring-1 ring-inset ring-amber-500/40 shadow-[inset_0_1px_0_rgba(255,251,235,0.18),0_14px_38px_rgba(180,115,35,0.2)]";
+const SCALPER_CARD_CLASS = "border-amber-200/20 bg-[linear-gradient(135deg,#111419_0%,#24231f_56%,#5b4a2d_100%)] text-amber-50 ring-1 ring-inset ring-amber-500/25 shadow-[inset_0_1px_0_rgba(255,251,235,0.14),0_14px_38px_rgba(149,112,47,0.14)]";
 
 interface TransactionLogProps {
   pagedBets: HistoryRecord[];
@@ -303,13 +303,13 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     {/* Key metrics grid */}
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/30" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <ShoppingCart className="h-3 w-3 text-amber-300" />}{isScalper ? "Order" : "Strike"}</div>
+                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <ShoppingCart className="h-3 w-3 text-amber-300/75" />}{isScalper ? "Order" : "Strike"}</div>
                          <div className={`text-xs font-semibold font-mono ${isScalper ? "text-amber-50" : ""}`}>{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
                       </div>
 
                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/30" : "bg-background/40"}`}>
                          <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>
-                          {isScalper && <CheckCircle2 className="h-3 w-3 text-amber-300" />}{isScalper ? "Settlement" : closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
+                          {isScalper && <CheckCircle2 className="h-3 w-3 text-amber-300/75" />}{isScalper ? "Settlement" : closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
                         </div>
                         <div className="text-xs font-semibold font-mono flex items-center gap-1">
                           {isScalper ? (
@@ -333,7 +333,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       </div>
 
                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/30" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <ArrowUp className="h-3 w-3 text-amber-300" />}Entry</div>
+                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <ArrowUp className="h-3 w-3 text-amber-300/75" />}Entry</div>
                         <div className="text-xs font-mono">
                           {ep != null ? (
                             <span>{(ep * 100).toFixed(0)}¢ YES · {((1 - ep) * 100).toFixed(0)}¢ NO</span>
@@ -342,7 +342,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       </div>
 
                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/30" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <Trophy className="h-3 w-3 text-amber-300" />}{isScalper ? "Result" : "Exit"}</div>
+                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <Trophy className="h-3 w-3 text-amber-300/75" />}{isScalper ? "Result" : "Exit"}</div>
                         <div className="text-xs font-mono">
                           {isScalper
                              ? (sigs?.settlementResult as string | null ?? (isOpen ? <span className="text-amber-50 text-[9px]">in play…</span> : "—"))
@@ -355,7 +355,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       </div>
 
                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/30" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <Users className="h-3 w-3 text-amber-300" />}Size</div>
+                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <Users className="h-3 w-3 text-amber-300/75" />}Size</div>
                         <div className="text-xs font-semibold">
                           {r.contractCount ?? "—"} @ {(() => {
                             const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
@@ -367,7 +367,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       </div>
 
                       <div className={`rounded-lg p-2.5 col-span-1 ${pnlNum == null ? "bg-background/40" : pnlNum > 0 ? "bg-emerald-500/10" : pnlNum < 0 ? "bg-red-500/10" : "bg-background/40"}`}>
-                        <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <BarChart3 className="h-3 w-3 text-amber-300" />}P&L</div>
+                        <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper && <BarChart3 className="h-3 w-3 text-amber-300/75" />}P&L</div>
                         <div className={`text-sm font-bold font-mono ${pnlNum == null ? "text-foreground" : pnlNum >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {pnlNum != null ? (pnlNum >= 0 ? "+" : "") + fmt$(pnlNum) : "—"}
                         </div>
