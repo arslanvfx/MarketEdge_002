@@ -860,16 +860,16 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[10px] font-semibold text-red-300">Session spend</span>
                         <span className="text-[10px] font-mono text-red-300">
-                          ${(status.testModeSpentAmount ?? 0).toFixed(2)} / ${(merged.testHardCapTotal ?? 4).toFixed(2)}
+                          ${(status.testModeSpentAmount ?? 0).toFixed(2)} / ${(merged.testHardCapTotal ?? 6).toFixed(2)}
                         </span>
                       </div>
                       <div className="w-full bg-red-950/60 rounded-full h-1.5">
                         <div
                           className="bg-red-500 h-1.5 rounded-full transition-all"
-                          style={{ width: `${Math.min(100, ((status.testModeSpentAmount ?? 0) / (merged.testHardCapTotal ?? 4)) * 100)}%` }}
+                          style={{ width: `${Math.min(100, ((status.testModeSpentAmount ?? 0) / (merged.testHardCapTotal ?? 6)) * 100)}%` }}
                         />
                       </div>
-                      {(status.testModeSpentAmount ?? 0) >= (merged.testHardCapTotal ?? 4) && (
+                      {(status.testModeSpentAmount ?? 0) >= (merged.testHardCapTotal ?? 6) && (
                         <p className="text-[10px] text-red-400 mt-1 font-semibold">⛔ Session ceiling reached — all live entries blocked. Toggle off+on to reset.</p>
                       )}
                     </div>
@@ -891,7 +891,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-xs text-muted-foreground">Session ceiling ($)</span>
                   <input type="number" min={1} max={50} step={1}
                     className="bg-background border border-red-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.testHardCapTotal ?? 4.00}
+                    value={merged.testHardCapTotal ?? 6.00}
                     onChange={e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setConfigDraft(d => ({ ...d, testHardCapTotal: v })); }} />
                   <span className="text-[10px] text-muted-foreground/60">All entries stop once total session spend hits this ceiling</span>
                 </label>

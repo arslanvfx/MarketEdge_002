@@ -736,6 +736,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     perSymbolQuietHours,
     dataGatheringEnabled,
     perMarketConvictionConfig,
+    testHardCapEnabled,
+    testHardCapPerBet,
+    testHardCapTotal,
   } = req.body as {
     betSize?: number;
     dailyLossLimit?: number;
@@ -854,6 +857,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     convictionCandleLookback?: number;
     convictionCandleSlopeThresholdPct?: number;
     convictionCandleAtrScaleEnabled?: boolean;
+    testHardCapEnabled?: boolean;
+    testHardCapPerBet?: number;
+    testHardCapTotal?: number;
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
@@ -1342,6 +1348,14 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof convictionMaxDailySpend === "number" && convictionMaxDailySpend >= 0) {
     partial.convictionMaxDailySpend = convictionMaxDailySpend > 0 ? convictionMaxDailySpend : undefined;
+  }
+  // Test hard-cap mode — pass through directly (boolean and numbers, no complex validation)
+  if (typeof testHardCapEnabled === "boolean") partial.testHardCapEnabled = testHardCapEnabled;
+  if (typeof testHardCapPerBet === "number" && testHardCapPerBet >= 0.5 && testHardCapPerBet <= 100) {
+    partial.testHardCapPerBet = +testHardCapPerBet.toFixed(2);
+  }
+  if (typeof testHardCapTotal === "number" && testHardCapTotal >= 1 && testHardCapTotal <= 500) {
+    partial.testHardCapTotal = +testHardCapTotal.toFixed(2);
   }
   // High-value scalping is a separate price-only execution path. Validate its
   // full effective band together so a partial update cannot leave it inverted.

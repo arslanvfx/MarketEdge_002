@@ -1305,7 +1305,7 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   S.config = { ...S.config, ...partial, ...modeSpecific };
   if (partial.testHardCapEnabled === true && !prevTestEnabled) {
     S.testModeSpentAmount = 0;
-    logger.info({ cap: S.config.testHardCapTotal ?? 4.00 }, "[kalshi-bot] test hard-cap enabled — session spend counter reset to $0.00");
+    logger.info({ cap: S.config.testHardCapTotal ?? 6.00 }, "[kalshi-bot] test hard-cap enabled — session spend counter reset to $0.00");
   }
   let snapshot = { ...S.config };
   let persisted = false;

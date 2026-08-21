@@ -210,7 +210,7 @@ export async function runHighValueScalpForCoin(
   // ── TEST HARD-CAP MODE ────────────────────────────────────────────────────
   if (config.testHardCapEnabled && mode === "live") {
     const perBetCap = config.testHardCapPerBet ?? 1.00;
-    const totalCap  = config.testHardCapTotal  ?? 4.00;
+    const totalCap  = config.testHardCapTotal  ?? 6.00;
     if (S.testModeSpentAmount >= totalCap) {
       logger.warn({ sym, spent: +S.testModeSpentAmount.toFixed(2), cap: totalCap }, "[high-value-scalp] TEST HARD-CAP: session ceiling reached — blocked");
       return;
@@ -256,7 +256,7 @@ export async function runHighValueScalpForCoin(
   const actualSidePrice = finalEligibility.side === "yes" ? fillYesPrice : 1 - fillYesPrice;
   if (config.testHardCapEnabled && mode === "live") {
     S.testModeSpentAmount += actualSpend;
-    logger.info({ sym, spend: +actualSpend.toFixed(2), sessionTotal: +S.testModeSpentAmount.toFixed(2), cap: config.testHardCapTotal ?? 4.00 }, "[high-value-scalp] TEST HARD-CAP: session spend updated");
+    logger.info({ sym, spend: +actualSpend.toFixed(2), sessionTotal: +S.testModeSpentAmount.toFixed(2), cap: config.testHardCapTotal ?? 6.00 }, "[high-value-scalp] TEST HARD-CAP: session spend updated");
   }
 
   // Out-of-band fill guard: if the exchange filled at a price outside the

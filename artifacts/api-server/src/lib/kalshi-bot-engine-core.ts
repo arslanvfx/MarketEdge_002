@@ -1273,7 +1273,7 @@ export interface BotConfig {
   // This runs at the order-placement layer and cannot be bypassed by any config.
   testHardCapEnabled?: boolean;    // master toggle (default false = off)
   testHardCapPerBet?: number;      // max $ per individual bet (default 1.00)
-  testHardCapTotal?: number;       // total $ session ceiling before all entries stop (default 4.00)
+  testHardCapTotal?: number;       // total $ session ceiling before all entries stop (default 6.00)
 
   // High-value scalp: isolated late-window price-only execution path. These
   // settings never participate in the regular bot decision pipeline.

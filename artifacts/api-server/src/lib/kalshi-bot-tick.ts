@@ -2883,7 +2883,7 @@ async function _runBotTick(
       // by any other config flag, randomizer, or dynamic-sizing logic.
       if (S.config.testHardCapEnabled && effectiveMode === "live") {
         const perBetCap = S.config.testHardCapPerBet  ?? 1.00;
-        const totalCap  = S.config.testHardCapTotal    ?? 4.00;
+        const totalCap  = S.config.testHardCapTotal    ?? 6.00;
         if (S.testModeSpentAmount >= totalCap) {
           logger.warn(
             { sym, spent: +S.testModeSpentAmount.toFixed(2), cap: totalCap },
@@ -3493,7 +3493,7 @@ async function _runBotTick(
     if (S.config.testHardCapEnabled) {
       S.testModeSpentAmount += actualBetAmount;
       logger.info(
-        { sym, bet: +actualBetAmount.toFixed(2), sessionTotal: +S.testModeSpentAmount.toFixed(2), cap: S.config.testHardCapTotal ?? 4.00 },
+        { sym, bet: +actualBetAmount.toFixed(2), sessionTotal: +S.testModeSpentAmount.toFixed(2), cap: S.config.testHardCapTotal ?? 6.00 },
         "[kalshi-bot] TEST HARD-CAP: session spend updated",
       );
     }
