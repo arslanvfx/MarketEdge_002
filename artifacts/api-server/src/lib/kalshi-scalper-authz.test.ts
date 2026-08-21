@@ -1,9 +1,3 @@
-// ---------------------------------------------------------------------------
-// kalshi-scalper-authz.test.ts — Unit tests for the fail-closed scalper
-// mutation authorization decision, plus static route-wiring assertions.
-// Run with: node --experimental-strip-types --test
-// ---------------------------------------------------------------------------
-
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -13,120 +7,90 @@ import { dirname, join } from "node:path";
 import {
   decideScalpMutationAuthz,
   getScalpMutationCapability,
+  type ScalpAdminState,
 } from "./kalshi-scalper-authz.ts";
 
-const ADMIN = "user_admin_123";
+const NO_ADMIN: ScalpAdminState = { hasAdmin: false, isAdmin: false };
+const NON_ADMIN: ScalpAdminState = { hasAdmin: true, isAdmin: false };
+const ADMIN: ScalpAdminState = { hasAdmin: true, isAdmin: true };
 
-describe("decideScalpMutationAuthz (fail-closed)", () => {
-  it("missing user (undefined) => 401 unauthenticated", () => {
-    const d = decideScalpMutationAuthz(undefined, ADMIN);
-    assert.equal(d.allowed, false);
-    assert.equal(d.status, 401);
-    assert.equal(d.reason, "unauthenticated");
-    assert.ok(d.error);
+describe("decideScalpMutationAuthz (fail-closed role authorization)", () => {
+  it("denies missing and blank authenticated users", () => {
+    for (const userId of [undefined, null, "", "   "]) {
+      const decision = decideScalpMutationAuthz(userId, ADMIN);
+      assert.equal(decision.allowed, false);
+      assert.equal(decision.status, 401);
+      assert.equal(decision.reason, "unauthenticated");
+    }
   });
 
-  it("missing user (null) => 401", () => {
-    const d = decideScalpMutationAuthz(null, ADMIN);
-    assert.equal(d.status, 401);
-    assert.equal(d.reason, "unauthenticated");
+  it("denies normal writes before the first admin is claimed", () => {
+    const decision = decideScalpMutationAuthz("user_first", NO_ADMIN);
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.status, 403);
+    assert.equal(decision.reason, "bootstrap_available");
+    assert.match(decision.error ?? "", /no Scalper administrator/i);
   });
 
-  it("blank user (whitespace) => 401", () => {
-    const d = decideScalpMutationAuthz("   ", ADMIN);
-    assert.equal(d.status, 401);
-    assert.equal(d.reason, "unauthenticated");
+  it("denies a signed-in user without the persisted admin role", () => {
+    const decision = decideScalpMutationAuthz("user_ordinary", NON_ADMIN);
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.status, 403);
+    assert.equal(decision.reason, "not_authorized");
   });
 
-  it("signed-in user but admin config UNSET => 403 operator_not_configured", () => {
-    const d = decideScalpMutationAuthz("user_someone", undefined);
-    assert.equal(d.allowed, false);
-    assert.equal(d.status, 403);
-    assert.equal(d.reason, "operator_not_configured");
-    assert.match(d.error ?? "", /not configured/i);
+  it("allows a signed-in user with the persisted admin role", () => {
+    const decision = decideScalpMutationAuthz("user_admin", ADMIN);
+    assert.deepEqual(decision, {
+      allowed: true,
+      status: 200,
+      error: null,
+      reason: "authorized",
+    });
   });
 
-  it("signed-in user but admin config BLANK => 403 operator_not_configured", () => {
-    const d = decideScalpMutationAuthz("user_someone", "   ");
-    assert.equal(d.status, 403);
-    assert.equal(d.reason, "operator_not_configured");
-  });
-
-  it("signed-in user but admin config empty string => 403 operator_not_configured", () => {
-    const d = decideScalpMutationAuthz("user_someone", "");
-    assert.equal(d.status, 403);
-    assert.equal(d.reason, "operator_not_configured");
-  });
-
-  it("ordinary signed-in user (not admin) => 403 not_authorized", () => {
-    const d = decideScalpMutationAuthz("user_ordinary", ADMIN);
-    assert.equal(d.allowed, false);
-    assert.equal(d.status, 403);
-    assert.equal(d.reason, "not_authorized");
-  });
-
-  it("exact authorized user => allowed (200)", () => {
-    const d = decideScalpMutationAuthz(ADMIN, ADMIN);
-    assert.equal(d.allowed, true);
-    assert.equal(d.status, 200);
-    assert.equal(d.reason, "authorized");
-    assert.equal(d.error, null);
-  });
-
-  it("authorized match ignores surrounding whitespace on both sides", () => {
-    const d = decideScalpMutationAuthz(`  ${ADMIN}  `, `  ${ADMIN}  `);
-    assert.equal(d.allowed, true);
-    assert.equal(d.reason, "authorized");
-  });
-
-  it("near-match (case/substring) is NOT authorized", () => {
-    assert.equal(decideScalpMutationAuthz(ADMIN.toUpperCase(), ADMIN).reason, "not_authorized");
-    assert.equal(decideScalpMutationAuthz(ADMIN + "x", ADMIN).reason, "not_authorized");
-    assert.equal(decideScalpMutationAuthz(ADMIN.slice(0, -1), ADMIN).reason, "not_authorized");
-  });
-
-  it("fail-closed: no input combination without exact match is allowed", () => {
-    const combos: Array<[string | null | undefined, string | null | undefined]> = [
-      [undefined, undefined],
-      [null, null],
-      ["", ""],
-      ["user_a", undefined],
-      ["user_a", ""],
-      ["user_a", "user_b"],
-      [undefined, ADMIN],
-    ];
-    for (const [u, a] of combos) {
-      assert.equal(decideScalpMutationAuthz(u, a).allowed, false, `expected deny for user=${u} admin=${a}`);
+  it("never treats isAdmin=false as authorized", () => {
+    for (const state of [NO_ADMIN, NON_ADMIN]) {
+      assert.equal(
+        decideScalpMutationAuthz("user_signed_in", state).allowed,
+        false,
+      );
     }
   });
 });
 
 describe("getScalpMutationCapability", () => {
+  it("offers the one-time claim only to an authenticated user when no admin exists", () => {
+    assert.deepEqual(
+      getScalpMutationCapability("user_first", NO_ADMIN),
+      {
+        canManage: false,
+        canClaimAdmin: true,
+        reason: "bootstrap_available",
+        message: "Forbidden — no Scalper administrator has been claimed",
+      },
+    );
+  });
+
+  it("does not offer a claim to a signed-out request", () => {
+    const capability = getScalpMutationCapability(null, NO_ADMIN);
+    assert.equal(capability.canManage, false);
+    assert.equal(capability.canClaimAdmin, false);
+    assert.equal(capability.reason, "unauthenticated");
+  });
+
   it("projects authorized access without returning identity values", () => {
-    const capability = getScalpMutationCapability(ADMIN, ADMIN);
+    const capability = getScalpMutationCapability("user_admin", ADMIN);
     assert.deepEqual(capability, {
       canManage: true,
+      canClaimAdmin: false,
       reason: "authorized",
       message: null,
     });
     assert.ok(!("userId" in capability));
-    assert.ok(!("adminId" in capability));
-  });
-
-  it("projects the exact denial reason without returning identity values", () => {
-    const capability = getScalpMutationCapability("user_other", ADMIN);
-    assert.equal(capability.canManage, false);
-    assert.equal(capability.reason, "not_authorized");
-    assert.match(capability.message ?? "", /not authorized/i);
-    assert.ok(!JSON.stringify(capability).includes(ADMIN));
+    assert.ok(!JSON.stringify(capability).includes("user_admin"));
   });
 });
-
-// ---------------------------------------------------------------------------
-// Static route-wiring assertions (no new packages): confirm both POST mutation
-// routes are guarded by the strict helper-backed middleware, and that GET
-// routes are NOT gated by it.
-// ---------------------------------------------------------------------------
 
 describe("scalper route wiring (static source assertions)", () => {
   const routeSrc = (() => {
@@ -134,30 +98,31 @@ describe("scalper route wiring (static source assertions)", () => {
     return readFileSync(join(here, "..", "routes", "kalshi-scalper.ts"), "utf8");
   })();
 
-  it("imports the pure authz helper", () => {
-    assert.match(routeSrc, /decideScalpMutationAuthz/);
-    assert.match(routeSrc, /kalshi-scalper-authz/);
+  it("uses the persisted role store and not BOT_ADMIN_CLERK_USER_ID", () => {
+    assert.match(routeSrc, /getScalpAdminState/);
+    assert.match(routeSrc, /claimInitialScalpAdmin/);
+    assert.doesNotMatch(routeSrc, /BOT_ADMIN_CLERK_USER_ID/);
   });
 
-  it("POST /crypto/scalper/config is guarded by requireScalpAdmin", () => {
+  it("guards both Scalper mutation routes with requireScalpAdmin", () => {
     assert.match(
       routeSrc,
       /router\.post\(\s*["']\/crypto\/scalper\/config["']\s*,\s*requireScalpAdmin/,
     );
-  });
-
-  it("POST /crypto/scalper/reset-circuit-breaker is guarded by requireScalpAdmin", () => {
     assert.match(
       routeSrc,
       /router\.post\(\s*["']\/crypto\/scalper\/reset-circuit-breaker["']\s*,\s*requireScalpAdmin/,
     );
   });
 
-  it("requireScalpAdmin delegates to the pure helper", () => {
-    assert.match(routeSrc, /function requireScalpAdmin[\s\S]*decideScalpMutationAuthz\(/);
+  it("requires Clerk authentication and an atomic store claim for bootstrap", () => {
+    assert.match(
+      routeSrc,
+      /router\.post\(\s*["']\/crypto\/scalper\/admin\/claim["'][\s\S]*getAuth\(req\)[\s\S]*claimInitialScalpAdmin\(userId\)/,
+    );
   });
 
-  it("GET config/status/history/performance are NOT guarded by requireScalpAdmin", () => {
+  it("keeps read-only Scalper routes outside requireScalpAdmin", () => {
     for (const path of [
       "/crypto/scalper/capability",
       "/crypto/scalper/config",
@@ -168,19 +133,7 @@ describe("scalper route wiring (static source assertions)", () => {
       const re = new RegExp(
         `router\\.get\\(\\s*["']${path.replace(/\//g, "\\/")}["']\\s*,\\s*requireScalpAdmin`,
       );
-      assert.ok(!re.test(routeSrc), `GET ${path} must not use requireScalpAdmin`);
+      assert.ok(!re.test(routeSrc), `GET ${path} must remain read-only`);
     }
-  });
-
-  it("GET capability uses the safe capability projection", () => {
-    assert.match(
-      routeSrc,
-      /router\.get\(\s*["']\/crypto\/scalper\/capability["'][\s\S]*getScalpMutationCapability\(/,
-    );
-  });
-
-  it("no lingering fail-open requireAuth guard remains", () => {
-    // The old fail-open guard was named requireAuth; ensure it's gone.
-    assert.ok(!/function requireAuth\b/.test(routeSrc), "old requireAuth guard must be removed");
   });
 });

@@ -13,15 +13,16 @@ interface BotScalperPanelProps {
 
 interface ScalperCapability {
   canManage: boolean;
-  reason: "unauthenticated" | "operator_not_configured" | "not_authorized" | "authorized";
+  canClaimAdmin: boolean;
+  reason: "unauthenticated" | "bootstrap_available" | "not_authorized" | "authorized";
   message: string | null;
 }
 
-type MutationName = "enable" | "mode" | "save" | "reset";
+type MutationName = "claim" | "enable" | "mode" | "save" | "reset";
 type Notice = { kind: "success" | "error"; text: string };
 
 export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
-  const { getToken } = useAuth();
+  const { getToken, isLoaded: authLoaded, userId } = useAuth();
   const qc = useQueryClient();
   const [configDraft, setConfigDraft] = useState<Partial<ScalperConfig>>({});
   const [mutationBusy, setMutationBusy] = useState<MutationName | null>(null);
@@ -31,6 +32,11 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   useEffect(() => () => {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
   }, []);
+
+  useEffect(() => {
+    setConfigDraft({});
+    setNotice(null);
+  }, [userId]);
 
   const { data: configData } = useQuery<{ config: ScalperConfig }>({
     queryKey: ["bot-scalper-config"],
@@ -46,7 +52,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     isLoading: capabilityLoading,
     isError: capabilityFailed,
   } = useQuery<ScalperCapability>({
-    queryKey: ["bot-scalper-capability"],
+    queryKey: ["bot-scalper-capability", userId ?? "signed-out"],
     queryFn: async () => {
       const token = await getToken();
       const response = await fetch(`${API_BASE}/crypto/scalper/capability`, {
@@ -57,6 +63,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       }
       return response.json();
     },
+    enabled: authLoaded,
     retry: false,
     refetchInterval: 60_000,
   });
@@ -94,12 +101,45 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     switch (capability?.reason) {
       case "unauthenticated":
         return "Sign in to change Scalper settings.";
-      case "operator_not_configured":
-        return "Scalper controls are read-only until BOT_ADMIN_CLERK_USER_ID is configured in Replit Secrets.";
+      case "bootstrap_available":
+        return "No Scalper administrator exists yet. Claim the initial admin role to enable controls for this account.";
       case "not_authorized":
-        return "This account can view Scalper data but is not the configured Scalper operator. Sign in with the authorized operator account.";
+        return "This account can view Scalper data but does not have the Scalper admin role.";
       default:
         return capability?.message ?? "Checking whether this account can manage the Scalper.";
+    }
+  }
+
+  async function claimAdminAccess(): Promise<void> {
+    if (!capability?.canClaimAdmin || mutationBusy !== null) return;
+    setMutationBusy("claim");
+    setNotice(null);
+    try {
+      const data = await authPost("/crypto/scalper/admin/claim", {}) as {
+        ok?: boolean;
+        capability?: ScalperCapability;
+        error?: string;
+      };
+      if (!data.ok || !data.capability?.canManage) {
+        throw new Error(data.error ?? "The server did not confirm Scalper administrator access.");
+      }
+      qc.setQueryData<ScalperCapability>(
+        ["bot-scalper-capability", userId ?? "signed-out"],
+        data.capability,
+      );
+      await qc.invalidateQueries({ queryKey: ["bot-scalper-capability"] });
+      showNotice({
+        kind: "success",
+        text: "Admin access claimed — Scalper controls are now enabled",
+      });
+    } catch (error) {
+      await qc.invalidateQueries({ queryKey: ["bot-scalper-capability"] });
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Scalper administrator access could not be claimed.",
+      });
+    } finally {
+      setMutationBusy(null);
     }
   }
 
@@ -283,17 +323,31 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         </div>
       </div>
 
-      <div className={`px-5 py-2.5 border-b text-xs flex items-center gap-2 ${
+      <div className={`px-5 py-2.5 border-b text-xs flex items-center justify-between gap-3 ${
         canManage
           ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-300"
           : "border-amber-500/25 bg-amber-500/10 text-amber-300"
       }`}>
-        <Shield className="w-4 h-4 shrink-0" />
-        {capabilityLoading
-          ? "Checking Scalper operator access…"
-          : canManage
-            ? "Operator access verified — controls and saving are enabled for this account."
-            : managementAccessMessage()}
+        <span className="flex min-w-0 items-center gap-2">
+          <Shield className="w-4 h-4 shrink-0" />
+          <span>
+            {capabilityLoading
+              ? "Checking Scalper admin access…"
+              : canManage
+                ? "Admin access verified — controls and saving are enabled for this account."
+                : managementAccessMessage()}
+          </span>
+        </span>
+        {capability?.canClaimAdmin && (
+          <button
+            type="button"
+            onClick={claimAdminAccess}
+            disabled={mutationBusy !== null}
+            className="shrink-0 rounded-md border border-amber-400/35 bg-amber-400/15 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-amber-200 transition-colors hover:bg-amber-400/25 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {mutationBusy === "claim" ? "Claiming…" : "Claim Admin Access"}
+          </button>
+        )}
       </div>
 
       {notice && (

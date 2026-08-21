@@ -3,20 +3,21 @@
 // scalper MUTATION routes (POST config, POST reset-circuit-breaker).
 //
 // SECURITY MODEL (fail-closed):
-//   - No signed-in Clerk user            → 401 (unauthenticated)
-//   - Operator identity NOT configured   → 403 (writes denied until configured)
-//   - Configured but userId != admin id  → 403 (not authorized)
-//   - Configured AND exact match         → allow
-//
-// The previous guard was FAIL-OPEN: when BOT_ADMIN_CLERK_USER_ID was unset, any
-// signed-in user could mutate the scalper. This module makes the decision pure
-// and fail-closed so it can be unit tested directly and cannot silently open.
+//   - No signed-in Clerk user             → 401 (unauthenticated)
+//   - No administrator has been claimed   → 403 (claim route only)
+//   - Signed in without the admin role     → 403 (not authorized)
+//   - Signed in with the persisted role    → allow
 //
 // This module is scalper-only. It does NOT read regular-bot state or modify any
 // regular-bot behavior.
 // ---------------------------------------------------------------------------
 
 export type ScalpAuthzStatus = 401 | 403 | 200;
+
+export interface ScalpAdminState {
+  hasAdmin: boolean;
+  isAdmin: boolean;
+}
 
 export interface ScalpAuthzDecision {
   /** true only for an exact authorized match. */
@@ -28,19 +29,20 @@ export interface ScalpAuthzDecision {
   /**
    * Machine-readable reason for logging/tests. One of:
    *  - "unauthenticated"
-   *  - "operator_not_configured"
+   *  - "bootstrap_available"
    *  - "not_authorized"
    *  - "authorized"
    */
   reason:
     | "unauthenticated"
-    | "operator_not_configured"
+    | "bootstrap_available"
     | "not_authorized"
     | "authorized";
 }
 
 export interface ScalpMutationCapability {
   canManage: boolean;
+  canClaimAdmin: boolean;
   reason: ScalpAuthzDecision["reason"];
   message: string | null;
 }
@@ -48,18 +50,14 @@ export interface ScalpMutationCapability {
 /**
  * Pure authorization decision for scalper mutations. Fail-closed by construction.
  *
- * @param userId  The authenticated Clerk user id (getAuth(req).userId) or null/undefined.
- * @param adminId The configured operator id (process.env.BOT_ADMIN_CLERK_USER_ID) or undefined.
- *
- * Both inputs are treated as opaque strings; surrounding whitespace is ignored,
- * and blank/empty values are treated as "absent".
+ * @param userId The authenticated Clerk user id (getAuth(req).userId) or null/undefined.
+ * @param adminState Persisted server-side role state for this user.
  */
 export function decideScalpMutationAuthz(
   userId: string | null | undefined,
-  adminId: string | null | undefined,
+  adminState: ScalpAdminState,
 ): ScalpAuthzDecision {
   const user = typeof userId === "string" ? userId.trim() : "";
-  const admin = typeof adminId === "string" ? adminId.trim() : "";
 
   // 1) Must be signed in.
   if (user === "") {
@@ -71,19 +69,19 @@ export function decideScalpMutationAuthz(
     };
   }
 
-  // 2) Operator identity must be configured (fail-closed when unset/blank).
-  if (admin === "") {
+  // 2) The bootstrap endpoint is the only path allowed before an admin exists.
+  if (!adminState.hasAdmin) {
     return {
       allowed: false,
       status: 403,
       error:
-        "Forbidden — operator authorization is not configured; scalper writes are disabled until an operator identity is set",
-      reason: "operator_not_configured",
+        "Forbidden — no Scalper administrator has been claimed",
+      reason: "bootstrap_available",
     };
   }
 
-  // 3) Must be an EXACT match.
-  if (user !== admin) {
+  // 3) The authenticated user must hold the persisted admin role.
+  if (!adminState.isAdmin) {
     return {
       allowed: false,
       status: 403,
@@ -102,11 +100,15 @@ export function decideScalpMutationAuthz(
  */
 export function getScalpMutationCapability(
   userId: string | null | undefined,
-  adminId: string | null | undefined,
+  adminState: ScalpAdminState,
 ): ScalpMutationCapability {
-  const decision = decideScalpMutationAuthz(userId, adminId);
+  const decision = decideScalpMutationAuthz(userId, adminState);
   return {
     canManage: decision.allowed,
+    canClaimAdmin:
+      decision.reason === "bootstrap_available" &&
+      typeof userId === "string" &&
+      userId.trim() !== "",
     reason: decision.reason,
     message: decision.error,
   };

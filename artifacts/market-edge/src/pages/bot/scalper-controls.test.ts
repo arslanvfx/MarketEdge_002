@@ -24,6 +24,13 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /\(\["paper", "live"\] as const\)\.map/);
   });
 
+  it("supports a one-time authenticated admin claim without the old secret message", () => {
+    assert.match(panelSource, /\/crypto\/scalper\/admin\/claim/);
+    assert.match(panelSource, /Claim Admin Access/);
+    assert.match(panelSource, /canClaimAdmin/);
+    assert.doesNotMatch(panelSource, /BOT_ADMIN_CLERK_USER_ID/);
+  });
+
   it("retains draft settings when a save throws", () => {
     const catchBlock = panelSource.match(/async function applyConfigPatch[\s\S]*?catch \(error\) \{([\s\S]*?)\n    \} finally/);
     assert.ok(catchBlock, "applyConfigPatch catch block must exist");
