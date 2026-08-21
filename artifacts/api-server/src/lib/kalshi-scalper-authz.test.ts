@@ -10,7 +10,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { decideScalpMutationAuthz } from "./kalshi-scalper-authz.ts";
+import {
+  decideScalpMutationAuthz,
+  getScalpMutationCapability,
+} from "./kalshi-scalper-authz.ts";
 
 const ADMIN = "user_admin_123";
 
@@ -98,6 +101,27 @@ describe("decideScalpMutationAuthz (fail-closed)", () => {
   });
 });
 
+describe("getScalpMutationCapability", () => {
+  it("projects authorized access without returning identity values", () => {
+    const capability = getScalpMutationCapability(ADMIN, ADMIN);
+    assert.deepEqual(capability, {
+      canManage: true,
+      reason: "authorized",
+      message: null,
+    });
+    assert.ok(!("userId" in capability));
+    assert.ok(!("adminId" in capability));
+  });
+
+  it("projects the exact denial reason without returning identity values", () => {
+    const capability = getScalpMutationCapability("user_other", ADMIN);
+    assert.equal(capability.canManage, false);
+    assert.equal(capability.reason, "not_authorized");
+    assert.match(capability.message ?? "", /not authorized/i);
+    assert.ok(!JSON.stringify(capability).includes(ADMIN));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Static route-wiring assertions (no new packages): confirm both POST mutation
 // routes are guarded by the strict helper-backed middleware, and that GET
@@ -135,6 +159,7 @@ describe("scalper route wiring (static source assertions)", () => {
 
   it("GET config/status/history/performance are NOT guarded by requireScalpAdmin", () => {
     for (const path of [
+      "/crypto/scalper/capability",
       "/crypto/scalper/config",
       "/crypto/scalper/status",
       "/crypto/scalper/history",
@@ -145,6 +170,13 @@ describe("scalper route wiring (static source assertions)", () => {
       );
       assert.ok(!re.test(routeSrc), `GET ${path} must not use requireScalpAdmin`);
     }
+  });
+
+  it("GET capability uses the safe capability projection", () => {
+    assert.match(
+      routeSrc,
+      /router\.get\(\s*["']\/crypto\/scalper\/capability["'][\s\S]*getScalpMutationCapability\(/,
+    );
   });
 
   it("no lingering fail-open requireAuth guard remains", () => {

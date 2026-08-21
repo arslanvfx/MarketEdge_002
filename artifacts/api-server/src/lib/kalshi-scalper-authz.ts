@@ -39,6 +39,12 @@ export interface ScalpAuthzDecision {
     | "authorized";
 }
 
+export interface ScalpMutationCapability {
+  canManage: boolean;
+  reason: ScalpAuthzDecision["reason"];
+  message: string | null;
+}
+
 /**
  * Pure authorization decision for scalper mutations. Fail-closed by construction.
  *
@@ -88,4 +94,20 @@ export function decideScalpMutationAuthz(
 
   // 4) Authorized.
   return { allowed: true, status: 200, error: null, reason: "authorized" };
+}
+
+/**
+ * Safe client-facing capability projection. It deliberately exposes neither
+ * the configured operator id nor the signed-in user id.
+ */
+export function getScalpMutationCapability(
+  userId: string | null | undefined,
+  adminId: string | null | undefined,
+): ScalpMutationCapability {
+  const decision = decideScalpMutationAuthz(userId, adminId);
+  return {
+    canManage: decision.allowed,
+    reason: decision.reason,
+    message: decision.error,
+  };
 }

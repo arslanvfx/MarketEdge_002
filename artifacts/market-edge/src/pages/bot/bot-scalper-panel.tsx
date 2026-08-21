@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
 import { API_BASE, fmt$, fmtPct } from "./utils";
@@ -7,104 +8,201 @@ import type { ScalperConfig, ScalperStatus, ScalperPerformance } from "./types";
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
 interface BotScalperPanelProps {
-  activeMode: "paper" | "live";
   authPost: (path: string, body: object) => Promise<unknown>;
 }
 
-export function BotScalperPanel({ activeMode, authPost }: BotScalperPanelProps) {
+interface ScalperCapability {
+  canManage: boolean;
+  reason: "unauthenticated" | "operator_not_configured" | "not_authorized" | "authorized";
+  message: string | null;
+}
+
+type MutationName = "enable" | "mode" | "save" | "reset";
+type Notice = { kind: "success" | "error"; text: string };
+
+export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
+  const { getToken } = useAuth();
   const qc = useQueryClient();
   const [configDraft, setConfigDraft] = useState<Partial<ScalperConfig>>({});
-  const [saving, setSaving] = useState(false);
-  const [savedMsg, setSavedMsg] = useState<string | null>(null);
-  
+  const [mutationBusy, setMutationBusy] = useState<MutationName | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+  }, []);
+
   const { data: configData } = useQuery<{ config: ScalperConfig }>({
     queryKey: ["bot-scalper-config"],
     queryFn: () => fetch(`${API_BASE}/crypto/scalper/config`).then(r => r.json()),
   });
-  
-  const { data: statusData } = useQuery<ScalperStatus>({
-    queryKey: ["bot-scalper-status", activeMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/scalper/status?mode=${activeMode}`).then(r => r.json()),
-    refetchInterval: 5_000,
-  });
-  
-  const { data: perfData } = useQuery<ScalperPerformance>({
-    queryKey: ["bot-scalper-perf", activeMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/scalper/performance?mode=${activeMode}`).then(r => r.json()),
-    refetchInterval: 30_000,
-  });
 
   const cfg = configData?.config;
   const merged = useMemo(() => ({ ...(cfg || {}), ...configDraft } as ScalperConfig), [cfg, configDraft]);
-  
+  const scalperMode = cfg?.mode ?? "paper";
+
+  const {
+    data: capability,
+    isLoading: capabilityLoading,
+    isError: capabilityFailed,
+  } = useQuery<ScalperCapability>({
+    queryKey: ["bot-scalper-capability"],
+    queryFn: async () => {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE}/crypto/scalper/capability`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!response.ok) {
+        throw new Error(`Unable to verify Scalper access (HTTP ${response.status})`);
+      }
+      return response.json();
+    },
+    retry: false,
+    refetchInterval: 60_000,
+  });
+
+  const { data: statusData } = useQuery<ScalperStatus>({
+    queryKey: ["bot-scalper-status", scalperMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/scalper/status?mode=${scalperMode}`).then(r => r.json()),
+    enabled: Boolean(cfg),
+    refetchInterval: 5_000,
+  });
+
+  const { data: perfData } = useQuery<ScalperPerformance>({
+    queryKey: ["bot-scalper-perf", scalperMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/scalper/performance?mode=${scalperMode}`).then(r => r.json()),
+    enabled: Boolean(cfg),
+    refetchInterval: 30_000,
+  });
+
   const hasDraft = Object.keys(configDraft).length > 0;
+  const canManage = capability?.canManage === true;
 
-  async function saveConfig() {
-    if (!hasDraft) return;
-    setSaving(true);
+  function showNotice(next: Notice): void {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    setNotice(next);
+    noticeTimer.current = setTimeout(
+      () => setNotice(null),
+      next.kind === "error" ? 8_000 : 4_000,
+    );
+  }
+
+  function managementAccessMessage(): string {
+    if (capabilityFailed) {
+      return "Scalper controls are read-only because operator access could not be verified. Refresh and try again.";
+    }
+    switch (capability?.reason) {
+      case "unauthenticated":
+        return "Sign in to change Scalper settings.";
+      case "operator_not_configured":
+        return "Scalper controls are read-only until BOT_ADMIN_CLERK_USER_ID is configured in Replit Secrets.";
+      case "not_authorized":
+        return "This account can view Scalper data but is not the configured Scalper operator. Sign in with the authorized operator account.";
+      default:
+        return capability?.message ?? "Checking whether this account can manage the Scalper.";
+    }
+  }
+
+  async function applyConfigPatch(
+    patch: Partial<ScalperConfig>,
+    mutation: MutationName,
+    successMessage: string,
+    clearAllDrafts = false,
+  ): Promise<void> {
+    if (!canManage) {
+      showNotice({ kind: "error", text: managementAccessMessage() });
+      return;
+    }
+    setMutationBusy(mutation);
+    setNotice(null);
     try {
-      const data = await authPost("/crypto/scalper/config", configDraft) as { config?: ScalperConfig; ok?: boolean };
-      if (data.ok && data.config) {
-        qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
+      const data = await authPost("/crypto/scalper/config", patch) as {
+        config?: ScalperConfig;
+        ok?: boolean;
+        error?: string;
+      };
+      if (!data.ok || !data.config) {
+        throw new Error(data.error ?? "The server did not confirm that Scalper settings were saved.");
+      }
+      qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
+      if (clearAllDrafts) {
         setConfigDraft({});
-        setSavedMsg("All settings saved");
-        setTimeout(() => setSavedMsg(null), 3000);
-        qc.invalidateQueries({ queryKey: ["bot-scalper-status"] });
-        qc.invalidateQueries({ queryKey: ["bot-scalper-perf"] });
-        qc.invalidateQueries({ queryKey: ["bot-scalper-history"] });
       } else {
-        throw new Error("Save failed");
+        setConfigDraft(previous => {
+          const next = { ...previous };
+          for (const key of Object.keys(patch) as Array<keyof ScalperConfig>) {
+            delete next[key];
+          }
+          return next;
+        });
       }
-    } catch {
-      setSavedMsg("Save failed");
-      setTimeout(() => setSavedMsg(null), 3000);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bot-scalper-config"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-status"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-perf"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-history"] }),
+      ]);
+      showNotice({ kind: "success", text: successMessage });
+    } catch (error) {
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Scalper settings could not be saved.",
+      });
     } finally {
-      setSaving(false);
+      setMutationBusy(null);
     }
   }
 
-  async function toggleMaster() {
+  async function saveConfig(): Promise<void> {
+    if (!hasDraft) return;
+    await applyConfigPatch(configDraft, "save", "All Scalper settings saved", true);
+  }
+
+  async function toggleMaster(): Promise<void> {
     const next = !(merged.enabled ?? false);
-    try {
-      const data = await authPost("/crypto/scalper/config", { enabled: next }) as { config?: ScalperConfig; ok?: boolean };
-      if (data.ok && data.config) {
-        qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
-        setConfigDraft(prev => {
-          const c = { ...prev };
-          delete c.enabled;
-          return c;
-        });
-      }
-    } catch {
-      // Revert optimism implicitly by failing
-    }
+    await applyConfigPatch(
+      { enabled: next },
+      "enable",
+      next ? "Scalper enabled" : "Scalper disabled",
+    );
   }
 
-  async function toggleMode() {
-    const next = merged.mode === "live" ? "paper" : "live";
-    try {
-      const data = await authPost("/crypto/scalper/config", { mode: next }) as { config?: ScalperConfig; ok?: boolean };
-      if (data.ok && data.config) {
-        qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
-        setConfigDraft(prev => {
-          const c = { ...prev };
-          delete c.mode;
-          return c;
-        });
-      }
-    } catch {
-      // Revert optimism implicitly by failing
-    }
+  async function setScalperMode(mode: "paper" | "live"): Promise<void> {
+    if (mode === scalperMode) return;
+    await applyConfigPatch(
+      { mode },
+      "mode",
+      `Scalper switched to ${mode === "live" ? "Live" : "Paper"} mode`,
+    );
   }
 
-  async function resetCircuitBreaker() {
+  async function resetCircuitBreaker(): Promise<void> {
+    if (!canManage) {
+      showNotice({ kind: "error", text: managementAccessMessage() });
+      return;
+    }
+    setMutationBusy("reset");
+    setNotice(null);
     try {
-      const data = await authPost("/crypto/scalper/reset-circuit-breaker", {}) as { ok?: boolean; config?: ScalperConfig };
-      if (data.ok && data.config) {
-        qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
-        qc.invalidateQueries({ queryKey: ["bot-scalper-status"] });
+      const data = await authPost("/crypto/scalper/reset-circuit-breaker", {}) as {
+        ok?: boolean;
+        config?: ScalperConfig;
+        error?: string;
+      };
+      if (!data.ok || !data.config) {
+        throw new Error(data.error ?? "The server did not confirm the circuit-breaker reset.");
       }
-    } catch {}
+      qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
+      await qc.invalidateQueries({ queryKey: ["bot-scalper-status"] });
+      showNotice({ kind: "success", text: "Scalper circuit breaker reset" });
+    } catch (error) {
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Circuit breaker could not be reset.",
+      });
+    } finally {
+      setMutationBusy(null);
+    }
   }
 
   function handleConfigChange(key: keyof ScalperConfig, value: any) {
@@ -139,31 +237,77 @@ export function BotScalperPanel({ activeMode, authPost }: BotScalperPanelProps) 
           </div>
           <span className="text-[10px] uppercase font-bold tracking-widest text-amber-500/70 mt-0.5">Late-Window Price Execution</span>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-end gap-4">
+          <div className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase font-bold tracking-widest text-muted-foreground">Scalper mode</span>
+            <div className="flex rounded-lg border border-border bg-background/50 p-0.5" role="group" aria-label="Scalper execution mode">
+              {(["paper", "live"] as const).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setScalperMode(mode)}
+                  disabled={!canManage || mutationBusy !== null}
+                  aria-pressed={scalperMode === mode}
+                  className={`px-3 py-1 rounded-md text-[10px] font-bold tracking-widest uppercase transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    scalperMode === mode
+                      ? mode === "live"
+                        ? "bg-red-500/25 text-red-300"
+                        : "bg-yellow-500/20 text-yellow-300"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          </div>
           <button
-            onClick={toggleMode}
-            className={`px-3 py-1.5 rounded-full text-[10px] font-bold tracking-widest uppercase transition-colors ${
-              merged.mode === "live"
-                ? "bg-red-500/20 text-red-400 border border-red-500/30"
-                : "bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
-            }`}
-          >
-            {merged.mode === "live" ? "Live" : "Paper"}
-          </button>
-          
-          <button
+            type="button"
+            role="switch"
+            aria-checked={Boolean(merged.enabled)}
+            aria-label="Enable or disable the Scalper"
             onClick={toggleMaster}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-colors ${
-              merged.enabled
-                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                : "bg-muted text-muted-foreground border border-border"
-            }`}
+            disabled={!canManage || mutationBusy !== null}
+            className="flex flex-col items-start gap-1 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <span className={`w-2 h-2 rounded-full ${merged.enabled ? "bg-emerald-400" : "bg-muted-foreground"}`} />
-            {merged.enabled ? "Scalper active" : "Scalper inactive"}
+            <span className="text-[9px] uppercase font-bold tracking-widest text-muted-foreground">Enable Scalper</span>
+            <span className="flex items-center gap-2">
+              <span className={`relative h-5 w-9 rounded-full transition-colors ${merged.enabled ? "bg-emerald-500" : "bg-muted"}`}>
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${merged.enabled ? "translate-x-4.5" : "translate-x-0.5"}`} />
+              </span>
+              <span className={`text-xs font-bold ${merged.enabled ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {mutationBusy === "enable" ? "Saving…" : merged.enabled ? "On" : "Off"}
+              </span>
+            </span>
           </button>
         </div>
       </div>
+
+      <div className={`px-5 py-2.5 border-b text-xs flex items-center gap-2 ${
+        canManage
+          ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-300"
+          : "border-amber-500/25 bg-amber-500/10 text-amber-300"
+      }`}>
+        <Shield className="w-4 h-4 shrink-0" />
+        {capabilityLoading
+          ? "Checking Scalper operator access…"
+          : canManage
+            ? "Operator access verified — controls and saving are enabled for this account."
+            : managementAccessMessage()}
+      </div>
+
+      {notice && (
+        <div className={`px-5 py-2.5 border-b flex items-center gap-2 text-xs font-medium ${
+          notice.kind === "error"
+            ? "border-red-500/30 bg-red-500/10 text-red-300"
+            : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+        }`}>
+          {notice.kind === "error"
+            ? <AlertTriangle className="w-4 h-4 shrink-0" />
+            : <CheckCircle2 className="w-4 h-4 shrink-0" />}
+          {notice.text}
+        </div>
+      )}
 
       <div className="p-5 text-xs text-muted-foreground/80 leading-relaxed border-b border-border bg-card/40 flex items-center justify-between">
         <span>Same workflow as regular conviction bets — same price feed, same order placement. Fires in the configured final window when the winning-side contract ask lands in the price band. Model signals, quiet hours, and market filters are bypassed.</span>
@@ -193,8 +337,12 @@ export function BotScalperPanel({ activeMode, authPost }: BotScalperPanelProps) 
             <AlertTriangle className="w-5 h-5" />
             Circuit Breaker Tripped! Scalper is halted. ({merged.circuitBreakerReason || "Unknown reason"})
           </div>
-          <button onClick={resetCircuitBreaker} className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded text-xs font-semibold transition-colors">
-            Reset Circuit Breaker
+          <button
+            onClick={resetCircuitBreaker}
+            disabled={!canManage || mutationBusy !== null}
+            className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {mutationBusy === "reset" ? "Resetting…" : "Reset Circuit Breaker"}
           </button>
         </div>
       )}
@@ -207,6 +355,10 @@ export function BotScalperPanel({ activeMode, authPost }: BotScalperPanelProps) 
       )}
 
       <div className="p-5 space-y-6">
+        <fieldset
+          disabled={!canManage || mutationBusy !== null}
+          className={`space-y-6 ${!canManage ? "opacity-65" : ""}`}
+        >
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="bg-background/50 border border-border rounded-lg p-4 flex flex-col justify-between">
             <div>
@@ -436,17 +588,13 @@ export function BotScalperPanel({ activeMode, authPost }: BotScalperPanelProps) 
         {hasDraft && (
           <div className="flex items-center justify-end gap-3 mt-4 pt-4 border-t border-border/50">
             <span className="text-xs text-amber-500/70">Unsaved changes</span>
-            <button onClick={() => setConfigDraft({})} disabled={saving} className="text-xs text-muted-foreground hover:text-foreground">Discard</button>
-            <button onClick={saveConfig} disabled={saving} className="bg-amber-600 hover:bg-amber-500 text-amber-50 px-4 py-1.5 rounded font-bold text-xs transition-colors shadow">
-              {saving ? "Saving..." : "Save settings"}
+            <button onClick={() => setConfigDraft({})} disabled={mutationBusy !== null} className="text-xs text-muted-foreground hover:text-foreground">Discard</button>
+            <button onClick={saveConfig} disabled={mutationBusy !== null || !canManage} className="bg-amber-600 hover:bg-amber-500 text-amber-50 px-4 py-1.5 rounded font-bold text-xs transition-colors shadow disabled:opacity-50 disabled:cursor-not-allowed">
+              {mutationBusy === "save" ? "Saving..." : "Save settings"}
             </button>
           </div>
         )}
-        {savedMsg && (
-          <div className={`flex items-center justify-end gap-1 mt-2 text-xs font-medium ${savedMsg === 'Save failed' ? 'text-red-400' : 'text-emerald-400'}`}>
-            {savedMsg === 'Save failed' ? <AlertTriangle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />} {savedMsg}
-          </div>
-        )}
+        </fieldset>
 
         {/* Performance Section */}
         {perfData && (

@@ -12,7 +12,10 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
 import { parseScalpConfigPatch } from "../lib/kalshi-scalper-policy.ts";
-import { decideScalpMutationAuthz } from "../lib/kalshi-scalper-authz.ts";
+import {
+  decideScalpMutationAuthz,
+  getScalpMutationCapability,
+} from "../lib/kalshi-scalper-authz.ts";
 import {
   getScalpConfig,
   applyScalpConfigUpdate,
@@ -47,6 +50,17 @@ function requireScalpAdmin(req: any, res: any, next: any): void {
 function parseMode(v: unknown): ScalpMode | undefined {
   return v === "paper" || v === "live" ? v : undefined;
 }
+
+// ── GET /api/crypto/scalper/capability ───────────────────────────────────────
+// Safe read-only projection of mutation access. Never returns either user id.
+
+router.get("/crypto/scalper/capability", (req, res): void => {
+  const auth = getAuth(req);
+  res.json(getScalpMutationCapability(
+    auth?.userId,
+    process.env["BOT_ADMIN_CLERK_USER_ID"],
+  ));
+});
 
 // ── GET /api/crypto/scalper/config ───────────────────────────────────────────
 

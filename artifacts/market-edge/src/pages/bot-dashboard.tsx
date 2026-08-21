@@ -33,6 +33,7 @@ import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 import { GapAnalyticsPanel } from "./bot/gap-analytics-panel";
 import { BotScalperPanel } from "./bot/bot-scalper-panel";
 import { ScalpTransactionLog } from "./bot/scalp-transaction-log";
+import { readApiResponse } from "./bot/api-response";
 import type { GapAnalyticsResult } from "./bot/types";
 function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; onReset: () => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
@@ -334,7 +335,7 @@ export default function BotDashboard() {
   const [presetMsg, setPresetMsg] = useState<string | null>(null);
 
   // ── Mutations ────────────────────────────────────────────────────────────
-  async function authPost(path: string, body: object) {
+  async function postAuthenticated(path: string, body: object, strictErrors: boolean) {
     const token = await getToken();
     const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
@@ -344,8 +345,19 @@ export default function BotDashboard() {
       },
       body: JSON.stringify(body),
     });
-    await qc.invalidateQueries({ queryKey: ["bot-status"] });
-    return res.json();
+    const data = strictErrors ? await readApiResponse(res) : await res.json();
+    if (path.startsWith("/crypto/bot/")) {
+      await qc.invalidateQueries({ queryKey: ["bot-status"] });
+    }
+    return data;
+  }
+
+  async function authPost(path: string, body: object) {
+    return postAuthenticated(path, body, false);
+  }
+
+  async function scalperAuthPost(path: string, body: object) {
+    return postAuthenticated(path, body, true);
   }
 
   async function submitManualOrder() {
@@ -715,7 +727,7 @@ export default function BotDashboard() {
         />
         <PerCoinGuard coinGuardData={coinGuardData} />
         <WindowEvalTable evaluation={evaluation} openPosList={openPosList} openManualOrder={openManualOrder} />
-        <BotScalperPanel activeMode={activeMode} authPost={authPost} />
+        <BotScalperPanel authPost={scalperAuthPost} />
         <BotConfigSection
           cfg={cfg}
           merged={merged}
