@@ -22,12 +22,12 @@ function ScalperMetricIcon({ label }: { label: string }) {
           : label.includes("Fill")
             ? ShoppingCart
             : Zap;
-  return <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/75" />;
+  return <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />;
 }
 
 export function ActivePositions({ openPosList, closeManualError, closingManualSym, closeManualPos, openManualOrder }: ActivePositionsProps) {
   if (openPosList.length === 0) return null;
-  const scalperCardClass = "border-amber-200/20 bg-[linear-gradient(135deg,#111419_0%,#24231f_56%,#5b4a2d_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,251,235,0.14),0_14px_38px_rgba(149,112,47,0.14)]";
+  const scalperCardClass = "border-amber-400/40 bg-[linear-gradient(135deg,#0c0f12_0%,#171716_52%,#634515_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_0_22px_rgba(245,158,11,0.16),0_14px_38px_rgba(0,0,0,0.35)]";
   return (
           <div className="space-y-3">
             {openPosList.length > 1 && (
@@ -62,7 +62,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                       <div className={`text-2xl font-black ${isScalper ? "text-amber-50" : pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
                       {pos.symbol}
                     </div>
-                      <span className={`text-sm font-bold px-3 py-1 rounded-full ${isScalper ? "bg-amber-400/20 text-amber-100" : pos.direction === "yes" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300"}`}>
+                      <span className={`text-sm font-bold px-3 py-1 rounded-full ${isScalper ? "border border-amber-400/40 bg-amber-500/20 text-amber-100" : pos.direction === "yes" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300"}`}>
                       {pos.direction === "yes" ? "▲ YES" : "▼ NO"}
                     </span>
                     {isManual && (
@@ -71,7 +71,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                       </span>
                     )}
                     {isScalper && (
-                        <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-white/10 text-amber-50 border border-amber-100/25 tracking-wide">
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-black/30 text-amber-100 border border-amber-300/35 tracking-wide">
                         SCALPER
                       </span>
                     )}
@@ -79,7 +79,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                         pos.mode === "live"
                           ? "bg-red-500/15 text-red-400"
-                           : "bg-white/10 text-amber-100"
+                           : "border border-amber-300/20 bg-black/25 text-amber-200/75"
                       }`}>
                         {pos.mode.toUpperCase()}
                       </span>
@@ -138,11 +138,11 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                     { label: "Ticker", value: pos.ticker },
                     { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
                    ]).map(({ label, value }) => (
-                     <div key={label} className={`rounded-lg p-2.5 ${isScalper ? "border border-amber-100/15 bg-black/30" : "bg-background/30"}`}>
+                     <div key={label} className={`rounded-lg p-2.5 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/30"}`}>
                        <div className="flex items-start gap-1.5">
                          {isScalper && <ScalperMetricIcon label={label} />}
                          <div>
-                           <div className={`text-[10px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{label}</div>
+                           <div className={`text-[10px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>{label}</div>
                            <div className={`font-semibold text-sm ${isScalper ? "text-amber-50" : "text-foreground"}`}>{value}</div>
                          </div>
                        </div>

@@ -2,15 +2,15 @@ import type { LucideIcon } from "lucide-react";
 import { Activity, ArrowDown, BarChart3, CheckCircle2, Clock, DollarSign, FileText, Layers, ShoppingCart, Trophy, Zap } from "lucide-react";
 
 const yellowShell =
-  "border border-amber-200/20 bg-[linear-gradient(135deg,#111419_0%,#24231f_56%,#5b4a2d_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,251,235,0.14),0_14px_38px_rgba(149,112,47,0.14)]";
+  "border border-amber-400/40 bg-[linear-gradient(135deg,#0c0f12_0%,#171716_52%,#634515_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_0_22px_rgba(245,158,11,0.16),0_14px_38px_rgba(0,0,0,0.35)]";
 
 function Metric({ label, value, icon: Icon, wide = false }: { label: string; value: string; icon?: LucideIcon; wide?: boolean }) {
   return (
-    <div className={`rounded-lg border border-amber-100/15 bg-black/30 p-2.5 ${wide ? "sm:col-span-2" : ""}`}>
+    <div className={`rounded-lg border border-amber-400/30 bg-black/45 p-2.5 ${wide ? "sm:col-span-2" : ""}`}>
       <div className="flex items-start gap-1.5">
-        {Icon && <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/75" />}
+        {Icon && <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />}
         <div>
-          <div className="mb-0.5 text-[9px] uppercase tracking-[0.14em] text-amber-100/70">{label}</div>
+          <div className="mb-0.5 text-[9px] uppercase tracking-[0.14em] text-amber-300/90">{label}</div>
           <div className="font-mono text-xs font-semibold text-amber-50">{value}</div>
         </div>
       </div>
@@ -24,13 +24,13 @@ function ActiveScalperCard() {
       <div className="mb-4 flex items-start justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
       <div className="text-2xl font-black tracking-tight text-amber-50">NEAR</div>
-          <span className="flex items-center gap-1 rounded-full bg-amber-400/20 px-3 py-1 text-sm font-bold text-amber-100">
+          <span className="flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/20 px-3 py-1 text-sm font-bold text-amber-100">
             <ArrowDown className="h-3.5 w-3.5" /> NO
           </span>
-          <span className="rounded-full border border-amber-100/25 bg-white/10 px-2 py-0.5 text-xs font-bold tracking-wide text-amber-50">
+          <span className="rounded-full border border-amber-300/35 bg-black/30 px-2 py-0.5 text-xs font-bold tracking-wide text-amber-100">
             SCALPER
           </span>
-          <span className="rounded bg-amber-300 px-1.5 py-0.5 text-[10px] font-bold text-[#2b1b0d]">LIVE</span>
+          <span className="rounded bg-gradient-to-br from-yellow-200 to-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-[#2b1b0d] shadow-[0_0_12px_rgba(245,158,11,0.35)]">LIVE</span>
           <span className="text-xs text-amber-100/70">Opened 02:28:15 AM</span>
         </div>
         <div className="text-right">
@@ -62,13 +62,13 @@ function HistoryScalperCard() {
     <section className={`rounded-xl p-4 text-amber-50 ${yellowShell}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="text-base font-black tracking-tight text-amber-50">NEAR</span>
-        <span className="flex items-center gap-0.5 rounded-full bg-amber-400/20 px-2 py-0.5 text-xs font-bold text-amber-100">
+        <span className="flex items-center gap-0.5 rounded-full border border-amber-400/35 bg-amber-500/15 px-2 py-0.5 text-xs font-bold text-amber-100">
           <ArrowDown className="h-3 w-3" /> BELOW
         </span>
-        <span className="flex items-center gap-1 rounded-full border border-amber-100/25 bg-white/10 px-1.5 py-0.5 text-[10px] font-bold text-amber-50">
+        <span className="flex items-center gap-1 rounded-full border border-amber-300/35 bg-black/30 px-1.5 py-0.5 text-[10px] font-bold text-amber-100">
           <Zap className="h-2.5 w-2.5" /> SCALPER
         </span>
-        <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-bold text-amber-100">PAPER</span>
+        <span className="rounded border border-amber-300/20 bg-black/25 px-1.5 py-0.5 text-[10px] font-bold text-amber-200/75">PAPER</span>
         <span className="ml-auto flex items-center gap-1 text-xs text-amber-100/70">
           <Clock className="h-3 w-3" /> Aug 21, 2:28 AM
         </span>
@@ -80,9 +80,9 @@ function HistoryScalperCard() {
         <Metric icon={Zap} label="Entry" value="2¢ YES · 98¢ NO" wide />
         <Metric icon={Trophy} label="Result" value="YES won" />
         <Metric icon={BarChart3} label="Size" value="3 @ 98¢" />
-        <div className="rounded-lg bg-emerald-400/10 p-2.5">
-          <div className="mb-0.5 flex items-center gap-1.5 text-[9px] uppercase tracking-[0.14em] text-amber-100/70">
-            <BarChart3 className="h-3.5 w-3.5 text-amber-300/75" /> P&L
+        <div className="rounded-lg border border-amber-300/40 bg-gradient-to-br from-amber-600/15 via-amber-400/30 to-yellow-300/65 p-2.5 shadow-[0_0_18px_rgba(245,158,11,0.18)]">
+          <div className="mb-0.5 flex items-center gap-1.5 text-[9px] uppercase tracking-[0.14em] text-amber-100">
+            <BarChart3 className="h-3.5 w-3.5 text-amber-300" /> P&L
           </div>
           <div className="font-mono text-sm font-bold text-emerald-300">+$0.06</div>
         </div>
@@ -101,9 +101,9 @@ export function ScalperYellowTreatment() {
     <main className="min-h-screen bg-[#08090d] p-6 text-foreground">
       <div className="mx-auto max-w-6xl space-y-3">
         <div className="flex items-center gap-2 px-1">
-          <span className="h-2 w-2 rounded-full bg-amber-300 shadow-[0_0_12px_rgba(252,211,77,0.8)]" />
-          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-100/75">Scalper bets</span>
-          <span className="text-xs text-amber-100/40">easy to spot at a glance</span>
+          <Layers className="h-4 w-4 text-amber-300" />
+          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-100">Scalper sets</span>
+          <span className="text-xs text-amber-200/55">every 3M scalp, all day.</span>
         </div>
         <ActiveScalperCard />
         <HistoryScalperCard />
