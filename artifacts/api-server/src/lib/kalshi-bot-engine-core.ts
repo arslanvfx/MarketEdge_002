@@ -1264,36 +1264,6 @@ export interface BotConfig {
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
-
-  // ── TEST HARD-CAP MODE ─────────────────────────────────────────────────────
-  // Safety mode for live testing after code changes.  When enabled:
-  //   • Every bet (conviction, scalper, regular) is capped to testHardCapPerBet ($)
-  //   • Once session total spend reaches testHardCapTotal, ALL new entries are blocked
-  // Toggling on resets the session spend counter to $0.
-  // This runs at the order-placement layer and cannot be bypassed by any config.
-  testHardCapEnabled?: boolean;    // master toggle (default false = off)
-  testHardCapPerBet?: number;      // max $ per individual bet (default 1.00)
-  testHardCapTotal?: number;       // total $ session ceiling before all entries stop (default 6.00)
-
-  // High-value scalp: isolated late-window price-only execution path. These
-  // settings never participate in the regular bot decision pipeline.
-  highValueScalpEnabled?: boolean;
-  highValueScalpMinPrice?: number;       // winning-side ask floor, 0–1 (default .90)
-  highValueScalpMaxPrice?: number;       // winning-side ask cap, 0–1 (default .95)
-  highValueScalpMaxMinutesRemaining?: number; // legacy whole-minute fallback (default 2)
-  highValueScalpMaxSecondsRemaining?: number; // only eligible with this many seconds left (default 120)
-  highValueScalpBetAmount?: number;      // dollar budget per scalp order (default $25)
-  highValueScalpMaxOpenExposure?: number | null; // gross open scalp exposure cap; null = no cap
-  highValueScalpMaxDailySpend?: number | null;   // gross daily scalp spend cap; null = no cap
-  // Per-coin scalp overrides — each field falls through to the global setting when omitted.
-  highValueScalpCoinOverrides?: Record<string, {
-    paused?: boolean;             // skip this coin entirely for scalping
-    maxBetSize?: number;          // per-coin dollar budget (overrides highValueScalpBetAmount)
-    maxSecondsRemaining?: number; // per-coin entry window (overrides highValueScalpMaxSecondsRemaining)
-  }>;
-  // Independent scalp stats reset timestamps (separate from the main bot stats reset).
-  paperScalpStatsResetAt?: string | null;
-  liveScalpStatsResetAt?: string | null;
   // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
   // Any field left undefined falls through to the matching global setting.
   //   lockPrice      — entry floor (overrides kalshiLockPrice)
@@ -1749,19 +1719,6 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   convictionCatastrophicFillThresholdCents: 15,
   convictionMinEntryMinutes: 0,
   convictionMaxDailySpend: undefined,
-  // High-value scalping is deliberately opt-in. It has independent limits so
-  // enabling it does not require loosening the normal bot's conservative caps.
-  highValueScalpEnabled: false,
-  highValueScalpMinPrice: 0.90,
-  highValueScalpMaxPrice: 0.95,
-  highValueScalpMaxMinutesRemaining: 2,
-  highValueScalpMaxSecondsRemaining: 120,
-  highValueScalpBetAmount: 25,
-  highValueScalpMaxOpenExposure: 800,
-  highValueScalpMaxDailySpend: 2000,
-  highValueScalpCoinOverrides: {},
-  paperScalpStatsResetAt: null,
-  liveScalpStatsResetAt: null,
   convictionBoostBetSize: undefined,
   convictionBoostProbability: 0.25,
   convictionBoostMinWinRate: 0.70,

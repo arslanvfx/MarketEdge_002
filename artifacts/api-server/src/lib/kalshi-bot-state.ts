@@ -40,11 +40,7 @@ export interface OpenPosition {
   entryDecision: BotDecision;
   phase2Activated: boolean;
   entryMode: BotMode;
-  source?: "bot" | "manual" | "high_value_scalp";
-  /** Gross portion of this position that originated from a high-value scalp. */
-  highValueScalpAmount?: number;
-  /** Number of confirmed scalp fills folded into this position. */
-  highValueScalpAddCount?: number;
+  source?: "bot" | "manual";
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
   /** ID of a mirrored paper-mode DB record created when shadowPaperBets is enabled in live mode. */
   shadowPaperId?: string;
@@ -156,9 +152,6 @@ export const S = {
   dailyPnl: 0,
   dailyLossCount: 0,
   dailySpendAmount: 0,
-  // Accumulated gross spend while testHardCapEnabled is on.  Reset to 0 whenever
-  // testHardCapEnabled is toggled on so each test session starts from $0.
-  testModeSpentAmount: 0,
   dailyDate: new Date().toISOString().slice(0, 10),
   accountBalance: null as number | null,
   cbState: { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 } as CircuitBreakerState,
@@ -206,19 +199,6 @@ export const windowTotalBets = new Map<string, number>();
 export const windowBetDetails = new Map<string, { direction: "yes" | "no"; confidence: number }>();
 export const windowDirectionCounts = new Map<"yes" | "no", number>();
 export const windowFailedFills = new Set<string>();
-// Tracks coins that have already had a scalp fired this window (sym:windowKey:mode).
-// Prevents double-bets. Cleared on window transition in the bot loop.
-export const highValueScalpFiredThisWindow = new Set<string>();
-// Concurrent-dispatch guard for the high-value scalper — mirrors convictionDispatchInFlight.
-// runHighValueScalpForCoin is async; without this lock every 1-second poll tick that
-// detects a coin in the scalp band passes the highValueScalpFiredThisWindow check
-// (not set until after the fill) and launches its own concurrent order — exactly the
-// same race that caused 4 simultaneous XRP scalp orders at 8:13pm ET.
-// Set SYNCHRONOUSLY before the first await; cleared in finally after execution.
-// Also bulk-cleared on window transition alongside highValueScalpFiredThisWindow.
-export const scalpDispatchInFlight = new Set<string>();
-export const paperHighValueScalpDailySpend = new Map<string, number>();
-export const liveHighValueScalpDailySpend = new Map<string, number>();
 export const windowZeroFillAttempts = new Map<string, number>();
 // Per-window randomizer de-duplication: tracks which dollar amounts the
 // randomizer has already picked for each coin in the current window.
@@ -230,14 +210,6 @@ export const windowRandomizerUsedValues = new Map<string, Set<number>>();
 // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢).  Cleared on window
 // transition alongside the other per-window guards.
 export const convictionFiredThisWindow = new Set<string>();
-// Keyed by `sym:windowKey`.  Set SYNCHRONOUSLY before the OB pre-warm `await` in
-// pollOnce() so subsequent 1-second poll ticks see the lock immediately and skip
-// dispatch.  Prevents the race condition where multiple concurrent OB pre-warm awaits
-// all complete at once and each calls callConvictionZoneEntry independently (which
-// was causing 17 simultaneous orders for the same coin in the same window).
-// Cleared after callConvictionZoneEntry fires so abort-cooldown retry can re-enter,
-// and bulk-cleared on window transition alongside convictionFiredThisWindow.
-export const convictionDispatchInFlight = new Set<string>();
 // Tracks `sym:windowKey` pairs where a YES conviction bet was aborted because the
 // YES bid was below the zone floor.  When extremeCautionEnabled=true, any subsequent
 // YES entry attempt for that coin+window is blocked immediately.  Cleared on window
@@ -290,24 +262,19 @@ export const CONVICTION_OB_CACHE_TTL_MS = 1_500;
 // (deriveConvictionZone(floor, cap)) before dispatching — belt-and-suspenders
 // so a future poller zone drift cannot dispatch out-of-zone ticks again.
 let _convictionZoneEntryFn:
-  | ((sym: string, yesAsk: number | null, noAsk: number | null) => Promise<void>)
+  | ((sym: string, yesAsk: number | null, noAsk: number | null) => void)
   | null = null;
 export function setConvictionZoneEntryCallback(
-  fn: (sym: string, yesAsk: number | null, noAsk: number | null) => Promise<void>,
+  fn: (sym: string, yesAsk: number | null, noAsk: number | null) => void,
 ): void {
   _convictionZoneEntryFn = fn;
 }
-/** Calls the registered zone-entry callback and returns a Promise that resolves
- *  only after the per-coin tick (and all its async gates) has completed.
- *  The caller MUST await this so that convictionDispatchInFlight is not cleared
- *  prematurely — if the lock is released before convictionFiredThisWindow is set,
- *  a subsequent 1-second poll can re-acquire it and start a duplicate dispatch. */
-export async function callConvictionZoneEntry(
+export function callConvictionZoneEntry(
   sym: string,
   yesAsk: number | null,
   noAsk: number | null,
-): Promise<void> {
-  await _convictionZoneEntryFn?.(sym, yesAsk, noAsk);
+): void {
+  _convictionZoneEntryFn?.(sym, yesAsk, noAsk);
 }
 // Per-coin rolling price ticks from the conviction 1 s poller.
 // Used by the direction guard to detect consecutive-seconds adverse movement.
@@ -500,8 +467,6 @@ export function resetDailyIfNeeded(): void {
     S.dailySpendAmount = 0;
     paperCoinDailyLoss.clear();
     liveCoinDailyLoss.clear();
-    paperHighValueScalpDailySpend.clear();
-    liveHighValueScalpDailySpend.clear();
   }
 }
 

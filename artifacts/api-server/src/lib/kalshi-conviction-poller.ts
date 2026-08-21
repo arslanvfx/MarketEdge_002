@@ -31,9 +31,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionDispatchInFlight, convictionPriceTicks, callConvictionZoneEntry, convictionObCache, highValueScalpFiredThisWindow, scalpDispatchInFlight } from "./kalshi-bot-state";
-import { runHighValueScalpForCoin } from "./kalshi-high-value-scalper";
-import { isHighValueScalpWindowOpen } from "./kalshi-high-value-scalper-policy";
+import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
 import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
 import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
@@ -119,9 +117,6 @@ async function pollOnce(): Promise<void> {
   const windowCloseTime = new Date(
     Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) + 15 * 60_000,
   );
-  // Seconds remaining in the current window — used for scalp-window detection
-  // and passed to runHighValueScalpForCoin so it uses a consistent timestamp.
-  const secondsRemaining = Math.max(0, Math.floor((windowCloseTime.getTime() - nowMs) / 1000));
 
   await Promise.allSettled(
     syms.map(async (sym) => {
@@ -198,64 +193,16 @@ async function pollOnce(): Promise<void> {
       // zone strictly).  No order is placed by the poller — it only removes
       // the 10 s throttle delay that would otherwise cause a brief zone visit
       // to be missed entirely.
+      if (convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
+        // Already bet this coin this window — nothing to do.
+        return;
+      }
+
       const { yesAsk, yesBid, noAsk: cachedNoAsk } = convictionPriceMap.get(sym) ?? { yesAsk: null, yesBid: null, noAsk: null };
       // Prefer noAsk (from no_ask_dollars) directly — the Kalshi API updates
       // no_ask_dollars and yes_bid_dollars independently; noAsk is faster to
       // reflect real-time NO pricing than the 1−yesBid complement.
       const noAsk = cachedNoAsk ?? (yesBid != null ? 1 - yesBid : null);
-
-      // ── Scalp-band detection ─────────────────────────────────────────────
-      // Runs on EVERY 1 s poll using the just-fetched fresh price, independent
-      // of whether a conviction bet has already fired this window.  The scalp
-      // stacks on top of an existing conviction position, so it MUST NOT be
-      // gated by convictionFiredThisWindow.  Same fire-and-forget pattern as
-      // callConvictionZoneEntry() — order placement lives in the scalper module.
-      if (S.config.highValueScalpEnabled && isHighValueScalpWindowOpen(secondsRemaining, S.config)) {
-        const scalpMode = S.botMode;
-        const scalpFiredKey = `${sym}:${windowKey}:${scalpMode}`;
-        const coinOvr = S.config.highValueScalpCoinOverrides?.[sym];
-        const perCoinSecs = coinOvr?.maxSecondsRemaining;
-        if (
-          !coinOvr?.paused &&
-          (perCoinSecs == null || secondsRemaining <= perCoinSecs) &&
-          !highValueScalpFiredThisWindow.has(scalpFiredKey) &&
-          S.config.enabled
-        ) {
-          const scalpMin = S.config.highValueScalpMinPrice ?? 0.90;
-          const scalpMax = S.config.highValueScalpMaxPrice ?? 0.95;
-          const yesInBand = yesAsk != null && yesAsk >= scalpMin && yesAsk <= scalpMax;
-          const noInBand  = noAsk  != null && noAsk  >= scalpMin && noAsk  <= scalpMax;
-          if (yesInBand !== noInBand) {
-            // ── Concurrent-dispatch guard (same race as conviction bot) ───────
-            // runHighValueScalpForCoin is async.  Without this lock every
-            // 1-second poll that detects a coin in band passes the
-            // highValueScalpFiredThisWindow check (not set until after the
-            // fill) and launches its own order concurrently — causing 4
-            // simultaneous XRP scalp orders ($21.36 total) at 8:13pm ET.
-            // Setting scalpInFlightKey SYNCHRONOUSLY before any await means
-            // subsequent ticks bail immediately.  Lock released in .finally().
-            const scalpInFlightKey = scalpFiredKey; // `sym:windowKey:mode`
-            if (scalpDispatchInFlight.has(scalpInFlightKey)) {
-              return; // another dispatch already in flight — bail
-            }
-            scalpDispatchInFlight.add(scalpInFlightKey); // synchronous lock
-            // ─────────────────────────────────────────────────────────────────
-            logger.info(
-              { sym, windowKey, yesAsk, noAsk, scalpMin, scalpMax, side: yesInBand ? "YES" : "NO", secondsRemaining },
-              "[high-value-scalp] poller detected scalp-band entry — dispatching",
-            );
-            runHighValueScalpForCoin(sym, { yesAsk, yesBid, noAsk }, nowMs)
-              .catch(err => logger.warn({ err, sym }, "[high-value-scalp] poller-triggered execution failed (non-fatal)"))
-              .finally(() => scalpDispatchInFlight.delete(scalpInFlightKey));
-          }
-        }
-      }
-      // ────────────────────────────────────────────────────────────────────
-
-      if (convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
-        // Already bet this coin this window — nothing to do.
-        return;
-      }
 
       // Derive the conviction zone for THIS symbol.  Per-market overrides in
       // perMarketConvictionConfig take priority over the global settings; if no
@@ -321,31 +268,6 @@ async function pollOnce(): Promise<void> {
           S.config.enabled &&
           !S.paused
         ) {
-          // ── Concurrent-dispatch guard ──────────────────────────────────────
-          // The OB pre-warm below is an `await` that yields the event loop.
-          // Without this lock every subsequent 1-second poll tick passes the
-          // convictionFiredThisWindow check (bet not placed yet → still empty)
-          // and queues its own concurrent dispatch.  When the OB cache is warm
-          // all queued ticks unblock at once and each independently calls
-          // callConvictionZoneEntry, resulting in multiple simultaneous orders
-          // for the same coin in the same window (confirmed: 17 orders in prod).
-          //
-          // Setting inFlightKey SYNCHRONOUSLY before the first await means
-          // subsequent poll ticks bail here immediately and never reach the await,
-          // so only one dispatch is in flight per sym:windowKey at any time.
-          //
-          // The lock is cleared AFTER callConvictionZoneEntry fires so that
-          // abort-cooldown retries can re-enter on the next cooldown expiry.
-          // convictionFiredThisWindow (set inside _runBotTick after the bet is
-          // recorded) is the durable "already bet" guard; this lock only covers
-          // the brief window between the start of OB pre-warm and dispatch.
-          const inFlightKey = `${sym}:${windowKey}`;
-          if (convictionDispatchInFlight.has(inFlightKey)) {
-            return; // Another dispatch already in flight — bail immediately
-          }
-          convictionDispatchInFlight.add(inFlightKey); // synchronous — blocks next tick instantly
-          // ──────────────────────────────────────────────────────────────────
-
           // Pre-warm: fetch the authenticated orderbook now (same poll cycle)
           // so the live-price gate in the tick can read it from convictionObCache
           // and skip its own 0.5–2 s round-trip.
@@ -381,20 +303,7 @@ async function pollOnce(): Promise<void> {
             },
             "[conviction-poller] zone entry — dispatching tick immediately",
           );
-          // await so the lock is held for the FULL duration of the tick.
-          // Without await, callConvictionZoneEntry returns immediately (fire-and-
-          // forget), the finally clears the lock, and the next 1-second poll can
-          // re-acquire it and start a duplicate dispatch before convictionFiredThisWindow
-          // is set inside the tick — reproducing the 17-orders race condition.
-          // The callback is async and its .catch() is internal so this never throws.
-          try {
-            await callConvictionZoneEntry(sym, yesAsk, noAsk);
-          } finally {
-            // Clear the in-flight lock so abort-cooldown retry can re-enter on
-            // the next poll cycle.  convictionFiredThisWindow (set inside _runBotTick
-            // after a bet is confirmed) is the durable guard from here onward.
-            convictionDispatchInFlight.delete(inFlightKey);
-          }
+          callConvictionZoneEntry(sym, yesAsk, noAsk);
         }
         // ─────────────────────────────────────────────────────────────────────
       }
@@ -478,9 +387,7 @@ export function stopConvictionPoller(): void {
  * at startup after loadBotConfigFromDB.
  */
 export function syncConvictionPoller(): void {
-  // Start the poller when conviction mode is active OR when high-value
-  // scalping is enabled — both features rely on the 1 s fresh-price cycle.
-  if (S.config.decisionMode === "conviction" || S.config.highValueScalpEnabled) {
+  if (S.config.decisionMode === "conviction") {
     startConvictionPoller();
   } else {
     stopConvictionPoller();

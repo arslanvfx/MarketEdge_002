@@ -124,21 +124,6 @@ export interface BotConfig {
   proximityLatePctOverrides?: Record<string, number>;
   convictionDailyLossLimit?: number;
   convictionMaxDailySpend?: number;
-  highValueScalpEnabled?: boolean;
-  highValueScalpMinPrice?: number;
-  highValueScalpMaxPrice?: number;
-  highValueScalpMaxMinutesRemaining?: number;
-  highValueScalpMaxSecondsRemaining?: number;
-  highValueScalpBetAmount?: number;
-  highValueScalpMaxOpenExposure?: number | null;
-  highValueScalpMaxDailySpend?: number | null;
-  highValueScalpCoinOverrides?: Record<string, {
-    paused?: boolean;
-    maxBetSize?: number;
-    maxSecondsRemaining?: number;
-  }>;
-  paperScalpStatsResetAt?: string | null;
-  liveScalpStatsResetAt?: string | null;
   convictionStopLossFloor?: number;
   convictionStopLossActivationMinute?: number;
   convictionMinEntryMinutes?: number;
@@ -186,10 +171,6 @@ export interface BotConfig {
   strikeProximityAtrScale?: boolean;
   strikeProximityMinPctOverrides?: Record<string, number>;
   lockPrice082Migrated?: boolean;
-  // Test hard-cap mode
-  testHardCapEnabled?: boolean;
-  testHardCapPerBet?: number;
-  testHardCapTotal?: number;
 }
 
 export interface TrajectoryGateResult {
@@ -239,10 +220,7 @@ export interface OpenPosition {
   unrealizedPnl: number | null;
   guardStates: GuardStates | null;
   guardReason: string | null;
-  source?: "bot" | "manual" | "high_value_scalp";
-  highValueScalpAmount?: number;
-  highValueScalpAddCount?: number;
-  decisionMode?: DecisionMode;
+  source?: "bot" | "manual";
   entrySignals?: { statAbove: boolean | null; claudeAbove: boolean | null; mlAbove: boolean | null };
 }
 
@@ -255,7 +233,7 @@ export interface GuardStates {
 export interface BotStatus {
   mode: "paper" | "live"; status: string; paused: boolean;
   config: BotConfig; openPositions: OpenPosition[];
-  dailyPnl: number; dailySpendAmount: number; testModeSpentAmount?: number; accountBalance: number | null;
+  dailyPnl: number; dailySpendAmount: number; accountBalance: number | null;
   warmupSecondsRemaining: number | null; configured: boolean;
   circuitBreakerWindowsRemaining: number;
   consecutiveLosses: number;

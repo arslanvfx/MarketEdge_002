@@ -2878,33 +2878,6 @@ async function _runBotTick(
       // conviction) instead of throwing into the generic error path.
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
-      // ── TEST HARD-CAP MODE ─────────────────────────────────────────────────
-      // Runs immediately before every live order submission.  Cannot be bypassed
-      // by any other config flag, randomizer, or dynamic-sizing logic.
-      if (S.config.testHardCapEnabled && effectiveMode === "live") {
-        const perBetCap = S.config.testHardCapPerBet  ?? 1.00;
-        const totalCap  = S.config.testHardCapTotal    ?? 6.00;
-        if (S.testModeSpentAmount >= totalCap) {
-          logger.warn(
-            { sym, spent: +S.testModeSpentAmount.toFixed(2), cap: totalCap },
-            "[kalshi-bot] TEST HARD-CAP: session ceiling reached — all live entries blocked",
-          );
-          releaseConvictionEntryReservation("test hard-cap: session total ceiling reached");
-          setTickAbortReason(sym, windowKey,
-            `TEST MODE BLOCKED: $${S.testModeSpentAmount.toFixed(2)} of $${totalCap} session ceiling reached`);
-          return;
-        }
-        const cappedCount = Math.max(1, Math.floor(perBetCap / expectedFillCost));
-        if (cappedCount < contractCount) {
-          logger.info(
-            { sym, originalCount: contractCount, cappedCount, perBetCap, costPerContract: +expectedFillCost.toFixed(4) },
-            "[kalshi-bot] TEST HARD-CAP: capping contract count to enforce per-bet $ limit",
-          );
-          contractCount = cappedCount;
-        }
-      }
-      // ──────────────────────────────────────────────────────────────────────
-
       const entryTimeInForce: "fill_or_kill" | "immediate_or_cancel" =
         usedPollerFallback ? "fill_or_kill" : "immediate_or_cancel";
       const pollerFallbackLabel =
@@ -2947,16 +2920,11 @@ async function _runBotTick(
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
-        // In conviction mode the book is thin and FOK/IOC 0-fills are normal for
-        // the first seconds of a window (market makers haven't posted quotes yet).
-        // NOTE: this code is reached via the 1-second conviction poller, NOT the
-        // 5-second bot loop — "~50 s at 5 s ticks" is therefore wrong.  With the
-        // poller firing every second, 10 attempts = 10 rapid Kalshi API calls in
-        // 10 seconds.  3 attempts gives the book 3 seconds to become liquid, which
-        // is enough for early-window fills; after that the order size or price is
-        // simply wrong for the current book depth.  Matches non-conviction cap (2)
-        // closely enough that the behavior is consistent.
-        const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 3 : 2;
+        // In conviction mode the book is thin and FOK 0-fills are normal for
+        // the first minute of a window (market makers haven't posted quotes yet).
+        // Allow up to 10 attempts (~50 s at 5 s ticks) before giving up so the
+        // bot keeps trying as liquidity builds, instead of blocking after just 10 s.
+        const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 10 : 2;
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, usedPollerFallback },
@@ -3310,20 +3278,13 @@ async function _runBotTick(
       // Invalidate the cached balance so the next entry guard fetches a fresh value.
       invalidateBalanceCache();
     } catch (err) {
-      logger.error({ err, sym }, "[kalshi-bot] order placement failed — coin blocked for rest of window");
-      // DO NOT release convictionFiredThisWindow here.  We already sent a real
-      // order to Kalshi before reaching this catch — a network timeout, 429, or
-      // any other error after the HTTP request was dispatched does NOT mean the
-      // order was rejected.  Kalshi may have filled it.  Retrying after a
-      // placement error is dangerous: if the order went through we'd be doubling
-      // our position on every retry.  This was the root cause of 20+ SILVER
-      // duplicate orders ($80 loss): the catch cleared the lock, the 1-second
-      // poller immediately re-dispatched, and each retry placed another real order.
-      // Block the coin for the rest of the window.  The operator can check Kalshi
-      // order history to reconcile.  If the error was transient and the order
-      // genuinely failed, the next window will re-enter normally.
+      logger.error({ err, sym }, "[kalshi-bot] order placement failed");
+      // Release conviction lock so the next tick can retry if the error is transient
+      // (e.g. network timeout, 429 rate-limit).  Permanent failures (e.g. invalid
+      // ticker, account suspended) will keep throwing and the window will expire.
+      releaseConvictionEntryReservation("order placement failed");
       setTickAbortReason(sym, windowKey,
-        `order placement failed (coin blocked): ${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}`);
+        `order placement failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}`);
       return;
     }
   }
@@ -3417,28 +3378,6 @@ async function _runBotTick(
     entryYesPrice: yesPrice,
     // Max-bet flag: true when the stability gate + probability roll upgraded this bet.
     isMaxBet: boostBetSize != null,
-  }).catch((dbErr: unknown) => {
-    // CRITICAL: the order was filled on Kalshi but the DB write failed.
-    // The position is tracked in openPositions (in memory) but will be LOST
-    // on server restart.  Log all fill details so the operator can reconcile
-    // against Kalshi's order history manually.
-    logger.error(
-      {
-        err: dbErr,
-        sym, direction, windowKey,
-        ticker: expectedTicker,
-        insertId: id,
-        contractCount,
-        betAmount: actualBetAmount,
-        fillPrice,
-        orderId,
-        entryYesPrice: yesPrice,
-        decisionMode: S.config.decisionMode,
-        mode: entryMode,
-      },
-      "[kalshi-bot] CRITICAL: bet filled on Kalshi but DB persist failed — " +
-      "position is live in memory but will be lost on restart; reconcile against Kalshi order history",
-    );
   });
 
   // Shadow paper bet: when live mode is active and shadowPaperBets is enabled,
@@ -3490,13 +3429,6 @@ async function _runBotTick(
   // Only live entries consume real capital — paper bypass entries must not affect this counter.
   if (entryMode === "live") {
     S.dailySpendAmount += actualBetAmount;
-    if (S.config.testHardCapEnabled) {
-      S.testModeSpentAmount += actualBetAmount;
-      logger.info(
-        { sym, bet: +actualBetAmount.toFixed(2), sessionTotal: +S.testModeSpentAmount.toFixed(2), cap: S.config.testHardCapTotal ?? 6.00 },
-        "[kalshi-bot] TEST HARD-CAP: session spend updated",
-      );
-    }
   }
   // Increment the GLOBAL window total (all symbols combined) for the maxBetsPerWindow cap.
   // Mode-aware: paper and live each have their own counter (effectiveMode matches entryMode here).

@@ -56,7 +56,6 @@ import {
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
-  highValueScalpFiredThisWindow, convictionDispatchInFlight, scalpDispatchInFlight,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
@@ -71,7 +70,6 @@ import {
 import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition, persistBetRecord } from "./kalshi-bot-close";
-// runHighValueScalpForCoin is now driven by the conviction poller's 1 s cycle.
 import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-tick";
 import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import {
@@ -93,7 +91,7 @@ import {
 // 5-second scheduler loop.  The dispatch is fire-and-forget; all gates still
 // run inside runBotTickForCoin (live-price check, direction guard, candle
 // slope, etc.) — nothing is bypassed.
-setConvictionZoneEntryCallback(async (sym: string, yesAsk: number | null, noAsk: number | null) => {
+setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: number | null) => {
   if (!S.config.enabled || S.paused || S.dbDegradedSince !== null) return;
   if (S.config.decisionMode !== "conviction") return;
   const wk = currentWindowKey();
@@ -121,12 +119,7 @@ setConvictionZoneEntryCallback(async (sym: string, yesAsk: number | null, noAsk:
   const kd = getKalshiCachedData(sym);
   if (!kd?.ticker || kd.value === null || kd.yesPrice == null) return;
   const pred = getCachedPrediction(sym);
-  // Await the tick so callConvictionZoneEntry (and therefore the poller's
-  // convictionDispatchInFlight lock) is not released until the full tick —
-  // including order placement and convictionFiredThisWindow — has settled.
-  // The .catch() ensures the async callback itself never throws (which would
-  // leave the lock held forever via the poller's try/finally).
-  await runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []).catch((err) =>
+  runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []).catch((err) =>
     logger.warn({ err, sym }, "[conviction-poller-dispatch] per-coin tick error (non-fatal)"),
   );
 });
@@ -597,8 +590,6 @@ export async function runBotLoopTick(): Promise<void> {
     windowZeroFillAttempts.clear();
     windowRandomizerUsedValues.clear();
     convictionFiredThisWindow.clear();
-    convictionDispatchInFlight.clear(); // clear per-window dispatch locks alongside bet-fired locks
-    scalpDispatchInFlight.clear();      // same race-guard for scalper concurrent dispatch
     extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();
     convictionAbortCooldownMs.clear();
@@ -606,7 +597,6 @@ export async function runBotLoopTick(): Promise<void> {
     convictionEmergencyCloses.clear();
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
-    highValueScalpFiredThisWindow.clear();
     tickAbortReasons.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
@@ -685,10 +675,6 @@ export async function runBotLoopTick(): Promise<void> {
   // so the UI and gate always have current velocity/projection data, even when
   // the bot is disabled or paused.
   refreshTrajectoryForAllCoins();
-
-  // High-value scalp detection is now driven by the conviction poller's 1 s
-  // fresh-price cycle (runHighValueScalpForCoin called from pollOnce()).
-  // No bot-loop-tick scan needed — prices are always fresh from the poller.
 
   if (!S.config.enabled || S.paused) return;
 

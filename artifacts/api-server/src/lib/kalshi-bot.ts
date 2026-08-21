@@ -40,7 +40,6 @@ export {
   getConvictionThresholdAnalysis,
   getConvictionStabilityAnalysis,
   getBotGapAnalytics,
-  getScalpStats,
 } from "./kalshi-bot-analytics";
 export type { GapBandRow, GapAnalyticsResult } from "./kalshi-bot-analytics";
 export type {
@@ -52,8 +51,6 @@ export type {
   StabilityThresholdRow,
   StabilityDimensionAnalysis,
   ConvictionStabilityAnalysis,
-  ScalpCoinStats,
-  ScalpStatsResult,
 } from "./kalshi-bot-analytics";
 
 // ---------------------------------------------------------------------------
@@ -63,13 +60,11 @@ export type { BotMode, BotStatus, OpenPosition, OpenPositionDisplay, BotStateSna
 export {
   loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB,
-  loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, fixPaperPnlHistorical,
-  clearBetHistoryOld, updateBotConfig, runQuietHoursAutoTune,
-  recomputeAllSymbolQuietHours,
+  loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, clearBetHistoryOld,
+  updateBotConfig, runQuietHoursAutoTune, recomputeAllSymbolQuietHours,
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
 export { runBotTickForCoin } from "./kalshi-bot-tick";
-export { runHighValueScalpScan, evaluateHighValueScalpEligibility } from "./kalshi-high-value-scalper";
 export { placeManualOrder, closeManualPosition, type ManualOrderResult } from "./kalshi-bot-manual";
 export { evalShadowBets } from "./kalshi-bot-shadow";
 export { evalClosedBets, reEvaluateSettledBets, fixCommodityOutcomes } from "./kalshi-bot-eval";
@@ -142,7 +137,6 @@ export function getBotState(): BotStateSnapshot {
     dailyPnl: S.dailyPnl,
     dailyLossCount: S.dailyLossCount,
     dailySpendAmount: S.dailySpendAmount,
-    testModeSpentAmount: S.testModeSpentAmount,
     dailyDate: S.dailyDate,
     accountBalance: S.accountBalance,
     lastUpdatedAt: new Date().toISOString(),

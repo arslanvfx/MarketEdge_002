@@ -211,10 +211,14 @@ export async function evalClosedBets(): Promise<void> {
             outcome = won ? "win" : "loss";
             const ep = entryPrice;
             const n  = count;
-            // Real contract math for both paper and live modes:
-            correctedPnl = won
-              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+            if (row.mode === "live") {
+              correctedPnl = won
+                ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+                : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+            } else {
+              const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+              correctedPnl = won ? betAmt * 0.50 : -betAmt;
+            }
             logger.info(
               { sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: settled.result, direction: row.direction, outcome, pnl: correctedPnl },
               "[kalshi-bot] evalClosedBets: expired bet settled via Kalshi result (authoritative)",
@@ -242,10 +246,14 @@ export async function evalClosedBets(): Promise<void> {
               const _seriesWon = row.direction === "yes" ? _seriesMatch.result === "yes" : _seriesMatch.result === "no";
               outcome = _seriesWon ? "win" : "loss";
               const ep = entryPrice; const n = count;
-              // Real contract math for both paper and live modes:
-              correctedPnl = _seriesWon
-                ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-                : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+              if (row.mode === "live") {
+                correctedPnl = _seriesWon
+                  ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+                  : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+              } else {
+                const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+                correctedPnl = _seriesWon ? betAmt * 0.50 : -betAmt;
+              }
               logger.info(
                 { sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: _seriesMatch.result, direction: row.direction, outcome, pnl: correctedPnl },
                 "[kalshi-bot] evalClosedBets: settled via series-level Kalshi lookup (step 1.5)",
@@ -399,10 +407,14 @@ export async function evalClosedBets(): Promise<void> {
           // Real contract P&L for live bets; paper simulation for paper bets.
           const ep = entryPrice;
           const n  = count;
-          // Real contract math for both paper and live modes:
-          correctedPnl = won
-            ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-            : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          if (row.mode === "live") {
+            correctedPnl = won
+              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          } else {
+            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+            correctedPnl = won ? betAmt * 0.50 : -betAmt;
+          }
 
           logger.info(
             { sym: row.symbol, windowKey: row.windowKey, closePrice, strike, direction: row.direction, outcome, pnl: correctedPnl },
@@ -642,10 +654,14 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
         if (entryPrice != null) {
           const ep = entryPrice;
           const n  = count;
-          // Real contract math for both paper and live modes:
-          correctedPnl = won
-            ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-            : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          if (row.mode === "live") {
+            correctedPnl = won
+              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          } else {
+            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+            correctedPnl = won ? betAmt * 0.50 : -betAmt;
+          }
         }
 
         const oldPnl = row.pnl != null ? String(row.pnl) : "null";
@@ -776,10 +792,14 @@ export async function fixCommodityOutcomes(opts: { since?: string; limit?: numbe
         let correctedPnl: number | null = null;
         if (entryPrice != null) {
           const ep = entryPrice; const n = count;
-          // Real contract math for both paper and live modes:
-          correctedPnl = won
-            ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-            : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          if (row.mode === "live") {
+            correctedPnl = won
+              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
+              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+          } else {
+            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
+            correctedPnl = won ? betAmt * 0.50 : -betAmt;
+          }
         }
 
         const oldPnl = row.pnl != null ? String(row.pnl) : "null";

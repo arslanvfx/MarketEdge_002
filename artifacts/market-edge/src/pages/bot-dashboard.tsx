@@ -116,7 +116,7 @@ export default function BotDashboard() {
   // Defaults to the active bot mode but can be toggled independently so the
   // user can browse paper history while live or vice versa.
   const [historyMode, setHistoryMode] = useState<"paper" | "live">("paper");
-  const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual" | "scalps" | "skips">("all");
+  const [histSourceFilter, setHistSourceFilter] = useState<"all" | "bot" | "manual" | "skips">("all");
   const [reEvalState, setReEvalState] = useState<{ loading: boolean; msg: string | null; ok: boolean }>({ loading: false, msg: null, ok: false });
 
   // ── Close manual position state ──────────────────────────────────────────
@@ -495,23 +495,18 @@ export default function BotDashboard() {
   const history = historyData?.history ?? [];
   const bets = history.filter(r => {
     const isSkipAction = r.action === "skip";
-    const isScalp = r.source === "high_value_scalp"
-      || r.action === "high_value_scalp"
-      || r.action === "high_value_scalp_add"
-      || (r.signals as Record<string, unknown> | null)?.highValueScalp === true;
 
     // "skips" tab: only gate-skip records
     if (histSourceFilter === "skips") return isSkipAction;
 
     // All other tabs: only real bet lifecycle actions — skips go in their own tab
-    const allowed = r.action === "bet" || r.action === "exit" || r.action === "late_recovery_exit" || r.action === "expired" || isScalp;
+    const allowed = r.action === "bet" || r.action === "exit" || r.action === "late_recovery_exit" || r.action === "expired";
     if (!allowed) return false;
 
-    if (histSourceFilter === "scalps") return isScalp;
     if (histSourceFilter === "manual") {
       return r.source === "manual" || (r.signals as Record<string, unknown> | null)?.manual === true;
     }
-    if (histSourceFilter === "bot") return !isScalp && r.source !== "manual" && (r.signals as Record<string, unknown> | null)?.manual !== true;
+    if (histSourceFilter === "bot") return r.source !== "manual" && (r.signals as Record<string, unknown> | null)?.manual !== true;
     return true; // "all"
   });
 

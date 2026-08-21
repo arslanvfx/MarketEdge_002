@@ -2,7 +2,6 @@ import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@wo
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
-import { buildHighValueScalpEntryUpdate } from "./kalshi-high-value-scalper-persistence";
 import {
   checkMaxBetSizeGuard, checkDailyLossGuard, checkStreakPauseGuard,
   checkSlippageStrikeGuard, checkWindowMonitorReadyGuard, checkBalanceGuard,
@@ -139,8 +138,12 @@ export async function closePosition(
   // For mid-window exits: pnl = (exitYesPrice - entryYesPrice) × contractCount
   //   YES bet profits when exitYesPrice > entryYesPrice
   //   NO  bet profits when exitYesPrice < entryYesPrice (they go inverse)
-  // For expiry: both paper and live use real Kalshi contract math.
-  //   evalClosedBets will later override with the authoritative Kalshi settlement result.
+  // For expiry: TEMP paper simulation uses fixed return rate (see PAPER_WIN_RETURN_RATE).
+  //   In live mode this path is replaced by evalClosedBets using real candle data.
+
+  // Paper win return rate: configurable via S.config.paperWinReturnRate.
+  // Default 0.50 = 50¢ profit per $1 bet. Change in Bot Configuration panel.
+  const PAPER_WIN_RETURN_RATE = S.config.paperWinReturnRate ?? 0.50;
 
   let pnl = 0;
   if (fillPrice !== null) {
@@ -157,22 +160,27 @@ export async function closePosition(
     if (lastCoinPrice !== null) {
       const priceAboveStrike = lastCoinPrice >= strike;
       const won = pos.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
-      {
-        // Real contract P&L for both paper and live:
-        //   YES cost = entryYesPrice/contract → win profit = (1 − entry) × n, loss = −entry × n
-        //   NO  cost = (1 − entry)/contract  → win profit = entry × n,       loss = −(1 − entry) × n
+      if (pos.entryMode === "live") {
+        // Real contract P&L: each contract pays $1.00 (win) or $0.00 (loss)
+        // YES cost = entryYesPrice/contract → profit = (1 − entry) × n   or loss = −entry × n
+        // NO  cost = (1 − entry)/contract  → profit = entry × n           or loss = −(1 − entry) × n
         const ep = pos.entryYesPrice;
         const n  = pos.contractCount;
         pnl = won
           ? (pos.direction === "yes" ? (1 - ep) * n : ep * n)
           : (pos.direction === "yes" ? -ep * n       : -(1 - ep) * n);
+      } else {
+        // Paper simulation: fixed win rate
+        pnl = won ? pos.betAmount * PAPER_WIN_RETURN_RATE : -pos.betAmount;
       }
     } else {
-      // No price data — book conservatively as full loss (real contract math)
-      {
+      // No price data — book conservatively as full loss
+      if (pos.entryMode === "live") {
         const ep = pos.entryYesPrice;
         const n  = pos.contractCount;
         pnl = pos.direction === "yes" ? -ep * n : -(1 - ep) * n;
+      } else {
+        pnl = -pos.betAmount;
       }
     }
   }
@@ -305,9 +313,12 @@ export async function closePosition(
     });
 
     // Shadow paper bet: close the mirrored paper record with the same outcome.
-    // Uses the same real contract math as the live record.
+    // pnl for paper uses the fixed simulation rate (not real contract math).
     if (pos.shadowPaperId) {
-      const paperPnl = pnl; // real contract math is now used for both modes
+      const PAPER_WIN_RATE = S.config.paperWinReturnRate ?? 0.50;
+      const paperPnl = isExpiry
+        ? (pnl >= 0 ? pos.betAmount * PAPER_WIN_RATE : -pos.betAmount)
+        : pnl; // mid-window price-delta PnL is equivalent for paper
       persistBetRecord({
         symbol: pos.symbol,
         windowKey: pos.windowKey,
@@ -388,14 +399,9 @@ export interface BetRecordArgs {
   // Bot mode (paper/live) captured at entry. Falls back to the global S.botMode
   // when omitted (e.g. skip/warmup rows). Prevents mid-fill flips mislabeling rows.
   mode?: BotMode;
-  // Originating source: ordinary automated loop, dashboard manual order, or
-  // the isolated late-window high-value scalp scanner.
+  // Originating source: "bot" (automated loop) | "manual" (dashboard button).
   // Omitting defaults to "bot" in the DB insert.
-  source?: "bot" | "manual" | "high_value_scalp";
-  // Used only when a high-value scalp is folded into an existing same-direction
-  // position. This updates entry-side accounting without creating a second
-  // independently-closed row for the same exchange position.
-  entryUpdate?: boolean;
+  source?: "bot" | "manual";
   // Kalshi YES contract price (0–1) at decision time — used for conviction threshold analysis.
   entryYesPrice?: number | null;
   // True when the stability gate + probability roll upgraded this bet to max size.
@@ -427,27 +433,6 @@ export async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> 
   try {
     const id = args.existingId ?? args.insertId ?? `${args.symbol}:${args.windowKey}:${Date.now()}`;
     if (args.existingId) {
-      if (args.entryUpdate) {
-        // A same-direction scalp add-on changes only the entry accounting of
-        // an already-open position. It must never reuse the exit upsert below:
-        // assigning exitedAt here would orphan a live exchange position after
-        // restart and allow a duplicate scalp.
-        const updatedRows = await db
-          .update(kalshiBotBetsTable)
-          .set(buildHighValueScalpEntryUpdate({
-            signals: args.signals as Record<string, unknown>,
-            entryPrice: args.entryPrice,
-            entryYesPrice: args.entryYesPrice ?? null,
-            contractCount: args.contractCount,
-            betAmount: args.betAmount,
-            source: args.source ?? "high_value_scalp",
-          }))
-          .where(eq(kalshiBotBetsTable.id, id))
-          .returning({ id: kalshiBotBetsTable.id });
-        if (updatedRows.length !== 1) {
-          throw new Error(`High-value scalp add-on could not find open record ${id}`);
-        }
-      } else {
       // Exit / expiry update. Use a race-safe upsert (INSERT … ON CONFLICT DO UPDATE)
       // instead of a plain UPDATE so the bet is never silently lost when the window
       // expires before the entry INSERT has committed to the DB.
@@ -502,7 +487,6 @@ export async function _persistBetRecordOnce(args: BetRecordArgs): Promise<void> 
             exitedAt,
           },
         });
-      }
     } else {
       // Insert new record (bet entry, skip, warmup)
       await db.insert(kalshiBotBetsTable).values({
