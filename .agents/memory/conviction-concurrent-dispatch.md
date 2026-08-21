@@ -16,6 +16,13 @@ description: Root cause and fix for multiple simultaneous Kalshi orders placed i
 3. In `kalshi-bot-loop.ts` window-transition cleanup: call `convictionDispatchInFlight.clear()` alongside `convictionFiredThisWindow.clear()`.
 4. `convictionFiredThisWindow` (set inside `_runBotTick` after a bet is recorded) is the durable guard; `convictionDispatchInFlight` only covers the brief window between OB pre-warm start and dispatch completion.
 
+## Scalper has the same race — scalpDispatchInFlight
+The HIGH-VALUE SCALPER has an identical race in the same `pollOnce()` loop. `runHighValueScalpForCoin` is async; `highValueScalpFiredThisWindow` only sets after the fill. Without a lock, 4 concurrent 1-second polls each placed a 6-contract XRP order (4 × ~$5.35 = $21.37 total at 8:13pm ET).
+
+Fix: `scalpDispatchInFlight = new Set<string>()` in `kalshi-bot-state.ts`. In `pollOnce()`, check/set synchronously before the dispatch, release in `.finally()`. Clear on window transition in `kalshi-bot-loop.ts` alongside `highValueScalpFiredThisWindow`.
+
+**Rule:** Every fire-and-forget async dispatch in the 1-second poller loop MUST have a synchronous in-flight lock. The durable fired-this-window guard is not enough because it only sets after the async order completes.
+
 ## Key files
 - `artifacts/api-server/src/lib/kalshi-bot-state.ts` — exports `convictionDispatchInFlight = new Set<string>()`
 - `artifacts/api-server/src/lib/kalshi-conviction-poller.ts` — the synchronous lock acquisition in `pollOnce()`

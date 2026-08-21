@@ -56,7 +56,7 @@ import {
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
-  highValueScalpFiredThisWindow, convictionDispatchInFlight,
+  highValueScalpFiredThisWindow, convictionDispatchInFlight, scalpDispatchInFlight,
   paperStreakStore, liveStreakStore, makeStreakStore, streakStoreForMode,
   activeCoinDailyLoss, coinDailyLossForMode, activeCoinStreakState,
   coinStreakStateForMode, todayUTC, probeDb, resetDailyIfNeeded,
@@ -598,6 +598,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowRandomizerUsedValues.clear();
     convictionFiredThisWindow.clear();
     convictionDispatchInFlight.clear(); // clear per-window dispatch locks alongside bet-fired locks
+    scalpDispatchInFlight.clear();      // same race-guard for scalper concurrent dispatch
     extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();
     convictionAbortCooldownMs.clear();

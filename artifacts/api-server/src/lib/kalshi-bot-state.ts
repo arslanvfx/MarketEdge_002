@@ -206,6 +206,14 @@ export const windowFailedFills = new Set<string>();
 // Tracks coins that have already had a scalp fired this window (sym:windowKey:mode).
 // Prevents double-bets. Cleared on window transition in the bot loop.
 export const highValueScalpFiredThisWindow = new Set<string>();
+// Concurrent-dispatch guard for the high-value scalper — mirrors convictionDispatchInFlight.
+// runHighValueScalpForCoin is async; without this lock every 1-second poll tick that
+// detects a coin in the scalp band passes the highValueScalpFiredThisWindow check
+// (not set until after the fill) and launches its own concurrent order — exactly the
+// same race that caused 4 simultaneous XRP scalp orders at 8:13pm ET.
+// Set SYNCHRONOUSLY before the first await; cleared in finally after execution.
+// Also bulk-cleared on window transition alongside highValueScalpFiredThisWindow.
+export const scalpDispatchInFlight = new Set<string>();
 export const paperHighValueScalpDailySpend = new Map<string, number>();
 export const liveHighValueScalpDailySpend = new Map<string, number>();
 export const windowZeroFillAttempts = new Map<string, number>();

@@ -31,7 +31,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionDispatchInFlight, convictionPriceTicks, callConvictionZoneEntry, convictionObCache, highValueScalpFiredThisWindow } from "./kalshi-bot-state";
+import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionDispatchInFlight, convictionPriceTicks, callConvictionZoneEntry, convictionObCache, highValueScalpFiredThisWindow, scalpDispatchInFlight } from "./kalshi-bot-state";
 import { runHighValueScalpForCoin } from "./kalshi-high-value-scalper";
 import { isHighValueScalpWindowOpen } from "./kalshi-high-value-scalper-policy";
 import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
@@ -226,12 +226,27 @@ async function pollOnce(): Promise<void> {
           const yesInBand = yesAsk != null && yesAsk >= scalpMin && yesAsk <= scalpMax;
           const noInBand  = noAsk  != null && noAsk  >= scalpMin && noAsk  <= scalpMax;
           if (yesInBand !== noInBand) {
+            // ── Concurrent-dispatch guard (same race as conviction bot) ───────
+            // runHighValueScalpForCoin is async.  Without this lock every
+            // 1-second poll that detects a coin in band passes the
+            // highValueScalpFiredThisWindow check (not set until after the
+            // fill) and launches its own order concurrently — causing 4
+            // simultaneous XRP scalp orders ($21.36 total) at 8:13pm ET.
+            // Setting scalpInFlightKey SYNCHRONOUSLY before any await means
+            // subsequent ticks bail immediately.  Lock released in .finally().
+            const scalpInFlightKey = scalpFiredKey; // `sym:windowKey:mode`
+            if (scalpDispatchInFlight.has(scalpInFlightKey)) {
+              return; // another dispatch already in flight — bail
+            }
+            scalpDispatchInFlight.add(scalpInFlightKey); // synchronous lock
+            // ─────────────────────────────────────────────────────────────────
             logger.info(
               { sym, windowKey, yesAsk, noAsk, scalpMin, scalpMax, side: yesInBand ? "YES" : "NO", secondsRemaining },
               "[high-value-scalp] poller detected scalp-band entry — dispatching",
             );
             runHighValueScalpForCoin(sym, { yesAsk, yesBid, noAsk }, nowMs)
-              .catch(err => logger.warn({ err, sym }, "[high-value-scalp] poller-triggered execution failed (non-fatal)"));
+              .catch(err => logger.warn({ err, sym }, "[high-value-scalp] poller-triggered execution failed (non-fatal)"))
+              .finally(() => scalpDispatchInFlight.delete(scalpInFlightKey));
           }
         }
       }
