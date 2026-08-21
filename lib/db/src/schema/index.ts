@@ -15,4 +15,3 @@ export * from "./stockNewsCache";
 export * from "./stockResearchReports";
 export * from "./stockBotDecisions";
 export * from "./botEntryTimingSnapshots";
-export * from "./scalperUserRoles";

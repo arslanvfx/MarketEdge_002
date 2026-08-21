@@ -113,3 +113,4 @@
 - [Bot config patch semantics](bot-config-patch-semantics.md) — partial settings updates preserve omitted fields, clear explicit nulls, and adopt the server-returned canonical config only after persistence succeeds
 - [High-value scalper isolation](high-value-scalper-isolation.md) — late-window scaler owns its execution lifecycle; never share or modify normal-bot mechanics, and unresolved live orders remain halted until reconciled
 - [Regular live-order intents](regular-live-order-intents.md) — persist exact client IDs before one-shot live POSTs; ambiguity retains entry/exit reservations and never triggers retry or opposite orders
+- [Scalper signed-in access](scalper-signed-in-access.md) — authorization matches the regular bot: any valid Clerk session can manage it; signed-out requests fail closed

@@ -5,7 +5,6 @@
 // GET  /api/crypto/scalper/status      — status with ?mode=paper|live
 // GET  /api/crypto/scalper/history     — {orders, total} with ?mode=&symbol=&limit=
 // GET  /api/crypto/scalper/performance — one ScalpPerformance for ?mode=paper|live
-// POST /api/crypto/scalper/admin/claim — first authenticated account claims admin
 // POST /api/crypto/scalper/config      — top-level partial ScalpConfig → {ok,config}
 // POST /api/crypto/scalper/reset-circuit-breaker → {ok,config}
 // ---------------------------------------------------------------------------
@@ -21,13 +20,7 @@ import { parseScalpConfigPatch } from "../lib/kalshi-scalper-policy.ts";
 import {
   decideScalpMutationAuthz,
   getScalpMutationCapability,
-  type ScalpAdminState,
-  type ScalpAuthzDecision,
 } from "../lib/kalshi-scalper-authz.ts";
-import {
-  claimInitialScalpAdmin,
-  getScalpAdminState,
-} from "../lib/kalshi-scalper-admin-store.ts";
 import {
   getScalpConfig,
   applyScalpConfigUpdate,
@@ -42,45 +35,20 @@ import type { ScalpMode } from "../lib/kalshi-scalper-types.ts";
 const router = Router();
 
 // ── Mutation auth guard (STRICT, fail-closed) ────────────────────────────────
-// Uses the pure decideScalpMutationAuthz helper so authorization is unit-tested
-// and cannot silently fail open. Writes are denied unless the signed-in Clerk
-// user holds the persisted Scalper admin role.
+// Matches the rest of the bot: a valid signed-in Clerk session is sufficient.
+// The pure helper still fails closed when Clerk provides no user identity.
 
-async function resolveScalpAuthz(req: Request): Promise<{
-  userId: string | null;
-  state: ScalpAdminState;
-  decision: ScalpAuthzDecision;
-}> {
-  const auth = getAuth(req);
-  const userId = auth?.userId?.trim() || null;
-  const state = userId
-    ? await getScalpAdminState(userId)
-    : { hasAdmin: false, isAdmin: false };
-  return {
-    userId,
-    state,
-    decision: decideScalpMutationAuthz(userId, state),
-  };
-}
-
-async function requireScalpAdmin(
+function requireScalpAdmin(
   req: Request,
   res: Response,
   next: NextFunction,
-): Promise<void> {
-  try {
-    const { decision } = await resolveScalpAuthz(req);
-    if (!decision.allowed) {
-      res.status(decision.status).json({ error: decision.error });
-      return;
-    }
-    next();
-  } catch (error) {
-    req.log.error({ error }, "Unable to verify Scalper administrator role");
-    res.status(503).json({
-      error: "Scalper controls are unavailable because administrator access could not be verified",
-    });
+): void {
+  const decision = decideScalpMutationAuthz(getAuth(req)?.userId);
+  if (!decision.allowed) {
+    res.status(decision.status).json({ error: decision.error });
+    return;
   }
+  next();
 }
 
 function parseMode(v: unknown): ScalpMode | undefined {
@@ -90,57 +58,8 @@ function parseMode(v: unknown): ScalpMode | undefined {
 // ── GET /api/crypto/scalper/capability ───────────────────────────────────────
 // Safe read-only projection of mutation access. Never returns either user id.
 
-router.get("/crypto/scalper/capability", async (req, res): Promise<void> => {
-  try {
-    const { userId, state } = await resolveScalpAuthz(req);
-    res.json(getScalpMutationCapability(userId, state));
-  } catch (error) {
-    req.log.error({ error }, "Unable to read Scalper administrator capability");
-    res.status(503).json({
-      error: "Unable to verify Scalper administrator access",
-    });
-  }
-});
-
-// ── POST /api/crypto/scalper/admin/claim ─────────────────────────────────────
-// The first authenticated account can claim the initial admin role exactly once.
-// The unique bootstrap index is the concurrency lock; this route never trusts a
-// user id from the request body.
-
-router.post("/crypto/scalper/admin/claim", async (req, res): Promise<void> => {
-  const userId = getAuth(req)?.userId?.trim();
-  if (!userId) {
-    const capability = getScalpMutationCapability(null, {
-      hasAdmin: false,
-      isAdmin: false,
-    });
-    res.status(401).json({ ok: false, error: capability.message });
-    return;
-  }
-
-  try {
-    const claim = await claimInitialScalpAdmin(userId);
-    const capability = getScalpMutationCapability(userId, claim.state);
-    if (claim.status === "unavailable") {
-      res.status(409).json({
-        ok: false,
-        error: "The initial Scalper administrator has already been claimed",
-        capability,
-      });
-      return;
-    }
-    res.json({
-      ok: true,
-      claimed: claim.status === "claimed",
-      capability,
-    });
-  } catch (error) {
-    req.log.error({ error }, "Unable to claim initial Scalper administrator");
-    res.status(503).json({
-      ok: false,
-      error: "Unable to claim Scalper administrator access",
-    });
-  }
+router.get("/crypto/scalper/capability", (req, res): void => {
+  res.json(getScalpMutationCapability(getAuth(req)?.userId));
 });
 
 // ── GET /api/crypto/scalper/config ───────────────────────────────────────────

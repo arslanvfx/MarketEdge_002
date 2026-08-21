@@ -24,10 +24,10 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /\(\["paper", "live"\] as const\)\.map/);
   });
 
-  it("supports a one-time authenticated admin claim without the old secret message", () => {
-    assert.match(panelSource, /\/crypto\/scalper\/admin\/claim/);
-    assert.match(panelSource, /Claim Admin Access/);
-    assert.match(panelSource, /canClaimAdmin/);
+  it("uses signed-in access without a separate secret or role-claim step", () => {
+    assert.match(panelSource, /Signed-in access verified/);
+    assert.doesNotMatch(panelSource, /\/crypto\/scalper\/admin\/claim/);
+    assert.doesNotMatch(panelSource, /canClaimAdmin/);
     assert.doesNotMatch(panelSource, /BOT_ADMIN_CLERK_USER_ID/);
   });
 
