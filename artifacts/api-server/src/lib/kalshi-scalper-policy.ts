@@ -1252,6 +1252,25 @@ export function preserveNewerScalpBreakerState<T extends {
   };
 }
 
+/**
+ * Apply the breaker persistence failure policy. Normal safety events retain an
+ * in-memory latch and retry in the background; callers that are about to
+ * release uncertain live exposure must require durable persistence and abort
+ * when it fails.
+ */
+export async function persistCircuitBreakerWithPolicy(
+  persist: () => Promise<unknown>,
+  onFailure: (error: unknown) => void,
+  requireDurable: boolean,
+): Promise<void> {
+  try {
+    await persist();
+  } catch (error) {
+    onFailure(error);
+    if (requireDurable) throw error;
+  }
+}
+
 /** Operator-settable fields only. Internal breaker state fields are NOT allowed. */
 export interface ScalpPerMarketOverridePatch {
   symbol: string;

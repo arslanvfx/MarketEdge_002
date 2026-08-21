@@ -32,6 +32,7 @@ import {
   parseScalpConfigPatch,
   describeScalpCircuitBreakerReason,
   preserveNewerScalpBreakerState,
+  persistCircuitBreakerWithPolicy,
   resolveEffectiveParams,
   evaluateScalpReservationRetry,
   SCALP_AUTH_RETRY_COOLDOWN_MS,
@@ -1545,6 +1546,39 @@ describe("preserveNewerScalpBreakerState", () => {
   });
 });
 
+describe("persistCircuitBreakerWithPolicy", () => {
+  it("rejects a durable breaker write failure before exposure can be released", async () => {
+    const failure = new Error("breaker config unavailable");
+    let failureObserved: unknown = null;
+    let releaseReached = false;
+
+    await assert.rejects(
+      async () => {
+        await persistCircuitBreakerWithPolicy(
+          async () => { throw failure; },
+          (error) => { failureObserved = error; },
+          true,
+        );
+        releaseReached = true;
+      },
+      failure,
+    );
+    assert.equal(failureObserved, failure);
+    assert.equal(releaseReached, false);
+  });
+
+  it("retains the existing background-retry behavior for non-strict callers", async () => {
+    const failure = new Error("breaker config unavailable");
+    let failureObserved: unknown = null;
+    await persistCircuitBreakerWithPolicy(
+      async () => { throw failure; },
+      (error) => { failureObserved = error; },
+      false,
+    );
+    assert.equal(failureObserved, failure);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Static wiring: prove the in-flight snapshot pin + final freefall + final
 // balance run BEFORE any order intent / placeOrder in the execution path.
@@ -1615,6 +1649,27 @@ describe("execution wiring (static source assertions)", () => {
     const countSql = db.slice(countStart, countEnd);
     assert.match(countSql, /SELECT mode, symbol, window_key[\s\S]*?UNION[\s\S]*?SELECT mode, symbol, window_key/);
     assert.ok(!/\+\s*\(SELECT COUNT/.test(countSql), "must not add matching order and reservation rows");
+  });
+
+  it("reconciled fills preserve out-of-band breaker safety before releasing reservations", () => {
+    const start = idx("async function _applyScalpReconciliation");
+    const end = svc.indexOf("async function _evaluateCandidate", start);
+    const reconciliation = svc.slice(start, end);
+    const bandCheck = reconciliation.indexOf("isFillWithinBand(");
+    const breaker = reconciliation.indexOf("await _tripCircuitBreaker(breakerReason, true)");
+    const release = reconciliation.indexOf("await reconcileScalpOrderAndReleaseReservation(");
+    assert.ok(bandCheck >= 0 && bandCheck < breaker && breaker < release);
+    assert.match(reconciliation, /incident,\s*\}\);/);
+  });
+
+  it("final sibling reconciliation derives reservation status from all order outcomes", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const db = readFileSync(join(here, "kalshi-scalper-db.ts"), "utf8");
+    const start = db.indexOf("export async function reconcileScalpOrderAndReleaseReservation");
+    const end = db.indexOf("function rowToScalpOrder", start);
+    const reconciliation = db.slice(start, end);
+    assert.match(reconciliation, /BOOL_OR\(status = 'filled'\)/);
+    assert.match(reconciliation, /hasFill \? "filled" : "zero_fill"/);
   });
 
   it("live path uses the strict parser outcome (not zero-coerced) and paper uses classify with requestedCount", () => {

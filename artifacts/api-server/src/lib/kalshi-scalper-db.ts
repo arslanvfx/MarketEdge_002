@@ -1105,7 +1105,6 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
   symbol: string;
   windowKey: string;
   status: "filled" | "zero_fill";
-  reservationStatus: "filled" | "zero_fill";
   filledCount: number;
   avgFillPrice: number | null;
   winningContractCost: number | null;
@@ -1113,6 +1112,7 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
   exchangeOrderId: string | null;
   exchangeResponseReason: string;
   evidence: Record<string, unknown>;
+  incident?: ScalpIncident | null;
 }): Promise<"resolved" | "resolved_held" | "already_resolved"> {
   const client = await pool.connect();
   try {
@@ -1127,18 +1127,38 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
               winning_contract_cost = $4, budget_spent = $5,
               order_id = COALESCE($6, order_id),
               error_message = NULL, exchange_response_reason = $7,
-              reconciliation_evidence = $8::jsonb, reconciled_at = NOW()
-        WHERE id = $9 AND status IN ('submitting','unknown')`,
+              reconciliation_evidence = $8::jsonb,
+              incident_id = COALESCE($9, incident_id),
+              reconciled_at = NOW()
+        WHERE id = $10 AND status IN ('submitting','unknown')`,
       [
         params.status, params.filledCount, params.avgFillPrice,
         params.winningContractCost, params.budgetSpent,
         params.exchangeOrderId, params.exchangeResponseReason,
-        JSON.stringify(params.evidence), params.orderRecordId,
+        JSON.stringify(params.evidence), params.incident?.id ?? null,
+        params.orderRecordId,
       ],
     ) as { rowCount?: number };
     if ((updated.rowCount ?? 0) === 0) {
       await client.query("ROLLBACK");
       return "already_resolved";
+    }
+    if (params.incident) {
+      const incident = params.incident;
+      await client.query(
+        `INSERT INTO kalshi_scalp_incidents
+           (id, order_id, mode, symbol, window_key, ticker, severity,
+            description, expected_band_min, expected_band_max, actual_winning_cost, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          incident.id, incident.orderId ?? null, incident.mode,
+          incident.symbol.toUpperCase(), incident.windowKey, incident.ticker,
+          incident.severity, incident.description,
+          incident.expectedBandMin, incident.expectedBandMax,
+          incident.actualWinningCost, incident.createdAt,
+        ],
+      );
     }
     const remaining = await client.query(
       `SELECT COUNT(*)::int AS cnt
@@ -1149,12 +1169,23 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
     );
     const remainingCount = Number(remaining.rows[0]?.cnt ?? 0);
     if (remainingCount === 0) {
+      const aggregate = await client.query(
+        `SELECT COALESCE(BOOL_OR(status = 'filled'), false) AS has_fill
+           FROM kalshi_scalp_orders
+          WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [params.mode, params.symbol.toUpperCase(), params.windowKey],
+      );
+      const hasFill = aggregate.rows[0]?.has_fill === true;
+      const reservationStatus = hasFill ? "filled" : "zero_fill";
+      const reservationReason = hasFill
+        ? "reconciled_attempt_contains_fill"
+        : params.exchangeResponseReason;
       await client.query(
         `UPDATE kalshi_scalp_reservations
             SET status = $1, reason = $2, reserved_budget = 0, attempted_at = NOW()
           WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
         [
-          params.reservationStatus, params.exchangeResponseReason,
+          reservationStatus, reservationReason,
           params.mode, params.symbol.toUpperCase(), params.windowKey,
         ],
       );

@@ -344,7 +344,6 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
       symbol: "GOLD",
       windowKey: wk,
       status: "filled",
-      reservationStatus: "filled",
       filledCount: 1.75,
       avgFillPrice: 0.9314285714285714,
       winningContractCost: 0.9314285714285714,
@@ -359,7 +358,6 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
       symbol: "GOLD",
       windowKey: wk,
       status: "filled",
-      reservationStatus: "filled",
       filledCount: 1.75,
       avgFillPrice: 0.9314285714285714,
       winningContractCost: 0.9314285714285714,
@@ -441,7 +439,6 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
       symbol: "SILVER",
       windowKey: wk,
       status: "zero_fill",
-      reservationStatus: "zero_fill",
       filledCount: 0,
       avgFillPrice: null,
       winningContractCost: null,
@@ -471,7 +468,6 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
       symbol: "SILVER",
       windowKey: wk,
       status: "zero_fill",
-      reservationStatus: "zero_fill",
       filledCount: 0,
       avgFillPrice: null,
       winningContractCost: null,
@@ -481,6 +477,114 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
       evidence: { source: "test" },
     });
     assert.equal(second, "resolved");
+  });
+
+  it("keeps the aggregate reservation filled when a partial-fill sibling resolves before a zero-fill sibling", async () => {
+    const wk = `DBTEST-mixed-siblings-${Date.now()}`;
+    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "GOLD", wk, "T", 2, null, null);
+    assert.equal(claim.allowed, true);
+    for (const suffix of ["partial", "zero"]) {
+      await db.insertScalpOrderIntent({
+        id: `order-${suffix}-${wk}`,
+        mode: MODE,
+        symbol: "GOLD",
+        windowKey: wk,
+        ticker: "T",
+        side: "yes",
+        entryYesPrice: 0.94,
+        contractCount: 2,
+        budgetSpent: 0,
+        clientOrderId: `client-${suffix}-${wk}`,
+        orderId: null,
+        exchangeResponseReason: "submit_response_unverified",
+        filledCount: 0,
+        avgFillPrice: null,
+        limitPrice: 0.94,
+        winningContractCost: null,
+        status: "unknown",
+        errorMessage: "response could not be verified",
+        settlementResult: null,
+        outcome: null,
+        pnl: null,
+        incidentId: null,
+        reconciledAt: null,
+        reconciliationEvidence: null,
+        createdAt: new Date(),
+        settledAt: null,
+      });
+    }
+
+    const incidentId = `incident-${wk}`;
+    const first = await db.reconcileScalpOrderAndReleaseReservation({
+      orderRecordId: `order-partial-${wk}`,
+      mode: MODE,
+      symbol: "GOLD",
+      windowKey: wk,
+      status: "filled",
+      filledCount: 1.17,
+      avgFillPrice: 0.94,
+      winningContractCost: 0.94,
+      budgetSpent: 1.0998,
+      exchangeOrderId: "exchange-partial",
+      exchangeResponseReason: "reconciled_authoritative_fills",
+      evidence: { source: "mixed-sibling-test" },
+      incident: {
+        id: incidentId,
+        orderId: `order-partial-${wk}`,
+        mode: MODE,
+        symbol: "GOLD",
+        windowKey: wk,
+        ticker: "T",
+        severity: "high",
+        description: "test incident",
+        expectedBandMin: 0.91,
+        expectedBandMax: 0.93,
+        actualWinningCost: 0.94,
+        createdAt: new Date(),
+      },
+    });
+    assert.equal(first, "resolved_held");
+
+    const second = await db.reconcileScalpOrderAndReleaseReservation({
+      orderRecordId: `order-zero-${wk}`,
+      mode: MODE,
+      symbol: "GOLD",
+      windowKey: wk,
+      status: "zero_fill",
+      filledCount: 0,
+      avgFillPrice: null,
+      winningContractCost: null,
+      budgetSpent: 0,
+      exchangeOrderId: "exchange-zero",
+      exchangeResponseReason: "reconciled_terminal_zero_fill",
+      evidence: { source: "mixed-sibling-test" },
+    });
+    assert.equal(second, "resolved");
+
+    const verify = await pool.connect();
+    try {
+      const reservation = await verify.query(
+        `SELECT status, reason, reserved_budget
+           FROM kalshi_scalp_reservations
+          WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "GOLD", wk],
+      );
+      const order = await verify.query(
+        `SELECT incident_id FROM kalshi_scalp_orders WHERE id = $1`,
+        [`order-partial-${wk}`],
+      );
+      const incident = await verify.query(
+        `SELECT id FROM kalshi_scalp_incidents WHERE id = $1`,
+        [incidentId],
+      );
+      assert.equal(reservation.rows[0]?.status, "filled");
+      assert.equal(reservation.rows[0]?.reason, "reconciled_attempt_contains_fill");
+      assert.equal(Number(reservation.rows[0]?.reserved_budget), 0);
+      assert.equal(order.rows[0]?.incident_id, incidentId);
+      assert.equal(incident.rows[0]?.id, incidentId);
+    } finally {
+      verify.release();
+    }
   });
 });
 

@@ -41,6 +41,7 @@ import {
   evaluateScalpReservationRetry,
   describeScalpCircuitBreakerReason,
   preserveNewerScalpBreakerState,
+  persistCircuitBreakerWithPolicy,
   SCALP_AUTH_RETRY_COOLDOWN_MS,
   SCALP_MAX_CONCURRENT_CANDIDATES,
   SCALP_MAX_SUBMISSIONS_PER_WINDOW,
@@ -293,7 +294,7 @@ function _scheduleBreakerPersistenceRetry(): void {
   }, 5_000);
 }
 
-async function _tripCircuitBreaker(reason: string): Promise<void> {
+async function _tripCircuitBreaker(reason: string, requireDurable = false): Promise<void> {
   // Always retain the event and reason, even when the operator has disabled
   // enforcement. Re-enabling protection will immediately respect this latch.
   const eventVersion = ++_breakerVersion;
@@ -306,22 +307,24 @@ async function _tripCircuitBreaker(reason: string): Promise<void> {
   );
   // Persist through the serialized writer. If a newer event arrived before
   // this queued operation began, leave its reason untouched.
-  try {
-    await _enqueueScalpConfigMutation(
+  await persistCircuitBreakerWithPolicy(
+    () => _enqueueScalpConfigMutation(
       (current) => _breakerVersion === eventVersion
         ? { ...current, circuitBreaker: true, circuitBreakerReason: reason }
         : current,
       false,
-    );
-  } catch (persistErr) {
-    // Keep in-memory breaker true and retry in the background until the
-    // transient DB failure clears.
-    logger.error(
-      { persistErr, reason, eventVersion },
-      "[kalshi-scalper] CRITICAL: circuit breaker persist FAILED — breaker active in memory; durable retry scheduled",
-    );
-    _scheduleBreakerPersistenceRetry();
-  }
+    ),
+    (persistErr) => {
+      // Keep in-memory breaker true and retry in the background until the
+      // transient DB failure clears. Strict callers also receive the failure.
+      logger.error(
+        { persistErr, reason, eventVersion, requireDurable },
+        "[kalshi-scalper] CRITICAL: circuit breaker persist FAILED — breaker active in memory; durable retry scheduled",
+      );
+      _scheduleBreakerPersistenceRetry();
+    },
+    requireDurable,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,6 +1192,34 @@ async function _applyScalpReconciliation(
     ? result.budgetSpent / result.filledCount
     : null;
   const budgetSpent = result.budgetSpent;
+  const params = resolveEffectiveParams(_config, order.symbol, order.ticker);
+  const outsideBand = isFill
+    && !isFillWithinBand(order.side, result.avgFillPrice, params.bandMin, params.bandMax);
+  let incident: ScalpIncident | null = null;
+  if (outsideBand && winningContractCost != null) {
+    const breakerReason =
+      `fill_outside_band:${order.symbol}:${order.side}:` +
+      `cost=${winningContractCost.toFixed(4)}:band=[${params.bandMin},${params.bandMax}]`;
+    incident = {
+      id: crypto.randomUUID(),
+      orderId: order.id,
+      mode: order.mode,
+      symbol: order.symbol,
+      windowKey: order.windowKey,
+      ticker: order.ticker,
+      severity: "high",
+      description:
+        `Reconciled winning-contract cost ${winningContractCost.toFixed(4)} ` +
+        `outside band [${params.bandMin}, ${params.bandMax}] for ${order.side} side`,
+      expectedBandMin: params.bandMin,
+      expectedBandMax: params.bandMax,
+      actualWinningCost: winningContractCost,
+      createdAt: new Date(),
+    };
+    // Latch the breaker in memory before releasing any held reservation. If
+    // persistence fails, reconciliation aborts and the reservation stays held.
+    await _tripCircuitBreaker(breakerReason, true);
+  }
   let resolution: "resolved" | "resolved_held" | "already_resolved";
   try {
     resolution = await reconcileScalpOrderAndReleaseReservation({
@@ -1197,7 +1228,6 @@ async function _applyScalpReconciliation(
       symbol: order.symbol,
       windowKey: order.windowKey,
       status: isFill ? "filled" : "zero_fill",
-      reservationStatus: isFill ? "filled" : "zero_fill",
       filledCount: result.filledCount,
       avgFillPrice: result.avgFillPrice,
       winningContractCost,
@@ -1208,6 +1238,7 @@ async function _applyScalpReconciliation(
         ...result.evidence,
         reconciledAt: new Date().toISOString(),
       },
+      incident,
     });
   } catch (err) {
     // This function is used directly inside the post-submit uncertainty path.

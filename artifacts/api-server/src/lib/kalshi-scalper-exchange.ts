@@ -350,13 +350,20 @@ export function resolveScalpReconciliationEvidence(
   const initialCount = fixedCountHundredths(order["initial_count_fp"]);
   const remaining = fixedCountHundredths(order["remaining_count_fp"]);
   const orderFillCount = fixedCountHundredths(order["fill_count_fp"]);
+  // Kalshi IOC semantics: after the unfilled remainder is canceled, a terminal
+  // `canceled` order reports remaining_count_fp = 0.00. The canceled quantity
+  // is therefore initial - fill, not `remaining_count_fp`. A fully executed
+  // order must still account for the entire initial quantity.
+  const terminalAccountingIsValid = status === "executed"
+    ? remaining === 0n && orderFillCount === initialCount
+    : status === "canceled"
+      ? remaining === 0n && orderFillCount != null && initialCount != null && orderFillCount <= initialCount
+      : false;
   if (
-    !["canceled", "executed"].includes(status)
-    || initialCount == null
+    initialCount == null
     || remaining == null
     || orderFillCount == null
-    || orderFillCount + remaining !== initialCount
-    || (status === "executed" && remaining !== 0n)
+    || !terminalAccountingIsValid
   ) {
     return {
       outcome: "ambiguous",
