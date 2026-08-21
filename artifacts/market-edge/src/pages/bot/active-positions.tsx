@@ -12,7 +12,7 @@ interface ActivePositionsProps {
 
 export function ActivePositions({ openPosList, closeManualError, closingManualSym, closeManualPos, openManualOrder }: ActivePositionsProps) {
   if (openPosList.length === 0) return null;
-  const scalperCardClass = "border-yellow-200/90 bg-gradient-to-br from-yellow-300 via-amber-300 to-orange-400 text-amber-950 shadow-[inset_0_1px_0_rgba(255,251,235,0.55),0_12px_34px_rgba(245,158,11,0.24)]";
+  const scalperCardClass = "border-amber-300/50 bg-[linear-gradient(135deg,#624524_0%,#9a6328_52%,#6c4a25_100%)] text-amber-50 shadow-[inset_0_1px_0_rgba(255,251,235,0.22),0_12px_34px_rgba(180,115,35,0.2)]";
   return (
           <div className="space-y-3">
             {openPosList.length > 1 && (
@@ -44,10 +44,10 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
               }`}>
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3 flex-wrap">
-                     <div className={`text-2xl font-black ${isScalper ? "text-amber-950" : pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
+                      <div className={`text-2xl font-black ${isScalper ? "text-amber-50" : pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
                       {pos.symbol}
                     </div>
-                     <span className={`text-sm font-bold px-3 py-1 rounded-full ${isScalper ? "bg-amber-950/15 text-amber-950" : pos.direction === "yes" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300"}`}>
+                      <span className={`text-sm font-bold px-3 py-1 rounded-full ${isScalper ? "bg-amber-50/15 text-amber-50" : pos.direction === "yes" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300"}`}>
                       {pos.direction === "yes" ? "▲ YES" : "▼ NO"}
                     </span>
                     {isManual && (
@@ -56,7 +56,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                       </span>
                     )}
                     {isScalper && (
-                       <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-950/15 text-amber-950 border border-amber-950/25 tracking-wide">
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-50/15 text-amber-50 border border-amber-50/25 tracking-wide">
                         SCALPER
                       </span>
                     )}
@@ -64,20 +64,20 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                         pos.mode === "live"
                           ? "bg-red-500/15 text-red-400"
-                           : "bg-amber-950/15 text-amber-950"
+                           : "bg-amber-50/15 text-amber-50"
                       }`}>
                         {pos.mode.toUpperCase()}
                       </span>
                     )}
-                     <span className={`text-xs ${isScalper ? "text-amber-950/65" : "text-muted-foreground"}`}>
+                      <span className={`text-xs ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>
                       Opened {new Date(pos.openedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                     </span>
                   </div>
                   <div className="flex items-start gap-3">
                     <div className="text-right">
-                      <div className="text-xs text-muted-foreground">{isScalper ? "Settlement" : "Unrealized P&L"}</div>
+                       <div className={`text-xs ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper ? "Settlement" : "Unrealized P&L"}</div>
                       {isScalper ? (
-                         <div className="text-sm font-bold text-amber-950">Pending</div>
+                          <div className="text-sm font-bold text-amber-50">Pending</div>
                       ) : (
                         <div className={`text-lg font-bold ${(pos.unrealizedPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {fmt$(pos.unrealizedPnl)}
@@ -123,9 +123,9 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                     { label: "Ticker", value: pos.ticker },
                     { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
                    ]).map(({ label, value }) => (
-                     <div key={label} className={`rounded-lg p-2.5 ${isScalper ? "border border-amber-950/15 bg-black/15" : "bg-background/30"}`}>
-                       <div className={`text-[10px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-950/65" : "text-muted-foreground"}`}>{label}</div>
-                       <div className={`font-semibold text-sm ${isScalper ? "text-amber-950" : "text-foreground"}`}>{value}</div>
+                     <div key={label} className={`rounded-lg p-2.5 ${isScalper ? "border border-amber-100/15 bg-black/25" : "bg-background/30"}`}>
+                       <div className={`text-[10px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{label}</div>
+                       <div className={`font-semibold text-sm ${isScalper ? "text-amber-50" : "text-foreground"}`}>{value}</div>
                     </div>
                   ))}
                 </div>

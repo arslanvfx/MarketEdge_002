@@ -4,7 +4,7 @@ import type { HistoryRecord } from "./types";
 import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtDuration, wkToEst } from "./utils";
 
 const HIST_PAGE_SIZE = 20;
-const SCALPER_CARD_CLASS = "border-yellow-200/90 bg-gradient-to-br from-yellow-300 via-amber-300 to-orange-400 text-amber-950 ring-1 ring-inset ring-amber-500/40 shadow-[inset_0_1px_0_rgba(255,251,235,0.55),0_12px_34px_rgba(245,158,11,0.24)]";
+const SCALPER_CARD_CLASS = "border-amber-300/50 bg-[linear-gradient(135deg,#624524_0%,#9a6328_52%,#6c4a25_100%)] text-amber-50 ring-1 ring-inset ring-amber-500/40 shadow-[inset_0_1px_0_rgba(255,251,235,0.22),0_12px_34px_rgba(180,115,35,0.2)]";
 
 interface TransactionLogProps {
   pagedBets: HistoryRecord[];
@@ -145,10 +145,10 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                    <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
                     {/* Card header */}
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
-                      <span className={`text-base font-black tracking-tight ${isScalper ? "text-amber-950" : "text-foreground"}`}>{r.symbol}</span>
+                      <span className={`text-base font-black tracking-tight ${isScalper ? "text-amber-50" : "text-foreground"}`}>{r.symbol}</span>
 
                       {r.direction && (
-                        <span className={`flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${isScalper ? "bg-amber-950/15 text-amber-950" : r.direction === "yes" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
+                        <span className={`flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${isScalper ? "bg-amber-50/15 text-amber-50" : r.direction === "yes" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
                           {r.direction === "yes" ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
                           {r.direction === "yes" ? "ABOVE" : "BELOW"}
                         </span>
@@ -255,7 +255,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       )}
 
-                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isScalper ? "bg-amber-950/15 text-amber-950" : r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
+                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isScalper ? "bg-amber-50/15 text-amber-50" : r.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-500"}`}>
                         {r.mode?.toUpperCase()}
                       </span>
 
@@ -266,7 +266,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </span>
                       )}
                       {isScalper && (
-                        <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-950/15 text-amber-950 border border-amber-950/25">
+                        <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-50/15 text-amber-50 border border-amber-50/25">
                           <Zap className="w-2.5 h-2.5" /> SCALPER
                         </span>
                       )}
@@ -302,18 +302,18 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
 
                     {/* Key metrics grid */}
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-950/15 bg-black/15" : "bg-background/40"}`}>
-                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-950/65" : "text-muted-foreground"}`}>{isScalper ? "Order" : "Strike"}</div>
-                         <div className={`text-xs font-semibold font-mono ${isScalper ? "text-amber-950" : ""}`}>{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/25" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper ? "Order" : "Strike"}</div>
+                         <div className={`text-xs font-semibold font-mono ${isScalper ? "text-amber-50" : ""}`}>{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-950/15 bg-black/15" : "bg-background/40"}`}>
-                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-950/65" : "text-muted-foreground"}`}>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/25" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>
                           {isScalper ? "Settlement" : closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
                         </div>
                         <div className="text-xs font-semibold font-mono flex items-center gap-1">
                           {isScalper ? (
-                            <span className={isOpen ? "text-amber-950" : isWin ? "text-emerald-400" : "text-red-400"}>
+                            <span className={isOpen ? "text-amber-50" : isWin ? "text-emerald-400" : "text-red-400"}>
                               {isOpen ? "Pending" : isWin ? "Won" : "Lost"}
                             </span>
                           ) : endPx != null ? (
@@ -332,8 +332,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         )}
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-950/15 bg-black/15" : "bg-background/40"}`}>
-                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-950/65" : "text-muted-foreground"}`}>Entry</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/25" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>Entry</div>
                         <div className="text-xs font-mono">
                           {ep != null ? (
                             <span>{(ep * 100).toFixed(0)}¢ YES · {((1 - ep) * 100).toFixed(0)}¢ NO</span>
@@ -341,11 +341,11 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-950/15 bg-black/15" : "bg-background/40"}`}>
-                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-950/65" : "text-muted-foreground"}`}>{isScalper ? "Result" : "Exit"}</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/25" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper ? "Result" : "Exit"}</div>
                         <div className="text-xs font-mono">
                           {isScalper
-                            ? (sigs?.settlementResult as string | null ?? (isOpen ? <span className="text-amber-950 text-[9px]">in play…</span> : "—"))
+                             ? (sigs?.settlementResult as string | null ?? (isOpen ? <span className="text-amber-50 text-[9px]">in play…</span> : "—"))
                             : xp != null
                               ? `${(xp * 100).toFixed(0)}¢ YES`
                               : isOpen
@@ -354,8 +354,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-950/15 bg-black/15" : "bg-background/40"}`}>
-                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-950/65" : "text-muted-foreground"}`}>Size</div>
+                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-100/15 bg-black/25" : "bg-background/40"}`}>
+                         <div className={`text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>Size</div>
                         <div className="text-xs font-semibold">
                           {r.contractCount ?? "—"} @ {(() => {
                             const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
@@ -382,7 +382,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           {fmtDuration(r.createdAt, r.exitedAt)}
                         </span>
                       )}
-                      <span className={isScalper ? "font-mono text-amber-950/65" : "font-mono"}>{wkToEst(r.windowKey)} EST</span>
+                      <span className={isScalper ? "font-mono text-amber-100/70" : "font-mono"}>{wkToEst(r.windowKey)} EST</span>
                       {(() => {
                         const conf = sigs?.confidence as number | null ?? sigs?.statConfidence as number | null ?? null;
                         return conf != null ? (
@@ -428,7 +428,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         <span className="text-amber-400/70">· awaiting window close price</span>
                       )}
                       {isScalper && (
-                         <span className="text-amber-950/70">
+                         <span className="text-amber-100/80">
                           · confirmed fill{typeof sigs?.status === "string" ? ` · ${sigs.status}` : ""}
                         </span>
                       )}
