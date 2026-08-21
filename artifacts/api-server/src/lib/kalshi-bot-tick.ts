@@ -2920,11 +2920,16 @@ async function _runBotTick(
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
-        // In conviction mode the book is thin and FOK 0-fills are normal for
-        // the first minute of a window (market makers haven't posted quotes yet).
-        // Allow up to 10 attempts (~50 s at 5 s ticks) before giving up so the
-        // bot keeps trying as liquidity builds, instead of blocking after just 10 s.
-        const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 10 : 2;
+        // In conviction mode the book is thin and FOK/IOC 0-fills are normal for
+        // the first seconds of a window (market makers haven't posted quotes yet).
+        // NOTE: this code is reached via the 1-second conviction poller, NOT the
+        // 5-second bot loop — "~50 s at 5 s ticks" is therefore wrong.  With the
+        // poller firing every second, 10 attempts = 10 rapid Kalshi API calls in
+        // 10 seconds.  3 attempts gives the book 3 seconds to become liquid, which
+        // is enough for early-window fills; after that the order size or price is
+        // simply wrong for the current book depth.  Matches non-conviction cap (2)
+        // closely enough that the behavior is consistent.
+        const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 3 : 2;
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, usedPollerFallback },
