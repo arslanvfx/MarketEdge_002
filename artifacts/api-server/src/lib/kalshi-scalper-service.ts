@@ -15,7 +15,11 @@ import { getKalshiCachedData, fetchOrderbookPrices, fetchKalshiTarget } from "./
 // reads only. The scalper's ORDER SUBMISSION path uses its own isolated exchange
 // boundary (placeScalpOrderStrict) and NEVER imports/calls placeOrder.
 import { getBalance, fetchKalshiMarketResult, fetchKalshiSettledMarkets } from "./kalshi-trader.ts";
-import { placeScalpOrderStrict } from "./kalshi-scalper-exchange.ts";
+import {
+  placeScalpOrderStrict,
+  reconcileScalpOrderStrict,
+  type ScalpReconciliationResult,
+} from "./kalshi-scalper-exchange.ts";
 import { getTicker } from "./crypto-data.ts";
 import type { ScalpConfig, ScalpMode, ScalpOrder, ScalpIncident, ScalpPerformance, ScalpMarketStatus, ScalpPerMarketOverride } from "./kalshi-scalper-types.ts";
 import { DEFAULT_SCALP_CONFIG } from "./kalshi-scalper-types.ts";
@@ -69,6 +73,9 @@ import {
   getOpenScalpSpend,
   countUnresolvedLiveAttempts,
   getUnresolvedLiveAttempts,
+  getScalpOrderById,
+  getSiblingScalpExchangeOrderIds,
+  reconcileScalpOrderAndReleaseReservation,
   insertScalpIncident,
   getScalpIncidents,
 } from "./kalshi-scalper-db.ts";
@@ -365,14 +372,24 @@ async function _recoverSubmittingOrders(): Promise<void> {
   const stuck = await getSubmittingScalpOrders();
   if (stuck.length === 0) return;
   for (const order of stuck) {
+    const reconciliation = await _fetchScalpReconciliation(order);
+    if (reconciliation.outcome !== "ambiguous") {
+      await _applyScalpReconciliation(order, reconciliation);
+      logger.warn(
+        { id: order.id, symbol: order.symbol, outcome: reconciliation.outcome },
+        "[kalshi-scalper] recovered submitting order from authoritative exchange history",
+      );
+      continue;
+    }
     logger.warn(
-      { id: order.id, symbol: order.symbol, mode: order.mode },
+      { id: order.id, symbol: order.symbol, mode: order.mode, reconciliationReason: reconciliation.reason },
       "[kalshi-scalper] found submitting order from prior crash — marking UNKNOWN, tripping breaker (reserved budget retained)",
     );
     // Mark order UNKNOWN (indeterminate fill), NOT error. Retain reserved budget.
     await finalizeScalpOrder(
-      order.id, "unknown", 0, null, null, 0, null,
+      order.id, "unknown", 0, null, null, 0, order.orderId,
       "unknown_fill_state_after_crash",
+      reconciliation.reason,
     ).catch(() => {});
     // Mark reservation unknown WITHOUT releasing reserved budget (fail-closed).
     await updateReservationStatus(
@@ -482,7 +499,7 @@ export class UnresolvedAttemptsError extends Error {
   readonly details: Awaited<ReturnType<typeof getUnresolvedLiveAttempts>>;
   constructor(count: number, details: Awaited<ReturnType<typeof getUnresolvedLiveAttempts>>) {
     super(
-      `Cannot reset circuit breaker: ${count} unresolved live attempt(s) with indeterminate fill state require authoritative manual reconciliation. No blind resolve is provided.`,
+      `Cannot reset circuit breaker: ${count} unresolved live attempt(s) require reconciliation with Kalshi before reset.`,
     );
     this.name = "UnresolvedAttemptsError";
     this.unresolvedCount = count;
@@ -515,6 +532,68 @@ export async function resetCircuitBreaker(): Promise<ScalpConfig> {
   }
   logger.info("[kalshi-scalper] circuit breaker reset");
   return updated;
+}
+
+export class ScalpReconciliationError extends Error {
+  readonly reason: string;
+  readonly evidence: Record<string, unknown>;
+  constructor(reason: string, evidence: Record<string, unknown>) {
+    super(
+      reason === "no_unique_exchange_order_match"
+        ? "Kalshi did not return one uniquely matching terminal order. The attempt remains blocked."
+        : "Kalshi evidence was incomplete or ambiguous. The attempt remains blocked.",
+    );
+    this.name = "ScalpReconciliationError";
+    this.reason = reason;
+    this.evidence = evidence;
+  }
+}
+
+export async function reconcileUnresolvedScalpOrder(orderRecordId: string) {
+  const order = await getScalpOrderById(orderRecordId);
+  if (!order || order.mode !== "live") {
+    throw new Error("Unresolved live Scalper order was not found");
+  }
+  if (!["submitting", "unknown"].includes(order.status)) {
+    return {
+      ok: true,
+      alreadyResolved: true,
+      outcome: order.status,
+      message: "This Scalper order was already resolved.",
+    };
+  }
+  const result = await _fetchScalpReconciliation(order);
+  if (result.outcome === "ambiguous") {
+    throw new ScalpReconciliationError(result.reason, result.evidence);
+  }
+  const persistence = await _applyScalpReconciliation(order, result);
+  logger.warn(
+    {
+      orderRecordId,
+      symbol: order.symbol,
+      windowKey: order.windowKey,
+      outcome: result.outcome,
+      exchangeOrderId: result.orderId,
+      persistence,
+    },
+    "[kalshi-scalper] unresolved live order reconciled from authoritative exchange evidence",
+  );
+  return {
+    ok: true,
+    alreadyResolved: persistence === "already_resolved",
+    reservationReleased: persistence !== "resolved_held",
+    outcome: result.outcome,
+    symbol: order.symbol,
+    windowKey: order.windowKey,
+    exchangeOrderId: result.orderId,
+    filledCount: result.filledCount,
+    avgFillPrice: result.avgFillPrice,
+    message: persistence === "resolved_held"
+      ? `${order.symbol} order was reconciled, but another order record in this attempt still needs reconciliation.`
+      : result.outcome === "zero_fill"
+        ? `${order.symbol} was authoritatively reconciled as zero fill.`
+        : `${order.symbol} was reconciled as a ${result.filledCount}-contract fill.`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,8 +1087,8 @@ function _rememberReservationOutcome(
 }
 
 /**
- * Shared fail-closed handling for LIVE confirmed exposure with an indeterminate
- * outcome (placeOrder threw, OR a nonzero fill with an untrustworthy price, OR a
+ * Shared fail-closed handling for a LIVE order result that cannot be fully
+ * verified (placeOrder threw, a response field was untrustworthy, or a
  * post-submit persistence failure). Never releases the reserved budget.
  *
  * Steps (each best-effort, breaker set FIRST and in-memory):
@@ -1028,15 +1107,21 @@ async function _handleUnknownExposure(args: {
   bandMax: number;
   reason: string;
   description: string;
+  exchangeOrderId?: string | null;
+  exchangeResponseReason?: string | null;
 }): Promise<void> {
-  const { orderRecordId, mode, symbol, windowKey, ticker, bandMin, bandMax, reason, description } = args;
+  const {
+    orderRecordId, mode, symbol, windowKey, ticker, bandMin, bandMax,
+    reason, description, exchangeOrderId, exchangeResponseReason,
+  } = args;
 
   // 1. Breaker first (fail-closed) — sets in-memory true synchronously.
   await _tripCircuitBreaker(reason);
 
   // 2. Best-effort mark the order UNKNOWN (do not throw on failure).
   await finalizeScalpOrder(
-    orderRecordId, "unknown", 0, null, null, 0, null, description,
+    orderRecordId, "unknown", 0, null, null, 0,
+    exchangeOrderId ?? null, description, exchangeResponseReason ?? reason,
   ).catch((e) => logger.error({ e, orderRecordId }, "[kalshi-scalper] failed to mark order unknown (breaker already tripped)"));
 
   // 3. Best-effort mark reservation UNKNOWN WITHOUT releasing reserved budget.
@@ -1061,6 +1146,80 @@ async function _handleUnknownExposure(args: {
   };
   await insertScalpIncident(incident).catch((e) => logger.error({ e, orderRecordId }, "[kalshi-scalper] failed to persist unknown-exposure incident"));
   await setScalpOrderIncident(orderRecordId, incidentId).catch(() => {});
+}
+
+async function _fetchScalpReconciliation(order: ScalpOrder): Promise<ScalpReconciliationResult> {
+  try {
+    const excludeExchangeOrderIds = await getSiblingScalpExchangeOrderIds(
+      order.mode,
+      order.symbol,
+      order.windowKey,
+      order.id,
+    );
+    return reconcileScalpOrderStrict({
+      ticker: order.ticker,
+      side: order.side,
+      count: order.contractCount,
+      limitPrice: order.limitPrice,
+      clientOrderId: order.clientOrderId,
+      exchangeOrderId: order.orderId,
+      createdAt: order.createdAt,
+      excludeExchangeOrderIds,
+    });
+  } catch (err) {
+    logger.error(
+      { err, orderRecordId: order.id },
+      "[kalshi-scalper] failed to prepare authoritative reconciliation lookup",
+    );
+    return {
+      outcome: "ambiguous",
+      reason: "local_reconciliation_lookup_failed",
+      candidateCount: 0,
+      evidence: { source: "local_reconciliation_preparation", lookupFailed: true },
+    };
+  }
+}
+
+async function _applyScalpReconciliation(
+  order: ScalpOrder,
+  result: Exclude<ScalpReconciliationResult, { outcome: "ambiguous" }>,
+): Promise<"resolved" | "resolved_held" | "already_resolved"> {
+  const isFill = result.outcome === "confirmed_fill";
+  const winningContractCost = isFill
+    ? result.budgetSpent / result.filledCount
+    : null;
+  const budgetSpent = result.budgetSpent;
+  let resolution: "resolved" | "resolved_held" | "already_resolved";
+  try {
+    resolution = await reconcileScalpOrderAndReleaseReservation({
+      orderRecordId: order.id,
+      mode: order.mode,
+      symbol: order.symbol,
+      windowKey: order.windowKey,
+      status: isFill ? "filled" : "zero_fill",
+      reservationStatus: isFill ? "filled" : "zero_fill",
+      filledCount: result.filledCount,
+      avgFillPrice: result.avgFillPrice,
+      winningContractCost,
+      budgetSpent,
+      exchangeOrderId: result.orderId,
+      exchangeResponseReason: result.reason,
+      evidence: {
+        ...result.evidence,
+        reconciledAt: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    // This function is used directly inside the post-submit uncertainty path.
+    // Escalate through the existing protected error so the outer attempt catch
+    // can never release a reservation after a live POST may have succeeded.
+    throw new PostSubmitPersistenceError(err);
+  }
+  if (resolution !== "resolved_held") {
+    _terminalAttemptKeys.add(`${order.mode}:${order.symbol}:${order.windowKey}`);
+    _nextAttemptAt.delete(`${order.mode}:${order.symbol}:${order.windowKey}`);
+  }
+  return resolution;
 }
 
 async function _evaluateCandidate(
@@ -1446,6 +1605,7 @@ async function _executeScalpAttempt(
 
   // ── Place order or simulate ───────────────────────────────────────────────
   const orderId_pre = mode === "paper" ? `paper-${crypto.randomUUID()}` : null;
+  const clientOrderId = mode === "live" ? crypto.randomUUID() : null;
 
   // For live: persist "submitting" intent BEFORE the exchange call
   const orderRecord: ScalpOrder = {
@@ -1458,7 +1618,9 @@ async function _executeScalpAttempt(
     entryYesPrice,
     contractCount,
     budgetSpent: 0,
+    clientOrderId,
     orderId: orderId_pre,
+    exchangeResponseReason: null,
     filledCount: 0,
     avgFillPrice: null,
     limitPrice,
@@ -1469,6 +1631,8 @@ async function _executeScalpAttempt(
     outcome: null,
     pnl: null,
     incidentId: null,
+    reconciledAt: null,
+    reconciliationEvidence: null,
     createdAt: new Date(),
     settledAt: null,
   };
@@ -1477,6 +1641,7 @@ async function _executeScalpAttempt(
   let avgFillPrice: number | null = null;
   let orderId: string | null = orderId_pre;
   let orderError: string | null = null;
+  let exchangeResponseReason: string | null = null;
   // Live outcome comes pre-classified from the strict exchange parser.
   let liveOutcome: PlaceOrderClassification = "unknown";
 
@@ -1533,10 +1698,12 @@ async function _executeScalpAttempt(
         side: effectiveSide,
         limitPrice,
         count: contractCount,
+        clientOrderId: clientOrderId!,
       });
       // Strict parser already discriminated the outcome. A malformed body maps
       // to outcome "unknown" (never zero-coerced); use its validated fields.
       liveOutcome = result.outcome;
+      exchangeResponseReason = result.reason;
       filledCount = result.filledCount ?? NaN; // null (unknown) → NaN sentinel
       avgFillPrice = result.avgFillPrice; // YES-side fraction or null
       orderId = result.orderId;
@@ -1548,6 +1715,19 @@ async function _executeScalpAttempt(
       orderError = String(err);
       logger.error({ err, symbol, ticker, side: effectiveSide }, "[kalshi-scalper] LIVE strict submit THREW — fill state UNKNOWN");
 
+      const reconciliation = await _fetchScalpReconciliation({
+        ...orderRecord,
+        exchangeResponseReason: "scalp_submit_threw",
+      });
+      if (reconciliation.outcome !== "ambiguous") {
+        await _applyScalpReconciliation(orderRecord, reconciliation);
+        logger.warn(
+          { symbol, windowKey, outcome: reconciliation.outcome, orderId: reconciliation.orderId },
+          "[kalshi-scalper] submit exception reconciled authoritatively before breaker latch",
+        );
+        return;
+      }
+
       // Submit threw — fill state INDETERMINATE. Mark order UNKNOWN (not
       // error), keep the reservation's reserved budget (do NOT release), create
       // a high-severity incident, and trip the breaker. Never infer a fill.
@@ -1557,6 +1737,7 @@ async function _executeScalpAttempt(
         bandMin: snapshot.bandMin, bandMax: snapshot.bandMax,
         reason: `scalp_submit_threw:${symbol}:${windowKey}`,
         description: `scalp submit threw (fill state unknown): ${orderError}`,
+        exchangeResponseReason: reconciliation.reason,
       });
       // Signal the outer catch to NOT release budget (fail-closed).
       throw new OrderIntentExistsError(err);
@@ -1572,18 +1753,41 @@ async function _executeScalpAttempt(
       ? (liveOutcome as PlaceOrderClassification)
       : classifyPlaceOrderResult({ filledCount, avgFillPrice, requestedCount: contractCount });
 
-  // ── (3) UNKNOWN CONFIRMED EXPOSURE: filled>0 but price null/nonfinite/OOB ──
+  // ── (3) UNVERIFIED EXCHANGE RESPONSE ──────────────────────────────────────
   if (classification === "unknown") {
     if (mode === "live") {
+      const parserReason = exchangeResponseReason ?? (
+        liveOutcome === "unknown" ? "strict_response_untrusted" : "unknown_classification"
+      );
+      const reconciliation = await _fetchScalpReconciliation({
+        ...orderRecord,
+        orderId,
+        exchangeResponseReason: parserReason,
+      });
+      if (reconciliation.outcome !== "ambiguous") {
+        await _applyScalpReconciliation(
+          { ...orderRecord, orderId, exchangeResponseReason: parserReason },
+          reconciliation,
+        );
+        logger.warn(
+          { symbol, windowKey, outcome: reconciliation.outcome, orderId: reconciliation.orderId },
+          "[kalshi-scalper] malformed submit response reconciled authoritatively before breaker latch",
+        );
+        return;
+      }
       // Fail closed: mark unknown, retain reserved budget, incident, breaker.
       await _handleUnknownExposure({
         orderRecordId: orderRecord.id,
         mode, symbol, windowKey, ticker,
         bandMin: snapshot.bandMin, bandMax: snapshot.bandMax,
-        reason: `unknown_confirmed_exposure:${symbol}:${windowKey}`,
+        reason: `unverified_exchange_response:${symbol}:${windowKey}`,
         description:
-          `Confirmed exposure with indeterminate fill price: filledCount=${filledCount} avgFillPrice=${String(avgFillPrice)}. ` +
-          `Reserved budget retained; manual reconciliation required.`,
+          `Kalshi returned an order response the Scalper could not fully verify: ` +
+          `parser=${parserReason}; filledCount=${filledCount} avgFillPrice=${String(avgFillPrice)}; ` +
+          `reconciliation=${reconciliation.reason}. ` +
+          `Reserved budget retained; authoritative reconciliation required.`,
+        exchangeOrderId: orderId,
+        exchangeResponseReason: parserReason,
       });
     } else {
       // Paper cannot reach here in practice (simulated price is always valid),
@@ -1913,13 +2117,16 @@ function serializeScalpOrder(o: ScalpOrder) {
 export async function getScalpStatus(requestedMode?: ScalpMode) {
   const mode = requestedMode ?? _config.mode;
   const wk = currentWindowKey() ?? "";
-  const [dailySpend, openSpend, recentOrders, recentAttempts, incidents, todayRes] = await Promise.all([
+  const [dailySpend, openSpend, recentOrders, recentAttempts, incidents, todayRes, unresolvedAttempts] = await Promise.all([
     getTodayScalpSpend(mode),
     getOpenScalpSpend(mode),
     getScalpOrders({ mode, limit: 20 }),
     getRecentScalpReservations({ mode, limit: 20 }),
     getScalpIncidents(10),
     countTodayReservations(mode),
+    // Unresolved exposure is always live and must remain visible even if the
+    // operator temporarily switches the Scalper UI to paper mode.
+    getUnresolvedLiveAttempts(),
   ]);
 
   const markets = _buildMarketStatuses(wk);
@@ -1965,6 +2172,10 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
         attemptedAt: attempt.attemptedAt.toISOString(),
       };
     }),
+    unresolvedAttempts: unresolvedAttempts.map((attempt) => ({
+      ...attempt,
+      createdAt: attempt.createdAt.toISOString(),
+    })),
     incidents,
     // ISO string | null (not epoch)
     lastScanAt: _lastScanAt != null ? new Date(_lastScanAt).toISOString() : null,

@@ -690,7 +690,7 @@ describe("classifyPlaceOrderResult", () => {
   });
 
   // (3) filledCount > 0 AND avg null/nonfinite/out-of-(0,1) => unknown
-  it("filledCount>0 with null avg => unknown (CONFIRMED EXPOSURE)", () => {
+  it("filledCount>0 with null avg => unknown (response cannot be verified)", () => {
     assert.equal(classifyPlaceOrderResult({ filledCount: 2, avgFillPrice: null }), "unknown");
   });
   it("filledCount>0 with NaN avg => unknown", () => {
@@ -726,10 +726,9 @@ describe("classifyPlaceOrderResult", () => {
     assert.equal(classifyPlaceOrderResult({ filledCount: 1, avgFillPrice: null }), "unknown");
   });
 
-  // Integer enforcement: a FRACTIONAL count is impossible → unknown (proves the fix).
-  it("fractional filledCount => unknown (not confirmed, not zero)", () => {
-    assert.equal(classifyPlaceOrderResult({ filledCount: 1.5, avgFillPrice: 0.9 }), "unknown");
-    assert.equal(classifyPlaceOrderResult({ filledCount: 0.5, avgFillPrice: 0.9 }), "unknown");
+  it("Kalshi FixedPointCount fractional fills are confirmed at hundredth precision", () => {
+    assert.equal(classifyPlaceOrderResult({ filledCount: 1.5, avgFillPrice: 0.9 }), "confirmed_fill");
+    assert.equal(classifyPlaceOrderResult({ filledCount: 0.5, avgFillPrice: 0.9 }), "confirmed_fill");
     assert.equal(classifyPlaceOrderResult({ filledCount: 2.0001, avgFillPrice: 0.9 }), "unknown");
   });
   it("null filledCount => unknown", () => {
@@ -806,6 +805,7 @@ describe("parseScalpOrderResponse", () => {
     const r = parseScalpOrderResponse({ order_id: "o" }, REQ);
     assert.equal(r.outcome, "unknown");
     assert.equal(r.reason, "missing_fill_count");
+    assert.equal(r.orderId, "o", "independently trusted order identity must survive later parse failure");
     assert.equal(r.filledCount, null);
   });
   it("null fill_count => unknown/missing_fill_count", () => {
@@ -837,9 +837,16 @@ describe("parseScalpOrderResponse", () => {
     assert.equal(parseScalpOrderResponse({ order_id: "o", fill_count: -1 }, REQ).reason, "unparseable_fill_count");
     assert.equal(parseScalpOrderResponse({ order_id: "o", fill_count: "-1" }, REQ).reason, "unparseable_fill_count");
   });
-  it("fractional fill_count (number 1.5 and string '1.5') => unknown", () => {
-    assert.equal(parseScalpOrderResponse({ order_id: "o", fill_count: 1.5, average_fill_price: 0.9 }, REQ).reason, "unparseable_fill_count");
-    assert.equal(parseScalpOrderResponse({ order_id: "o", fill_count: "1.5", average_fill_price: 0.9 }, REQ).reason, "unparseable_fill_count");
+  it("fractional FixedPointCount values are valid confirmed fills", () => {
+    for (const fill_count of [1.5, "1.5", "0.25"]) {
+      const r = parseScalpOrderResponse({ order_id: "o", fill_count, average_fill_price: 0.9 }, REQ);
+      assert.equal(r.outcome, "confirmed_fill");
+      assert.equal(r.filledCount, Number(fill_count));
+    }
+    assert.equal(
+      parseScalpOrderResponse({ order_id: "o", fill_count: "1.234", average_fill_price: 0.9 }, REQ).reason,
+      "unparseable_fill_count",
+    );
   });
   it("whitespace-padded numeric string fill_count => unknown", () => {
     assert.equal(parseScalpOrderResponse({ order_id: "o", fill_count: " 1 " }, REQ).reason, "unparseable_fill_count");
@@ -897,6 +904,8 @@ describe("parseScalpOrderResponse", () => {
     const r = parseScalpOrderResponse({ order_id: "o", fill_count: 2 }, REQ);
     assert.equal(r.outcome, "unknown");
     assert.equal(r.reason, "missing_avg_price");
+    assert.equal(r.orderId, "o");
+    assert.equal(r.filledCount, 2);
   });
   it("positive fill + null avg => unknown/missing_avg_price", () => {
     const r = parseScalpOrderResponse({ order_id: "o", fill_count: 2, average_fill_price: null }, REQ);
@@ -917,7 +926,7 @@ describe("parseScalpOrderResponse", () => {
 
   it("never coerces a malformed fill to zero_fill", () => {
     // The core bug: malformed fill must NOT become zero_fill.
-    for (const bad of [undefined, null, "", "abc", "1x", NaN, Infinity, -1, 1.5]) {
+    for (const bad of [undefined, null, "", "abc", "1x", NaN, Infinity, -1, "1.234"]) {
       const r = parseScalpOrderResponse({ order_id: "o", fill_count: bad as unknown }, REQ);
       assert.notEqual(r.outcome, "zero_fill", `fill_count=${String(bad)} must not be zero_fill`);
       assert.equal(r.outcome, "unknown");
@@ -1514,7 +1523,9 @@ describe("describeScalpCircuitBreakerReason", () => {
 
 describe("preserveNewerScalpBreakerState", () => {
   it("allows an intentional reset when no newer event occurred", () => {
-    const proposed = { enabled: true, circuitBreaker: false, circuitBreakerReason: null };
+    const proposed: { enabled: boolean; circuitBreaker: boolean; circuitBreakerReason: string | null } = {
+      enabled: true, circuitBreaker: false, circuitBreakerReason: null,
+    };
     const latest = { circuitBreaker: true, circuitBreakerReason: "old_event" };
     assert.deepEqual(
       preserveNewerScalpBreakerState(proposed, latest, 4, 4),
@@ -1523,7 +1534,9 @@ describe("preserveNewerScalpBreakerState", () => {
   });
 
   it("preserves a breaker event that arrived during an async config save", () => {
-    const proposed = { enabled: false, circuitBreaker: false, circuitBreakerReason: null };
+    const proposed: { enabled: boolean; circuitBreaker: boolean; circuitBreakerReason: string | null } = {
+      enabled: false, circuitBreaker: false, circuitBreakerReason: null,
+    };
     const latest = { circuitBreaker: true, circuitBreakerReason: "new_event" };
     assert.deepEqual(
       preserveNewerScalpBreakerState(proposed, latest, 4, 5),
@@ -1568,8 +1581,40 @@ describe("execution wiring (static source assertions)", () => {
   });
 
   it("service imports and calls the strict scalper submission", () => {
-    assert.match(svc, /import\s*\{\s*placeScalpOrderStrict\s*\}\s*from\s*"\.\/kalshi-scalper-exchange\.ts"/);
+    assert.match(svc, /import\s*\{[\s\S]*?\bplaceScalpOrderStrict\b[\s\S]*?\}\s*from\s*"\.\/kalshi-scalper-exchange\.ts"/);
     assert.match(svc, /await placeScalpOrderStrict\(/);
+  });
+
+  it("persists a caller-generated client order id before passing it unchanged to Kalshi", () => {
+    const clientId = idx('const clientOrderId = mode === "live" ? crypto.randomUUID() : null');
+    const intent = idx("await insertScalpOrderIntent(orderRecord)");
+    const submit = idx("const result = await placeScalpOrderStrict");
+    assert.ok(clientId >= 0 && clientId < intent && intent < submit);
+    assert.match(svc.slice(submit, submit + 500), /clientOrderId: clientOrderId!/);
+    assert.match(exch, /client_order_id:\s*clientOrderId/);
+    assert.ok(!/const clientOrderId = crypto\.randomUUID\(\)/.test(exch));
+  });
+
+  it("reconciles startup submitting rows before latching them unknown", () => {
+    const start = idx("async function _recoverSubmittingOrders");
+    const end = idx("export function getScalpConfig");
+    const recovery = svc.slice(start, end);
+    assert.match(recovery, /_fetchScalpReconciliation\(order\)/);
+    assert.match(recovery, /_applyScalpReconciliation\(order, reconciliation\)/);
+    assert.ok(
+      recovery.indexOf("_fetchScalpReconciliation(order)")
+        < recovery.indexOf('"unknown_fill_state_after_crash"'),
+    );
+  });
+
+  it("deduplicates unresolved order and reservation rows by attempt identity", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const db = readFileSync(join(here, "kalshi-scalper-db.ts"), "utf8");
+    const countStart = db.indexOf("export async function countUnresolvedLiveAttempts");
+    const countEnd = db.indexOf("export async function getUnresolvedLiveAttempts", countStart);
+    const countSql = db.slice(countStart, countEnd);
+    assert.match(countSql, /SELECT mode, symbol, window_key[\s\S]*?UNION[\s\S]*?SELECT mode, symbol, window_key/);
+    assert.ok(!/\+\s*\(SELECT COUNT/.test(countSql), "must not add matching order and reservation rows");
   });
 
   it("live path uses the strict parser outcome (not zero-coerced) and paper uses classify with requestedCount", () => {

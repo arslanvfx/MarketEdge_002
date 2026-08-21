@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
-import { API_BASE, fmt$, fmtPct, fmtDateTime } from "./utils";
-import type { ScalperConfig, ScalperStatus, ScalperPerformance } from "./types";
+import { API_BASE, fmt$, fmtPct, fmtDateTime, wkToEstRange, ET_LABEL } from "./utils";
+import type { ScalperConfig, ScalperStatus, ScalperPerformance, ScalperUnresolvedAttempt } from "./types";
 import { describeScalperAttempt } from "./scalper-ledger";
 
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
@@ -26,6 +26,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const qc = useQueryClient();
   const [configDraft, setConfigDraft] = useState<Partial<ScalperConfig>>({});
   const [mutationBusy, setMutationBusy] = useState<MutationName | null>(null);
+  const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -223,6 +224,51 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     } finally {
       setMutationBusy(null);
     }
+  }
+
+  async function reconcileAttempt(attempt: ScalperUnresolvedAttempt): Promise<void> {
+    if (!attempt.orderRecordId) return;
+    if (!canManage) {
+      showNotice({ kind: "error", text: managementAccessMessage() });
+      return;
+    }
+    setReconcileBusyId(attempt.orderRecordId ?? attempt.attemptId);
+    setNotice(null);
+    try {
+      const data = await authPost("/crypto/scalper/reconcile-order", {
+        orderRecordId: attempt.orderRecordId,
+      }) as {
+        ok?: boolean;
+        outcome?: string;
+        message?: string;
+        error?: string;
+      };
+      if (!data.ok) {
+        throw new Error(data.message ?? data.error ?? "Kalshi reconciliation did not complete.");
+      }
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bot-scalper-config"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-status"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-history"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-perf"] }),
+      ]);
+      showNotice({
+        kind: "success",
+        text: data.message ?? `Reconciled ${attempt.symbol} with Kalshi.`,
+      });
+    } catch (error) {
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Kalshi reconciliation could not be completed.",
+      });
+    } finally {
+      setReconcileBusyId(null);
+    }
+  }
+
+  function readableReason(reason: string | null): string {
+    if (!reason) return "Awaiting Kalshi reconciliation";
+    return reason.replaceAll("_", " ");
   }
 
   function handleConfigChange(key: keyof ScalperConfig, value: any) {
@@ -430,28 +476,111 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       )}
 
       {merged.circuitBreaker && (
-        <div className={`${merged.circuitBreakerEnabled !== false ? "bg-red-500/10 border-red-500/30" : "bg-amber-500/10 border-amber-500/30"} border-b px-5 py-3 flex items-center justify-between gap-4`}>
-          <div className={`flex items-start gap-3 ${merged.circuitBreakerEnabled !== false ? "text-red-300" : "text-amber-200"}`}>
-            <AlertTriangle className="w-5 h-5" />
-            <div>
-              <div className="text-sm font-semibold">
-                {merged.circuitBreakerEnabled !== false
-                  ? "Circuit breaker triggered — Scalper paused"
-                  : "Circuit-breaker event recorded — Scalper still running"}
-              </div>
-              <div data-testid="text-scalper-circuit-breaker-reason" className="text-xs mt-0.5 opacity-90 font-normal">
-                {statusData?.circuitBreakerMessage
-                  ?? "The Scalper recorded a safety event, but no additional details were available."}
+        <div className={`${merged.circuitBreakerEnabled !== false ? "bg-red-500/10 border-red-500/30" : "bg-amber-500/10 border-amber-500/30"} border-b px-5 py-3 flex flex-col gap-3`}>
+          <div className="flex items-center justify-between gap-4">
+            <div className={`flex items-start gap-3 ${merged.circuitBreakerEnabled !== false ? "text-red-300" : "text-amber-200"}`}>
+              <AlertTriangle className="w-5 h-5" />
+              <div>
+                <div className="text-sm font-semibold">
+                  {merged.circuitBreakerEnabled !== false
+                    ? "Circuit breaker triggered — Scalper paused"
+                    : "Circuit-breaker event recorded — Scalper still running"}
+                </div>
+                <div data-testid="text-scalper-circuit-breaker-reason" className="text-xs mt-0.5 opacity-90 font-normal">
+                  {statusData?.circuitBreakerMessage
+                    ?? "The Scalper recorded a safety event, but no additional details were available."}
+                </div>
               </div>
             </div>
+            <button
+              onClick={resetCircuitBreaker}
+              disabled={!canManage || mutationBusy !== null}
+              className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {mutationBusy === "reset" ? "Resetting…" : "Reset Circuit Breaker"}
+            </button>
           </div>
-          <button
-            onClick={resetCircuitBreaker}
-            disabled={!canManage || mutationBusy !== null}
-            className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {mutationBusy === "reset" ? "Resetting…" : "Reset Circuit Breaker"}
-          </button>
+
+          {(() => {
+            const unresolved = statusData?.unresolvedAttempts ?? [];
+            const groups = new Map<string, ScalperUnresolvedAttempt[]>();
+            for (const attempt of unresolved) {
+              const current = groups.get(attempt.attemptId) ?? [];
+              current.push(attempt);
+              groups.set(attempt.attemptId, current);
+            }
+            const groupedAttempts = [...groups.entries()];
+            if (groupedAttempts.length === 0) return null;
+            return (
+              <div
+                data-testid="list-scalper-unresolved-attempts"
+                className="border-t border-red-500/20 pt-3 flex flex-col gap-2"
+              >
+                <div className="text-[10px] uppercase font-bold tracking-widest text-red-300/80">
+                  Unresolved live attempts ({groupedAttempts.length})
+                </div>
+                {groupedAttempts.map(([attemptId, records]) => {
+                  const attempt = records[0]!;
+                  return (
+                    <div
+                      key={attemptId}
+                      data-testid={`row-scalper-unresolved-${attemptId}`}
+                      className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2"
+                    >
+                      <div className="min-w-0 flex flex-col gap-1.5">
+                        <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-red-200">
+                          <span data-testid={`text-scalper-unresolved-symbol-${attemptId}`}>
+                            {attempt.symbol}
+                          </span>
+                          <span className="text-red-300/60 font-mono font-normal">
+                            {wkToEstRange(attempt.windowKey)} {ET_LABEL}
+                          </span>
+                          <span className="text-red-300/40 font-mono font-normal">
+                            · opened {fmtDateTime(attempt.createdAt)}
+                          </span>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          {records.map((record, index) => {
+                            const busyKey = record.orderRecordId ?? record.attemptId;
+                            return (
+                              <div
+                                key={record.orderRecordId ?? `${record.attemptId}-${index}`}
+                                className="flex items-center justify-between gap-4"
+                              >
+                                <div
+                                  data-testid={`text-scalper-unresolved-reason-${attemptId}-${index}`}
+                                  className="text-[11px] text-red-300/80"
+                                >
+                                  {records.length > 1 ? `Order ${index + 1}: ` : ""}
+                                  {readableReason(record.reason)}
+                                </div>
+                                {record.orderRecordId ? (
+                                  <button
+                                    type="button"
+                                    data-testid={`button-scalper-reconcile-${attemptId}-${index}`}
+                                    onClick={() => reconcileAttempt(record)}
+                                    disabled={!canManage || reconcileBusyId !== null}
+                                    aria-label={`Reconcile ${record.symbol} order ${index + 1} with Kalshi`}
+                                    className="shrink-0 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-200 rounded text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {reconcileBusyId === busyKey ? "Reconciling…" : "Reconcile with Kalshi"}
+                                  </button>
+                                ) : (
+                                  <span className="shrink-0 text-[10px] text-red-300/60 italic">
+                                    No order to reconcile
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 

@@ -769,32 +769,25 @@ export interface PlaceOrderResultInput {
  *   2. filledCount  >  0 AND avgFillPrice is a
  *      finite number strictly inside (0, 1)    → "confirmed_fill"
  *   3. filledCount  >  0 AND avgFillPrice is
- *      null / non-finite / <=0 / >=1           → "unknown"     (CONFIRMED EXPOSURE,
- *                                                 indeterminate price)
+ *      null / non-finite / <=0 / >=1           → "unknown"     (response cannot
+ *                                                 be fully verified)
  *
  * A "confirmed_fill" is the ONLY classification that permits computing P&L and
  * releasing the reservation. "unknown" means contracts may have been bought at
  * an indeterminate price — never zero-fill it and never release the budget.
  *
- * filledCount MUST be a finite nonnegative INTEGER. A negative, non-finite, null,
- * or FRACTIONAL count is impossible from a whole-contract exchange and is
- * classified "unknown". When requestedCount is supplied it must be a positive
- * integer and an overfill (filledCount > requestedCount) is classified "unknown".
+ * filledCount MUST be a finite nonnegative FixedPointCount with at most two
+ * decimal places. Kalshi supports fractional fills down to 0.01 contracts.
+ * When requestedCount is supplied it must remain a positive integer and an
+ * overfill is classified "unknown".
  */
 export function classifyPlaceOrderResult(
   input: PlaceOrderResultInput,
 ): PlaceOrderClassification {
   const { filledCount, avgFillPrice, requestedCount } = input;
 
-  // Guard against garbage counts. filledCount must be a finite, NONNEGATIVE
-  // INTEGER. Non-integer (fractional) counts are impossible from a whole-contract
-  // exchange and are treated as UNKNOWN (never zero-filled, never confirmed).
-  if (
-    filledCount == null ||
-    !Number.isFinite(filledCount) ||
-    !Number.isInteger(filledCount) ||
-    filledCount < 0
-  ) {
+  const parsedFilledCount = parseFixedPointCount(filledCount);
+  if (parsedFilledCount == null) {
     return "unknown";
   }
 
@@ -807,7 +800,7 @@ export function classifyPlaceOrderResult(
       !Number.isFinite(requestedCount) ||
       !Number.isInteger(requestedCount) ||
       requestedCount <= 0 ||
-      filledCount > requestedCount
+      parsedFilledCount.hundredths > requestedCount * 100
     ) {
       return "unknown";
     }
@@ -854,35 +847,33 @@ export type ScalpFillOutcome = "zero_fill" | "confirmed_fill" | "unknown";
 export interface ParsedScalpFill {
   outcome: ScalpFillOutcome;
   reason: string;                 // machine-readable reason code
-  orderId: string | null;        // non-empty string only when trusted
-  filledCount: number | null;    // validated nonnegative integer, else null
+  orderId: string | null;        // independently validated non-empty exchange id
+  filledCount: number | null;    // validated nonnegative fixed-point count, else null
   avgFillPrice: number | null;   // validated (0,1) fraction, else null
 }
 
 /**
- * Parse a value that Kalshi accepts as a numeric count field. Accepts an actual
- * finite integer number OR a canonical numeric STRING that represents an integer
- * (optionally with trailing ".0"/".00" zeros, since Kalshi uses fixed-point
- * strings). Rejects: null/undefined/empty, whitespace-padded, non-numeric,
- * NaN/Infinity, negative, and any fractional value (e.g. "1.5").
- * Returns a finite nonnegative integer, or null when unparseable/invalid.
+ * Parse Kalshi FixedPointCount into exact hundredths before exposing a number.
+ * Current V2 responses may contain fractional contract fills down to 0.01 even
+ * when the submitted order count was integral. Binary-float tolerance is never
+ * used for validation.
  */
-function parseFixedPointInteger(v: unknown): number | null {
+function parseFixedPointCount(v: unknown): { value: number; hundredths: number } | null {
   if (typeof v === "number") {
-    if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) return null;
-    return v;
+    if (!Number.isFinite(v) || v < 0) return null;
+    const hundredths = Math.round(v * 100);
+    if (!Number.isSafeInteger(hundredths) || Math.abs(v * 100 - hundredths) > 1e-8) return null;
+    return { value: hundredths / 100, hundredths };
   }
   if (typeof v === "string") {
-    // No leniency: must be a canonical numeric string. Disallow whitespace,
-    // signs other than plain digits, exponents, hex, etc.
-    const s = v;
-    if (s.length === 0) return null;
-    // Match: digits, optional fractional part that is all zeros.
-    const m = /^(\d+)(?:\.(0+))?$/.exec(s);
+    const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(v);
     if (!m) return null;
-    const n = Number(m[1]);
-    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return null;
-    return n;
+    const whole = Number(m[1]);
+    if (!Number.isSafeInteger(whole)) return null;
+    const fraction = (m[2] ?? "").padEnd(2, "0");
+    const hundredths = whole * 100 + Number(fraction || "0");
+    if (!Number.isSafeInteger(hundredths)) return null;
+    return { value: hundredths / 100, hundredths };
   }
   return null;
 }
@@ -930,12 +921,15 @@ export function parseScalpOrderResponse(
   raw: unknown,
   requestedCount: number,
 ): ParsedScalpFill {
-  const fail = (reason: string): ParsedScalpFill => ({
+  const fail = (
+    reason: string,
+    partial: Partial<Pick<ParsedScalpFill, "orderId" | "filledCount" | "avgFillPrice">> = {},
+  ): ParsedScalpFill => ({
     outcome: "unknown",
     reason,
-    orderId: null,
-    filledCount: null,
-    avgFillPrice: null,
+    orderId: partial.orderId ?? null,
+    filledCount: partial.filledCount ?? null,
+    avgFillPrice: partial.avgFillPrice ?? null,
   });
 
   // requestedCount must itself be a positive integer to trust any comparison.
@@ -963,17 +957,18 @@ export function parseScalpOrderResponse(
   // fill_count must be PRESENT (not missing/null) and strictly parseable.
   const rawFill = obj["fill_count"];
   if (rawFill == null) {
-    return fail("missing_fill_count");
+    return fail("missing_fill_count", { orderId });
   }
-  const filledCount = parseFixedPointInteger(rawFill);
-  if (filledCount == null) {
-    return fail("unparseable_fill_count");
+  const parsedFill = parseFixedPointCount(rawFill);
+  if (parsedFill == null) {
+    return fail("unparseable_fill_count", { orderId });
   }
 
   // Overfill is impossible.
-  if (filledCount > requestedCount) {
-    return fail("overfill_count");
+  if (parsedFill.hundredths > requestedCount * 100) {
+    return fail("overfill_count", { orderId, filledCount: parsedFill.value });
   }
+  const filledCount = parsedFill.value;
 
   // Definite zero fill — avg may be absent/null.
   if (filledCount === 0) {
@@ -989,11 +984,15 @@ export function parseScalpOrderResponse(
   // Positive integral fill → average_fill_price MUST be present + valid + (0,1).
   const rawAvg = obj["average_fill_price"];
   if (rawAvg == null) {
-    return fail("missing_avg_price");
+    return fail("missing_avg_price", { orderId, filledCount });
   }
   const avg = parseFixedPointNumber(rawAvg);
   if (avg == null || avg <= 0 || avg >= 1) {
-    return fail("invalid_avg_price");
+    return fail("invalid_avg_price", {
+      orderId,
+      filledCount,
+      avgFillPrice: avg != null && Number.isFinite(avg) ? avg : null,
+    });
   }
 
   return {
@@ -1215,7 +1214,12 @@ export function describeScalpCircuitBreakerReason(reason: string | null): string
 
   if (reason.startsWith("unknown_confirmed_exposure:")) {
     const symbol = reason.split(":")[1] || "live";
-    return `Kalshi reported that the ${symbol} order filled, but the Scalper could not verify its fill price.`;
+    return `Kalshi returned a ${symbol} order result the Scalper could not verify. The order may or may not have filled.`;
+  }
+
+  if (reason.startsWith("unverified_exchange_response:")) {
+    const symbol = reason.split(":")[1] || "live";
+    return `Kalshi returned a ${symbol} order result the Scalper could not verify. The order may or may not have filled.`;
   }
 
   if (reason.startsWith("post_submit_persist_failed:")) {

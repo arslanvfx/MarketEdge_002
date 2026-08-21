@@ -28,6 +28,8 @@ import {
   getScalpStatus,
   getScalpHistory,
   getScalpPerformance,
+  reconcileUnresolvedScalpOrder,
+  ScalpReconciliationError,
   UnresolvedAttemptsError,
 } from "../lib/kalshi-scalper-service.ts";
 import type { ScalpMode } from "../lib/kalshi-scalper-types.ts";
@@ -163,6 +165,35 @@ router.post("/crypto/scalper/reset-circuit-breaker", requireScalpAdmin, async (_
     }
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// ── POST /api/crypto/scalper/reconcile-order (admin) ─────────────────────────
+// Exchange-backed only: ambiguous evidence returns 409 and leaves all state held.
+
+router.post("/crypto/scalper/reconcile-order", requireScalpAdmin, async (req, res): Promise<void> => {
+  const orderRecordId = typeof req.body?.orderRecordId === "string"
+    ? req.body.orderRecordId.trim()
+    : "";
+  if (!orderRecordId || orderRecordId.length > 100) {
+    res.status(400).json({ ok: false, error: "A valid unresolved order record is required." });
+    return;
+  }
+  try {
+    const result = await reconcileUnresolvedScalpOrder(orderRecordId);
+    res.json(result);
+  } catch (err) {
+    if (err instanceof ScalpReconciliationError) {
+      res.status(409).json({
+        ok: false,
+        error: err.message,
+        reason: err.reason,
+        evidence: err.evidence,
+      });
+      return;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(msg.includes("not found") ? 404 : 500).json({ ok: false, error: msg });
   }
 });
 

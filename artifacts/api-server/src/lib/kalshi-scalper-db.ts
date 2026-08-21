@@ -67,18 +67,22 @@ export async function runScalpMigrations(): Promise<void> {
         side                  TEXT NOT NULL,
         entry_yes_price       NUMERIC(8,4) NOT NULL,
         contract_count        INTEGER NOT NULL,
-        budget_spent          NUMERIC(10,4) NOT NULL DEFAULT 0,
+        budget_spent          NUMERIC(16,8) NOT NULL DEFAULT 0,
+        client_order_id       TEXT,
         order_id              TEXT,
-        filled_count          INTEGER NOT NULL DEFAULT 0,
-        avg_fill_price        NUMERIC(8,4),
+        filled_count          NUMERIC(12,2) NOT NULL DEFAULT 0,
+        avg_fill_price        NUMERIC(12,8),
         limit_price           NUMERIC(8,4) NOT NULL,
-        winning_contract_cost NUMERIC(8,4),
+        winning_contract_cost NUMERIC(12,8),
         status                TEXT NOT NULL DEFAULT 'submitting',
         error_message         TEXT,
+        exchange_response_reason TEXT,
         settlement_result     TEXT,
         outcome               TEXT,
-        pnl                   NUMERIC(10,4),
+        pnl                   NUMERIC(16,8),
         incident_id           TEXT,
+        reconciliation_evidence JSONB,
+        reconciled_at         TIMESTAMPTZ,
         created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         settled_at            TIMESTAMPTZ
       )
@@ -180,6 +184,7 @@ async function _upgradeScalpSchema(
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS winning_contract_cost NUMERIC(8,4)`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS status                TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS error_message         TEXT`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS client_order_id       TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS order_id              TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS filled_count          INTEGER`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS avg_fill_price        NUMERIC(8,4)`);
@@ -188,6 +193,9 @@ async function _upgradeScalpSchema(
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS outcome               TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS pnl                   NUMERIC(10,4)`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS incident_id           TEXT`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS exchange_response_reason TEXT`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS reconciliation_evidence JSONB`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS reconciled_at         TIMESTAMPTZ`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS settled_at            TIMESTAMPTZ`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS created_at            TIMESTAMPTZ`);
   // Backfill safe defaults before enforcing NOT NULL.
@@ -199,12 +207,18 @@ async function _upgradeScalpSchema(
   await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN status       SET DEFAULT 'submitting'`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN filled_count SET NOT NULL`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN filled_count SET DEFAULT 0`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN filled_count TYPE NUMERIC(12,2) USING filled_count::numeric`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN avg_fill_price TYPE NUMERIC(12,8) USING avg_fill_price::numeric`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN winning_contract_cost TYPE NUMERIC(12,8) USING winning_contract_cost::numeric`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN budget_spent TYPE NUMERIC(16,8) USING budget_spent::numeric`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN pnl TYPE NUMERIC(16,8) USING pnl::numeric`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN budget_spent SET NOT NULL`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN budget_spent SET DEFAULT 0`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN created_at   SET NOT NULL`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ALTER COLUMN created_at   SET DEFAULT NOW()`);
   await client.query(`CREATE INDEX IF NOT EXISTS scalp_orders_mode_created ON kalshi_scalp_orders (mode, created_at DESC)`);
   await client.query(`CREATE INDEX IF NOT EXISTS scalp_orders_symbol_window ON kalshi_scalp_orders (symbol, window_key)`);
+  await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS scalp_orders_client_order_id_unique ON kalshi_scalp_orders (client_order_id) WHERE client_order_id IS NOT NULL`);
 
   // ── incidents ───────────────────────────────────────────────────────────
   // Current code inserts/queries actual_winning_cost + expected_band_min/max.
@@ -755,12 +769,20 @@ export async function abortIntentAndReleaseReservation(params: {
 // ---------------------------------------------------------------------------
 
 export interface UnresolvedLiveRow {
-  kind: "order" | "reservation";
-  id: string;
+  attemptId: string;
+  orderRecordId: string | null;
+  reservationId: string | null;
+  mode: "live";
   symbol: string;
   windowKey: string;
   ticker: string;
   status: string;
+  side: "yes" | "no" | null;
+  contractCount: number | null;
+  limitPrice: number | null;
+  clientOrderId: string | null;
+  exchangeOrderId: string | null;
+  reason: string | null;
   reservedBudget: number;
   createdAt: Date;
 }
@@ -776,12 +798,17 @@ export async function countUnresolvedLiveAttempts(): Promise<number> {
   const client = await pool.connect();
   try {
     const res = await client.query(
-      `SELECT
-        (SELECT COUNT(*) FROM kalshi_scalp_orders
-           WHERE mode = 'live' AND status IN ('submitting','unknown'))
-      + (SELECT COUNT(*) FROM kalshi_scalp_reservations
-           WHERE mode = 'live'
-             AND (status = 'unknown' OR (reserved_budget > 0 AND status = 'claimed'))) AS cnt`,
+      `SELECT COUNT(*)::int AS cnt
+       FROM (
+         SELECT mode, symbol, window_key
+           FROM kalshi_scalp_orders
+          WHERE mode = 'live' AND status IN ('submitting','unknown')
+         UNION
+         SELECT mode, symbol, window_key
+           FROM kalshi_scalp_reservations
+          WHERE mode = 'live'
+            AND (status = 'unknown' OR (reserved_budget > 0 AND status = 'claimed'))
+       ) unresolved_attempts`,
     );
     return Number(res.rows[0]?.cnt ?? 0);
   } finally {
@@ -792,47 +819,63 @@ export async function countUnresolvedLiveAttempts(): Promise<number> {
 export async function getUnresolvedLiveAttempts(): Promise<UnresolvedLiveRow[]> {
   const client = await pool.connect();
   try {
-    const [ordersRes, resRes] = await Promise.all([
-      client.query(
-        `SELECT id, symbol, window_key, ticker, status, created_at
-         FROM kalshi_scalp_orders
-         WHERE mode = 'live' AND status IN ('submitting','unknown')
-         ORDER BY created_at ASC`,
-      ),
-      client.query(
-        `SELECT id, symbol, window_key, ticker, status, reserved_budget, created_at
-         FROM kalshi_scalp_reservations
-         WHERE mode = 'live'
-           AND (status = 'unknown' OR (reserved_budget > 0 AND status = 'claimed'))
-         ORDER BY created_at ASC`,
-      ),
-    ]);
-    const rows: UnresolvedLiveRow[] = [];
-    for (const r of ordersRes.rows) {
-      rows.push({
-        kind: "order",
-        id: String(r["id"]),
-        symbol: String(r["symbol"]),
-        windowKey: String(r["window_key"]),
-        ticker: String(r["ticker"]),
-        status: String(r["status"]),
-        reservedBudget: 0,
-        createdAt: r["created_at"] instanceof Date ? r["created_at"] : new Date(String(r["created_at"])),
-      });
-    }
-    for (const r of resRes.rows) {
-      rows.push({
-        kind: "reservation",
-        id: String(r["id"]),
-        symbol: String(r["symbol"]),
-        windowKey: String(r["window_key"]),
-        ticker: String(r["ticker"]),
-        status: String(r["status"]),
-        reservedBudget: Number(r["reserved_budget"] ?? 0),
-        createdAt: r["created_at"] instanceof Date ? r["created_at"] : new Date(String(r["created_at"])),
-      });
-    }
-    return rows;
+    const res = await client.query(
+      `WITH unresolved_orders AS (
+         SELECT o.*
+           FROM kalshi_scalp_orders o
+          WHERE o.mode = 'live' AND o.status IN ('submitting','unknown')
+       ),
+       reservation_only AS (
+         SELECT r.*
+           FROM kalshi_scalp_reservations r
+          WHERE r.mode = 'live'
+            AND (r.status = 'unknown' OR (r.reserved_budget > 0 AND r.status = 'claimed'))
+            AND NOT EXISTS (
+              SELECT 1 FROM unresolved_orders o
+               WHERE o.mode = r.mode AND o.symbol = r.symbol AND o.window_key = r.window_key
+            )
+       )
+       SELECT
+         o.mode, o.symbol, o.window_key,
+         COALESCE(o.ticker, r.ticker, '') AS ticker,
+         COALESCE(o.status, r.status, 'unknown') AS status,
+         o.id AS order_record_id,
+         r.id AS reservation_id,
+         o.side, o.contract_count, o.limit_price, o.client_order_id,
+         o.order_id AS exchange_order_id,
+         COALESCE(o.exchange_response_reason, o.error_message, r.reason) AS reason,
+         COALESCE(r.reserved_budget, 0) AS reserved_budget,
+         COALESCE(o.created_at, r.created_at) AS created_at
+       FROM unresolved_orders o
+       LEFT JOIN kalshi_scalp_reservations r
+         ON r.mode = o.mode AND r.symbol = o.symbol AND r.window_key = o.window_key
+       UNION ALL
+       SELECT
+         r.mode, r.symbol, r.window_key, r.ticker, r.status,
+         NULL AS order_record_id, r.id AS reservation_id,
+         NULL AS side, NULL AS contract_count, NULL AS limit_price, NULL AS client_order_id,
+         NULL AS exchange_order_id, r.reason, r.reserved_budget, r.created_at
+       FROM reservation_only r
+       ORDER BY created_at ASC`,
+    );
+    return res.rows.map((r) => ({
+      attemptId: `live:${String(r["symbol"])}:${String(r["window_key"])}`,
+      orderRecordId: r["order_record_id"] != null ? String(r["order_record_id"]) : null,
+      reservationId: r["reservation_id"] != null ? String(r["reservation_id"]) : null,
+      mode: "live",
+      symbol: String(r["symbol"]),
+      windowKey: String(r["window_key"]),
+      ticker: String(r["ticker"]),
+      status: String(r["status"]),
+      side: r["side"] === "yes" || r["side"] === "no" ? r["side"] : null,
+      contractCount: r["contract_count"] != null ? Number(r["contract_count"]) : null,
+      limitPrice: r["limit_price"] != null ? Number(r["limit_price"]) : null,
+      clientOrderId: r["client_order_id"] != null ? String(r["client_order_id"]) : null,
+      exchangeOrderId: r["exchange_order_id"] != null ? String(r["exchange_order_id"]) : null,
+      reason: r["reason"] != null ? String(r["reason"]) : null,
+      reservedBudget: Number(r["reserved_budget"] ?? 0),
+      createdAt: r["created_at"] instanceof Date ? r["created_at"] : new Date(String(r["created_at"])),
+    }));
   } finally {
     client.release();
   }
@@ -883,21 +926,23 @@ export async function insertScalpOrderIntent(order: ScalpOrder): Promise<void> {
   try {
     await client.query(
       `INSERT INTO kalshi_scalp_orders
-         (id, mode, symbol, window_key, ticker, side, entry_yes_price,
-          contract_count, budget_spent, order_id, filled_count, avg_fill_price,
-          limit_price, winning_contract_cost, status, error_message,
-          settlement_result, outcome, pnl, incident_id, created_at, settled_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+          (id, mode, symbol, window_key, ticker, side, entry_yes_price,
+           contract_count, budget_spent, client_order_id, order_id, filled_count,
+           avg_fill_price, limit_price, winning_contract_cost, status, error_message,
+           exchange_response_reason, settlement_result, outcome, pnl, incident_id,
+           reconciliation_evidence, reconciled_at, created_at, settled_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
        ON CONFLICT (id) DO NOTHING`,
       [
         order.id, order.mode, order.symbol.toUpperCase(), order.windowKey,
         order.ticker, order.side, order.entryYesPrice, order.contractCount,
-        order.budgetSpent, order.orderId, order.filledCount,
+        order.budgetSpent, order.clientOrderId ?? null, order.orderId, order.filledCount,
         order.avgFillPrice ?? null, order.limitPrice,
         order.winningContractCost ?? null,
         order.status, order.errorMessage ?? null,
-        order.settlementResult ?? null, order.outcome ?? null,
-        order.pnl ?? null, order.incidentId ?? null,
+        order.exchangeResponseReason ?? null, order.settlementResult ?? null,
+        order.outcome ?? null, order.pnl ?? null, order.incidentId ?? null,
+        order.reconciliationEvidence ?? null, order.reconciledAt ?? null,
         order.createdAt, order.settledAt ?? null,
       ],
     );
@@ -916,6 +961,7 @@ export async function finalizeScalpOrder(
   budgetSpent: number,
   orderId: string | null,
   errorMessage: string | null,
+  exchangeResponseReason: string | null = null,
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -923,10 +969,12 @@ export async function finalizeScalpOrder(
       `UPDATE kalshi_scalp_orders
        SET status = $1, filled_count = $2, avg_fill_price = $3,
            winning_contract_cost = $4, budget_spent = $5,
-           order_id = $6, error_message = $7
-       WHERE id = $8`,
+            order_id = COALESCE($6, order_id), error_message = $7,
+            exchange_response_reason = COALESCE($8, exchange_response_reason)
+        WHERE id = $9`,
       [status, filledCount, avgFillPrice ?? null, winningContractCost ?? null,
-       budgetSpent, orderId ?? null, errorMessage ?? null, id],
+       budgetSpent, orderId ?? null, errorMessage ?? null,
+       exchangeResponseReason ?? null, id],
     );
   } finally {
     client.release();
@@ -1021,6 +1069,115 @@ export async function getScalpOrders(opts: {
   }
 }
 
+export async function getScalpOrderById(id: string): Promise<ScalpOrder | null> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(`SELECT * FROM kalshi_scalp_orders WHERE id = $1 LIMIT 1`, [id]);
+    return res.rows[0] ? rowToScalpOrder(res.rows[0]) : null;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getSiblingScalpExchangeOrderIds(
+  mode: ScalpMode,
+  symbol: string,
+  windowKey: string,
+  excludeRecordId: string,
+): Promise<string[]> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT order_id FROM kalshi_scalp_orders
+        WHERE mode = $1 AND symbol = $2 AND window_key = $3
+          AND id <> $4 AND order_id IS NOT NULL`,
+      [mode, symbol.toUpperCase(), windowKey, excludeRecordId],
+    );
+    return res.rows.map((r) => String(r["order_id"]));
+  } finally {
+    client.release();
+  }
+}
+
+export async function reconcileScalpOrderAndReleaseReservation(params: {
+  orderRecordId: string;
+  mode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  status: "filled" | "zero_fill";
+  reservationStatus: "filled" | "zero_fill";
+  filledCount: number;
+  avgFillPrice: number | null;
+  winningContractCost: number | null;
+  budgetSpent: number;
+  exchangeOrderId: string | null;
+  exchangeResponseReason: string;
+  evidence: Record<string, unknown>;
+}): Promise<"resolved" | "resolved_held" | "already_resolved"> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [`kalshi-scalper-cap:${params.mode}`],
+    );
+    const updated = await client.query(
+      `UPDATE kalshi_scalp_orders
+          SET status = $1, filled_count = $2, avg_fill_price = $3,
+              winning_contract_cost = $4, budget_spent = $5,
+              order_id = COALESCE($6, order_id),
+              error_message = NULL, exchange_response_reason = $7,
+              reconciliation_evidence = $8::jsonb, reconciled_at = NOW()
+        WHERE id = $9 AND status IN ('submitting','unknown')`,
+      [
+        params.status, params.filledCount, params.avgFillPrice,
+        params.winningContractCost, params.budgetSpent,
+        params.exchangeOrderId, params.exchangeResponseReason,
+        JSON.stringify(params.evidence), params.orderRecordId,
+      ],
+    ) as { rowCount?: number };
+    if ((updated.rowCount ?? 0) === 0) {
+      await client.query("ROLLBACK");
+      return "already_resolved";
+    }
+    const remaining = await client.query(
+      `SELECT COUNT(*)::int AS cnt
+         FROM kalshi_scalp_orders
+        WHERE mode = $1 AND symbol = $2 AND window_key = $3
+          AND status IN ('submitting','unknown')`,
+      [params.mode, params.symbol.toUpperCase(), params.windowKey],
+    );
+    const remainingCount = Number(remaining.rows[0]?.cnt ?? 0);
+    if (remainingCount === 0) {
+      await client.query(
+        `UPDATE kalshi_scalp_reservations
+            SET status = $1, reason = $2, reserved_budget = 0, attempted_at = NOW()
+          WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
+        [
+          params.reservationStatus, params.exchangeResponseReason,
+          params.mode, params.symbol.toUpperCase(), params.windowKey,
+        ],
+      );
+    } else {
+      await client.query(
+        `UPDATE kalshi_scalp_reservations
+            SET status = 'unknown',
+                reason = 'other_unresolved_order_records_remain',
+                attempted_at = NOW()
+          WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [params.mode, params.symbol.toUpperCase(), params.windowKey],
+      );
+    }
+    await client.query("COMMIT");
+    return remainingCount === 0 ? "resolved" : "resolved_held";
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 function rowToScalpOrder(row: Record<string, unknown>): ScalpOrder {
   return {
     id: String(row["id"]),
@@ -1032,7 +1189,9 @@ function rowToScalpOrder(row: Record<string, unknown>): ScalpOrder {
     entryYesPrice: Number(row["entry_yes_price"]),
     contractCount: Number(row["contract_count"]),
     budgetSpent: Number(row["budget_spent"]),
+    clientOrderId: row["client_order_id"] != null ? String(row["client_order_id"]) : null,
     orderId: row["order_id"] != null ? String(row["order_id"]) : null,
+    exchangeResponseReason: row["exchange_response_reason"] != null ? String(row["exchange_response_reason"]) : null,
     filledCount: Number(row["filled_count"]),
     avgFillPrice: row["avg_fill_price"] != null ? Number(row["avg_fill_price"]) : null,
     limitPrice: Number(row["limit_price"]),
@@ -1043,6 +1202,12 @@ function rowToScalpOrder(row: Record<string, unknown>): ScalpOrder {
     outcome: (row["outcome"] === "win" || row["outcome"] === "loss") ? row["outcome"] : null,
     pnl: row["pnl"] != null ? Number(row["pnl"]) : null,
     incidentId: row["incident_id"] != null ? String(row["incident_id"]) : null,
+    reconciledAt: row["reconciled_at"] != null
+      ? (row["reconciled_at"] instanceof Date ? row["reconciled_at"] : new Date(String(row["reconciled_at"])))
+      : null,
+    reconciliationEvidence: row["reconciliation_evidence"] != null && typeof row["reconciliation_evidence"] === "object"
+      ? row["reconciliation_evidence"] as Record<string, unknown>
+      : null,
     createdAt: row["created_at"] instanceof Date ? row["created_at"] : new Date(String(row["created_at"])),
     settledAt: row["settled_at"] != null ? (row["settled_at"] instanceof Date ? row["settled_at"] : new Date(String(row["settled_at"]))) : null,
   };

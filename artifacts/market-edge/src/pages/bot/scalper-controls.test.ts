@@ -52,4 +52,59 @@ describe("Scalper control wiring", () => {
     assert.ok(catchBlock, "applyConfigPatch catch block must exist");
     assert.doesNotMatch(catchBlock[1], /setConfigDraft\(\{\}\)/);
   });
+
+  it("surfaces distinct unresolved live attempts in the circuit-breaker banner", () => {
+    assert.match(panelSource, /statusData\?\.unresolvedAttempts/);
+    assert.match(panelSource, /list-scalper-unresolved-attempts/);
+    // Records are grouped by attemptId for the count, but every unresolved
+    // order record remains individually actionable.
+    assert.match(panelSource, /groups\.get\(attempt\.attemptId\)/);
+    assert.match(panelSource, /records\.map\(\(record, index\)/);
+    // Each attempt shows its symbol, original window/time, and a readable reason.
+    assert.match(panelSource, /text-scalper-unresolved-symbol-/);
+    assert.match(panelSource, /wkToEstRange\(attempt\.windowKey\)/);
+    assert.match(panelSource, /fmtDateTime\(attempt\.createdAt\)/);
+    assert.match(panelSource, /text-scalper-unresolved-reason-/);
+    assert.match(panelSource, /readableReason\(record\.reason\)/);
+  });
+
+  it("only offers Reconcile with Kalshi when an order record exists", () => {
+    assert.match(panelSource, /record\.orderRecordId \? \(/);
+    assert.match(panelSource, /button-scalper-reconcile-/);
+    assert.match(panelSource, /Reconcile with Kalshi/);
+    assert.match(panelSource, /No order to reconcile/);
+  });
+
+  it("posts the reconcile request with only the orderRecordId", () => {
+    assert.match(
+      panelSource,
+      /authPost\(\s*"\/crypto\/scalper\/reconcile-order",\s*\{\s*orderRecordId: attempt\.orderRecordId,\s*\}\s*\)/,
+    );
+  });
+
+  it("tracks reconcile busy state independently from the config/reset mutation state", () => {
+    assert.match(panelSource, /reconcileBusyId, setReconcileBusyId/);
+    assert.match(panelSource, /setReconcileBusyId\(attempt\.orderRecordId \?\? attempt\.attemptId\)/);
+    assert.match(panelSource, /reconcileBusyId === busyKey \? "Reconciling…"/);
+    // Reconcile buttons disable on reconcile state, not the config mutation state.
+    assert.match(panelSource, /disabled=\{!canManage \|\| reconcileBusyId !== null\}/);
+    // Reset stays gated only by the existing mutation state.
+    assert.match(panelSource, /onClick=\{resetCircuitBreaker\}\s*\n\s*disabled=\{!canManage \|\| mutationBusy !== null\}/);
+  });
+
+  it("invalidates config, status, history, and performance after a successful reconcile", () => {
+    const reconcileFn = panelSource.match(/async function reconcileAttempt[\s\S]*?\n  \}/);
+    assert.ok(reconcileFn, "reconcileAttempt function must exist");
+    const body = reconcileFn[0];
+    assert.match(body, /invalidateQueries\(\{ queryKey: \["bot-scalper-config"\] \}\)/);
+    assert.match(body, /invalidateQueries\(\{ queryKey: \["bot-scalper-status"\] \}\)/);
+    assert.match(body, /invalidateQueries\(\{ queryKey: \["bot-scalper-history"\] \}\)/);
+    assert.match(body, /invalidateQueries\(\{ queryKey: \["bot-scalper-perf"\] \}\)/);
+  });
+
+  it("does not render raw client, exchange, or order IDs in the UI", () => {
+    assert.doesNotMatch(panelSource, /\{attempt\.clientOrderId\}/);
+    assert.doesNotMatch(panelSource, /\{attempt\.exchangeOrderId\}/);
+    assert.doesNotMatch(panelSource, /\{attempt\.orderRecordId\}/);
+  });
 });

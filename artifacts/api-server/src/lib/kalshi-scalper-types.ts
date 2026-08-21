@@ -126,7 +126,11 @@ export interface ScalpOrder {
   contractCount: number;
   /** Actual $ cost spent = winningContractCost * filledCount */
   budgetSpent: number;
+  /** Caller-generated idempotency/reconciliation key persisted before live POST. */
+  clientOrderId: string | null;
   orderId: string | null;
+  /** Exact strict-parser/transport reason retained for future reconciliation. */
+  exchangeResponseReason: string | null;
   filledCount: number;
   /** avgFillPrice is always the YES-side fraction as returned by placeOrder. */
   avgFillPrice: number | null;
@@ -140,6 +144,8 @@ export interface ScalpOrder {
   outcome: "win" | "loss" | null;
   pnl: number | null;
   incidentId: string | null;
+  reconciledAt: Date | null;
+  reconciliationEvidence: Record<string, unknown> | null;
   createdAt: Date;
   settledAt: Date | null;
 }

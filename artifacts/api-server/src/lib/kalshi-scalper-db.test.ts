@@ -241,7 +241,9 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
         entryYesPrice: 0.95,
         contractCount: 2,
         budgetSpent: 0,
+        clientOrderId: `client-${submission}-${wk}`,
         orderId: `exchange-${submission}`,
+        exchangeResponseReason: null,
         filledCount: 0,
         avgFillPrice: null,
         limitPrice: 0.95,
@@ -252,6 +254,8 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
         outcome: null,
         pnl: null,
         incidentId: null,
+        reconciledAt: null,
+        reconciliationEvidence: null,
         createdAt: new Date(),
         settledAt: null,
       });
@@ -298,6 +302,185 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     }
 
     assert.ok(claim.reservationId);
+  });
+
+  it("reconciles one uncertain order atomically and releases its reservation only once", async () => {
+    const wk = `DBTEST-reconcile-${Date.now()}`;
+    const orderRecordId = `order-${wk}`;
+    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "GOLD", wk, "T", 2, null, null);
+    assert.equal(claim.allowed, true);
+    await db.insertScalpOrderIntent({
+      id: orderRecordId,
+      mode: MODE,
+      symbol: "GOLD",
+      windowKey: wk,
+      ticker: "T",
+      side: "yes",
+      entryYesPrice: 0.94,
+      contractCount: 2,
+      budgetSpent: 0,
+      clientOrderId: `client-${wk}`,
+      orderId: null,
+      exchangeResponseReason: "unparseable_fill_count",
+      filledCount: 0,
+      avgFillPrice: null,
+      limitPrice: 0.94,
+      winningContractCost: null,
+      status: "unknown",
+      errorMessage: "response could not be verified",
+      settlementResult: null,
+      outcome: null,
+      pnl: null,
+      incidentId: null,
+      reconciledAt: null,
+      reconciliationEvidence: null,
+      createdAt: new Date(),
+      settledAt: null,
+    });
+
+    const first = await db.reconcileScalpOrderAndReleaseReservation({
+      orderRecordId,
+      mode: MODE,
+      symbol: "GOLD",
+      windowKey: wk,
+      status: "filled",
+      reservationStatus: "filled",
+      filledCount: 1.75,
+      avgFillPrice: 0.9314285714285714,
+      winningContractCost: 0.9314285714285714,
+      budgetSpent: 1.63,
+      exchangeOrderId: "exchange-order",
+      exchangeResponseReason: "reconciled_authoritative_fills",
+      evidence: { source: "test" },
+    });
+    const second = await db.reconcileScalpOrderAndReleaseReservation({
+      orderRecordId,
+      mode: MODE,
+      symbol: "GOLD",
+      windowKey: wk,
+      status: "filled",
+      reservationStatus: "filled",
+      filledCount: 1.75,
+      avgFillPrice: 0.9314285714285714,
+      winningContractCost: 0.9314285714285714,
+      budgetSpent: 1.63,
+      exchangeOrderId: "exchange-order",
+      exchangeResponseReason: "reconciled_authoritative_fills",
+      evidence: { source: "test-repeat" },
+    });
+    assert.equal(first, "resolved");
+    assert.equal(second, "already_resolved");
+
+    const verify = await pool.connect();
+    try {
+      const orderRow = await verify.query(
+        `SELECT status, filled_count::text, avg_fill_price::text,
+                winning_contract_cost::text, budget_spent::text,
+                reconciled_at, reconciliation_evidence
+           FROM kalshi_scalp_orders WHERE id = $1`,
+        [orderRecordId],
+      );
+      const reservationRow = await verify.query(
+        `SELECT status, reserved_budget
+           FROM kalshi_scalp_reservations
+          WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "GOLD", wk],
+      );
+      assert.equal(orderRow.rows[0]?.status, "filled");
+      assert.equal(orderRow.rows[0]?.filled_count, "1.75");
+      assert.equal(orderRow.rows[0]?.avg_fill_price, "0.93142857");
+      assert.equal(orderRow.rows[0]?.winning_contract_cost, "0.93142857");
+      assert.equal(orderRow.rows[0]?.budget_spent, "1.63000000");
+      assert.ok(orderRow.rows[0]?.reconciled_at);
+      assert.deepEqual(orderRow.rows[0]?.reconciliation_evidence, { source: "test" });
+      assert.equal(reservationRow.rows[0]?.status, "filled");
+      assert.equal(Number(reservationRow.rows[0]?.reserved_budget), 0);
+    } finally {
+      verify.release();
+    }
+  });
+
+  it("keeps the reservation held until every unresolved sibling order is reconciled", async () => {
+    const wk = `DBTEST-siblings-${Date.now()}`;
+    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "SILVER", wk, "T", 2, null, null);
+    assert.equal(claim.allowed, true);
+    for (const suffix of ["a", "b"]) {
+      await db.insertScalpOrderIntent({
+        id: `order-${suffix}-${wk}`,
+        mode: MODE,
+        symbol: "SILVER",
+        windowKey: wk,
+        ticker: "T",
+        side: "yes",
+        entryYesPrice: 0.94,
+        contractCount: 2,
+        budgetSpent: 0,
+        clientOrderId: `client-${suffix}-${wk}`,
+        orderId: null,
+        exchangeResponseReason: "submit_response_unverified",
+        filledCount: 0,
+        avgFillPrice: null,
+        limitPrice: 0.94,
+        winningContractCost: null,
+        status: "unknown",
+        errorMessage: "response could not be verified",
+        settlementResult: null,
+        outcome: null,
+        pnl: null,
+        incidentId: null,
+        reconciledAt: null,
+        reconciliationEvidence: null,
+        createdAt: new Date(),
+        settledAt: null,
+      });
+    }
+
+    const first = await db.reconcileScalpOrderAndReleaseReservation({
+      orderRecordId: `order-a-${wk}`,
+      mode: MODE,
+      symbol: "SILVER",
+      windowKey: wk,
+      status: "zero_fill",
+      reservationStatus: "zero_fill",
+      filledCount: 0,
+      avgFillPrice: null,
+      winningContractCost: null,
+      budgetSpent: 0,
+      exchangeOrderId: "exchange-a",
+      exchangeResponseReason: "reconciled_terminal_zero_fill",
+      evidence: { source: "test" },
+    });
+    assert.equal(first, "resolved_held");
+
+    const verifyHeld = await pool.connect();
+    try {
+      const held = await verifyHeld.query(
+        `SELECT status, reserved_budget FROM kalshi_scalp_reservations
+          WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "SILVER", wk],
+      );
+      assert.equal(held.rows[0]?.status, "unknown");
+      assert.equal(Number(held.rows[0]?.reserved_budget), 2);
+    } finally {
+      verifyHeld.release();
+    }
+
+    const second = await db.reconcileScalpOrderAndReleaseReservation({
+      orderRecordId: `order-b-${wk}`,
+      mode: MODE,
+      symbol: "SILVER",
+      windowKey: wk,
+      status: "zero_fill",
+      reservationStatus: "zero_fill",
+      filledCount: 0,
+      avgFillPrice: null,
+      winningContractCost: null,
+      budgetSpent: 0,
+      exchangeOrderId: "exchange-b",
+      exchangeResponseReason: "reconciled_terminal_zero_fill",
+      evidence: { source: "test" },
+    });
+    assert.equal(second, "resolved");
   });
 });
 

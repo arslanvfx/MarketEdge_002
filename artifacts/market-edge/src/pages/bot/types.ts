@@ -606,6 +606,26 @@ export interface ScalperStatus {
     preflightLeadSeconds: number;
   };
   markets: ScalperStatusMarket[];
+  unresolvedAttempts?: ScalperUnresolvedAttempt[];
+}
+
+export interface ScalperUnresolvedAttempt {
+  attemptId: string;
+  orderRecordId: string | null;
+  reservationId: string | null;
+  mode: "live";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  status: string;
+  side: "yes" | "no" | null;
+  contractCount: number | null;
+  limitPrice: number | null;
+  clientOrderId: string | null;
+  exchangeOrderId: string | null;
+  reason: string | null;
+  reservedBudget: number;
+  createdAt: string;
 }
 
 export interface ScalperAttempt {
