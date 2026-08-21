@@ -12,7 +12,7 @@ interface ActivePositionsProps {
 
 export function ActivePositions({ openPosList, closeManualError, closingManualSym, closeManualPos, openManualOrder }: ActivePositionsProps) {
   if (openPosList.length === 0) return null;
-  const scalperCardClass = "border-amber-400/65 bg-amber-300/[0.12] shadow-[inset_0_1px_0_rgba(253,230,138,0.14),0_10px_30px_rgba(217,119,6,0.08)]";
+  const scalperCardClass = "border-amber-300/80 bg-gradient-to-br from-yellow-300/[0.18] via-amber-300/[0.11] to-orange-400/[0.18] shadow-[inset_0_1px_0_rgba(255,251,235,0.24),0_12px_34px_rgba(245,158,11,0.14)]";
   return (
           <div className="space-y-3">
             {openPosList.length > 1 && (
