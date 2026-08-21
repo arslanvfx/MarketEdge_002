@@ -1,10 +1,9 @@
 // ---------------------------------------------------------------------------
 // kalshi-scalper-service.ts — Isolated high-value Kalshi scalper service.
 //
-// Runs independently on a 1-second cadence.
-// First authenticated quote used for guard/cap/balance work.
-// A SECOND authenticated quote is fetched immediately before paper simulation
-// and live placeOrder, re-checking all guards with fresh prices.
+// Runs independently on a 250ms scan cadence with bounded authenticated work.
+// Preflight warms readiness before the final window. A single authoritative
+// authenticated quote is fetched concurrently with final guard inputs.
 // Regular bot state read-only (mode only); regular positions never mutated.
 // ---------------------------------------------------------------------------
 
@@ -35,6 +34,13 @@ import {
   buildExecutionRiskSnapshot,
   compareRiskSnapshot,
   sizeOrderWithinReservedBudget,
+  evaluateScalpReservationRetry,
+  SCALP_AUTH_RETRY_COOLDOWN_MS,
+  SCALP_MAX_CONCURRENT_CANDIDATES,
+  SCALP_MAX_SUBMISSIONS_PER_WINDOW,
+  SCALP_PREFLIGHT_LEAD_SECONDS,
+  SCALP_PREFLIGHT_REFRESH_MS,
+  SCALP_SCAN_INTERVAL_MS,
   type FreefallSample,
   type ExecutionRiskSnapshot,
   type ScalpConfigPatch,
@@ -46,6 +52,7 @@ import {
   claimReservationAndCap,
   updateReservationStatus,
   countTodayReservations,
+  getScalpCommittedTotals,
   insertScalpOrderIntent,
   finalizeScalpOrder,
   finalizeOrderAndReleaseReservation,
@@ -74,9 +81,90 @@ let _scanInterval: ReturnType<typeof setInterval> | null = null;
 let _lastScanAt: number | null = null;
 let _lastError: string | null = null;
 
+type ScalpPreflightState = "idle" | "warming" | "ready" | "blocked";
+interface ScalpPreflightMarketStatusInternal {
+  symbol: string;
+  ready: boolean;
+  reason: string | null;
+}
+interface ScalpPreflightStatusInternal {
+  state: ScalpPreflightState;
+  mode: ScalpMode;
+  windowKey: string | null;
+  checkedAt: number | null;
+  startsInSeconds: number | null;
+  readySymbols: number;
+  totalSymbols: number;
+  reason: string | null;
+  availableBalance: number | null;
+  dailyCommitted: number | null;
+  openCommitted: number | null;
+  markets: ScalpPreflightMarketStatusInternal[];
+}
+
+const _attemptsInFlight = new Set<string>();
+const _terminalAttemptKeys = new Set<string>();
+const _nextAttemptAt = new Map<string, number>();
+const _preflightIdentityReady = new Set<string>();
+let _lastSampleCollectionAt = 0;
+let _lastObservedWindowKey: string | null = null;
+let _preflightInFlight = false;
+let _lastPreflightStartedAt = 0;
+let _preflightStatus: ScalpPreflightStatusInternal = {
+  state: "idle",
+  mode: _config.mode,
+  windowKey: null,
+  checkedAt: null,
+  startsInSeconds: null,
+  readySymbols: 0,
+  totalSymbols: 0,
+  reason: null,
+  availableBalance: null,
+  dailyCommitted: null,
+  openCommitted: null,
+  markets: [],
+};
+
 // Per-symbol price samples for the scalper's own freefall guard (never shared)
 const _priceSamples = new Map<string, FreefallSample[]>();
 const MAX_PRICE_SAMPLES = 120;
+type PriceSamplePriority = "authoritative" | "background";
+interface PriceSampleJob {
+  key: string;
+  symbol: string;
+  product: string;
+  priority: PriceSamplePriority;
+  started: boolean;
+  promise: Promise<boolean>;
+  resolve: (value: boolean) => void;
+}
+const _priceSampleJobs = new Map<string, PriceSampleJob>();
+const _authoritativeSampleQueue: PriceSampleJob[] = [];
+const _backgroundSampleQueue: PriceSampleJob[] = [];
+let _activePriceSampleFetches = 0;
+
+function _attemptKey(mode: ScalpMode, symbol: string, windowKey: string): string {
+  return `${mode}:${symbol}:${windowKey}`;
+}
+
+function _resetPreflightState(): void {
+  _preflightIdentityReady.clear();
+  _lastPreflightStartedAt = 0;
+  _preflightStatus = {
+    state: "idle",
+    mode: _config.mode,
+    windowKey: null,
+    checkedAt: null,
+    startsInSeconds: null,
+    readySymbols: 0,
+    totalSymbols: 0,
+    reason: null,
+    availableBalance: null,
+    dailyCommitted: null,
+    openCommitted: null,
+    markets: [],
+  };
+}
 
 // Read regular bot mode read-only for display metadata only.
 function getRegularBotMode(): string | null {
@@ -116,6 +204,7 @@ async function _tripCircuitBreaker(reason: string): Promise<void> {
 export async function initScalper(): Promise<void> {
   await runScalpMigrations();
   _config = await loadScalpConfigFromDB();
+  _resetPreflightState();
   logger.info(
     { enabled: _config.enabled, mode: _config.mode, circuitBreaker: _config.circuitBreaker },
     "[kalshi-scalper] initialized",
@@ -136,8 +225,11 @@ function _startScanLoop(): void {
     _runScanTick().catch((err) =>
       logger.warn({ err }, "[kalshi-scalper] scan tick error (non-fatal)"),
     );
-  }, 1_000);
-  logger.info("[kalshi-scalper] scan loop started (1-second cadence)");
+  }, SCALP_SCAN_INTERVAL_MS);
+  logger.info(
+    { intervalMs: SCALP_SCAN_INTERVAL_MS },
+    "[kalshi-scalper] scan loop started",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +343,7 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
   // Persist BEFORE replacing in-memory
   await saveScalpConfigToDB(merged);
   _config = merged;
+  _resetPreflightState();
   logger.info({ enabled: _config.enabled, mode: _config.mode }, "[kalshi-scalper] config updated");
   return { ..._config };
 }
@@ -284,6 +377,7 @@ export async function resetCircuitBreaker(): Promise<ScalpConfig> {
   const updated = { ..._config, circuitBreaker: false, circuitBreakerReason: null };
   await saveScalpConfigToDB(updated);
   _config = updated;
+  _resetPreflightState();
   logger.info("[kalshi-scalper] circuit breaker reset");
   return { ..._config };
 }
@@ -301,19 +395,302 @@ export async function resetCircuitBreaker(): Promise<ScalpConfig> {
  * `false` as "no fresh data" and fail closed — existing old samples must NOT
  * mask a failed fresh fetch.
  */
-async function _collectPriceSample(symbol: string, product: string): Promise<boolean> {
-  try {
-    const price = await getTicker(product);
-    if (!Number.isFinite(price) || price <= 0) return false;
-    const samples = _priceSamples.get(symbol) ?? [];
-    samples.push({ price, at: Date.now() });
-    if (samples.length > MAX_PRICE_SAMPLES) samples.splice(0, samples.length - MAX_PRICE_SAMPLES);
-    _priceSamples.set(symbol, samples);
-    return true;
-  } catch {
-    // Fetch failed — no fresh sample available.
-    return false;
+function _removeQueuedSampleJob(queue: PriceSampleJob[], job: PriceSampleJob): void {
+  const index = queue.indexOf(job);
+  if (index >= 0) queue.splice(index, 1);
+}
+
+function _drainPriceSampleQueue(): void {
+  while (_activePriceSampleFetches < SCALP_MAX_CONCURRENT_CANDIDATES) {
+    const job = _authoritativeSampleQueue.shift() ?? _backgroundSampleQueue.shift();
+    if (!job) return;
+    if (job.started) continue;
+    job.started = true;
+    _activePriceSampleFetches += 1;
+    void (async () => {
+      try {
+        // getTicker has its own AbortController-backed request timeout.
+        const price = await getTicker(job.product);
+        if (!Number.isFinite(price) || price <= 0) return false;
+        const samples = _priceSamples.get(job.symbol) ?? [];
+        samples.push({ price, at: Date.now() });
+        if (samples.length > MAX_PRICE_SAMPLES) {
+          samples.splice(0, samples.length - MAX_PRICE_SAMPLES);
+        }
+        _priceSamples.set(job.symbol, samples);
+        return true;
+      } catch {
+        // Fetch failed — no fresh sample available.
+        return false;
+      }
+    })()
+      .then(job.resolve)
+      .finally(() => {
+        _activePriceSampleFetches -= 1;
+        if (_priceSampleJobs.get(job.key) === job) {
+          _priceSampleJobs.delete(job.key);
+        }
+        _drainPriceSampleQueue();
+      });
   }
+}
+
+function _collectPriceSample(
+  symbol: string,
+  product: string,
+  priority: PriceSamplePriority = "authoritative",
+): Promise<boolean> {
+  const key = symbol.toUpperCase();
+  const existing = _priceSampleJobs.get(key);
+  if (existing) {
+    if (
+      priority === "authoritative" &&
+      existing.priority === "background" &&
+      !existing.started
+    ) {
+      existing.priority = "authoritative";
+      _removeQueuedSampleJob(_backgroundSampleQueue, existing);
+      _authoritativeSampleQueue.push(existing);
+      _drainPriceSampleQueue();
+    }
+    return existing.promise;
+  }
+
+  let resolve!: (value: boolean) => void;
+  const promise = new Promise<boolean>((done) => {
+    resolve = done;
+  });
+  const job: PriceSampleJob = {
+    key,
+    symbol: key,
+    product,
+    priority,
+    started: false,
+    promise,
+    resolve,
+  };
+  _priceSampleJobs.set(key, job);
+  if (priority === "authoritative") {
+    _authoritativeSampleQueue.push(job);
+  } else {
+    _backgroundSampleQueue.push(job);
+  }
+  _drainPriceSampleQueue();
+  return promise;
+}
+
+interface ScalpPreflightTarget {
+  symbol: string;
+  product: string;
+  closeTime: string;
+  params: ReturnType<typeof resolveEffectiveParams>;
+}
+
+async function _runWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < items.length) {
+        const item = items[cursor++];
+        await worker(item);
+      }
+    }),
+  );
+}
+
+function _currentWindowCloseTime(windowKey: string): string | null {
+  const openMs = Date.parse(`${windowKey}:00.000Z`);
+  if (!Number.isFinite(openMs)) return null;
+  return new Date(openMs + 15 * 60_000).toISOString();
+}
+
+function _getPreflightTargets(windowKey: string, nowMs: number): {
+  targets: ScalpPreflightTarget[];
+  startsInSeconds: number | null;
+} {
+  const closeTime = _currentWindowCloseTime(windowKey);
+  if (!closeTime) return { targets: [], startsInSeconds: null };
+  const secondsRemaining = (Date.parse(closeTime) - nowMs) / 1_000;
+  if (!Number.isFinite(secondsRemaining) || secondsRemaining <= 0) {
+    return { targets: [], startsInSeconds: null };
+  }
+
+  const targets: ScalpPreflightTarget[] = [];
+  let startsInSeconds: number | null = null;
+  for (const coin of CRYPTO_COINS) {
+    const symbol = coin.symbol.toUpperCase();
+    if (!KALSHI_SERIES[symbol]) continue;
+    const params = resolveEffectiveParams(_config, symbol, "");
+    if (params.paused) continue;
+    const startsIn = Math.max(0, secondsRemaining - params.finalWindowSeconds);
+    startsInSeconds = startsInSeconds == null ? startsIn : Math.min(startsInSeconds, startsIn);
+    if (startsIn <= SCALP_PREFLIGHT_LEAD_SECONDS) {
+      targets.push({ symbol, product: coin.product, closeTime, params });
+    }
+  }
+  return { targets, startsInSeconds };
+}
+
+async function _runPreflight(
+  windowKey: string,
+  targets: ScalpPreflightTarget[],
+  startsInSeconds: number,
+): Promise<void> {
+  const mode = _config.mode;
+  const sampleTime = Date.now();
+  const accountPromise = Promise.all([
+    getScalpCommittedTotals(mode),
+    mode === "live"
+      ? getBalance().then(
+          (balance) => ({ available: balance.availableBalance, error: null as string | null }),
+          (err) => ({ available: null, error: String(err) }),
+        )
+      : Promise.resolve({ available: null, error: null as string | null }),
+  ]);
+
+  const needsIdentity = targets.filter(
+    (target) => !_preflightIdentityReady.has(`${windowKey}:${target.symbol}`),
+  );
+  await _runWithConcurrency(needsIdentity, SCALP_MAX_CONCURRENT_CANDIDATES, async (target) => {
+    try {
+      await fetchKalshiTarget(target.symbol, new Date(target.closeTime), true);
+      const refreshed = getKalshiCachedData(target.symbol);
+      if (
+        refreshed?.ticker &&
+        refreshed.closeTime &&
+        Math.abs(Date.parse(refreshed.closeTime) - Date.parse(target.closeTime)) <= 30_000
+      ) {
+        _preflightIdentityReady.add(`${windowKey}:${target.symbol}`);
+      }
+    } catch (err) {
+      logger.debug(
+        { err, symbol: target.symbol, windowKey },
+        "[kalshi-scalper] preflight identity warm-up failed",
+      );
+    }
+  });
+
+  const [{ dailyCommitted, openCommitted }, balance] = await accountPromise;
+  if (windowKey !== currentWindowKey() || mode !== _config.mode) return;
+
+  const marketStatuses = targets.map((target): ScalpPreflightMarketStatusInternal => {
+    let reason: string | null = null;
+    if (_config.circuitBreaker) {
+      reason = "circuit_breaker_active";
+    } else if (mode === "live" && balance.error) {
+      reason = "balance_unavailable";
+    } else if (
+      mode === "live" &&
+      balance.available != null &&
+      balance.available + 1e-9 < target.params.budgetDollars
+    ) {
+      reason = "insufficient_balance";
+    } else if (
+      _config.dailyCapDollars != null &&
+      dailyCommitted + target.params.budgetDollars > _config.dailyCapDollars + 1e-9
+    ) {
+      reason = "daily_cap_reached";
+    } else if (
+      _config.openCapDollars != null &&
+      openCommitted + target.params.budgetDollars > _config.openCapDollars + 1e-9
+    ) {
+      reason = "open_cap_reached";
+    } else if (!_preflightIdentityReady.has(`${windowKey}:${target.symbol}`)) {
+      reason = "market_identity_not_ready";
+    } else if (
+      _config.freefallGuardEnabled &&
+      !checkFreefallGuard(
+      _priceSamples.get(target.symbol) ?? [],
+      "yes",
+      sampleTime,
+      _config.freefallLookbackSeconds * 1_000,
+      _config.freefallThresholdPct,
+      ).evaluable
+    ) {
+      reason = "freefall_samples_not_ready";
+    }
+    return { symbol: target.symbol, ready: reason == null, reason };
+  });
+  const readySymbols = marketStatuses.filter((market) => market.ready).length;
+  const reason =
+    readySymbols === targets.length
+      ? null
+      : readySymbols === 0
+        ? marketStatuses[0]?.reason ?? "markets_not_ready"
+        : `${targets.length - readySymbols}_markets_blocked_or_warming`;
+
+  _preflightStatus = {
+    state: readySymbols === 0 ? "blocked" : "ready",
+    mode,
+    windowKey,
+    checkedAt: Date.now(),
+    startsInSeconds,
+    readySymbols,
+    totalSymbols: targets.length,
+    reason,
+    availableBalance: balance.available,
+    dailyCommitted,
+    openCommitted,
+    markets: marketStatuses,
+  };
+}
+
+function _maybeStartPreflight(windowKey: string, nowMs: number): void {
+  const plan = _getPreflightTargets(windowKey, nowMs);
+  if (plan.targets.length === 0) {
+    _preflightStatus = {
+      ..._preflightStatus,
+      state: "idle",
+      mode: _config.mode,
+      windowKey,
+      startsInSeconds: plan.startsInSeconds,
+      readySymbols: 0,
+      totalSymbols: 0,
+      markets: [],
+      reason: null,
+    };
+    return;
+  }
+
+  const startsInSeconds = plan.startsInSeconds ?? 0;
+  _preflightStatus = {
+    ..._preflightStatus,
+    state: _preflightInFlight ? "warming" : _preflightStatus.state,
+    mode: _config.mode,
+    windowKey,
+    startsInSeconds,
+    totalSymbols: plan.targets.length,
+  };
+  if (_preflightInFlight || nowMs - _lastPreflightStartedAt < SCALP_PREFLIGHT_REFRESH_MS) {
+    return;
+  }
+
+  _preflightInFlight = true;
+  _lastPreflightStartedAt = nowMs;
+  _preflightStatus = {
+    ..._preflightStatus,
+    state: "warming",
+    checkedAt: nowMs,
+    reason: null,
+  };
+  void _runPreflight(windowKey, plan.targets, startsInSeconds)
+    .catch((err) => {
+      _preflightStatus = {
+        ..._preflightStatus,
+        state: "blocked",
+        checkedAt: Date.now(),
+        reason: `preflight_failed:${String(err)}`,
+      };
+      logger.warn({ err, windowKey }, "[kalshi-scalper] preflight failed");
+    })
+    .finally(() => {
+      _preflightInFlight = false;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -336,31 +713,58 @@ async function _runScanTick(): Promise<void> {
 }
 
 async function _doScanTick(): Promise<void> {
-  if (!_config.enabled) return;
-  if (_config.circuitBreaker) {
-    logger.debug("[kalshi-scalper] circuit breaker active — scan suppressed");
+  if (!_config.enabled) {
+    _preflightStatus = {
+      ..._preflightStatus,
+      state: "idle",
+      reason: "scalper_disabled",
+      startsInSeconds: null,
+      readySymbols: 0,
+      totalSymbols: 0,
+    };
     return;
   }
 
   const wk = currentWindowKey();
   if (!wk) return;
+  if (_lastObservedWindowKey !== wk) {
+    _lastObservedWindowKey = wk;
+    _terminalAttemptKeys.clear();
+    _nextAttemptAt.clear();
+    _resetPreflightState();
+  }
 
   const mode = _config.mode;
 
-  // Collect freefall guard price samples for all active symbols
-  for (const coin of CRYPTO_COINS) {
-    if (KALSHI_SERIES[coin.symbol]) {
-      _collectPriceSample(coin.symbol, coin.product).catch(() => {});
+  // Keep Freefall Guard inputs warm at one-second cadence. The shared queue
+  // deduplicates each symbol and caps all underlying fetches at three.
+  if (Date.now() - _lastSampleCollectionAt >= 1_000) {
+    _lastSampleCollectionAt = Date.now();
+    for (const coin of CRYPTO_COINS) {
+      if (KALSHI_SERIES[coin.symbol]) {
+        void _collectPriceSample(coin.symbol, coin.product, "background");
+      }
     }
   }
 
-  // Quick scan using cached public quotes to find candidates
+  _maybeStartPreflight(wk, Date.now());
+  if (_config.circuitBreaker) {
+    _preflightStatus = {
+      ..._preflightStatus,
+      state: "blocked",
+      reason: "circuit_breaker_active",
+    };
+    logger.debug("[kalshi-scalper] circuit breaker active — scan suppressed");
+    return;
+  }
+
+  // Quick scan using cached public quotes to find candidates.
   const candidates = _findCandidates(wk);
   if (candidates.length === 0) return;
 
-  for (const candidate of candidates) {
+  await _runWithConcurrency(candidates, SCALP_MAX_CONCURRENT_CANDIDATES, async (candidate) => {
     await _evaluateCandidate(candidate, wk, mode);
-  }
+  });
 }
 
 interface Candidate {
@@ -375,10 +779,19 @@ interface Candidate {
 
 function _findCandidates(wk: string): Candidate[] {
   const candidates: Candidate[] = [];
+  const now = Date.now();
 
   for (const coin of CRYPTO_COINS) {
     const sym = coin.symbol.toUpperCase();
     if (!KALSHI_SERIES[sym]) continue;
+    const key = _attemptKey(_config.mode, sym, wk);
+    if (
+      _attemptsInFlight.has(key) ||
+      _terminalAttemptKeys.has(key) ||
+      (_nextAttemptAt.get(key) ?? 0) > now
+    ) {
+      continue;
+    }
 
     const params = resolveEffectiveParams(_config, sym, "");
     if (params.paused) continue;
@@ -387,7 +800,7 @@ function _findCandidates(wk: string): Candidate[] {
     if (!cached?.ticker || !cached.closeTime) continue;
 
     // Quick timing check before expensive orderbook fetch
-    if (!isInFinalWindow(cached.closeTime, Date.now(), params.finalWindowSeconds, wk)) continue;
+    if (!isInFinalWindow(cached.closeTime, now, params.finalWindowSeconds, wk)) continue;
 
     // Use cached quotes for initial candidate detection
     const yesAsk = cached.yesAsk ?? null;
@@ -435,6 +848,27 @@ class PostSubmitPersistenceError extends Error {
     super(`post-submit persistence failed — fail closed: ${String(cause)}`);
     this.name = "PostSubmitPersistenceError";
     this.cause = cause;
+  }
+}
+
+function _rememberReservationOutcome(
+  key: string,
+  status: string,
+  reason: string | null,
+  submittedOrders: number,
+): void {
+  const retry = evaluateScalpReservationRetry({
+    status,
+    reason,
+    elapsedMs: 0,
+    submittedOrders,
+  });
+  if (retry.retryAfterMs != null) {
+    _nextAttemptAt.set(key, Date.now() + retry.retryAfterMs);
+    _terminalAttemptKeys.delete(key);
+  } else {
+    _nextAttemptAt.delete(key);
+    _terminalAttemptKeys.add(key);
   }
 }
 
@@ -500,64 +934,76 @@ async function _evaluateCandidate(
   mode: ScalpMode,
 ): Promise<void> {
   const { symbol, ticker, closeTime } = candidate;
-  const params = resolveEffectiveParams(_config, symbol, ticker);
-
-  // ── Pin the IMMUTABLE execution-risk snapshot at claim time ────────────────
-  // Every sizing, cap, band, window, freefall and balance decision downstream
-  // uses THIS snapshot. claimReservationAndCap reserves snapshot.budgetDollars.
-  // We never atomically resize; any mid-flight change fails closed later.
-  const snapshot: ExecutionRiskSnapshot = buildExecutionRiskSnapshot(
-    _config,
-    params,
-    { symbol, windowKey, ticker, closeTime },
-  );
-  const budget = snapshot.budgetDollars;
-
-  // ── ATOMIC claim + cap under a single per-mode advisory-locked transaction ──
-  const reservationId = crypto.randomUUID();
-  let claim: Awaited<ReturnType<typeof claimReservationAndCap>>;
+  const key = _attemptKey(mode, symbol, windowKey);
+  if (_attemptsInFlight.has(key)) return;
+  _attemptsInFlight.add(key);
   try {
-    claim = await claimReservationAndCap(
-      reservationId, mode, symbol, windowKey, ticker, budget,
-      snapshot.dailyCapDollars, snapshot.openCapDollars,
+    const params = resolveEffectiveParams(_config, symbol, ticker);
+    // Pin the immutable execution-risk snapshot at claim time. Every sizing,
+    // cap, band, window, freefall and balance decision downstream uses it.
+    const snapshot: ExecutionRiskSnapshot = buildExecutionRiskSnapshot(
+      _config,
+      params,
+      { symbol, windowKey, ticker, closeTime },
     );
-  } catch (err) {
-    // Claim transaction failed BEFORE any order intent — safe to skip; no
-    // reservation may exist (rolled back) or it exists as 'claimed' with 0 budget.
-    _lastError = String(err);
-    logger.warn({ err, symbol, windowKey, mode }, "[kalshi-scalper] claim-and-cap failed");
-    return;
-  }
+    const budget = snapshot.budgetDollars;
 
-  if (!claim.claimed) {
-    return; // Duplicate — permanent, never retry.
-  }
-  if (!claim.allowed) {
-    // Cap denied. Row already persisted 'skipped' with reserved_budget=0 in the
-    // same transaction. One-attempt blocking preserved. Nothing else to do.
-    logger.debug({ symbol, windowKey, reason: claim.reason }, "[kalshi-scalper] cap-denied, skipped");
-    return;
-  }
-
-  // Reserved budget is now held atomically. Proceed to guards + submit,
-  // pinned to the exact snapshot under which the budget was reserved.
-  try {
-    await _executeScalpAttempt(reservationId, candidate, windowKey, mode, snapshot);
-  } catch (err) {
-    _lastError = String(err);
-    if (err instanceof OrderIntentExistsError || err instanceof PostSubmitPersistenceError) {
-      // FAIL-CLOSED: the broker was (or may have been) called. Do NOT release
-      // the reserved budget here. The unknown handling inside
-      // _executeScalpAttempt already tripped the breaker / marked unknown.
-      logger.error(
-        { err: err.cause, kind: err.name, symbol, windowKey, mode },
-        "[kalshi-scalper] post-intent failure — reserved budget retained (fail-closed)",
+    let claim: Awaited<ReturnType<typeof claimReservationAndCap>>;
+    try {
+      claim = await claimReservationAndCap(
+        crypto.randomUUID(), mode, symbol, windowKey, ticker, budget,
+        snapshot.dailyCapDollars, snapshot.openCapDollars,
       );
+    } catch (err) {
+      _lastError = String(err);
+      logger.warn({ err, symbol, windowKey, mode }, "[kalshi-scalper] claim-and-cap failed");
       return;
     }
-    // PRE-ORDER failure only: no intent persisted. Safe to release reservation.
-    logger.warn({ err, symbol, windowKey, mode }, "[kalshi-scalper] pre-order attempt error — releasing reservation");
-    await updateReservationStatus(mode, symbol, windowKey, "error", String(err), true).catch(() => {});
+
+    if (!claim.claimed) {
+      if (claim.retryAfterMs != null) {
+        _nextAttemptAt.set(key, Date.now() + claim.retryAfterMs);
+      } else {
+        _terminalAttemptKeys.add(key);
+      }
+      return;
+    }
+    if (!claim.allowed || !claim.reservationId) {
+      _terminalAttemptKeys.add(key);
+      logger.debug({ symbol, windowKey, reason: claim.reason }, "[kalshi-scalper] cap-denied, skipped");
+      return;
+    }
+
+    try {
+      await _executeScalpAttempt(
+        claim.reservationId,
+        candidate,
+        windowKey,
+        mode,
+        snapshot,
+        claim.submittedOrders,
+        key,
+      );
+    } catch (err) {
+      _lastError = String(err);
+      if (err instanceof OrderIntentExistsError || err instanceof PostSubmitPersistenceError) {
+        _terminalAttemptKeys.add(key);
+        // FAIL-CLOSED: the broker was (or may have been) called. Do NOT release
+        // the reserved budget here. Unknown handling already tripped the breaker.
+        logger.error(
+          { err: err.cause, kind: err.name, symbol, windowKey, mode },
+          "[kalshi-scalper] post-intent failure — reserved budget retained (fail-closed)",
+        );
+        return;
+      }
+      // PRE-ORDER failure only: no intent persisted. Safe to release, but
+      // arbitrary errors are terminal rather than blindly retried.
+      logger.warn({ err, symbol, windowKey, mode }, "[kalshi-scalper] pre-order attempt error — releasing reservation");
+      await updateReservationStatus(mode, symbol, windowKey, "error", String(err), true).catch(() => {});
+      _terminalAttemptKeys.add(key);
+    }
+  } finally {
+    _attemptsInFlight.delete(key);
   }
 }
 
@@ -617,54 +1063,10 @@ async function _executeScalpAttempt(
   windowKey: string,
   mode: ScalpMode,
   snapshot: ExecutionRiskSnapshot,
+  priorSubmittedOrders: number,
+  attemptKey: string,
 ): Promise<void> {
   const { symbol, ticker, closeTime, side: initialSide } = candidate;
-
-  // ── FIRST authenticated orderbook fetch — for guards/caps/balance ─────────
-  const ob1 = await fetchOrderbookPrices(ticker);
-  const quote1 = ob1 ? validateOrderbookQuote(ob1, ticker, closeTime) : null;
-
-  if (!quote1) {
-    logger.warn({ symbol, ticker }, "[kalshi-scalper] first orderbook quote invalid — skipping");
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "first_quote_invalid", true);
-    return;
-  }
-
-  // Re-check band and side from first quote — using PINNED snapshot band.
-  const match1 = selectScalpSide(quote1.yesAsk, quote1.noAsk, snapshot.bandMin, snapshot.bandMax);
-  if (!match1) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "first_quote_outside_band", true);
-    return;
-  }
-
-  // Side must not flip from initial candidate
-  if (match1.side !== initialSide) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "side_flipped_first_quote", true);
-    return;
-  }
-
-  // ── Early freefall guard (uses PINNED snapshot config) ────────────────────
-  // EARLY reject only; the authoritative freefall check runs at the final
-  // pre-submit boundary against a guaranteed-fresh sample (below). Fail closed:
-  // when enabled, skip on BLOCKED *and* on UNAVAILABLE (not evaluable).
-  if (snapshot.freefallGuardEnabled) {
-    const samples = _priceSamples.get(symbol) ?? [];
-    const ffResult = checkFreefallGuard(
-      samples,
-      match1.side,
-      Date.now(),
-      snapshot.freefallLookbackSeconds * 1000,
-      snapshot.freefallThresholdPct,
-    );
-    if (!ffResult.evaluable || ffResult.blocked) {
-      logger.info(
-        { symbol, side: match1.side, evaluable: ffResult.evaluable, reason: ffResult.reason, adverseMovePct: ffResult.adverseMovePct },
-        "[kalshi-scalper] freefall guard skip (early)",
-      );
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", ffResult.reason ?? "freefall_blocked", true);
-      return;
-    }
-  }
 
   // NOTE: cap checks are NOT repeated here. They were performed atomically
   // inside claimReservationAndCap under the per-mode advisory lock, which
@@ -675,28 +1077,9 @@ async function _executeScalpAttempt(
   // params2 budget. This is the authoritative value throughout.
   const reservedBudget = snapshot.budgetDollars;
 
-  // ── Early balance check (live mode only) ─────────────────────────────────
-  // Non-authoritative pre-flight only; the final balance check (against actual
-  // worst-case submit exposure) runs at the pre-submit boundary below.
-  if (mode === "live") {
-    try {
-      const balance = await getBalance();
-      if (balance.availableBalance < reservedBudget) {
-        logger.warn({ symbol, available: balance.availableBalance, reservedBudget }, "[kalshi-scalper] insufficient balance (early) — skipping");
-        await updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance", true);
-        return;
-      }
-    } catch (err) {
-      logger.warn({ err, symbol }, "[kalshi-scalper] balance check failed (early) — skipping");
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_check_failed", true);
-      return;
-    }
-  }
-
   // ── FINAL PRE-SUBMIT BOUNDARY ─────────────────────────────────────────────
-  // Re-fetch immediately before paper simulation AND live submit. We re-resolve
-  // the freshest config + effective params and compare the ENTIRE pinned
-  // snapshot; any change fails closed BEFORE any order intent is written.
+  // Identity, authenticated quote, balance, and fresh Freefall sample are
+  // warmed concurrently. Every result remains mandatory and fail-closed.
 
   if (_config.circuitBreaker) {
     await updateReservationStatus(mode, symbol, windowKey, "skipped", "breaker_before_submit", true);
@@ -710,15 +1093,38 @@ async function _executeScalpAttempt(
     return;
   }
 
-  // ── Force-refresh current market identity immediately before second book ───
-  // Re-resolve the authoritative ticker/closeTime for this symbol+window and
-  // require an EXACT match with the reserved candidate. This guards against the
-  // cache pointing at an adjacent/pre-published market by the time we submit.
-  try {
-    await fetchKalshiTarget(symbol, new Date(closeTime), true);
-  } catch (err) {
-    logger.warn({ err, symbol }, "[kalshi-scalper] identity force-refresh failed — skipping permanently");
+  const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
+  const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
+    fetchKalshiTarget(symbol, new Date(closeTime), true).then(
+      () => ({ ok: true as const, error: null as unknown }),
+      (error) => ({ ok: false as const, error }),
+    ),
+    fetchOrderbookPrices(ticker).then(
+      (orderbook) => ({ ok: true as const, orderbook }),
+      (error) => ({ ok: false as const, orderbook: null, error }),
+    ),
+    snapshot.freefallGuardEnabled
+      ? coin
+        ? _collectPriceSample(coin.symbol, coin.product)
+        : Promise.resolve(false)
+      : Promise.resolve(true),
+    mode === "live"
+      ? getBalance().then(
+          (balance) => ({ ok: true as const, availableBalance: balance.availableBalance }),
+          (error) => ({ ok: false as const, availableBalance: null, error }),
+        )
+      : Promise.resolve({ ok: true as const, availableBalance: null }),
+  ]);
+
+  // Re-resolve the authoritative ticker/closeTime and require an exact match
+  // with the reserved candidate. Identity failure is terminal for this window.
+  if (!identityResult.ok) {
+    logger.warn(
+      { err: identityResult.error, symbol },
+      "[kalshi-scalper] identity force-refresh failed — skipping permanently",
+    );
     await updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_refresh_failed", true);
+    _rememberReservationOutcome(attemptKey, "skipped", "identity_refresh_failed", priorSubmittedOrders);
     return;
   }
   const refreshed = getKalshiCachedData(symbol);
@@ -765,13 +1171,23 @@ async function _executeScalpAttempt(
     return;
   }
 
-  // ── SECOND authenticated orderbook for the CONFIRMED ticker ────────────────
-  const ob2 = await fetchOrderbookPrices(ticker);
-  const quote2 = ob2 ? validateOrderbookQuote(ob2, ticker, closeTime) : null;
+  // The one authoritative authenticated quote was fetched in parallel with
+  // identity, balance, and the fresh Freefall sample.
+  const quote2 = orderbookResult.ok && orderbookResult.orderbook
+    ? validateOrderbookQuote(orderbookResult.orderbook, ticker, closeTime)
+    : null;
 
   if (!quote2) {
-    logger.warn({ symbol, ticker }, "[kalshi-scalper] second orderbook quote invalid — skipping");
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "second_quote_invalid", true);
+    logger.warn(
+      {
+        symbol,
+        ticker,
+        err: orderbookResult.ok ? undefined : orderbookResult.error,
+      },
+      "[kalshi-scalper] final orderbook quote invalid — re-arming",
+    );
+    await updateReservationStatus(mode, symbol, windowKey, "skipped", "final_quote_invalid", true);
+    _rememberReservationOutcome(attemptKey, "skipped", "final_quote_invalid", priorSubmittedOrders);
     return;
   }
 
@@ -784,13 +1200,15 @@ async function _executeScalpAttempt(
   // Band selection uses the PINNED snapshot band (verified unchanged above).
   const match2 = selectScalpSide(quote2.yesAsk, quote2.noAsk, snapshot.bandMin, snapshot.bandMax);
   if (!match2) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "second_quote_outside_band", true);
+    await updateReservationStatus(mode, symbol, windowKey, "skipped", "final_quote_outside_band", true);
+    _rememberReservationOutcome(attemptKey, "skipped", "final_quote_outside_band", priorSubmittedOrders);
     return;
   }
 
   // Side must remain consistent with initial candidate
   if (match2.side !== initialSide) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "side_flipped_second_quote", true);
+    await updateReservationStatus(mode, symbol, windowKey, "skipped", "side_flipped_final_quote", true);
+    _rememberReservationOutcome(attemptKey, "skipped", "side_flipped_final_quote", priorSubmittedOrders);
     return;
   }
 
@@ -802,20 +1220,20 @@ async function _executeScalpAttempt(
   // is "unavailable" and skips — existing old samples must NOT mask it. Then the
   // guard must be evaluable AND not blocked to proceed.
   if (snapshot.freefallGuardEnabled) {
-    const coin = CRYPTO_COINS.find((c) => c.symbol.toUpperCase() === symbol);
     if (!coin) {
       // No underlying product to sample → cannot evaluate → fail closed.
       await updateReservationStatus(mode, symbol, windowKey, "skipped", "freefall_unavailable_no_product", true);
+      _rememberReservationOutcome(attemptKey, "skipped", "freefall_unavailable_no_product", priorSubmittedOrders);
       return;
     }
-    const collected = await _collectPriceSample(coin.symbol, coin.product);
-    if (!collected) {
+    if (!freshSampleResult) {
       // Fresh fetch failed; do NOT fall back to stale samples.
       logger.info(
         { symbol, side: effectiveSide },
         "[kalshi-scalper] freefall final sample fetch failed — unavailable, skipping (fail-closed)",
       );
       await updateReservationStatus(mode, symbol, windowKey, "skipped", "freefall_unavailable_fetch_failed", true);
+      _rememberReservationOutcome(attemptKey, "skipped", "freefall_unavailable_fetch_failed", priorSubmittedOrders);
       return;
     }
     const samplesFinal = _priceSamples.get(symbol) ?? [];
@@ -831,7 +1249,9 @@ async function _executeScalpAttempt(
         { symbol, side: effectiveSide, evaluable: ffFinal.evaluable, reason: ffFinal.reason, adverseMovePct: ffFinal.adverseMovePct, samplesUsed: ffFinal.samplesUsed },
         "[kalshi-scalper] freefall guard skip (final boundary)",
       );
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", ffFinal.reason ?? "freefall_blocked_final", true);
+      const freefallReason = ffFinal.reason ?? "freefall_blocked_final";
+      await updateReservationStatus(mode, symbol, windowKey, "skipped", freefallReason, true);
+      _rememberReservationOutcome(attemptKey, "skipped", freefallReason, priorSubmittedOrders);
       return;
     }
   }
@@ -848,19 +1268,22 @@ async function _executeScalpAttempt(
 
   // ── FINAL live balance check against ACTUAL worst-case submit exposure ─────
   if (mode === "live") {
-    try {
-      const balanceFinal = await getBalance();
-      if (balanceFinal.availableBalance < maxExposure) {
-        logger.warn(
-          { symbol, available: balanceFinal.availableBalance, maxExposure, contractCount, cappedWinningAsk },
-          "[kalshi-scalper] insufficient balance for worst-case exposure (final) — skipping",
-        );
-        await updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance_final", true);
-        return;
-      }
-    } catch (err) {
-      logger.warn({ err, symbol }, "[kalshi-scalper] final balance check failed — skipping");
+    if (!balanceResult.ok || balanceResult.availableBalance == null) {
+      logger.warn(
+        { err: balanceResult.ok ? undefined : balanceResult.error, symbol },
+        "[kalshi-scalper] final balance check failed — re-arming",
+      );
       await updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_check_failed_final", true);
+      _rememberReservationOutcome(attemptKey, "skipped", "balance_check_failed_final", priorSubmittedOrders);
+      return;
+    }
+    if (balanceResult.availableBalance < maxExposure) {
+      logger.warn(
+        { symbol, available: balanceResult.availableBalance, maxExposure, contractCount, cappedWinningAsk },
+        "[kalshi-scalper] insufficient balance for worst-case exposure (final) — re-arming",
+      );
+      await updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance_final", true);
+      _rememberReservationOutcome(attemptKey, "skipped", "insufficient_balance_final", priorSubmittedOrders);
       return;
     }
   }
@@ -1040,6 +1463,7 @@ async function _executeScalpAttempt(
       await updateReservationStatus(mode, symbol, windowKey, "error", "paper_unknown_classification", true).catch(() => {});
     }
     // Never continue past a confirmed-exposure unknown.
+    _terminalAttemptKeys.add(attemptKey);
     return;
   }
 
@@ -1071,6 +1495,21 @@ async function _executeScalpAttempt(
       await insertScalpOrderIntent({ ...orderRecord, status: "zero_fill", orderId }).catch(() => {});
       await updateReservationStatus(mode, symbol, windowKey, "zero_fill", "zero_fill", true).catch(() => {});
     }
+    _rememberReservationOutcome(
+      attemptKey,
+      "zero_fill",
+      "zero_fill",
+      mode === "live" ? priorSubmittedOrders + 1 : priorSubmittedOrders,
+    );
+    logger.info(
+      {
+        symbol,
+        windowKey,
+        submission: priorSubmittedOrders + 1,
+        maxSubmissions: SCALP_MAX_SUBMISSIONS_PER_WINDOW,
+      },
+      "[kalshi-scalper] confirmed zero fill — bounded retry policy applied",
+    );
     return;
   }
 
@@ -1115,6 +1554,8 @@ async function _executeScalpAttempt(
     }).catch(() => {});
     await updateReservationStatus(mode, symbol, windowKey, "filled", undefined, true).catch(() => {});
   }
+  _terminalAttemptKeys.add(attemptKey);
+  _nextAttemptAt.delete(attemptKey);
 
   // ── Out-of-band fill → incident + circuit breaker ────────────────────────
   if (!withinBand) {
@@ -1356,22 +1797,54 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
     openSpend,
     dailySpend,
     recentOrders: recentOrders.map(serializeScalpOrder),
-    recentAttempts: recentAttempts.map((attempt) => ({
-      id: attempt.id,
-      mode: attempt.mode,
-      symbol: attempt.symbol,
-      windowKey: attempt.windowKey,
-      ticker: attempt.ticker,
-      status: attempt.status,
-      reason: attempt.reason ?? null,
-      reservedBudget: attempt.reservedBudget,
-      createdAt: attempt.createdAt.toISOString(),
-      attemptedAt: attempt.attemptedAt.toISOString(),
-    })),
+    recentAttempts: recentAttempts.map((attempt) => {
+      const retry = evaluateScalpReservationRetry({
+        status: attempt.status,
+        reason: attempt.reason,
+        elapsedMs: Math.max(0, Date.now() - attempt.attemptedAt.getTime()),
+        submittedOrders: attempt.submissionCount,
+      });
+      return {
+        id: attempt.id,
+        mode: attempt.mode,
+        symbol: attempt.symbol,
+        windowKey: attempt.windowKey,
+        ticker: attempt.ticker,
+        status: attempt.status,
+        reason: attempt.reason ?? null,
+        reservedBudget: attempt.reservedBudget,
+        submissionCount: attempt.submissionCount,
+        retryEligible: !retry.terminal,
+        retryState:
+          attempt.status === "claimed"
+            ? "in_flight"
+            : retry.terminal
+              ? "terminal"
+              : retry.retryableNow
+                ? "ready"
+                : "cooldown",
+        retryAfterMs: retry.retryAfterMs,
+        createdAt: attempt.createdAt.toISOString(),
+        attemptedAt: attempt.attemptedAt.toISOString(),
+      };
+    }),
     incidents,
     // ISO string | null (not epoch)
     lastScanAt: _lastScanAt != null ? new Date(_lastScanAt).toISOString() : null,
     lastError: _lastError,
+    preflight: {
+      ..._preflightStatus,
+      checkedAt: _preflightStatus.checkedAt != null
+        ? new Date(_preflightStatus.checkedAt).toISOString()
+        : null,
+    },
+    executionPolicy: {
+      scanIntervalMs: SCALP_SCAN_INTERVAL_MS,
+      authenticatedRetryCooldownMs: SCALP_AUTH_RETRY_COOLDOWN_MS,
+      maxSubmissionsPerWindow: SCALP_MAX_SUBMISSIONS_PER_WINDOW,
+      maxConcurrentCandidates: SCALP_MAX_CONCURRENT_CANDIDATES,
+      preflightLeadSeconds: SCALP_PREFLIGHT_LEAD_SECONDS,
+    },
     markets,
     regularBotMode: getRegularBotMode(),
   };

@@ -72,7 +72,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     queryKey: ["bot-scalper-status", scalperMode],
     queryFn: () => fetch(`${API_BASE}/crypto/scalper/status?mode=${scalperMode}`).then(r => r.json()),
     enabled: Boolean(cfg),
-    refetchInterval: 5_000,
+    refetchInterval: 2_000,
   });
 
   const { data: perfData } = useQuery<ScalperPerformance>({
@@ -313,7 +313,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       )}
 
       <div className="p-5 text-xs text-muted-foreground/80 leading-relaxed border-b border-border bg-card/40 flex items-center justify-between">
-        <span>An in-band scan is only a preliminary candidate. Immediately before ordering, the Scalper fetches a fresh authenticated quote and rechecks the configured band, risk caps, and IOC liquidity. The final quote can move outside the band or fill zero contracts; only confirmed fills appear in Active Positions and Transaction History.</span>
+        <span>An in-band scan is only a preliminary candidate. Preflight warms balance, cap headroom, market identity, and Freefall samples before the execution window. During the window, the Scalper scans four times per second and fetches one authoritative authenticated quote before each IOC submission. Confirmed zero fills can retry up to three total submissions; only confirmed fills appear in Active Positions and Transaction History.</span>
         
         {/* Status Indicators */}
         {statusData && (
@@ -333,6 +333,52 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           </div>
         )}
       </div>
+
+      {statusData?.preflight && (
+        <div
+          data-testid="status-scalper-preflight"
+          className={`border-b px-5 py-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between ${
+            statusData.preflight.state === "ready"
+              ? "border-emerald-500/25 bg-emerald-500/5 text-emerald-300"
+              : statusData.preflight.state === "blocked"
+                ? "border-red-500/25 bg-red-500/5 text-red-300"
+                : statusData.preflight.state === "warming"
+                  ? "border-amber-500/25 bg-amber-500/5 text-amber-300"
+                  : "border-border bg-background/30 text-muted-foreground"
+          }`}
+        >
+          <div className="flex items-center gap-2 text-xs font-semibold">
+            {statusData.preflight.state === "ready"
+              ? <CheckCircle2 className="w-4 h-4 shrink-0" />
+              : statusData.preflight.state === "blocked"
+                ? <AlertTriangle className="w-4 h-4 shrink-0" />
+                : <Activity className="w-4 h-4 shrink-0" />}
+            <span>
+              Execution preflight: {statusData.preflight.state}
+              {statusData.preflight.totalSymbols > 0
+                ? ` · ${statusData.preflight.readySymbols}/${statusData.preflight.totalSymbols} markets ready`
+                : ""}
+            </span>
+          </div>
+          <div className="text-[10px] font-mono opacity-80">
+            {statusData.preflight.reason
+              ? statusData.preflight.reason.replaceAll("_", " ")
+              : statusData.preflight.state === "idle" && statusData.preflight.startsInSeconds != null
+                ? `starts in ${Math.ceil(statusData.preflight.startsInSeconds)}s`
+                : statusData.preflight.checkedAt
+                  ? `checked ${fmtDateTime(statusData.preflight.checkedAt)}`
+                  : `starts ${statusData.executionPolicy.preflightLeadSeconds}s before entry`}
+          </div>
+          {statusData.preflight.markets.some((market) => !market.ready) && (
+            <div className="text-[10px] font-mono opacity-75 sm:text-right">
+              {statusData.preflight.markets
+                .filter((market) => !market.ready)
+                .map((market) => `${market.symbol}: ${market.reason?.replaceAll("_", " ") ?? "not ready"}`)
+                .join(" · ")}
+            </div>
+          )}
+        </div>
+      )}
 
       {merged.circuitBreaker && (
         <div className="bg-red-500/10 border-b border-red-500/30 px-5 py-3 flex items-center justify-between">
@@ -410,7 +456,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
               </label>
             </div>
             <div className="text-[9px] text-muted-foreground/60 mt-3 leading-tight">
-              Checks every second while this window is active. A final fresh quote is taken immediately before the order.
+              Scans every {statusData?.executionPolicy.scanIntervalMs ?? 250}ms. IOC zero fills cool down briefly and retry up to {statusData?.executionPolicy.maxSubmissionsPerWindow ?? 3} total submissions.
             </div>
           </div>
 
@@ -628,6 +674,22 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                     }`}>
                       {describeScalperAttempt(attempt)}
                     </span>
+                    {isZeroFill && (
+                      <span className="text-[10px] text-muted-foreground">
+                        {attempt.retryEligible
+                          ? attempt.retryState === "ready"
+                            ? `Retry ready · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
+                            : `Retry in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
+                          : `${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`}
+                      </span>
+                    )}
+                    {!isZeroFill && attempt.retryEligible && (
+                      <span className="text-[10px] text-muted-foreground">
+                        {attempt.retryState === "ready"
+                          ? "Transient no-exposure skip · retry ready"
+                          : `Transient no-exposure skip · retries in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s`}
+                      </span>
+                    )}
                     <span className={`ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded ${
                       attempt.mode === "live"
                         ? "bg-red-500/15 text-red-400"

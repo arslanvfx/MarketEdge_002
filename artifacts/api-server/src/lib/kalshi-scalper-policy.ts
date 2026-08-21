@@ -179,6 +179,116 @@ export function isInFinalWindow(
 }
 
 // ---------------------------------------------------------------------------
+// Bounded retry policy
+// ---------------------------------------------------------------------------
+
+/** Fast-window cadence and retry limits. These are deliberately not user
+ * configurable: they control exchange pressure and duplicate-order safety,
+ * rather than trading strategy. */
+export const SCALP_SCAN_INTERVAL_MS = 250;
+export const SCALP_AUTH_RETRY_COOLDOWN_MS = 500;
+export const SCALP_GUARD_RETRY_COOLDOWN_MS = 1_000;
+export const SCALP_BALANCE_RETRY_COOLDOWN_MS = 2_000;
+export const SCALP_MAX_SUBMISSIONS_PER_WINDOW = 3;
+export const SCALP_PREFLIGHT_LEAD_SECONDS = 30;
+export const SCALP_PREFLIGHT_REFRESH_MS = 5_000;
+export const SCALP_MAX_CONCURRENT_CANDIDATES = 3;
+
+export interface ScalpReservationRetryDecision {
+  /** True only when the row may be atomically returned to `claimed` now. */
+  retryableNow: boolean;
+  /** Non-null when the outcome is retryable after this remaining cooldown. */
+  retryAfterMs: number | null;
+  /** True when this symbol/window must never be retried. */
+  terminal: boolean;
+  reason: "retry_ready" | "retry_cooldown" | "retry_limit_reached" | "terminal";
+}
+
+const QUICK_RETRY_SKIP_REASONS = new Set([
+  // Backward-compatible names from the original two-quote path.
+  "first_quote_invalid",
+  "first_quote_outside_band",
+  "side_flipped_first_quote",
+  "second_quote_invalid",
+  "second_quote_outside_band",
+  "side_flipped_second_quote",
+  // Current consolidated final-quote path.
+  "final_quote_invalid",
+  "final_quote_outside_band",
+  "side_flipped_final_quote",
+]);
+
+/**
+ * Decide whether a durable reservation may be re-claimed.
+ *
+ * Only outcomes that prove no exposure was created can retry. Unknown,
+ * submitting, filled, cap/risk/identity failures, and arbitrary errors are
+ * terminal. A confirmed zero-fill may retry until the bounded submission
+ * limit. Freefall and balance failures can retry more slowly, but every retry
+ * still has to pass the same authoritative final checks.
+ */
+export function evaluateScalpReservationRetry(input: {
+  status: string;
+  reason: string | null | undefined;
+  elapsedMs: number;
+  submittedOrders: number;
+}): ScalpReservationRetryDecision {
+  const elapsedMs = Number.isFinite(input.elapsedMs) ? Math.max(0, input.elapsedMs) : 0;
+  const submittedOrders = Number.isFinite(input.submittedOrders)
+    ? Math.max(0, Math.floor(input.submittedOrders))
+    : 0;
+  let cooldownMs: number | null = null;
+
+  if (input.status === "zero_fill") {
+    if (submittedOrders >= SCALP_MAX_SUBMISSIONS_PER_WINDOW) {
+      return {
+        retryableNow: false,
+        retryAfterMs: null,
+        terminal: true,
+        reason: "retry_limit_reached",
+      };
+    }
+    cooldownMs = SCALP_AUTH_RETRY_COOLDOWN_MS;
+  } else if (input.status === "skipped") {
+    const reason = input.reason ?? "";
+    if (QUICK_RETRY_SKIP_REASONS.has(reason)) {
+      cooldownMs = SCALP_AUTH_RETRY_COOLDOWN_MS;
+    } else if (reason.startsWith("freefall_")) {
+      cooldownMs = SCALP_GUARD_RETRY_COOLDOWN_MS;
+    } else if (
+      reason === "insufficient_balance_final" ||
+      reason === "balance_check_failed_final"
+    ) {
+      cooldownMs = SCALP_BALANCE_RETRY_COOLDOWN_MS;
+    }
+  }
+
+  if (cooldownMs == null) {
+    return {
+      retryableNow: false,
+      retryAfterMs: null,
+      terminal: true,
+      reason: "terminal",
+    };
+  }
+
+  const retryAfterMs = Math.max(0, cooldownMs - elapsedMs);
+  return retryAfterMs === 0
+    ? {
+        retryableNow: true,
+        retryAfterMs: 0,
+        terminal: false,
+        reason: "retry_ready",
+      }
+    : {
+        retryableNow: false,
+        retryAfterMs,
+        terminal: false,
+        reason: "retry_cooldown",
+      };
+}
+
+// ---------------------------------------------------------------------------
 // Budget / contract count
 // ---------------------------------------------------------------------------
 

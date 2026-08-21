@@ -31,6 +31,11 @@ import {
   validateScalpConfigPartial,
   parseScalpConfigPatch,
   resolveEffectiveParams,
+  evaluateScalpReservationRetry,
+  SCALP_AUTH_RETRY_COOLDOWN_MS,
+  SCALP_BALANCE_RETRY_COOLDOWN_MS,
+  SCALP_GUARD_RETRY_COOLDOWN_MS,
+  SCALP_MAX_SUBMISSIONS_PER_WINDOW,
   type FreefallSample,
   type RiskConfigLike,
   type RiskParamsLike,
@@ -364,6 +369,90 @@ describe("isInFinalWindow", () => {
     // Adjacent window key — close time does NOT fall in this window
     const wkBad = "2024-01-01T12:15";
     assert.ok(!isInFinalWindow(closeTime, nowMs, 120, wkBad));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bounded reservation retries
+// ---------------------------------------------------------------------------
+
+describe("evaluateScalpReservationRetry", () => {
+  it("re-arms transient quote movement after the short cooldown", () => {
+    const cooling = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "final_quote_outside_band",
+      elapsedMs: 100,
+      submittedOrders: 0,
+    });
+    assert.equal(cooling.retryableNow, false);
+    assert.equal(cooling.retryAfterMs, SCALP_AUTH_RETRY_COOLDOWN_MS - 100);
+    assert.equal(cooling.terminal, false);
+
+    const ready = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "side_flipped_final_quote",
+      elapsedMs: SCALP_AUTH_RETRY_COOLDOWN_MS,
+      submittedOrders: 0,
+    });
+    assert.equal(ready.retryableNow, true);
+    assert.equal(ready.retryAfterMs, 0);
+  });
+
+  it("uses slower retries for Freefall and balance readiness", () => {
+    const freefall = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "freefall_unavailable_fetch_failed",
+      elapsedMs: 0,
+      submittedOrders: 0,
+    });
+    const balance = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "balance_check_failed_final",
+      elapsedMs: 0,
+      submittedOrders: 0,
+    });
+    assert.equal(freefall.retryAfterMs, SCALP_GUARD_RETRY_COOLDOWN_MS);
+    assert.equal(balance.retryAfterMs, SCALP_BALANCE_RETRY_COOLDOWN_MS);
+  });
+
+  it("allows confirmed zero fills only below the submission limit", () => {
+    const second = evaluateScalpReservationRetry({
+      status: "zero_fill",
+      reason: "zero_fill",
+      elapsedMs: SCALP_AUTH_RETRY_COOLDOWN_MS,
+      submittedOrders: SCALP_MAX_SUBMISSIONS_PER_WINDOW - 1,
+    });
+    assert.equal(second.retryableNow, true);
+
+    const exhausted = evaluateScalpReservationRetry({
+      status: "zero_fill",
+      reason: "zero_fill",
+      elapsedMs: 60_000,
+      submittedOrders: SCALP_MAX_SUBMISSIONS_PER_WINDOW,
+    });
+    assert.equal(exhausted.retryableNow, false);
+    assert.equal(exhausted.retryAfterMs, null);
+    assert.equal(exhausted.terminal, true);
+    assert.equal(exhausted.reason, "retry_limit_reached");
+  });
+
+  it("never retries filled, unknown, submitting, cap, identity, or arbitrary errors", () => {
+    for (const outcome of [
+      { status: "filled", reason: null },
+      { status: "unknown", reason: "manual_reconciliation_required" },
+      { status: "submitting", reason: null },
+      { status: "skipped", reason: "daily_cap_exceeded" },
+      { status: "skipped", reason: "identity_changed" },
+      { status: "error", reason: "network_error" },
+    ]) {
+      const decision = evaluateScalpReservationRetry({
+        ...outcome,
+        elapsedMs: 60_000,
+        submittedOrders: 0,
+      });
+      assert.equal(decision.terminal, true, `${outcome.status}:${outcome.reason}`);
+      assert.equal(decision.retryAfterMs, null, `${outcome.status}:${outcome.reason}`);
+    }
   });
 });
 
@@ -1477,8 +1566,44 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(svc, /const budget = snapshot\.budgetDollars/);
   });
 
+  it("preflight warms readiness without reserving budget or creating orders", () => {
+    const start = idx("async function _runPreflight(");
+    const end = svc.indexOf("function _maybeStartPreflight", start);
+    assert.ok(start >= 0 && end > start);
+    const preflight = svc.slice(start, end);
+    assert.match(preflight, /getScalpCommittedTotals\(/);
+    assert.match(preflight, /fetchKalshiTarget\(/);
+    assert.match(preflight, /getBalance\(\)/);
+    assert.match(preflight, /checkFreefallGuard\(/);
+    assert.ok(!/claimReservationAndCap\(/.test(preflight), "preflight must not claim a reservation");
+    assert.ok(!/insertScalpOrderIntent\(/.test(preflight), "preflight must not create an order intent");
+    assert.ok(!/placeScalpOrderStrict\(/.test(preflight), "preflight must not submit an order");
+  });
+
+  it("uses a 250ms scan with bounded concurrent candidate evaluation", () => {
+    assert.match(svc, /setInterval\([\s\S]*?SCALP_SCAN_INTERVAL_MS\)/);
+    assert.match(
+      svc,
+      /_runWithConcurrency\(candidates,\s*SCALP_MAX_CONCURRENT_CANDIDATES/,
+    );
+  });
+
+  it("deduplicates and bounds Freefall sample fetches behind a shared priority queue", () => {
+    assert.match(svc, /const _priceSampleJobs = new Map/);
+    assert.match(
+      svc,
+      /while \(_activePriceSampleFetches < SCALP_MAX_CONCURRENT_CANDIDATES\)/,
+    );
+    assert.match(svc, /_authoritativeSampleQueue\.shift\(\) \?\? _backgroundSampleQueue\.shift\(\)/);
+    assert.match(svc, /const existing = _priceSampleJobs\.get\(key\)/);
+    assert.match(svc, /existing\.priority = "authoritative"/);
+  });
+
   it("passes the snapshot into _executeScalpAttempt", () => {
-    assert.match(svc, /_executeScalpAttempt\(reservationId, candidate, windowKey, mode, snapshot\)/);
+    assert.match(
+      svc,
+      /_executeScalpAttempt\([\s\S]*?claim\.reservationId,[\s\S]*?candidate,[\s\S]*?windowKey,[\s\S]*?mode,[\s\S]*?snapshot,[\s\S]*?claim\.submittedOrders,[\s\S]*?key/,
+    );
   });
 
   it("compareRiskSnapshot runs before any order intent and before submit", () => {
@@ -1617,11 +1742,15 @@ describe("execution wiring (static source assertions)", () => {
     const place = idx("await placeScalpOrderStrict(");
     const intent = idx("insertScalpOrderIntent(orderRecord)");
     assert.ok(finalFf >= 0 && place >= 0 && intent >= 0);
-    // The final freefall block awaits _collectPriceSample and branches on it.
+    // The authoritative fresh sample is awaited in the concurrent readiness
+    // batch, then the final guard branches on that exact result.
+    const executeStart = idx("async function _executeScalpAttempt");
+    const parallelBoundary = svc.slice(executeStart, finalFf);
+    assert.match(parallelBoundary, /await Promise\.all\(\[[\s\S]*?_collectPriceSample\(/);
     const block = svc.slice(finalFf, idx("Size the order STRICTLY"));
-    assert.match(block, /const collected = await _collectPriceSample\(/);
-    // Must NOT swallow the fetch with a silent .catch in the final block.
-    assert.ok(!/_collectPriceSample\([^)]*\)\.catch\(/.test(block), "final sample must not be best-effort .catch");
+    assert.match(block, /if \(!freshSampleResult\)/);
+    // Must NOT swallow the final fetch with a silent .catch.
+    assert.ok(!/_collectPriceSample\([^)]*\)\.catch\(/.test(parallelBoundary), "final sample must not be best-effort .catch");
     // Fetch failure → unavailable skip before any intent/submit.
     assert.match(block, /freefall_unavailable_fetch_failed/);
     assert.ok(finalFf < intent && finalFf < place);
@@ -1635,16 +1764,52 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(block, /updateReservationStatus\([\s\S]*?"skipped"[\s\S]*?\);\s*\n\s*return;/);
   });
 
-  it("EARLY freefall also skips on unavailable OR blocked", () => {
-    const early = svc.slice(idx("Early freefall guard"), idx("cap checks are NOT repeated"));
-    assert.match(early, /if \(!ffResult\.evaluable \|\| ffResult\.blocked\)/);
+  it("quote, identity, Freefall sample, and balance are fetched concurrently", () => {
+    const executeStart = idx("async function _executeScalpAttempt");
+    const finalFf = idx("FINAL FREEFALL GUARD");
+    const boundary = svc.slice(executeStart, finalFf);
+    assert.match(boundary, /await Promise\.all\(\[/);
+    assert.match(boundary, /fetchKalshiTarget\(/);
+    assert.match(boundary, /fetchOrderbookPrices\(/);
+    assert.match(boundary, /_collectPriceSample\(/);
+    assert.match(boundary, /getBalance\(\)/);
+  });
+
+  it("confirmed zero fills schedule a bounded retry but confirmed fills terminate", () => {
+    assert.match(
+      svc,
+      /_rememberReservationOutcome\([\s\S]*?"zero_fill"[\s\S]*?priorSubmittedOrders \+ 1/,
+    );
+    assert.match(svc, /_terminalAttemptKeys\.add\(attemptKey\)/);
+  });
+
+  it("DB re-claim path locks the durable row and counts zero-fill submissions", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const db = readFileSync(join(here, "kalshi-scalper-db.ts"), "utf8");
+    const claimStart = db.indexOf("export async function claimReservationAndCap");
+    const claimEnd = db.indexOf("export async function updateReservationStatus", claimStart);
+    const claim = db.slice(claimStart, claimEnd);
+    assert.match(claim, /FOR UPDATE/);
+    assert.match(claim, /evaluateScalpReservationRetry\(/);
+    assert.match(claim, /status = 'zero_fill'/);
+    assert.match(claim, /SET status = 'claimed'/);
+    assert.match(claim, /\[blockedReason, reservationId\]/);
+  });
+
+  it("status exposes retry readiness and cooldown for every policy-retryable outcome", () => {
+    const start = idx("recentAttempts: recentAttempts.map");
+    const end = svc.indexOf("incidents,", start);
+    const status = svc.slice(start, end);
+    assert.match(status, /evaluateScalpReservationRetry\(/);
+    assert.match(status, /retryEligible: !retry\.terminal/);
+    assert.match(status, /retryAfterMs: retry\.retryAfterMs/);
   });
 
   it("_collectPriceSample returns a boolean success signal (not void)", () => {
-    assert.match(svc, /async function _collectPriceSample\([^)]*\): Promise<boolean>/);
-    // Returns true on success and false on failure/unusable.
-    const fnIdx = svc.indexOf("async function _collectPriceSample");
-    const body = svc.slice(fnIdx, fnIdx + 700);
+    assert.match(svc, /function _collectPriceSample\([\s\S]*?\): Promise<boolean>/);
+    // The shared queue resolves true on success and false on failure/unusable.
+    const fnIdx = svc.indexOf("function _drainPriceSampleQueue");
+    const body = svc.slice(fnIdx, fnIdx + 1_500);
     assert.match(body, /return true;/);
     assert.match(body, /return false;/);
   });

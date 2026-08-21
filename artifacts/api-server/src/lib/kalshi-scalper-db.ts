@@ -15,6 +15,7 @@ import {
   type ScalpMode,
   type ScalpReservation,
 } from "./kalshi-scalper-types.ts";
+import { evaluateScalpReservationRetry } from "./kalshi-scalper-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Schema creation
@@ -294,9 +295,12 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
 // ---------------------------------------------------------------------------
 
 export interface ClaimAndCapResult {
-  claimed: boolean;   // false only when this (mode,symbol,windowKey) already existed
+  claimed: boolean;   // false when an existing row is still cooling down or terminal
   allowed: boolean;   // true only when budget passed all caps and was reserved
   reason: string | null;
+  reservationId: string | null;
+  submittedOrders: number;
+  retryAfterMs: number | null;
   dailyCommitted: number; // pre-existing daily committed (spend + reserved), excludes this claim
   openCommitted: number;  // pre-existing open committed (spend + reserved), excludes this claim
 }
@@ -308,7 +312,9 @@ export interface ClaimAndCapResult {
  * Steps inside ONE transaction:
  *   1. pg_advisory_xact_lock(hashtext('kalshi-scalper-cap:' || mode))
  *   2. INSERT reservation (reserved_budget=0) ON CONFLICT DO NOTHING RETURNING.
- *      No row returned → duplicate → {claimed:false, allowed:false, 'duplicate'}.
+ *      On conflict, lock the existing row and apply the bounded retry policy.
+ *      Only confirmed zero-fills and explicit no-exposure transient skips may be
+ *      returned to `claimed`; terminal/unknown/in-flight rows stay blocked.
  *   3. Sum actual daily filled/paper spend + current reserved totals (this new
  *      row is still 0, so it never double-counts itself); and open unsettled
  *      spend + reserved totals.
@@ -318,8 +324,9 @@ export interface ClaimAndCapResult {
  *   5. Allowed → UPDATE this reservation reserved_budget=requestedBudget;
  *      return {claimed:true, allowed:true}.
  *
- * One-attempt blocking is preserved even when the cap denies: the row persists
- * with status 'skipped', so a later tick's ON CONFLICT will still find it.
+ * Cap denials remain terminal. Retryable outcomes retain the same durable row,
+ * so restart safety and the UNIQUE(mode,symbol,window_key) serialization point
+ * are preserved while allowing bounded re-attempts.
  */
 export async function claimReservationAndCap(
   id: string,
@@ -350,9 +357,72 @@ export async function claimReservationAndCap(
       [id, mode, symbol.toUpperCase(), windowKey, ticker],
     );
 
+    let reservationId = id;
+    let submittedOrders = 0;
+
     if (insertRes.rows.length === 0) {
-      await client.query("COMMIT");
-      return { claimed: false, allowed: false, reason: "duplicate", dailyCommitted: 0, openCommitted: 0 };
+      // The unique row is the durable per-symbol/window mutex. Lock it before
+      // deciding whether a proven no-exposure outcome may retry.
+      const existingRes = await client.query(
+        `SELECT id, status, reason, reserved_budget,
+                GREATEST(0, EXTRACT(EPOCH FROM (NOW() - attempted_at)) * 1000)::float AS elapsed_ms
+         FROM kalshi_scalp_reservations
+         WHERE mode = $1 AND symbol = $2 AND window_key = $3
+         FOR UPDATE`,
+        [mode, symbol.toUpperCase(), windowKey],
+      );
+      const existing = existingRes.rows[0];
+      if (!existing) {
+        await client.query("COMMIT");
+        return {
+          claimed: false,
+          allowed: false,
+          reason: "duplicate_missing",
+          reservationId: null,
+          submittedOrders: 0,
+          retryAfterMs: null,
+          dailyCommitted: 0,
+          openCommitted: 0,
+        };
+      }
+
+      reservationId = String(existing["id"]);
+      const submittedRes = await client.query(
+        `SELECT COUNT(*)::int AS count
+         FROM kalshi_scalp_orders
+         WHERE mode = $1 AND symbol = $2 AND window_key = $3
+           AND status = 'zero_fill'`,
+        [mode, symbol.toUpperCase(), windowKey],
+      );
+      submittedOrders = Number(submittedRes.rows[0]?.["count"] ?? 0);
+      const retry = evaluateScalpReservationRetry({
+        status: String(existing["status"] ?? ""),
+        reason: existing["reason"] != null ? String(existing["reason"]) : null,
+        elapsedMs: Number(existing["elapsed_ms"] ?? 0),
+        submittedOrders,
+      });
+
+      if (!retry.retryableNow) {
+        await client.query("COMMIT");
+        return {
+          claimed: false,
+          allowed: false,
+          reason: retry.reason,
+          reservationId,
+          submittedOrders,
+          retryAfterMs: retry.retryAfterMs,
+          dailyCommitted: 0,
+          openCommitted: 0,
+        };
+      }
+
+      await client.query(
+        `UPDATE kalshi_scalp_reservations
+         SET status = 'claimed', reason = NULL, reserved_budget = 0,
+             ticker = $1, attempted_at = NOW()
+         WHERE id = $2`,
+        [ticker, reservationId],
+      );
     }
 
     // Sum actual committed spend + reserved (this row is 0, safe from self-count).
@@ -396,15 +466,24 @@ export async function claimReservationAndCap(
     }
 
     if (blockedReason) {
-      // Persist skip (keeps one-attempt blocking) with no reserved budget.
+      // Persist cap denial as a terminal skip with no reserved budget.
       await client.query(
         `UPDATE kalshi_scalp_reservations
          SET status = 'skipped', reason = $1, reserved_budget = 0, attempted_at = NOW()
          WHERE id = $2`,
-        [blockedReason, id],
+        [blockedReason, reservationId],
       );
       await client.query("COMMIT");
-      return { claimed: true, allowed: false, reason: blockedReason, dailyCommitted, openCommitted };
+      return {
+        claimed: true,
+        allowed: false,
+        reason: blockedReason,
+        reservationId,
+        submittedOrders,
+        retryAfterMs: null,
+        dailyCommitted,
+        openCommitted,
+      };
     }
 
     // Allowed: reserve the requested budget on this row.
@@ -412,10 +491,19 @@ export async function claimReservationAndCap(
       `UPDATE kalshi_scalp_reservations
        SET reserved_budget = $1, attempted_at = NOW()
        WHERE id = $2`,
-      [requestedBudget, id],
+      [requestedBudget, reservationId],
     );
     await client.query("COMMIT");
-    return { claimed: true, allowed: true, reason: null, dailyCommitted, openCommitted };
+    return {
+      claimed: true,
+      allowed: true,
+      reason: null,
+      reservationId,
+      submittedOrders,
+      retryAfterMs: null,
+      dailyCommitted,
+      openCommitted,
+    };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
@@ -462,6 +550,47 @@ export async function countTodayReservations(mode: ScalpMode): Promise<number> {
   }
 }
 
+/** Read-only preflight snapshot using the same committed-spend semantics as the
+ * atomic claim transaction. It is informational/warm-up only; every actual
+ * attempt still repeats the authoritative calculation under the advisory lock. */
+export async function getScalpCommittedTotals(mode: ScalpMode): Promise<{
+  dailyCommitted: number;
+  openCommitted: number;
+}> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT
+         (SELECT COALESCE(SUM(budget_spent), 0)::float
+            FROM kalshi_scalp_orders
+            WHERE mode = $1
+              AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')
+              AND status IN ('filled', 'paper', 'submitting', 'unknown'))
+       + (SELECT COALESCE(SUM(reserved_budget), 0)::float
+            FROM kalshi_scalp_reservations
+            WHERE mode = $1
+              AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')
+              AND reserved_budget > 0) AS daily_committed,
+         (SELECT COALESCE(SUM(budget_spent), 0)::float
+            FROM kalshi_scalp_orders
+            WHERE mode = $1
+              AND settlement_result IS NULL
+              AND status IN ('filled', 'paper', 'submitting', 'unknown'))
+       + (SELECT COALESCE(SUM(reserved_budget), 0)::float
+            FROM kalshi_scalp_reservations
+            WHERE mode = $1
+              AND reserved_budget > 0) AS open_committed`,
+      [mode],
+    );
+    return {
+      dailyCommitted: Number(res.rows[0]?.["daily_committed"] ?? 0),
+      openCommitted: Number(res.rows[0]?.["open_committed"] ?? 0),
+    };
+  } finally {
+    client.release();
+  }
+}
+
 export async function getRecentScalpReservations(opts: {
   mode?: ScalpMode;
   limit?: number;
@@ -472,18 +601,24 @@ export async function getRecentScalpReservations(opts: {
     const conditions: string[] = [];
     let idx = 1;
     if (opts.mode) {
-      conditions.push(`mode = $${idx++}`);
+      conditions.push(`r.mode = $${idx++}`);
       params.push(opts.mode);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const limit = Math.max(1, Math.min(opts.limit ?? 20, 100));
     params.push(limit);
     const res = await client.query(
-      `SELECT id, mode, symbol, window_key, ticker, status, reason,
-              reserved_budget, created_at, attempted_at
-       FROM kalshi_scalp_reservations
+      `SELECT r.id, r.mode, r.symbol, r.window_key, r.ticker, r.status, r.reason,
+               r.reserved_budget, r.created_at, r.attempted_at,
+               (SELECT COUNT(*)::int
+                  FROM kalshi_scalp_orders o
+                  WHERE o.mode = r.mode
+                    AND o.symbol = r.symbol
+                    AND o.window_key = r.window_key
+                    AND o.status IN ('filled', 'zero_fill', 'submitting', 'unknown')) AS submission_count
+       FROM kalshi_scalp_reservations r
        ${where}
-       ORDER BY attempted_at DESC
+       ORDER BY r.attempted_at DESC
        LIMIT $${idx}`,
       params,
     );
@@ -496,6 +631,7 @@ export async function getRecentScalpReservations(opts: {
       status: String(row["status"]) as ScalpReservation["status"],
       reason: row["reason"] != null ? String(row["reason"]) : undefined,
       reservedBudget: Number(row["reserved_budget"] ?? 0),
+      submissionCount: Number(row["submission_count"] ?? 0),
       createdAt: row["created_at"] instanceof Date
         ? row["created_at"]
         : new Date(String(row["created_at"])),

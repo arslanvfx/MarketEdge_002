@@ -36,7 +36,15 @@ if (RUN_DB_TESTS) {
 // node:test honors `skip` on the describe options.
 describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set SCALPER_DB_TEST=1 with DATABASE_URL" : false }, () => {
   let db: typeof import("./kalshi-scalper-db.ts");
-  let pool: { connect: () => Promise<{ query: (sql: string) => Promise<unknown>; release: () => void }> };
+  let pool: {
+    connect: () => Promise<{
+      query: (
+        sql: string,
+        params?: readonly unknown[],
+      ) => Promise<{ rows: Array<Record<string, unknown>> }>;
+      release: () => void;
+    }>;
+  };
   const MODE = "paper" as const; // paper keeps it isolated from any live rows
 
   // Remove EVERY DBTEST-* row this suite could have created, scoped to paper mode
@@ -85,7 +93,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     assert.equal(r1.claimed, true);
     assert.equal(r1.allowed, true);
     assert.equal(r2.claimed, false);
-    assert.equal(r2.reason, "duplicate");
+    assert.equal(r2.reason, "terminal");
   });
 
   it("concurrent distinct claims respect the daily cap exactly (no double-add, no over-admit)", async () => {
@@ -108,7 +116,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 
     // Exactly floor(cap / budget) = 3 admitted; the rest cap-denied.
     assert.equal(allowed, Math.floor(dailyCap / budget), `expected 3 allowed, got ${allowed}`);
-    assert.equal(allowed + denied, N, "every distinct claim must persist (one-attempt blocking)");
+    assert.equal(allowed + denied, N, "every distinct claim must persist a durable outcome");
 
     // Denied rows persist as 'skipped' with reserved_budget=0 → re-claim still duplicate.
     const reAttempt = await db.claimReservationAndCap(
@@ -139,6 +147,157 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     // Now a new window should fit again.
     const r2 = await db.claimReservationAndCap(`id-${base}-2`, MODE, "XRP", `${base}-2`, "T", budget, null, openCap);
     assert.equal(r2.allowed, true, "headroom must be freed after release");
+  });
+
+  it("atomically re-claims a transient no-order skip after its cooldown", async () => {
+    const wk = `DBTEST-rearm-${Date.now()}`;
+    const first = await db.claimReservationAndCap(`id-${wk}`, MODE, "BTC", wk, "T", 2, null, null);
+    assert.equal(first.allowed, true);
+    await db.updateReservationStatus(MODE, "BTC", wk, "skipped", "final_quote_outside_band", true);
+
+    const cooling = await db.claimReservationAndCap(`id-cooling-${wk}`, MODE, "BTC", wk, "T", 2, null, null);
+    assert.equal(cooling.claimed, false);
+    assert.equal(cooling.reason, "retry_cooldown");
+    assert.ok((cooling.retryAfterMs ?? 0) > 0);
+
+    const c = await pool.connect();
+    try {
+      await c.query(
+        `UPDATE kalshi_scalp_reservations
+         SET attempted_at = NOW() - INTERVAL '2 seconds'
+         WHERE mode = '${MODE}' AND window_key = '${wk}'`,
+      );
+    } finally {
+      c.release();
+    }
+
+    const retried = await db.claimReservationAndCap(`id-retry-${wk}`, MODE, "BTC", wk, "T", 2, null, null);
+    assert.equal(retried.claimed, true);
+    assert.equal(retried.allowed, true);
+    assert.equal(retried.reservationId, first.reservationId);
+  });
+
+  it("persists cap denial on the existing durable row during a re-claim", async () => {
+    const wk = `DBTEST-rearm-cap-${Date.now()}`;
+    const first = await db.claimReservationAndCap(
+      `id-${wk}`, MODE, "BTC", wk, "T", 2, null, null,
+    );
+    assert.equal(first.allowed, true);
+    await db.updateReservationStatus(
+      MODE, "BTC", wk, "skipped", "final_quote_outside_band", true,
+    );
+
+    const c = await pool.connect();
+    try {
+      await c.query(
+        `UPDATE kalshi_scalp_reservations
+         SET attempted_at = NOW() - INTERVAL '2 seconds'
+         WHERE mode = $1 AND window_key = $2`,
+        [MODE, wk],
+      );
+    } finally {
+      c.release();
+    }
+
+    const denied = await db.claimReservationAndCap(
+      `new-id-${wk}`, MODE, "BTC", wk, "T", 2, 1, null,
+    );
+    assert.equal(denied.claimed, true);
+    assert.equal(denied.allowed, false);
+    assert.equal(denied.reservationId, first.reservationId);
+    assert.match(denied.reason ?? "", /daily_cap_exceeded/);
+
+    const verify = await pool.connect();
+    try {
+      const row = await verify.query(
+        `SELECT id, status, reason, reserved_budget
+         FROM kalshi_scalp_reservations
+         WHERE mode = $1 AND window_key = $2`,
+        [MODE, wk],
+      );
+      assert.equal(row.rows[0]?.id, first.reservationId);
+      assert.equal(row.rows[0]?.status, "skipped");
+      assert.match(String(row.rows[0]?.reason ?? ""), /daily_cap_exceeded/);
+      assert.equal(Number(row.rows[0]?.reserved_budget), 0);
+    } finally {
+      verify.release();
+    }
+  });
+
+  it("persists a restart-safe maximum of three zero-fill IOC submissions", async () => {
+    const wk = `DBTEST-zero-${Date.now()}`;
+    let claim = await db.claimReservationAndCap(`id-${wk}`, MODE, "ETH", wk, "T", 2, null, null);
+    assert.equal(claim.allowed, true);
+
+    for (let submission = 1; submission <= 3; submission++) {
+      const orderId = `order-${submission}-${wk}`;
+      await db.insertScalpOrderIntent({
+        id: orderId,
+        mode: MODE,
+        symbol: "ETH",
+        windowKey: wk,
+        ticker: "T",
+        side: "yes",
+        entryYesPrice: 0.95,
+        contractCount: 2,
+        budgetSpent: 0,
+        orderId: `exchange-${submission}`,
+        filledCount: 0,
+        avgFillPrice: null,
+        limitPrice: 0.95,
+        winningContractCost: null,
+        status: "submitting",
+        errorMessage: null,
+        settlementResult: null,
+        outcome: null,
+        pnl: null,
+        incidentId: null,
+        createdAt: new Date(),
+        settledAt: null,
+      });
+      await db.finalizeOrderAndReleaseReservation({
+        orderId,
+        mode: MODE,
+        symbol: "ETH",
+        windowKey: wk,
+        status: "zero_fill",
+        reservationStatus: "zero_fill",
+        filledCount: 0,
+        avgFillPrice: null,
+        winningContractCost: null,
+        budgetSpent: 0,
+        exchangeOrderId: `exchange-${submission}`,
+        reason: "zero_fill",
+      });
+
+      const c = await pool.connect();
+      try {
+        await c.query(
+          `UPDATE kalshi_scalp_reservations
+           SET attempted_at = NOW() - INTERVAL '2 seconds'
+           WHERE mode = '${MODE}' AND window_key = '${wk}'`,
+        );
+      } finally {
+        c.release();
+      }
+
+      const next = await db.claimReservationAndCap(
+        `id-next-${submission}-${wk}`, MODE, "ETH", wk, "T", 2, null, null,
+      );
+      if (submission < 3) {
+        assert.equal(next.claimed, true);
+        assert.equal(next.allowed, true);
+        assert.equal(next.submittedOrders, submission);
+        claim = next;
+      } else {
+        assert.equal(next.claimed, false);
+        assert.equal(next.reason, "retry_limit_reached");
+        assert.equal(next.submittedOrders, 3);
+        assert.equal(next.retryAfterMs, null);
+      }
+    }
+
+    assert.ok(claim.reservationId);
   });
 });
 

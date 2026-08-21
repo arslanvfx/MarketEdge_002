@@ -92,6 +92,8 @@ export interface ScalpReservation {
   reason?: string;
   /** Budget reserved for cap accounting until the attempt resolves. */
   reservedBudget: number;
+  /** Durable count of live IOC submissions for this symbol/window. */
+  submissionCount: number;
 }
 
 // ---------------------------------------------------------------------------

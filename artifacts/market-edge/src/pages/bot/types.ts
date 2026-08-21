@@ -578,6 +578,31 @@ export interface ScalperStatus {
   incidents: any[];
   lastScanAt: string | null;
   lastError: string | null;
+  preflight: {
+    state: "idle" | "warming" | "ready" | "blocked";
+    mode: "paper" | "live";
+    windowKey: string | null;
+    checkedAt: string | null;
+    startsInSeconds: number | null;
+    readySymbols: number;
+    totalSymbols: number;
+    reason: string | null;
+    availableBalance: number | null;
+    dailyCommitted: number | null;
+    openCommitted: number | null;
+    markets: Array<{
+      symbol: string;
+      ready: boolean;
+      reason: string | null;
+    }>;
+  };
+  executionPolicy: {
+    scanIntervalMs: number;
+    authenticatedRetryCooldownMs: number;
+    maxSubmissionsPerWindow: number;
+    maxConcurrentCandidates: number;
+    preflightLeadSeconds: number;
+  };
   markets: ScalperStatusMarket[];
 }
 
@@ -590,6 +615,10 @@ export interface ScalperAttempt {
   status: "claimed" | "filled" | "zero_fill" | "error" | "skipped" | "unknown";
   reason: string | null;
   reservedBudget: number;
+  submissionCount: number;
+  retryEligible: boolean;
+  retryState: "ready" | "cooldown" | "in_flight" | "terminal";
+  retryAfterMs: number | null;
   createdAt: string;
   attemptedAt: string;
 }
