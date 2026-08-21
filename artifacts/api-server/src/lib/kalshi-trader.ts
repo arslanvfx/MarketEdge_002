@@ -357,6 +357,9 @@ export interface PlaceOrderParams {
   // to place at exactly that price. priceImprovementCents still escalates from
   // this baseline. minReturnMultiple is ignored when limitPrice is set.
   limitPrice?: number;
+  /** Optional caller-owned idempotency key. Live entry callers persist this
+   * exact ID before POST so an uncertain result can be reconciled durably. */
+  clientOrderId?: string;
 }
 
 export interface PlaceOrderResult {
@@ -364,6 +367,155 @@ export interface PlaceOrderResult {
   status: string;
   filledCount: number;
   avgPrice: number | null; // in fraction (0-1)
+}
+
+// ---------------------------------------------------------------------------
+// Strict regular-order response parsing (pure, fail-closed)
+// ---------------------------------------------------------------------------
+//
+// The regular Kalshi bot's order boundary MUST NEVER (a) coerce a malformed
+// fill_count to 0, or (b) let a confirmed fill fall back to a cached decision
+// yesPrice. A confirmed fill must carry a finite fixed-point dollar fill price
+// strictly inside (0, 1). Any ambiguity resolves to "unknown" (indeterminate
+// live exposure) — never a zero fill.
+//
+// This is a DELIBERATE, independent re-implementation of the same invariants the
+// scalper enforces (see kalshi-scalper-policy.ts parseScalpOrderResponse). It is
+// intentionally NOT imported from the scalper: the scalper's execution lifecycle
+// must never be pulled into the regular bot, and vice versa. The invariants are
+// duplicated as pure code so each subsystem owns its own boundary.
+
+export type RegularOrderOutcome = "zero_fill" | "confirmed_fill" | "unknown";
+
+export interface ParsedRegularOrder {
+  outcome: RegularOrderOutcome;
+  reason: string;             // machine-readable reason code
+  orderId: string | null;    // non-empty string only when trusted
+  filledCount: number | null; // validated nonnegative integer, else null
+  avgPrice: number | null;    // validated (0,1) YES-side fraction, else null
+}
+
+/**
+ * Typed error thrown by placeOrder when an HTTP-2xx response body is malformed
+ * or otherwise indeterminate. Carries the generated client_order_id so the
+ * caller can reconcile the possible live exposure. Treat ANY throw of this as
+ * UNKNOWN LIVE EXPOSURE — never a zero fill, never a retry.
+ */
+export class UncertainOrderError extends Error {
+  readonly clientOrderId: string;
+  readonly reason: string;
+  readonly kind = "uncertain_order" as const;
+  constructor(clientOrderId: string, reason: string) {
+    super(`kalshi order outcome uncertain (${reason}) — client_order_id=${clientOrderId}`);
+    this.name = "UncertainOrderError";
+    this.clientOrderId = clientOrderId;
+    this.reason = reason;
+  }
+}
+
+/** Narrowing helper for callers that must treat uncertain outcomes specially. */
+export function isUncertainOrderError(err: unknown): err is UncertainOrderError {
+  return err instanceof UncertainOrderError ||
+    (typeof err === "object" && err != null && (err as { kind?: string }).kind === "uncertain_order");
+}
+
+/**
+ * Parse a value Kalshi accepts as a numeric count field. Accepts a finite
+ * nonnegative integer number OR a canonical integer string (optionally with
+ * trailing ".0"/".00" fixed-point zeros). Rejects null/empty/whitespace/
+ * non-numeric/NaN/Infinity/negative/fractional. Returns int or null.
+ */
+export function parseRegularFixedPointInteger(v: unknown): number | null {
+  if (typeof v === "number") {
+    if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) return null;
+    return v;
+  }
+  if (typeof v === "string") {
+    if (v.length === 0) return null;
+    const m = /^(\d+)(?:\.(0+))?$/.exec(v);
+    if (!m) return null;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return null;
+    return n;
+  }
+  return null;
+}
+
+/**
+ * Parse a value Kalshi accepts as a numeric price field (fixed-point YES-side
+ * dollars). Accepts a finite number or a canonical finite numeric string.
+ * Range is NOT enforced here — the caller applies the (0,1) rule.
+ */
+export function parseRegularFixedPointNumber(v: unknown): number | null {
+  if (typeof v === "number") {
+    return Number.isFinite(v) ? v : null;
+  }
+  if (typeof v === "string") {
+    if (v.length === 0) return null;
+    if (!/^-?\d+(?:\.\d+)?$/.test(v)) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Strictly parse a raw Kalshi CreateOrderV2 response body (HTTP already 2xx).
+ *
+ * Fail-closed contract:
+ *   - top-level must be a plain object (reject null/array/primitive)
+ *   - order_id must be a NON-EMPTY string for any trusted outcome
+ *   - fill_count must be PRESENT and a finite nonnegative INTEGER (number or
+ *     canonical integer string incl. trailing-zero fixed-point); missing/null/
+ *     empty/nonnumeric/NaN/Infinity/negative/fractional → unknown
+ *   - filledCount must be <= requestedCount; requestedCount must be a positive int
+ *   - validated 0 → zero_fill (avg may be absent/null)
+ *   - positive integral fill → average_fill_price must be present, parseable,
+ *     finite, and strictly inside (0,1); else unknown (CONFIRMED EXPOSURE at an
+ *     indeterminate price — never zero-fill it, never fall back to cached price)
+ */
+export function parseRegularOrderResponse(
+  raw: unknown,
+  requestedCount: number,
+): ParsedRegularOrder {
+  const fail = (reason: string): ParsedRegularOrder => ({
+    outcome: "unknown",
+    reason,
+    orderId: null,
+    filledCount: null,
+    avgPrice: null,
+  });
+
+  if (!Number.isFinite(requestedCount) || !Number.isInteger(requestedCount) || requestedCount <= 0) {
+    return fail("bad_requested_count");
+  }
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    return fail("non_object_response");
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const rawOrderId = obj["order_id"];
+  if (typeof rawOrderId !== "string" || rawOrderId.length === 0) {
+    return fail("missing_order_id");
+  }
+  const orderId = rawOrderId;
+
+  const rawFill = obj["fill_count"];
+  if (rawFill == null) return fail("missing_fill_count");
+  const filledCount = parseRegularFixedPointInteger(rawFill);
+  if (filledCount == null) return fail("unparseable_fill_count");
+  if (filledCount > requestedCount) return fail("overfill_count");
+
+  if (filledCount === 0) {
+    return { outcome: "zero_fill", reason: "zero_fill", orderId, filledCount: 0, avgPrice: null };
+  }
+
+  const rawAvg = obj["average_fill_price"];
+  if (rawAvg == null) return fail("missing_avg_price");
+  const avg = parseRegularFixedPointNumber(rawAvg);
+  if (avg == null || avg <= 0 || avg >= 1) return fail("invalid_avg_price");
+
+  return { outcome: "confirmed_fill", reason: "confirmed_fill", orderId, filledCount, avgPrice: avg };
 }
 
 /**
@@ -447,7 +599,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   // with time_in_force="fill_or_kill". We send an aggressive price that crosses
   // the spread; price-improvement means we never pay worse than the resting book,
   // and FOK guarantees the whole order fills at once or is killed (never rests).
-  const clientOrderId = crypto.randomUUID();
+  const clientOrderId = params.clientOrderId?.trim() || crypto.randomUUID();
 
   // Which side of the YES book acquires the exposure we want.
   const wantYesExposure =
@@ -503,20 +655,78 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   // exit next tick; swallowing it here would strand a real position on the
   // exchange. The FOK "no fill, retry" behavior is handled ONLY in
   // placeOrderWithRetry (the entry path), which opts into retrying.
-  const data = await kalshiFetch<{
-    order_id?: string;
-    fill_count?: string;
-    remaining_count?: string;
-    average_fill_price?: string; // fixed-point YES-side dollars
-  }>("POST", "/portfolio/events/orders", body);
+  // Raw response is parsed as an unknown object and passed to the STRICT parser.
+  // A fill_or_kill 409 for insufficient resting volume is still THROWN by
+  // kalshiFetch (non-2xx) — preserving the exit path's throw-to-keep-position-open
+  // semantics (see .agents/memory/fok-retry-split.md). We only reach here on 2xx.
+  //
+  // Transport-ambiguity handling (Task #667 req #2): a definite HTTP rejection
+  // carries a "→ <status>:" marker (the server answered — no fill accepted,
+  // safe to retry / for the volume-retry helper to inspect). An abort/timeout/
+  // network error has NO such marker: the request may have reached the exchange
+  // and filled, so it is AMBIGUOUS and must surface as UNKNOWN LIVE EXPOSURE.
+  let raw: unknown;
+  try {
+    raw = await kalshiFetch<unknown>("POST", "/portfolio/events/orders", body);
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err);
+    if (isUncertainOrderError(err)) throw err;
+    const httpStatus = Number(msg.match(/→\s*(\d{3}):/)?.[1] ?? NaN);
+    // Only verified client-side rejections are definite no-order outcomes.
+    // 5xx/408/425/429 can be emitted by a proxy after the POST reached Kalshi;
+    // treating those as zero and retrying can duplicate a real fill.
+    const definitiveClientRejection =
+      Number.isInteger(httpStatus) &&
+      httpStatus >= 400 &&
+      httpStatus < 500 &&
+      ![408, 425, 429].includes(httpStatus) &&
+      (httpStatus !== 409 || isInsufficientVolumeError(err));
+    if (definitiveClientRejection) throw err;
+    // No verified rejection ⇒ transport/timeout/ambiguous HTTP failure AFTER
+    // send. The order may exist, so preserve the client id and halt.
+    logger.error(
+      { ticker: params.ticker, side: params.side, count: params.count, clientOrderId, httpStatus, err: msg },
+      "[kalshi-trader] order POST result ambiguous — indeterminate outcome (possible live exposure)",
+    );
+    throw new UncertainOrderError(
+      clientOrderId,
+      Number.isInteger(httpStatus) ? `ambiguous_http_${httpStatus}` : "transport_or_timeout",
+    );
+  }
 
-  const filled = data.fill_count != null ? parseFloat(data.fill_count) || 0 : 0;
-  const avg = data.average_fill_price != null ? parseFloat(data.average_fill_price) : NaN;
+  // STRICT parse — never coerce a malformed fill_count to 0, and never let a
+  // confirmed fill fall back to a cached price. An indeterminate result is
+  // surfaced as UNKNOWN LIVE EXPOSURE via a typed throw carrying client_order_id.
+  const parsed = parseRegularOrderResponse(raw, params.count);
+  if (parsed.outcome === "unknown") {
+    logger.error(
+      { ticker: params.ticker, side: params.side, count: params.count, reason: parsed.reason, clientOrderId },
+      "[kalshi-trader] strict order parse → UNKNOWN (indeterminate live exposure; not treating as zero fill)",
+    );
+    throw new UncertainOrderError(clientOrderId, parsed.reason);
+  }
+  if (
+    parsed.outcome === "confirmed_fill" &&
+    parsed.avgPrice != null &&
+    (
+      (bookSide === "bid" && parsed.avgPrice > priceFrac + 1e-9) ||
+      (bookSide === "ask" && parsed.avgPrice < priceFrac - 1e-9)
+    )
+  ) {
+    logger.error(
+      { ticker: params.ticker, side: params.side, avgPrice: parsed.avgPrice, limitPrice: priceFrac, clientOrderId },
+      "[kalshi-trader] confirmed fill contradicts submitted limit — UNKNOWN exposure; halting",
+    );
+    throw new UncertainOrderError(clientOrderId, "fill_breached_submitted_limit");
+  }
+
   return {
-    orderId: data.order_id ?? null,
-    status: filled > 0 ? "filled" : "unfilled",
-    filledCount: filled,
-    avgPrice: Number.isFinite(avg) ? avg : null, // YES-side fraction 0-1
+    orderId: parsed.orderId,
+    status: parsed.outcome === "confirmed_fill" ? "filled" : "unfilled",
+    filledCount: parsed.filledCount ?? 0,
+    // For zero_fill avgPrice is null; for confirmed_fill it is a validated (0,1)
+    // fraction — never a cached fallback.
+    avgPrice: parsed.avgPrice, // YES-side fraction 0-1, or null on zero fill
   };
 }
 
@@ -776,11 +986,11 @@ export async function buyNo(ticker: string, count: number): Promise<PlaceOrderRe
 }
 
 // Sell (close) Yes contracts at market price.
-export async function sellYes(ticker: string, count: number): Promise<PlaceOrderResult> {
-  return placeOrder({ ticker, side: "yes", action: "sell", count, type: "market" });
+export async function sellYes(ticker: string, count: number, clientOrderId?: string): Promise<PlaceOrderResult> {
+  return placeOrder({ ticker, side: "yes", action: "sell", count, type: "market", clientOrderId });
 }
 
 // Sell (close) No contracts at market price.
-export async function sellNo(ticker: string, count: number): Promise<PlaceOrderResult> {
-  return placeOrder({ ticker, side: "no", action: "sell", count, type: "market" });
+export async function sellNo(ticker: string, count: number, clientOrderId?: string): Promise<PlaceOrderResult> {
+  return placeOrder({ ticker, side: "no", action: "sell", count, type: "market", clientOrderId });
 }

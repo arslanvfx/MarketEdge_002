@@ -4,7 +4,7 @@ import { fetchAllMarkets } from "./lib/markets";
 import { startPredictionTracker, fetchCryptoPredictions } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
-import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, recomputeAllSymbolQuietHours, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
+import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, runSmartHoursCalibration, runSmartHoursCalibrationCatchUpIfNeeded, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
 import { pool, startPoolPinger } from "@workspace/db";
 import { initScalper } from "./lib/kalshi-scalper-service";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
@@ -623,14 +623,21 @@ app.listen(port, (err) => {
       setInterval(runQHAutoTune, 30 * 60_000);
 
       // Per-symbol Smart Hours calibration runs at every exact UTC hour
-      // boundary. It does not fire immediately on restart and the scheduler
-      // skips overlapping runs when a slow DB query crosses a boundary.
+      // boundary. Restart catch-up below closes the mid-hour blind spot, and
+      // the shared operation skips overlap with a manual run.
+      // The hourly run funnels through the SAME shared operation as the manual
+      // "Calibrate & Apply All Markets" button: force-enables every calibrated
+      // symbol, preserves operator fields, and stamps a durable per-UTC-hour
+      // marker so a restart can catch up exactly once.
       scheduleAtTopOfEveryUtcHour(async () => {
-        if (getBotState().config.quietHoursMode !== "per_market") return;
         try {
-          const { calibratedSymbols, skippedSymbols } = await recomputeAllSymbolQuietHours();
+          const result = await runSmartHoursCalibration({ queueIfBusy: true });
+          if (result.skipped) {
+            logger.info("[qh-per-symbol] hourly calibration skipped — already in flight");
+            return;
+          }
           logger.info(
-            { calibratedSymbols, skippedSymbols },
+            { calibratedSymbols: result.calibratedSymbols, skippedSymbols: result.skippedSymbols },
             "[qh-per-symbol] hourly bulk calibration complete",
           );
         } catch (err) {
@@ -640,6 +647,13 @@ app.listen(port, (err) => {
           );
         }
       });
+
+      // Restart catch-up: if the current UTC hour has not already been
+      // calibrated, run once so a mid-hour restart does not skip the hour.
+      // This refreshes per-market schedules without changing the selected mode.
+      runSmartHoursCalibrationCatchUpIfNeeded().catch((err) =>
+        logger.warn({ err }, "[qh-per-symbol] startup catch-up failed (non-fatal)"),
+      );
 
       // Bring up the isolated Kalshi scalper — fully independent of the regular bot.
       initScalper().catch((err) =>

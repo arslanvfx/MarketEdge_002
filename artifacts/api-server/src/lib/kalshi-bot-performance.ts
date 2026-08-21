@@ -856,7 +856,8 @@ export function computeSymbolQuietHoursV2(
 
   // Build silencedByDow and dataGatheringByDow — populate ALL 7 days.
   // silencedByDow: hours with ≥ minBets bets AND win rate < threshold → fully blocked.
-  // dataGatheringByDow: hours with 0 – (minBets-1) bets → active but capped at dataGatheringBetCap.
+  // dataGatheringByDow: hours with 0 – (minBets-1) bets → capped when
+  // data collection is enabled, otherwise blocked by the entry resolver.
   const silencedByDow: Record<string, number[]> = {};
   const dataGatheringByDow: Record<string, number[]> = {};
   for (let dow = 0; dow < 7; dow++) {
@@ -878,7 +879,8 @@ export function computeSymbolQuietHoursV2(
       }
       const total = cell.wins + cell.losses;
       if (total < minBets) {
-        // Sparse data: flag for bet cap rather than silencing
+        // Sparse data: flag for the data-collection policy. The entry resolver
+        // caps it when enabled and blocks it when collection is disabled.
         dataGathering.push(h);
         continue;
       }
@@ -903,15 +905,21 @@ export function computeSymbolQuietHoursV2(
  * Merge a computed schedule over the freshest stored per-market schedule.
  * Calibration owns only silence/data-collection classification and its stamp;
  * operator fields such as reduced percentages and per-cell overrides survive.
+ *
+ * When forceEnable is true the merged schedule is enabled regardless of the
+ * stored value. This mirrors the manual "Calibrate & Apply All Markets" action,
+ * which force-enables every calibrated symbol so the automatic hourly run and the
+ * manual button reach identical enablement state.
  */
 export function mergeCalibratedSymbolQuietHours(
   current: QuietHoursV2 | undefined,
   calibrated: QuietHoursV2,
+  forceEnable = false,
 ): QuietHoursV2 {
   return {
     ...calibrated,
     ...(current ?? {}),
-    enabled: current?.enabled ?? true,
+    enabled: forceEnable ? true : (current?.enabled ?? true),
     silencedByDow: calibrated.silencedByDow,
     dataGatheringByDow: calibrated.dataGatheringByDow,
     silencedUtcHours: calibrated.silencedUtcHours,

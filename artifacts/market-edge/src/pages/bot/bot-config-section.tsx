@@ -52,7 +52,7 @@ function resolveSymbolStateClient(
       if (override.type === "percent") return { mode: "reduced", pct: override.pct };
       return { mode: "data-gathering", amount: override.amount };
     }
-    if (!dgEnabled) return { mode: "active" };
+    if (!dgEnabled) return { mode: "silenced" };
     return { mode: "data-gathering", amount: dgCap };
   }
   return { mode: "active" };
@@ -259,8 +259,8 @@ function PerSymbolQuietHoursPanel({ perSymbolQuietHours, onChange, authPost, dgC
               className="w-14 bg-background border border-violet-500/30 rounded px-1 py-0.5 text-[11px] text-violet-300 text-right focus:outline-none focus:ring-1 focus:ring-violet-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
             />
           </span>
-          {/* Master on/off toggle — when OFF, sparse hours bet at normal size */}
-          <label className="flex items-center gap-1.5 cursor-pointer ml-1" title={dgEnabled ? "Data-gathering is ON — sparse cells are capped at the $ amount" : "Data-gathering is OFF — sparse cells bet normally with no $ restriction"}>
+          {/* Master on/off toggle — when OFF, sparse hours are blocked */}
+          <label className="flex items-center gap-1.5 cursor-pointer ml-1" title={dgEnabled ? "Data-gathering is ON — sparse cells are capped at the $ amount" : "Data-gathering is OFF — sparse cells are blocked"}>
             <div
               className={`w-7 h-3.5 rounded-full relative transition-colors ${dgEnabled ? "bg-violet-500" : "bg-muted"}`}
               onClick={() => { const v = !dgEnabled; setDgEnabled(v); saveDgEnabled(v); }}

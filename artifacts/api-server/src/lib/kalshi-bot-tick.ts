@@ -44,7 +44,13 @@ import {
   placeEntryOrderWithSizeFallback,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
+  isUncertainOrderError,
 } from "./kalshi-trader";
+import {
+  claimRegularOrderIntent, resolveRegularOrderIntent, markRegularOrderIntentUnknown,
+  hasUnresolvedRegularIntent,
+} from "./kalshi-regular-order-intent";
+import crypto from "crypto";
 import { decideRemainderAttempt } from "./kalshi-entry-remainder";
 import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
 import {
@@ -1683,11 +1689,12 @@ async function _runBotTick(
   // ─────────────────────────────────────────────────────────────────────────
 
   // ── DATA-GATHERING DOLLAR CAP ───────────────────────────────────────────────
-  // Hours in dataGatheringByDow have 0 or sparse bets.  The bot stays active
-  // (not silenced) but is capped at a small dollar amount so it collects data
-  // without exposing real risk.  Applied after all other sizing so the cap is
+  // Hours in dataGatheringByDow have 0 or sparse bets. When collection is on,
+  // the bot is capped at a small dollar amount so it collects data without
+  // exposing normal risk. When collection is off, the authoritative entry gate
+  // blocks these cells before sizing. Applied after all other sizing so the cap is
   // always honoured regardless of dynamic sizing, conviction boost, or randomizer.
-  // Skipped when dataGatheringEnabled===false (operator turned off the feature).
+  // This cap path only runs when dataGatheringEnabled is on.
   // Per-cell dollar overrides take precedence over the global dataGatheringBetCap.
   if (qhSizing.isDataGathering && S.config.dataGatheringEnabled !== false) {
     const dgCap = qhSizing.dgOverrideAmount ?? (S.config.dataGatheringBetCap ?? 1);
@@ -2853,6 +2860,51 @@ async function _runBotTick(
   }
 
   if (entryMode === "live") {
+    // ── DURABLE INTENT + ATOMIC RESERVATION (Task #667 req #3/#4) ────────────
+    // Persist a durable order intent AND atomically claim a per-(mode,symbol,
+    // window) reservation BEFORE the live POST so parallel symbol ticks cannot
+    // double-enter, and so an indeterminate POST outcome leaves a durable
+    // record that blocks re-entry until reconciliation. Live mode ONLY —
+    // paper never touches this table (paper behavior stays isolated).
+    const _intentReservationId = crypto.randomUUID();
+    let _intentClaimed = false;
+    try {
+      const claim = await claimRegularOrderIntent({
+        clientOrderId: _intentReservationId,
+        mode: "live",
+        symbol: sym,
+        windowKey,
+        ticker: expectedTicker,
+        side: direction,
+        requestedCount: contractCount,
+        limitPrice: orderLimitPrice ?? null,
+        maxOrdersPerWindow: S.config.maxBetsPerWindow,
+      });
+      if (!claim.claimed) {
+        // An unresolved intent already exists for this symbol/window — a prior
+        // attempt is in flight or was left UNKNOWN. Never place a second live
+        // order; block and retain that reservation until reconciliation.
+        releaseConvictionEntryReservation("durable intent claim denied — unresolved prior attempt");
+        logger.warn(
+          { sym, windowKey, direction, reason: claim.reason },
+          "[kalshi-bot] live entry blocked — unresolved durable order intent exists for this symbol/window",
+        );
+        setTickAbortReason(sym, windowKey,
+          "live entry blocked: an unresolved order intent already exists for this symbol/window (awaiting reconciliation)");
+        return;
+      }
+      _intentClaimed = true;
+    } catch (claimErr) {
+      // Could not persist the durable intent — fail CLOSED. Placing a live order
+      // without a durable record would risk an unrecoverable rogue order.
+      releaseConvictionEntryReservation("durable intent persist failed");
+      logger.error(
+        { err: claimErr, sym, windowKey, direction },
+        "[kalshi-bot] live entry aborted — durable order intent could not be persisted (fail-closed)",
+      );
+      setTickAbortReason(sym, windowKey, "live entry aborted: durable order intent could not be persisted");
+      return;
+    }
     try {
       // ── ENTRY ORDER (IOC real-book / FOK poller-fallback) ───────────────────
       // Kalshi does not support any GTC/resting time-in-force value — both
@@ -2892,6 +2944,7 @@ async function _runBotTick(
 
       const fokResult = await placeEntryOrderWithSizeFallback(
         {
+          clientOrderId: _intentReservationId,
           ticker: expectedTicker,
           side: direction,
           action: "buy",
@@ -2908,6 +2961,8 @@ async function _runBotTick(
                 minReturnMultiple: S.config.minReturnMultiple,
               }),
         },
+        undefined,
+        { disableHalfSizeRetry: true },
       );
 
       if (fokResult.filledCount === 0) {
@@ -2945,6 +3000,14 @@ async function _runBotTick(
           setTickAbortReason(sym, windowKey,
             `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying next tick`);
         }
+        // Confirmed zero fill (dead) — release the durable reservation so the
+        // next tick may re-claim. This is a DEFINITE outcome, safe to release.
+        void resolveRegularOrderIntent({
+          clientOrderId: _intentReservationId,
+          status: "zero_fill",
+          reason: "entry order returned zero fills",
+          filledCount: 0,
+        }).catch((e) => logger.warn({ err: e, sym }, "[kalshi-bot] intent zero-fill resolve failed (non-fatal)"));
         return;
       }
       result = fokResult;
@@ -2976,7 +3039,8 @@ async function _runBotTick(
       //   • remainder measured against attemptedCount (actual submitted size).
       //   • fresh ≥3-min hard floor re-check (same rule as entry dispatch) so
       //     the remainder cannot land dangerously late in the window.
-      if (fokResult.filledCount > 0 && fokResult.filledCount < contractCount) {
+      const allowAdditionalLiveEntrySubmission = false;
+      if (allowAdditionalLiveEntrySubmission && fokResult.filledCount > 0 && fokResult.filledCount < contractCount) {
         const requestedCount = contractCount;
         const firstFill      = fokResult.filledCount;
         let totalFilled      = firstFill;
@@ -3060,7 +3124,29 @@ async function _runBotTick(
       // ── FILL ACCOUNTING (both GTC and IOC paths) ───────────────────────────
       // Must happen AFTER the branch so both paths feed the same downstream
       // accounting (post-fill zone check, emergency close, position recording).
-      fillPrice = result.avgPrice ?? yesPrice;
+      //
+      // A CONFIRMED fill (filledCount > 0) always carries a validated (0,1)
+      // avgPrice from the strict parser — it must NEVER fall back to the cached
+      // decision yesPrice (Task #667 req #1). If it is somehow null here the
+      // result is indeterminate: treat as UNKNOWN LIVE EXPOSURE, retain the
+      // reservation, and halt (do NOT auto-close, do NOT place an opposite order).
+      if (result.avgPrice == null) {
+        void markRegularOrderIntentUnknown({
+          clientOrderId: _intentReservationId,
+          reason: "confirmed fill with missing avg price",
+        }).catch(() => {});
+        logger.error(
+          { sym, direction, windowKey, filled: result.filledCount, orderId: result.orderId },
+          "[kalshi-bot] confirmed fill missing avg price — UNKNOWN exposure, retaining reservation and halting (no auto-close)",
+        );
+        // Retain the conviction reservation (block re-entry). Track the position
+        // as open at a NULL-safe price only via reconciliation; here we simply
+        // stop to avoid recording a fabricated price.
+        setTickAbortReason(sym, windowKey,
+          "confirmed fill returned no price — treated as unknown exposure; awaiting reconciliation");
+        return;
+      }
+      fillPrice = result.avgPrice;
       orderId   = result.orderId;
 
       // Order filled — clear any stale tick-time abort reason from earlier ticks
@@ -3099,7 +3185,7 @@ async function _runBotTick(
           const thresholdCents = (S.config.convictionCatastrophicFillThresholdCents ?? 15) / 100;
           const deviationCents = fillDeviation * 100;
 
-          if (fillDeviation > thresholdCents) {
+          if (S.config.convictionEmergencyAutoCloseEnabled === true && fillDeviation > thresholdCents) {
             // CATASTROPHIC deviation — the FOK was price-improved to a fill far outside
             // the conviction zone (e.g. YES filled at 11¢ when lockPrice = 88¢).
             // This happens when a resting sell order at a very different price appears
@@ -3210,10 +3296,12 @@ async function _runBotTick(
               return; // Tracked as open; Phase 2 will close it.
             }
           } else {
-            // Minor below-floor deviation (e.g. 86¢ fill when lockPrice = 88¢).
-            // Selling immediately crystalizes a spread loss and re-enables entry
-            // so the loop may repeat; holding is far better when deviation is small.
-            // A lower NO fill price still wins if YES closes below target.
+            // A buy limit can cap the WORST executable price but exchanges may
+            // legally price-improve a fill below the entry floor. Immediately
+            // selling that cheaper fill crystallizes spread loss and creates the
+            // dangerous buy/close loop the operator explicitly prohibited. The
+            // known quote was already checked before POST; an accepted improved
+            // fill is held and no opposite order is submitted here.
             logger.warn(
               {
                 sym, direction, windowKey,
@@ -3224,7 +3312,7 @@ async function _runBotTick(
                 thresholdCents: thresholdCents * 100,
                 contractCount, ticker: expectedTicker,
               },
-              "[kalshi-bot] conviction fill: minor below-floor deviation — holding position to settlement",
+              "[kalshi-bot] conviction fill price-improved outside entry band — holding; emergency auto-close disabled",
             );
             // Fall through: position is recorded as open and held until settlement.
           }
@@ -3278,7 +3366,42 @@ async function _runBotTick(
       // Invalidate the cached balance so the next entry guard fetches a fresh value.
       invalidateBalanceCache();
     } catch (err) {
+      // ── UNKNOWN LIVE EXPOSURE (Task #667 req #2/#3/#7) ────────────────────
+      // An UncertainOrderError means the broker returned an HTTP-2xx body we
+      // could not trust (malformed fill_count/order_id/price, overfill, etc.), OR
+      // the response contradicted the submitted order. A transport timeout AFTER
+      // the request was sent is equally indeterminate. In BOTH cases contracts
+      // may be live. We MUST NOT: treat it as a zero fill, retry it, release the
+      // reservation, auto-close, or place an opposite order. Mark the intent
+      // UNKNOWN (retain the reservation → blocks re-entry) and halt.
+      const uncertain = isUncertainOrderError(err);
+      if (uncertain) {
+        const coid = (err as { clientOrderId?: string }).clientOrderId ?? null;
+        void markRegularOrderIntentUnknown({
+          clientOrderId: _intentReservationId,
+          reason: `uncertain order outcome: ${(err as { reason?: string }).reason ?? "unknown"}${coid ? ` (client_order_id=${coid})` : ""}`,
+        }).catch((e) => logger.warn({ err: e, sym }, "[kalshi-bot] intent unknown-mark failed (non-fatal)"));
+        // Retain the conviction reservation & max-bet token — DO NOT release, DO
+        // NOT retry. Block the coin for the rest of the window.
+        windowFailedFills.add(`${sym}:${windowKey}:${S.botMode}`);
+        logger.error(
+          { err, sym, windowKey, direction, clientOrderId: coid },
+          "[kalshi-bot] order outcome UNKNOWN — possible live exposure; retaining reservation, blocking window, awaiting reconciliation (no retry, no auto-close)",
+        );
+        setTickAbortReason(sym, windowKey,
+          "order outcome uncertain — possible live exposure; blocked pending reconciliation (no retry)");
+        return;
+      }
+
+      // DEFINITE pre-exposure failure (e.g. transport error establishing the
+      // request, auth failure, invalid ticker): no order was accepted, so it is
+      // safe to release the durable reservation and allow a retry next tick.
       logger.error({ err, sym }, "[kalshi-bot] order placement failed");
+      void resolveRegularOrderIntent({
+        clientOrderId: _intentReservationId,
+        status: "skipped",
+        reason: `order placement failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}`,
+      }).catch(() => {});
       // Release conviction lock so the next tick can retry if the error is transient
       // (e.g. network timeout, 429 rate-limit).  Permanent failures (e.g. invalid
       // ticker, account suspended) will keep throwing and the window will expire.
@@ -3379,6 +3502,27 @@ async function _runBotTick(
     // Max-bet flag: true when the stability gate + probability roll upgraded this bet.
     isMaxBet: boostBetSize != null,
   });
+
+  // Resolve the live intent only AFTER the open position and bet row exist.
+  // A crash before this point leaves the intent reserved, which blocks the
+  // symbol across later windows rather than risking an untracked duplicate.
+  if (entryMode === "live" && _intentClaimed) {
+    try {
+      await resolveRegularOrderIntent({
+        clientOrderId: _intentReservationId,
+        status: "filled",
+        reason: "confirmed fill persisted locally",
+        filledCount: contractCount,
+        avgFillPrice: actualFillYesPrice,
+        orderId,
+      });
+    } catch (err) {
+      logger.error(
+        { err, sym, clientOrderId: _intentReservationId },
+        "[kalshi-bot] confirmed fill persisted but intent resolve failed — reservation remains fail-closed",
+      );
+    }
+  }
 
   // Shadow paper bet: when live mode is active and shadowPaperBets is enabled,
   // write an identical mode='paper' row so quiet-hours analysis accumulates data

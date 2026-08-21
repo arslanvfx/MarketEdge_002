@@ -30,7 +30,7 @@ import {
   reEvaluateSettledBets,
   fixCommodityOutcomes,
   runQuietHoursAutoTune,
-  recomputeAllSymbolQuietHours,
+  runSmartHoursCalibration,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -1635,8 +1635,17 @@ router.post("/crypto/bot/quiet-hours-calibrate-all", requireAuth, async (req, re
     const rawThreshold = (req.body as Record<string, unknown>)?.threshold;
     const thresholdOverride = typeof rawThreshold === "number" && rawThreshold > 0 && rawThreshold <= 100
       ? rawThreshold : undefined;
-    const result = await recomputeAllSymbolQuietHours(thresholdOverride);
-    res.json({ ok: true, ...result });
+    // Route the manual button through the shared Smart Hours operation so it is
+    // byte-for-byte equivalent to the automatic hourly run: force-enables every
+    // calibrated symbol, preserves operator fields, stamps the durable per-hour
+    // marker, and shares the non-overlap lock with the scheduler.
+    const result = await runSmartHoursCalibration({ thresholdOverride });
+    if (result.skipped) {
+      res.status(409).json({ ok: false, error: "calibration already in progress" });
+      return;
+    }
+    const { skipped: _skipped, ...payload } = result;
+    res.json({ ok: true, ...payload });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

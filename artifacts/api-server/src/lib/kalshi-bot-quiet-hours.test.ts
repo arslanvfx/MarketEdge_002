@@ -412,6 +412,38 @@ test("entry gate: active hour proceeds live untouched", () => {
   assert.equal(d.reducedPct, null);
 });
 
+test("entry gate: sparse hour is capped only while data collection is enabled", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    dataGatheringByDow: { "1": [15] },
+  };
+  const d = resolveEntryQuietHoursDecision(
+    qhCfg(qhv2, { dataGatheringEnabled: true }),
+    "live",
+    MON_11AM_ET,
+  );
+  assert.equal(d.action, "proceed");
+  assert.equal(d.isDataGathering, true);
+});
+
+test("entry gate: turning off data collection blocks sparse hours instead of promoting them to active", () => {
+  const qhv2: QuietHoursV2 = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    dataGatheringByDow: { "1": [15] },
+  };
+  const d = resolveEntryQuietHoursDecision(
+    qhCfg(qhv2, { dataGatheringEnabled: false }),
+    "live",
+    MON_11AM_ET,
+  );
+  assert.equal(d.action, "block");
+  assert.equal(d.qhMode, "silenced");
+});
+
 // ---------------------------------------------------------------------------
 // Auto-tune merge-safe writes (applyQuietHoursAutoTuneDeltas) — a concurrent
 // manual toggle saved between auto-tune's read and write must survive.

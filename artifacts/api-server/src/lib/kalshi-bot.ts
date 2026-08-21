@@ -23,6 +23,7 @@ import {
 import {
   _persistModeToConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadPaperBalanceFromDB, runQuietHoursAutoTune, recomputeAllSymbolQuietHours,
+  runSmartHoursCalibration, runSmartHoursCalibrationCatchUpIfNeeded,
 } from "./kalshi-bot-db";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,7 @@ export {
   loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB,
   loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, clearBetHistoryOld,
   updateBotConfig, runQuietHoursAutoTune, recomputeAllSymbolQuietHours,
+  runSmartHoursCalibration, runSmartHoursCalibrationCatchUpIfNeeded,
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
 export { runBotTickForCoin } from "./kalshi-bot-tick";

@@ -1,4 +1,5 @@
 import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable } from "@workspace/db";
+import { randomUUID } from "node:crypto";
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
@@ -22,8 +23,14 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
-  fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
+  fetchKalshiMarketResult, fetchKalshiSettledMarkets,
+  UncertainOrderError, isUncertainOrderError,
 } from "./kalshi-trader";
+import {
+  claimRegularExitIntent,
+  markRegularExitIntentUnknown,
+  resolveRegularExitIntent,
+} from "./kalshi-regular-order-intent";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
@@ -61,15 +68,9 @@ export async function closePosition(
   currentKalshiTarget: number | null,
   reason: string,
   isLateRecovery = false,
-  options?: {
-    // When true, a FOK exit that fails with "fill_or_kill_insufficient_resting_volume"
-    // is immediately retried as an IOC limit order at the most aggressive price (0.01)
-    // rather than throwing and waiting for the next tick.  IOC fills whatever the book
-    // has right now; an empty book returns 0 fills and the position is marked closed at
-    // 0.01 (worst-case placeholder); evalClosedBets corrects the record once Kalshi settles.
-    // Use for stop-loss exits where we want out at any price, not just on a tick
-    // where the book happens to have resting volume.
-    // NOTE: "gtc" is NOT supported by Kalshi v2 — it returns 400 (oneof failure).
+  _options?: {
+    // Retained for call-site compatibility. Additional fallback submissions are
+    // intentionally disabled: every live close is exactly one durable FOK POST.
     gtcFallback?: boolean;
   },
 ): Promise<void> {
@@ -86,51 +87,72 @@ export async function closePosition(
   let fillPrice: number | null = isExpiry ? null : currentYesPrice;
 
   if (pos.entryMode === "live" && !isExpiry) {
+    const exitClientOrderId = randomUUID();
+    const claim = await claimRegularExitIntent({
+      clientOrderId: exitClientOrderId,
+      mode: "live",
+      positionId: pos.id,
+      symbol: pos.symbol,
+      windowKey: pos.windowKey,
+      ticker: pos.ticker,
+      side: pos.direction,
+      requestedCount: pos.contractCount,
+    });
+    if (!claim.claimed) {
+      throw new Error(
+        `live exit blocked: ${claim.reason ?? "active exit intent exists"}; no additional order submitted`,
+      );
+    }
+
     try {
       const result = pos.direction === "yes"
-        ? await sellYes(pos.ticker, pos.contractCount)
-        : await sellNo(pos.ticker, pos.contractCount);
-      fillPrice = result.avgPrice ?? currentYesPrice;
-    } catch (err) {
-      const isFokDry = String((err as Error).message ?? err).includes("fill_or_kill_insufficient");
-      if (isFokDry && options?.gtcFallback) {
-        // FOK failed because the order book has no resting bids at any price.
-        // Retry as IOC at 0.01 (minimum price) — fills whatever is available right now.
-        // If nothing fills, position is marked closed at 0.01 placeholder and
-        // evalClosedBets will correct the P&L once Kalshi settles the market.
-        logger.warn(
-          { sym: pos.symbol, direction: pos.direction, contractCount: pos.contractCount },
-          "[kalshi-bot] stop-loss FOK failed (no resting bids) — retrying as IOC at minimum price",
-        );
-        try {
-          const side = pos.direction === "yes" ? ("yes" as const) : ("no" as const);
-          // IOC at the most aggressive price (0.01 sell limit) fills whatever the book
-          // has right now and cancels the remainder.  0 fills = book truly empty;
-          // position is marked closed at 0.01 worst-case; evalClosedBets will correct.
-          // Kalshi v2 rejects "gtc"/"good_till_cancelled" with 400 — use IOC instead.
-          const iocResult = await placeOrder({
-            ticker: pos.ticker,
-            side,
-            action: "sell",
-            count: pos.contractCount,
-            type: "limit",
-            timeInForce: "immediate_or_cancel",
-          });
-          fillPrice = iocResult.avgPrice ?? 0.01;
-          logger.info(
-            { sym: pos.symbol, fillPrice, orderId: iocResult.orderId, filledCount: iocResult.filledCount },
-            "[kalshi-bot] IOC fallback exit placed — position marked closed",
-          );
-        } catch (iocErr) {
-          logger.error({ err: iocErr, sym: pos.symbol }, "[kalshi-bot] IOC fallback also failed — position remains OPEN; will retry next tick");
-          throw iocErr;
-        }
-      } else {
-        logger.error({ err, sym: pos.symbol }, "[kalshi-bot] exit order failed — position remains OPEN; will retry next tick");
-        // Do NOT proceed: openPosition stays live so the next tick retries the exit.
-        // Throwing here prevents the caller from clearing openPosition.
-        throw err;
+        ? await sellYes(pos.ticker, pos.contractCount, exitClientOrderId)
+        : await sellNo(pos.ticker, pos.contractCount, exitClientOrderId);
+      if (result.filledCount === 0) {
+        await resolveRegularExitIntent({
+          clientOrderId: exitClientOrderId,
+          status: "zero_fill",
+          reason: "confirmed FOK zero fill",
+          filledCount: 0,
+          orderId: result.orderId,
+        });
+        throw new Error("live exit confirmed zero fill");
       }
+      if (result.filledCount !== pos.contractCount || result.avgPrice == null) {
+        throw new UncertainOrderError(exitClientOrderId, "exit_fill_not_complete");
+      }
+      fillPrice = result.avgPrice;
+      await resolveRegularExitIntent({
+        clientOrderId: exitClientOrderId,
+        status: "filled",
+        reason,
+        filledCount: result.filledCount,
+        avgFillPrice: result.avgPrice,
+        orderId: result.orderId,
+      });
+    } catch (err) {
+      if (isUncertainOrderError(err)) {
+        await markRegularExitIntentUnknown({
+          clientOrderId: exitClientOrderId,
+          reason: `uncertain exit outcome: ${(err as UncertainOrderError).reason}`,
+        });
+        logger.error(
+          { err, sym: pos.symbol, clientOrderId: exitClientOrderId },
+          "[kalshi-bot] exit outcome UNKNOWN — position remains open locally and additional exit orders are blocked",
+        );
+      } else {
+        await resolveRegularExitIntent({
+          clientOrderId: exitClientOrderId,
+          status: "zero_fill",
+          reason: `definite exit rejection: ${String((err as Error)?.message ?? err).slice(0, 160)}`,
+          filledCount: 0,
+        });
+        logger.error(
+          { err, sym: pos.symbol, clientOrderId: exitClientOrderId },
+          "[kalshi-bot] exit definitely rejected — position remains open; a later tick may claim a new exit intent",
+        );
+      }
+      throw err;
     }
   }
 

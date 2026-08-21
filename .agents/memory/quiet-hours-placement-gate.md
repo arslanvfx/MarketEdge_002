@@ -1,6 +1,6 @@
 ---
 name: Quiet-hours placement-time gate
-description: Smart Hours must be enforced at the moment an order is placed, not only when the tick/loop starts; auto-tune config writes must merge per-cell deltas.
+description: Smart Hours placement enforcement, hourly calibration parity, sparse-cell policy, and safe config merging.
 ---
 
 # Quiet-hours placement-time gate
@@ -14,3 +14,11 @@ description: Smart Hours must be enforced at the moment an order is placed, not 
 **How to apply:** any new entry path or timer gets this for free if it goes through the standard tick. Any future code that places orders outside the tick must re-resolve the quiet-hours decision (silenced + reduced) itself right before the order call.
 
 **Auto-tune merge rule:** auto-tune must compute per-cell silence/unsilence deltas from its pre-query snapshot and apply them onto the freshest config at write time — never overwrite the whole per-day map, or a manual slot toggle saved during the aggregation query gets clobbered.
+
+**Hourly calibration rule:** Refresh every market at each UTC hour even when the operator currently selected global mode. Automatic calibration must behave like the manual “apply all” action while preserving the selected mode, manual reductions, caps, and overrides. If a run overlaps the next boundary, queue the latest hour instead of dropping it.
+
+**Sparse-cell rule:** Proven bad cells stay silenced. Cells with too little evidence may trade only under the configured data-collection cap; when data collection is disabled, sparse cells are blocked rather than promoted to normal sizing.
+
+**Why:** Schedule freshness and data-collection permission are independent operator controls. Turning off small exploratory bets must never accidentally enable full-size trading in an unproven window.
+
+**How to apply:** Any calibration entry point must use the shared server-owned operation and preserve operator-owned fields. Any resolver or UI summary must treat sparse + collection-off as blocked.

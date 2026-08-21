@@ -112,3 +112,4 @@
 - [Async entry reservation ownership](async-entry-reservation-ownership.md) — lock/token cleanup must be idempotent and keyed to what that tick claimed, never mutable global mode after awaits
 - [Bot config patch semantics](bot-config-patch-semantics.md) — partial settings updates preserve omitted fields, clear explicit nulls, and adopt the server-returned canonical config only after persistence succeeds
 - [High-value scalper isolation](high-value-scalper-isolation.md) — late-window scaler owns its execution lifecycle; never share or modify normal-bot mechanics, and unresolved live orders remain halted until reconciled
+- [Regular live-order intents](regular-live-order-intents.md) — persist exact client IDs before one-shot live POSTs; ambiguity retains entry/exit reservations and never triggers retry or opposite orders

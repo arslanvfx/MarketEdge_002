@@ -6,7 +6,41 @@ import {
   createNonOverlappingAsyncJob,
   millisecondsUntilNextUtcHour,
   scheduleAtTopOfEveryUtcHour,
+  utcHourMarker,
+  shouldRunSmartHoursCatchUp,
 } from "./kalshi-quiet-hours-scheduler.ts";
+
+test("Smart Hours UTC marker is stable within an hour and changes at the boundary", () => {
+  assert.equal(utcHourMarker(Date.parse("2026-08-19T14:00:00.000Z")), "2026-08-19T14");
+  assert.equal(utcHourMarker(Date.parse("2026-08-19T14:59:59.999Z")), "2026-08-19T14");
+  assert.equal(utcHourMarker(Date.parse("2026-08-19T15:00:00.000Z")), "2026-08-19T15");
+});
+
+test("restart catch-up runs when current UTC hour is uncalibrated in per_market mode", () => {
+  const now = Date.parse("2026-08-19T15:20:00.000Z");
+  // No marker at all → run.
+  assert.equal(shouldRunSmartHoursCatchUp("per_market", undefined, now), true);
+  // Marker for a previous hour → run.
+  assert.equal(shouldRunSmartHoursCatchUp("per_market", "2026-08-19T14", now), true);
+});
+
+test("restart catch-up skips when the current UTC hour was already calibrated", () => {
+  const now = Date.parse("2026-08-19T15:20:00.000Z");
+  assert.equal(shouldRunSmartHoursCatchUp("per_market", "2026-08-19T15", now), false);
+  // Even at the very end of the same hour, the same-hour marker still skips.
+  assert.equal(
+    shouldRunSmartHoursCatchUp("per_market", "2026-08-19T15", Date.parse("2026-08-19T15:59:59.999Z")),
+    false,
+  );
+});
+
+test("restart catch-up keeps per-market schedules fresh regardless of selected mode", () => {
+  const now = Date.parse("2026-08-19T15:20:00.000Z");
+  assert.equal(shouldRunSmartHoursCatchUp("global", undefined, now), true);
+  assert.equal(shouldRunSmartHoursCatchUp(undefined, undefined, now), true);
+  assert.equal(shouldRunSmartHoursCatchUp("global", "2026-08-19T14", now), true);
+  assert.equal(shouldRunSmartHoursCatchUp("global", "2026-08-19T15", now), false);
+});
 
 test("hourly Smart Hours scheduler waits for the next exact UTC hour", () => {
   assert.equal(
@@ -50,7 +84,7 @@ test("hourly Smart Hours scheduler realigns after a delayed boundary callback", 
   assert.equal(timeoutDelays[1], UTC_HOUR_MS - 20_000);
 });
 
-test("hourly Smart Hours scheduler skips overlap and resumes after completion", async () => {
+test("hourly Smart Hours scheduler queues one overlap and resumes after completion", async () => {
   let release: (() => void) | undefined;
   const firstJob = new Promise<void>(resolve => { release = resolve; });
   let runs = 0;
@@ -64,6 +98,7 @@ test("hourly Smart Hours scheduler skips overlap and resumes after completion", 
   assert.equal(runs, 1);
   release?.();
   assert.equal(await first, true);
-  assert.equal(await run(), true);
   assert.equal(runs, 2);
+  assert.equal(await run(), true);
+  assert.equal(runs, 3);
 });

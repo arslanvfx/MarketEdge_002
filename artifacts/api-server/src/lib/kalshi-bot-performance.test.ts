@@ -988,3 +988,44 @@ test("per-market recalibration preserves manual percentage and dollar limits", (
   assert.deepEqual(merged.dataGatheringOverrides, current.dataGatheringOverrides);
   assert.equal(merged.calibratedAt, calibrated.calibratedAt);
 });
+
+test("forceEnable calibration enables a disabled symbol (auto == manual enablement parity)", () => {
+  const current = {
+    enabled: false, // operator-disabled symbol
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "1": [10] },
+    dataGatheringByDow: { "1": [15, 16] },
+    reducedByDow: { "1": { "11": 40 } },
+    dataGatheringOverrides: {
+      "1": { "16": { type: "dollar" as const, amount: 2 } },
+    },
+    autoTuneEnabled: false, // operator restriction that must survive
+    calibratedAt: "2026-08-19T14:00:00.000Z",
+  };
+  const calibrated = {
+    enabled: true,
+    silencedUtcHours: [],
+    reducedBetUtcHours: {},
+    silencedByDow: { "1": [] },
+    dataGatheringByDow: { "1": [16] },
+    autoTuneEnabled: true, // calibration hard-codes true — must NOT override operator's false
+    calibratedAt: "2026-08-19T15:00:00.000Z",
+  };
+
+  // Default (no forceEnable): stored enabled:false is preserved.
+  const preserved = mergeCalibratedSymbolQuietHours(current, calibrated);
+  assert.equal(preserved.enabled, false);
+
+  // forceEnable:true → enabled flips to true, exactly like the manual button.
+  const forced = mergeCalibratedSymbolQuietHours(current, calibrated, true);
+  assert.equal(forced.enabled, true);
+  // Operator-owned fields still preserved under forceEnable.
+  assert.equal(forced.autoTuneEnabled, false);
+  assert.deepEqual(forced.reducedByDow, current.reducedByDow);
+  assert.deepEqual(forced.dataGatheringOverrides, current.dataGatheringOverrides);
+  // Calibration still owns the classification + timestamp.
+  assert.deepEqual(forced.silencedByDow, calibrated.silencedByDow);
+  assert.deepEqual(forced.dataGatheringByDow, calibrated.dataGatheringByDow);
+  assert.equal(forced.calibratedAt, calibrated.calibratedAt);
+});

@@ -984,7 +984,7 @@ export interface QuietHoursV2 {
   reducedByDow?:  Record<string, Record<string, number>>; // dow → utcHour → % reduction 1–99 on that day only
 
   calibratedAt?: string; // ISO timestamp — when recomputeAllSymbolQuietHours last ran for this coin
-  dataGatheringByDow?: Record<string, number[]>; // dow → UTC hours with ≤2 historical bets (active but capped at dataGatheringBetCap)
+  dataGatheringByDow?: Record<string, number[]>; // dow → UTC hours with ≤2 historical bets (capped when collection is on; blocked when off)
   /** Per-cell overrides: operator can set a custom $ cap or promote to a % of global bet (which removes the $ cap). */
   dataGatheringOverrides?: Record<string, Record<string, { type: 'dollar'; amount: number } | { type: 'percent'; pct: number }>>;
 }
@@ -1099,7 +1099,7 @@ export interface EntryQuietHoursDecision {
 }
 
 export function resolveEntryQuietHoursDecision(
-  config: Pick<BotConfig, "freeRunMode" | "quietHoursV2" | "quietHoursStart" | "quietHoursEnd" | "shadowPaperIgnoreQuietHours">,
+  config: Pick<BotConfig, "freeRunMode" | "quietHoursV2" | "quietHoursStart" | "quietHoursEnd" | "shadowPaperIgnoreQuietHours" | "dataGatheringEnabled">,
   botMode: "paper" | "live",
   now: Date = new Date(),
 ): EntryQuietHoursDecision {
@@ -1118,6 +1118,12 @@ export function resolveEntryQuietHoursDecision(
     }
     if (st.mode === "reduced") {
       return { action: "proceed", qhMode: "reduced", ...base, reducedPct: st.reducedBetAmount ?? null };
+    }
+    // The data-collection toggle controls whether sparse cells may trade at all.
+    // Turning it off must never promote an unproven cell to a normal-size active
+    // window; that would invert the safety control and increase risk.
+    if (st.isDataGathering && config.dataGatheringEnabled === false) {
+      return { action: "block", qhMode: "silenced", ...base };
     }
     return { action: "proceed", qhMode: "active", ...base, isDataGathering: st.isDataGathering, dgOverrideAmount: st.dgOverrideAmount };
   }
@@ -1146,7 +1152,7 @@ export function resolveEntryQuietHoursDecision(
  * final pre-order checks.
  */
 export function resolveEntryQuietHoursDecisionForSymbol(
-  config: Pick<BotConfig, "freeRunMode" | "quietHoursV2" | "quietHoursStart" | "quietHoursEnd" | "shadowPaperIgnoreQuietHours" | "quietHoursMode" | "perSymbolQuietHours">,
+  config: Pick<BotConfig, "freeRunMode" | "quietHoursV2" | "quietHoursStart" | "quietHoursEnd" | "shadowPaperIgnoreQuietHours" | "quietHoursMode" | "perSymbolQuietHours" | "dataGatheringEnabled">,
   botMode: "paper" | "live",
   symbol: string,
   now: Date = new Date(),
@@ -1262,6 +1268,7 @@ export interface BotConfig {
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
   convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
+  convictionEmergencyAutoCloseEnabled?: boolean; // safety default false: never churn a price-improved out-of-band fill into an immediate opposite order
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
   // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
@@ -1278,8 +1285,9 @@ export interface BotConfig {
   quietHoursV2?: QuietHoursV2; // per-hour silence / reduced-bet controls (V2); takes precedence over legacy range when enabled
   quietHoursMode?: 'global' | 'per_market'; // 'global' = single shared schedule (default); 'per_market' = each symbol uses its own auto-calibrated schedule
   perSymbolQuietHours?: Record<string, QuietHoursV2>; // per-symbol V2 schedules — only active when quietHoursMode === 'per_market'
-  dataGatheringBetCap?: number; // $ cap applied to hours with ≤ 2 historical bets (default 1.00) — bot stays active but collects data at reduced risk
-  dataGatheringEnabled?: boolean; // master switch for the $ cap feature (default true); when false, sparse hours bet normally
+  smartHoursCalibratedUtcHour?: string; // durable per-hour marker: ISO "YYYY-MM-DDTHH" of the last UTC hour Smart Hours calibration succeeded. Used to skip duplicate runs and drive restart catch-up.
+  dataGatheringBetCap?: number; // $ cap applied to hours with ≤ 2 historical bets (default 1.00)
+  dataGatheringEnabled?: boolean; // master switch (default true); when false, sparse hours are blocked rather than promoted to normal bets
   maxConsecutiveLosses: number;     // trigger circuit breaker after this many consecutive losses (default 3)
   circuitBreakerPauseWindows: number; // windows to skip after circuit breaker triggers (default 2)
   // Directional balance filter: caps correlated exposure by limiting same-direction
