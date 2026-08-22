@@ -1,5 +1,5 @@
 import { useEffect, useRef, lazy, Suspense } from "react";
-import { ClerkProvider, SignIn, SignUp, Show, useClerk, useAuth } from '@clerk/react';
+import { ClerkProvider, SignIn, useClerk, useAuth } from '@clerk/react';
 import { publishableKeyFromHost } from '@clerk/react/internal';
 import { shadcn } from '@clerk/themes';
 import { Switch, Route, useLocation, Router as WouterRouter, Redirect } from 'wouter';
@@ -109,15 +109,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 function SignInPage() {
   return (
     <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4">
-      <SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} />
-    </div>
-  );
-}
-
-function SignUpPage() {
-  return (
-    <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4">
-      <SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} />
+      <SignIn routing="path" path={`${basePath}/sign-in`} />
     </div>
   );
 }
@@ -150,7 +142,6 @@ function ClerkProviderWithRoutes() {
       proxyUrl={clerkProxyUrl}
       appearance={clerkAppearance}
       signInUrl={`${basePath}/sign-in`}
-      signUpUrl={`${basePath}/sign-up`}
       routerPush={(to) => setLocation(stripBase(to))}
       routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
     >
@@ -159,10 +150,11 @@ function ClerkProviderWithRoutes() {
         <AlertsNotifier />
         <BuilderProvider>
           <Switch>
-            {/* Sign-in and sign-up are exempt from the auth gate — they must
-                render before RequireAuth so there is no redirect loop. */}
+            {/* Sign-in is exempt from the auth gate — it must
+                render before RequireAuth so there is no redirect loop.
+                Sign-up is disabled; redirect to sign-in. */}
             <Route path="/sign-in/*?" component={SignInPage} />
-            <Route path="/sign-up/*?" component={SignUpPage} />
+            <Route path="/sign-up/*?" component={() => <Redirect to="/sign-in" />} />
 
             {/* Every other route requires authentication. */}
             <Route>
