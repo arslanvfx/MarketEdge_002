@@ -47,6 +47,8 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const [mutationBusy, setMutationBusy] = useState<MutationName | null>(null);
   const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [attemptPage, setAttemptPage] = useState(0);
+  const ATTEMPT_PAGE_SIZE = 8;
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
@@ -384,7 +386,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           </div>
           <span className="text-[10px] uppercase font-bold tracking-widest text-amber-500/70 mt-0.5">Late-Window Price Execution</span>
         </div>
-        <div className="flex items-end gap-4">
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-2 justify-end">
           <div className="flex flex-col gap-1">
             <span className="text-[9px] uppercase font-bold tracking-widest text-muted-foreground">Scalper mode</span>
             <div className="flex rounded-lg border border-border bg-background/50 p-0.5" role="group" aria-label="Scalper execution mode">
@@ -420,10 +422,10 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           >
             <span className="text-[9px] uppercase font-bold tracking-widest text-muted-foreground">Circuit Breaker</span>
             <span className="flex items-center gap-2">
-              <span className={`relative h-5 w-9 rounded-full transition-colors ${merged.circuitBreakerEnabled !== false ? "bg-emerald-500" : "bg-red-500"}`}>
-                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${merged.circuitBreakerEnabled !== false ? "translate-x-4.5" : "translate-x-0.5"}`} />
+              <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${merged.circuitBreakerEnabled !== false ? "bg-emerald-500" : "bg-red-500"}`}>
+                <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.circuitBreakerEnabled !== false ? "translate-x-5" : "translate-x-0"}`} />
               </span>
-              <span className={`text-xs font-bold ${merged.circuitBreakerEnabled !== false ? "text-emerald-400" : "text-red-300"}`}>
+              <span className={`text-xs font-bold whitespace-nowrap ${merged.circuitBreakerEnabled !== false ? "text-emerald-400" : "text-red-300"}`}>
                 {mutationBusy === "breaker" ? "Saving…" : merged.circuitBreakerEnabled !== false ? "Protected" : "Off"}
               </span>
             </span>
@@ -439,10 +441,10 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           >
             <span className="text-[9px] uppercase font-bold tracking-widest text-muted-foreground">Enable Scalper</span>
             <span className="flex items-center gap-2">
-              <span className={`relative h-5 w-9 rounded-full transition-colors ${merged.enabled ? "bg-emerald-500" : "bg-muted"}`}>
-                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${merged.enabled ? "translate-x-4.5" : "translate-x-0.5"}`} />
+              <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${merged.enabled ? "bg-emerald-500" : "bg-muted"}`}>
+                <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.enabled ? "translate-x-5" : "translate-x-0"}`} />
               </span>
-              <span className={`text-xs font-bold ${merged.enabled ? "text-emerald-400" : "text-muted-foreground"}`}>
+              <span className={`text-xs font-bold whitespace-nowrap ${merged.enabled ? "text-emerald-400" : "text-muted-foreground"}`}>
                 {mutationBusy === "enable" ? "Saving…" : merged.enabled ? "On" : "Off"}
               </span>
             </span>
@@ -763,12 +765,19 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
             </div>
             <div className="flex items-center justify-between mt-3">
               <div className="text-[9px] text-muted-foreground/60 leading-tight pr-2">Separate from normal bets. One scalp per market per 15-min window.</div>
-              <label className="flex items-center gap-1.5 cursor-pointer shrink-0" title="Freefall Guard">
-                <div className={`w-7 h-3.5 rounded-full relative transition-colors ${merged.freefallGuardEnabled ? "bg-amber-500" : "bg-muted"}`} onClick={() => handleConfigChange("freefallGuardEnabled", !merged.freefallGuardEnabled)}>
-                  <span className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white shadow transition-transform ${merged.freefallGuardEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} />
-                </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={merged.freefallGuardEnabled}
+                onClick={() => handleConfigChange("freefallGuardEnabled", !merged.freefallGuardEnabled)}
+                className="flex items-center gap-1.5 shrink-0"
+                title="Toggle Freefall Guard"
+              >
+                <span className={`relative h-5 w-9 rounded-full transition-colors ${merged.freefallGuardEnabled ? "bg-amber-500" : "bg-muted"}`}>
+                  <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${merged.freefallGuardEnabled ? "translate-x-4" : "translate-x-0"}`} />
+                </span>
                 <span className="text-[10px] text-muted-foreground/50"><Shield className="w-3 h-3 inline" /> Guard</span>
-              </label>
+              </button>
             </div>
           </div>
         </div>
@@ -810,10 +819,10 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 aria-checked={merged.targetProximityGuardEnabled}
                 data-testid="switch-scalper-target-proximity"
                 onClick={() => handleConfigChange("targetProximityGuardEnabled", !merged.targetProximityGuardEnabled)}
-                className={`w-10 h-5 rounded-full relative transition-colors ${merged.targetProximityGuardEnabled ? "bg-amber-500" : "bg-muted"}`}
+                className={`relative h-6 w-11 rounded-full transition-colors ${merged.targetProximityGuardEnabled ? "bg-amber-500" : "bg-muted"}`}
                 title="Toggle Target Distance Guard"
               >
-                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${merged.targetProximityGuardEnabled ? "translate-x-5" : "translate-x-0.5"}`} />
+                <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.targetProximityGuardEnabled ? "translate-x-5" : "translate-x-0"}`} />
                 <span className="sr-only">Target Distance Guard</span>
               </button>
             </div>
@@ -996,89 +1005,111 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         )}
         </fieldset>
 
-        {(statusData?.recentAttempts?.length ?? 0) > 0 && (
-          <div className="mt-8 border-t border-amber-500/20 pt-6">
-            <div className="flex items-center gap-2 mb-3">
-              <Target className="w-4 h-4 text-amber-500/70" />
-              <h3 className="text-xs font-bold text-amber-500/70 tracking-widest uppercase">Recent candidate checks</h3>
-              <span className="text-[10px] text-muted-foreground">Operational outcomes, not all completed bets</span>
-            </div>
-            <div className="space-y-2">
-              {statusData!.recentAttempts.slice(0, 8).map((attempt) => {
-                const isFilled = attempt.status === "filled";
-                const isUnsafe = attempt.status === "unknown" || attempt.status === "error";
-                const isZeroFill = attempt.status === "zero_fill";
-                const executionPricing = attempt.observedWinningAsk != null && attempt.executionWinningLimit != null
-                  ? `${(attempt.observedWinningAsk * 100).toFixed(1).replace(/\.0$/, "")}¢ quote → ${(attempt.executionWinningLimit * 100).toFixed(1).replace(/\.0$/, "")}¢ ${attempt.mode === "live" ? "IOC" : "sim"} cap`
-                  : null;
-                const evidenceLines = describeScalperEvidence(attempt);
-                return (
-                  <div
-                    key={attempt.id}
-                    className="rounded-lg border border-border bg-background/40 px-3 py-2"
-                  >
-                    <div className="flex items-center gap-3 text-xs">
-                      <span className="font-bold text-foreground w-12">{attempt.symbol}</span>
-                      <span className={`font-semibold ${
-                        isFilled
-                          ? "text-emerald-400"
-                          : isUnsafe
-                            ? "text-red-400"
-                            : isZeroFill
-                              ? "text-sky-400"
-                              : "text-amber-300"
-                      }`}>
-                        {describeScalperAttempt(attempt)}
-                      </span>
-                      {executionPricing && (
-                        <span
-                          className="text-[10px] text-amber-200/75 font-mono whitespace-nowrap"
-                          title={`Latest ${attempt.mode === "live" ? "submitted" : "simulated"} ${attempt.side?.toUpperCase() ?? ""} quote and worst acceptable winning-contract cost`}
-                        >
-                          {executionPricing}
+        {(statusData?.recentAttempts?.length ?? 0) > 0 && (() => {
+          const totalAttempts = statusData!.recentAttempts.length;
+          const totalPages = Math.ceil(totalAttempts / ATTEMPT_PAGE_SIZE);
+          const safePage = Math.min(attemptPage, totalPages - 1);
+          const pagedAttempts = statusData!.recentAttempts.slice(
+            safePage * ATTEMPT_PAGE_SIZE,
+            (safePage + 1) * ATTEMPT_PAGE_SIZE,
+          );
+          return (
+            <div className="mt-8 border-t border-amber-500/20 pt-6">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-3">
+                <Target className="w-4 h-4 text-amber-500/70 shrink-0" />
+                <h3 className="text-xs font-bold text-amber-500/70 tracking-widest uppercase">Recent candidate checks</h3>
+                <span className="text-[10px] text-muted-foreground">Operational outcomes, not all completed bets</span>
+                <span className="ml-auto text-[10px] text-muted-foreground">{totalAttempts} total</span>
+              </div>
+              <div className="space-y-2">
+                {pagedAttempts.map((attempt) => {
+                  const isFilled = attempt.status === "filled";
+                  const isUnsafe = attempt.status === "unknown" || attempt.status === "error";
+                  const isZeroFill = attempt.status === "zero_fill";
+                  const executionPricing = attempt.observedWinningAsk != null && attempt.executionWinningLimit != null
+                    ? `${(attempt.observedWinningAsk * 100).toFixed(1).replace(/\.0$/, "")}¢ quote → ${(attempt.executionWinningLimit * 100).toFixed(1).replace(/\.0$/, "")}¢ ${attempt.mode === "live" ? "IOC" : "sim"} cap`
+                    : null;
+                  const evidenceLines = describeScalperEvidence(attempt);
+                  const retryText = isZeroFill
+                    ? (attempt.retryEligible
+                        ? attempt.retryState === "ready"
+                          ? `Retry ready · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} used`
+                          : `Retry in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} used`
+                        : `${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`)
+                    : (!isZeroFill && attempt.retryEligible
+                        ? attempt.retryState === "ready"
+                          ? "Transient skip · retry ready"
+                          : `Transient skip · ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s`
+                        : null);
+                  return (
+                    <div
+                      key={attempt.id}
+                      className="rounded-lg border border-border bg-background/40 px-3 py-2"
+                    >
+                      {/* Top row: symbol + description + mode badge */}
+                      <div className="flex items-center gap-2 text-xs min-w-0">
+                        <span className="font-bold text-foreground w-10 shrink-0">{attempt.symbol}</span>
+                        <span className={`font-semibold min-w-0 truncate ${
+                          isFilled ? "text-emerald-400" : isUnsafe ? "text-red-400" : isZeroFill ? "text-sky-400" : "text-amber-300"
+                        }`}>
+                          {describeScalperAttempt(attempt)}
                         </span>
-                      )}
-                      {isZeroFill && (
-                        <span className="text-[10px] text-muted-foreground">
-                          {attempt.retryEligible
-                            ? attempt.retryState === "ready"
-                              ? `Retry ready · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
-                              : `Retry in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
-                            : `${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`}
+                        <span className={`ml-auto shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                          attempt.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-400"
+                        }`}>
+                          {attempt.mode.toUpperCase()}
                         </span>
-                      )}
-                      {!isZeroFill && attempt.retryEligible && (
-                        <span className="text-[10px] text-muted-foreground">
-                          {attempt.retryState === "ready"
-                            ? "Transient no-exposure skip · retry ready"
-                            : `Transient no-exposure skip · retries in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s`}
-                        </span>
-                      )}
-                      <span className={`ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                        attempt.mode === "live"
-                          ? "bg-red-500/15 text-red-400"
-                          : "bg-yellow-500/15 text-yellow-400"
-                      }`}>
-                        {attempt.mode.toUpperCase()}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                        {fmtDateTime(attempt.attemptedAt)}
-                      </span>
-                    </div>
-                    {evidenceLines.length > 0 && (
-                      <div
-                        data-testid={`text-scalper-skip-evidence-${attempt.id}`}
-                        className="mt-1.5 ml-14 flex flex-col gap-0.5 text-[10px] font-mono text-muted-foreground/80"
-                      >
-                        {evidenceLines.map((line) => <span key={line}>{line}</span>)}
                       </div>
-                    )}
-                  </div>
-                );
-              })}
+                      {/* Second row: pricing / retry status + timestamp */}
+                      {(executionPricing || retryText || true) && (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1 pl-12 text-[10px] text-muted-foreground">
+                          {executionPricing && (
+                            <span className="font-mono text-amber-200/75" title={`Latest ${attempt.mode === "live" ? "submitted" : "simulated"} ${attempt.side?.toUpperCase() ?? ""} quote`}>
+                              {executionPricing}
+                            </span>
+                          )}
+                          {retryText && <span>{retryText}</span>}
+                          <span className="ml-auto whitespace-nowrap">{fmtDateTime(attempt.attemptedAt)}</span>
+                        </div>
+                      )}
+                      {evidenceLines.length > 0 && (
+                        <div
+                          data-testid={`text-scalper-skip-evidence-${attempt.id}`}
+                          className="mt-1.5 pl-12 flex flex-col gap-0.5 text-[10px] font-mono text-muted-foreground/80"
+                        >
+                          {evidenceLines.map((line) => <span key={line}>{line}</span>)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between mt-3 pt-3 border-t border-amber-500/10">
+                  <button
+                    type="button"
+                    onClick={() => setAttemptPage(p => Math.max(0, p - 1))}
+                    disabled={safePage === 0}
+                    className="text-[10px] font-bold text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed px-2 py-1 rounded border border-border hover:border-amber-500/40 transition-colors"
+                  >
+                    ← Prev
+                  </button>
+                  <span className="text-[10px] text-muted-foreground">
+                    Page {safePage + 1} of {totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAttemptPage(p => Math.min(totalPages - 1, p + 1))}
+                    disabled={safePage >= totalPages - 1}
+                    className="text-[10px] font-bold text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed px-2 py-1 rounded border border-border hover:border-amber-500/40 transition-colors"
+                  >
+                    Next →
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Performance Section */}
         {perfData && (

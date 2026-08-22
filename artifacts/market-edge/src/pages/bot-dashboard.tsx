@@ -591,7 +591,7 @@ export default function BotDashboard() {
 
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto bg-background">
+    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-background">
       <BotHeader
         status={status}
         openPosList={openPosList}
@@ -617,7 +617,7 @@ export default function BotDashboard() {
         merged={merged}
         setMode={setMode}
       />
-      <div className="flex-1 p-6 space-y-6">
+      <div className="flex-1 p-3 sm:p-6 space-y-4 sm:space-y-6">
         {/* ── Stats Row ── */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
