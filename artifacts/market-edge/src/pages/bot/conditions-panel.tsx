@@ -15,7 +15,7 @@ function ConditionChip({ ok, warn, bad, label }: { ok?: boolean; warn?: boolean;
     : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
   const dot = bad ? "bg-red-400" : warn ? "bg-amber-400" : "bg-emerald-400";
   return (
-    <span className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full border font-medium whitespace-nowrap ${cls}`}>
+    <span className={`max-w-full flex items-center gap-1.5 text-[11px] leading-tight px-2.5 py-1 rounded-full border font-medium whitespace-normal break-words sm:whitespace-nowrap ${cls}`}>
       <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dot}`} />
       {label}
     </span>
@@ -103,11 +103,11 @@ export function ConditionsPanel({
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
       <div
-        className="flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-muted/30 transition-colors select-none"
+        className="flex flex-wrap items-center gap-2 sm:gap-3 px-3 sm:px-5 py-3 cursor-pointer hover:bg-muted/30 transition-colors select-none"
         onClick={() => setOpen(o => !o)}
       >
         <Shield className="w-4 h-4 text-sky-400 flex-shrink-0" />
-        <span className="font-semibold text-sm text-foreground flex-1">Bot Conditions</span>
+        <span className="min-w-0 font-semibold text-sm text-foreground flex-1">Bot Conditions</span>
         {restrictionCount > 0 ? (
           <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
             {restrictionCount} active
@@ -123,7 +123,7 @@ export function ConditionsPanel({
           title={conditions?.freeRunMode
             ? "Free Run is ON — all restriction layers bypassed. Safety rails (circuit breaker, daily loss, max bets, ML-Claude gate) still active. Click to turn off."
             : "Free Run OFF — click to bypass all restriction/penalty layers for unrestricted model-driven betting"}
-          className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-lg border transition-colors font-medium ${
+          className={`order-last flex min-h-8 flex-1 items-center justify-center gap-1.5 text-xs px-3 py-1 rounded-lg border transition-colors font-medium min-[460px]:flex-none sm:order-none ${
             conditions?.freeRunMode
               ? "border-amber-500/60 text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 cursor-pointer"
               : freeRunLoading
@@ -138,7 +138,7 @@ export function ConditionsPanel({
           onClick={(e) => { e.stopPropagation(); if (resetState === "idle") handleReset(); }}
           disabled={resetState !== "idle"}
           title="Clear all window restrictions, cooldowns, pauses, and circuit breaker — safe to run at any time"
-          className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-lg border transition-colors ${
+          className={`order-last flex min-h-8 flex-1 items-center justify-center gap-1.5 text-xs px-3 py-1 rounded-lg border transition-colors min-[460px]:flex-none sm:order-none ${
             resetState === "done"
               ? "border-emerald-500/50 text-emerald-400 bg-emerald-500/10"
               : resetState === "loading"
@@ -149,13 +149,13 @@ export function ConditionsPanel({
           <RotateCcw className={`w-3 h-3 ${resetState === "loading" ? "animate-spin" : ""}`} />
           {resetState === "done" ? "Reset ✓" : resetState === "loading" ? "Resetting…" : "Reset all"}
         </button>
-        {open ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+        {open ? <ChevronUp className="ml-auto w-4 h-4 text-muted-foreground sm:ml-0" /> : <ChevronDown className="ml-auto w-4 h-4 text-muted-foreground sm:ml-0" />}
       </div>
 
       {open && (
         <div className="border-t border-border">
           {/* ── Global conditions ── */}
-          <div className="px-5 py-3 flex flex-wrap gap-2 border-b border-border/50">
+          <div className="px-3 sm:px-5 py-3 flex flex-wrap gap-2 border-b border-border/50">
             <ConditionChip
               ok={(conditions?.botEnabled !== false) && !conditions?.botPaused}
               warn={conditions?.botPaused}
@@ -267,7 +267,7 @@ export function ConditionsPanel({
 
           {/* ── Smart Hours per-symbol status row ── */}
           {conditions?.symbolSmartHoursModes != null && Object.keys(conditions.symbolSmartHoursModes).length > 0 && (
-            <div className="px-5 py-2 border-b border-border/50 flex flex-col gap-1">
+            <div className="px-3 sm:px-5 py-2 border-b border-border/50 flex flex-col gap-1">
               <span className="text-[10px] font-semibold text-muted-foreground/70 flex items-center gap-1">
                 <Clock className="w-3 h-3" />
                 Smart Hours entry eligibility

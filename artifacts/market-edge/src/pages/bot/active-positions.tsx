@@ -50,15 +50,15 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                 ? pos.entryYesPrice
                 : 1 - pos.entryYesPrice;
               return (
-              <div key={pos.id} className={`border rounded-xl p-5 ${
+              <div key={pos.id} className={`min-w-0 border rounded-xl p-3 sm:p-5 ${
                 isScalper
                    ? scalperCardClass
                   : pos.direction === "yes"
                     ? "border-emerald-500/40 bg-emerald-950/20"
                     : "border-red-500/40 bg-red-950/20"
               }`}>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3 flex-wrap">
+                <div className="mb-4 flex flex-col items-stretch gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0 flex items-center gap-2 sm:gap-3 flex-wrap">
                       <div className={`text-2xl font-black ${isScalper ? "text-amber-50" : pos.direction === "yes" ? "text-emerald-400" : "text-red-400"}`}>
                       {pos.symbol}
                     </div>
@@ -88,7 +88,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                       Opened {new Date(pos.openedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                     </span>
                   </div>
-                  <div className="flex items-start gap-3">
+                  <div className="flex w-full items-start justify-between gap-3 sm:w-auto sm:justify-start">
                     <div className="text-right">
                        <div className={`text-xs ${isScalper ? "text-amber-100/70" : "text-muted-foreground"}`}>{isScalper ? "Settlement" : "Unrealized P&L"}</div>
                       {isScalper ? (
@@ -117,7 +117,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 text-sm mb-4">
+                <div className="grid grid-cols-1 min-[360px]:grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2 sm:gap-3 text-sm mb-4">
                    {(isScalper ? [
                     { label: `${pos.direction.toUpperCase()} Fill`, value: fmtPct(winningContractCost) },
                     { label: "YES Fill", value: fmtPct(pos.entryYesPrice) },
@@ -138,12 +138,12 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                     { label: "Ticker", value: pos.ticker },
                     { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
                    ]).map(({ label, value }) => (
-                     <div key={label} className={`rounded-lg p-2.5 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/30"}`}>
+                     <div key={label} className={`min-w-0 rounded-lg p-2.5 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/30"}`}>
                        <div className="flex items-start gap-1.5">
                          {isScalper && <ScalperMetricIcon label={label} />}
-                         <div>
+                          <div className="min-w-0">
                            <div className={`text-[10px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>{label}</div>
-                           <div className={`font-semibold text-sm ${isScalper ? "text-amber-50" : "text-foreground"}`}>{value}</div>
+                            <div className={`break-words font-semibold text-sm ${isScalper ? "text-amber-50" : "text-foreground"}`}>{value}</div>
                          </div>
                        </div>
                     </div>

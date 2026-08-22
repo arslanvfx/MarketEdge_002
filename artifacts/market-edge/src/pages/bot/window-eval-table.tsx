@@ -11,8 +11,8 @@ interface WindowEvalTableProps {
 
 export function WindowEvalTable({ evaluation, openPosList, openManualOrder }: WindowEvalTableProps) {
   return (
-        <div className="bg-card border border-border rounded-xl overflow-hidden">
-          <div className="px-5 py-3 border-b border-border flex items-center gap-2">
+        <div className="min-w-0 bg-card border border-border rounded-xl overflow-hidden">
+          <div className="px-3 sm:px-5 py-3 border-b border-border flex flex-wrap items-center gap-2">
             <Zap className="w-4 h-4 text-amber-400" />
             <h2 className="font-semibold text-sm">Market Selection — This Window</h2>
             {evaluation.length > 0 && (
@@ -22,12 +22,12 @@ export function WindowEvalTable({ evaluation, openPosList, openManualOrder }: Wi
             )}
           </div>
           {evaluation.length === 0 ? (
-            <div className="px-5 py-8 text-center text-muted-foreground text-sm">
+            <div className="px-3 sm:px-5 py-8 text-center text-muted-foreground text-sm">
               Waiting for next bot tick (every 30s)…
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+            <div className="overflow-x-auto overscroll-x-contain">
+              <table className="w-full min-w-[760px] text-sm">
                 <thead>
                   <tr className="text-left text-[10px] uppercase tracking-wide text-muted-foreground border-b border-border">
                     <th className="px-5 py-2">Coin</th>
@@ -99,7 +99,7 @@ export function WindowEvalTable({ evaluation, openPosList, openManualOrder }: Wi
                           </span>
                         ) : <span className="text-muted-foreground text-xs">—</span>}
                       </td>
-                      <td className="px-3 py-2.5 min-w-[240px] max-w-[320px]"><CountdownCell reason={e.reason} windowKey={e.windowKey} /></td>
+                      <td className="px-3 py-2.5 min-w-[200px] max-w-[280px] whitespace-normal break-words"><CountdownCell reason={e.reason} windowKey={e.windowKey} /></td>
                       <td className="px-3 py-2.5">
                         {e.betPlacedThisWindow ? (
                           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap">

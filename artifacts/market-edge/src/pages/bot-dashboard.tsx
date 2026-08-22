@@ -591,7 +591,7 @@ export default function BotDashboard() {
 
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-background">
+    <div className="flex w-full min-w-0 max-w-full flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-background">
       <BotHeader
         status={status}
         openPosList={openPosList}
@@ -617,9 +617,9 @@ export default function BotDashboard() {
         merged={merged}
         setMode={setMode}
       />
-      <div className="flex-1 p-3 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="w-full min-w-0 flex-1 p-3 sm:p-6 space-y-4 sm:space-y-6">
         {/* ── Stats Row ── */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 min-[360px]:grid-cols-2 md:grid-cols-4 gap-2 sm:gap-4">
           {[
             {
               label: status?.mode === "live" ? "Kalshi Balance" : "Paper Balance",
@@ -629,10 +629,10 @@ export default function BotDashboard() {
             { label: `Win Rate (${activeMode})`, value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
             { label: `Total Bets (${activeMode})`, value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
           ].map(({ label, value, sub, icon: Icon, color, bold }) => (
-            <div key={label} className="bg-card border border-border rounded-lg p-4">
+            <div key={label} className="min-w-0 bg-card border border-border rounded-lg p-3 sm:p-4">
               <div className="flex items-center gap-2 mb-2">
-                <Icon className={`w-4 h-4 ${color}`} />
-                <span className="text-xs text-muted-foreground">{label}</span>
+                <Icon className={`w-4 h-4 shrink-0 ${color}`} />
+                <span className="min-w-0 text-xs leading-tight text-muted-foreground">{label}</span>
               </div>
               <div className={`text-xl font-bold ${bold ? (pnl >= 0 ? "text-emerald-400" : "text-red-400") : "text-foreground"}`}>{value}</div>
               {sub && <div className="text-xs text-muted-foreground mt-0.5">{sub}</div>}
@@ -656,16 +656,16 @@ export default function BotDashboard() {
 
         {/* ── Paused Coins Banner ── */}
         {(Object.keys(pausedCoins).length > 0 || streakPausedCoins.length > 0 || (status?.circuitBreakerWindowsRemaining ?? 0) > 0) && (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3 flex flex-wrap items-center gap-3">
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 sm:px-5 py-3 flex flex-wrap items-start sm:items-center gap-3">
             <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm flex-shrink-0">
               <Pause className="w-4 h-4" />
               Blocked coins
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="min-w-0 flex flex-1 flex-wrap gap-2">
               {Object.entries(pausedCoins).map(([sym, windowsRemaining]) => (
                 <span
                   key={`tune-${sym}`}
-                  className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  className="max-w-full flex flex-wrap items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40"
                   title={`${sym} is paused by auto-tune for ${windowsRemaining} more 15-min window(s) (~${windowsRemaining * 15} min)`}
                 >
                   {sym}
@@ -677,7 +677,7 @@ export default function BotDashboard() {
                 return (
                   <span
                     key={`streak-${sym}`}
-                    className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/40"
+                    className="max-w-full flex flex-wrap items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/40"
                     title={`${sym} streak-paused after ${consecutiveLosses} consecutive losses — re-opens at window ${pauseUntilWindowKey} UTC`}
                   >
                     {sym}
@@ -789,13 +789,13 @@ export default function BotDashboard() {
         {/* ── Per-Coin Stats ── */}
         {(stats?.bySymbol?.length ?? 0) > 0 && (
           <div className="bg-card border border-border rounded-xl overflow-hidden">
-            <div className="px-5 py-3 border-b border-border flex items-center gap-2">
+            <div className="px-3 sm:px-5 py-3 border-b border-border flex flex-wrap items-center gap-2">
               <Activity className="w-4 h-4 text-muted-foreground" />
               <h2 className="font-semibold text-sm">Performance by Coin</h2>
               <span className={`ml-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${activeMode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-400"}`}>{activeMode}</span>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+            <div className="overflow-x-auto overscroll-x-contain">
+              <table className="w-full min-w-[640px] text-sm">
                 <thead>
                   <tr className="text-left text-[10px] uppercase tracking-wide text-muted-foreground border-b border-border">
                     {["Coin", "Bets", "Wins", "Losses", "Win Rate", "P&L"].map(h => (

@@ -69,9 +69,9 @@ export function BotEntryTimingPanel({ rows, isLoading }: Props) {
   if (rows.length === 0 && !isLoading) return null;
 
   return (
-    <div className="bg-card border border-border rounded-xl overflow-hidden">
+    <div className="min-w-0 bg-card border border-border rounded-xl overflow-hidden">
       <button
-        className="w-full px-5 py-3 border-b border-border flex items-center gap-2 hover:bg-muted/30 transition-colors"
+        className="w-full px-3 sm:px-5 py-3 border-b border-border flex flex-wrap items-center gap-2 hover:bg-muted/30 transition-colors"
         onClick={() => setOpen(o => !o)}
       >
         <Timer className="w-4 h-4 text-violet-400" />
@@ -96,7 +96,7 @@ export function BotEntryTimingPanel({ rows, isLoading }: Props) {
       </button>
 
       {open && (
-        <div className="p-5 space-y-4">
+        <div className="p-3 sm:p-5 space-y-4">
           <p className="text-[10px] text-muted-foreground">
             At each minute (0–14) into the window, shows how often the composite ML Gate model direction matched the final outcome.
             Higher accuracy + higher theoretical return = optimal entry zone.

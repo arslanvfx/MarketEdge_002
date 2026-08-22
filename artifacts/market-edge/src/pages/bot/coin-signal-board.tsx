@@ -106,18 +106,18 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
-      <div className="flex items-center gap-2.5 px-5 py-3 border-b border-border">
+      <div className="flex flex-wrap items-center gap-2.5 px-3 sm:px-5 py-3 border-b border-border">
         <Activity className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Live Signals</h2>
         {windowKey && (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
+          <span className="max-w-full text-xs leading-tight px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
             Window {wkToEstRange(windowKey)} {ET_LABEL}
           </span>
         )}
-        <span className="text-xs text-muted-foreground ml-1">mirrored from predictor · updates every 5 s</span>
+        <span className="basis-full text-xs text-muted-foreground sm:basis-auto sm:ml-1">mirrored from predictor · updates every 5 s</span>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+      <div className="overflow-x-auto overscroll-x-contain">
+        <table className="w-full min-w-[680px] text-xs">
           <thead>
             <tr className="text-muted-foreground border-b border-border">
               <th className="text-left px-5 py-2 font-medium w-16">Coin</th>
@@ -208,24 +208,24 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
-      <div className="flex items-center gap-2.5 px-5 py-3 border-b border-border">
+      <div className="flex flex-wrap items-center gap-2.5 px-3 sm:px-5 py-3 border-b border-border">
         <TrendingUp className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Market Conditions</h2>
         {windowKey && (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
+          <span className="max-w-full text-xs leading-tight px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
             Window {wkToEstRange(windowKey)} {ET_LABEL}
           </span>
         )}
         {hasStability && (
-          <span className="text-xs text-muted-foreground ml-auto">
+          <span className="basis-full text-xs text-muted-foreground sm:ml-auto sm:basis-auto">
             <span className="text-emerald-400 font-medium">{stableCount}</span>
             <span className="text-muted-foreground/60">/{syms.length} stable · max bet</span>
           </span>
         )}
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+      <div className="overflow-x-auto overscroll-x-contain">
+        <table className="w-full min-w-[980px] text-xs">
           <thead>
             <tr className="text-muted-foreground border-b border-border">
               <th className="text-left px-5 py-2 font-medium w-16">Coin</th>

@@ -590,9 +590,9 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
   return (
     <>
         {/* ── Config Settings ── */}
-        <div className="bg-card border border-border rounded-xl overflow-hidden">
+        <div className="min-w-0 bg-card border border-border rounded-xl overflow-hidden">
           <button
-            className="w-full px-5 py-3 border-b border-border flex items-center gap-2 hover:bg-muted/30 transition-colors"
+            className="w-full px-3 sm:px-5 py-3 border-b border-border flex flex-wrap items-center gap-2 hover:bg-muted/30 transition-colors"
             onClick={() => setConfigOpen(o => !o)}
           >
             <Settings className="w-4 h-4 text-muted-foreground" />
@@ -602,7 +602,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
           </button>
 
           {configOpen && cfg && (
-            <div className="p-5 space-y-5">
+            <div className="min-w-0 p-3 sm:p-5 space-y-4 sm:space-y-5">
 
               {/* ── Bet Profile ── */}
               <div className="flex flex-col gap-2">
@@ -610,7 +610,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <Zap className="w-3 h-3" />
                   Bet Profile
                 </span>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3">
                   {((): Array<{ id: "normal" | "aggressive"; label: string; sublabel: string; bullets: string[]; color: string }> => {
                     const mode = merged.decisionMode ?? "classic";
                     const mlBullet = (thresh: number): string => {
@@ -646,7 +646,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         key={p.id}
                         type="button"
                         onClick={() => setConfigDraft(d => ({ ...d, betProfile: p.id }))}
-                        className={`text-left rounded-xl p-3.5 border transition-all ${
+                        className={`min-w-0 text-left rounded-xl p-3.5 border transition-all ${
                           isSelected ? colorSelected : "border-border bg-background/30 hover:border-border/80 hover:bg-muted/30"
                         }`}
                       >
@@ -668,7 +668,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 min-[420px]:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
                 {/* Bet Size */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">
@@ -1184,7 +1184,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                   Invalid entry zone for {invalidPerMarketSymbols.join(", ")}. Floor must not exceed cap; fix these rows before saving.
                                 </div>
                               )}
-                              <div className="grid grid-cols-[auto_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]">
+                              <div className="grid min-w-[520px] grid-cols-[auto_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]">
                                 <span className="text-muted-foreground/50">Market</span>
                                 <span className="text-muted-foreground/50">Floor</span>
                                 <span className="text-muted-foreground/50">Cap</span>
@@ -3214,7 +3214,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     <DollarSign className="w-3.5 h-3.5 text-sky-400" />
                     <span className="text-xs font-semibold text-sky-400">Paper Trading Simulation</span>
                   </div>
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 min-[420px]:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
                     {/* Starting Balance */}
                     <label className="flex flex-col gap-1.5">
                       <span className="text-xs text-muted-foreground">Starting Wallet ($)</span>

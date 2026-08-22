@@ -21,15 +21,15 @@ interface BotHeaderProps {
 export function BotHeader({ status, openPosList, statusLabel, cfg, merged, confirmLive, recentTuneEntry, kalshiBalanceData, pnl, togglePause, setConfirmLive, setMode }: BotHeaderProps) {
   return (
     <>
-      <div className="sticky top-0 z-10 bg-card/95 backdrop-blur border-b border-border px-6 py-3 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <Bot className="w-6 h-6 text-cyan-400" />
-          <div>
-            <h1 className="text-lg font-bold tracking-tight text-foreground">Kalshi Bot Dashboard</h1>
-            <p className="text-xs text-muted-foreground">Automated prediction market engine</p>
+      <div className="sticky top-0 z-10 bg-card/95 backdrop-blur border-b border-border px-3 sm:px-6 py-3 flex flex-col items-stretch sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
+        <div className="min-w-0 flex items-center gap-2.5 sm:gap-3">
+          <Bot className="w-5 h-5 sm:w-6 sm:h-6 shrink-0 text-cyan-400" />
+          <div className="min-w-0">
+            <h1 className="text-base sm:text-lg font-bold leading-tight tracking-tight text-foreground">Kalshi Bot Dashboard</h1>
+            <p className="text-[11px] sm:text-xs text-muted-foreground">Automated prediction market engine</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="min-w-0 flex items-center justify-start sm:justify-end gap-1.5 sm:gap-2 flex-wrap">
           <span className={`text-xs font-bold px-2 py-1 rounded-full border ${status?.mode === "live" ? "border-red-500/50 bg-red-500/10 text-red-400" : "border-yellow-500/50 bg-yellow-500/10 text-yellow-400"}`}>
             {status?.mode?.toUpperCase() ?? "PAPER"}
           </span>
