@@ -36,7 +36,7 @@ import {
   checkTargetProximityGuard,
   resolveScalpMarketState,
   computeScalpPnl,
-  isFillWithinBand,
+  classifyScalpFillAgainstBand,
   classifyPlaceOrderResult,
   type PlaceOrderClassification,
   buildExecutionRiskSnapshot,
@@ -55,6 +55,7 @@ import {
   type FreefallSample,
   type ExecutionRiskSnapshot,
   type ScalpConfigPatch,
+  type ScalpFillBandResult,
 } from "./kalshi-scalper-policy.ts";
 import {
   loadScalpConfigFromDB,
@@ -1200,34 +1201,38 @@ async function _applyScalpReconciliation(
   result: Exclude<ScalpReconciliationResult, { outcome: "ambiguous" }>,
 ): Promise<"resolved" | "resolved_held" | "already_resolved"> {
   const isFill = result.outcome === "confirmed_fill";
-  const winningContractCost = isFill
-    ? result.budgetSpent / result.filledCount
-    : null;
   const budgetSpent = result.budgetSpent;
   const params = resolveEffectiveParams(_config, order.symbol, order.ticker);
-  const outsideBand = isFill
-    && !isFillWithinBand(order.side, result.avgFillPrice, params.bandMin, params.bandMax);
-  let incident: ScalpIncident | null = null;
-  if (outsideBand && winningContractCost != null) {
-    const breakerReason =
-      `fill_outside_band:${order.symbol}:${order.side}:` +
-      `cost=${winningContractCost.toFixed(4)}:band=[${params.bandMin},${params.bandMax}]`;
-    incident = {
-      id: crypto.randomUUID(),
-      orderId: order.id,
-      mode: order.mode,
-      symbol: order.symbol,
-      windowKey: order.windowKey,
-      ticker: order.ticker,
-      severity: "high",
-      description:
-        `Reconciled winning-contract cost ${winningContractCost.toFixed(4)} ` +
-        `outside band [${params.bandMin}, ${params.bandMax}] for ${order.side} side`,
-      expectedBandMin: params.bandMin,
-      expectedBandMax: params.bandMax,
-      actualWinningCost: winningContractCost,
-      createdAt: new Date(),
-    };
+  const fillBand = isFill
+    ? classifyScalpFillAgainstBand(
+        order.side,
+        result.avgFillPrice,
+        params.bandMin,
+        params.bandMax,
+      )
+    : null;
+  const winningContractCost = fillBand?.winningContractCost ?? null;
+  const incident = fillBand == null || fillBand.classification === "within_band"
+    ? null
+    : _buildFillBandIncident({
+        orderId: order.id,
+        mode: order.mode,
+        symbol: order.symbol,
+        windowKey: order.windowKey,
+        ticker: order.ticker,
+        side: order.side,
+        bandMin: params.bandMin,
+        bandMax: params.bandMax,
+        fillBand,
+        reconciled: true,
+      });
+  if (fillBand?.classification === "adverse_limit_breach") {
+    const breakerReason = _fillAboveCeilingBreakerReason(
+      order.symbol,
+      order.side,
+      fillBand.winningContractCost,
+      params.bandMax,
+    );
     // Latch the breaker in memory before releasing any held reservation. If
     // persistence fails, reconciliation aborts and the reservation stays held.
     await _tripCircuitBreaker(breakerReason, true);
@@ -1263,6 +1268,47 @@ async function _applyScalpReconciliation(
     _nextAttemptAt.delete(`${order.mode}:${order.symbol}:${order.windowKey}`);
   }
   return resolution;
+}
+
+function _fillAboveCeilingBreakerReason(
+  symbol: string,
+  side: "yes" | "no",
+  winningContractCost: number,
+  bandMax: number,
+): string {
+  return `fill_above_ceiling:${symbol}:${side}:cost=${winningContractCost.toFixed(4)}:ceiling=${bandMax}`;
+}
+
+function _buildFillBandIncident(input: {
+  orderId: string;
+  mode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  side: "yes" | "no";
+  bandMin: number;
+  bandMax: number;
+  fillBand: Exclude<ScalpFillBandResult, { classification: "within_band" }>;
+  reconciled: boolean;
+}): ScalpIncident {
+  const favorable = input.fillBand.classification === "favorable_price_improvement";
+  const prefix = input.reconciled ? "Reconciled " : "";
+  return {
+    id: crypto.randomUUID(),
+    orderId: input.orderId,
+    mode: input.mode,
+    symbol: input.symbol,
+    windowKey: input.windowKey,
+    ticker: input.ticker,
+    severity: favorable ? "info" : "high",
+    description: favorable
+      ? `${prefix}favorable price improvement: winning-contract cost ${input.fillBand.winningContractCost.toFixed(4)} below configured minimum ${input.bandMin} for ${input.side} side`
+      : `${prefix}winning-contract cost ${input.fillBand.winningContractCost.toFixed(4)} above configured ceiling ${input.bandMax} for ${input.side} side`,
+    expectedBandMin: input.bandMin,
+    expectedBandMax: input.bandMax,
+    actualWinningCost: input.fillBand.winningContractCost,
+    createdAt: new Date(),
+  };
 }
 
 async function _evaluateCandidate(
@@ -2133,8 +2179,13 @@ async function _executeScalpAttempt(
   // ── (2) CONFIRMED FILL: filledCount>0 AND avgFillPrice finite in (0,1) ─────
   // (classification === "confirmed_fill"; avgFillPrice is narrowed non-null.)
   const confirmedAvg = avgFillPrice as number;
-  const withinBand = isFillWithinBand(effectiveSide, confirmedAvg, snapshot.bandMin, snapshot.bandMax);
-  const winningContractCost = winningCostFromFill(effectiveSide, confirmedAvg);
+  const fillBand = classifyScalpFillAgainstBand(
+    effectiveSide,
+    confirmedAvg,
+    snapshot.bandMin,
+    snapshot.bandMax,
+  );
+  const winningContractCost = fillBand.winningContractCost;
   const actualSpent = winningContractCost * filledCount;
   const finalStatus = mode === "paper" ? "paper" as const : "filled" as const;
 
@@ -2174,29 +2225,34 @@ async function _executeScalpAttempt(
   _terminalAttemptKeys.add(attemptKey);
   _nextAttemptAt.delete(attemptKey);
 
-  // ── Out-of-band fill → incident + circuit breaker ────────────────────────
-  if (!withinBand) {
-    const incidentId = crypto.randomUUID();
-    const incident: ScalpIncident = {
-      id: incidentId,
+  // Record both non-standard outcomes, but only an adverse above-ceiling fill
+  // is high severity and allowed to halt execution.
+  if (fillBand.classification !== "within_band") {
+    const incident = _buildFillBandIncident({
       orderId: orderRecord.id,
       mode,
       symbol,
       windowKey,
       ticker,
-      severity: "high",
-      description: `Winning-contract cost ${winningContractCost.toFixed(4)} outside band [${snapshot.bandMin}, ${snapshot.bandMax}] for ${effectiveSide} side`,
-      expectedBandMin: snapshot.bandMin,
-      expectedBandMax: snapshot.bandMax,
-      actualWinningCost: winningContractCost,
-      createdAt: new Date(),
-    };
-    // Never swallow incident persist failures
+      side: effectiveSide,
+      bandMin: snapshot.bandMin,
+      bandMax: snapshot.bandMax,
+      fillBand,
+      reconciled: false,
+    });
+    // Never swallow execution-record persist failures.
     await insertScalpIncident(incident);
-    await setScalpOrderIncident(orderRecord.id, incidentId).catch(() => {});
-    await _tripCircuitBreaker(
-      `fill_outside_band:${symbol}:${effectiveSide}:cost=${winningContractCost.toFixed(4)}:band=[${snapshot.bandMin},${snapshot.bandMax}]`,
-    );
+    await setScalpOrderIncident(orderRecord.id, incident.id).catch(() => {});
+    if (fillBand.classification === "adverse_limit_breach") {
+      await _tripCircuitBreaker(
+        _fillAboveCeilingBreakerReason(
+          symbol,
+          effectiveSide,
+          winningContractCost,
+          snapshot.bandMax,
+        ),
+      );
+    }
   }
 }
 

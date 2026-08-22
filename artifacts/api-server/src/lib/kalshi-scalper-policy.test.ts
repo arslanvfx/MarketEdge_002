@@ -16,6 +16,7 @@ import {
   winningCostFromFill,
   computeScalpPnl,
   isFillWithinBand,
+  classifyScalpFillAgainstBand,
   isInFinalWindow,
   resolveTimingPhase,
   secondsUntilEligible,
@@ -290,6 +291,49 @@ describe("isFillWithinBand", () => {
     assert.ok(isFillWithinBand("no", 0.07, 0.91, 0.98));
     // avgFillPrice=0.50 (YES-side) → NO cost = 0.50 → not in [0.91, 0.98]
     assert.ok(!isFillWithinBand("no", 0.50, 0.91, 0.98));
+  });
+});
+
+describe("classifyScalpFillAgainstBand", () => {
+  const bandMin = 0.91;
+  const bandMax = 0.95;
+
+  it("classifies a YES fill below the minimum as favorable price improvement", () => {
+    assert.deepEqual(
+      classifyScalpFillAgainstBand("yes", 0.89, bandMin, bandMax),
+      {
+        classification: "favorable_price_improvement",
+        winningContractCost: 0.89,
+      },
+    );
+  });
+
+  it("classifies a NO fill below the minimum as favorable price improvement", () => {
+    const result = classifyScalpFillAgainstBand("no", 0.11, bandMin, bandMax);
+    assert.equal(result.classification, "favorable_price_improvement");
+    assert.ok(Math.abs(result.winningContractCost - 0.89) < 0.0001);
+  });
+
+  it("classifies YES and NO fills above the ceiling as adverse limit breaches", () => {
+    assert.equal(
+      classifyScalpFillAgainstBand("yes", 0.96, bandMin, bandMax).classification,
+      "adverse_limit_breach",
+    );
+    assert.equal(
+      classifyScalpFillAgainstBand("no", 0.04, bandMin, bandMax).classification,
+      "adverse_limit_breach",
+    );
+  });
+
+  it("keeps both exact boundaries within band", () => {
+    assert.equal(
+      classifyScalpFillAgainstBand("yes", bandMin, bandMin, bandMax).classification,
+      "within_band",
+    );
+    assert.equal(
+      classifyScalpFillAgainstBand("yes", bandMax, bandMin, bandMax).classification,
+      "within_band",
+    );
   });
 });
 
@@ -1816,6 +1860,13 @@ describe("describeScalpCircuitBreakerReason", () => {
     );
   });
 
+  it("explains an above-ceiling fill as an adverse cost breach", () => {
+    assert.equal(
+      describeScalpCircuitBreakerReason("fill_above_ceiling:GOLD:no:cost=0.9600:ceiling=0.95"),
+      "GOLD NO filled at 96¢, above your 95¢ winning-cost ceiling.",
+    );
+  });
+
   it("explains uncertain order outcomes without exposing machine codes", () => {
     const message = describeScalpCircuitBreakerReason("scalp_submit_threw:ETH:2026-08-21T15:30");
     assert.equal(message, "Kalshi did not confirm whether the ETH order was accepted or filled.");
@@ -1974,15 +2025,33 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(!latestProvenOrder.includes("'unknown'"));
   });
 
-  it("reconciled fills preserve out-of-band breaker safety before releasing reservations", () => {
+  it("reconciled fills classify favorable improvements separately and trip only above-ceiling breaches before release", () => {
     const start = idx("async function _applyScalpReconciliation");
     const end = svc.indexOf("async function _evaluateCandidate", start);
     const reconciliation = svc.slice(start, end);
-    const bandCheck = reconciliation.indexOf("isFillWithinBand(");
+    const bandCheck = reconciliation.indexOf("classifyScalpFillAgainstBand(");
+    const adverseGate = reconciliation.indexOf('fillBand?.classification === "adverse_limit_breach"');
     const breaker = reconciliation.indexOf("await _tripCircuitBreaker(breakerReason, true)");
     const release = reconciliation.indexOf("await reconcileScalpOrderAndReleaseReservation(");
-    assert.ok(bandCheck >= 0 && bandCheck < breaker && breaker < release);
+    assert.ok(
+      bandCheck >= 0
+        && bandCheck < adverseGate
+        && adverseGate < breaker
+        && breaker < release,
+    );
+    assert.match(reconciliation, /favorable_price_improvement/);
     assert.match(reconciliation, /incident,\s*\}\);/);
+  });
+
+  it("immediate fills use the shared classification and breaker only for adverse breaches", () => {
+    const start = idx("// ── (2) CONFIRMED FILL:");
+    const end = svc.indexOf("/**\n * Post-submit persistence failure handler", start);
+    const immediateFill = svc.slice(start, end);
+    assert.match(immediateFill, /classifyScalpFillAgainstBand\(/);
+    assert.match(
+      immediateFill,
+      /fillBand\.classification === "adverse_limit_breach"[\s\S]*?_tripCircuitBreaker\(/,
+    );
   });
 
   it("final sibling reconciliation derives reservation status from all order outcomes", () => {

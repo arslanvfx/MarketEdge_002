@@ -4,6 +4,7 @@ import {
   resolveScalpReconciliationEvidence,
   type ScalpReconciliationInput,
 } from "./kalshi-scalper-exchange.ts";
+import { classifyScalpFillAgainstBand } from "./kalshi-scalper-policy.ts";
 
 const createdAt = new Date("2026-08-21T15:58:45.763Z");
 
@@ -199,5 +200,79 @@ describe("resolveScalpReconciliationEvidence", () => {
       [],
     );
     assert.equal(result.outcome, "zero_fill");
+  });
+
+  it("classifies a reconciled YES fill below the band as favorable", () => {
+    const result = resolveScalpReconciliationEvidence(
+      input(),
+      [order({ fill_count_fp: "2.00" })],
+      [{
+        fill_id: "fill-improved-yes",
+        order_id: "order-gold-3",
+        ticker: "KXGOLD15M-26AUG211200-00",
+        outcome_side: "yes",
+        book_side: "bid",
+        count_fp: "2.00",
+        yes_price_dollars: "0.890000",
+      }],
+    );
+    assert.equal(result.outcome, "confirmed_fill");
+    if (result.outcome !== "confirmed_fill") return;
+    assert.equal(
+      classifyScalpFillAgainstBand("yes", result.avgFillPrice, 0.91, 0.95)
+        .classification,
+      "favorable_price_improvement",
+    );
+  });
+
+  it("classifies a reconciled NO fill below the band as favorable", () => {
+    const result = resolveScalpReconciliationEvidence(
+      input({ side: "no", limitPrice: 0.06 }),
+      [order({
+        outcome_side: "no",
+        book_side: "ask",
+        yes_price_dollars: "0.060000",
+        fill_count_fp: "2.00",
+      })],
+      [{
+        fill_id: "fill-improved-no",
+        order_id: "order-gold-3",
+        ticker: "KXGOLD15M-26AUG211200-00",
+        outcome_side: "no",
+        book_side: "ask",
+        count_fp: "2.00",
+        yes_price_dollars: "0.110000",
+      }],
+    );
+    assert.equal(result.outcome, "confirmed_fill");
+    if (result.outcome !== "confirmed_fill") return;
+    assert.equal(
+      classifyScalpFillAgainstBand("no", result.avgFillPrice, 0.91, 0.95)
+        .classification,
+      "favorable_price_improvement",
+    );
+  });
+
+  it("classifies a reconciled above-ceiling fill as an adverse limit breach", () => {
+    const result = resolveScalpReconciliationEvidence(
+      input(),
+      [order({ fill_count_fp: "2.00" })],
+      [{
+        fill_id: "fill-breach-yes",
+        order_id: "order-gold-3",
+        ticker: "KXGOLD15M-26AUG211200-00",
+        outcome_side: "yes",
+        book_side: "bid",
+        count_fp: "2.00",
+        yes_price_dollars: "0.960000",
+      }],
+    );
+    assert.equal(result.outcome, "confirmed_fill");
+    if (result.outcome !== "confirmed_fill") return;
+    assert.equal(
+      classifyScalpFillAgainstBand("yes", result.avgFillPrice, 0.91, 0.95)
+        .classification,
+      "adverse_limit_breach",
+    );
   });
 });

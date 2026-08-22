@@ -153,11 +153,11 @@ export interface ScalpIncident {
   symbol: string;
   windowKey: string;
   ticker: string;
-  severity: "high";
+  severity: "info" | "high";
   description: string;
   expectedBandMin: number;
   expectedBandMax: number;
-  actualWinningCost: number; // the winning-contract cost that triggered the incident
+  actualWinningCost: number; // the winning-contract cost recorded for this execution event
   createdAt: Date;
 }
 

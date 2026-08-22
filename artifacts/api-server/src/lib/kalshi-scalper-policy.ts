@@ -1206,14 +1206,50 @@ export function computeScalpPnl(
 }
 
 // ---------------------------------------------------------------------------
-// Band integrity check (for circuit breaker)
+// Fill-band classification (for execution records + circuit breaker)
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true if the actual winning-contract fill cost is within the band.
+ * Classify an actual winning-contract fill against the configured entry band.
+ *
+ * The upper boundary is the execution safety limit: paying more than bandMax
+ * is an adverse limit breach. The lower boundary is only an entry-selection
+ * threshold, so a fill below bandMin is favorable price improvement and must
+ * never trip the circuit breaker.
+ *
  * Winning-contract cost:
  *   YES: avgFillPrice         (YES-side fraction from exchange)
  *   NO:  1 - avgFillPrice     (NO contract cost = complement of YES-side avg)
+ */
+export type ScalpFillBandClassification =
+  | "within_band"
+  | "favorable_price_improvement"
+  | "adverse_limit_breach";
+
+export interface ScalpFillBandResult {
+  classification: ScalpFillBandClassification;
+  winningContractCost: number;
+}
+
+export function classifyScalpFillAgainstBand(
+  side: "yes" | "no",
+  avgFillPrice: number,
+  bandMin: number,
+  bandMax: number,
+): ScalpFillBandResult {
+  const winningContractCost = winningCostFromFill(side, avgFillPrice);
+  const classification =
+    winningContractCost > bandMax
+      ? "adverse_limit_breach"
+      : winningContractCost < bandMin
+        ? "favorable_price_improvement"
+        : "within_band";
+  return { classification, winningContractCost };
+}
+
+/**
+ * Backward-compatible boolean band check for callers that only need to know
+ * whether the fill remained between both configured boundaries.
  */
 export function isFillWithinBand(
   side: "yes" | "no",
@@ -1221,8 +1257,8 @@ export function isFillWithinBand(
   bandMin: number,
   bandMax: number,
 ): boolean {
-  const winningCost = winningCostFromFill(side, avgFillPrice);
-  return winningCost >= bandMin && winningCost <= bandMax;
+  return classifyScalpFillAgainstBand(side, avgFillPrice, bandMin, bandMax)
+    .classification === "within_band";
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,6 +1413,18 @@ export function describeScalpCircuitBreakerReason(reason: string | null): string
     const cents = (value: number): string =>
       `${value.toFixed(2).replace(/\.?0+$/, "")}¢`;
     return `${symbol} ${side.toUpperCase()} filled at ${cents(cost)}, outside your allowed ${cents(min)}–${cents(max)} range.`;
+  }
+
+  const aboveCeiling = reason.match(
+    /^fill_above_ceiling:([^:]+):(yes|no):cost=([0-9.]+):ceiling=([0-9.]+)$/,
+  );
+  if (aboveCeiling) {
+    const [, symbol, side, costText, maxText] = aboveCeiling;
+    const cost = Number(costText) * 100;
+    const max = Number(maxText) * 100;
+    const cents = (value: number): string =>
+      `${value.toFixed(2).replace(/\.?0+$/, "")}¢`;
+    return `${symbol} ${side.toUpperCase()} filled at ${cents(cost)}, above your ${cents(max)} winning-cost ceiling.`;
   }
 
   if (reason.startsWith("scalp_submit_threw:")) {

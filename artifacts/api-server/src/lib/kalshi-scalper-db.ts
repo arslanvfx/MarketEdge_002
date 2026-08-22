@@ -1601,7 +1601,7 @@ export async function getScalpIncidents(limit = 20): Promise<ScalpIncident[]> {
       symbol: String(row["symbol"]),
       windowKey: String(row["window_key"]),
       ticker: String(row["ticker"]),
-      severity: "high" as const,
+      severity: row["severity"] === "info" ? "info" as const : "high" as const,
       description: String(row["description"]),
       expectedBandMin: Number(row["expected_band_min"]),
       expectedBandMax: Number(row["expected_band_max"]),
