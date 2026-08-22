@@ -1,5 +1,5 @@
 import { useEffect, useRef, lazy, Suspense } from "react";
-import { ClerkProvider, SignIn, SignUp, Show, useClerk } from '@clerk/react';
+import { ClerkProvider, SignIn, SignUp, Show, useClerk, useAuth } from '@clerk/react';
 import { publishableKeyFromHost } from '@clerk/react/internal';
 import { shadcn } from '@clerk/themes';
 import { Switch, Route, useLocation, Router as WouterRouter, Redirect } from 'wouter';
@@ -79,17 +79,31 @@ const clerkAppearance = {
   }
 };
 
+// All routes inside RequireAuth are only reachable when signed in,
+// so HomeRedirect can unconditionally send to /builder.
 function HomeRedirect() {
-  return (
-    <>
-      <Show when="signed-in">
-        <Redirect to="/builder" />
-      </Show>
-      <Show when="signed-out">
-        <Home />
-      </Show>
-    </>
-  );
+  return <Redirect to="/builder" />;
+}
+
+/**
+ * Global auth gate. Wraps every route except /sign-in and /sign-up.
+ * While Clerk is initialising (isLoaded=false) we render nothing to avoid
+ * a flash-redirect. Once loaded, any unauthenticated visitor is sent to
+ * /sign-in with their intended destination preserved as redirect_url so
+ * Clerk returns them there after login.
+ */
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { isSignedIn, isLoaded } = useAuth();
+  const [location] = useLocation();
+
+  if (!isLoaded) return null;
+
+  if (!isSignedIn) {
+    const dest = encodeURIComponent(`${basePath}${location}`);
+    return <Redirect to={`/sign-in?redirect_url=${dest}`} />;
+  }
+
+  return <>{children}</>;
 }
 
 function SignInPage() {
@@ -145,71 +159,66 @@ function ClerkProviderWithRoutes() {
         <AlertsNotifier />
         <BuilderProvider>
           <Switch>
-            <Route path="/" component={HomeRedirect} />
+            {/* Sign-in and sign-up are exempt from the auth gate — they must
+                render before RequireAuth so there is no redirect loop. */}
             <Route path="/sign-in/*?" component={SignInPage} />
             <Route path="/sign-up/*?" component={SignUpPage} />
-            
-            <Route path="/markets">
-              <Layout><Markets /></Layout>
-            </Route>
-            <Route path="/picks">
-              <Layout><SmartPicks /></Layout>
-            </Route>
-            <Route path="/predictor">
-              <Layout><Predictor /></Layout>
-            </Route>
-            <Route path="/builder">
-              <Layout><Builder /></Layout>
-            </Route>
-            <Route path="/bot">
-              <Layout>
-                <Show when="signed-in"><BotDashboard /></Show>
-                <Show when="signed-out"><Redirect to="/sign-in" /></Show>
-              </Layout>
-            </Route>
-            <Route path="/portfolio">
-              <Layout>
-                <Show when="signed-in"><Portfolio /></Show>
-                <Show when="signed-out"><Redirect to="/sign-in" /></Show>
-              </Layout>
-            </Route>
-            <Route path="/combo/:id">
-              {(params) => (
-                <Layout>
-                  <Show when="signed-in"><ComboDetail id={params.id} /></Show>
-                  <Show when="signed-out"><Redirect to="/sign-in" /></Show>
-                </Layout>
-              )}
-            </Route>
 
-            <Route path="/stocks" component={() => <Redirect to="/stocks/scanner" />} />
-            <Route path="/stocks/scanner">
-              <Layout><Suspense fallback={<StocksFallback />}><StockScanner /></Suspense></Layout>
-            </Route>
-            <Route path="/stocks/research">
-              <Layout><Suspense fallback={<StocksFallback />}><StockResearch /></Suspense></Layout>
-            </Route>
-            <Route path="/stocks/watchlist">
-              <Layout><Suspense fallback={<StocksFallback />}><StockWatchlist /></Suspense></Layout>
-            </Route>
-            <Route path="/stocks/performance">
-              <Layout><Suspense fallback={<StocksFallback />}><StockPerformance /></Suspense></Layout>
-            </Route>
-            <Route path="/stocks/history">
-              <Layout>
-                <Show when="signed-in"><Suspense fallback={<StocksFallback />}><StockHistory /></Suspense></Show>
-                <Show when="signed-out"><Redirect to="/sign-in" /></Show>
-              </Layout>
-            </Route>
-            <Route path="/stocks/bot">
-              <Layout>
-                <Show when="signed-in"><Suspense fallback={<StocksFallback />}><StockBot /></Suspense></Show>
-                <Show when="signed-out"><Redirect to="/sign-in" /></Show>
-              </Layout>
-            </Route>
-            
+            {/* Every other route requires authentication. */}
             <Route>
-              <NotFound />
+              <RequireAuth>
+                <Switch>
+                  <Route path="/" component={HomeRedirect} />
+
+                  <Route path="/markets">
+                    <Layout><Markets /></Layout>
+                  </Route>
+                  <Route path="/picks">
+                    <Layout><SmartPicks /></Layout>
+                  </Route>
+                  <Route path="/predictor">
+                    <Layout><Predictor /></Layout>
+                  </Route>
+                  <Route path="/builder">
+                    <Layout><Builder /></Layout>
+                  </Route>
+                  <Route path="/bot">
+                    <Layout><BotDashboard /></Layout>
+                  </Route>
+                  <Route path="/portfolio">
+                    <Layout><Portfolio /></Layout>
+                  </Route>
+                  <Route path="/combo/:id">
+                    {(params) => (
+                      <Layout><ComboDetail id={params.id} /></Layout>
+                    )}
+                  </Route>
+
+                  <Route path="/stocks" component={() => <Redirect to="/stocks/scanner" />} />
+                  <Route path="/stocks/scanner">
+                    <Layout><Suspense fallback={<StocksFallback />}><StockScanner /></Suspense></Layout>
+                  </Route>
+                  <Route path="/stocks/research">
+                    <Layout><Suspense fallback={<StocksFallback />}><StockResearch /></Suspense></Layout>
+                  </Route>
+                  <Route path="/stocks/watchlist">
+                    <Layout><Suspense fallback={<StocksFallback />}><StockWatchlist /></Suspense></Layout>
+                  </Route>
+                  <Route path="/stocks/performance">
+                    <Layout><Suspense fallback={<StocksFallback />}><StockPerformance /></Suspense></Layout>
+                  </Route>
+                  <Route path="/stocks/history">
+                    <Layout><Suspense fallback={<StocksFallback />}><StockHistory /></Suspense></Layout>
+                  </Route>
+                  <Route path="/stocks/bot">
+                    <Layout><Suspense fallback={<StocksFallback />}><StockBot /></Suspense></Layout>
+                  </Route>
+
+                  <Route>
+                    <NotFound />
+                  </Route>
+                </Switch>
+              </RequireAuth>
             </Route>
           </Switch>
         </BuilderProvider>
