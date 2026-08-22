@@ -1,7 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { SCALP_GUARD_RETRY_COOLDOWN_MS } from "./kalshi-scalper-policy.ts";
-import { runControlledFreefallServiceExercise } from "./kalshi-scalper-service.ts";
+import {
+  runControlledFreefallServiceExercise,
+  runControlledSampleSchedulerExercise,
+} from "./kalshi-scalper-service.ts";
 
 describe("real Scalper service Freefall boundary", () => {
   it("blocks actual intent/submit sinks, enforces cooldown, and recovers on fresh clear data", async () => {
@@ -103,5 +106,21 @@ describe("real Scalper service Freefall boundary", () => {
       assert.equal(attempt.evidence?.protectedSide, "yes");
       assert.equal(attempt.evidence?.freefallThresholdPct, 0.5);
     }
+  });
+});
+
+describe("real Scalper authoritative sample lane", () => {
+  it("starts final guard work while two background fetches are still occupied", async () => {
+    const result = await runControlledSampleSchedulerExercise();
+    assert.deepEqual(
+      result.backgroundStartedBeforeAuthoritative,
+      ["CTRL-BG-1", "CTRL-BG-2"],
+    );
+    assert.equal(result.authoritativeStartedBeforeBackgroundRelease, true);
+    assert.deepEqual(
+      result.startOrder,
+      ["CTRL-BG-1", "CTRL-BG-2", "CTRL-AUTH", "CTRL-BG-3"],
+    );
+    assert.equal(result.maxActiveObserved, 3);
   });
 });

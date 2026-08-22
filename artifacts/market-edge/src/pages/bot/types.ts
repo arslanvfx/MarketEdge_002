@@ -669,6 +669,13 @@ export interface ScalperStatus {
   dailySpend: number;
   recentOrders: ScalpOrder[];
   recentAttempts: ScalperAttempt[];
+  latency: {
+    sampleSize: number;
+    p50Ms: number | null;
+    p90Ms: number | null;
+    p99Ms: number | null;
+    maxMs: number | null;
+  };
   incidents: any[];
   lastScanAt: string | null;
   lastError: string | null;
@@ -695,6 +702,7 @@ export interface ScalperStatus {
     authenticatedRetryCooldownMs: number;
     maxSubmissionsPerWindow: number;
     maxConcurrentCandidates: number;
+    maxConcurrentBackgroundSamples: number;
     preflightLeadSeconds: number;
   };
   markets: ScalperStatusMarket[];
@@ -735,6 +743,31 @@ export interface ScalperAttempt {
   executionWinningLimit: number | null;
   submittedLimitPrice: number | null;
   skipEvidence: ScalpSkipEvidence | null;
+  latency?: {
+    mode: "paper" | "live";
+    symbol: string;
+    windowKey: string;
+    detectedAt: string;
+    completedAt: string;
+    totalMs: number;
+    queueWaitMs: number | null;
+    capClaimMs: number | null;
+    identityRefreshMs: number | null;
+    quoteRefreshMs: number | null;
+    parallelRefreshMs: number | null;
+    intentWriteMs: number | null;
+    brokerSubmitMs: number | null;
+    decisionFinalizeMs: number | null;
+    slowestStage:
+      | "queue_wait"
+      | "cap_claim"
+      | "parallel_refresh"
+      | "intent_write"
+      | "broker_submit"
+      | "decision_finalize"
+      | null;
+    slowestStageMs: number | null;
+  } | null;
   retryEligible: boolean;
   retryState: "ready" | "cooldown" | "in_flight" | "terminal";
   retryAfterMs: number | null;

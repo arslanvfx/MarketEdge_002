@@ -32,7 +32,6 @@
 // ---------------------------------------------------------------------------
 
 import {
-  DEFAULT_SCALP_OPEN_CAP_DOLLARS,
   normalizeScalpOpenCapDollars,
   type ScalpConfig,
   type EffectiveScalpParams,
@@ -254,9 +253,20 @@ export const SCALP_AUTH_RETRY_COOLDOWN_MS = 500;
 export const SCALP_GUARD_RETRY_COOLDOWN_MS = 1_000;
 export const SCALP_BALANCE_RETRY_COOLDOWN_MS = 2_000;
 export const SCALP_MAX_SUBMISSIONS_PER_WINDOW = 3;
-export const SCALP_PREFLIGHT_LEAD_SECONDS = 30;
+/** Begin non-submitting warm-up three minutes before the entry window opens. */
+export const SCALP_PREFLIGHT_LEAD_SECONDS = 180;
 export const SCALP_PREFLIGHT_REFRESH_MS = 5_000;
+export const SCALP_PREFLIGHT_EARLY_REFRESH_MS = 15_000;
+export const SCALP_PREFLIGHT_FAST_ZONE_SECONDS = 30;
 export const SCALP_MAX_CONCURRENT_CANDIDATES = 3;
+/** Keep one of the three ticker lanes free for final authoritative guard work. */
+export const SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES = 2;
+
+export function scalpPreflightRefreshMs(startsInSeconds: number): number {
+  return startsInSeconds <= SCALP_PREFLIGHT_FAST_ZONE_SECONDS
+    ? SCALP_PREFLIGHT_REFRESH_MS
+    : SCALP_PREFLIGHT_EARLY_REFRESH_MS;
+}
 
 export interface ScalpReservationRetryDecision {
   /** True only when the row may be atomically returned to `claimed` now. */
@@ -1394,8 +1404,8 @@ export function validateScalpConfigPartial(
     const v = Number(c["budgetDollars"]);
     if (!Number.isFinite(v) || v <= 0 || v > 1000) errors.push("budgetDollars must be > 0 and ≤ 1000");
   }
-  // Daily cap may be explicitly cleared. Open exposure is mandatory and may
-  // only be made stricter than the approved $50 aggregate ceiling.
+  // Daily cap may be explicitly cleared. Open exposure is mandatory, but the
+  // operator chooses its amount; the atomic claim enforces that exact value.
   if (c["dailyCapDollars"] != null && c["dailyCapDollars"] !== null) {
     const v = Number(c["dailyCapDollars"]);
     if (!Number.isFinite(v) || v <= 0) errors.push("dailyCapDollars must be > 0 when set");
@@ -1406,9 +1416,8 @@ export function validateScalpConfigPartial(
       typeof v !== "number"
       || !Number.isFinite(v)
       || v <= 0
-      || v > DEFAULT_SCALP_OPEN_CAP_DOLLARS
     ) {
-      errors.push("openCapDollars must be a finite number > 0 and ≤ 50");
+       errors.push("openCapDollars must be a finite number > 0");
     }
   }
   if (c["mode"] != null && c["mode"] !== "paper" && c["mode"] !== "live") {
@@ -1739,8 +1748,8 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   }
   if (has("openCapDollars")) {
     const v = body["openCapDollars"];
-    if (!isFiniteNumber(v) || v <= 0 || v > DEFAULT_SCALP_OPEN_CAP_DOLLARS) {
-      errors.push("openCapDollars must be a number > 0 and ≤ 50");
+    if (!isFiniteNumber(v) || v <= 0) {
+      errors.push("openCapDollars must be a finite number > 0");
     } else {
       out.openCapDollars = v;
     }

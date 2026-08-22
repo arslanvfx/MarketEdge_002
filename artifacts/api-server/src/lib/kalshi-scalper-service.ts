@@ -21,7 +21,17 @@ import {
   type ScalpReconciliationResult,
 } from "./kalshi-scalper-exchange.ts";
 import { getTicker } from "./crypto-data.ts";
-import type { ScalpConfig, ScalpMode, ScalpOrder, ScalpIncident, ScalpPerformance, ScalpMarketStatus, ScalpPerMarketOverride, ScalpSkipEvidence } from "./kalshi-scalper-types.ts";
+import type {
+  ScalpAttemptLatency,
+  ScalpConfig,
+  ScalpMode,
+  ScalpOrder,
+  ScalpIncident,
+  ScalpPerformance,
+  ScalpMarketStatus,
+  ScalpPerMarketOverride,
+  ScalpSkipEvidence,
+} from "./kalshi-scalper-types.ts";
 import { DEFAULT_SCALP_CONFIG } from "./kalshi-scalper-types.ts";
 import {
   resolveEffectiveParams,
@@ -50,15 +60,22 @@ import {
   SCALP_AUTH_RETRY_COOLDOWN_MS,
   SCALP_GUARD_RETRY_COOLDOWN_MS,
   SCALP_MAX_CONCURRENT_CANDIDATES,
+  SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES,
   SCALP_MAX_SUBMISSIONS_PER_WINDOW,
   SCALP_PREFLIGHT_LEAD_SECONDS,
-  SCALP_PREFLIGHT_REFRESH_MS,
   SCALP_SCAN_INTERVAL_MS,
+  scalpPreflightRefreshMs,
   type FreefallSample,
   type ExecutionRiskSnapshot,
   type ScalpConfigPatch,
   type ScalpFillBandResult,
 } from "./kalshi-scalper-policy.ts";
+import {
+  createCoalescedAsyncRunner,
+  findSlowestScalpLatencyStage,
+  selectNextScalpSamplePriority,
+  summarizeScalpAttemptLatencies,
+} from "./kalshi-scalper-fast-path.ts";
 import {
   loadScalpConfigFromDB,
   saveScalpConfigToDB,
@@ -166,9 +183,98 @@ const _priceSampleJobs = new Map<string, PriceSampleJob>();
 const _authoritativeSampleQueue: PriceSampleJob[] = [];
 const _backgroundSampleQueue: PriceSampleJob[] = [];
 let _activePriceSampleFetches = 0;
+let _activeBackgroundPriceSampleFetches = 0;
+let _fetchScalpUnderlyingPrice: typeof getTicker = getTicker;
+
+interface MutableScalpAttemptLatency {
+  mode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  detectedAtMs: number;
+  queueWaitMs: number | null;
+  capClaimMs: number | null;
+  identityRefreshMs: number | null;
+  quoteRefreshMs: number | null;
+  parallelRefreshMs: number | null;
+  intentWriteMs: number | null;
+  brokerSubmitMs: number | null;
+}
+const _recentAttemptLatencies: ScalpAttemptLatency[] = [];
+const _latestAttemptLatencyByKey = new Map<string, ScalpAttemptLatency>();
+const MAX_RECENT_ATTEMPT_LATENCIES = 200;
 
 function _attemptKey(mode: ScalpMode, symbol: string, windowKey: string): string {
   return `${mode}:${symbol}:${windowKey}`;
+}
+
+function _beginAttemptLatency(
+  mode: ScalpMode,
+  symbol: string,
+  windowKey: string,
+  detectedAtMs: number,
+): MutableScalpAttemptLatency {
+  const startedAtMs = Date.now();
+  return {
+    mode,
+    symbol,
+    windowKey,
+    detectedAtMs,
+    queueWaitMs: Math.max(0, startedAtMs - detectedAtMs),
+    capClaimMs: null,
+    identityRefreshMs: null,
+    quoteRefreshMs: null,
+    parallelRefreshMs: null,
+    intentWriteMs: null,
+    brokerSubmitMs: null,
+  };
+}
+
+function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
+  const completedAtMs = Date.now();
+  const totalMs = Math.max(0, completedAtMs - timing.detectedAtMs);
+  const measuredSequentialMs = [
+    timing.queueWaitMs,
+    timing.capClaimMs,
+    timing.parallelRefreshMs,
+    timing.intentWriteMs,
+    timing.brokerSubmitMs,
+  ].reduce<number>((sum, value) => sum + (value ?? 0), 0);
+  const decisionFinalizeMs = Math.max(0, totalMs - measuredSequentialMs);
+  const slowest = findSlowestScalpLatencyStage({
+    ...timing,
+    decisionFinalizeMs,
+  });
+  const completed: ScalpAttemptLatency = {
+    mode: timing.mode,
+    symbol: timing.symbol,
+    windowKey: timing.windowKey,
+    detectedAt: new Date(timing.detectedAtMs).toISOString(),
+    completedAt: new Date(completedAtMs).toISOString(),
+    totalMs,
+    queueWaitMs: timing.queueWaitMs,
+    capClaimMs: timing.capClaimMs,
+    identityRefreshMs: timing.identityRefreshMs,
+    quoteRefreshMs: timing.quoteRefreshMs,
+    parallelRefreshMs: timing.parallelRefreshMs,
+    intentWriteMs: timing.intentWriteMs,
+    brokerSubmitMs: timing.brokerSubmitMs,
+    decisionFinalizeMs,
+    slowestStage: slowest.stage,
+    slowestStageMs: slowest.latencyMs,
+  };
+  _recentAttemptLatencies.push(completed);
+  if (_recentAttemptLatencies.length > MAX_RECENT_ATTEMPT_LATENCIES) {
+    _recentAttemptLatencies.splice(
+      0,
+      _recentAttemptLatencies.length - MAX_RECENT_ATTEMPT_LATENCIES,
+    );
+  }
+  const key = _attemptKey(timing.mode, timing.symbol, timing.windowKey);
+  _latestAttemptLatencyByKey.set(key, completed);
+  if (_latestAttemptLatencyByKey.size > MAX_RECENT_ATTEMPT_LATENCIES) {
+    const oldestKey = _latestAttemptLatencyByKey.keys().next().value;
+    if (oldestKey) _latestAttemptLatencyByKey.delete(oldestKey);
+  }
 }
 
 function _resetPreflightState(): void {
@@ -638,15 +744,27 @@ function _removeQueuedSampleJob(queue: PriceSampleJob[], job: PriceSampleJob): v
 
 function _drainPriceSampleQueue(): void {
   while (_activePriceSampleFetches < SCALP_MAX_CONCURRENT_CANDIDATES) {
-    const job = _authoritativeSampleQueue.shift() ?? _backgroundSampleQueue.shift();
+    const priority = selectNextScalpSamplePriority({
+      activeTotal: _activePriceSampleFetches,
+      activeBackground: _activeBackgroundPriceSampleFetches,
+      maxTotal: SCALP_MAX_CONCURRENT_CANDIDATES,
+      maxBackground: SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES,
+      authoritativeQueued: _authoritativeSampleQueue.length,
+      backgroundQueued: _backgroundSampleQueue.length,
+    });
+    if (!priority) return;
+    const job = priority === "authoritative"
+      ? _authoritativeSampleQueue.shift()
+      : _backgroundSampleQueue.shift();
     if (!job) return;
     if (job.started) continue;
     job.started = true;
     _activePriceSampleFetches += 1;
+    if (job.priority === "background") _activeBackgroundPriceSampleFetches += 1;
     void (async () => {
       try {
         // getTicker has its own AbortController-backed request timeout.
-        const price = await getTicker(job.product);
+        const price = await _fetchScalpUnderlyingPrice(job.product);
         if (!Number.isFinite(price) || price <= 0) return false;
         const samples = _priceSamples.get(job.symbol) ?? [];
         samples.push({ price, at: Date.now() });
@@ -663,6 +781,7 @@ function _drainPriceSampleQueue(): void {
       .then(job.resolve)
       .finally(() => {
         _activePriceSampleFetches -= 1;
+        if (job.priority === "background") _activeBackgroundPriceSampleFetches -= 1;
         if (_priceSampleJobs.get(job.key) === job) {
           _priceSampleJobs.delete(job.key);
         }
@@ -902,7 +1021,8 @@ function _maybeStartPreflight(windowKey: string, nowMs: number): void {
     startsInSeconds,
     totalSymbols: plan.targets.length,
   };
-  if (_preflightInFlight || nowMs - _lastPreflightStartedAt < SCALP_PREFLIGHT_REFRESH_MS) {
+  const preflightRefreshMs = scalpPreflightRefreshMs(startsInSeconds);
+  if (_preflightInFlight || nowMs - _lastPreflightStartedAt < preflightRefreshMs) {
     return;
   }
 
@@ -934,7 +1054,10 @@ function _maybeStartPreflight(windowKey: string, nowMs: number): void {
 // ---------------------------------------------------------------------------
 
 async function _runScanTick(): Promise<void> {
-  if (_running) return;
+  return _scanRunner.run();
+}
+
+async function _executeScanPass(): Promise<void> {
   _running = true;
   try {
     await _doScanTick();
@@ -947,6 +1070,8 @@ async function _runScanTick(): Promise<void> {
     _running = false;
   }
 }
+
+const _scanRunner = createCoalescedAsyncRunner(_executeScanPass);
 
 async function _doScanTick(): Promise<void> {
   if (!_config.enabled) {
@@ -1007,6 +1132,7 @@ interface Candidate {
   symbol: string;
   ticker: string;
   closeTime: string;
+  detectedAtMs: number;
   cachedYesAsk: number | null;
   cachedNoAsk: number | null;
   side: "yes" | "no";
@@ -1051,6 +1177,7 @@ function _findCandidates(wk: string): Candidate[] {
       symbol: sym,
       ticker: cached.ticker,
       closeTime: cached.closeTime,
+      detectedAtMs: now,
       cachedYesAsk: yesAsk,
       cachedNoAsk: noAsk,
       side: match.side,
@@ -1058,6 +1185,14 @@ function _findCandidates(wk: string): Candidate[] {
     });
   }
 
+  // Urgent candidates first: nearest close, then the highest qualifying winning
+  // ask (closest to leaving through the hard upper band), then stable symbol
+  // ordering. This changes scheduling only; all final checks remain mandatory.
+  candidates.sort((a, b) => (
+    new Date(a.closeTime).getTime() - new Date(b.closeTime).getTime()
+    || b.winningAsk - a.winningAsk
+    || a.symbol.localeCompare(b.symbol)
+  ));
   return candidates;
 }
 
@@ -1327,6 +1462,12 @@ async function _evaluateCandidate(
   const key = _attemptKey(mode, symbol, windowKey);
   if (_attemptsInFlight.has(key)) return;
   _attemptsInFlight.add(key);
+  const latency = _beginAttemptLatency(
+    mode,
+    symbol,
+    windowKey,
+    candidate.detectedAtMs,
+  );
   try {
     const params = resolveEffectiveParams(_config, symbol, ticker);
     // Pin the immutable execution-risk snapshot at claim time. Every sizing,
@@ -1339,6 +1480,7 @@ async function _evaluateCandidate(
     const budget = snapshot.budgetDollars;
 
     let claim: Awaited<ReturnType<typeof claimReservationAndCap>>;
+    const claimStartedAtMs = Date.now();
     try {
       // Pass closeTime + finalWindowSeconds so claimReservationAndCap can enforce
       // the effective per-market final-window boundary atomically at claim time.
@@ -1348,10 +1490,12 @@ async function _evaluateCandidate(
         closeTime, snapshot.finalWindowSeconds,
       );
     } catch (err) {
+      latency.capClaimMs = Date.now() - claimStartedAtMs;
       _lastError = String(err);
       logger.warn({ err, symbol, windowKey, mode }, "[kalshi-scalper] claim-and-cap failed");
       return;
     }
+    latency.capClaimMs = Date.now() - claimStartedAtMs;
 
     if (!claim.claimed) {
       if (claim.reason === "outside_window_at_claim") {
@@ -1379,6 +1523,8 @@ async function _evaluateCandidate(
         snapshot,
         claim.submittedOrders,
         key,
+        LIVE_SCALP_ATTEMPT_RUNTIME,
+        latency,
       );
     } catch (err) {
       _lastError = String(err);
@@ -1400,6 +1546,7 @@ async function _evaluateCandidate(
     }
   } finally {
     _attemptsInFlight.delete(key);
+    _finishAttemptLatency(latency);
   }
 }
 
@@ -1477,6 +1624,7 @@ async function _executeScalpAttempt(
   priorSubmittedOrders: number,
   attemptKey: string,
   runtime: ScalpAttemptRuntime = LIVE_SCALP_ATTEMPT_RUNTIME,
+  latency?: MutableScalpAttemptLatency,
 ): Promise<void> {
   const { symbol, ticker, closeTime, side: initialSide } = candidate;
   const attemptStartMs = runtime.nowMs();
@@ -1569,6 +1717,11 @@ async function _executeScalpAttempt(
   identityRefreshMs = identityResult.latencyMs;
   quoteRefreshMs = orderbookResult.latencyMs;
   parallelRefreshMs = concurrentFetchMs;
+  if (latency) {
+    latency.identityRefreshMs = identityRefreshMs;
+    latency.quoteRefreshMs = quoteRefreshMs;
+    latency.parallelRefreshMs = parallelRefreshMs;
+  }
 
   // Re-resolve the authoritative ticker/closeTime and require an exact match
   // with the reserved candidate. Identity failure is terminal for this window.
@@ -1981,7 +2134,12 @@ async function _executeScalpAttempt(
   } else {
     // ── Live: persist the "submitting" intent BEFORE the exchange call ────────
     // insertScalpOrderIntent is awaited, so config could change DURING it.
-    await runtime.insertScalpOrderIntent(orderRecord);
+    const intentWriteStartedAtMs = runtime.nowMs();
+    try {
+      await runtime.insertScalpOrderIntent(orderRecord);
+    } finally {
+      if (latency) latency.intentWriteMs = runtime.nowMs() - intentWriteStartedAtMs;
+    }
 
     // ── FINAL synchronous re-validation AFTER intent creation, IMMEDIATELY ────
     // before placeOrder. There MUST be no await between this successful check and
@@ -2014,6 +2172,7 @@ async function _executeScalpAttempt(
     // Uses immediate_or_cancel + taker_at_cross with the exact YES-side
     // limitPrice, and STRICTLY parses the raw response (no zero-coercion).
     // NOTE: no await occurs between the successful check above and this call.
+    const brokerSubmitStartedAtMs = runtime.nowMs();
     try {
       const result = await runtime.placeScalpOrderStrict({
         ticker,
@@ -2022,6 +2181,7 @@ async function _executeScalpAttempt(
         count: contractCount,
         clientOrderId: clientOrderId!,
       });
+      if (latency) latency.brokerSubmitMs = runtime.nowMs() - brokerSubmitStartedAtMs;
       // Strict parser already discriminated the outcome. A malformed body maps
       // to outcome "unknown" (never zero-coerced); use its validated fields.
       liveOutcome = result.outcome;
@@ -2034,6 +2194,7 @@ async function _executeScalpAttempt(
         "[kalshi-scalper] LIVE order submitted (strict)",
       );
     } catch (err) {
+      if (latency) latency.brokerSubmitMs = runtime.nowMs() - brokerSubmitStartedAtMs;
       orderError = String(err);
       logger.error({ err, symbol, ticker, side: effectiveSide }, "[kalshi-scalper] LIVE strict submit THREW — fill state UNKNOWN");
 
@@ -2274,6 +2435,13 @@ export interface ControlledFreefallServiceExerciseResult {
   intentWrites: number;
   brokerSubmissions: number;
 }
+
+export interface ControlledSampleSchedulerExerciseResult {
+  backgroundStartedBeforeAuthoritative: string[];
+  authoritativeStartedBeforeBackgroundRelease: boolean;
+  startOrder: string[];
+  maxActiveObserved: number;
+}
 /**
  * Post-submit persistence failure handler. Called when a LIVE
  * finalizeOrderAndReleaseReservation transaction throws AFTER the broker call.
@@ -2507,6 +2675,9 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
   ]);
 
   const markets = _buildMarketStatuses(wk);
+  const latencySummary = summarizeScalpAttemptLatencies(
+    _recentAttemptLatencies.filter((attempt) => attempt.mode === mode),
+  );
 
   return {
     config: { ..._config },
@@ -2540,6 +2711,9 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
         executionWinningLimit: attempt.executionWinningLimit ?? null,
         submittedLimitPrice: attempt.submittedLimitPrice ?? null,
         skipEvidence: attempt.skipEvidence ?? null,
+        latency: _latestAttemptLatencyByKey.get(
+          _attemptKey(attempt.mode, attempt.symbol, attempt.windowKey),
+        ) ?? null,
         retryEligible: !retry.terminal,
         retryState:
           attempt.status === "claimed"
@@ -2559,6 +2733,7 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
       createdAt: attempt.createdAt.toISOString(),
     })),
     incidents,
+    latency: latencySummary,
     // ISO string | null (not epoch)
     lastScanAt: _lastScanAt != null ? new Date(_lastScanAt).toISOString() : null,
     lastError: _lastError,
@@ -2573,6 +2748,7 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
       authenticatedRetryCooldownMs: SCALP_AUTH_RETRY_COOLDOWN_MS,
       maxSubmissionsPerWindow: SCALP_MAX_SUBMISSIONS_PER_WINDOW,
       maxConcurrentCandidates: SCALP_MAX_CONCURRENT_CANDIDATES,
+      maxConcurrentBackgroundSamples: SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES,
       preflightLeadSeconds: SCALP_PREFLIGHT_LEAD_SECONDS,
     },
     markets,
@@ -2697,6 +2873,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
     symbol,
     ticker,
     closeTime,
+    detectedAtMs: nowMs,
     cachedYesAsk: 0.97,
     cachedNoAsk: 0.98,
     side: "yes",
@@ -2825,5 +3002,80 @@ Promise<ControlledFreefallServiceExerciseResult> {
     else _nextAttemptAt.set(attemptKey, originalNextAttemptAt);
     if (wasTerminal) _terminalAttemptKeys.add(attemptKey);
     else _terminalAttemptKeys.delete(attemptKey);
+  }
+}
+
+/**
+ * In-memory contention proof for the production sample queue. No network or DB
+ * calls are possible: the underlying-price boundary is temporarily replaced by
+ * deferred local promises and restored before returning.
+ */
+export async function runControlledSampleSchedulerExercise():
+Promise<ControlledSampleSchedulerExerciseResult> {
+  if (
+    _activePriceSampleFetches !== 0
+    || _authoritativeSampleQueue.length !== 0
+    || _backgroundSampleQueue.length !== 0
+  ) {
+    throw new Error("sample scheduler exercise requires an idle queue");
+  }
+
+  const originalFetcher = _fetchScalpUnderlyingPrice;
+  const products = ["CTRL-BG-1", "CTRL-BG-2", "CTRL-BG-3", "CTRL-AUTH"];
+  const symbols = products.map((product) => product.replaceAll("-", ""));
+  const releases = new Map<string, () => void>();
+  const startOrder: string[] = [];
+  const promises: Promise<boolean>[] = [];
+  let maxActiveObserved = 0;
+  const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  _fetchScalpUnderlyingPrice = async (product: string) => {
+    startOrder.push(product);
+    maxActiveObserved = Math.max(maxActiveObserved, _activePriceSampleFetches);
+    return new Promise<number>((resolve) => {
+      releases.set(product, () => resolve(100));
+    });
+  };
+
+  try {
+    promises.push(
+      _collectPriceSample(symbols[0]!, products[0]!, "background"),
+      _collectPriceSample(symbols[1]!, products[1]!, "background"),
+      _collectPriceSample(symbols[2]!, products[2]!, "background"),
+    );
+    await nextTurn();
+    const backgroundStartedBeforeAuthoritative = [...startOrder];
+
+    promises.push(_collectPriceSample(symbols[3]!, products[3]!, "authoritative"));
+    await nextTurn();
+    const authoritativeStartedBeforeBackgroundRelease = startOrder.includes("CTRL-AUTH");
+
+    releases.get("CTRL-AUTH")?.();
+    await nextTurn();
+    releases.get("CTRL-BG-1")?.();
+    releases.get("CTRL-BG-2")?.();
+    await nextTurn();
+    releases.get("CTRL-BG-3")?.();
+    await Promise.all(promises);
+
+    return {
+      backgroundStartedBeforeAuthoritative,
+      authoritativeStartedBeforeBackgroundRelease,
+      startOrder: [...startOrder],
+      maxActiveObserved,
+    };
+  } finally {
+    for (const release of releases.values()) release();
+    await Promise.allSettled(promises);
+    _fetchScalpUnderlyingPrice = originalFetcher;
+    for (const symbol of symbols) {
+      _priceSamples.delete(symbol);
+      _priceSampleJobs.delete(symbol);
+    }
+    for (const queue of [_authoritativeSampleQueue, _backgroundSampleQueue]) {
+      for (let index = queue.length - 1; index >= 0; index -= 1) {
+        if (symbols.includes(queue[index]!.symbol)) queue.splice(index, 1);
+      }
+    }
   }
 }

@@ -40,6 +40,12 @@ function preferNewerPerformance(
   return incoming;
 }
 
+function formatScalperLatency(value: number | null): string {
+  if (value == null) return "—";
+  if (value < 1_000) return `${Math.round(value)}ms`;
+  return `${(value / 1_000).toFixed(value < 10_000 ? 2 : 1)}s`;
+}
+
 export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const { getToken, isLoaded: authLoaded, userId } = useAuth();
   const qc = useQueryClient();
@@ -566,6 +572,19 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         </div>
       )}
 
+      {statusData?.latency && statusData.latency.sampleSize > 0 && (
+        <div
+          data-testid="status-scalper-fast-path-latency"
+          className="border-b border-amber-500/15 bg-amber-500/[0.03] px-5 py-2 text-[10px] font-mono text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1"
+        >
+          <span className="uppercase tracking-widest text-amber-500/70 font-bold">Fast path</span>
+          <span>p50 {formatScalperLatency(statusData.latency.p50Ms)}</span>
+          <span>p90 {formatScalperLatency(statusData.latency.p90Ms)}</span>
+          <span>p99 {formatScalperLatency(statusData.latency.p99Ms)}</span>
+          <span className="sm:ml-auto">{statusData.latency.sampleSize} measured attempt{statusData.latency.sampleSize === 1 ? "" : "s"}</span>
+        </div>
+      )}
+
       {merged.circuitBreaker && (
         <div className={`${merged.circuitBreakerEnabled !== false ? "bg-red-500/10 border-red-500/30" : "bg-amber-500/10 border-amber-500/30"} border-b px-5 py-3 flex flex-col gap-3`}>
           <div className="flex items-center justify-between gap-4">
@@ -750,9 +769,9 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                   </div>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs">$</span>
-                    <input data-testid="input-scalper-open-cap" type="number" min={1} max={50} step={1} value={merged.openCapDollars} onChange={e => handleConfigChange("openCapDollars", Math.min(parseFloat(e.target.value) || 0, 50))} className="w-full bg-background border border-border rounded-md pl-6 pr-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50" />
+                    <input data-testid="input-scalper-open-cap" type="number" min={0.01} step={0.01} value={merged.openCapDollars} onChange={e => handleConfigChange("openCapDollars", parseFloat(e.target.value) || 0)} className="w-full bg-background border border-border rounded-md pl-6 pr-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50" />
                   </div>
-                  <span className="text-[9px] text-muted-foreground/60 leading-tight">Maximum $50. Includes unsettled fills and in-flight reservations across every Scalper market.</span>
+                  <span className="text-[9px] text-muted-foreground/60 leading-tight">Your chosen limit for unsettled fills and in-flight reservations across every Scalper market.</span>
                 </label>
                 <label className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center">

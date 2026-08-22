@@ -103,7 +103,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     await cleanupDbTestRows();
   });
 
-  it("normalizes and persists unsafe legacy open caps before returning config", async () => {
+  it("defaults invalid open caps while preserving valid operator-entered values", async () => {
     const c = await pool.connect();
     const original = await c.query(
       "SELECT config FROM kalshi_scalp_config WHERE id = 'singleton'",
@@ -111,12 +111,17 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     const hadOriginal = original.rows.length > 0;
     const originalConfig = original.rows[0]?.["config"];
     try {
-      for (const unsafeOpenCap of [null, 75, 500]) {
+      for (const [storedOpenCap, expectedOpenCap] of [
+        [null, OPEN_CAP],
+        [0, OPEN_CAP],
+        [75, 75],
+        [500, 500],
+      ] as const) {
         const legacyConfig = {
           ...(hadOriginal && originalConfig && typeof originalConfig === "object"
             ? originalConfig
             : DEFAULT_SCALP_CONFIG),
-          openCapDollars: unsafeOpenCap,
+          openCapDollars: storedOpenCap,
         };
         await c.query(
           `INSERT INTO kalshi_scalp_config (id, config, updated_at)
@@ -126,13 +131,13 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
         );
 
         const loaded = await db.loadScalpConfigFromDB();
-        assert.equal(loaded.openCapDollars, OPEN_CAP);
+        assert.equal(loaded.openCapDollars, expectedOpenCap);
 
         const persisted = await c.query(
           "SELECT config FROM kalshi_scalp_config WHERE id = 'singleton'",
         );
         const persistedConfig = persisted.rows[0]?.["config"] as Record<string, unknown>;
-        assert.equal(Number(persistedConfig["openCapDollars"]), OPEN_CAP);
+        assert.equal(Number(persistedConfig["openCapDollars"]), expectedOpenCap);
       }
     } finally {
       if (hadOriginal) {

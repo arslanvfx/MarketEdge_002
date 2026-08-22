@@ -551,10 +551,16 @@ export async function claimReservationAndCap(
       // The unique row is the durable per-symbol/window mutex. Lock it before
       // deciding whether a proven no-exposure outcome may retry.
       const existingRes = await client.query(
-        `SELECT id, status, reason, reserved_budget,
-                GREATEST(0, EXTRACT(EPOCH FROM (NOW() - attempted_at)) * 1000)::float AS elapsed_ms
-         FROM kalshi_scalp_reservations
-         WHERE mode = $1 AND symbol = $2 AND window_key = $3
+        `SELECT r.id, r.status, r.reason, r.reserved_budget,
+                GREATEST(0, EXTRACT(EPOCH FROM (NOW() - r.attempted_at)) * 1000)::float AS elapsed_ms,
+                (SELECT COUNT(*)::int
+                 FROM kalshi_scalp_orders o
+                 WHERE o.mode = r.mode
+                   AND o.symbol = r.symbol
+                   AND o.window_key = r.window_key
+                   AND o.status = 'zero_fill') AS submitted_orders
+         FROM kalshi_scalp_reservations r
+         WHERE r.mode = $1 AND r.symbol = $2 AND r.window_key = $3
          FOR UPDATE`,
         [mode, symbol.toUpperCase(), windowKey],
       );
@@ -574,14 +580,7 @@ export async function claimReservationAndCap(
       }
 
       reservationId = String(existing["id"]);
-      const submittedRes = await client.query(
-        `SELECT COUNT(*)::int AS count
-         FROM kalshi_scalp_orders
-         WHERE mode = $1 AND symbol = $2 AND window_key = $3
-           AND status = 'zero_fill'`,
-        [mode, symbol.toUpperCase(), windowKey],
-      );
-      submittedOrders = Number(submittedRes.rows[0]?.["count"] ?? 0);
+      submittedOrders = Number(existing["submitted_orders"] ?? 0);
       const retry = evaluateScalpReservationRetry({
         status: String(existing["status"] ?? ""),
         reason: existing["reason"] != null ? String(existing["reason"]) : null,
@@ -613,7 +612,7 @@ export async function claimReservationAndCap(
     }
 
     // Sum actual committed spend + reserved (this row is 0, safe from self-count).
-    const dailyRes = await client.query(
+    const committedRes = await client.query(
       `SELECT
          (SELECT COALESCE(SUM(budget_spent), 0)::float
             FROM kalshi_scalp_orders
@@ -624,11 +623,7 @@ export async function claimReservationAndCap(
             FROM kalshi_scalp_reservations
             WHERE mode = $1
               AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')
-              AND reserved_budget > 0) AS total`,
-      [mode],
-    );
-    const openRes = await client.query(
-      `SELECT
+               AND reserved_budget > 0) AS daily_total,
          (SELECT COALESCE(SUM(budget_spent), 0)::float
             FROM kalshi_scalp_orders
             WHERE mode = $1
@@ -637,12 +632,12 @@ export async function claimReservationAndCap(
        + (SELECT COALESCE(SUM(reserved_budget), 0)::float
             FROM kalshi_scalp_reservations
             WHERE mode = $1
-              AND reserved_budget > 0) AS total`,
+               AND reserved_budget > 0) AS open_total`,
       [mode],
     );
 
-    const dailyCommitted = Number(dailyRes.rows[0]?.total ?? 0);
-    const openCommitted = Number(openRes.rows[0]?.total ?? 0);
+    const dailyCommitted = Number(committedRes.rows[0]?.["daily_total"] ?? 0);
+    const openCommitted = Number(committedRes.rows[0]?.["open_total"] ?? 0);
 
     // Daily remains nullable. Open exposure is mandatory and normalized before
     // entering this transaction, including for legacy runtime callers.

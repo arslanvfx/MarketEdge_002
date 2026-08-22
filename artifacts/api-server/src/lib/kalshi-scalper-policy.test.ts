@@ -924,6 +924,12 @@ describe("checkOpenCap", () => {
     assert.ok(!r.allowed);
     assert.ok(r.reason?.includes("open_cap_exceeded"));
   });
+  it("honors an operator cap above the old $50 default without clipping it", () => {
+    assert.equal(checkOpenCap(500, 498, 2).allowed, true);
+    const blocked = checkOpenCap(500, 498.01, 2);
+    assert.equal(blocked.allowed, false);
+    assert.ok(blocked.reason?.includes("cap=500"));
+  });
   it("fails closed to the default when a legacy runtime caller passes null", () => {
     const r = checkOpenCap(
       null as unknown as number,
@@ -936,9 +942,12 @@ describe("checkOpenCap", () => {
 });
 
 describe("normalizeScalpOpenCapDollars", () => {
-  it("allows lower caps but clamps every unsafe legacy shape to the $50 ceiling", () => {
+  it("preserves every positive finite operator value and defaults invalid legacy shapes", () => {
     assert.equal(normalizeScalpOpenCapDollars(40), 40);
-    for (const legacyValue of [null, undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, "50", 75, 500]) {
+    assert.equal(normalizeScalpOpenCapDollars(75), 75);
+    assert.equal(normalizeScalpOpenCapDollars(500), 500);
+    assert.equal(normalizeScalpOpenCapDollars(10_000), 10_000);
+    for (const legacyValue of [null, undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, "50"]) {
       assert.equal(
         normalizeScalpOpenCapDollars(legacyValue),
         DEFAULT_SCALP_OPEN_CAP_DOLLARS,
@@ -1314,13 +1323,14 @@ describe("validateScalpConfigPartial", () => {
     assert.ok(!r3.valid);
   });
 
-  it("allows clearing the daily cap but limits the open cap to $50", () => {
+  it("allows clearing the daily cap and any positive finite open cap", () => {
     assert.ok(validateScalpConfigPartial({ dailyCapDollars: null }).valid);
     const r = validateScalpConfigPartial({ openCapDollars: null });
     assert.equal(r.valid, false);
     assert.ok(r.errors.some((error) => error.includes("openCapDollars")));
     assert.equal(validateScalpConfigPartial({ openCapDollars: 40 }).valid, true);
-    assert.equal(validateScalpConfigPartial({ openCapDollars: 51 }).valid, false);
+    assert.equal(validateScalpConfigPartial({ openCapDollars: 51 }).valid, true);
+    assert.equal(validateScalpConfigPartial({ openCapDollars: 10_000 }).valid, true);
   });
 
   it("rejects invalid mode", () => {
@@ -1801,13 +1811,13 @@ describe("parseScalpConfigPatch", () => {
     assert.ok(errsOf(r).some((e) => e.includes("less than")));
   });
 
-  it("caps: daily accepts null while open exposure cannot exceed $50", () => {
+  it("caps: daily accepts null while open exposure honors larger operator values", () => {
     assert.deepEqual(parseScalpConfigPatch({ dailyCapDollars: null }), { ok: true, value: { dailyCapDollars: null } });
     assert.deepEqual(parseScalpConfigPatch({ openCapDollars: 40 }), { ok: true, value: { openCapDollars: 40 } });
     assert.deepEqual(parseScalpConfigPatch({ openCapDollars: 50 }), { ok: true, value: { openCapDollars: 50 } });
+    assert.deepEqual(parseScalpConfigPatch({ openCapDollars: 500 }), { ok: true, value: { openCapDollars: 500 } });
     assert.equal(parseScalpConfigPatch({ openCapDollars: null }).ok, false);
-    assert.equal(parseScalpConfigPatch({ openCapDollars: 51 }).ok, false);
-    assert.equal(parseScalpConfigPatch({ openCapDollars: 500 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ openCapDollars: -1 }).ok, false);
     assert.equal(parseScalpConfigPatch({ dailyCapDollars: "50" }).ok, false);
     assert.equal(parseScalpConfigPatch({ dailyCapDollars: 0 }).ok, false);
     assert.equal(parseScalpConfigPatch({ openCapDollars: NaN }).ok, false);
@@ -2172,13 +2182,15 @@ describe("execution wiring (static source assertions)", () => {
     );
   });
 
-  it("deduplicates and bounds Freefall sample fetches behind a shared priority queue", () => {
+  it("deduplicates and bounds Freefall sample fetches with an authoritative reserved lane", () => {
     assert.match(svc, /const _priceSampleJobs = new Map/);
     assert.match(
       svc,
       /while \(_activePriceSampleFetches < SCALP_MAX_CONCURRENT_CANDIDATES\)/,
     );
-    assert.match(svc, /_authoritativeSampleQueue\.shift\(\) \?\? _backgroundSampleQueue\.shift\(\)/);
+    assert.match(svc, /selectNextScalpSamplePriority\(/);
+    assert.match(svc, /SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES/);
+    assert.match(svc, /priority === "authoritative"/);
     assert.match(svc, /const existing = _priceSampleJobs\.get\(key\)/);
     assert.match(svc, /existing\.priority = "authoritative"/);
   });

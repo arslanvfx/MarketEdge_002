@@ -164,4 +164,29 @@ describe("describeScalperAttempt", () => {
     assert.match(lines.join("\n"), /Authenticated final quote YES 94\.7¢ \/ NO 6\.1¢/);
     assert.match(lines.join("\n"), /identity 84ms · quote 132ms · parallel total 140ms/);
   });
+
+  it("renders full fast-path latency and its slowest phase", () => {
+    const lines = describeScalperEvidence(attempt({
+      skipEvidence: null,
+      latency: {
+        mode: "live",
+        symbol: "BTC",
+        windowKey: "2026-08-21T19:00:00.000Z",
+        detectedAt: "2026-08-21T19:14:00.000Z",
+        completedAt: "2026-08-21T19:14:01.284Z",
+        totalMs: 1_284,
+        queueWaitMs: 4,
+        capClaimMs: 82,
+        identityRefreshMs: 130,
+        quoteRefreshMs: 410,
+        parallelRefreshMs: 415,
+        intentWriteMs: 24,
+        brokerSubmitMs: 731,
+        decisionFinalizeMs: 32,
+        slowestStage: "broker_submit",
+        slowestStageMs: 731,
+      },
+    }));
+    assert.match(lines.join("\n"), /Fast path 1\.28s total · slowest broker submit 731ms/);
+  });
 });

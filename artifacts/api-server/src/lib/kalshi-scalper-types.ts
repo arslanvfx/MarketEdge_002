@@ -196,6 +196,43 @@ export interface ScalpPerformance {
   }>;
 }
 
+export type ScalpLatencyStage =
+  | "queue_wait"
+  | "cap_claim"
+  | "parallel_refresh"
+  | "intent_write"
+  | "broker_submit"
+  | "decision_finalize";
+
+export interface ScalpAttemptLatency {
+  mode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  detectedAt: string;
+  completedAt: string;
+  /** Complete cached-candidate detection through final durable outcome. */
+  totalMs: number;
+  queueWaitMs: number | null;
+  capClaimMs: number | null;
+  identityRefreshMs: number | null;
+  quoteRefreshMs: number | null;
+  parallelRefreshMs: number | null;
+  intentWriteMs: number | null;
+  brokerSubmitMs: number | null;
+  /** Remaining guard evaluation + durable outcome work not covered above. */
+  decisionFinalizeMs: number | null;
+  slowestStage: ScalpLatencyStage | null;
+  slowestStageMs: number | null;
+}
+
+export interface ScalpLatencySummary {
+  sampleSize: number;
+  p50Ms: number | null;
+  p90Ms: number | null;
+  p99Ms: number | null;
+  maxMs: number | null;
+}
+
 // ---------------------------------------------------------------------------
 // Skip evidence (structured, additive, durable — stored in skip_evidence JSONB)
 // ---------------------------------------------------------------------------
@@ -356,12 +393,12 @@ export interface ScalpReservation {
 
 /**
  * Runtime compatibility guard for legacy persisted config and rolling callers.
- * A missing, null, malformed, non-positive, or over-limit value never raises
- * the approved $50 aggregate exposure ceiling. Operators may set a lower cap.
+ * Missing, null, malformed, or non-positive values fall back to the conservative
+ * default. Every valid positive finite operator-entered cap is preserved.
  */
 export function normalizeScalpOpenCapDollars(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return DEFAULT_SCALP_OPEN_CAP_DOLLARS;
   }
-  return Math.min(value, DEFAULT_SCALP_OPEN_CAP_DOLLARS);
+  return value;
 }

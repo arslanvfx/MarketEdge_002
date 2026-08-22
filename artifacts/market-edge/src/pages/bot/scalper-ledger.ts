@@ -141,10 +141,9 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
 
 export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   const evidence = attempt.skipEvidence;
-  if (!evidence) return [];
   const details: string[] = [];
 
-  if (evidence.distancePct != null || evidence.minimumPct != null) {
+  if (evidence && (evidence.distancePct != null || evidence.minimumPct != null)) {
     const measured = evidence.distancePct == null ? "unavailable" : `${evidence.distancePct.toFixed(3)}%`;
     const minimum = evidence.minimumPct == null ? "not configured" : `${evidence.minimumPct.toFixed(3)}% minimum`;
     const prices = evidence.targetPrice != null && evidence.underlyingPrice != null
@@ -153,11 +152,11 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`Target distance ${measured} (${minimum})${prices}`);
   }
 
-  if (
+  if (evidence && (
     evidence.adverseMovePct != null
     || evidence.freefallThresholdPct != null
     || evidence.samplesUsed != null
-  ) {
+  )) {
     const adverse = evidence.adverseMovePct == null ? "unavailable" : `${evidence.adverseMovePct.toFixed(3)}%`;
     const threshold = evidence.freefallThresholdPct == null
       ? "threshold unavailable"
@@ -171,7 +170,7 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`Adverse move ${adverse} (${threshold})${sampleText}${sideText}`);
   }
 
-  if (evidence.quoteYesAsk != null || evidence.quoteNoAsk != null) {
+  if (evidence && (evidence.quoteYesAsk != null || evidence.quoteNoAsk != null)) {
     const asks = [
       evidence.quoteYesAsk == null ? null : `YES ${(evidence.quoteYesAsk * 100).toFixed(1)}¢`,
       evidence.quoteNoAsk == null ? null : `NO ${(evidence.quoteNoAsk * 100).toFixed(1)}¢`,
@@ -182,7 +181,7 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`Authenticated final quote ${asks}${band}`);
   }
 
-  if (evidence.requestedBudget != null) {
+  if (evidence?.requestedBudget != null) {
     const capDetails = [
       evidence.openCapDollars == null
         ? null
@@ -194,13 +193,13 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`Requested ${formatMoney(evidence.requestedBudget)} · ${capDetails || "cap details unavailable"}`);
   }
 
-  if (evidence.availableBalance != null || evidence.maxExposure != null) {
+  if (evidence && (evidence.availableBalance != null || evidence.maxExposure != null)) {
     details.push(
       `Available balance ${formatMoney(evidence.availableBalance)} · required exposure ${formatMoney(evidence.maxExposure)}`,
     );
   }
 
-  if (evidence.secondsRemaining != null || evidence.effectiveWindowSeconds != null) {
+  if (evidence && (evidence.secondsRemaining != null || evidence.effectiveWindowSeconds != null)) {
     const remaining = evidence.secondsRemaining == null
       ? "close time unavailable"
       : evidence.secondsRemaining > 0
@@ -212,12 +211,21 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`${remaining}${window}`);
   }
 
-  const latencyParts = [
-    evidence.identityRefreshMs == null ? null : `identity ${evidence.identityRefreshMs}ms`,
-    evidence.quoteRefreshMs == null ? null : `quote ${evidence.quoteRefreshMs}ms`,
-    evidence.parallelRefreshMs == null ? null : `parallel total ${evidence.parallelRefreshMs}ms`,
+  const refreshLatencyParts = [
+    evidence?.identityRefreshMs == null ? null : `identity ${evidence.identityRefreshMs}ms`,
+    evidence?.quoteRefreshMs == null ? null : `quote ${evidence.quoteRefreshMs}ms`,
+    evidence?.parallelRefreshMs == null ? null : `parallel total ${evidence.parallelRefreshMs}ms`,
   ].filter(Boolean);
-  if (latencyParts.length > 0) details.push(`Final refresh latency: ${latencyParts.join(" · ")}`);
+  if (refreshLatencyParts.length > 0) {
+    details.push(`Final refresh latency: ${refreshLatencyParts.join(" · ")}`);
+  }
+
+  if (attempt.latency) {
+    const slowest = attempt.latency.slowestStage == null
+      ? "stage unavailable"
+      : `${attempt.latency.slowestStage.replaceAll("_", " ")} ${formatLatency(attempt.latency.slowestStageMs)}`;
+    details.push(`Fast path ${formatLatency(attempt.latency.totalMs)} total · slowest ${slowest}`);
+  }
 
   return details;
 }
@@ -268,4 +276,10 @@ function formatUnderlyingPrice(value: number): string {
 
 function formatMoney(value: number | null | undefined): string {
   return value == null ? "unavailable" : `$${value.toFixed(2)}`;
+}
+
+function formatLatency(value: number | null | undefined): string {
+  if (value == null) return "unavailable";
+  if (value < 1_000) return `${Math.round(value)}ms`;
+  return `${(value / 1_000).toFixed(value < 10_000 ? 2 : 1)}s`;
 }
