@@ -81,7 +81,11 @@ import {
   reconcileScalpOrderAndReleaseReservation,
   insertScalpIncident,
   getScalpIncidents,
+  getScalpOrdersForPerformance,
+  getScalpPerformanceBaseline,
+  resetScalpPerformanceWindow,
 } from "./kalshi-scalper-db.ts";
+import { calculateScalpPerformance } from "./kalshi-scalper-performance.ts";
 
 // ---------------------------------------------------------------------------
 // In-memory state
@@ -2313,62 +2317,24 @@ export async function getScalpHistory(opts: { mode?: ScalpMode; symbol?: string;
 }
 
 export async function getScalpPerformance(mode: ScalpMode): Promise<ScalpPerformance> {
-  const orders = await getScalpOrders({ mode, limit: 2000 });
-
-  const filled = orders.filter((o) => o.filledCount > 0);
-  const settled = filled.filter((o) => o.outcome != null);
-  const wins = settled.filter((o) => o.outcome === "win").length;
-  const losses = settled.filter((o) => o.outcome === "loss").length;
-  const totalPnl = settled.reduce((s, o) => s + (o.pnl ?? 0), 0);
-  const totalSpent = filled.reduce((s, o) => s + o.budgetSpent, 0);
-  const fillPrices = filled.filter((o) => o.avgFillPrice != null).map((o) => o.avgFillPrice!);
-  const avgFillPrice = fillPrices.length > 0
-    ? fillPrices.reduce((a, b) => a + b, 0) / fillPrices.length
-    : null;
-
-  const bySymbolMap = new Map<string, {
-    orders: number; wins: number; losses: number; settled: number;
-    pnl: number; spent: number; fillPrices: number[];
-  }>();
-  for (const o of filled) {
-    if (!bySymbolMap.has(o.symbol)) {
-      bySymbolMap.set(o.symbol, { orders: 0, wins: 0, losses: 0, settled: 0, pnl: 0, spent: 0, fillPrices: [] });
-    }
-    const s = bySymbolMap.get(o.symbol)!;
-    s.orders++;
-    s.spent += o.budgetSpent;
-    if (o.avgFillPrice != null) s.fillPrices.push(o.avgFillPrice);
-    if (o.outcome === "win") { s.wins++; s.settled++; s.pnl += o.pnl ?? 0; }
-    if (o.outcome === "loss") { s.losses++; s.settled++; s.pnl += o.pnl ?? 0; }
-  }
-
-  const bySymbol = Array.from(bySymbolMap.entries()).map(([symbol, s]) => ({
-    symbol,
-    orders: s.orders,
-    wins: s.wins,
-    losses: s.losses,
-    settled: s.settled,
-    winRate: s.wins + s.losses > 0 ? s.wins / (s.wins + s.losses) : null,
-    pnl: s.pnl,
-    spent: s.spent,
-    avgFillPrice: s.fillPrices.length > 0
-      ? s.fillPrices.reduce((a, b) => a + b, 0) / s.fillPrices.length
-      : null,
-  }));
-
-  return {
+  const baseline = await getScalpPerformanceBaseline(mode);
+  const orders = await getScalpOrdersForPerformance(mode, baseline.trackingSince);
+  return calculateScalpPerformance(
     mode,
-    totalOrders: orders.length,
-    filledOrders: filled.length,
-    settled: settled.length,   // frontend field name (was settledOrders)
-    wins,
-    losses,
-    winRate: wins + losses > 0 ? wins / (wins + losses) : null,
-    totalPnl,
-    totalSpent,
-    avgFillPrice,
-    bySymbol,
-  };
+    baseline.trackingSince,
+    baseline.trackingVersion,
+    orders,
+  );
+}
+
+export async function resetScalpPerformance(mode: ScalpMode): Promise<ScalpPerformance> {
+  const window = await resetScalpPerformanceWindow(mode);
+  return calculateScalpPerformance(
+    mode,
+    window.trackingSince,
+    window.trackingVersion,
+    window.orders,
+  );
 }
 
 // Re-export the unresolved query for route/reconciliation display.

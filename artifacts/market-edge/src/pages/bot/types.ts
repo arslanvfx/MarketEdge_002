@@ -706,6 +706,8 @@ export interface ScalperPerformanceBySymbol {
 
 export interface ScalperPerformance {
   mode: "paper" | "live";
+  trackingSince: string;
+  trackingVersion: number;
   totalOrders: number;
   filledOrders: number;
   settled: number;

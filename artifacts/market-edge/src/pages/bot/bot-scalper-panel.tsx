@@ -18,8 +18,27 @@ interface ScalperCapability {
   message: string | null;
 }
 
-type MutationName = "enable" | "breaker" | "mode" | "save" | "reset";
+type MutationName =
+  | "enable"
+  | "breaker"
+  | "mode"
+  | "save"
+  | "reset"
+  | "performance-reset";
 type Notice = { kind: "success" | "error"; text: string };
+
+function preferNewerPerformance(
+  current: ScalperPerformance | undefined,
+  incoming: ScalperPerformance,
+): ScalperPerformance {
+  if (
+    current?.mode === incoming.mode
+    && current.trackingVersion > incoming.trackingVersion
+  ) {
+    return current;
+  }
+  return incoming;
+}
 
 export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const { getToken, isLoaded: authLoaded, userId } = useAuth();
@@ -78,7 +97,21 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
 
   const { data: perfData } = useQuery<ScalperPerformance>({
     queryKey: ["bot-scalper-perf", scalperMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/scalper/performance?mode=${scalperMode}`).then(r => r.json()),
+    queryFn: async ({ signal }) => {
+      const response = await fetch(
+        `${API_BASE}/crypto/scalper/performance?mode=${scalperMode}`,
+        { signal },
+      );
+      if (!response.ok) {
+        throw new Error(`Unable to load Scalper performance (HTTP ${response.status})`);
+      }
+      const incoming = await response.json() as ScalperPerformance;
+      const current = qc.getQueryData<ScalperPerformance>([
+        "bot-scalper-perf",
+        scalperMode,
+      ]);
+      return preferNewerPerformance(current, incoming);
+    },
     enabled: Boolean(cfg),
     refetchInterval: 30_000,
   });
@@ -220,6 +253,54 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       showNotice({
         kind: "error",
         text: error instanceof Error ? error.message : "Circuit breaker could not be reset.",
+      });
+    } finally {
+      setMutationBusy(null);
+    }
+  }
+
+  async function resetPerformance(): Promise<void> {
+    if (!canManage) {
+      showNotice({ kind: "error", text: managementAccessMessage() });
+      return;
+    }
+
+    const mode = scalperMode;
+    const confirmed = window.confirm(
+      `Reset displayed ${mode === "paper" ? "Paper" : "Live"} Scalper performance stats?\n\n`
+      + "This starts a new reporting window only. It will not cancel trades, delete order history, "
+      + "change settings, close positions, or disable safety protections.",
+    );
+    if (!confirmed) return;
+
+    setMutationBusy("performance-reset");
+    setNotice(null);
+    try {
+      await qc.cancelQueries({
+        queryKey: ["bot-scalper-perf", mode],
+        exact: true,
+      });
+      const data = await authPost("/crypto/scalper/reset-performance", { mode }) as {
+        ok?: boolean;
+        performance?: ScalperPerformance;
+        error?: string;
+      };
+      if (!data.ok || !data.performance) {
+        throw new Error(data.error ?? "The server did not confirm the performance reset.");
+      }
+      qc.setQueryData<ScalperPerformance>(
+        ["bot-scalper-perf", mode],
+        current => preferNewerPerformance(current, data.performance!),
+      );
+      await qc.invalidateQueries({ queryKey: ["bot-scalper-perf", mode] });
+      showNotice({
+        kind: "success",
+        text: `${mode === "paper" ? "Paper" : "Live"} performance now tracks from this reset`,
+      });
+    } catch (error) {
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Performance stats could not be reset.",
       });
     } finally {
       setMutationBusy(null);
@@ -971,16 +1052,37 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         {/* Performance Section */}
         {perfData && (
           <div className="mt-8 border-t border-amber-500/20 pt-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-amber-500/70" />
-                <h3 className="text-xs font-bold text-amber-500/70 tracking-widest uppercase">Performance</h3>
-                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400">{perfData.settled} settled</span>
-                
-                {perfData.mode !== merged.mode && (
-                  <span className="text-[10px] ml-2 text-muted-foreground">(Showing {perfData.mode} data while viewing {merged.mode})</span>
-                )}
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Activity className="w-4 h-4 text-amber-500/70" />
+                  <h3 className="text-xs font-bold text-amber-500/70 tracking-widest uppercase">Performance</h3>
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400">{perfData.settled} settled</span>
+
+                  {perfData.mode !== merged.mode && (
+                    <span className="text-[10px] ml-2 text-muted-foreground">(Showing {perfData.mode} data while viewing {merged.mode})</span>
+                  )}
+                </div>
+                <div
+                  className="mt-1 text-[10px] text-muted-foreground"
+                  data-testid="text-scalper-performance-tracking-since"
+                >
+                  Tracking {perfData.mode === "paper" ? "Paper" : "Live"} entries since {fmtDateTime(perfData.trackingSince)}
+                </div>
               </div>
+              <button
+                type="button"
+                data-testid="button-scalper-reset-performance"
+                onClick={resetPerformance}
+                disabled={!canManage || mutationBusy !== null}
+                title={canManage
+                  ? `Start a new ${perfData.mode} reporting window without deleting order history`
+                  : managementAccessMessage()}
+                className="inline-flex items-center justify-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wide text-amber-300 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RotateCcw className={`h-3 w-3 ${mutationBusy === "performance-reset" ? "animate-spin" : ""}`} />
+                {mutationBusy === "performance-reset" ? "Resetting…" : "Reset stats"}
+              </button>
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">

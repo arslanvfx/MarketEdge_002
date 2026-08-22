@@ -116,6 +116,50 @@ describe("Scalper control wiring", () => {
     assert.match(body, /invalidateQueries\(\{ queryKey: \["bot-scalper-perf"\] \}\)/);
   });
 
+  it("offers a signed-in, mode-specific visual performance reset", () => {
+    assert.match(panelSource, /button-scalper-reset-performance/);
+    assert.match(panelSource, /onClick=\{resetPerformance\}/);
+    assert.match(
+      panelSource,
+      /authPost\("\/crypto\/scalper\/reset-performance", \{ mode \}\)/,
+    );
+    assert.match(panelSource, /disabled=\{!canManage \|\| mutationBusy !== null\}/);
+    assert.match(panelSource, /will not cancel trades, delete order history/);
+    assert.match(panelSource, /or disable safety protections/);
+  });
+
+  it("instantly replaces and refreshes only the selected mode's performance data", () => {
+    const resetFn = panelSource.match(/async function resetPerformance[\s\S]*?\n  \}/);
+    assert.ok(resetFn, "resetPerformance function must exist");
+    assert.match(resetFn[0], /const mode = scalperMode/);
+    assert.match(
+      resetFn[0],
+      /setQueryData<ScalperPerformance>\([\s\S]*?\["bot-scalper-perf", mode\],[\s\S]*?preferNewerPerformance/,
+    );
+    assert.match(
+      resetFn[0],
+      /invalidateQueries\(\{ queryKey: \["bot-scalper-perf", mode\] \}\)/,
+    );
+    assert.doesNotMatch(resetFn[0], /bot-scalper-history/);
+    assert.doesNotMatch(resetFn[0], /resetCircuitBreaker|applyConfigPatch/);
+  });
+
+  it("rejects stale performance responses from concurrent resets", () => {
+    assert.match(panelSource, /current\.trackingVersion > incoming\.trackingVersion/);
+    assert.match(panelSource, /return preferNewerPerformance\(current, incoming\)/);
+    assert.match(
+      panelSource,
+      /cancelQueries\(\{[\s\S]*?queryKey: \["bot-scalper-perf", mode\],[\s\S]*?exact: true/,
+    );
+    assert.match(panelSource, /\{ signal \}/);
+  });
+
+  it("shows the selected mode's durable performance tracking start", () => {
+    assert.match(panelSource, /text-scalper-performance-tracking-since/);
+    assert.match(panelSource, /fmtDateTime\(perfData\.trackingSince\)/);
+    assert.match(panelSource, /Tracking \{perfData\.mode === "paper" \? "Paper" : "Live"\} entries since/);
+  });
+
   it("does not render raw client, exchange, or order IDs in the UI", () => {
     assert.doesNotMatch(panelSource, /\{attempt\.clientOrderId\}/);
     assert.doesNotMatch(panelSource, /\{attempt\.exchangeOrderId\}/);

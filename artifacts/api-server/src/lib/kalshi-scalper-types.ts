@@ -189,6 +189,10 @@ export interface ScalpIncident {
 
 export interface ScalpPerformance {
   mode: ScalpMode;
+  /** Inclusive order-entry boundary for this reporting window. */
+  trackingSince: string;
+  /** Monotonic per-mode reset generation used to reject stale responses. */
+  trackingVersion: number;
   totalOrders: number;
   filledOrders: number;
   /** Aligned with frontend field name (was settledOrders). */

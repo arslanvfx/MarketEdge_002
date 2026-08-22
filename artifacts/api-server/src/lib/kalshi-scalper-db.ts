@@ -98,6 +98,34 @@ export async function runScalpMigrations(): Promise<void> {
         ON kalshi_scalp_orders (symbol, window_key)
     `);
 
+    // Reporting-only performance windows. One independently resettable
+    // baseline per mode; no order, fill, incident, or reservation is mutated.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kalshi_scalp_performance_baselines (
+        mode        TEXT PRIMARY KEY,
+        baseline_at TIMESTAMPTZ NOT NULL,
+        version     BIGINT NOT NULL DEFAULT 0,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT scalp_performance_baseline_mode
+          CHECK (mode IN ('paper', 'live'))
+      )
+    `);
+    await client.query(`
+      ALTER TABLE kalshi_scalp_performance_baselines
+      ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0
+    `);
+    await client.query(`
+      INSERT INTO kalshi_scalp_performance_baselines (mode, baseline_at, updated_at)
+      SELECT seed.mode,
+             COALESCE(
+               (SELECT MIN(o.created_at) FROM kalshi_scalp_orders o WHERE o.mode = seed.mode),
+               NOW()
+             ),
+             NOW()
+      FROM (VALUES ('paper'), ('live')) AS seed(mode)
+      ON CONFLICT (mode) DO NOTHING
+    `);
+
     // Incidents
     await client.query(`
       CREATE TABLE IF NOT EXISTS kalshi_scalp_incidents (
@@ -1104,6 +1132,106 @@ export async function getScalpOrders(opts: {
       params,
     );
     return res.rows.map(rowToScalpOrder);
+  } finally {
+    client.release();
+  }
+}
+
+/** All orders whose entry intent was created inside the active reporting
+ * window. This intentionally filters on created_at, never settled_at, so an
+ * order opened before a reset cannot re-enter the metrics when it settles. */
+export async function getScalpOrdersForPerformance(
+  mode: ScalpMode,
+  trackingSince: Date,
+): Promise<ScalpOrder[]> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT * FROM kalshi_scalp_orders
+       WHERE mode = $1 AND created_at >= $2
+       ORDER BY created_at DESC`,
+      [mode, trackingSince],
+    );
+    return res.rows.map(rowToScalpOrder);
+  } finally {
+    client.release();
+  }
+}
+
+/** Read the durable reporting baseline for one execution mode. Migrations seed
+ * both rows while preserving existing all-time metrics. */
+export async function getScalpPerformanceBaseline(mode: ScalpMode): Promise<{
+  trackingSince: Date;
+  trackingVersion: number;
+}> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT baseline_at, version
+       FROM kalshi_scalp_performance_baselines
+       WHERE mode = $1`,
+      [mode],
+    );
+    const value = res.rows[0]?.["baseline_at"];
+    if (value == null) {
+      throw new Error(`Missing Scalper performance baseline for ${mode} mode`);
+    }
+    return {
+      trackingSince: value instanceof Date ? value : new Date(String(value)),
+      trackingVersion: Number(res.rows[0]?.["version"] ?? 0),
+    };
+  } finally {
+    client.release();
+  }
+}
+
+/** Atomically start and read a fresh reporting window for exactly one mode.
+ * The transaction-scoped advisory lock serializes concurrent resets through
+ * the order read, while version lets clients reject out-of-order responses. */
+export async function resetScalpPerformanceWindow(mode: ScalpMode): Promise<{
+  trackingSince: Date;
+  trackingVersion: number;
+  orders: ScalpOrder[];
+}> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [`kalshi-scalper-performance-reset:${mode}`],
+    );
+    const res = await client.query(
+      `INSERT INTO kalshi_scalp_performance_baselines
+         (mode, baseline_at, version, updated_at)
+       VALUES ($1, clock_timestamp(), 1, clock_timestamp())
+       ON CONFLICT (mode) DO UPDATE
+         SET baseline_at = EXCLUDED.baseline_at,
+             version = kalshi_scalp_performance_baselines.version + 1,
+             updated_at = EXCLUDED.updated_at
+       RETURNING baseline_at, version`,
+      [mode],
+    );
+    const value = res.rows[0]?.["baseline_at"];
+    if (value == null) {
+      throw new Error(`Failed to reset Scalper performance baseline for ${mode} mode`);
+    }
+    const trackingSince = value instanceof Date ? value : new Date(String(value));
+    const trackingVersion = Number(res.rows[0]?.["version"] ?? 0);
+    const orders = await client.query(
+      `SELECT * FROM kalshi_scalp_orders
+       WHERE mode = $1 AND created_at >= $2
+       ORDER BY created_at DESC`,
+      [mode, trackingSince],
+    );
+    await client.query("COMMIT");
+    return {
+      trackingSince,
+      trackingVersion,
+      orders: orders.rows.map(rowToScalpOrder),
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
   } finally {
     client.release();
   }

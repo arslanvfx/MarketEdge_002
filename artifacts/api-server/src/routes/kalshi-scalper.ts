@@ -28,6 +28,7 @@ import {
   getScalpStatus,
   getScalpHistory,
   getScalpPerformance,
+  resetScalpPerformance,
   reconcileUnresolvedScalpOrder,
   ScalpReconciliationError,
   UnresolvedAttemptsError,
@@ -117,6 +118,29 @@ router.get("/crypto/scalper/performance", async (req, res): Promise<void> => {
     res.json(performance);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch scalper performance" });
+  }
+});
+
+// ── POST /api/crypto/scalper/reset-performance (signed-in operator) ──────────
+// Reporting-only: advances one mode's entry-time baseline without mutating the
+// order ledger, active positions, configuration, or safety state.
+
+router.post("/crypto/scalper/reset-performance", requireScalpAdmin, async (req, res): Promise<void> => {
+  const mode = parseMode(req.body?.mode);
+  if (!mode) {
+    res.status(400).json({ ok: false, error: "mode must be paper or live" });
+    return;
+  }
+  try {
+    const performance = await resetScalpPerformance(mode);
+    req.log.info(
+      { mode, trackingSince: performance.trackingSince },
+      "Reset Scalper performance reporting window",
+    );
+    res.json({ ok: true, performance });
+  } catch (err) {
+    req.log.error({ err, mode }, "Failed to reset Scalper performance reporting window");
+    res.status(500).json({ ok: false, error: "Failed to reset Scalper performance" });
   }
 });
 

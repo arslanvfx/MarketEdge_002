@@ -69,7 +69,7 @@ describe("scalper route wiring (static source assertions)", () => {
     assert.doesNotMatch(routeSrc, /\/crypto\/scalper\/admin\/claim/);
   });
 
-  it("guards both Scalper mutation routes", () => {
+  it("guards every Scalper mutation route", () => {
     assert.match(
       routeSrc,
       /router\.post\(\s*["']\/crypto\/scalper\/config["']\s*,\s*requireScalpAdmin/,
@@ -77,6 +77,10 @@ describe("scalper route wiring (static source assertions)", () => {
     assert.match(
       routeSrc,
       /router\.post\(\s*["']\/crypto\/scalper\/reset-circuit-breaker["']\s*,\s*requireScalpAdmin/,
+    );
+    assert.match(
+      routeSrc,
+      /router\.post\(\s*["']\/crypto\/scalper\/reset-performance["']\s*,\s*requireScalpAdmin/,
     );
   });
 
