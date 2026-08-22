@@ -1072,7 +1072,12 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                             </span>
                           )}
                           {retryText && <span>{retryText}</span>}
-                          <span className="ml-auto whitespace-nowrap">{fmtDateTime(attempt.attemptedAt)}</span>
+                          <span
+                            data-testid={`text-scalper-attempt-timestamp-${attempt.id}`}
+                            className="ml-auto whitespace-nowrap"
+                          >
+                            Guard checked {fmtDateTime(attempt.attemptedAt)}
+                          </span>
                         </div>
                       )}
                       {evidenceLines.length > 0 && (

@@ -114,6 +114,17 @@ describe("describeScalperAttempt", () => {
     );
   });
 
+  it("clearly names fail-closed Freefall feed outcomes", () => {
+    assert.equal(
+      describeScalperAttempt(attempt({ reason: "freefall_unavailable_fetch_failed" })),
+      "Fresh underlying price fetch failed — Freefall blocked submission",
+    );
+    assert.equal(
+      describeScalperAttempt(attempt({ reason: "freefall_unavailable_stale" })),
+      "Freefall samples were stale",
+    );
+  });
+
   it("renders measured target-distance and Freefall evidence", () => {
     const lines = describeScalperEvidence(attempt({
       reason: "target_proximity_too_close",

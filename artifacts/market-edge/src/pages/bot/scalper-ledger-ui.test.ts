@@ -34,5 +34,7 @@ describe("unified Scalper ledger wiring", () => {
     assert.match(panelSource, /in-band scan is only a preliminary candidate/i);
     assert.match(panelSource, /recentAttempts/);
     assert.match(panelSource, /describeScalperAttempt/);
+    assert.match(panelSource, /Guard checked \{fmtDateTime\(attempt\.attemptedAt\)\}/);
+    assert.match(panelSource, /text-scalper-attempt-timestamp-/);
   });
 });

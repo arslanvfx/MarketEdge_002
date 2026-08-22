@@ -21,6 +21,7 @@ import {
   resolveTimingPhase,
   secondsUntilEligible,
   checkFreefallGuard,
+  evaluateFreefallPreSubmitGuard,
   checkTargetProximityGuard,
   resolveScalpMarketState,
   checkDailyCap,
@@ -2014,13 +2015,13 @@ describe("execution wiring (static source assertions)", () => {
 
   it("service imports and calls the strict scalper submission", () => {
     assert.match(svc, /import\s*\{[\s\S]*?\bplaceScalpOrderStrict\b[\s\S]*?\}\s*from\s*"\.\/kalshi-scalper-exchange\.ts"/);
-    assert.match(svc, /await placeScalpOrderStrict\(/);
+    assert.match(svc, /await runtime\.placeScalpOrderStrict\(/);
   });
 
   it("persists a caller-generated client order id before passing it unchanged to Kalshi", () => {
     const clientId = idx('const clientOrderId = mode === "live" ? crypto.randomUUID() : null');
-    const intent = idx("await insertScalpOrderIntent(orderRecord)");
-    const submit = idx("const result = await placeScalpOrderStrict");
+    const intent = idx("await runtime.insertScalpOrderIntent(orderRecord)");
+    const submit = idx("const result = await runtime.placeScalpOrderStrict");
     assert.ok(clientId >= 0 && clientId < intent && intent < submit);
     assert.match(svc.slice(submit, submit + 500), /clientOrderId: clientOrderId!/);
     assert.match(exch, /client_order_id:\s*clientOrderId/);
@@ -2135,7 +2136,7 @@ describe("execution wiring (static source assertions)", () => {
 
   it("thrown strict submit is handled as UNKNOWN (retain budget, incident, breaker)", () => {
     // The catch around placeScalpOrderStrict routes to _handleUnknownExposure.
-    const submitCall = idx("await placeScalpOrderStrict(");
+    const submitCall = idx("await runtime.placeScalpOrderStrict(");
     const submitCatch = svc.indexOf("scalp_submit_threw", submitCall);
     assert.ok(submitCall >= 0 && submitCatch > submitCall, "submit catch must handle throw");
     const unknownHandler = svc.indexOf("_handleUnknownExposure(", submitCall);
@@ -2191,8 +2192,8 @@ describe("execution wiring (static source assertions)", () => {
 
   it("compareRiskSnapshot runs before any order intent and before submit", () => {
     const cmp = idx("compareRiskSnapshot(");
-    const intent = idx("insertScalpOrderIntent(orderRecord)");
-    const place = idx("await placeScalpOrderStrict(");
+    const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
+    const place = idx("await runtime.placeScalpOrderStrict(");
     assert.ok(cmp >= 0 && intent >= 0 && place >= 0);
     assert.ok(cmp < intent, "compareRiskSnapshot must precede order intent");
     assert.ok(cmp < place, "compareRiskSnapshot must precede submit");
@@ -2200,19 +2201,22 @@ describe("execution wiring (static source assertions)", () => {
 
   it("FINAL freefall guard runs before order intent and before submit", () => {
     const finalFf = idx("FINAL FREEFALL GUARD");
-    const intent = idx("insertScalpOrderIntent(orderRecord)");
-    const place = idx("await placeScalpOrderStrict(");
+    const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
+    const place = idx("await runtime.placeScalpOrderStrict(");
     assert.ok(finalFf >= 0, "final freefall guard block must exist");
     assert.ok(finalFf < intent, "final freefall guard must precede order intent");
     assert.ok(finalFf < place, "final freefall guard must precede submit");
     // It must use the pinned snapshot freefall config.
-    assert.match(svc, /snapshot\.freefallLookbackSeconds \* 1000,\s*\n?\s*snapshot\.freefallThresholdPct/);
+    assert.match(
+      svc,
+      /lookbackMs: snapshot\.freefallLookbackSeconds \* 1000,[\s\S]*?thresholdPct: snapshot\.freefallThresholdPct/,
+    );
   });
 
   it("FINAL target proximity guard uses fresh inputs before order intent and submit", () => {
     const finalProximity = idx("FINAL TARGET PROXIMITY GUARD");
-    const intent = idx("insertScalpOrderIntent(orderRecord)");
-    const place = idx("await placeScalpOrderStrict(");
+    const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
+    const place = idx("await runtime.placeScalpOrderStrict(");
     assert.ok(finalProximity >= 0, "final target proximity guard block must exist");
     assert.ok(finalProximity < intent, "target proximity guard must precede order intent");
     assert.ok(finalProximity < place, "target proximity guard must precede submit");
@@ -2223,7 +2227,7 @@ describe("execution wiring (static source assertions)", () => {
 
   it("order sizing goes through sizeOrderWithinReservedBudget (reserved amount)", () => {
     const sized = idx("sizeOrderWithinReservedBudget(reservedBudget, winningAsk, snapshot.bandMax)");
-    const place = idx("await placeScalpOrderStrict(");
+    const place = idx("await runtime.placeScalpOrderStrict(");
     assert.ok(sized >= 0, "sizing must use sizeOrderWithinReservedBudget with reservedBudget");
     assert.ok(sized < place, "sizing must precede submit");
     // reservedBudget is snapshot.budgetDollars
@@ -2245,8 +2249,8 @@ describe("execution wiring (static source assertions)", () => {
 
   it("FINAL balance check uses worst-case maxExposure before order intent/submit", () => {
     const finalBal = idx("FINAL live balance check");
-    const intent = idx("insertScalpOrderIntent(orderRecord)");
-    const place = idx("await placeScalpOrderStrict(");
+    const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
+    const place = idx("await runtime.placeScalpOrderStrict(");
     assert.ok(finalBal >= 0, "final balance check block must exist");
     assert.ok(finalBal < intent, "final balance check must precede order intent");
     assert.ok(finalBal < place, "final balance check must precede submit");
@@ -2267,8 +2271,8 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(authoritative > finalFf, "authoritative validation must be AFTER final freefall");
     assert.ok(authoritative > finalBal, "authoritative validation must be AFTER final balance");
     // And it must precede order intent and submit.
-    assert.ok(authoritative < idx("insertScalpOrderIntent(orderRecord)"));
-    assert.ok(authoritative < idx("await placeScalpOrderStrict("));
+    assert.ok(authoritative < idx("runtime.insertScalpOrderIntent(orderRecord)"));
+    assert.ok(authoritative < idx("await runtime.placeScalpOrderStrict("));
   });
 
   it("authoritative validation uses the synchronous helper (no await inside)", () => {
@@ -2283,12 +2287,12 @@ describe("execution wiring (static source assertions)", () => {
   });
 
   it("LIVE: a second sync validation occurs AFTER intent insert and BEFORE submit", () => {
-    const intent = idx("await insertScalpOrderIntent(orderRecord)");
-    const place = idx("const result = await placeScalpOrderStrict(");
+    const intent = idx("await runtime.insertScalpOrderIntent(orderRecord)");
+    const place = idx("const result = await runtime.placeScalpOrderStrict(");
     assert.ok(intent >= 0 && place >= 0);
     // Find the sync-validation call that sits between intent and submit.
     const between = svc.slice(intent, place);
-    const checkPos = between.indexOf("_finalRiskValidationSync(");
+    const checkPos = between.indexOf("runtime.finalRiskValidationSync(");
     assert.ok(checkPos >= 0, "a sync final validation must occur between intent and submit");
   });
 
@@ -2297,9 +2301,9 @@ describe("execution wiring (static source assertions)", () => {
     // must be inside the failure branch (abortIntentAndReleaseReservation),
     // which returns. On the success path there is no await before submit.
     const checkCall = svc.indexOf(
-      "const finalReasonLive = _finalRiskValidationSync(snapshot, windowKey, symbol, ticker);",
+      "const finalReasonLive = runtime.finalRiskValidationSync(snapshot, windowKey, symbol, ticker);",
     );
-    const place = svc.indexOf("const result = await placeScalpOrderStrict(");
+    const place = svc.indexOf("const result = await runtime.placeScalpOrderStrict(");
     assert.ok(checkCall >= 0 && place >= 0 && checkCall < place);
     // Strip line comments so prose (e.g. "no await occurs") is not miscounted.
     const segment = svc.slice(checkCall, place).replace(/\/\/[^\n]*/g, "");
@@ -2323,7 +2327,7 @@ describe("execution wiring (static source assertions)", () => {
 
   it("PAPER: post-await final validation runs before simulating the fill", () => {
     const paperCheck = svc.indexOf(
-      "const finalReasonPaper = _finalRiskValidationSync(snapshot, windowKey, symbol, ticker);",
+      "const finalReasonPaper = runtime.finalRiskValidationSync(snapshot, windowKey, symbol, ticker);",
     );
     const simulate = svc.indexOf("PAPER order simulated");
     assert.ok(paperCheck >= 0 && simulate >= 0);
@@ -2347,27 +2351,27 @@ describe("execution wiring (static source assertions)", () => {
 
   it("FINAL freefall guard requires an authoritative fresh sample (no silent catch)", () => {
     const finalFf = idx("FINAL FREEFALL GUARD");
-    const place = idx("await placeScalpOrderStrict(");
-    const intent = idx("insertScalpOrderIntent(orderRecord)");
+    const place = idx("await runtime.placeScalpOrderStrict(");
+    const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
     assert.ok(finalFf >= 0 && place >= 0 && intent >= 0);
     // The authoritative fresh sample is awaited in the concurrent readiness
-    // batch, then the final guard branches on that exact result.
+    // batch, then the shared production decision receives that exact result.
     const executeStart = idx("async function _executeScalpAttempt");
     const parallelBoundary = svc.slice(executeStart, finalFf);
-    assert.match(parallelBoundary, /await Promise\.all\(\[[\s\S]*?_collectPriceSample\(/);
+    assert.match(parallelBoundary, /await Promise\.all\(\[[\s\S]*?runtime\.collectPriceSample\(/);
     const block = svc.slice(finalFf, idx("Size the order STRICTLY"));
-    assert.match(block, /if \(!freshSampleResult\)/);
+    assert.match(block, /evaluateFreefallPreSubmitGuard\(\{[\s\S]*?freshSampleSucceeded: freshSampleResult/);
     // Must NOT swallow the final fetch with a silent .catch.
-    assert.ok(!/_collectPriceSample\([^)]*\)\.catch\(/.test(parallelBoundary), "final sample must not be best-effort .catch");
+    assert.ok(!/runtime\.collectPriceSample\([^)]*\)\.catch\(/.test(parallelBoundary), "final sample must not be best-effort .catch");
     // Fetch failure → unavailable skip before any intent/submit.
-    assert.match(block, /freefall_unavailable_fetch_failed/);
+    assert.match(block, /if \(!freefallDecision\.allowed\)/);
     assert.ok(finalFf < intent && finalFf < place);
   });
 
   it("FINAL freefall skips on unavailable OR blocked (fail-closed) before intent/placeOrder", () => {
     const block = svc.slice(idx("FINAL FREEFALL GUARD"), idx("Size the order STRICTLY"));
-    // Guard proceeds only when evaluable AND not blocked.
-    assert.match(block, /if \(!ffFinal\.evaluable \|\| ffFinal\.blocked\)/);
+    // Shared policy only allows fresh, evaluable, non-adverse inputs.
+    assert.match(block, /if \(!freefallDecision\.allowed\)/);
     // On the negative path it updates the reservation to skipped and returns.
     assert.match(block, /updateReservationStatus\([\s\S]*?"skipped"[\s\S]*?\);\s*\n\s*return;/);
   });
@@ -2379,7 +2383,7 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(boundary, /await Promise\.all\(\[/);
     assert.match(boundary, /fetchKalshiTarget\(/);
     assert.match(boundary, /fetchOrderbookPrices\(/);
-    assert.match(boundary, /_collectPriceSample\(/);
+    assert.match(boundary, /runtime\.collectPriceSample\(/);
     assert.match(boundary, /getBalance\(\)/);
   });
 

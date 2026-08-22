@@ -410,15 +410,16 @@ export interface FreefallGuardResult {
   samplesUsed: number;
 }
 
-// Freshness/coverage constants tuned for ~1s polling.
-//
-// FREEFALL_MAX_SAMPLE_AGE_MS: newest sample must be no older than this or the
-//   guard cannot see the "now" price. 5s tolerates a couple of missed polls.
-// FREEFALL_MIN_COVERAGE_FRAC: the observed span (newest-oldest) must cover at
-//   least this fraction of the configured lookback so a brand-new symbol cannot
-//   trade after only 1-2 seconds of data. 0.8 = "substantial/full coverage".
-// FREEFALL_COVERAGE_TOLERANCE_MS: small absolute slack added to the coverage
-//   requirement to account for polling jitter around the window edge.
+export interface FreefallPreSubmitDecision {
+  /** True only when the enabled guard has fresh, evaluable, non-adverse inputs. */
+  allowed: boolean;
+  /** Durable machine reason recorded when the attempt is blocked. */
+  reason: string | null;
+  /** Full guard result when price samples reached the momentum evaluator. */
+  guardResult: FreefallGuardResult | null;
+  /** Oldest-to-newest coverage of valid in-window samples, for dashboard evidence. */
+  sampleCoverageMs: number | null;
+}
 export const FREEFALL_MAX_SAMPLE_AGE_MS = 5_000;
 export const FREEFALL_MIN_COVERAGE_FRAC = 0.8;
 export const FREEFALL_COVERAGE_TOLERANCE_MS = 1_500;
@@ -545,10 +546,85 @@ export function checkFreefallGuard(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Target Proximity Guard
-// ---------------------------------------------------------------------------
+/**
+ * Authoritative Freefall decision used at the final pre-submit boundary.
+ *
+ * This keeps the live service and the controlled integration exercise on the
+ * same production decision path. Missing product metadata, a failed fresh
+ * underlying fetch, stale/insufficient samples, and an adverse move all fail
+ * closed. Callers must return before creating an order intent when allowed=false.
+ */
+export function evaluateFreefallPreSubmitGuard(input: {
+  enabled: boolean;
+  hasProduct: boolean;
+  freshSampleSucceeded: boolean;
+  samples: FreefallSample[];
+  side: "yes" | "no";
+  nowMs: number;
+  lookbackMs: number;
+  thresholdPct: number;
+}): FreefallPreSubmitDecision {
+  if (!input.enabled) {
+    return {
+      allowed: true,
+      reason: null,
+      guardResult: null,
+      sampleCoverageMs: null,
+    };
+  }
 
+  if (!input.hasProduct) {
+    return {
+      allowed: false,
+      reason: "freefall_unavailable_no_product",
+      guardResult: null,
+      sampleCoverageMs: null,
+    };
+  }
+
+  // A fresh fetch failure is authoritative. Never let older cached samples
+  // hide the fact that the guard cannot see the current underlying price.
+  if (!input.freshSampleSucceeded) {
+    return {
+      allowed: false,
+      reason: "freefall_unavailable_fetch_failed",
+      guardResult: null,
+      sampleCoverageMs: null,
+    };
+  }
+
+  const result = checkFreefallGuard(
+    input.samples,
+    input.side,
+    input.nowMs,
+    input.lookbackMs,
+    input.thresholdPct,
+  );
+  const cutoffMs = input.nowMs - input.lookbackMs;
+  const relevant = input.samples.filter(
+    (sample) =>
+      sample != null
+      && Number.isFinite(sample.price)
+      && sample.price > 0
+      && Number.isFinite(sample.at)
+      && sample.at >= cutoffMs
+      && sample.at <= input.nowMs,
+  );
+  const oldestAt = relevant[0]?.at;
+  const newestAt = relevant[relevant.length - 1]?.at;
+  const sampleCoverageMs = oldestAt != null && newestAt != null
+    ? newestAt - oldestAt
+    : null;
+
+  return {
+    allowed: result.evaluable && !result.blocked,
+    reason: result.evaluable && !result.blocked
+      ? null
+      : result.reason ?? "freefall_blocked_final",
+    guardResult: result,
+    sampleCoverageMs,
+  };
+}
 export interface TargetProximityGuardResult {
   /** False means the enabled guard cannot prove the entry safe. */
   evaluable: boolean;

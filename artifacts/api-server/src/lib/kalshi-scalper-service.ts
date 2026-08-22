@@ -33,6 +33,7 @@ import {
   winningCostFromFill,
   validateOrderbookQuote,
   checkFreefallGuard,
+  evaluateFreefallPreSubmitGuard,
   checkTargetProximityGuard,
   resolveScalpMarketState,
   computeScalpPnl,
@@ -47,6 +48,7 @@ import {
   preserveNewerScalpBreakerState,
   persistCircuitBreakerWithPolicy,
   SCALP_AUTH_RETRY_COOLDOWN_MS,
+  SCALP_GUARD_RETRY_COOLDOWN_MS,
   SCALP_MAX_CONCURRENT_CANDIDATES,
   SCALP_MAX_SUBMISSIONS_PER_WINDOW,
   SCALP_PREFLIGHT_LEAD_SECONDS,
@@ -1090,6 +1092,7 @@ function _rememberReservationOutcome(
   status: string,
   reason: string | null,
   submittedOrders: number,
+  nowMs = Date.now(),
 ): void {
   const retry = evaluateScalpReservationRetry({
     status,
@@ -1098,7 +1101,7 @@ function _rememberReservationOutcome(
     submittedOrders,
   });
   if (retry.retryAfterMs != null) {
-    _nextAttemptAt.set(key, Date.now() + retry.retryAfterMs);
+    _nextAttemptAt.set(key, nowMs + retry.retryAfterMs);
     _terminalAttemptKeys.delete(key);
   } else {
     _nextAttemptAt.delete(key);
@@ -1451,6 +1454,20 @@ function _finalRiskValidationSync(
   return null;
 }
 
+interface ScalpAttemptRuntime {
+  nowMs: () => number;
+  currentWindowKey: typeof currentWindowKey;
+  fetchKalshiTarget: typeof fetchKalshiTarget;
+  fetchOrderbookPrices: typeof fetchOrderbookPrices;
+  collectPriceSample: typeof _collectPriceSample;
+  getBalance: typeof getBalance;
+  getKalshiCachedData: typeof getKalshiCachedData;
+  updateReservationStatus: typeof updateReservationStatus;
+  insertScalpOrderIntent: typeof insertScalpOrderIntent;
+  placeScalpOrderStrict: typeof placeScalpOrderStrict;
+  finalizeOrderAndReleaseReservation: typeof finalizeOrderAndReleaseReservation;
+  finalRiskValidationSync: typeof _finalRiskValidationSync;
+}
 async function _executeScalpAttempt(
   reservationId: string,
   candidate: Candidate,
@@ -1459,9 +1476,10 @@ async function _executeScalpAttempt(
   snapshot: ExecutionRiskSnapshot,
   priorSubmittedOrders: number,
   attemptKey: string,
+  runtime: ScalpAttemptRuntime = LIVE_SCALP_ATTEMPT_RUNTIME,
 ): Promise<void> {
   const { symbol, ticker, closeTime, side: initialSide } = candidate;
-  const attemptStartMs = Date.now();
+  const attemptStartMs = runtime.nowMs();
   let identityRefreshMs: number | null = null;
   let quoteRefreshMs: number | null = null;
   let parallelRefreshMs: number | null = null;
@@ -1477,7 +1495,7 @@ async function _executeScalpAttempt(
 
   // Helper: build base timing evidence from the close time at skip time.
   const _timingEvidence = (): ScalpSkipEvidence => {
-    const nowMs = Date.now();
+    const nowMs = runtime.nowMs();
     const closeMs = new Date(closeTime).getTime();
     const secondsRemainingVal = Number.isFinite(closeMs)
       ? (closeMs - nowMs) / 1000
@@ -1511,43 +1529,43 @@ async function _executeScalpAttempt(
   // concurrent fetch below.
 
   if (_isCircuitBreakerBlocking()) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "breaker_before_submit", true, _timingEvidence());
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "breaker_before_submit", true, _timingEvidence());
     return;
   }
 
   // Confirm window identity still matches
-  const wkNow = currentWindowKey();
+  const wkNow = runtime.currentWindowKey();
   if (!wkNow || wkNow !== windowKey) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "window_expired_before_submit", true, _timingEvidence());
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "window_expired_before_submit", true, _timingEvidence());
     return;
   }
 
-  const concurrentFetchStartMs = Date.now();
-  const identityRefreshStartMs = Date.now();
-  const quoteRefreshStartMs = Date.now();
+  const concurrentFetchStartMs = runtime.nowMs();
+  const identityRefreshStartMs = runtime.nowMs();
+  const quoteRefreshStartMs = runtime.nowMs();
   const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
   const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
-    fetchKalshiTarget(symbol, new Date(closeTime), true).then(
-      (target) => ({ ok: true as const, target, error: null as unknown, latencyMs: Date.now() - identityRefreshStartMs }),
-      (error) => ({ ok: false as const, error, latencyMs: Date.now() - identityRefreshStartMs }),
+    runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
+      (target) => ({ ok: true as const, target, error: null as unknown, latencyMs: runtime.nowMs() - identityRefreshStartMs }),
+      (error) => ({ ok: false as const, error, latencyMs: runtime.nowMs() - identityRefreshStartMs }),
     ),
-    fetchOrderbookPrices(ticker).then(
-      (orderbook) => ({ ok: true as const, orderbook, latencyMs: Date.now() - quoteRefreshStartMs }),
-      (error) => ({ ok: false as const, orderbook: null, error, latencyMs: Date.now() - quoteRefreshStartMs }),
+    runtime.fetchOrderbookPrices(ticker).then(
+      (orderbook) => ({ ok: true as const, orderbook, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
+      (error) => ({ ok: false as const, orderbook: null, error, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
     ),
     snapshot.freefallGuardEnabled || snapshot.targetProximityGuardEnabled
       ? coin
-        ? _collectPriceSample(coin.symbol, coin.product)
+        ? runtime.collectPriceSample(coin.symbol, coin.product)
         : Promise.resolve(false)
       : Promise.resolve(true),
     mode === "live"
-      ? getBalance().then(
+      ? runtime.getBalance().then(
           (balance) => ({ ok: true as const, availableBalance: balance.availableBalance }),
           (error) => ({ ok: false as const, availableBalance: null, error }),
         )
       : Promise.resolve({ ok: true as const, availableBalance: null }),
   ]);
-  const concurrentFetchMs = Date.now() - concurrentFetchStartMs;
+  const concurrentFetchMs = runtime.nowMs() - concurrentFetchStartMs;
   identityRefreshMs = identityResult.latencyMs;
   quoteRefreshMs = orderbookResult.latencyMs;
   parallelRefreshMs = concurrentFetchMs;
@@ -1559,17 +1577,17 @@ async function _executeScalpAttempt(
       { err: identityResult.error, symbol },
       "[kalshi-scalper] identity force-refresh failed — skipping permanently",
     );
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_refresh_failed", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_refresh_failed", true, {
       ..._timingEvidence(),
       identityFetchOk: false,
       identityReason: "identity_refresh_failed",
     });
-    _rememberReservationOutcome(attemptKey, "skipped", "identity_refresh_failed", priorSubmittedOrders);
+    _rememberReservationOutcome(attemptKey, "skipped", "identity_refresh_failed", priorSubmittedOrders, runtime.nowMs());
     return;
   }
-  const refreshed = getKalshiCachedData(symbol);
+  const refreshed = runtime.getKalshiCachedData(symbol);
   if (!refreshed?.ticker || !refreshed.closeTime) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_missing_after_refresh", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_missing_after_refresh", true, {
       ..._timingEvidence(),
       identityFetchOk: true,
       identityReason: "identity_missing_after_refresh",
@@ -1581,7 +1599,7 @@ async function _executeScalpAttempt(
       { symbol, reservedTicker: ticker, refreshedTicker: refreshed.ticker },
       "[kalshi-scalper] market identity changed after refresh — skipping permanently",
     );
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_changed", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_changed", true, {
       ..._timingEvidence(),
       identityFetchOk: true,
       identityReason: "identity_changed",
@@ -1610,7 +1628,7 @@ async function _executeScalpAttempt(
       { symbol, windowKey, changed: diff.changedFields },
       "[kalshi-scalper] risk snapshot changed mid-flight (early) — skipping permanently (fail-closed, no resize)",
     );
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", diff.reason ?? "risk_changed", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", diff.reason ?? "risk_changed", true, {
       ..._timingEvidence(),
       refreshedTicker: refreshed.ticker,
       refreshedCloseTimeIso: refreshed.closeTime,
@@ -1620,10 +1638,10 @@ async function _executeScalpAttempt(
 
   // Confirm the refreshed close time still falls in the current window (uses
   // the PINNED window seconds — already verified unchanged by the diff above).
-  const postDiffNowMs = Date.now();
+  const postDiffNowMs = runtime.nowMs();
   const postDiffCloseMs = new Date(refreshed.closeTime).getTime();
   if (!isInFinalWindow(refreshed.closeTime, postDiffNowMs, snapshot.finalWindowSeconds, wkNow)) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_outside_window", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_outside_window", true, {
       ..._timingEvidence(),
       timingPhase: resolveTimingPhase(refreshed.closeTime, postDiffNowMs, snapshot.finalWindowSeconds, SCALP_PREFLIGHT_LEAD_SECONDS),
       closeTimeIso: refreshed.closeTime,
@@ -1652,7 +1670,7 @@ async function _executeScalpAttempt(
       },
       "[kalshi-scalper] final orderbook quote invalid — re-arming",
     );
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "final_quote_invalid", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "final_quote_invalid", true, {
       ..._timingEvidence(),
       quoteFetchOk: orderbookResult.ok,
       quotedReason: "final_quote_invalid",
@@ -1663,15 +1681,15 @@ async function _executeScalpAttempt(
       bandMin: snapshot.bandMin,
       bandMax: snapshot.bandMax,
     });
-    _rememberReservationOutcome(attemptKey, "skipped", "final_quote_invalid", priorSubmittedOrders);
+    _rememberReservationOutcome(attemptKey, "skipped", "final_quote_invalid", priorSubmittedOrders, runtime.nowMs());
     return;
   }
 
   // Revalidate window with second quote (pinned window seconds).
-  const quoteWindowNowMs = Date.now();
+  const quoteWindowNowMs = runtime.nowMs();
   const quoteCloseMs = new Date(quote2.closeTime).getTime();
   if (!isInFinalWindow(quote2.closeTime, quoteWindowNowMs, snapshot.finalWindowSeconds, wkNow)) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "outside_window_second_quote", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "outside_window_second_quote", true, {
       ..._timingEvidence(),
       timingPhase: resolveTimingPhase(quote2.closeTime, quoteWindowNowMs, snapshot.finalWindowSeconds, SCALP_PREFLIGHT_LEAD_SECONDS),
       closeTimeIso: quote2.closeTime,
@@ -1690,7 +1708,7 @@ async function _executeScalpAttempt(
   // Band selection uses the PINNED snapshot band (verified unchanged above).
   const match2 = selectScalpSide(quote2.yesAsk, quote2.noAsk, snapshot.bandMin, snapshot.bandMax);
   if (!match2) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "final_quote_outside_band", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "final_quote_outside_band", true, {
       ..._timingEvidence(),
       quoteFetchOk: true,
       quotedReason: "final_quote_outside_band",
@@ -1699,13 +1717,13 @@ async function _executeScalpAttempt(
       bandMin: snapshot.bandMin,
       bandMax: snapshot.bandMax,
     });
-    _rememberReservationOutcome(attemptKey, "skipped", "final_quote_outside_band", priorSubmittedOrders);
+    _rememberReservationOutcome(attemptKey, "skipped", "final_quote_outside_band", priorSubmittedOrders, runtime.nowMs());
     return;
   }
 
   // Side must remain consistent with initial candidate
   if (match2.side !== initialSide) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", "side_flipped_final_quote", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "side_flipped_final_quote", true, {
       ..._timingEvidence(),
       quoteFetchOk: true,
       quotedReason: "side_flipped_final_quote",
@@ -1716,7 +1734,7 @@ async function _executeScalpAttempt(
       bandMin: snapshot.bandMin,
       bandMax: snapshot.bandMax,
     });
-    _rememberReservationOutcome(attemptKey, "skipped", "side_flipped_final_quote", priorSubmittedOrders);
+    _rememberReservationOutcome(attemptKey, "skipped", "side_flipped_final_quote", priorSubmittedOrders, runtime.nowMs());
     return;
   }
 
@@ -1730,12 +1748,12 @@ async function _executeScalpAttempt(
   if (snapshot.targetProximityGuardEnabled) {
     const targetPriceNum = Number(identityResult.target);
     if (!coin) {
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", "target_proximity_unavailable_no_product", true, {
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "target_proximity_unavailable_no_product", true, {
         ..._timingEvidence(),
         minimumPct: snapshot.targetProximityThresholdPct,
         targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
       });
-      _rememberReservationOutcome(attemptKey, "skipped", "target_proximity_unavailable_no_product", priorSubmittedOrders);
+      _rememberReservationOutcome(attemptKey, "skipped", "target_proximity_unavailable_no_product", priorSubmittedOrders, runtime.nowMs());
       return;
     }
     if (!freshSampleResult) {
@@ -1743,12 +1761,12 @@ async function _executeScalpAttempt(
         { symbol, side: effectiveSide },
         "[kalshi-scalper] target proximity sample fetch failed — unavailable, skipping (fail-closed)",
       );
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", "target_proximity_unavailable_fetch_failed", true, {
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "target_proximity_unavailable_fetch_failed", true, {
         ..._timingEvidence(),
         minimumPct: snapshot.targetProximityThresholdPct,
         targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
       });
-      _rememberReservationOutcome(attemptKey, "skipped", "target_proximity_unavailable_fetch_failed", priorSubmittedOrders);
+      _rememberReservationOutcome(attemptKey, "skipped", "target_proximity_unavailable_fetch_failed", priorSubmittedOrders, runtime.nowMs());
       return;
     }
     const samplesFinal = _priceSamples.get(symbol) ?? [];
@@ -1771,7 +1789,7 @@ async function _executeScalpAttempt(
         "[kalshi-scalper] target proximity guard skip (final boundary)",
       );
       const proximityReason = proximityFinal.reason ?? "target_proximity_blocked_final";
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", proximityReason, true, {
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", proximityReason, true, {
         ..._timingEvidence(),
         distancePct: proximityFinal.distancePct,
         minimumPct: snapshot.targetProximityThresholdPct,
@@ -1779,7 +1797,7 @@ async function _executeScalpAttempt(
         underlyingPrice: latestSample?.price ?? null,
         selectedSide: effectiveSide,
       });
-      _rememberReservationOutcome(attemptKey, "skipped", proximityReason, priorSubmittedOrders);
+      _rememberReservationOutcome(attemptKey, "skipped", proximityReason, priorSubmittedOrders, runtime.nowMs());
       return;
     }
   }
@@ -1789,64 +1807,41 @@ async function _executeScalpAttempt(
   // is "unavailable" and skips — existing old samples must NOT mask it. Then the
   // guard must be evaluable AND not blocked to proceed.
   if (snapshot.freefallGuardEnabled) {
-    if (!coin) {
-      // No underlying product to sample → cannot evaluate → fail closed.
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", "freefall_unavailable_no_product", true, {
-        ..._timingEvidence(),
-        freefallThresholdPct: snapshot.freefallThresholdPct,
-        protectedSide: effectiveSide,
-      });
-      _rememberReservationOutcome(attemptKey, "skipped", "freefall_unavailable_no_product", priorSubmittedOrders);
-      return;
-    }
-    if (!freshSampleResult) {
-      // Fresh fetch failed; do NOT fall back to stale samples.
-      logger.info(
-        { symbol, side: effectiveSide },
-        "[kalshi-scalper] freefall final sample fetch failed — unavailable, skipping (fail-closed)",
-      );
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", "freefall_unavailable_fetch_failed", true, {
-        ..._timingEvidence(),
-        freefallThresholdPct: snapshot.freefallThresholdPct,
-        protectedSide: effectiveSide,
-      });
-      _rememberReservationOutcome(attemptKey, "skipped", "freefall_unavailable_fetch_failed", priorSubmittedOrders);
-      return;
-    }
     const samplesFinal = _priceSamples.get(symbol) ?? [];
-    const ffNowMs = Date.now();
-    const ffFinal = checkFreefallGuard(
-      samplesFinal,
-      effectiveSide,
-      ffNowMs,
-      snapshot.freefallLookbackSeconds * 1000,
-      snapshot.freefallThresholdPct,
-    );
-    // Compute sample coverage span (oldest-to-newest ms) for evidence.
-    const ffCutoffMs = ffNowMs - snapshot.freefallLookbackSeconds * 1_000;
-    const ffRelevantSamples = samplesFinal.filter(
-      (sample) => Number.isFinite(sample.at) && sample.at >= ffCutoffMs && sample.at <= ffNowMs,
-    );
-    const ffOldest = ffRelevantSamples.length > 0 ? ffRelevantSamples[0]?.at : null;
-    const ffNewest = ffRelevantSamples.length > 0
-      ? ffRelevantSamples[ffRelevantSamples.length - 1]?.at
-      : null;
-    const ffCoverageMs = (ffOldest != null && ffNewest != null) ? ffNewest - ffOldest : null;
-    if (!ffFinal.evaluable || ffFinal.blocked) {
+    const ffNowMs = runtime.nowMs();
+    const freefallDecision = evaluateFreefallPreSubmitGuard({
+      enabled: snapshot.freefallGuardEnabled,
+      hasProduct: coin != null,
+      freshSampleSucceeded: freshSampleResult,
+      samples: samplesFinal,
+      side: effectiveSide,
+      nowMs: ffNowMs,
+      lookbackMs: snapshot.freefallLookbackSeconds * 1000,
+      thresholdPct: snapshot.freefallThresholdPct,
+    });
+    if (!freefallDecision.allowed) {
+      const ffFinal = freefallDecision.guardResult;
       logger.info(
-        { symbol, side: effectiveSide, evaluable: ffFinal.evaluable, reason: ffFinal.reason, adverseMovePct: ffFinal.adverseMovePct, samplesUsed: ffFinal.samplesUsed },
+        {
+          symbol,
+          side: effectiveSide,
+          evaluable: ffFinal?.evaluable ?? false,
+          reason: freefallDecision.reason,
+          adverseMovePct: ffFinal?.adverseMovePct ?? null,
+          samplesUsed: ffFinal?.samplesUsed ?? null,
+        },
         "[kalshi-scalper] freefall guard skip (final boundary)",
       );
-      const freefallReason = ffFinal.reason ?? "freefall_blocked_final";
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", freefallReason, true, {
+      const freefallReason = freefallDecision.reason ?? "freefall_blocked_final";
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", freefallReason, true, {
         ..._timingEvidence(),
-        adverseMovePct: ffFinal.adverseMovePct,
+        adverseMovePct: ffFinal?.adverseMovePct ?? null,
         freefallThresholdPct: snapshot.freefallThresholdPct,
-        samplesUsed: ffFinal.samplesUsed,
-        sampleCoverageMs: ffCoverageMs,
+        samplesUsed: ffFinal?.samplesUsed ?? null,
+        sampleCoverageMs: freefallDecision.sampleCoverageMs,
         protectedSide: effectiveSide,
       });
-      _rememberReservationOutcome(attemptKey, "skipped", freefallReason, priorSubmittedOrders);
+      _rememberReservationOutcome(attemptKey, "skipped", freefallReason, priorSubmittedOrders, runtime.nowMs());
       return;
     }
   }
@@ -1856,7 +1851,7 @@ async function _executeScalpAttempt(
   // exposure at the band-capped IOC limit is guaranteed <= reservedBudget.
   const sized = sizeOrderWithinReservedBudget(reservedBudget, winningAsk, snapshot.bandMax);
   if (!sized.ok) {
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", sized.reason ?? "sizing_failed", true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", sized.reason ?? "sizing_failed", true, {
       ..._timingEvidence(),
     });
     return;
@@ -1870,12 +1865,12 @@ async function _executeScalpAttempt(
         { err: balanceResult.ok ? undefined : balanceResult.error, symbol },
         "[kalshi-scalper] final balance check failed — re-arming",
       );
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_check_failed_final", true, {
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_check_failed_final", true, {
         ..._timingEvidence(),
         availableBalance: balanceResult.availableBalance,
         maxExposure,
       });
-      _rememberReservationOutcome(attemptKey, "skipped", "balance_check_failed_final", priorSubmittedOrders);
+      _rememberReservationOutcome(attemptKey, "skipped", "balance_check_failed_final", priorSubmittedOrders, runtime.nowMs());
       return;
     }
     if (balanceResult.availableBalance < maxExposure) {
@@ -1883,12 +1878,12 @@ async function _executeScalpAttempt(
         { symbol, available: balanceResult.availableBalance, maxExposure, contractCount, maxWinningCost },
         "[kalshi-scalper] insufficient balance for worst-case exposure (final) — re-arming",
       );
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance_final", true, {
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance_final", true, {
         ..._timingEvidence(),
         availableBalance: balanceResult.availableBalance,
         maxExposure,
       });
-      _rememberReservationOutcome(attemptKey, "skipped", "insufficient_balance_final", priorSubmittedOrders);
+      _rememberReservationOutcome(attemptKey, "skipped", "insufficient_balance_final", priorSubmittedOrders, runtime.nowMs());
       return;
     }
   }
@@ -1898,15 +1893,15 @@ async function _executeScalpAttempt(
   // final balance) is now complete. Re-run the SYNCHRONOUS authoritative check
   // AFTER all that async work so a config/window/identity change during those
   // awaits fails closed here — before any intent is written or fill simulated.
-  const finalReason1 = _finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
+  const finalReason1 = runtime.finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
   if (finalReason1 !== null) {
     logger.info(
       { symbol, windowKey, reason: finalReason1 },
       "[kalshi-scalper] authoritative final validation failed (post-await) — skipping permanently",
     );
-    await updateReservationStatus(mode, symbol, windowKey, "skipped", finalReason1, true, {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", finalReason1, true, {
       ..._timingEvidence(),
-      elapsedMs: Date.now() - attemptStartMs,
+      elapsedMs: runtime.nowMs() - attemptStartMs,
     });
     return;
   }
@@ -1963,15 +1958,15 @@ async function _executeScalpAttempt(
     // ── Paper post-await final validation (no intent exists yet) ──────────────
     // Simulating a fill is the paper equivalent of "submitting", so re-validate
     // synchronously immediately before it.
-    const finalReasonPaper = _finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
+    const finalReasonPaper = runtime.finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
     if (finalReasonPaper !== null) {
       logger.info(
         { symbol, windowKey, reason: finalReasonPaper },
         "[kalshi-scalper] paper final validation failed before simulate — skipping permanently",
       );
-      await updateReservationStatus(mode, symbol, windowKey, "skipped", finalReasonPaper, true, {
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", finalReasonPaper, true, {
         ..._timingEvidence(),
-        elapsedMs: Date.now() - attemptStartMs,
+        elapsedMs: runtime.nowMs() - attemptStartMs,
       });
       return;
     }
@@ -1986,14 +1981,14 @@ async function _executeScalpAttempt(
   } else {
     // ── Live: persist the "submitting" intent BEFORE the exchange call ────────
     // insertScalpOrderIntent is awaited, so config could change DURING it.
-    await insertScalpOrderIntent(orderRecord);
+    await runtime.insertScalpOrderIntent(orderRecord);
 
     // ── FINAL synchronous re-validation AFTER intent creation, IMMEDIATELY ────
     // before placeOrder. There MUST be no await between this successful check and
     // the placeOrder call expression below. If it fails, the never-submitted
     // intent is atomically marked skipped and the reservation released (no broker
     // was called → RESOLVED, not unknown), then we abort before any exchange call.
-    const finalReasonLive = _finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
+    const finalReasonLive = runtime.finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
     if (finalReasonLive !== null) {
       logger.info(
         { symbol, windowKey, reason: finalReasonLive },
@@ -2020,7 +2015,7 @@ async function _executeScalpAttempt(
     // limitPrice, and STRICTLY parses the raw response (no zero-coercion).
     // NOTE: no await occurs between the successful check above and this call.
     try {
-      const result = await placeScalpOrderStrict({
+      const result = await runtime.placeScalpOrderStrict({
         ticker,
         side: effectiveSide,
         limitPrice,
@@ -2123,11 +2118,11 @@ async function _executeScalpAttempt(
         { symbol, windowKey, filledCount, avgFillPrice },
         "[kalshi-scalper] PAPER unexpected unknown classification — recording error + releasing reservation",
       );
-      await insertScalpOrderIntent({
+      await runtime.insertScalpOrderIntent({
         ...orderRecord, status: "error", filledCount, avgFillPrice, orderId,
         errorMessage: `paper_unknown_classification: filledCount=${filledCount} avgFillPrice=${String(avgFillPrice)}`,
       }).catch(() => {});
-      await updateReservationStatus(mode, symbol, windowKey, "error", "paper_unknown_classification", true).catch(() => {});
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "error", "paper_unknown_classification", true).catch(() => {});
     }
     // Never continue past a confirmed-exposure unknown.
     _terminalAttemptKeys.add(attemptKey);
@@ -2140,7 +2135,7 @@ async function _executeScalpAttempt(
       // Atomic: finalize intent zero_fill + release reservation in one txn.
       // Post-submit persistence MUST fail closed — no .catch swallowing.
       try {
-        await finalizeOrderAndReleaseReservation({
+        await runtime.finalizeOrderAndReleaseReservation({
           orderId: orderRecord.id, mode, symbol, windowKey,
           status: "zero_fill", reservationStatus: "zero_fill",
           filledCount: 0, avgFillPrice: null, winningContractCost: null,
@@ -2159,14 +2154,15 @@ async function _executeScalpAttempt(
       }
     } else {
       // Paper: no broker exposure. Persist zero-fill record + release. Explicit.
-      await insertScalpOrderIntent({ ...orderRecord, status: "zero_fill", orderId }).catch(() => {});
-      await updateReservationStatus(mode, symbol, windowKey, "zero_fill", "zero_fill", true).catch(() => {});
+      await runtime.insertScalpOrderIntent({ ...orderRecord, status: "zero_fill", orderId }).catch(() => {});
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "zero_fill", "zero_fill", true).catch(() => {});
     }
     _rememberReservationOutcome(
       attemptKey,
       "zero_fill",
       "zero_fill",
       mode === "live" ? priorSubmittedOrders + 1 : priorSubmittedOrders,
+      runtime.nowMs(),
     );
     logger.info(
       {
@@ -2197,7 +2193,7 @@ async function _executeScalpAttempt(
     // Atomic: finalize intent filled + release reservation in one txn.
     // Post-submit persistence MUST fail closed — no .catch swallowing.
     try {
-      await finalizeOrderAndReleaseReservation({
+      await runtime.finalizeOrderAndReleaseReservation({
         orderId: orderRecord.id, mode, symbol, windowKey,
         status: finalStatus, reservationStatus: "filled",
         filledCount, avgFillPrice: confirmedAvg, winningContractCost,
@@ -2215,7 +2211,7 @@ async function _executeScalpAttempt(
     }
   } else {
     // Paper: no broker exposure. Persist filled record + release. Explicit.
-    await insertScalpOrderIntent({
+    await runtime.insertScalpOrderIntent({
       ...orderRecord,
       status: finalStatus,
       filledCount,
@@ -2224,7 +2220,7 @@ async function _executeScalpAttempt(
       budgetSpent: actualSpent,
       orderId,
     }).catch(() => {});
-    await updateReservationStatus(mode, symbol, windowKey, "filled", undefined, true).catch(() => {});
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "filled", undefined, true).catch(() => {});
   }
   _terminalAttemptKeys.add(attemptKey);
   _nextAttemptAt.delete(attemptKey);
@@ -2260,6 +2256,24 @@ async function _executeScalpAttempt(
   }
 }
 
+export interface ControlledFreefallServiceExerciseResult {
+  steps: Array<{
+    label: "adverse" | "adverse_cooldown" | "fetch_failed" | "fetch_cooldown" | "stale" | "stale_cooldown" | "recovered";
+    state: "skipped" | "cooldown" | "submitted";
+    reason: string | null;
+    checkedAt: string;
+    retryAfterMs: number | null;
+    intentWrites: number;
+    brokerSubmissions: number;
+  }>;
+  skippedAttempts: Array<{
+    reason: string;
+    skippedAt: string | null;
+    evidence: ScalpSkipEvidence | null;
+  }>;
+  intentWrites: number;
+  brokerSubmissions: number;
+}
 /**
  * Post-submit persistence failure handler. Called when a LIVE
  * finalizeOrderAndReleaseReservation transaction throws AFTER the broker call.
@@ -2599,4 +2613,217 @@ export async function getUnresolvedLiveScalpAttempts() {
 
 export async function applyScalpConfigUpdate(patch: ScalpConfigPatch): Promise<ScalpConfig> {
   return updateScalpConfig(patch);
+}
+
+const LIVE_SCALP_ATTEMPT_RUNTIME: ScalpAttemptRuntime = {
+  nowMs: Date.now,
+  currentWindowKey,
+  fetchKalshiTarget,
+  fetchOrderbookPrices,
+  collectPriceSample: _collectPriceSample,
+  getBalance,
+  getKalshiCachedData,
+  updateReservationStatus,
+  insertScalpOrderIntent,
+  placeScalpOrderStrict,
+  finalizeOrderAndReleaseReservation,
+  finalRiskValidationSync: _finalRiskValidationSync,
+};
+
+/**
+ * Controlled live-window proof that executes the real `_executeScalpAttempt`
+ * reservation-to-submit path with in-memory DB/exchange boundaries.
+ *
+ * It can never reach the network or persistent database: every external sink
+ * used by the attempt is replaced locally, while the production guard,
+ * reservation retry state, sizing, intent ordering, and submit ordering remain
+ * unchanged. This is intentionally exported only for the bundled integration
+ * test; runtime application code never calls it.
+ */
+export async function runControlledFreefallServiceExercise():
+Promise<ControlledFreefallServiceExerciseResult> {
+  const originalConfig = _config;
+  const symbol = "BTC";
+  const ticker = "CONTROLLED-FREEFALL-BTC";
+  const windowOpenMs = Date.UTC(2026, 7, 22, 7, 0, 0);
+  const windowKey = "2026-08-22T07:00";
+  const closeTime = new Date(windowOpenMs + 15 * 60_000).toISOString();
+  const attemptKey = _attemptKey("live", symbol, windowKey);
+  const originalSamples = _priceSamples.get(symbol);
+  const originalNextAttemptAt = _nextAttemptAt.get(attemptKey);
+  const wasTerminal = _terminalAttemptKeys.has(attemptKey);
+  let nowMs = windowOpenMs + 14 * 60_000 + 20_000;
+  let freshSampleSucceeded = true;
+  let currentSamples: FreefallSample[] = [];
+  let intentWrites = 0;
+  let brokerSubmissions = 0;
+  const skippedAttempts: ControlledFreefallServiceExerciseResult["skippedAttempts"] = [];
+  const steps: ControlledFreefallServiceExerciseResult["steps"] = [];
+
+  const coveredSamples = (prices: number[], newestAgeMs = 250): FreefallSample[] => {
+    const oldestAt = nowMs - 28_000;
+    const newestAt = nowMs - newestAgeMs;
+    const step = prices.length > 1 ? (newestAt - oldestAt) / (prices.length - 1) : 0;
+    return prices.map((price, index) => ({
+      price,
+      at: Math.round(oldestAt + step * index),
+    }));
+  };
+
+  _config = {
+    ...DEFAULT_SCALP_CONFIG,
+    enabled: true,
+    mode: "live",
+    globalBandMin: 0.96,
+    globalBandMax: 0.99,
+    finalWindowSeconds: 60,
+    budgetDollars: 2,
+    freefallGuardEnabled: true,
+    freefallLookbackSeconds: 30,
+    freefallThresholdPct: 0.5,
+    targetProximityGuardEnabled: false,
+    circuitBreakerEnabled: true,
+    circuitBreaker: false,
+    circuitBreakerReason: null,
+    perMarketOverrides: [],
+  };
+  const params = resolveEffectiveParams(_config, symbol, ticker);
+  const snapshot = buildExecutionRiskSnapshot(
+    _config,
+    params,
+    { symbol, windowKey, ticker, closeTime },
+  );
+  const candidate: Candidate = {
+    symbol,
+    ticker,
+    closeTime,
+    cachedYesAsk: 0.97,
+    cachedNoAsk: 0.98,
+    side: "yes",
+    winningAsk: 0.97,
+  };
+
+  const runtime: ScalpAttemptRuntime = {
+    nowMs: () => nowMs,
+    currentWindowKey: () => windowKey,
+    fetchKalshiTarget: async () => 100,
+    fetchOrderbookPrices: async () => ({
+      yesAsk: 0.97,
+      yesBid: 0.02,
+      yesDepth: [[0.02, 100]],
+      noDepth: [[0.03, 100]],
+    }),
+    collectPriceSample: async () => freshSampleSucceeded,
+    getBalance: async () => ({ availableBalance: 100, totalBalance: 100 }),
+    getKalshiCachedData: () => ({
+      value: 100,
+      ticker,
+      closeTime,
+      yesAsk: 0.97,
+      yesBid: 0.02,
+      noAsk: 0.98,
+    }),
+    updateReservationStatus: async (_mode, _symbol, _windowKey, status, reason, _release, evidence) => {
+      if (status !== "skipped") return;
+      skippedAttempts.push({
+        reason: reason ?? "unknown_skip",
+        skippedAt: evidence?.skippedAt ?? null,
+        evidence: evidence ?? null,
+      });
+    },
+    insertScalpOrderIntent: async () => {
+      intentWrites += 1;
+    },
+    placeScalpOrderStrict: async () => {
+      brokerSubmissions += 1;
+      return {
+        outcome: "zero_fill",
+        reason: "controlled_zero_fill",
+        orderId: "controlled-order",
+        filledCount: 0,
+        avgFillPrice: null,
+      };
+    },
+    finalizeOrderAndReleaseReservation: async () => {},
+    finalRiskValidationSync: () => null,
+  };
+
+  const runStep = async (
+    label: ControlledFreefallServiceExerciseResult["steps"][number]["label"],
+    samples: FreefallSample[],
+    fresh: boolean,
+  ): Promise<void> => {
+    const retryAt = _nextAttemptAt.get(attemptKey) ?? 0;
+    if (retryAt > nowMs) {
+      steps.push({
+        label,
+        state: "cooldown",
+        reason: null,
+        checkedAt: new Date(nowMs).toISOString(),
+        retryAfterMs: retryAt - nowMs,
+        intentWrites,
+        brokerSubmissions,
+      });
+      return;
+    }
+
+    currentSamples = samples;
+    freshSampleSucceeded = fresh;
+    _priceSamples.set(symbol, currentSamples);
+    const previousSkipCount = skippedAttempts.length;
+    const previousSubmissions = brokerSubmissions;
+    await _executeScalpAttempt(
+      `controlled-reservation-${label}`,
+      candidate,
+      windowKey,
+      "live",
+      snapshot,
+      0,
+      attemptKey,
+      runtime,
+    );
+    const skip = skippedAttempts.length > previousSkipCount
+      ? skippedAttempts[skippedAttempts.length - 1]
+      : null;
+    steps.push({
+      label,
+      state: brokerSubmissions > previousSubmissions ? "submitted" : "skipped",
+      reason: skip?.reason ?? null,
+      checkedAt: skip?.skippedAt ?? new Date(nowMs).toISOString(),
+      retryAfterMs: skip ? Math.max(0, (_nextAttemptAt.get(attemptKey) ?? nowMs) - nowMs) : null,
+      intentWrites,
+      brokerSubmissions,
+    });
+  };
+
+  _nextAttemptAt.delete(attemptKey);
+  _terminalAttemptKeys.delete(attemptKey);
+  try {
+    await runStep("adverse", coveredSamples([100, 99.8, 99.2, 98.7]), true);
+    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
+    await runStep("adverse_cooldown", coveredSamples([100, 100.1, 100.2]), true);
+
+    nowMs += 1;
+    await runStep("fetch_failed", coveredSamples([100, 100.1, 100.2]), false);
+    nowMs += 250;
+    await runStep("fetch_cooldown", coveredSamples([100, 100.1, 100.2]), true);
+
+    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 250;
+    await runStep("stale", coveredSamples([100, 100.1, 100.2], 6_000), true);
+    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
+    await runStep("stale_cooldown", coveredSamples([100, 100.1, 100.2]), true);
+
+    nowMs += 1;
+    await runStep("recovered", coveredSamples([100, 100.1, 100.2]), true);
+
+    return { steps, skippedAttempts, intentWrites, brokerSubmissions };
+  } finally {
+    _config = originalConfig;
+    if (originalSamples === undefined) _priceSamples.delete(symbol);
+    else _priceSamples.set(symbol, originalSamples);
+    if (originalNextAttemptAt === undefined) _nextAttemptAt.delete(attemptKey);
+    else _nextAttemptAt.set(attemptKey, originalNextAttemptAt);
+    if (wasTerminal) _terminalAttemptKeys.add(attemptKey);
+    else _terminalAttemptKeys.delete(attemptKey);
+  }
 }
