@@ -89,30 +89,8 @@ export interface ValidatedQuote {
 // ---------------------------------------------------------------------------
 // Reservation
 // ---------------------------------------------------------------------------
-
-export interface ScalpReservation {
-  id: string;
-  mode: ScalpMode;
-  symbol: string;
-  windowKey: string;
-  ticker: string;
-  createdAt: Date;
-  attemptedAt: Date;
-  status: "claimed" | "filled" | "zero_fill" | "error" | "skipped" | "unknown";
-  reason?: string;
-  /** Budget reserved for cap accounting until the attempt resolves. */
-  reservedBudget: number;
-  /** Durable count of live IOC submissions for this symbol/window. */
-  submissionCount: number;
-  /** Latest confirmed live outcome side, or simulated paper side. */
-  latestSide?: "yes" | "no";
-  /** Authoritative winning-contract quote for that submission/simulation. */
-  observedWinningAsk?: number;
-  /** Worst winning-contract cost for that proven submission/simulation. */
-  executionWinningLimit?: number;
-  /** Raw YES-side limit from a confirmed live outcome (live only). */
-  submittedLimitPrice?: number;
-}
+// (ScalpReservation is defined after ScalpSkipEvidence near the bottom of this
+//  file so it can reference that type. See "Reservation skip_evidence field".)
 
 // ---------------------------------------------------------------------------
 // Order
@@ -217,8 +195,107 @@ export interface ScalpPerformance {
 }
 
 // ---------------------------------------------------------------------------
+// Skip evidence (structured, additive, durable — stored in skip_evidence JSONB)
+// ---------------------------------------------------------------------------
+
+/** Structured evidence persisted alongside a skipped reservation row.
+ *  All fields are optional/nullable so older rows without evidence remain valid.
+ *  Never contains credentials or raw exchange payloads. */
+export interface ScalpSkipEvidence {
+  // ── Timing / window phase ─────────────────────────────────────────────────
+  /** Timing phase at skip time: preflight_warmup | waiting_eligibility | eligible | closed_expired */
+  timingPhase?: "preflight_warmup" | "waiting_eligibility" | "eligible" | "closed_expired";
+  /** Market close time (ISO) when the skip was evaluated. */
+  closeTimeIso?: string;
+  /** Seconds remaining until market close at skip time (null = unavailable). */
+  secondsRemaining?: number | null;
+  /** Effective window seconds configured for this symbol. */
+  effectiveWindowSeconds?: number;
+  /** UTC market window key tied to the reservation. */
+  windowKey?: string;
+
+  // ── Target distance ───────────────────────────────────────────────────────
+  /** Absolute distance of live underlying price from Kalshi target as %. */
+  distancePct?: number | null;
+  /** Threshold % that would block the entry. */
+  minimumPct?: number | null;
+  /** Force-refreshed Kalshi target price. */
+  targetPrice?: number | null;
+  /** Live underlying price at skip time. */
+  underlyingPrice?: number | null;
+
+  // ── Freefall guard ────────────────────────────────────────────────────────
+  /** Adverse move % that caused/failed the guard. */
+  adverseMovePct?: number | null;
+  /** Configured threshold % for the freefall guard. */
+  freefallThresholdPct?: number | null;
+  /** Number of price samples used in the freefall evaluation. */
+  samplesUsed?: number | null;
+  /** Observed coverage span (ms) of samples used. */
+  sampleCoverageMs?: number | null;
+  /** Which side was being protected (yes = falling blocks YES, no = rising blocks NO). */
+  protectedSide?: "yes" | "no" | null;
+
+  // ── Authenticated quote / identity ────────────────────────────────────────
+  /** Machine reason code from the orderbook/quote validation step. */
+  quotedReason?: string | null;
+  /** Machine reason code from the identity check (ticker/closeTime match). */
+  identityReason?: string | null;
+  /** Whether the quote fetch succeeded (false = network error, null = not attempted). */
+  quoteFetchOk?: boolean | null;
+  /** Whether the identity refresh succeeded. */
+  identityFetchOk?: boolean | null;
+  /** Authenticated YES ask observed at the final decision boundary. */
+  quoteYesAsk?: number | null;
+  /** Authenticated NO ask observed at the final decision boundary. */
+  quoteNoAsk?: number | null;
+  /** Winning-side ask selected from the authenticated quote. */
+  winningAsk?: number | null;
+  /** Side selected from the authenticated quote. */
+  selectedSide?: "yes" | "no" | null;
+  /** Effective lower band bound used for the decision. */
+  bandMin?: number | null;
+  /** Effective upper band bound used for the decision. */
+  bandMax?: number | null;
+  /** Ticker pinned when the reservation was claimed. */
+  reservedTicker?: string | null;
+  /** Ticker returned by the final identity refresh. */
+  refreshedTicker?: string | null;
+  /** Close time returned by the final identity refresh. */
+  refreshedCloseTimeIso?: string | null;
+
+  // ── Latency / timing measurements ────────────────────────────────────────
+  /** Elapsed ms from attempt start to skip decision (diagnostic only). */
+  elapsedMs?: number | null;
+  /** Duration of the force-refreshed market identity request. */
+  identityRefreshMs?: number | null;
+  /** Duration of the authenticated orderbook request. */
+  quoteRefreshMs?: number | null;
+  /** Wall time for all concurrent final refreshes. */
+  parallelRefreshMs?: number | null;
+  /** ISO timestamp when the skip was recorded. */
+  skippedAt?: string;
+
+  // ── Cap, sizing, and balance context ──────────────────────────────────────
+  requestedBudget?: number | null;
+  dailyCapDollars?: number | null;
+  openCapDollars?: number | null;
+  dailyCommittedDollars?: number | null;
+  openCommittedDollars?: number | null;
+  availableBalance?: number | null;
+  maxExposure?: number | null;
+}
+
+// ---------------------------------------------------------------------------
 // Status market row
 // ---------------------------------------------------------------------------
+
+/** Timing phase for a scalp market candidate — disambiguates the UI states. */
+export type ScalpTimingPhase =
+  | "preflight_warmup"    // non-submitting warm-up inside the configured preflight lead
+  | "waiting_eligibility" // not yet inside the preflight lead or close time unavailable
+  | "eligible"            // within finalWindowSeconds of close — active submission window
+  | "closed_expired";     // market close already passed
 
 /** Market status row — field names aligned exactly with the frontend
  *  ScalperStatusMarket interface. `state` uses 'active' when the market is a
@@ -227,14 +304,50 @@ export interface ScalpPerformance {
 export interface ScalpMarketStatus {
   symbol: string;
   state: "active" | "guarded" | "ready" | "out_of_band" | "paused" | "no_quote";
+  /** Timing phase — frontend uses this to distinguish preflight warm-up,
+   *  waiting for eligibility, eligible final window, and closed/expired. */
+  timingPhase: ScalpTimingPhase;
   effectiveBandMin: number;
   effectiveBandMax: number;
   effectiveWindowSeconds: number;
   effectiveBudgetDollars: number;
   lastAsk: number | null;
   secondsRemaining: number | null;
+  /** Seconds until the eligibility window opens (null when already eligible or no close time). */
+  secondsUntilEligible: number | null;
   freefallBlocked: boolean;
   targetProximityBlocked: boolean;
   targetDistancePct: number | null;
   reason: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Reservation skip_evidence field
+// ---------------------------------------------------------------------------
+
+/** Updated ScalpReservation shape including optional structured skip evidence. */
+export interface ScalpReservation {
+  id: string;
+  mode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  createdAt: Date;
+  attemptedAt: Date;
+  status: "claimed" | "filled" | "zero_fill" | "error" | "skipped" | "unknown";
+  reason?: string;
+  /** Budget reserved for cap accounting until the attempt resolves. */
+  reservedBudget: number;
+  /** Durable count of live IOC submissions for this symbol/window. */
+  submissionCount: number;
+  /** Latest confirmed live outcome side, or simulated paper side. */
+  latestSide?: "yes" | "no";
+  /** Authoritative winning-contract quote for that submission/simulation. */
+  observedWinningAsk?: number;
+  /** Worst winning-contract cost for that proven submission/simulation. */
+  executionWinningLimit?: number;
+  /** Raw YES-side limit from a confirmed live outcome (live only). */
+  submittedLimitPrice?: number;
+  /** Structured skip evidence (null for non-skip rows and pre-upgrade rows). */
+  skipEvidence?: ScalpSkipEvidence | null;
 }

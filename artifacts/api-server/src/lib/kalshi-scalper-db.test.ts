@@ -8,6 +8,7 @@
 
 import { describe, it, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
+import { evaluateScalpReservationRetry } from "./kalshi-scalper-policy.ts";
 
 // Requires BOTH a DATABASE_URL and an explicit opt-in, because the
 // @workspace/db package uses directory ESM imports that the bare
@@ -99,7 +100,8 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
   it("concurrent distinct claims respect the daily cap exactly (no double-add, no over-admit)", async () => {
     const base = `DBTEST-cap-${Date.now()}`;
     const budget = 2;
-    const dailyCap = 6; // only 3 attempts of $2 should be allowed
+    const baseline = await db.getScalpCommittedTotals(MODE);
+    const dailyCap = baseline.dailyCommitted + 6; // exactly 3 new attempts of $2 should be allowed
     const N = 8;
 
     // Fire N distinct-window claims concurrently.
@@ -115,7 +117,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     const denied = results.filter((r) => r.claimed && !r.allowed).length;
 
     // Exactly floor(cap / budget) = 3 admitted; the rest cap-denied.
-    assert.equal(allowed, Math.floor(dailyCap / budget), `expected 3 allowed, got ${allowed}`);
+    assert.equal(allowed, 3, `expected 3 allowed above the existing daily baseline, got ${allowed}`);
     assert.equal(allowed + denied, N, "every distinct claim must persist a durable outcome");
 
     // Denied rows persist as 'skipped' with reserved_budget=0 → re-claim still duplicate.
@@ -709,6 +711,259 @@ describe("runScalpMigrations backward compatibility", { skip: !RUN_DB_TESTS ? "s
       await c3.query(`DELETE FROM kalshi_scalp_incidents WHERE window_key = 'DBTEST-old-wk'`);
     } finally {
       c3.release();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// skip_evidence persistence tests
+// ---------------------------------------------------------------------------
+
+describe("skip_evidence persistence and retrieval", { skip: !RUN_DB_TESTS ? "set SCALPER_DB_TEST=1 with DATABASE_URL" : false }, () => {
+  let db: typeof import("./kalshi-scalper-db.ts");
+  const MODE = "paper" as const;
+  const WINDOW_KEY = "DBTEST-skipev-wk";
+  const SYMBOL = "BTC";
+  const TICKER = "BTC-TICKER";
+
+  before(async () => {
+    db = await import("./kalshi-scalper-db.ts");
+    // Clean up any residual rows from previous runs.
+    const { pool: p } = await import("@workspace/db");
+    const c = await p.connect();
+    try {
+      await c.query(`DELETE FROM kalshi_scalp_orders WHERE mode = $1 AND window_key = $2`, [MODE, WINDOW_KEY]);
+      await c.query(`DELETE FROM kalshi_scalp_reservations WHERE mode = $1 AND window_key = $2`, [MODE, WINDOW_KEY]);
+    } finally {
+      c.release();
+    }
+  });
+
+  it("persists skip_evidence JSONB alongside a skipped reservation", async () => {
+    const { pool: p } = await import("@workspace/db");
+
+    // Insert a reservation row manually.
+    const resId = `DBTEST-skipev-${Date.now()}`;
+    const c = await p.connect();
+    try {
+      await c.query(
+        `INSERT INTO kalshi_scalp_reservations (id, mode, symbol, window_key, ticker, status, reserved_budget, created_at, attempted_at)
+         VALUES ($1, $2, $3, $4, $5, 'claimed', 0, NOW(), NOW())`,
+        [resId, MODE, SYMBOL, WINDOW_KEY, TICKER],
+      );
+    } finally {
+      c.release();
+    }
+
+    // Update to skipped with evidence.
+    const evidence = {
+      timingPhase: "eligible" as const,
+      closeTimeIso: new Date(Date.now() + 30_000).toISOString(),
+      secondsRemaining: 30,
+      effectiveWindowSeconds: 120,
+      quoteFetchOk: false,
+      quotedReason: "final_quote_invalid",
+      elapsedMs: 42,
+      skippedAt: new Date().toISOString(),
+    };
+    await db.updateReservationStatus(MODE, SYMBOL, WINDOW_KEY, "skipped", "final_quote_invalid", true, evidence);
+
+    // Verify via getRecentScalpReservations.
+    const rows = await db.getRecentScalpReservations({ mode: MODE, limit: 100 });
+    const row = rows.find((r) => r.id === resId);
+    assert.ok(row, "reservation row should be returned");
+    assert.equal(row.status, "skipped");
+    assert.equal(row.reason, "final_quote_invalid");
+    assert.ok(row.skipEvidence != null, "skipEvidence should be non-null");
+    assert.equal(row.skipEvidence?.timingPhase, "eligible");
+    assert.equal(row.skipEvidence?.quotedReason, "final_quote_invalid");
+    assert.equal(row.skipEvidence?.elapsedMs, 42);
+    assert.equal(row.skipEvidence?.effectiveWindowSeconds, 120);
+  });
+
+  it("returns null skipEvidence for non-skip rows (compatible with old rows)", async () => {
+    const { pool: p } = await import("@workspace/db");
+    const WINDOW_KEY2 = `${WINDOW_KEY}-noskip`;
+    const resId = `DBTEST-skipev-noskip-${Date.now()}`;
+    const c = await p.connect();
+    try {
+      await c.query(
+        `INSERT INTO kalshi_scalp_reservations (id, mode, symbol, window_key, ticker, status, reserved_budget, created_at, attempted_at)
+         VALUES ($1, $2, $3, $4, $5, 'filled', 0, NOW(), NOW())`,
+        [resId, MODE, SYMBOL, WINDOW_KEY2, TICKER],
+      );
+    } finally {
+      c.release();
+    }
+
+    const rows = await db.getRecentScalpReservations({ mode: MODE, limit: 100 });
+    const row = rows.find((r) => r.id === resId);
+    assert.ok(row, "filled reservation row should be returned");
+    assert.equal(row.status, "filled");
+    // skipEvidence should be null for rows without it.
+    assert.equal(row.skipEvidence, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// claimReservationAndCap final-window boundary check
+// ---------------------------------------------------------------------------
+
+describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS ? "set SCALPER_DB_TEST=1 with DATABASE_URL" : false }, () => {
+  let db: typeof import("./kalshi-scalper-db.ts");
+  const MODE = "paper" as const;
+  const SYMBOL = "BTC";
+  const TICKER = "BTC-TICKER";
+
+  before(async () => {
+    db = await import("./kalshi-scalper-db.ts");
+  });
+
+  it("rejects a claim when closeTime is outside the final window (already passed)", async () => {
+    const windowKey = `DBTEST-windowbnd-past-${Date.now()}`;
+    // Close time is 10 seconds in the past.
+    const closeTime = new Date(Date.now() - 10_000).toISOString();
+    const result = await db.claimReservationAndCap(
+      `id-past-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
+      2, null, null,
+      closeTime, 120,
+    );
+    assert.equal(result.claimed, false, "Should not claim when window is expired");
+    assert.equal(result.reason, "outside_window_at_claim");
+    assert.ok(result.reservationId, "Denied claim should still have a durable reservation id");
+    const rows = await db.getRecentScalpReservations({ mode: MODE, limit: 100 });
+    const row = rows.find((candidate) => candidate.id === result.reservationId);
+    assert.equal(row?.status, "skipped");
+    assert.equal(row?.skipEvidence?.timingPhase, "closed_expired");
+
+    const { pool: p } = await import("@workspace/db");
+    const c = await p.connect();
+    try {
+      await c.query(`DELETE FROM kalshi_scalp_reservations WHERE id = $1`, [result.reservationId]);
+    } finally {
+      c.release();
+    }
+  });
+
+  it("rejects a claim when closeTime is far future (outside 45-second window)", async () => {
+    const windowKey = `DBTEST-windowbnd-far-${Date.now()}`;
+    // 300 seconds in the future, but window is only 45 s.
+    const closeTime = new Date(Date.now() + 300_000).toISOString();
+    const result = await db.claimReservationAndCap(
+      `id-far-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
+      2, null, null,
+      closeTime, 45,
+    );
+    assert.equal(result.claimed, false, "Should not claim when outside 45 s window");
+    assert.equal(result.reason, "outside_window_at_claim");
+    assert.ok(result.reservationId, "Denied early claim should be auditable");
+    const rows = await db.getRecentScalpReservations({ mode: MODE, limit: 100 });
+    const row = rows.find((candidate) => candidate.id === result.reservationId);
+    assert.equal(row?.skipEvidence?.effectiveWindowSeconds, 45);
+    assert.equal(row?.skipEvidence?.timingPhase, "waiting_eligibility");
+
+    const { pool: p } = await import("@workspace/db");
+    const c = await p.connect();
+    try {
+      await c.query(`DELETE FROM kalshi_scalp_reservations WHERE id = $1`, [result.reservationId]);
+    } finally {
+      c.release();
+    }
+  });
+
+  it("replaces stale retryable skip evidence when the same reservation reaches the boundary", async () => {
+    const windowKey = `DBTEST-windowbnd-retry-${Date.now()}`;
+    const first = await db.claimReservationAndCap(
+      `id-retry-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
+      0, null, null,
+    );
+    assert.equal(first.claimed, true);
+    await db.updateReservationStatus(
+      MODE,
+      SYMBOL,
+      windowKey,
+      "skipped",
+      "final_quote_invalid",
+      true,
+      {
+        quotedReason: "final_quote_invalid",
+        skippedAt: new Date().toISOString(),
+      },
+    );
+
+    const expiredClose = new Date(Date.now() - 1_000).toISOString();
+    const denied = await db.claimReservationAndCap(
+      `id-retry-second-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
+      0, null, null,
+      expiredClose, 45,
+    );
+    assert.equal(denied.claimed, false);
+    assert.equal(denied.reason, "outside_window_at_claim");
+    assert.equal(denied.reservationId, first.reservationId);
+
+    const rows = await db.getRecentScalpReservations({ mode: MODE, limit: 100 });
+    const row = rows.find((candidate) => candidate.id === first.reservationId);
+    assert.equal(row?.status, "skipped");
+    assert.equal(row?.reason, "outside_window_at_claim");
+    assert.equal(row?.skipEvidence?.timingPhase, "closed_expired");
+    assert.equal(row?.skipEvidence?.quotedReason, undefined);
+    const retry = evaluateScalpReservationRetry({
+      status: row?.status ?? "",
+      reason: row?.reason,
+      elapsedMs: 0,
+      submittedOrders: row?.submissionCount ?? 0,
+    });
+    assert.equal(retry.terminal, true);
+
+    const { pool: p } = await import("@workspace/db");
+    const c = await p.connect();
+    try {
+      await c.query(`DELETE FROM kalshi_scalp_reservations WHERE id = $1`, [first.reservationId]);
+    } finally {
+      c.release();
+    }
+  });
+
+  it("allows a claim when closeTime is within the final window", async () => {
+    const closeMs = Math.floor(Date.now() / 60_000) * 60_000 + 60_000;
+    const closeTime = new Date(closeMs).toISOString();
+    const windowKey = new Date(closeMs - 15 * 60_000).toISOString().slice(0, 16);
+    // The next exact minute boundary is at most 60 seconds away, inside 120 s.
+    const result = await db.claimReservationAndCap(
+      `id-ok-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
+      0, null, null,
+      closeTime, 120,
+    );
+    // Budget = 0 means cap check always passes; should be claimed and allowed.
+    assert.equal(result.claimed, true, "Should claim when inside window");
+
+    // Cleanup.
+    const { pool: p } = await import("@workspace/db");
+    const c = await p.connect();
+    try {
+      await c.query(`DELETE FROM kalshi_scalp_reservations WHERE mode = $1 AND window_key = $2`, [MODE, windowKey]);
+    } finally {
+      c.release();
+    }
+  });
+
+  it("allows claim without final-window check when closeTime is omitted", async () => {
+    const windowKey = `DBTEST-windowbnd-noctrl-${Date.now()}`;
+    // No closeTime supplied → bypass final-window enforcement (backward compat).
+    const result = await db.claimReservationAndCap(
+      `id-noctrl-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
+      0, null, null,
+      // No closeTime / finalWindowSeconds passed
+    );
+    assert.equal(result.claimed, true, "Should claim when no window enforcement args supplied");
+
+    // Cleanup.
+    const { pool: p } = await import("@workspace/db");
+    const c = await p.connect();
+    try {
+      await c.query(`DELETE FROM kalshi_scalp_reservations WHERE mode = $1 AND window_key = $2`, [MODE, windowKey]);
+    } finally {
+      c.release();
     }
   });
 });

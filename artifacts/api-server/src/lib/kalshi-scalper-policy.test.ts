@@ -17,6 +17,8 @@ import {
   computeScalpPnl,
   isFillWithinBand,
   isInFinalWindow,
+  resolveTimingPhase,
+  secondsUntilEligible,
   checkFreefallGuard,
   checkTargetProximityGuard,
   resolveScalpMarketState,
@@ -41,6 +43,7 @@ import {
   SCALP_BALANCE_RETRY_COOLDOWN_MS,
   SCALP_GUARD_RETRY_COOLDOWN_MS,
   SCALP_MAX_SUBMISSIONS_PER_WINDOW,
+  SCALP_PREFLIGHT_LEAD_SECONDS,
   type FreefallSample,
   type RiskConfigLike,
   type RiskParamsLike,
@@ -394,6 +397,160 @@ describe("isInFinalWindow", () => {
     // Adjacent window key — close time does NOT fall in this window
     const wkBad = "2024-01-01T12:15";
     assert.ok(!isInFinalWindow(closeTime, nowMs, 120, wkBad));
+  });
+
+  // ── 45-second inclusive/exclusive boundary tests ──────────────────────────
+
+  it("returns true when exactly 45 seconds remain (inclusive)", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs + 45_000).toISOString();
+    // With finalWindowSeconds=45: remainingS = 45 — should be in window (0 < 45 <= 45)
+    assert.ok(isInFinalWindow(closeTime, nowMs, 45), "45 s remaining is inclusive");
+  });
+
+  it("returns false when exactly 45 seconds + 1 ms remain (exclusive upper boundary)", () => {
+    const nowMs = Date.now();
+    // 45_001 ms → remainingS = 45.001 > finalWindowSeconds=45 → outside
+    const closeTime = new Date(nowMs + 45_001).toISOString();
+    assert.ok(!isInFinalWindow(closeTime, nowMs, 45), "45.001 s remaining is outside the 45 s window");
+  });
+
+  it("returns false when 0 seconds remain (exclusive lower boundary — closed)", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs).toISOString(); // exactly now
+    assert.ok(!isInFinalWindow(closeTime, nowMs, 45), "0 s remaining is excluded (closed)");
+  });
+
+  it("returns true when 1 ms remains (still open, just barely in window)", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs + 1).toISOString();
+    assert.ok(isInFinalWindow(closeTime, nowMs, 45), "1 ms remaining is inside window");
+  });
+
+  // ── Per-market windowSeconds override tests ───────────────────────────────
+
+  it("respects a per-market windowSeconds override via resolveEffectiveParams", () => {
+    const config = {
+      ...DEFAULT_SCALP_CONFIG,
+      finalWindowSeconds: 120,
+      perMarketOverrides: [
+        { symbol: "BTCA", windowSeconds: 45 },
+      ],
+    };
+    const paramsOverride = resolveEffectiveParams(config, "BTCA", "BTCA-TICKER");
+    const paramsDefault = resolveEffectiveParams(config, "ETHB", "ETHB-TICKER");
+
+    // Override market: effective window is 45 s
+    assert.equal(paramsOverride.finalWindowSeconds, 45);
+    // Non-override market: falls back to global default 120 s
+    assert.equal(paramsDefault.finalWindowSeconds, 120);
+
+    const nowMs = Date.now();
+    // 60 s remaining → inside 120 s default window but outside 45 s override
+    const closeTime60 = new Date(nowMs + 60_000).toISOString();
+    assert.ok(!isInFinalWindow(closeTime60, nowMs, paramsOverride.finalWindowSeconds),
+      "60 s remaining is outside 45 s override window");
+    assert.ok(isInFinalWindow(closeTime60, nowMs, paramsDefault.finalWindowSeconds),
+      "60 s remaining is inside 120 s default window");
+
+    // 44 s remaining → inside 45 s override window
+    const closeTime44 = new Date(nowMs + 44_000).toISOString();
+    assert.ok(isInFinalWindow(closeTime44, nowMs, paramsOverride.finalWindowSeconds),
+      "44 s remaining is inside 45 s override window");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveTimingPhase
+// ---------------------------------------------------------------------------
+
+describe("resolveTimingPhase", () => {
+  const WIN_S = 120; // default final window seconds
+  const LEAD_S = SCALP_PREFLIGHT_LEAD_SECONDS;
+
+  it("returns 'waiting_eligibility' when close time is null", () => {
+    assert.equal(resolveTimingPhase(null, Date.now(), WIN_S, LEAD_S), "waiting_eligibility");
+    assert.equal(resolveTimingPhase(undefined, Date.now(), WIN_S, LEAD_S), "waiting_eligibility");
+    assert.equal(resolveTimingPhase("", Date.now(), WIN_S, LEAD_S), "waiting_eligibility");
+  });
+
+  it("returns 'waiting_eligibility' for invalid date", () => {
+    assert.equal(resolveTimingPhase("not-a-date", Date.now(), WIN_S, LEAD_S), "waiting_eligibility");
+  });
+
+  it("returns 'closed_expired' when close time has passed", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs - 1_000).toISOString();
+    assert.equal(resolveTimingPhase(closeTime, nowMs, WIN_S, LEAD_S), "closed_expired");
+  });
+
+  it("returns 'closed_expired' when remaining is exactly 0", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs).toISOString();
+    assert.equal(resolveTimingPhase(closeTime, nowMs, WIN_S, LEAD_S), "closed_expired");
+  });
+
+  it("returns 'eligible' when within finalWindowSeconds", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs + 90_000).toISOString(); // 90 s < 120 s
+    assert.equal(resolveTimingPhase(closeTime, nowMs, WIN_S, LEAD_S), "eligible");
+  });
+
+  it("returns 'eligible' at exactly finalWindowSeconds remaining", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs + 120_000).toISOString(); // exactly 120 s
+    assert.equal(resolveTimingPhase(closeTime, nowMs, WIN_S, LEAD_S), "eligible");
+  });
+
+  it("returns 'preflight_warmup' when within preflight lead but outside final window", () => {
+    const nowMs = Date.now();
+    // 150 s remaining: > 120 (window) but <= 120 + LEAD_S
+    const closeTime = new Date(nowMs + (WIN_S + LEAD_S / 2) * 1000).toISOString();
+    const phase = resolveTimingPhase(closeTime, nowMs, WIN_S, LEAD_S);
+    assert.equal(phase, "preflight_warmup");
+  });
+
+  it("returns 'waiting_eligibility' when far from close (beyond lead window)", () => {
+    const nowMs = Date.now();
+    // Way beyond finalWindowSeconds + preflightLeadSeconds
+    const closeTime = new Date(nowMs + (WIN_S + LEAD_S + 3600) * 1000).toISOString();
+    assert.equal(resolveTimingPhase(closeTime, nowMs, WIN_S, LEAD_S), "waiting_eligibility");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// secondsUntilEligible
+// ---------------------------------------------------------------------------
+
+describe("secondsUntilEligible", () => {
+  const WIN_S = 120;
+
+  it("returns null when close time is null/empty", () => {
+    assert.equal(secondsUntilEligible(null, Date.now(), WIN_S), null);
+    assert.equal(secondsUntilEligible(undefined, Date.now(), WIN_S), null);
+    assert.equal(secondsUntilEligible("", Date.now(), WIN_S), null);
+  });
+
+  it("returns null when close time has expired", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs - 5_000).toISOString();
+    assert.equal(secondsUntilEligible(closeTime, nowMs, WIN_S), null);
+  });
+
+  it("returns 0 when already inside the final window", () => {
+    const nowMs = Date.now();
+    const closeTime = new Date(nowMs + 90_000).toISOString(); // 90 s in
+    assert.equal(secondsUntilEligible(closeTime, nowMs, WIN_S), 0);
+  });
+
+  it("returns the seconds until window opens when outside final window", () => {
+    const nowMs = Date.now();
+    // 180 s remaining, window=120 s → eligible in 60 s
+    const closeTime = new Date(nowMs + 180_000).toISOString();
+    const result = secondsUntilEligible(closeTime, nowMs, WIN_S);
+    assert.ok(result != null);
+    // Allow ±1 s tolerance for timing jitter
+    assert.ok(Math.abs(result - 60) <= 1, `expected ~60, got ${result}`);
   });
 });
 
@@ -2135,7 +2292,7 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(claim, /evaluateScalpReservationRetry\(/);
     assert.match(claim, /status = 'zero_fill'/);
     assert.match(claim, /SET status = 'claimed'/);
-    assert.match(claim, /\[blockedReason, reservationId\]/);
+    assert.match(claim, /\[blockedReason, JSON\.stringify\(capEvidence\), reservationId\]/);
   });
 
   it("status exposes retry readiness and cooldown for every policy-retryable outcome", () => {

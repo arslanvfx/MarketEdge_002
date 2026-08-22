@@ -53,18 +53,64 @@ export function BotHeader({ status, openPosList, statusLabel, cfg, merged, confi
               Quiet
             </span>
           )}
-          {status?.quietHoursV2State?.mode === "silenced" && (
-            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-slate-500/15 text-slate-400 border border-slate-500/30" title={`Smart Quiet Hours V2: silenced (${status.quietHoursV2State.utcHour} UTC) — no new entries`}>
-              <Clock className="w-3 h-3" />
-              🔇 Silenced
-            </span>
-          )}
-          {status?.quietHoursV2State?.mode === "reduced" && (
-            <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20" title={`Smart Quiet Hours V2: reduced bets to ${status.quietHoursV2State.reducedBetAmount ?? "—"}% of the selected bet size (${status.quietHoursV2State.utcHour} UTC)`}>
-              <Clock className="w-3 h-3" />
-              📉 {status.quietHoursV2State.reducedBetAmount != null ? `${status.quietHoursV2State.reducedBetAmount}%` : "—"}
-            </span>
-          )}
+          {(() => {
+            const qhState = status?.quietHoursV2State;
+            const scope = status?.smartHoursScope ?? "global";
+            const symModes = status?.symbolSmartHoursModes ?? {};
+            if (scope === "per_market") {
+              // Per-market mode: never show the global schedule as a universal badge.
+              // Count how many symbols have entry blocked (silenced) or reduced.
+              const blockedCount = Object.values(symModes).filter(m => m === "silenced").length;
+              const reducedCount = Object.values(symModes).filter(m => m === "reduced").length;
+              if (blockedCount > 0) {
+                return (
+                  <span
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-slate-500/15 text-slate-400 border border-slate-500/30"
+                    title={`Smart Hours (per-market): entries blocked for ${blockedCount} symbol${blockedCount !== 1 ? "s" : ""} — each symbol uses its own schedule`}
+                  >
+                    <Clock className="w-3 h-3" />
+                    🔇 {blockedCount} entry blocked
+                  </span>
+                );
+              }
+              if (reducedCount > 0) {
+                return (
+                  <span
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                    title={`Smart Hours (per-market): reduced entries for ${reducedCount} symbol${reducedCount !== 1 ? "s" : ""}`}
+                  >
+                    <Clock className="w-3 h-3" />
+                    📉 {reducedCount} reduced
+                  </span>
+                );
+              }
+              return null;
+            }
+            // Global mode: show the global schedule state clearly.
+            if (qhState?.mode === "silenced") {
+              return (
+                <span
+                  className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-slate-500/15 text-slate-400 border border-slate-500/30"
+                  title={`Smart Hours (global): entries blocked for all symbols (${qhState.utcHour} UTC)`}
+                >
+                  <Clock className="w-3 h-3" />
+                  🔇 Entries blocked
+                </span>
+              );
+            }
+            if (qhState?.mode === "reduced") {
+              return (
+                <span
+                  className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                  title={`Smart Hours (global): reduced entries to ${qhState.reducedBetAmount ?? "—"}% of selected bet size (${qhState.utcHour} UTC)`}
+                >
+                  <Clock className="w-3 h-3" />
+                  📉 Reduced entry {qhState.reducedBetAmount != null ? `${qhState.reducedBetAmount}%` : "—"}
+                </span>
+              );
+            }
+            return null;
+          })()}
           {status?.dbDegraded && (
             <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30 animate-pulse" title={`Database unreachable since ${status.dbDegradedSince ? new Date(status.dbDegradedSince).toLocaleTimeString() : "recently"} — new bets paused until connection restores`}>
               <AlertTriangle className="w-3 h-3" />

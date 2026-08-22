@@ -53,6 +53,9 @@ export interface OpenPositionDisplay extends OpenPosition {
   guardReason: string | null;
 }
 
+/** Effective Smart Hours mode for a single symbol, resolved via the server canonical resolver. */
+export type SymbolSmartHoursMode = "active" | "silenced" | "reduced" | "no-schedule";
+
 export interface BotStateSnapshot {
   mode: BotMode;
   status: BotStatus;
@@ -60,6 +63,7 @@ export interface BotStateSnapshot {
   config: BotConfig;
   openPositions: OpenPositionDisplay[];
   dailyPnl: number;
+  dailySpendAmount: number;
   dailyLossCount: number;
   dailyDate: string;
   accountBalance: number | null;
@@ -78,6 +82,18 @@ export interface BotStateSnapshot {
   coinStreakState: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
   convictionPollerRunning: boolean;
   convictionPriceAgeMs: Record<string, number>;
+  /** Whether Smart Hours is operating in global or per-market mode. */
+  smartHoursScope: "global" | "per_market";
+  /**
+   * Per-symbol effective Smart Hours mode resolved via the canonical server resolver at the
+   * time this snapshot was taken. Keys are upper-case symbols (BTC, ETH, …).
+   * All tracked symbols are included; symbols without a schedule show "no-schedule".
+   * Only populated when the global Smart Hours master is enabled; when master is OFF every
+   * symbol shows "active".
+   */
+  symbolSmartHoursModes: Record<string, SymbolSmartHoursMode>;
+  /** ISO timestamp at which symbolSmartHoursModes was resolved (shared across all symbols). */
+  symbolSmartHoursResolvedAt: string;
 }
 
 export interface WindowCoinEvaluation {

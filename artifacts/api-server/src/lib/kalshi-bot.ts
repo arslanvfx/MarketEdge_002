@@ -8,7 +8,7 @@ import { isKalshiConfigured, getCachedKalshiBalance } from "./kalshi-trader";
 import { syncConvictionPoller, getPollerStats } from "./kalshi-conviction-poller";
 import {
   DEFAULT_BOT_CONFIG, isInQuietHours, assertSetBotModeAllowed,
-  resolveQuietHoursV2State,
+  resolveQuietHoursV2State, resolveEntryQuietHoursDecisionForSymbol,
   type BotConfig,
 } from "./kalshi-bot-engine";
 import {
@@ -19,6 +19,7 @@ import {
   S, openPositions, lastGuardStatesMap, lastGuardReasonMap,
   activeCoinStreakState, WINDOW_ENTRY_BUFFER_S, getEffectiveDailyLossLimit,
   type BotMode, type BotStatus, type OpenPositionDisplay, type BotStateSnapshot,
+  type SymbolSmartHoursMode,
 } from "./kalshi-bot-state";
 import {
   _persistModeToConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
@@ -130,6 +131,47 @@ export function getBotState(): BotStateSnapshot {
     }
   }
 
+  const now = new Date();
+  const smartHoursScope: "global" | "per_market" = S.config.quietHoursMode === "per_market" ? "per_market" : "global";
+
+  // Resolve per-symbol Smart Hours modes using the canonical server resolver.
+  // This ensures the header/status UI can never disagree with the enforcement logic.
+  const symbolSmartHoursModes: Record<string, SymbolSmartHoursMode> = {};
+  const masterEnabled = S.config.quietHoursV2?.enabled === true;
+  for (const coin of CRYPTO_COINS.filter((c) => KALSHI_SERIES[c.symbol])) {
+    const sym = coin.symbol;
+    if (!masterEnabled) {
+      // Master switch is OFF (or absent): all symbols proceed active.
+      symbolSmartHoursModes[sym] = "active";
+      continue;
+    }
+    if (smartHoursScope === "per_market") {
+      const symSchedule = S.config.perSymbolQuietHours?.[sym];
+      if (!symSchedule?.enabled) {
+        symbolSmartHoursModes[sym] = "no-schedule";
+        continue;
+      }
+      const decision = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym, now);
+      if (decision.action === "block" || decision.qhMode === "silenced") {
+        symbolSmartHoursModes[sym] = "silenced";
+      } else if (decision.qhMode === "reduced") {
+        symbolSmartHoursModes[sym] = "reduced";
+      } else {
+        symbolSmartHoursModes[sym] = "active";
+      }
+    } else {
+      // Global mode: all symbols share the same state.
+      const st = resolveQuietHoursV2State(S.config.quietHoursV2, now);
+      if (st.mode === "silenced") {
+        symbolSmartHoursModes[sym] = "silenced";
+      } else if (st.mode === "reduced") {
+        symbolSmartHoursModes[sym] = "reduced";
+      } else {
+        symbolSmartHoursModes[sym] = "active";
+      }
+    }
+  }
+
   return {
     mode: S.botMode,
     status,
@@ -141,13 +183,13 @@ export function getBotState(): BotStateSnapshot {
     dailySpendAmount: S.dailySpendAmount,
     dailyDate: S.dailyDate,
     accountBalance: S.accountBalance,
-    lastUpdatedAt: new Date().toISOString(),
+    lastUpdatedAt: now.toISOString(),
     configured: isKalshiConfigured(),
     warmupSecondsRemaining,
     circuitBreakerWindowsRemaining: S.cbState.circuitBreakerWindowsRemaining,
     consecutiveLosses: S.cbState.consecutiveLosses,
-    isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
-    quietHoursV2State: resolveQuietHoursV2State(S.config.quietHoursV2),
+    isInQuietHours: isInQuietHours(now.getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
+    quietHoursV2State: resolveQuietHoursV2State(S.config.quietHoursV2, now),
     autoTuneQHLastRunAt: S.autoTuneQHLastRunAt,
     autoTuneQHLastChanges: S.autoTuneQHLastChanges,
     dbDegraded: S.dbDegradedSince !== null,
@@ -156,6 +198,9 @@ export function getBotState(): BotStateSnapshot {
     coinStreakState: Object.fromEntries(activeCoinStreakState()),
     convictionPollerRunning: getPollerStats().running,
     convictionPriceAgeMs: getPollerStats().priceAgeMs,
+    smartHoursScope,
+    symbolSmartHoursModes,
+    symbolSmartHoursResolvedAt: now.toISOString(),
   };
 }
 

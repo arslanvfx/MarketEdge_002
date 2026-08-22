@@ -14,8 +14,14 @@ import {
   type ScalpIncident,
   type ScalpMode,
   type ScalpReservation,
+  type ScalpSkipEvidence,
 } from "./kalshi-scalper-types.ts";
-import { evaluateScalpReservationRetry } from "./kalshi-scalper-policy.ts";
+import {
+  evaluateScalpReservationRetry,
+  isInFinalWindow,
+  resolveTimingPhase,
+  SCALP_PREFLIGHT_LEAD_SECONDS,
+} from "./kalshi-scalper-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Schema creation
@@ -35,6 +41,7 @@ export async function runScalpMigrations(): Promise<void> {
 
     // Durable reservations: UNIQUE(mode, symbol, window_key) prevents duplicate attempts.
     // reserved_budget is held for cap accounting until the attempt resolves.
+    // skip_evidence is a nullable additive JSONB column for structured skip diagnostics.
     await client.query(`
       CREATE TABLE IF NOT EXISTS kalshi_scalp_reservations (
         id              TEXT PRIMARY KEY,
@@ -45,6 +52,7 @@ export async function runScalpMigrations(): Promise<void> {
         status          TEXT NOT NULL DEFAULT 'claimed',
         reason          TEXT,
         reserved_budget NUMERIC(10,4) NOT NULL DEFAULT 0,
+        skip_evidence   JSONB,
         created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         attempted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         CONSTRAINT uq_scalp_reservation UNIQUE (mode, symbol, window_key)
@@ -179,6 +187,9 @@ async function _upgradeScalpSchema(
   await client.query(`ALTER TABLE kalshi_scalp_reservations ADD COLUMN IF NOT EXISTS ticker          TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_reservations ADD COLUMN IF NOT EXISTS attempted_at    TIMESTAMPTZ`);
   await client.query(`ALTER TABLE kalshi_scalp_reservations ADD COLUMN IF NOT EXISTS created_at      TIMESTAMPTZ`);
+  // Additive nullable JSONB for structured skip diagnostics (idempotent).
+  // Old rows without this column will have NULL here — fully backward compatible.
+  await client.query(`ALTER TABLE kalshi_scalp_reservations ADD COLUMN IF NOT EXISTS skip_evidence   JSONB`);
   // Backfill safe defaults before enforcing NOT NULL.
   await client.query(`UPDATE kalshi_scalp_reservations SET status = 'claimed' WHERE status IS NULL`);
   await client.query(`UPDATE kalshi_scalp_reservations SET reserved_budget = 0 WHERE reserved_budget IS NULL`);
@@ -355,7 +366,10 @@ export interface ClaimAndCapResult {
  * advisory transaction lock so no two processes/ticks can race the cap.
  *
  * Steps inside ONE transaction:
- *   1. pg_advisory_xact_lock(hashtext('kalshi-scalper-cap:' || mode))
+ *   0. pg_advisory_xact_lock(hashtext('kalshi-scalper-cap:' || mode))
+ *   1. Final-window boundary check (closeTime + finalWindowSeconds).
+ *      If the market is outside the effective final window, persist a terminal
+ *      skipped reservation with timing evidence and return without reserving.
  *   2. INSERT reservation (reserved_budget=0) ON CONFLICT DO NOTHING RETURNING.
  *      On conflict, lock the existing row and apply the bounded retry policy.
  *      Only confirmed zero-fills and explicit no-exposure transient skips may be
@@ -372,6 +386,9 @@ export interface ClaimAndCapResult {
  * Cap denials remain terminal. Retryable outcomes retain the same durable row,
  * so restart safety and the UNIQUE(mode,symbol,window_key) serialization point
  * are preserved while allowing bounded re-attempts.
+ *
+ * @param closeTime         ISO close time for the market (used for final-window check)
+ * @param finalWindowSeconds Effective per-market final window seconds (honors override)
  */
 export async function claimReservationAndCap(
   id: string,
@@ -382,6 +399,8 @@ export async function claimReservationAndCap(
   requestedBudget: number,
   dailyCapDollars: number | null,
   openCapDollars: number | null,
+  closeTime?: string,
+  finalWindowSeconds?: number,
 ): Promise<ClaimAndCapResult> {
   const client = await pool.connect();
   try {
@@ -391,6 +410,96 @@ export async function claimReservationAndCap(
       `SELECT pg_advisory_xact_lock(hashtext($1))`,
       [`kalshi-scalper-cap:${mode}`],
     );
+
+    // Enforce the effective per-market final-window boundary while holding the
+    // same lock as the reservation claim. A denied candidate still gets a
+    // durable skipped row so timing mistakes remain auditable after restart.
+    if (closeTime != null && finalWindowSeconds != null) {
+      const nowMs = Date.now();
+      if (!isInFinalWindow(closeTime, nowMs, finalWindowSeconds, windowKey)) {
+        const closeMs = new Date(closeTime).getTime();
+        const evidence: ScalpSkipEvidence = {
+          timingPhase: resolveTimingPhase(
+            closeTime,
+            nowMs,
+            finalWindowSeconds,
+            SCALP_PREFLIGHT_LEAD_SECONDS,
+          ),
+          closeTimeIso: closeTime,
+          secondsRemaining: Number.isFinite(closeMs) ? (closeMs - nowMs) / 1_000 : null,
+          effectiveWindowSeconds: finalWindowSeconds,
+          windowKey,
+          reservedTicker: ticker,
+          skippedAt: new Date(nowMs).toISOString(),
+          elapsedMs: 0,
+        };
+        const boundaryInsert = await client.query(
+          `INSERT INTO kalshi_scalp_reservations
+             (id, mode, symbol, window_key, ticker, status, reason, reserved_budget,
+              skip_evidence, created_at, attempted_at)
+           VALUES ($1, $2, $3, $4, $5, 'skipped', 'outside_window_at_claim', 0,
+                   $6::jsonb, NOW(), NOW())
+           ON CONFLICT (mode, symbol, window_key) DO NOTHING
+           RETURNING id`,
+          [id, mode, symbol.toUpperCase(), windowKey, ticker, JSON.stringify(evidence)],
+        );
+        let reservationId = boundaryInsert.rows[0]?.["id"] != null
+          ? String(boundaryInsert.rows[0]["id"])
+          : null;
+        let submittedOrders = 0;
+        if (reservationId == null) {
+          const existing = await client.query(
+            `SELECT r.id, r.status, r.reason, r.reserved_budget,
+                    GREATEST(0, EXTRACT(EPOCH FROM (NOW() - r.attempted_at)) * 1000)::float AS elapsed_ms,
+                    (SELECT COUNT(*)::int
+                     FROM kalshi_scalp_orders o
+                     WHERE o.mode = r.mode
+                       AND o.symbol = r.symbol
+                       AND o.window_key = r.window_key
+                       AND o.status = 'zero_fill') AS submitted_orders
+             FROM kalshi_scalp_reservations r
+             WHERE r.mode = $1 AND r.symbol = $2 AND r.window_key = $3
+             FOR UPDATE`,
+            [mode, symbol.toUpperCase(), windowKey],
+          );
+          const existingRow = existing.rows[0];
+          reservationId = existingRow?.["id"] != null
+            ? String(existingRow["id"])
+            : null;
+          submittedOrders = Number(existingRow?.["submitted_orders"] ?? 0);
+          if (reservationId != null) {
+            const retry = evaluateScalpReservationRetry({
+              status: String(existingRow["status"] ?? ""),
+              reason: existingRow["reason"] != null ? String(existingRow["reason"]) : null,
+              elapsedMs: Number(existingRow["elapsed_ms"] ?? 0),
+              submittedOrders,
+            });
+            const hasNoReservedExposure = Number(existingRow["reserved_budget"] ?? 0) <= 0;
+            if (!retry.terminal && hasNoReservedExposure) {
+              await client.query(
+                `UPDATE kalshi_scalp_reservations
+                 SET status = 'skipped', reason = 'outside_window_at_claim',
+                     reserved_budget = 0, ticker = $1,
+                     skip_evidence = $2::jsonb, attempted_at = NOW()
+                 WHERE id = $3`,
+                [ticker, JSON.stringify(evidence), reservationId],
+              );
+            }
+          }
+        }
+        await client.query("COMMIT");
+        return {
+          claimed: false,
+          allowed: false,
+          reason: "outside_window_at_claim",
+          reservationId,
+          submittedOrders,
+          retryAfterMs: null,
+          dailyCommitted: 0,
+          openCommitted: 0,
+        };
+      }
+    }
 
     // Attempt to insert this reservation with reserved_budget=0.
     const insertRes = await client.query(
@@ -464,7 +573,7 @@ export async function claimReservationAndCap(
       await client.query(
         `UPDATE kalshi_scalp_reservations
          SET status = 'claimed', reason = NULL, reserved_budget = 0,
-             ticker = $1, attempted_at = NOW()
+             ticker = $1, skip_evidence = NULL, attempted_at = NOW()
          WHERE id = $2`,
         [ticker, reservationId],
       );
@@ -512,11 +621,27 @@ export async function claimReservationAndCap(
 
     if (blockedReason) {
       // Persist cap denial as a terminal skip with no reserved budget.
+      const capEvidence: ScalpSkipEvidence = {
+        timingPhase: closeTime != null && finalWindowSeconds != null
+          ? resolveTimingPhase(closeTime, Date.now(), finalWindowSeconds, SCALP_PREFLIGHT_LEAD_SECONDS)
+          : undefined,
+        closeTimeIso: closeTime,
+        effectiveWindowSeconds: finalWindowSeconds,
+        windowKey,
+        reservedTicker: ticker,
+        requestedBudget,
+        dailyCapDollars,
+        openCapDollars,
+        dailyCommittedDollars: dailyCommitted,
+        openCommittedDollars: openCommitted,
+        skippedAt: new Date().toISOString(),
+      };
       await client.query(
         `UPDATE kalshi_scalp_reservations
-         SET status = 'skipped', reason = $1, reserved_budget = 0, attempted_at = NOW()
-         WHERE id = $2`,
-        [blockedReason, reservationId],
+         SET status = 'skipped', reason = $1, reserved_budget = 0,
+             skip_evidence = $2::jsonb, attempted_at = NOW()
+         WHERE id = $3`,
+        [blockedReason, JSON.stringify(capEvidence), reservationId],
       );
       await client.query("COMMIT");
       return {
@@ -564,15 +689,24 @@ export async function updateReservationStatus(
   status: "claimed" | "filled" | "zero_fill" | "error" | "skipped" | "unknown",
   reason?: string,
   releaseBudget = false,
+  skipEvidence?: ScalpSkipEvidence | null,
 ): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query(
       `UPDATE kalshi_scalp_reservations
-       SET status = $1, reason = $2, attempted_at = NOW()
+       SET status = $1, reason = $2, attempted_at = NOW(),
+           skip_evidence = $3::jsonb
            ${releaseBudget ? ", reserved_budget = 0" : ""}
-       WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
-      [status, reason ?? null, mode, symbol.toUpperCase(), windowKey],
+       WHERE mode = $4 AND symbol = $5 AND window_key = $6`,
+      [
+        status,
+        reason ?? null,
+        skipEvidence == null ? null : JSON.stringify(skipEvidence),
+        mode,
+        symbol.toUpperCase(),
+        windowKey,
+      ],
     );
   } finally {
     client.release();
@@ -654,7 +788,7 @@ export async function getRecentScalpReservations(opts: {
     params.push(limit);
     const res = await client.query(
       `SELECT r.id, r.mode, r.symbol, r.window_key, r.ticker, r.status, r.reason,
-               r.reserved_budget, r.created_at, r.attempted_at,
+               r.reserved_budget, r.created_at, r.attempted_at, r.skip_evidence,
                latest_order.side AS latest_side,
                latest_order.entry_yes_price AS latest_entry_yes_price,
                latest_order.limit_price AS latest_limit_price,
@@ -700,6 +834,11 @@ export async function getRecentScalpReservations(opts: {
         ? (latestSide === "yes" ? submittedLimitPrice : 1 - submittedLimitPrice)
         : undefined;
       const mode = String(row["mode"]) as ScalpMode;
+      const rawSkipEvidence = row["skip_evidence"];
+      const skipEvidence: ScalpSkipEvidence | null =
+        rawSkipEvidence != null && typeof rawSkipEvidence === "object"
+          ? rawSkipEvidence as ScalpSkipEvidence
+          : null;
       return {
         id: String(row["id"]),
         mode,
@@ -714,6 +853,7 @@ export async function getRecentScalpReservations(opts: {
         observedWinningAsk,
         executionWinningLimit,
         submittedLimitPrice: mode === "live" ? submittedLimitPrice ?? undefined : undefined,
+        skipEvidence,
         createdAt: row["created_at"] instanceof Date
           ? row["created_at"]
           : new Date(String(row["created_at"])),
@@ -772,7 +912,8 @@ export async function finalizeOrderAndReleaseReservation(params: {
     );
     await client.query(
       `UPDATE kalshi_scalp_reservations
-       SET status = $1, reason = $2, reserved_budget = 0, attempted_at = NOW()
+       SET status = $1, reason = $2, reserved_budget = 0,
+           skip_evidence = NULL, attempted_at = NOW()
        WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
       [params.reservationStatus, params.reason ?? null, params.mode, params.symbol.toUpperCase(), params.windowKey],
     );
@@ -801,6 +942,7 @@ export async function abortIntentAndReleaseReservation(params: {
   symbol: string;
   windowKey: string;
   reason: string;
+  skipEvidence?: ScalpSkipEvidence | null;
 }): Promise<void> {
   const client = await pool.connect();
   try {
@@ -819,9 +961,16 @@ export async function abortIntentAndReleaseReservation(params: {
     // Release the reservation — no broker exposure exists.
     await client.query(
       `UPDATE kalshi_scalp_reservations
-       SET status = 'skipped', reason = $1, reserved_budget = 0, attempted_at = NOW()
-       WHERE mode = $2 AND symbol = $3 AND window_key = $4`,
-      [params.reason, params.mode, params.symbol.toUpperCase(), params.windowKey],
+       SET status = 'skipped', reason = $1, reserved_budget = 0,
+           skip_evidence = $2::jsonb, attempted_at = NOW()
+       WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
+      [
+        params.reason,
+        params.skipEvidence == null ? null : JSON.stringify(params.skipEvidence),
+        params.mode,
+        params.symbol.toUpperCase(),
+        params.windowKey,
+      ],
     );
     await client.query("COMMIT");
   } catch (err) {

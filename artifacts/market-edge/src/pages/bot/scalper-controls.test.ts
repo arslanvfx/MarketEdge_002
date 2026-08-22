@@ -23,6 +23,14 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /candidate ·/);
   });
 
+  it("clearly separates non-submitting warm-up from submission eligibility", () => {
+    assert.match(panelSource, /Non-submitting warm-up in progress/);
+    assert.match(panelSource, /Warm-up only · eligible in/);
+    assert.match(panelSource, /Submission eligible ·/);
+    assert.match(panelSource, /effectiveWindowSeconds/);
+    assert.match(panelSource, /Warm-up never submits an order/);
+  });
+
   it("renders an explicit enable switch and Paper/Live controls", () => {
     assert.match(panelSource, /role="switch"/);
     assert.match(panelSource, /Enable Scalper/);
@@ -164,5 +172,10 @@ describe("Scalper control wiring", () => {
     assert.doesNotMatch(panelSource, /\{attempt\.clientOrderId\}/);
     assert.doesNotMatch(panelSource, /\{attempt\.exchangeOrderId\}/);
     assert.doesNotMatch(panelSource, /\{attempt\.orderRecordId\}/);
+  });
+
+  it("renders durable reason-specific skip measurements", () => {
+    assert.match(panelSource, /describeScalperEvidence\(attempt\)/);
+    assert.match(panelSource, /text-scalper-skip-evidence-/);
   });
 });

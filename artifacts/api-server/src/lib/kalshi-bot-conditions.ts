@@ -13,7 +13,7 @@ import {
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
-  resolveQuietHoursV2State,
+  resolveQuietHoursV2State, resolveEntryQuietHoursDecisionForSymbol,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -55,6 +55,7 @@ import {
   getEffectiveDailyLossLimit, tickAbortReasons,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
+  type SymbolSmartHoursMode,
 } from "./kalshi-bot-state";
 import { updateBotConfig } from "./kalshi-bot-db";
 import { overlayTickAbortReasons } from "./kalshi-bot-eval-overlay";
@@ -194,6 +195,18 @@ export interface BotConditionsSnapshot {
   fullyBlockedCoins: string[];
   // Auto-tune + streak pauses
   autoTunePausedCoins: Record<string, number>; // sym -> windows remaining
+  // Smart Hours clarity fields (additive — backward-compatible)
+  /** Whether Smart Hours is operating in global or per-market mode. */
+  smartHoursScope: "global" | "per_market";
+  /**
+   * Per-symbol effective Smart Hours mode resolved via the canonical server resolver.
+   * Keys are upper-case symbols. "no-schedule" means per-market mode is active but
+   * this symbol has no schedule configured (entries proceed active by design).
+   * Only present in responses from servers that support this field.
+   */
+  symbolSmartHoursModes: Record<string, SymbolSmartHoursMode>;
+  /** ISO timestamp at which symbolSmartHoursModes was resolved. */
+  symbolSmartHoursResolvedAt: string;
 }
 
 /** Returns a snapshot of every active restriction and condition in the bot. */
@@ -222,16 +235,54 @@ export function getWindowConditions(): BotConditionsSnapshot {
     if (sym) emptyBookAttempts[sym] = count;
   }
 
+  const conditionsNow = new Date();
+  const smartHoursScope: "global" | "per_market" = S.config.quietHoursMode === "per_market" ? "per_market" : "global";
+
+  // Resolve per-symbol Smart Hours modes using the canonical server resolver.
+  const symbolSmartHoursModes: Record<string, SymbolSmartHoursMode> = {};
+  const masterEnabled = S.config.quietHoursV2?.enabled === true;
+  for (const coin of CRYPTO_COINS.filter((c) => KALSHI_SERIES[c.symbol])) {
+    const sym = coin.symbol;
+    if (!masterEnabled) {
+      symbolSmartHoursModes[sym] = "active";
+      continue;
+    }
+    if (smartHoursScope === "per_market") {
+      const symSchedule = S.config.perSymbolQuietHours?.[sym];
+      if (!symSchedule?.enabled) {
+        symbolSmartHoursModes[sym] = "no-schedule";
+        continue;
+      }
+      const decision = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym, conditionsNow);
+      if (decision.action === "block" || decision.qhMode === "silenced") {
+        symbolSmartHoursModes[sym] = "silenced";
+      } else if (decision.qhMode === "reduced") {
+        symbolSmartHoursModes[sym] = "reduced";
+      } else {
+        symbolSmartHoursModes[sym] = "active";
+      }
+    } else {
+      const st = resolveQuietHoursV2State(S.config.quietHoursV2, conditionsNow);
+      if (st.mode === "silenced") {
+        symbolSmartHoursModes[sym] = "silenced";
+      } else if (st.mode === "reduced") {
+        symbolSmartHoursModes[sym] = "reduced";
+      } else {
+        symbolSmartHoursModes[sym] = "active";
+      }
+    }
+  }
+
   return {
     windowKey: wk,
     mode: S.botMode,
     freeRunMode: S.config.freeRunMode ?? false,
     botEnabled: S.config.enabled ?? true,  // undefined in DB = enabled by default
     botPaused: S.paused,
-    isInQuietHours: isInQuietHours(new Date().getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
+    isInQuietHours: isInQuietHours(conditionsNow.getUTCHours(), S.config.quietHoursStart, S.config.quietHoursEnd),
     quietHoursStart: S.config.quietHoursStart,
     quietHoursEnd: S.config.quietHoursEnd,
-    quietHoursV2State: resolveQuietHoursV2State(S.config.quietHoursV2),
+    quietHoursV2State: resolveQuietHoursV2State(S.config.quietHoursV2, conditionsNow),
     circuitBreakerActive: S.cbState.circuitBreakerWindowsRemaining > 0,
     circuitBreakerWindowsRemaining: S.cbState.circuitBreakerWindowsRemaining,
     dailyLimitHit: S.dailyPnl <= -getEffectiveDailyLossLimit(),
@@ -255,6 +306,9 @@ export function getWindowConditions(): BotConditionsSnapshot {
     yesBlockedCoins: [...COIN_YES_BLOCKED],
     fullyBlockedCoins: [...COIN_FULLY_BLOCKED],
     autoTunePausedCoins: Object.fromEntries(pausedCoins),
+    smartHoursScope,
+    symbolSmartHoursModes,
+    symbolSmartHoursResolvedAt: conditionsNow.toISOString(),
   };
 }
 

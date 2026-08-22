@@ -169,12 +169,57 @@ export function ConditionsPanel({
                 ? `Quiet hrs (${conditions.quietHoursStart}–${conditions.quietHoursEnd} UTC)`
                 : "No quiet hours"}
             />
-            {conditions?.quietHoursV2State?.mode === "silenced" && (
-              <ConditionChip bad label={`🔇 Silenced (${conditions.quietHoursV2State.utcHour} UTC)`} />
-            )}
-            {conditions?.quietHoursV2State?.mode === "reduced" && (
-              <ConditionChip warn label={`📉 Reduced bets (${conditions.quietHoursV2State.reducedBetAmount != null ? `${conditions.quietHoursV2State.reducedBetAmount}%` : "—"} of selected size) (${conditions.quietHoursV2State.utcHour} UTC)`} />
-            )}
+            {(() => {
+              const qhState = conditions?.quietHoursV2State;
+              const scope = conditions?.smartHoursScope ?? "global";
+              const symModes = conditions?.symbolSmartHoursModes ?? {};
+              if (scope === "per_market") {
+                // Per-market mode: show per-symbol breakdown using server-resolved states.
+                // Fall back to client calculation (quietHoursV2State) only for older server responses
+                // that don't include symbolSmartHoursModes.
+                const hasServerSymModes = conditions?.symbolSmartHoursModes != null;
+                if (hasServerSymModes) {
+                  const blockedSyms = Object.entries(symModes)
+                    .filter(([, m]) => m === "silenced")
+                    .map(([s]) => s);
+                  const reducedSyms = Object.entries(symModes)
+                    .filter(([, m]) => m === "reduced")
+                    .map(([s]) => s);
+                  return (
+                    <>
+                      {blockedSyms.length > 0 && (
+                        <ConditionChip
+                          bad
+                          label={`🔇 Entry blocked: ${blockedSyms.join(", ")} (${qhState?.utcHour ?? "?"} UTC)`}
+                        />
+                      )}
+                      {reducedSyms.length > 0 && (
+                        <ConditionChip
+                          warn
+                          label={`📉 Reduced entry: ${reducedSyms.join(", ")}`}
+                        />
+                      )}
+                    </>
+                  );
+                }
+                // Fallback for older server responses: use quietHoursV2State but with corrected wording.
+                if (qhState?.mode === "silenced") {
+                  return <ConditionChip bad label={`🔇 Smart Hours: entries blocked (${qhState.utcHour} UTC)`} />;
+                }
+                if (qhState?.mode === "reduced") {
+                  return <ConditionChip warn label={`📉 Smart Hours: reduced entry (${qhState.reducedBetAmount != null ? `${qhState.reducedBetAmount}%` : "—"}) (${qhState.utcHour} UTC)`} />;
+                }
+                return null;
+              }
+              // Global mode.
+              if (qhState?.mode === "silenced") {
+                return <ConditionChip bad label={`🔇 Smart Hours: entries blocked (${qhState.utcHour} UTC)`} />;
+              }
+              if (qhState?.mode === "reduced") {
+                return <ConditionChip warn label={`📉 Smart Hours: reduced entry (${qhState.reducedBetAmount != null ? `${qhState.reducedBetAmount}%` : "—"} of size) (${qhState.utcHour} UTC)`} />;
+              }
+              return null;
+            })()}
             <ConditionChip
               ok={!conditions?.circuitBreakerActive}
               bad={conditions?.circuitBreakerActive}
@@ -219,6 +264,47 @@ export function ConditionsPanel({
               label={`${conditions?.totalBetsThisWindow ?? 0}/${conditions?.maxBetsPerWindow ?? "?"} window bets`}
             />
           </div>
+
+          {/* ── Smart Hours per-symbol status row ── */}
+          {conditions?.symbolSmartHoursModes != null && Object.keys(conditions.symbolSmartHoursModes).length > 0 && (
+            <div className="px-5 py-2 border-b border-border/50 flex flex-col gap-1">
+              <span className="text-[10px] font-semibold text-muted-foreground/70 flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                Smart Hours entry eligibility
+                <span className="ml-1 font-normal text-muted-foreground/50">
+                  ({conditions.smartHoursScope === "per_market" ? "per-market" : "global"} · {conditions.symbolSmartHoursResolvedAt ? new Date(conditions.symbolSmartHoursResolvedAt).toUTCString().slice(17, 22) + " UTC" : "—"})
+                </span>
+              </span>
+              <div className="flex flex-wrap gap-1">
+                {Object.entries(conditions.symbolSmartHoursModes).map(([sym, mode]) => {
+                  let chipCls = "";
+                  let label = "";
+                  if (mode === "silenced") {
+                    chipCls = "bg-red-500/15 text-red-300 border-red-500/25";
+                    label = "Entry blocked";
+                  } else if (mode === "reduced") {
+                    chipCls = "bg-amber-500/15 text-amber-300 border-amber-500/25";
+                    label = "Reduced entry";
+                  } else if (mode === "no-schedule") {
+                    chipCls = "bg-muted/30 text-muted-foreground/50 border-border/40";
+                    label = "No schedule";
+                  } else {
+                    chipCls = "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+                    label = "Entries active";
+                  }
+                  return (
+                    <span
+                      key={sym}
+                      className={`text-[9px] px-1.5 py-0.5 rounded border font-medium ${chipCls}`}
+                      title={`${sym}: Smart Hours — ${label}`}
+                    >
+                      {sym} · {label}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* ── Per-coin table ── */}
           <div className="overflow-x-auto">

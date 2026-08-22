@@ -31,7 +31,7 @@
 // P&L (paper): identical economics to live (no arbitrary discount).
 // ---------------------------------------------------------------------------
 
-import type { ScalpConfig, EffectiveScalpParams, ScalpMarketStatus, ValidatedQuote } from "./kalshi-scalper-types.ts";
+import type { ScalpConfig, EffectiveScalpParams, ScalpMarketStatus, ScalpTimingPhase, ValidatedQuote } from "./kalshi-scalper-types.ts";
 
 // ---------------------------------------------------------------------------
 // Effective params resolution
@@ -179,6 +179,59 @@ export function isInFinalWindow(
   }
 
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Timing phase resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the human-visible timing phase for a market candidate. Used by the
+ * status API to let the frontend distinguish:
+ *   preflight_warmup    — inside the preflight lead period but not yet inside
+ *                         the final submission window; never submission-eligible.
+ *   waiting_eligibility — close time is unavailable or the preflight lead has
+ *                         not started yet.
+ *   eligible            — inside the final submission window (>0 s remaining).
+ *   closed_expired      — close time has already passed (remainingS <= 0).
+ *
+ * @param closeTimeIso     ISO string of the market close time (null/empty → preflight_warmup)
+ * @param nowMs            Current time in ms
+ * @param finalWindowS     Effective final window seconds for this symbol
+ * @param preflightLeadS   Preflight lead seconds (SCALP_PREFLIGHT_LEAD_SECONDS)
+ */
+export function resolveTimingPhase(
+  closeTimeIso: string | null | undefined,
+  nowMs: number,
+  finalWindowS: number,
+  preflightLeadS: number,
+): ScalpTimingPhase {
+  if (!closeTimeIso) return "waiting_eligibility";
+  const closeMs = new Date(closeTimeIso).getTime();
+  if (!Number.isFinite(closeMs)) return "waiting_eligibility";
+  const remainingS = (closeMs - nowMs) / 1000;
+  if (remainingS <= 0) return "closed_expired";
+  if (remainingS <= finalWindowS) return "eligible";
+  if (remainingS <= finalWindowS + preflightLeadS) return "preflight_warmup";
+  return "waiting_eligibility";
+}
+
+/**
+ * Seconds until the eligibility window opens.
+ * Returns 0 when already eligible, null when close time is unavailable or expired.
+ */
+export function secondsUntilEligible(
+  closeTimeIso: string | null | undefined,
+  nowMs: number,
+  finalWindowS: number,
+): number | null {
+  if (!closeTimeIso) return null;
+  const closeMs = new Date(closeTimeIso).getTime();
+  if (!Number.isFinite(closeMs)) return null;
+  const remainingS = (closeMs - nowMs) / 1000;
+  if (remainingS <= 0) return null; // closed/expired
+  if (remainingS <= finalWindowS) return 0; // already eligible
+  return remainingS - finalWindowS;
 }
 
 // ---------------------------------------------------------------------------

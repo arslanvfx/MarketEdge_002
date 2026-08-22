@@ -247,6 +247,9 @@ export interface GuardStates {
   [key: string]: boolean | undefined;
 }
 
+/** Effective Smart Hours entry mode for a single symbol (server-resolved). */
+export type SymbolSmartHoursMode = "active" | "silenced" | "reduced" | "no-schedule";
+
 export interface BotStatus {
   mode: "paper" | "live"; status: string; paused: boolean;
   config: BotConfig; openPositions: OpenPosition[];
@@ -268,6 +271,16 @@ export interface BotStatus {
   coinStreakState?: Record<string, { consecutiveLosses: number; pauseUntilWindowKey: string | null }>;
   convictionPollerRunning?: boolean;
   convictionPriceAgeMs?: Record<string, number>;
+  /** Whether Smart Hours is in global or per-market mode. */
+  smartHoursScope?: "global" | "per_market";
+  /**
+   * Per-symbol effective Smart Hours mode resolved on the server.
+   * Keys are upper-case symbols (BTC, ETH, …).
+   * "no-schedule" = per-market mode is active but no schedule is configured for this symbol.
+   */
+  symbolSmartHoursModes?: Record<string, SymbolSmartHoursMode>;
+  /** ISO timestamp at which symbolSmartHoursModes was resolved. */
+  symbolSmartHoursResolvedAt?: string;
 }
 
 export interface HistoryRecord {
@@ -338,6 +351,16 @@ export interface BotConditionsSnapshot {
   directionCountNo: number;
   maxBetsPerWindow: number;
   totalBetsThisWindow: number;
+  /** Whether Smart Hours is in global or per-market mode. */
+  smartHoursScope?: "global" | "per_market";
+  /**
+   * Per-symbol effective Smart Hours mode resolved via the server canonical resolver.
+   * "no-schedule" = per-market mode but no schedule configured (entries proceed active).
+   * Only present in responses from servers that support this field.
+   */
+  symbolSmartHoursModes?: Record<string, SymbolSmartHoursMode>;
+  /** ISO timestamp at which symbolSmartHoursModes was resolved. */
+  symbolSmartHoursResolvedAt?: string;
   emptyBookBlockedCoins: string[];
   emptyBookAttempts: Record<string, number>;
   nearStrikeFilteredCoins: string[];
@@ -570,15 +593,65 @@ export interface ScalperConfig {
   }>;
 }
 
+export type ScalpTimingPhase =
+  | "preflight_warmup"
+  | "waiting_eligibility"
+  | "eligible"
+  | "closed_expired";
+
+export interface ScalpSkipEvidence {
+  timingPhase?: ScalpTimingPhase;
+  closeTimeIso?: string;
+  secondsRemaining?: number | null;
+  effectiveWindowSeconds?: number;
+  windowKey?: string;
+  distancePct?: number | null;
+  minimumPct?: number | null;
+  targetPrice?: number | null;
+  underlyingPrice?: number | null;
+  adverseMovePct?: number | null;
+  freefallThresholdPct?: number | null;
+  samplesUsed?: number | null;
+  sampleCoverageMs?: number | null;
+  protectedSide?: "yes" | "no" | null;
+  quotedReason?: string | null;
+  identityReason?: string | null;
+  quoteFetchOk?: boolean | null;
+  identityFetchOk?: boolean | null;
+  quoteYesAsk?: number | null;
+  quoteNoAsk?: number | null;
+  winningAsk?: number | null;
+  selectedSide?: "yes" | "no" | null;
+  bandMin?: number | null;
+  bandMax?: number | null;
+  reservedTicker?: string | null;
+  refreshedTicker?: string | null;
+  refreshedCloseTimeIso?: string | null;
+  elapsedMs?: number | null;
+  identityRefreshMs?: number | null;
+  quoteRefreshMs?: number | null;
+  parallelRefreshMs?: number | null;
+  skippedAt?: string;
+  requestedBudget?: number | null;
+  dailyCapDollars?: number | null;
+  openCapDollars?: number | null;
+  dailyCommittedDollars?: number | null;
+  openCommittedDollars?: number | null;
+  availableBalance?: number | null;
+  maxExposure?: number | null;
+}
+
 export interface ScalperStatusMarket {
   symbol: string;
   state: string;
+  timingPhase: ScalpTimingPhase;
   effectiveBandMin: number;
   effectiveBandMax: number;
   effectiveWindowSeconds: number;
   effectiveBudgetDollars: number;
   lastAsk: number | null;
   secondsRemaining: number | null;
+  secondsUntilEligible: number | null;
   freefallBlocked: boolean;
   targetProximityBlocked: boolean;
   targetDistancePct: number | null;
@@ -661,6 +734,7 @@ export interface ScalperAttempt {
   observedWinningAsk: number | null;
   executionWinningLimit: number | null;
   submittedLimitPrice: number | null;
+  skipEvidence: ScalpSkipEvidence | null;
   retryEligible: boolean;
   retryState: "ready" | "cooldown" | "in_flight" | "terminal";
   retryAfterMs: number | null;

@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
 import { API_BASE, fmt$, fmtPct, fmtDateTime, wkToEstRange, ET_LABEL } from "./utils";
 import type { ScalperConfig, ScalperStatus, ScalperPerformance, ScalperUnresolvedAttempt } from "./types";
-import { describeScalperAttempt } from "./scalper-ledger";
+import { describeScalperAttempt, describeScalperEvidence } from "./scalper-ledger";
 
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
@@ -530,7 +530,13 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 ? <AlertTriangle className="w-4 h-4 shrink-0" />
                 : <Activity className="w-4 h-4 shrink-0" />}
             <span>
-              Execution preflight: {statusData.preflight.state}
+              {statusData.preflight.state === "ready"
+                ? "Non-submitting warm-up complete"
+                : statusData.preflight.state === "warming"
+                  ? "Non-submitting warm-up in progress"
+                  : statusData.preflight.state === "blocked"
+                    ? "Warm-up blocked — no order submitted"
+                    : "Waiting to start non-submitting warm-up"}
               {statusData.preflight.totalSymbols > 0
                 ? ` · ${statusData.preflight.readySymbols}/${statusData.preflight.totalSymbols} markets ready`
                 : ""}
@@ -826,11 +832,21 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                   const pm = merged.perMarketOverrides?.find(m => m.symbol === sym) || { symbol: sym };
                   const isPaused = pm.paused ?? false;
                   const statusInfo = statusData?.markets.find(m => m.symbol === sym);
-                  const statusLabel = statusInfo?.state === "active"
-                    ? (statusInfo.lastAsk !== null ? `candidate · ${Math.round(statusInfo.lastAsk * 100)}¢` : "Scanning...")
+                  const timingLabel = statusInfo?.timingPhase === "eligible"
+                    ? `Submission eligible · ${statusInfo.secondsRemaining == null ? "time unknown" : `${Math.max(0, Math.ceil(statusInfo.secondsRemaining))}s left`} · ${statusInfo.effectiveWindowSeconds}s window`
+                    : statusInfo?.timingPhase === "preflight_warmup"
+                      ? `Warm-up only · eligible in ${Math.max(0, Math.ceil(statusInfo.secondsUntilEligible ?? 0))}s`
+                      : statusInfo?.timingPhase === "closed_expired"
+                        ? "Window closed"
+                        : statusInfo
+                          ? `Waiting · eligible in ${statusInfo.secondsUntilEligible == null ? "—" : `${Math.max(0, Math.ceil(statusInfo.secondsUntilEligible))}s`}`
+                          : null;
+                  const scannerLabel = statusInfo?.state === "active"
+                    ? (statusInfo.lastAsk !== null ? `candidate · ${Math.round(statusInfo.lastAsk * 100)}¢` : "scanning")
                     : statusInfo?.state === "guarded"
                       ? `blocked · ${readableReason(statusInfo.reason)}`
                       : statusInfo?.state;
+                  const statusLabel = [timingLabel, scannerLabel].filter(Boolean).join(" · ");
                   
                   return (
                     <tr key={sym} className={`border-b border-border/40 last:border-0 hover:bg-muted/10 transition-colors ${isPaused ? "bg-red-500/5" : ""}`}>
@@ -945,7 +961,11 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                                   TARGET
                                 </span>
                               )}
-                              <span className="text-[9px] text-muted-foreground/50 w-28 text-right truncate" title={statusInfo.reason || "Preliminary scan only; a fresh authenticated quote is checked before ordering."}>
+                              <span
+                                data-testid={`text-scalper-timing-${sym}`}
+                                className="text-[9px] text-muted-foreground/60 w-52 text-right"
+                                title={`${statusLabel}. Warm-up never submits an order; an authenticated quote and all guards are rechecked immediately before Paper/Live execution.`}
+                              >
                                 {statusLabel}
                               </span>
                             </div>
@@ -991,57 +1011,68 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 const executionPricing = attempt.observedWinningAsk != null && attempt.executionWinningLimit != null
                   ? `${(attempt.observedWinningAsk * 100).toFixed(1).replace(/\.0$/, "")}¢ quote → ${(attempt.executionWinningLimit * 100).toFixed(1).replace(/\.0$/, "")}¢ ${attempt.mode === "live" ? "IOC" : "sim"} cap`
                   : null;
+                const evidenceLines = describeScalperEvidence(attempt);
                 return (
                   <div
                     key={attempt.id}
-                    className="flex items-center gap-3 rounded-lg border border-border bg-background/40 px-3 py-2 text-xs"
+                    className="rounded-lg border border-border bg-background/40 px-3 py-2"
                   >
-                    <span className="font-bold text-foreground w-12">{attempt.symbol}</span>
-                    <span className={`font-semibold ${
-                      isFilled
-                        ? "text-emerald-400"
-                        : isUnsafe
-                          ? "text-red-400"
-                          : isZeroFill
-                            ? "text-sky-400"
-                            : "text-amber-300"
-                    }`}>
-                      {describeScalperAttempt(attempt)}
-                    </span>
-                    {executionPricing && (
-                      <span
-                        className="text-[10px] text-amber-200/75 font-mono whitespace-nowrap"
-                        title={`Latest ${attempt.mode === "live" ? "submitted" : "simulated"} ${attempt.side?.toUpperCase() ?? ""} quote and worst acceptable winning-contract cost`}
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="font-bold text-foreground w-12">{attempt.symbol}</span>
+                      <span className={`font-semibold ${
+                        isFilled
+                          ? "text-emerald-400"
+                          : isUnsafe
+                            ? "text-red-400"
+                            : isZeroFill
+                              ? "text-sky-400"
+                              : "text-amber-300"
+                      }`}>
+                        {describeScalperAttempt(attempt)}
+                      </span>
+                      {executionPricing && (
+                        <span
+                          className="text-[10px] text-amber-200/75 font-mono whitespace-nowrap"
+                          title={`Latest ${attempt.mode === "live" ? "submitted" : "simulated"} ${attempt.side?.toUpperCase() ?? ""} quote and worst acceptable winning-contract cost`}
+                        >
+                          {executionPricing}
+                        </span>
+                      )}
+                      {isZeroFill && (
+                        <span className="text-[10px] text-muted-foreground">
+                          {attempt.retryEligible
+                            ? attempt.retryState === "ready"
+                              ? `Retry ready · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
+                              : `Retry in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
+                            : `${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`}
+                        </span>
+                      )}
+                      {!isZeroFill && attempt.retryEligible && (
+                        <span className="text-[10px] text-muted-foreground">
+                          {attempt.retryState === "ready"
+                            ? "Transient no-exposure skip · retry ready"
+                            : `Transient no-exposure skip · retries in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s`}
+                        </span>
+                      )}
+                      <span className={`ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                        attempt.mode === "live"
+                          ? "bg-red-500/15 text-red-400"
+                          : "bg-yellow-500/15 text-yellow-400"
+                      }`}>
+                        {attempt.mode.toUpperCase()}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                        {fmtDateTime(attempt.attemptedAt)}
+                      </span>
+                    </div>
+                    {evidenceLines.length > 0 && (
+                      <div
+                        data-testid={`text-scalper-skip-evidence-${attempt.id}`}
+                        className="mt-1.5 ml-14 flex flex-col gap-0.5 text-[10px] font-mono text-muted-foreground/80"
                       >
-                        {executionPricing}
-                      </span>
+                        {evidenceLines.map((line) => <span key={line}>{line}</span>)}
+                      </div>
                     )}
-                    {isZeroFill && (
-                      <span className="text-[10px] text-muted-foreground">
-                        {attempt.retryEligible
-                          ? attempt.retryState === "ready"
-                            ? `Retry ready · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
-                            : `Retry in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`
-                          : `${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} submissions used`}
-                      </span>
-                    )}
-                    {!isZeroFill && attempt.retryEligible && (
-                      <span className="text-[10px] text-muted-foreground">
-                        {attempt.retryState === "ready"
-                          ? "Transient no-exposure skip · retry ready"
-                          : `Transient no-exposure skip · retries in ${Math.max(0.1, (attempt.retryAfterMs ?? 0) / 1_000).toFixed(1)}s`}
-                      </span>
-                    )}
-                    <span className={`ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                      attempt.mode === "live"
-                        ? "bg-red-500/15 text-red-400"
-                        : "bg-yellow-500/15 text-yellow-400"
-                    }`}>
-                      {attempt.mode.toUpperCase()}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                      {fmtDateTime(attempt.attemptedAt)}
-                    </span>
                   </div>
                 );
               })}
