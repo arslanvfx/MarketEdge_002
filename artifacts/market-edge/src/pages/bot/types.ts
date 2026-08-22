@@ -574,7 +574,7 @@ export interface ScalperConfig {
   finalWindowSeconds: number;
   budgetDollars: number;
   dailyCapDollars: number | null;
-  openCapDollars: number | null;
+  openCapDollars: number;
   freefallGuardEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;

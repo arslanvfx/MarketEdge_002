@@ -501,8 +501,10 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
               <span className="text-foreground">{statusData.totalReservationsToday} today</span>
             </div>
             <div className="flex flex-col items-end">
-              <span className="text-muted-foreground/50 uppercase tracking-widest">Open</span>
-              <span className="text-foreground">{fmt$(statusData.openSpend)}</span>
+              <span className="text-muted-foreground/50 uppercase tracking-widest">Open / Cap</span>
+              <span data-testid="text-scalper-open-cap" className="text-foreground">
+                {fmt$(statusData.openSpend)} / {fmt$(statusData.config.openCapDollars)}
+              </span>
             </div>
             <div className="flex flex-col items-end">
               <span className="text-muted-foreground/50 uppercase tracking-widest">Spent</span>
@@ -743,13 +745,14 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
               <div className="grid grid-cols-1 gap-3">
                 <label className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground">Open exposure</span>
-                    {merged.openCapDollars === null && <span className="text-[9px] font-bold text-muted-foreground/50">NO CAP</span>}
+                    <span className="text-[10px] text-muted-foreground">Open exposure cap</span>
+                    <span className="text-[9px] font-bold text-amber-400/80">REQUIRED</span>
                   </div>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs">$</span>
-                    <input type="number" value={merged.openCapDollars || ""} placeholder="No cap" onChange={e => handleConfigChange("openCapDollars", e.target.value ? parseFloat(e.target.value) : null)} className="w-full bg-background border border-border rounded-md pl-6 pr-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50" />
+                    <input data-testid="input-scalper-open-cap" type="number" min={1} max={50} step={1} value={merged.openCapDollars} onChange={e => handleConfigChange("openCapDollars", Math.min(parseFloat(e.target.value) || 0, 50))} className="w-full bg-background border border-border rounded-md pl-6 pr-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50" />
                   </div>
+                  <span className="text-[9px] text-muted-foreground/60 leading-tight">Maximum $50. Includes unsettled fills and in-flight reservations across every Scalper market.</span>
                 </label>
                 <label className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center">

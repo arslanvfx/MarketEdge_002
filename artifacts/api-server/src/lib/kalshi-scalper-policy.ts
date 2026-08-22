@@ -31,7 +31,15 @@
 // P&L (paper): identical economics to live (no arbitrary discount).
 // ---------------------------------------------------------------------------
 
-import type { ScalpConfig, EffectiveScalpParams, ScalpMarketStatus, ScalpTimingPhase, ValidatedQuote } from "./kalshi-scalper-types.ts";
+import {
+  DEFAULT_SCALP_OPEN_CAP_DOLLARS,
+  normalizeScalpOpenCapDollars,
+  type ScalpConfig,
+  type EffectiveScalpParams,
+  type ScalpMarketStatus,
+  type ScalpTimingPhase,
+  type ValidatedQuote,
+} from "./kalshi-scalper-types.ts";
 
 // ---------------------------------------------------------------------------
 // Effective params resolution
@@ -634,15 +642,15 @@ export function checkDailyCap(
  * unsettled filled orders + reserved amounts for in-flight attempts.
  */
 export function checkOpenCap(
-  openCapDollars: number | null,
+  openCapDollars: number,
   currentOpenCommitted: number,
   orderBudget: number,
 ): CapCheckResult {
-  if (openCapDollars == null) return { allowed: true, reason: null };
-  if (currentOpenCommitted + orderBudget > openCapDollars) {
+  const effectiveOpenCapDollars = normalizeScalpOpenCapDollars(openCapDollars);
+  if (currentOpenCommitted + orderBudget > effectiveOpenCapDollars) {
     return {
       allowed: false,
-      reason: `open_cap_exceeded (open=${currentOpenCommitted.toFixed(2)} cap=${openCapDollars})`,
+      reason: `open_cap_exceeded (open=${currentOpenCommitted.toFixed(2)} cap=${effectiveOpenCapDollars})`,
     };
   }
   return { allowed: true, reason: null };
@@ -663,7 +671,8 @@ export interface CapDecision {
  *
  * Both totals ALREADY include actual committed spend + outstanding reserved
  * amounts (excluding this attempt, whose row is reserved_budget=0 at decision
- * time). A cap of null means "no limit". The comparison is strict `>` so the
+ * time). Only the daily cap may be null ("no daily limit"). Open exposure is
+ * always normalized to a finite ceiling. The comparison is strict `>` so the
  * total is allowed to reach the cap exactly.
  */
 export function evaluateCapDecision(
@@ -671,18 +680,19 @@ export function evaluateCapDecision(
   dailyCommitted: number,
   openCommitted: number,
   dailyCapDollars: number | null,
-  openCapDollars: number | null,
+  openCapDollars: number,
 ): CapDecision {
+  const effectiveOpenCapDollars = normalizeScalpOpenCapDollars(openCapDollars);
   if (dailyCapDollars != null && dailyCommitted + requestedBudget > dailyCapDollars) {
     return {
       allowed: false,
       reason: `daily_cap_exceeded (committed=${dailyCommitted.toFixed(2)} cap=${dailyCapDollars})`,
     };
   }
-  if (openCapDollars != null && openCommitted + requestedBudget > openCapDollars) {
+  if (openCommitted + requestedBudget > effectiveOpenCapDollars) {
     return {
       allowed: false,
-      reason: `open_cap_exceeded (open=${openCommitted.toFixed(2)} cap=${openCapDollars})`,
+      reason: `open_cap_exceeded (open=${openCommitted.toFixed(2)} cap=${effectiveOpenCapDollars})`,
     };
   }
   return { allowed: true, reason: null };
@@ -717,7 +727,7 @@ export interface ExecutionRiskSnapshot {
   paused: boolean;
   // Global caps
   dailyCapDollars: number | null;
-  openCapDollars: number | null;
+  openCapDollars: number;
   // Freefall guard config
   freefallGuardEnabled: boolean;
   freefallLookbackSeconds: number;
@@ -734,7 +744,7 @@ export interface RiskConfigLike {
   enabled: boolean;
   mode: "paper" | "live";
   dailyCapDollars: number | null;
-  openCapDollars: number | null;
+  openCapDollars: number;
   freefallGuardEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
@@ -835,7 +845,7 @@ export function compareRiskSnapshot(
 
   // Global caps
   if (!eqNullNum(currentConfig.dailyCapDollars, snapshot.dailyCapDollars)) changed.push("dailyCapDollars");
-  if (!eqNullNum(currentConfig.openCapDollars, snapshot.openCapDollars)) changed.push("openCapDollars");
+  if (!eqNum(currentConfig.openCapDollars, snapshot.openCapDollars)) changed.push("openCapDollars");
 
   // Freefall config
   if (currentConfig.freefallGuardEnabled !== snapshot.freefallGuardEnabled) changed.push("freefallGuardEnabled");
@@ -1308,14 +1318,22 @@ export function validateScalpConfigPartial(
     const v = Number(c["budgetDollars"]);
     if (!Number.isFinite(v) || v <= 0 || v > 1000) errors.push("budgetDollars must be > 0 and ≤ 1000");
   }
-  // Explicit null is allowed (clears the cap)
+  // Daily cap may be explicitly cleared. Open exposure is mandatory and may
+  // only be made stricter than the approved $50 aggregate ceiling.
   if (c["dailyCapDollars"] != null && c["dailyCapDollars"] !== null) {
     const v = Number(c["dailyCapDollars"]);
     if (!Number.isFinite(v) || v <= 0) errors.push("dailyCapDollars must be > 0 when set");
   }
-  if (c["openCapDollars"] != null && c["openCapDollars"] !== null) {
-    const v = Number(c["openCapDollars"]);
-    if (!Number.isFinite(v) || v <= 0) errors.push("openCapDollars must be > 0 when set");
+  if (Object.prototype.hasOwnProperty.call(c, "openCapDollars")) {
+    const v = c["openCapDollars"];
+    if (
+      typeof v !== "number"
+      || !Number.isFinite(v)
+      || v <= 0
+      || v > DEFAULT_SCALP_OPEN_CAP_DOLLARS
+    ) {
+      errors.push("openCapDollars must be a finite number > 0 and ≤ 50");
+    }
   }
   if (c["mode"] != null && c["mode"] !== "paper" && c["mode"] !== "live") {
     errors.push("mode must be 'paper' or 'live'");
@@ -1509,7 +1527,7 @@ export interface ScalpConfigPatch {
   finalWindowSeconds?: number;
   budgetDollars?: number;
   dailyCapDollars?: number | null;
-  openCapDollars?: number | null;
+  openCapDollars?: number;
   freefallGuardEnabled?: boolean;
   freefallLookbackSeconds?: number;
   freefallThresholdPct?: number;
@@ -1566,13 +1584,14 @@ function isFiniteNumber(v: unknown): v is number {
  *   - enabled / freefallGuardEnabled / circuitBreakerEnabled that are not booleans
  *   - mode that is not exactly "paper" | "live"
  *   - numeric fields that are not finite JSON numbers, or out of range
- *   - nullable caps that are anything other than number | null
+ *   - a daily cap that is anything other than number | null
+ *   - an open cap that is not a positive finite number at or below $50
  *   - perMarketOverrides that are not a well-formed array of allowlisted objects,
  *     with normalized/supported uppercase symbols, real booleans, and
  *     number|null numeric overrides; unknown keys / duplicate symbols rejected
  *
- * Explicit null is preserved for the nullable fields (caps + override numerics)
- * to keep "clear this value" semantics distinct from "leave unchanged" (absent).
+ * Explicit null is preserved for nullable daily cap and override numerics to
+ * keep "clear this value" semantics distinct from "leave unchanged" (absent).
  */
 export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   const errors: string[] = [];
@@ -1635,16 +1654,21 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   numField("freefallThresholdPct", (v) => v > 0, "freefallThresholdPct must be a number > 0");
   numField("targetProximityThresholdPct", (v) => v > 0 && v <= 10, "targetProximityThresholdPct must be a number > 0 and ≤ 10");
 
-  // ── Nullable caps (number | null only) ──
-  const capField = (key: "dailyCapDollars" | "openCapDollars"): void => {
-    if (!has(key)) return;
-    const v = body[key];
-    if (v === null) { out[key] = null; return; }
-    if (!isFiniteNumber(v) || v <= 0) { errors.push(`${key} must be a number > 0 or null`); return; }
-    out[key] = v;
-  };
-  capField("dailyCapDollars");
-  capField("openCapDollars");
+  // ── Caps ──
+  if (has("dailyCapDollars")) {
+    const v = body["dailyCapDollars"];
+    if (v === null) out.dailyCapDollars = null;
+    else if (!isFiniteNumber(v) || v <= 0) errors.push("dailyCapDollars must be a number > 0 or null");
+    else out.dailyCapDollars = v;
+  }
+  if (has("openCapDollars")) {
+    const v = body["openCapDollars"];
+    if (!isFiniteNumber(v) || v <= 0 || v > DEFAULT_SCALP_OPEN_CAP_DOLLARS) {
+      errors.push("openCapDollars must be a number > 0 and ≤ 50");
+    } else {
+      out.openCapDollars = v;
+    }
+  }
 
   // Cross-field: effective band min < max (only when both provided together).
   if (out.globalBandMin != null && out.globalBandMax != null && out.globalBandMin >= out.globalBandMax) {

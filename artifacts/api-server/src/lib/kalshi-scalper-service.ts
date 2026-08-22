@@ -348,6 +348,8 @@ export async function initScalper(): Promise<void> {
     {
       enabled: _config.enabled,
       mode: _config.mode,
+      dailyCapDollars: _config.dailyCapDollars,
+      openCapDollars: _config.openCapDollars,
       circuitBreakerEnabled: _config.circuitBreakerEnabled,
       circuitBreaker: _config.circuitBreaker,
     },
@@ -441,7 +443,7 @@ export function getScalpConfig(): ScalpConfig {
 /**
  * Apply a partial update. Persists the merged canonical config BEFORE replacing
  * in-memory. Validates both the partial input and the effective merged config.
- * Preserves explicit null values (dailyCapDollars/openCapDollars).
+ * Preserves explicit null for dailyCapDollars. Open exposure is mandatory.
  * Never allows overwriting server-owned circuitBreaker state via this path.
  */
 /**
@@ -500,6 +502,8 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
     {
       enabled: updated.enabled,
       mode: updated.mode,
+      dailyCapDollars: updated.dailyCapDollars,
+      openCapDollars: updated.openCapDollars,
       circuitBreakerEnabled: updated.circuitBreakerEnabled,
       targetProximityGuardEnabled: updated.targetProximityGuardEnabled,
       targetProximityThresholdPct: updated.targetProximityThresholdPct,

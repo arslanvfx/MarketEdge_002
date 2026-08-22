@@ -24,7 +24,8 @@ export interface ScalpConfig {
   finalWindowSeconds: number;   // default 120
   budgetDollars: number;        // per-order budget, default $2
   dailyCapDollars: number | null;
-  openCapDollars: number | null;
+  /** Mandatory aggregate ceiling for all unsettled fills and in-flight reservations. */
+  openCapDollars: number;
   freefallGuardEnabled: boolean;    // default true
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;     // % adverse underlying move that blocks entry
@@ -40,6 +41,7 @@ export interface ScalpConfig {
   perMarketOverrides: ScalpPerMarketOverride[];
 }
 
+export const DEFAULT_SCALP_OPEN_CAP_DOLLARS = 50;
 export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   enabled: false,
   mode: "paper",
@@ -48,7 +50,7 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   finalWindowSeconds: 120,
   budgetDollars: 2,
   dailyCapDollars: null,
-  openCapDollars: null,
+  openCapDollars: DEFAULT_SCALP_OPEN_CAP_DOLLARS,
   freefallGuardEnabled: true,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
@@ -350,4 +352,16 @@ export interface ScalpReservation {
   submittedLimitPrice?: number;
   /** Structured skip evidence (null for non-skip rows and pre-upgrade rows). */
   skipEvidence?: ScalpSkipEvidence | null;
+}
+
+/**
+ * Runtime compatibility guard for legacy persisted config and rolling callers.
+ * A missing, null, malformed, non-positive, or over-limit value never raises
+ * the approved $50 aggregate exposure ceiling. Operators may set a lower cap.
+ */
+export function normalizeScalpOpenCapDollars(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return DEFAULT_SCALP_OPEN_CAP_DOLLARS;
+  }
+  return Math.min(value, DEFAULT_SCALP_OPEN_CAP_DOLLARS);
 }

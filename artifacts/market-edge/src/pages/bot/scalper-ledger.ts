@@ -183,12 +183,15 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   }
 
   if (evidence.requestedBudget != null) {
-    const cap = evidence.dailyCapDollars != null
-      ? `daily ${formatMoney(evidence.dailyCommittedDollars)} of ${formatMoney(evidence.dailyCapDollars)}`
-      : evidence.openCapDollars != null
-        ? `open ${formatMoney(evidence.openCommittedDollars)} of ${formatMoney(evidence.openCapDollars)}`
-        : "cap details unavailable";
-    details.push(`Requested ${formatMoney(evidence.requestedBudget)} · ${cap}`);
+    const capDetails = [
+      evidence.openCapDollars == null
+        ? null
+        : `open ${formatMoney(evidence.openCommittedDollars)} of ${formatMoney(evidence.openCapDollars)}`,
+      evidence.dailyCapDollars == null
+        ? null
+        : `daily ${formatMoney(evidence.dailyCommittedDollars)} of ${formatMoney(evidence.dailyCapDollars)}`,
+    ].filter(Boolean).join(" · ");
+    details.push(`Requested ${formatMoney(evidence.requestedBudget)} · ${capDetails || "cap details unavailable"}`);
   }
 
   if (evidence.availableBalance != null || evidence.maxExposure != null) {

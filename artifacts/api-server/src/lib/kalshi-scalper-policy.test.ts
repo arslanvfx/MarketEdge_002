@@ -49,7 +49,11 @@ import {
   type RiskConfigLike,
   type RiskParamsLike,
 } from "./kalshi-scalper-policy.ts";
-import { DEFAULT_SCALP_CONFIG } from "./kalshi-scalper-types.ts";
+import {
+  DEFAULT_SCALP_CONFIG,
+  DEFAULT_SCALP_OPEN_CAP_DOLLARS,
+  normalizeScalpOpenCapDollars,
+} from "./kalshi-scalper-types.ts";
 
 // ---------------------------------------------------------------------------
 // selectScalpSide — canonical price model
@@ -906,8 +910,8 @@ describe("checkDailyCap", () => {
 });
 
 describe("checkOpenCap", () => {
-  it("allows when no cap set", () => {
-    const r = checkOpenCap(null, 100, 5);
+  it("allows when the finite cap has enough headroom", () => {
+    const r = checkOpenCap(50, 40, 5);
     assert.ok(r.allowed);
   });
   it("allows when committed + budget <= cap", () => {
@@ -919,6 +923,27 @@ describe("checkOpenCap", () => {
     assert.ok(!r.allowed);
     assert.ok(r.reason?.includes("open_cap_exceeded"));
   });
+  it("fails closed to the default when a legacy runtime caller passes null", () => {
+    const r = checkOpenCap(
+      null as unknown as number,
+      DEFAULT_SCALP_OPEN_CAP_DOLLARS - 1,
+      2,
+    );
+    assert.equal(r.allowed, false);
+    assert.ok(r.reason?.includes(`cap=${DEFAULT_SCALP_OPEN_CAP_DOLLARS}`));
+  });
+});
+
+describe("normalizeScalpOpenCapDollars", () => {
+  it("allows lower caps but clamps every unsafe legacy shape to the $50 ceiling", () => {
+    assert.equal(normalizeScalpOpenCapDollars(40), 40);
+    for (const legacyValue of [null, undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, "50", 75, 500]) {
+      assert.equal(
+        normalizeScalpOpenCapDollars(legacyValue),
+        DEFAULT_SCALP_OPEN_CAP_DOLLARS,
+      );
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -926,21 +951,28 @@ describe("checkOpenCap", () => {
 // ---------------------------------------------------------------------------
 
 describe("evaluateCapDecision (atomic cap boundary math)", () => {
-  it("allows when both caps are null", () => {
-    const d = evaluateCapDecision(5, 1000, 1000, null, null);
-    assert.ok(d.allowed);
-    assert.equal(d.reason, null);
+  it("normalizes a legacy null open cap to the finite default", () => {
+    const d = evaluateCapDecision(
+      5,
+      0,
+      DEFAULT_SCALP_OPEN_CAP_DOLLARS - 4,
+      null,
+      null as unknown as number,
+    );
+    assert.equal(d.allowed, false);
+    assert.ok(d.reason?.includes("open_cap_exceeded"));
+    assert.ok(d.reason?.includes(`cap=${DEFAULT_SCALP_OPEN_CAP_DOLLARS}`));
   });
 
   it("allows exactly at the daily cap boundary (total == cap)", () => {
     // 18 committed + 2 budget = 20 == cap → allowed (strict >)
-    const d = evaluateCapDecision(2, 18, 0, 20, null);
+    const d = evaluateCapDecision(2, 18, 0, 20, DEFAULT_SCALP_OPEN_CAP_DOLLARS);
     assert.ok(d.allowed, "reaching the cap exactly must be allowed");
   });
 
   it("blocks one cent over the daily cap boundary", () => {
     // 18.01 + 2 = 20.01 > 20 → blocked
-    const d = evaluateCapDecision(2, 18.01, 0, 20, null);
+    const d = evaluateCapDecision(2, 18.01, 0, 20, DEFAULT_SCALP_OPEN_CAP_DOLLARS);
     assert.ok(!d.allowed);
     assert.ok(d.reason?.includes("daily_cap_exceeded"));
   });
@@ -1281,9 +1313,13 @@ describe("validateScalpConfigPartial", () => {
     assert.ok(!r3.valid);
   });
 
-  it("accepts explicit null for cap fields", () => {
-    const r = validateScalpConfigPartial({ dailyCapDollars: null, openCapDollars: null });
-    assert.ok(r.valid, JSON.stringify(r.errors));
+  it("allows clearing the daily cap but limits the open cap to $50", () => {
+    assert.ok(validateScalpConfigPartial({ dailyCapDollars: null }).valid);
+    const r = validateScalpConfigPartial({ openCapDollars: null });
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.some((error) => error.includes("openCapDollars")));
+    assert.equal(validateScalpConfigPartial({ openCapDollars: 40 }).valid, true);
+    assert.equal(validateScalpConfigPartial({ openCapDollars: 51 }).valid, false);
   });
 
   it("rejects invalid mode", () => {
@@ -1484,12 +1520,12 @@ describe("compareRiskSnapshot (fail-closed diff)", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), dailyCapDollars: 200 }, baseParams(), baseIdentity());
     assert.ok(d.changedFields.includes("dailyCapDollars"));
   });
-  it("open cap change (number → null) => rejected", () => {
-    const d = compareRiskSnapshot(snap(), { ...baseCfg(), openCapDollars: null }, baseParams(), baseIdentity());
+  it("open cap change => rejected", () => {
+    const d = compareRiskSnapshot(snap(), { ...baseCfg(), openCapDollars: 40 }, baseParams(), baseIdentity());
     assert.ok(d.changedFields.includes("openCapDollars"));
   });
-  it("null caps unchanged => allowed", () => {
-    const cfg = { ...baseCfg(), dailyCapDollars: null, openCapDollars: null };
+  it("nullable daily cap with unchanged finite open cap => allowed", () => {
+    const cfg = { ...baseCfg(), dailyCapDollars: null };
     const s = buildExecutionRiskSnapshot(cfg, baseParams(), baseIdentity());
     const d = compareRiskSnapshot(s, cfg, baseParams(), baseIdentity());
     assert.equal(d.unchanged, true);
@@ -1764,9 +1800,13 @@ describe("parseScalpConfigPatch", () => {
     assert.ok(errsOf(r).some((e) => e.includes("less than")));
   });
 
-  it("caps: accepts number or explicit null; rejects other types", () => {
+  it("caps: daily accepts null while open exposure cannot exceed $50", () => {
     assert.deepEqual(parseScalpConfigPatch({ dailyCapDollars: null }), { ok: true, value: { dailyCapDollars: null } });
+    assert.deepEqual(parseScalpConfigPatch({ openCapDollars: 40 }), { ok: true, value: { openCapDollars: 40 } });
     assert.deepEqual(parseScalpConfigPatch({ openCapDollars: 50 }), { ok: true, value: { openCapDollars: 50 } });
+    assert.equal(parseScalpConfigPatch({ openCapDollars: null }).ok, false);
+    assert.equal(parseScalpConfigPatch({ openCapDollars: 51 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ openCapDollars: 500 }).ok, false);
     assert.equal(parseScalpConfigPatch({ dailyCapDollars: "50" }).ok, false);
     assert.equal(parseScalpConfigPatch({ dailyCapDollars: 0 }).ok, false);
     assert.equal(parseScalpConfigPatch({ openCapDollars: NaN }).ok, false);
@@ -1836,13 +1876,13 @@ describe("parseScalpConfigPatch", () => {
   it("accepts a full valid patch and returns only present fields", () => {
     const r = parseScalpConfigPatch({
       enabled: true, mode: "paper", budgetDollars: 2.5,
-      dailyCapDollars: 100, openCapDollars: null,
+      dailyCapDollars: 100, openCapDollars: 50,
       perMarketOverrides: [{ symbol: "SOL", paused: false, windowSeconds: 60 }],
     });
     assert.equal(r.ok, true);
     assert.deepEqual(r.ok && r.value, {
       enabled: true, mode: "paper", budgetDollars: 2.5,
-      dailyCapDollars: 100, openCapDollars: null,
+      dailyCapDollars: 100, openCapDollars: 50,
       perMarketOverrides: [{ symbol: "SOL", paused: false, windowSeconds: 60 }],
     });
   });

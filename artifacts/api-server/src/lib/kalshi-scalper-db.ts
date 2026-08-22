@@ -8,6 +8,7 @@ import { pool } from "@workspace/db";
 import { logger } from "./logger.ts";
 import {
   DEFAULT_SCALP_CONFIG,
+  normalizeScalpOpenCapDollars,
   type ScalpConfig,
   type ScalpOrder,
   type ScalpOrderStatus,
@@ -295,9 +296,38 @@ export async function loadScalpConfigFromDB(): Promise<ScalpConfig> {
     const res = await client.query(
       "SELECT config FROM kalshi_scalp_config WHERE id = 'singleton'",
     );
-    if (res.rows.length === 0) return { ...DEFAULT_SCALP_CONFIG };
+    if (res.rows.length === 0) {
+      const defaults = { ...DEFAULT_SCALP_CONFIG };
+      await client.query(
+        `INSERT INTO kalshi_scalp_config (id, config, updated_at)
+         VALUES ('singleton', $1, NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [JSON.stringify(defaults)],
+      );
+      return defaults;
+    }
     const raw = res.rows[0].config as Record<string, unknown>;
-    return mergeScalpConfig(DEFAULT_SCALP_CONFIG, raw);
+    const merged = mergeScalpConfig(DEFAULT_SCALP_CONFIG, raw);
+
+    // Legacy production config allowed null ("no cap"). The Scalper now always
+    // requires a finite aggregate open-exposure ceiling, so normalize and
+    // persist the safe default before the scan loop can start.
+    if (raw["openCapDollars"] !== merged.openCapDollars) {
+      await client.query(
+        `UPDATE kalshi_scalp_config
+         SET config = $1, updated_at = NOW()
+         WHERE id = 'singleton'`,
+        [JSON.stringify(merged)],
+      );
+      logger.warn(
+        {
+          priorOpenCapDollars: raw["openCapDollars"] ?? null,
+          openCapDollars: merged.openCapDollars,
+        },
+        "[kalshi-scalper] normalized mandatory open-exposure cap",
+      );
+    }
+    return merged;
   } finally {
     client.release();
   }
@@ -325,13 +355,11 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
     globalBandMax: typeof raw["globalBandMax"] === "number" ? raw["globalBandMax"] : defaults.globalBandMax,
     finalWindowSeconds: typeof raw["finalWindowSeconds"] === "number" ? raw["finalWindowSeconds"] : defaults.finalWindowSeconds,
     budgetDollars: typeof raw["budgetDollars"] === "number" ? raw["budgetDollars"] : defaults.budgetDollars,
-    // Preserve explicit null (null = no cap)
+    // Daily cap remains operator-nullable; open exposure is always finite.
     dailyCapDollars: "dailyCapDollars" in raw
       ? (raw["dailyCapDollars"] === null ? null : typeof raw["dailyCapDollars"] === "number" ? raw["dailyCapDollars"] : defaults.dailyCapDollars)
       : defaults.dailyCapDollars,
-    openCapDollars: "openCapDollars" in raw
-      ? (raw["openCapDollars"] === null ? null : typeof raw["openCapDollars"] === "number" ? raw["openCapDollars"] : defaults.openCapDollars)
-      : defaults.openCapDollars,
+    openCapDollars: normalizeScalpOpenCapDollars(raw["openCapDollars"]),
     freefallGuardEnabled: typeof raw["freefallGuardEnabled"] === "boolean" ? raw["freefallGuardEnabled"] : defaults.freefallGuardEnabled,
     freefallLookbackSeconds: typeof raw["freefallLookbackSeconds"] === "number" ? raw["freefallLookbackSeconds"] : defaults.freefallLookbackSeconds,
     freefallThresholdPct: typeof raw["freefallThresholdPct"] === "number" ? raw["freefallThresholdPct"] : defaults.freefallThresholdPct,
@@ -377,7 +405,8 @@ export interface ClaimAndCapResult {
  *   3. Sum actual daily filled/paper spend + current reserved totals (this new
  *      row is still 0, so it never double-counts itself); and open unsettled
  *      spend + reserved totals.
- *   4. Compare each (total + requestedBudget) against nullable caps.
+ *   4. Compare each (total + requestedBudget) against the nullable daily cap
+ *      and mandatory open cap.
  *      Blocked → UPDATE this reservation status='skipped', reason, reserved_budget=0;
  *      return {claimed:true, allowed:false}.
  *   5. Allowed → UPDATE this reservation reserved_budget=requestedBudget;
@@ -398,10 +427,14 @@ export async function claimReservationAndCap(
   ticker: string,
   requestedBudget: number,
   dailyCapDollars: number | null,
-  openCapDollars: number | null,
+  openCapDollars: number,
   closeTime?: string,
   finalWindowSeconds?: number,
 ): Promise<ClaimAndCapResult> {
+  // Runtime callers compiled against the legacy nullable contract may still
+  // pass null during a rolling deployment. Normalize at the atomic boundary so
+  // malformed input can never restore the old unlimited-exposure behavior.
+  const effectiveOpenCapDollars = normalizeScalpOpenCapDollars(openCapDollars);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -611,12 +644,13 @@ export async function claimReservationAndCap(
     const dailyCommitted = Number(dailyRes.rows[0]?.total ?? 0);
     const openCommitted = Number(openRes.rows[0]?.total ?? 0);
 
-    // Cap comparisons (nullable caps → no limit)
+    // Daily remains nullable. Open exposure is mandatory and normalized before
+    // entering this transaction, including for legacy runtime callers.
     let blockedReason: string | null = null;
     if (dailyCapDollars != null && dailyCommitted + requestedBudget > dailyCapDollars) {
       blockedReason = `daily_cap_exceeded (committed=${dailyCommitted.toFixed(2)} cap=${dailyCapDollars})`;
-    } else if (openCapDollars != null && openCommitted + requestedBudget > openCapDollars) {
-      blockedReason = `open_cap_exceeded (open=${openCommitted.toFixed(2)} cap=${openCapDollars})`;
+    } else if (openCommitted + requestedBudget > effectiveOpenCapDollars) {
+      blockedReason = `open_cap_exceeded (open=${openCommitted.toFixed(2)} cap=${effectiveOpenCapDollars})`;
     }
 
     if (blockedReason) {
@@ -631,7 +665,7 @@ export async function claimReservationAndCap(
         reservedTicker: ticker,
         requestedBudget,
         dailyCapDollars,
-        openCapDollars,
+        openCapDollars: effectiveOpenCapDollars,
         dailyCommittedDollars: dailyCommitted,
         openCommittedDollars: openCommitted,
         skippedAt: new Date().toISOString(),

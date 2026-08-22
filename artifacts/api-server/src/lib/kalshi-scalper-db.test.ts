@@ -9,6 +9,10 @@
 import { describe, it, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { evaluateScalpReservationRetry } from "./kalshi-scalper-policy.ts";
+import {
+  DEFAULT_SCALP_CONFIG,
+  DEFAULT_SCALP_OPEN_CAP_DOLLARS,
+} from "./kalshi-scalper-types.ts";
 
 // Requires BOTH a DATABASE_URL and an explicit opt-in, because the
 // @workspace/db package uses directory ESM imports that the bare
@@ -58,6 +62,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     }>;
   };
   const MODE = "paper" as const; // paper keeps it isolated from any live rows
+  const OPEN_CAP = DEFAULT_SCALP_OPEN_CAP_DOLLARS;
 
   // Remove EVERY DBTEST-* row this suite could have created, scoped to paper mode
   // so it can never touch live/production rows. Orders (child) are deleted before
@@ -98,10 +103,56 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     await cleanupDbTestRows();
   });
 
+  it("normalizes and persists unsafe legacy open caps before returning config", async () => {
+    const c = await pool.connect();
+    const original = await c.query(
+      "SELECT config FROM kalshi_scalp_config WHERE id = 'singleton'",
+    );
+    const hadOriginal = original.rows.length > 0;
+    const originalConfig = original.rows[0]?.["config"];
+    try {
+      for (const unsafeOpenCap of [null, 75, 500]) {
+        const legacyConfig = {
+          ...(hadOriginal && originalConfig && typeof originalConfig === "object"
+            ? originalConfig
+            : DEFAULT_SCALP_CONFIG),
+          openCapDollars: unsafeOpenCap,
+        };
+        await c.query(
+          `INSERT INTO kalshi_scalp_config (id, config, updated_at)
+           VALUES ('singleton', $1, NOW())
+           ON CONFLICT (id) DO UPDATE SET config = $1, updated_at = NOW()`,
+          [JSON.stringify(legacyConfig)],
+        );
+
+        const loaded = await db.loadScalpConfigFromDB();
+        assert.equal(loaded.openCapDollars, OPEN_CAP);
+
+        const persisted = await c.query(
+          "SELECT config FROM kalshi_scalp_config WHERE id = 'singleton'",
+        );
+        const persistedConfig = persisted.rows[0]?.["config"] as Record<string, unknown>;
+        assert.equal(Number(persistedConfig["openCapDollars"]), OPEN_CAP);
+      }
+    } finally {
+      if (hadOriginal) {
+        await c.query(
+          `UPDATE kalshi_scalp_config
+           SET config = $1, updated_at = NOW()
+           WHERE id = 'singleton'`,
+          [JSON.stringify(originalConfig)],
+        );
+      } else {
+        await c.query("DELETE FROM kalshi_scalp_config WHERE id = 'singleton'");
+      }
+      c.release();
+    }
+  });
+
   it("duplicate (mode,symbol,windowKey) is claimed only once", async () => {
     const wk = `DBTEST-dup-${Date.now()}`;
-    const r1 = await db.claimReservationAndCap("id-a-" + wk, MODE, "BTC", wk, "T", 2, null, null);
-    const r2 = await db.claimReservationAndCap("id-b-" + wk, MODE, "BTC", wk, "T", 2, null, null);
+    const r1 = await db.claimReservationAndCap("id-a-" + wk, MODE, "BTC", wk, "T", 2, null, OPEN_CAP);
+    const r2 = await db.claimReservationAndCap("id-b-" + wk, MODE, "BTC", wk, "T", 2, null, OPEN_CAP);
     assert.equal(r1.claimed, true);
     assert.equal(r1.allowed, true);
     assert.equal(r2.claimed, false);
@@ -119,7 +170,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     const results = await Promise.all(
       Array.from({ length: N }, (_v, i) =>
         db.claimReservationAndCap(
-          `id-${base}-${i}`, MODE, "ETH", `${base}-${i}`, "T", budget, dailyCap, null,
+          `id-${base}-${i}`, MODE, "ETH", `${base}-${i}`, "T", budget, dailyCap, OPEN_CAP,
         ),
       ),
     );
@@ -133,7 +184,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 
     // Denied rows persist as 'skipped' with reserved_budget=0 → re-claim still duplicate.
     const reAttempt = await db.claimReservationAndCap(
-      `id-re-${base}`, MODE, "ETH", `${base}-0`, "T", budget, dailyCap, null,
+      `id-re-${base}`, MODE, "ETH", `${base}-0`, "T", budget, dailyCap, OPEN_CAP,
     );
     assert.equal(reAttempt.claimed, false, "re-claiming an existing window must be duplicate");
   });
@@ -147,6 +198,79 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     assert.equal(r1.allowed, true);
     assert.equal(r2.allowed, false);
     assert.ok(r2.reason?.includes("open_cap_exceeded"));
+
+    const c = await pool.connect();
+    try {
+      const denied = await c.query(
+        `SELECT status, reason, reserved_budget, skip_evidence
+         FROM kalshi_scalp_reservations
+         WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "SOL", `${base}-2`],
+      );
+      assert.equal(denied.rows.length, 1, "cap denial must leave one durable reservation");
+      assert.equal(denied.rows[0]?.["status"], "skipped");
+      assert.match(String(denied.rows[0]?.["reason"]), /^open_cap_exceeded/);
+      assert.equal(Number(denied.rows[0]?.["reserved_budget"]), 0);
+
+      const evidence = denied.rows[0]?.["skip_evidence"] as Record<string, unknown>;
+      assert.equal(Number(evidence["requestedBudget"]), budget);
+      assert.equal(Number(evidence["openCapDollars"]), openCap);
+      assert.equal(Number(evidence["openCommittedDollars"]), budget);
+      assert.ok(typeof evidence["skippedAt"] === "string");
+
+      const orders = await c.query(
+        `SELECT COUNT(*)::int AS count
+         FROM kalshi_scalp_orders
+         WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "SOL", `${base}-2`],
+      );
+      assert.equal(Number(orders.rows[0]?.["count"]), 0, "cap denial must not create or submit an order");
+    } finally {
+      c.release();
+    }
+  });
+
+  it("normalizes a legacy null at the atomic claim boundary and denies before any order", async () => {
+    const base = `DBTEST-open-legacy-null-${Date.now()}`;
+    const requestedBudget = OPEN_CAP + 1;
+    const denied = await db.claimReservationAndCap(
+      `id-${base}`,
+      MODE,
+      "SOL",
+      base,
+      "T",
+      requestedBudget,
+      null,
+      null as unknown as number,
+    );
+    assert.equal(denied.claimed, true);
+    assert.equal(denied.allowed, false);
+    assert.match(denied.reason ?? "", /^open_cap_exceeded/);
+    assert.match(denied.reason ?? "", new RegExp(`cap=${OPEN_CAP}`));
+
+    const c = await pool.connect();
+    try {
+      const reservation = await c.query(
+        `SELECT status, reserved_budget, skip_evidence
+         FROM kalshi_scalp_reservations
+         WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "SOL", base],
+      );
+      assert.equal(reservation.rows[0]?.["status"], "skipped");
+      assert.equal(Number(reservation.rows[0]?.["reserved_budget"]), 0);
+      const evidence = reservation.rows[0]?.["skip_evidence"] as Record<string, unknown>;
+      assert.equal(Number(evidence["openCapDollars"]), OPEN_CAP);
+
+      const orders = await c.query(
+        `SELECT COUNT(*)::int AS count
+         FROM kalshi_scalp_orders
+         WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "SOL", base],
+      );
+      assert.equal(Number(orders.rows[0]?.["count"]), 0);
+    } finally {
+      c.release();
+    }
   });
 
   it("releasing reserved budget frees open-cap headroom", async () => {
@@ -164,11 +288,11 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 
   it("atomically re-claims a transient no-order skip after its cooldown", async () => {
     const wk = `DBTEST-rearm-${Date.now()}`;
-    const first = await db.claimReservationAndCap(`id-${wk}`, MODE, "BTC", wk, "T", 2, null, null);
+    const first = await db.claimReservationAndCap(`id-${wk}`, MODE, "BTC", wk, "T", 2, null, OPEN_CAP);
     assert.equal(first.allowed, true);
     await db.updateReservationStatus(MODE, "BTC", wk, "skipped", "final_quote_outside_band", true);
 
-    const cooling = await db.claimReservationAndCap(`id-cooling-${wk}`, MODE, "BTC", wk, "T", 2, null, null);
+    const cooling = await db.claimReservationAndCap(`id-cooling-${wk}`, MODE, "BTC", wk, "T", 2, null, OPEN_CAP);
     assert.equal(cooling.claimed, false);
     assert.equal(cooling.reason, "retry_cooldown");
     assert.ok((cooling.retryAfterMs ?? 0) > 0);
@@ -184,7 +308,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
       c.release();
     }
 
-    const retried = await db.claimReservationAndCap(`id-retry-${wk}`, MODE, "BTC", wk, "T", 2, null, null);
+    const retried = await db.claimReservationAndCap(`id-retry-${wk}`, MODE, "BTC", wk, "T", 2, null, OPEN_CAP);
     assert.equal(retried.claimed, true);
     assert.equal(retried.allowed, true);
     assert.equal(retried.reservationId, first.reservationId);
@@ -193,7 +317,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
   it("persists cap denial on the existing durable row during a re-claim", async () => {
     const wk = `DBTEST-rearm-cap-${Date.now()}`;
     const first = await db.claimReservationAndCap(
-      `id-${wk}`, MODE, "BTC", wk, "T", 2, null, null,
+      `id-${wk}`, MODE, "BTC", wk, "T", 2, null, OPEN_CAP,
     );
     assert.equal(first.allowed, true);
     await db.updateReservationStatus(
@@ -213,7 +337,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     }
 
     const denied = await db.claimReservationAndCap(
-      `new-id-${wk}`, MODE, "BTC", wk, "T", 2, 1, null,
+      `new-id-${wk}`, MODE, "BTC", wk, "T", 2, 1, OPEN_CAP,
     );
     assert.equal(denied.claimed, true);
     assert.equal(denied.allowed, false);
@@ -239,7 +363,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 
   it("persists a restart-safe maximum of three zero-fill IOC submissions", async () => {
     const wk = `DBTEST-zero-${Date.now()}`;
-    let claim = await db.claimReservationAndCap(`id-${wk}`, MODE, "ETH", wk, "T", 2, null, null);
+    let claim = await db.claimReservationAndCap(`id-${wk}`, MODE, "ETH", wk, "T", 2, null, OPEN_CAP);
     assert.equal(claim.allowed, true);
 
     for (let submission = 1; submission <= 3; submission++) {
@@ -299,7 +423,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
       }
 
       const next = await db.claimReservationAndCap(
-        `id-next-${submission}-${wk}`, MODE, "ETH", wk, "T", 2, null, null,
+        `id-next-${submission}-${wk}`, MODE, "ETH", wk, "T", 2, null, OPEN_CAP,
       );
       if (submission < 3) {
         assert.equal(next.claimed, true);
@@ -320,7 +444,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
   it("reconciles one uncertain order atomically and releases its reservation only once", async () => {
     const wk = `DBTEST-reconcile-${Date.now()}`;
     const orderRecordId = `order-${wk}`;
-    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "GOLD", wk, "T", 2, null, null);
+    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "GOLD", wk, "T", 2, null, OPEN_CAP);
     assert.equal(claim.allowed, true);
     await db.insertScalpOrderIntent({
       id: orderRecordId,
@@ -413,7 +537,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 
   it("keeps the reservation held until every unresolved sibling order is reconciled", async () => {
     const wk = `DBTEST-siblings-${Date.now()}`;
-    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "SILVER", wk, "T", 2, null, null);
+    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "SILVER", wk, "T", 2, null, OPEN_CAP);
     assert.equal(claim.allowed, true);
     for (const suffix of ["a", "b"]) {
       await db.insertScalpOrderIntent({
@@ -494,7 +618,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 
   it("keeps the aggregate reservation filled when a partial-fill sibling resolves before a zero-fill sibling", async () => {
     const wk = `DBTEST-mixed-siblings-${Date.now()}`;
-    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "GOLD", wk, "T", 2, null, null);
+    const claim = await db.claimReservationAndCap(`reservation-${wk}`, MODE, "GOLD", wk, "T", 2, null, OPEN_CAP);
     assert.equal(claim.allowed, true);
     for (const suffix of ["partial", "zero"]) {
       await db.insertScalpOrderIntent({
@@ -832,6 +956,7 @@ describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS
   const MODE = "paper" as const;
   const SYMBOL = "BTC";
   const TICKER = "BTC-TICKER";
+  const OPEN_CAP = DEFAULT_SCALP_OPEN_CAP_DOLLARS;
 
   before(async () => {
     db = await import("./kalshi-scalper-db.ts");
@@ -843,7 +968,7 @@ describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS
     const closeTime = new Date(Date.now() - 10_000).toISOString();
     const result = await db.claimReservationAndCap(
       `id-past-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
-      2, null, null,
+      2, null, OPEN_CAP,
       closeTime, 120,
     );
     assert.equal(result.claimed, false, "Should not claim when window is expired");
@@ -869,7 +994,7 @@ describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS
     const closeTime = new Date(Date.now() + 300_000).toISOString();
     const result = await db.claimReservationAndCap(
       `id-far-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
-      2, null, null,
+      2, null, OPEN_CAP,
       closeTime, 45,
     );
     assert.equal(result.claimed, false, "Should not claim when outside 45 s window");
@@ -893,7 +1018,7 @@ describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS
     const windowKey = `DBTEST-windowbnd-retry-${Date.now()}`;
     const first = await db.claimReservationAndCap(
       `id-retry-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
-      0, null, null,
+      0, null, OPEN_CAP,
     );
     assert.equal(first.claimed, true);
     await db.updateReservationStatus(
@@ -912,7 +1037,7 @@ describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS
     const expiredClose = new Date(Date.now() - 1_000).toISOString();
     const denied = await db.claimReservationAndCap(
       `id-retry-second-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
-      0, null, null,
+      0, null, OPEN_CAP,
       expiredClose, 45,
     );
     assert.equal(denied.claimed, false);
@@ -949,7 +1074,7 @@ describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS
     // The next exact minute boundary is at most 60 seconds away, inside 120 s.
     const result = await db.claimReservationAndCap(
       `id-ok-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
-      0, null, null,
+      0, null, OPEN_CAP,
       closeTime, 120,
     );
     // Budget = 0 means cap check always passes; should be claimed and allowed.
@@ -970,7 +1095,7 @@ describe("claimReservationAndCap outside_window_at_claim", { skip: !RUN_DB_TESTS
     // No closeTime supplied → bypass final-window enforcement (backward compat).
     const result = await db.claimReservationAndCap(
       `id-noctrl-${Date.now()}`, MODE, SYMBOL, windowKey, TICKER,
-      0, null, null,
+      0, null, OPEN_CAP,
       // No closeTime / finalWindowSeconds passed
     );
     assert.equal(result.claimed, true, "Should claim when no window enforcement args supplied");
