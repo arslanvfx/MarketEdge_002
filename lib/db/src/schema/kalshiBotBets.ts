@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, numeric, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, jsonb, numeric, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   id: text("id").primaryKey(),
@@ -9,14 +9,14 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   action: text("action").notNull(),         // "bet" | "skip" | "exit" | "late_recovery_exit" | "expired"
   mode: text("mode").notNull(),             // "paper" | "live"
   signals: jsonb("signals"),                // full reasoning snapshot at decision time
-  entryPrice: numeric("entry_price", { precision: 8, scale: 4 }),
-  exitPrice: numeric("exit_price", { precision: 8, scale: 4 }),
-  contractCount: integer("contract_count"),
-  betAmount: numeric("bet_amount", { precision: 10, scale: 4 }),
-  pnl: numeric("pnl", { precision: 10, scale: 4 }),
+  entryPrice: numeric("entry_price", { precision: 12, scale: 8 }),
+  exitPrice: numeric("exit_price", { precision: 12, scale: 8 }),
+  contractCount: numeric("contract_count", { precision: 12, scale: 2, mode: "number" }),
+  betAmount: numeric("bet_amount", { precision: 16, scale: 8 }),
+  pnl: numeric("pnl", { precision: 16, scale: 8 }),
   exitReason: text("exit_reason"),
   phase2Activated: boolean("phase2_activated").default(false),
-  phase2RecoveredAmount: numeric("phase2_recovered_amount", { precision: 10, scale: 4 }),
+  phase2RecoveredAmount: numeric("phase2_recovered_amount", { precision: 16, scale: 8 }),
   outcome: text("outcome"),                 // "win" | "loss" | "push" | null
   kalshiTarget: numeric("kalshi_target", { precision: 16, scale: 6 }),
   cryptoPriceAtEntry: numeric("crypto_price_at_entry", { precision: 16, scale: 2 }),
@@ -37,7 +37,7 @@ export const kalshiBotBetsTable = pgTable("kalshi_bot_bets", {
   source: text("source"),
   // Kalshi YES contract price (0–1) at the moment the bet decision was made.
   // Populated for all bets; especially useful for conviction mode threshold analysis.
-  entryYesPrice: numeric("entry_yes_price", { precision: 8, scale: 4 }),
+  entryYesPrice: numeric("entry_yes_price", { precision: 12, scale: 8 }),
   // True when the stability gate + probability roll upgraded this bet to max size.
   // Null / false for regular-sized bets and all non-bet rows.
   isMaxBet: boolean("is_max_bet").default(false),

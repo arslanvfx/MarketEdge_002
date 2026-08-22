@@ -164,7 +164,7 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
 
   async function readIntent(clientOrderId: string): Promise<{
     status: string;
-    filled_count: number | null;
+    filled_count: string | null;
     avg_fill_price: string | null;
   } | null> {
     const c = await pool.connect();
@@ -176,7 +176,7 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
       );
       return (r.rows[0] as {
         status: string;
-        filled_count: number | null;
+        filled_count: string | null;
         avg_fill_price: string | null;
       }) ?? null;
     } finally {
@@ -197,7 +197,7 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     const after = await readIntent("cid-recon1");
     assert.ok(after);
     assert.equal(after!.status, "filled");
-    assert.equal(after!.filled_count, 4, "contract_count copied as fill metadata");
+    assert.equal(Number(after!.filled_count), 4, "contract_count copied as fill metadata");
     assert.equal(Number(after!.avg_fill_price), 0.63, "entry_price copied as fill metadata");
     // A restart cannot duplicate confirmed exposure — same-window re-claim denied.
     assert.equal((await mod.claimRegularOrderIntent(key("cid-recon2", wk))).claimed, false);

@@ -1,7 +1,7 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save, Thermometer, Waves, Crosshair, Timer, Users } from "lucide-react";
 import React from "react";
 import type { HistoryRecord } from "./types";
-import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtDuration, wkToEst } from "./utils";
+import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtContracts, fmtDuration, wkToEst } from "./utils";
 
 const HIST_PAGE_SIZE = 20;
 const SCALPER_CARD_CLASS = "border-amber-400/40 bg-[linear-gradient(135deg,#0c0f12_0%,#171716_52%,#634515_100%)] text-amber-50 ring-1 ring-inset ring-amber-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_0_22px_rgba(245,158,11,0.16),0_14px_38px_rgba(0,0,0,0.35)]";
@@ -357,7 +357,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/40"}`}>
                          <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>{isScalper && <Users className="h-3 w-3 text-amber-300" />}Size</div>
                         <div className="text-xs font-semibold">
-                          {r.contractCount ?? "—"} @ {(() => {
+                          {fmtContracts(r.contractCount)} @ {(() => {
                             const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
                             if (ep == null) return r.betAmount ? fmt$(parseFloat(r.betAmount)) : "—";
                             const costPerContract = r.direction === "no" ? 1 - ep : ep;

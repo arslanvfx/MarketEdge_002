@@ -14,6 +14,17 @@
 
 import crypto from "crypto";
 import { logger } from "./logger.ts";
+import {
+  formatRegularFixedPointCount,
+  parseRegularFixedPointCount,
+  regularCountHundredths,
+} from "./kalshi-regular-fixed-point.ts";
+
+export {
+  formatRegularFixedPointCount,
+  parseRegularFixedPointCount,
+  regularCountHundredths,
+} from "./kalshi-regular-fixed-point.ts";
 
 const KALSHI_TRADE_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
@@ -100,6 +111,48 @@ async function kalshiFetch<T>(
   }
 }
 
+/**
+ * Read every page from one authenticated Kalshi portfolio history endpoint.
+ * This is a narrow read-only primitive for regular-bot reconciliation; it
+ * never submits, cancels, or mutates an exchange order.
+ */
+export async function fetchKalshiAuthenticatedHistoryPages(
+  path: "/portfolio/orders" | "/historical/orders" | "/portfolio/fills" | "/historical/fills",
+  params: Record<string, string | number | undefined>,
+  listKey: "orders" | "fills",
+): Promise<Array<Record<string, unknown>>> {
+  let cursor: string | undefined;
+  const out: Array<Record<string, unknown>> = [];
+  for (let page = 0; page < 100; page++) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value != null) query.set(key, String(value));
+    }
+    query.set("limit", "100");
+    if (cursor) query.set("cursor", cursor);
+    const data = await kalshiFetch<Record<string, unknown>>(
+      "GET",
+      `${path}?${query.toString()}`,
+      undefined,
+      10_000,
+    );
+    const rows = data[listKey];
+    if (!Array.isArray(rows)) {
+      throw new Error(`Kalshi ${path} response missing ${listKey} array`);
+    }
+    for (const row of rows) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) {
+        throw new Error(`Kalshi ${path} returned malformed ${listKey} evidence`);
+      }
+      out.push(row as Record<string, unknown>);
+    }
+    const next = typeof data["cursor"] === "string" ? data["cursor"] : "";
+    if (!next) return out;
+    cursor = next;
+  }
+  throw new Error(`Kalshi ${path} pagination exceeded 100 pages`);
+}
+
 // ---------------------------------------------------------------------------
 // Market Settlement
 // ---------------------------------------------------------------------------
@@ -136,7 +189,7 @@ export async function fetchKalshiMarketResult(ticker: string): Promise<KalshiMar
     return {
       result,
       status: typeof m.status === "string" ? m.status : null,
-      floorStrike: typeof m.floor_strike === "number" ? m.floor_strike : null,
+      floorStrike: Number.isFinite(Number(m.floor_strike)) ? Number(m.floor_strike) : null,
     };
   } catch {
     return { result: null, status: null, floorStrike: null };
@@ -391,7 +444,7 @@ export interface ParsedRegularOrder {
   outcome: RegularOrderOutcome;
   reason: string;             // machine-readable reason code
   orderId: string | null;    // non-empty string only when trusted
-  filledCount: number | null; // validated nonnegative integer, else null
+  filledCount: number | null; // validated nonnegative centi-contract count, else null
   avgPrice: number | null;    // validated (0,1) YES-side fraction, else null
 }
 
@@ -420,25 +473,12 @@ export function isUncertainOrderError(err: unknown): err is UncertainOrderError 
 }
 
 /**
- * Parse a value Kalshi accepts as a numeric count field. Accepts a finite
- * nonnegative integer number OR a canonical integer string (optionally with
- * trailing ".0"/".00" fixed-point zeros). Rejects null/empty/whitespace/
- * non-numeric/NaN/Infinity/negative/fractional. Returns int or null.
+ * Backward-compatible export retained for callers/tests that used the old name.
+ * The exchange now returns FixedPointCount values with up to two fractional
+ * digits, so valid centi-contract quantities are intentionally accepted.
  */
 export function parseRegularFixedPointInteger(v: unknown): number | null {
-  if (typeof v === "number") {
-    if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) return null;
-    return v;
-  }
-  if (typeof v === "string") {
-    if (v.length === 0) return null;
-    const m = /^(\d+)(?:\.(0+))?$/.exec(v);
-    if (!m) return null;
-    const n = Number(m[1]);
-    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return null;
-    return n;
-  }
-  return null;
+  return parseRegularFixedPointCount(v);
 }
 
 /**
@@ -465,12 +505,11 @@ export function parseRegularFixedPointNumber(v: unknown): number | null {
  * Fail-closed contract:
  *   - top-level must be a plain object (reject null/array/primitive)
  *   - order_id must be a NON-EMPTY string for any trusted outcome
- *   - fill_count must be PRESENT and a finite nonnegative INTEGER (number or
- *     canonical integer string incl. trailing-zero fixed-point); missing/null/
- *     empty/nonnumeric/NaN/Infinity/negative/fractional → unknown
- *   - filledCount must be <= requestedCount; requestedCount must be a positive int
+ *   - fill_count/fill_count_fp must be PRESENT and a finite nonnegative
+ *     FixedPointCount at centi-contract precision; malformed values → unknown
+ *   - filledCount must be <= requestedCount; requestedCount must be positive
  *   - validated 0 → zero_fill (avg may be absent/null)
- *   - positive integral fill → average_fill_price must be present, parseable,
+ *   - positive fill → average_fill_price(_dollars) must be present, parseable,
  *     finite, and strictly inside (0,1); else unknown (CONFIRMED EXPOSURE at an
  *     indeterminate price — never zero-fill it, never fall back to cached price)
  */
@@ -486,7 +525,8 @@ export function parseRegularOrderResponse(
     avgPrice: null,
   });
 
-  if (!Number.isFinite(requestedCount) || !Number.isInteger(requestedCount) || requestedCount <= 0) {
+  const requestedUnits = regularCountHundredths(requestedCount);
+  if (requestedUnits == null || requestedUnits <= 0n) {
     return fail("bad_requested_count");
   }
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -500,19 +540,40 @@ export function parseRegularOrderResponse(
   }
   const orderId = rawOrderId;
 
-  const rawFill = obj["fill_count"];
-  if (rawFill == null) return fail("missing_fill_count");
-  const filledCount = parseRegularFixedPointInteger(rawFill);
+  const rawFillFp = obj["fill_count_fp"];
+  const rawFillLegacy = obj["fill_count"];
+  if (rawFillFp == null && rawFillLegacy == null) return fail("missing_fill_count");
+  const fillFpUnits = rawFillFp == null ? null : regularCountHundredths(rawFillFp);
+  const fillLegacyUnits = rawFillLegacy == null ? null : regularCountHundredths(rawFillLegacy);
+  if (
+    (rawFillFp != null && fillFpUnits == null)
+    || (rawFillLegacy != null && fillLegacyUnits == null)
+  ) return fail("unparseable_fill_count");
+  if (fillFpUnits != null && fillLegacyUnits != null && fillFpUnits !== fillLegacyUnits) {
+    return fail("conflicting_fill_count");
+  }
+  const filledUnits = fillFpUnits ?? fillLegacyUnits;
+  const filledCount = filledUnits == null ? null : Number(filledUnits) / 100;
   if (filledCount == null) return fail("unparseable_fill_count");
-  if (filledCount > requestedCount) return fail("overfill_count");
+  if (filledUnits == null || filledUnits > requestedUnits) return fail("overfill_count");
 
   if (filledCount === 0) {
     return { outcome: "zero_fill", reason: "zero_fill", orderId, filledCount: 0, avgPrice: null };
   }
 
-  const rawAvg = obj["average_fill_price"];
-  if (rawAvg == null) return fail("missing_avg_price");
-  const avg = parseRegularFixedPointNumber(rawAvg);
+  const rawAvgDollars = obj["average_fill_price_dollars"];
+  const rawAvgLegacy = obj["average_fill_price"];
+  if (rawAvgDollars == null && rawAvgLegacy == null) return fail("missing_avg_price");
+  const avgDollars = rawAvgDollars == null ? null : parseRegularFixedPointNumber(rawAvgDollars);
+  const avgLegacy = rawAvgLegacy == null ? null : parseRegularFixedPointNumber(rawAvgLegacy);
+  if (
+    (rawAvgDollars != null && avgDollars == null)
+    || (rawAvgLegacy != null && avgLegacy == null)
+  ) return fail("invalid_avg_price");
+  if (avgDollars != null && avgLegacy != null && Math.abs(avgDollars - avgLegacy) > 1e-9) {
+    return fail("conflicting_avg_price");
+  }
+  const avg = avgDollars ?? avgLegacy;
   if (avg == null || avg <= 0 || avg >= 1) return fail("invalid_avg_price");
 
   return { outcome: "confirmed_fill", reason: "confirmed_fill", orderId, filledCount, avgPrice: avg };
@@ -585,6 +646,11 @@ export function computeMarketableLimitPrice(
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
   if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
+  const formattedCount = formatRegularFixedPointCount(params.count);
+  const requestedUnits = regularCountHundredths(params.count);
+  if (formattedCount == null || requestedUnits == null || requestedUnits <= 0n) {
+    throw new Error("Kalshi order count must be a positive FixedPointCount with at most two decimal places");
+  }
 
   // Kalshi Trade API v2: POST /portfolio/events/orders  (CreateOrderV2).
   // The legacy /portfolio/orders path returns 410 deprecated_v1_order_endpoint.
@@ -639,7 +705,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     client_order_id: clientOrderId,
     ticker: params.ticker,
     side: bookSide, // BookSide: "bid" | "ask"
-    count: String(params.count), // FixedPointCount string
+    count: formattedCount, // FixedPointCount string, exact to centi-contracts
     price, // required in v2 (YES-side)
     // Kalshi only accepts "fill_or_kill" and "immediate_or_cancel".
     // "gtc" and "good_till_cancelled" both return 400 (oneof tag failure).
@@ -790,7 +856,7 @@ export async function getOrder(
     };
     const o = data.order ?? {};
     // Number() handles both numeric and string fields (Kalshi type drift)
-    const filled = side === "yes" ? Number(o.yes_count ?? 0) : Number(o.no_count ?? 0);
+    const filled = parseRegularFixedPointCount(side === "yes" ? o.yes_count ?? 0 : o.no_count ?? 0);
     const raw = (o.status ?? "").toLowerCase();
     const status: OrderStatus =
       raw.includes("rest")                         ? "resting"   :
@@ -798,7 +864,7 @@ export async function getOrder(
       raw.includes("cancel")                       ? "cancelled" : "unknown";
     const avgRaw = o.avg_price != null ? Number(o.avg_price) : null;
     return {
-      filledCount: Number.isFinite(filled) ? Math.round(filled) : 0,
+      filledCount: filled ?? 0,
       status,
       avgPrice: avgRaw != null && Number.isFinite(avgRaw) ? avgRaw / 100 : null,
     };

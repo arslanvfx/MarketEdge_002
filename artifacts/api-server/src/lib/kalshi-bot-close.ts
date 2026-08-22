@@ -31,6 +31,7 @@ import {
   markRegularExitIntentUnknown,
   resolveRegularExitIntent,
 } from "./kalshi-regular-order-intent";
+import { regularCountsEqual } from "./kalshi-regular-fixed-point";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
@@ -118,7 +119,7 @@ export async function closePosition(
         });
         throw new Error("live exit confirmed zero fill");
       }
-      if (result.filledCount !== pos.contractCount || result.avgPrice == null) {
+      if (!regularCountsEqual(result.filledCount, pos.contractCount) || result.avgPrice == null) {
         throw new UncertainOrderError(exitClientOrderId, "exit_fill_not_complete");
       }
       fillPrice = result.avgPrice;

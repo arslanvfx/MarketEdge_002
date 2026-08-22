@@ -12,7 +12,7 @@ import {
 } from "./kalshi-trader.ts";
 
 // ---------------------------------------------------------------------------
-// parseRegularFixedPointInteger — count field
+// FixedPointCount — count field
 // ---------------------------------------------------------------------------
 
 test("count: finite nonnegative integer number accepted", () => {
@@ -20,15 +20,16 @@ test("count: finite nonnegative integer number accepted", () => {
   assert.equal(parseRegularFixedPointInteger(5), 5);
 });
 
-test("count: canonical integer string accepted (incl. fixed-point trailing zeros)", () => {
+test("count: canonical values through centi-contract precision are accepted", () => {
   assert.equal(parseRegularFixedPointInteger("5"), 5);
   assert.equal(parseRegularFixedPointInteger("5.0"), 5);
   assert.equal(parseRegularFixedPointInteger("12.00"), 12);
+  assert.equal(parseRegularFixedPointInteger("3.60"), 3.6);
+  assert.equal(parseRegularFixedPointInteger("0.01"), 0.01);
+  assert.equal(parseRegularFixedPointInteger(1.5), 1.5);
 });
 
-test("count CRITICAL: fractional / negative / NaN / Infinity / malformed → null (never coerced to 0)", () => {
-  assert.equal(parseRegularFixedPointInteger("1.5"), null);
-  assert.equal(parseRegularFixedPointInteger(1.5), null);
+test("count CRITICAL: over-precision / negative / NaN / Infinity / malformed → null (never coerced to 0)", () => {
   assert.equal(parseRegularFixedPointInteger(-1), null);
   assert.equal(parseRegularFixedPointInteger("-1"), null);
   assert.equal(parseRegularFixedPointInteger(NaN), null);
@@ -38,7 +39,8 @@ test("count CRITICAL: fractional / negative / NaN / Infinity / malformed → nul
   assert.equal(parseRegularFixedPointInteger(""), null);
   assert.equal(parseRegularFixedPointInteger(null), null);
   assert.equal(parseRegularFixedPointInteger(undefined), null);
-  assert.equal(parseRegularFixedPointInteger("5.1"), null);
+  assert.equal(parseRegularFixedPointInteger("5.123"), null);
+  assert.equal(parseRegularFixedPointInteger(1.005), null);
   assert.equal(parseRegularFixedPointInteger("1e3"), null); // no exponents
   assert.equal(parseRegularFixedPointInteger("0x5"), null);
 });
@@ -58,13 +60,13 @@ test("price: finite number and canonical numeric string accepted; malformed → 
 // parseRegularOrderResponse — strict, fail-closed discriminated outcome
 // ---------------------------------------------------------------------------
 
-test("confirmed_fill: positive integral fill with finite (0,1) price", () => {
+test("confirmed_fill: positive fixed-point fill with finite (0,1) price", () => {
   const r = parseRegularOrderResponse(
-    { order_id: "o1", fill_count: "5", average_fill_price: "0.88" },
+    { order_id: "o1", fill_count_fp: "3.60", average_fill_price_dollars: "0.88" },
     5,
   );
   assert.equal(r.outcome, "confirmed_fill");
-  assert.equal(r.filledCount, 5);
+  assert.equal(r.filledCount, 3.6);
   assert.equal(r.avgPrice, 0.88);
   assert.equal(r.orderId, "o1");
 });
@@ -78,12 +80,23 @@ test("zero_fill: validated integer fill_count === 0 (avg may be absent)", () => 
 
 test("CRITICAL: malformed fill_count → unknown, NOT zero", () => {
   const r = parseRegularOrderResponse(
-    { order_id: "o1", fill_count: "1.5", average_fill_price: "0.88" },
+    { order_id: "o1", fill_count: "1.555", average_fill_price: "0.88" },
     5,
   );
   assert.equal(r.outcome, "unknown");
   assert.equal(r.reason, "unparseable_fill_count");
   assert.equal(r.filledCount, null);
+});
+
+test("CRITICAL: conflicting modern and legacy fill counts stay unknown", () => {
+  const result = parseRegularOrderResponse({
+    order_id: "o1",
+    fill_count_fp: "3.60",
+    fill_count: "4",
+    average_fill_price_dollars: "0.15",
+  }, 4);
+  assert.equal(result.outcome, "unknown");
+  assert.equal(result.reason, "conflicting_fill_count");
 });
 
 test("CRITICAL: missing fill_count → unknown (never coerced to zero)", () => {
@@ -131,7 +144,7 @@ test("non-object / null / array response → unknown", () => {
 
 test("bad requestedCount → unknown (fail closed)", () => {
   assert.equal(parseRegularOrderResponse({ order_id: "o1", fill_count: "0" }, 0).reason, "bad_requested_count");
-  assert.equal(parseRegularOrderResponse({ order_id: "o1", fill_count: "0" }, 1.5).reason, "bad_requested_count");
+  assert.equal(parseRegularOrderResponse({ order_id: "o1", fill_count: "0" }, 1.555).reason, "bad_requested_count");
 });
 
 // ---------------------------------------------------------------------------
@@ -191,7 +204,7 @@ test("placeOrder: zero fill returns filledCount 0, avgPrice null", withEnvAndFet
 ));
 
 test("placeOrder CRITICAL: malformed fill_count throws UncertainOrderError (not zero fill)", withEnvAndFetch(
-  async () => jsonResponse({ order_id: "ok3", fill_count: "1.5" }),
+  async () => jsonResponse({ order_id: "ok3", fill_count: "1.555", average_fill_price: "0.5" }),
   async () => {
     await assert.rejects(placeOrder(BASE), (err: unknown) => {
       assert.ok(isUncertainOrderError(err), "must be UncertainOrderError");

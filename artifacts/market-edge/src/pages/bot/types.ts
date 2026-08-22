@@ -2,6 +2,21 @@
 
 export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
 
+export interface RegularUnresolvedIntent {
+  clientOrderId: string;
+  status: "reserved" | "unknown";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  side: "yes" | "no";
+  requestedCount: number;
+  limitPrice: number | null;
+  reason: string | null;
+  reconciliationReason: string | null;
+  createdAt: string;
+  lastReconciledAt: string | null;
+}
+
 export interface QuietHoursV2 {
   enabled: boolean;
 

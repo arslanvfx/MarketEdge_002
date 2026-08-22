@@ -1,6 +1,6 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
 import type { OpenPosition } from "./types";
-import { fmt$, fmtPct, fmtCrypto, wkToEst, GUARD_LABELS } from "./utils";
+import { fmt$, fmtPct, fmtCrypto, fmtContracts, wkToEst, GUARD_LABELS } from "./utils";
 
 interface ActivePositionsProps {
   openPosList: OpenPosition[];
@@ -122,7 +122,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                     { label: `${pos.direction.toUpperCase()} Fill`, value: fmtPct(winningContractCost) },
                     { label: "YES Fill", value: fmtPct(pos.entryYesPrice) },
                     { label: "NO Fill", value: fmtPct(1 - pos.entryYesPrice) },
-                    { label: "Contracts Filled", value: String(pos.contractCount) },
+                    { label: "Contracts Filled", value: fmtContracts(pos.contractCount) },
                     { label: "Spend", value: fmt$(pos.betAmount) },
                     { label: "Ticker", value: pos.ticker },
                     { label: "Window", value: wkToEst(pos.windowKey) + " EST" },
@@ -133,7 +133,7 @@ export function ActivePositions({ openPosList, closeManualError, closingManualSy
                     { label: "Entry No%", value: fmtPct(1 - pos.entryYesPrice) },
                     { label: "Current Yes%", value: fmtPct(pos.currentYesPrice) },
                     { label: "Current No%", value: pos.currentYesPrice != null ? fmtPct(1 - pos.currentYesPrice) : "—" },
-                    { label: "Contracts", value: String(pos.contractCount) },
+                    { label: "Contracts", value: fmtContracts(pos.contractCount) },
                     { label: "Bet Size", value: fmt$(pos.betAmount) },
                     { label: "Ticker", value: pos.ticker },
                     { label: "Window", value: wkToEst(pos.windowKey) + " EST" },

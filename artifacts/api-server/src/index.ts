@@ -17,6 +17,7 @@ import { alpacaConfigured } from "./lib/stock/alpaca";
 import { initAiSpend } from "./lib/ai-spend";
 import { scheduleAtTopOfEveryUtcHour } from "./lib/kalshi-quiet-hours-scheduler";
 import { reconcileReservedRegularIntents } from "./lib/kalshi-regular-order-intent";
+import { runRegularIntentReconciliationPass } from "./lib/kalshi-regular-order-reconcile";
 
 const rawPort = process.env["PORT"];
 
@@ -146,14 +147,15 @@ async function runStartupMigrations(): Promise<void> {
         action                   TEXT NOT NULL,
         mode                     TEXT NOT NULL,
         signals                  JSONB,
-        entry_price              NUMERIC(8,4),
-        exit_price               NUMERIC(8,4),
-        contract_count           INTEGER,
-        bet_amount               NUMERIC(10,4),
-        pnl                      NUMERIC(10,4),
+        entry_price              NUMERIC(12,8),
+        exit_price               NUMERIC(12,8),
+        entry_yes_price          NUMERIC(12,8),
+        contract_count           NUMERIC(12,2),
+        bet_amount               NUMERIC(16,8),
+        pnl                      NUMERIC(16,8),
         exit_reason              TEXT,
         phase2_activated         BOOLEAN DEFAULT FALSE,
-        phase2_recovered_amount  NUMERIC(10,4),
+        phase2_recovered_amount  NUMERIC(16,8),
         outcome                  TEXT,
         kalshi_target            NUMERIC(16,6),
         created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -217,6 +219,22 @@ async function runStartupMigrations(): Promise<void> {
     await client.query(`
       ALTER TABLE kalshi_bot_bets
         ADD COLUMN IF NOT EXISTS is_max_bet BOOLEAN DEFAULT FALSE
+    `);
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ADD COLUMN IF NOT EXISTS entry_yes_price NUMERIC(12,8)
+    `);
+    // Kalshi FixedPointCount supports centi-contract fills. Preserve those
+    // quantities and the resulting weighted prices/costs without rounding.
+    await client.query(`
+      ALTER TABLE kalshi_bot_bets
+        ALTER COLUMN contract_count TYPE NUMERIC(12,2) USING contract_count::numeric,
+        ALTER COLUMN entry_price TYPE NUMERIC(12,8) USING entry_price::numeric,
+        ALTER COLUMN exit_price TYPE NUMERIC(12,8) USING exit_price::numeric,
+        ALTER COLUMN entry_yes_price TYPE NUMERIC(12,8) USING entry_yes_price::numeric,
+        ALTER COLUMN bet_amount TYPE NUMERIC(16,8) USING bet_amount::numeric,
+        ALTER COLUMN pnl TYPE NUMERIC(16,8) USING pnl::numeric,
+        ALTER COLUMN phase2_recovered_amount TYPE NUMERIC(16,8) USING phase2_recovered_amount::numeric
     `);
   } finally {
     client.release();
@@ -516,14 +534,20 @@ app.listen(port, (err) => {
       // proved durable only once its intent row is status='filled'; a prior
       // scoping bug left confirmed fills stranded at status='reserved'. Repair
       // any such rows once at startup (after migrations + state load), then poll
-      // at a low frequency so a restart or a mid-flight crash cannot leave a
-      // symbol/window blocked indefinitely. Fail-closed 'unknown' rows and
-      // unmatched reserved rows are left untouched.
+      // at a low frequency. Local repair remains restricted to matching bet
+      // rows; the separate exchange-backed pass below handles unresolved rows
+      // only with exact authenticated order/fill evidence.
       await reconcileReservedRegularIntents().catch((err) =>
         logger.warn({ err }, "[kalshi-regular-intent] startup reconciliation failed (non-fatal)"),
       );
+      await runRegularIntentReconciliationPass({ minAgeMs: 30_000, limit: 20 }).catch((err) =>
+        logger.warn({ err }, "[kalshi-regular-intent] startup exchange reconciliation failed (non-fatal)"),
+      );
       setInterval(() => {
-        reconcileReservedRegularIntents().catch((err) =>
+        void (async () => {
+          await reconcileReservedRegularIntents();
+          await runRegularIntentReconciliationPass({ minAgeMs: 30_000, limit: 20 });
+        })().catch((err) =>
           logger.warn({ err }, "[kalshi-regular-intent] periodic reconciliation failed (non-fatal)"),
         );
       }, 5 * 60_000);

@@ -16,3 +16,9 @@ description: Fail-closed rules for regular Kalshi entry and exit submissions whe
 **Why:** Confirmed fills can be locally durable even if intent finalization fails, but a loose match can misclassify unrelated manual activity and release a reservation whose exchange outcome is still uncertain.
 
 **Price rule:** Enforce known acceptable quotes immediately before POST and treat a fill that contradicts the submitted limit as unknown. A legitimate buy-limit price improvement below an entry band is held; never immediately sell it merely for being cheaper than the strategy’s entry floor.
+
+**Exchange recovery rule:** Resolve an unknown regular intent only from fully paginated authenticated history with one exact economic match and internally consistent terminal order/fill evidence. Conflicting or incomplete evidence remains unresolved.
+
+**Why:** Kalshi can return valid fractional quantities such as `3.60`, and current and historical endpoints can overlap. Integer coercion hides real fills, while loose matching or duplicate evidence can fabricate exposure.
+
+**How to apply:** Repeated evidence may be collapsed only when it agrees. Any disagreement in identity, quantity, price, status, or settlement accounting must fail closed rather than choosing one source.

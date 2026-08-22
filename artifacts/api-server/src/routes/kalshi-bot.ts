@@ -42,6 +42,11 @@ import { getKalshiCachedData } from "../lib/crypto-kalshi";
 import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow, convictionDirectionGuardBlockedMap, type ConvictionDirectionBlockInfo } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
+import {
+  isValidRegularClientOrderId,
+  listUnresolvedRegularIntents,
+  reconcileRegularIntent,
+} from "../lib/kalshi-regular-order-reconcile";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -576,6 +581,39 @@ router.get("/crypto/bot/status", (_req, res) => {
       minRequired: 30,
     };
     res.json({ ...getBotState(), mlStatus, coinStability: Object.fromEntries(coinStabilityCache), coinTrajectory: Object.fromEntries(coinTrajectoryCache) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/unresolved-intents — read-only operator visibility for
+// regular-bot live orders whose exchange outcome is not yet locally resolved.
+router.get("/crypto/bot/unresolved-intents", requireAuth, async (_req, res) => {
+  try {
+    res.json({ intents: await listUnresolvedRegularIntents(100) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/reconcile-intent — strict authenticated exchange recovery.
+// The client supplies only the durable client ID; all economic identity comes
+// from the locked DB intent and must match exactly one terminal Kalshi order.
+router.post("/crypto/bot/reconcile-intent", requireAuth, async (req, res) => {
+  const clientOrderId = (req.body as { clientOrderId?: unknown })?.clientOrderId;
+  if (!isValidRegularClientOrderId(clientOrderId)) {
+    res.status(400).json({ error: "clientOrderId must be a valid UUID" });
+    return;
+  }
+  try {
+    const result = await reconcileRegularIntent(clientOrderId);
+    if (result.outcome === "ambiguous") {
+      res.status(409).json({ ok: false, ...result });
+      return;
+    }
+    res.json({ ok: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

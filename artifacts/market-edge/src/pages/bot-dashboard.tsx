@@ -32,6 +32,7 @@ import { KalshiLiveTickerPanel } from "./bot/kalshi-live-ticker-panel";
 import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 import { GapAnalyticsPanel } from "./bot/gap-analytics-panel";
 import { BotScalperPanel } from "./bot/bot-scalper-panel";
+import { BotRegularIntentPanel } from "./bot/bot-regular-intent-panel";
 import { normalizeScalpOrders } from "./bot/scalper-ledger";
 import { readApiResponse } from "./bot/api-response";
 import type { GapAnalyticsResult } from "./bot/types";
@@ -744,6 +745,7 @@ export default function BotDashboard() {
         />
         <PerCoinGuard coinGuardData={coinGuardData} />
         <WindowEvalTable evaluation={evaluation} openPosList={regularOpenPosList} openManualOrder={openManualOrder} />
+        <BotRegularIntentPanel authPost={authPost} getToken={getToken} />
         <BotScalperPanel authPost={scalperAuthPost} />
         <BotConfigSection
           cfg={cfg}

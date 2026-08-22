@@ -191,11 +191,11 @@ export async function evalClosedBets(): Promise<void> {
 
         const strike = row.kalshiTarget != null ? parseFloat(String(row.kalshiTarget)) : null;
         const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
-        const count = row.contractCount ?? 1;
-        if (strike == null || entryPrice == null) {
+        const count = row.contractCount != null ? Number(row.contractCount) : 1;
+        if (entryPrice == null) {
           logger.warn(
             { id: row.id, sym: row.symbol, windowKey: row.windowKey, strike, entryPrice },
-            "[kalshi-bot] evalClosedBets: skipping row — missing strike or entryPrice; row may need manual correction",
+            "[kalshi-bot] evalClosedBets: skipping row — missing entryPrice; row may need manual correction",
           );
           continue;
         }
@@ -261,6 +261,17 @@ export async function evalClosedBets(): Promise<void> {
               kalshiSettled = true;
             }
           }
+        }
+
+        // Recovered exchange fills may not have strategy-time strike context.
+        // Kalshi settlement above is authoritative and does not need the
+        // strike; only the Coinbase/Pyth fallback below does.
+        if (!kalshiSettled && strike == null) {
+          logger.warn(
+            { id: row.id, sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker },
+            "[kalshi-bot] evalClosedBets: awaiting Kalshi settlement — recovered row has no fallback strike",
+          );
+          continue;
         }
 
         // ── Commodity-specific defer ───────────────────────────────────────────
@@ -648,7 +659,7 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
 
         // Outcome is wrong — recompute P&L and correct the record
         const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
-        const count = row.contractCount ?? 1;
+        const count = row.contractCount != null ? Number(row.contractCount) : 1;
         let correctedPnl: number | null = null;
 
         if (entryPrice != null) {
@@ -788,7 +799,7 @@ export async function fixCommodityOutcomes(opts: { since?: string; limit?: numbe
         if (correctOutcome === row.outcome) continue; // already correct
 
         const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
-        const count = row.contractCount ?? 1;
+        const count = row.contractCount != null ? Number(row.contractCount) : 1;
         let correctedPnl: number | null = null;
         if (entryPrice != null) {
           const ep = entryPrice; const n = count;

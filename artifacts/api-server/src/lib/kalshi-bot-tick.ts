@@ -2869,6 +2869,14 @@ async function _runBotTick(
   }
 
   if (entryMode === "live") {
+    // Persist and submit the exact same YES-side limit. Older fallback paths
+    // stored NULL and let placeOrder derive the price internally, which made an
+    // uncertain order impossible to match strictly during reconciliation.
+    const durableEntryLimitPrice = orderLimitPrice ?? computeMarketableLimitPrice(
+      direction === "yes" ? "bid" : "ask",
+      yesPrice,
+      S.config.minReturnMultiple,
+    );
     // ── DURABLE INTENT + ATOMIC RESERVATION (Task #667 req #3/#4) ────────────
     // Persist a durable order intent AND atomically claim a per-(mode,symbol,
     // window) reservation BEFORE the live POST so parallel symbol ticks cannot
@@ -2886,7 +2894,7 @@ async function _runBotTick(
         ticker: expectedTicker,
         side: direction,
         requestedCount: contractCount,
-        limitPrice: orderLimitPrice ?? null,
+        limitPrice: durableEntryLimitPrice,
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
       });
       if (!claim.claimed) {
@@ -2963,12 +2971,7 @@ async function _runBotTick(
           // Use the zone-capped/crossing-buffered limit price when available.
           // Falls back to midpoint mode (yesPrice + minReturnMultiple) only when
           // neither the poller nor the authenticated book supplied a price.
-          ...(orderLimitPrice != null
-            ? { limitPrice: orderLimitPrice }
-            : {
-                yesPrice: yesPrice ?? undefined,
-                minReturnMultiple: S.config.minReturnMultiple,
-              }),
+          limitPrice: durableEntryLimitPrice,
         },
         undefined,
         { disableHalfSizeRetry: true },
@@ -3129,6 +3132,10 @@ async function _runBotTick(
         }
         contractCount = totalFilled;
       }
+      // IOC can fill a fixed-point fraction of the submitted whole-contract
+      // request. Every downstream position, exit, and P&L calculation must use
+      // the authoritative fill count rather than the requested count.
+      contractCount = result.filledCount;
 
       // ── FILL ACCOUNTING (both GTC and IOC paths) ───────────────────────────
       // Must happen AFTER the branch so both paths feed the same downstream

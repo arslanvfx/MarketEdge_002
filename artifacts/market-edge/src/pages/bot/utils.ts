@@ -14,6 +14,16 @@ export const fmtPct = (n: number | string | null | undefined) => {
   return isNaN(v) ? "—" : `${(v * 100).toFixed(0)}¢`;
 };
 
+export const fmtContracts = (n: number | string | null | undefined) => {
+  if (n == null || n === "") return "—";
+  const value = typeof n === "string" ? Number(n) : n;
+  if (!Number.isFinite(value)) return "—";
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+};
+
 export const fmtCrypto = (n: number | string | null | undefined) => {
   if (n == null || n === "") return "—";
   const v = typeof n === "string" ? parseFloat(n) : n;

@@ -21,6 +21,7 @@
 
 import { pool } from "@workspace/db";
 import { logger } from "./logger.ts";
+import { regularCountHundredths } from "./kalshi-regular-fixed-point.ts";
 
 export type RegularIntentStatus =
   | "reserved"    // intent persisted + reserved, POST not yet attempted / in flight
@@ -78,13 +79,16 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
         window_key       TEXT NOT NULL,
         ticker           TEXT NOT NULL,
         side             TEXT NOT NULL,
-        requested_count  INTEGER NOT NULL,
-        limit_price      NUMERIC(8,4),
+        requested_count  NUMERIC(12,2) NOT NULL,
+        limit_price      NUMERIC(12,8),
         status           TEXT NOT NULL DEFAULT 'reserved',
         reason           TEXT,
-        filled_count     INTEGER,
-        avg_fill_price   NUMERIC(8,4),
+        filled_count     NUMERIC(12,2),
+        avg_fill_price   NUMERIC(12,8),
         order_id         TEXT,
+        reconciliation_reason TEXT,
+        reconciliation_evidence JSONB,
+        last_reconciled_at TIMESTAMPTZ,
         created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         resolved_at      TIMESTAMPTZ
       )
@@ -117,11 +121,11 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
         window_key       TEXT NOT NULL,
         ticker           TEXT NOT NULL,
         side             TEXT NOT NULL,
-        requested_count  INTEGER NOT NULL,
+        requested_count  NUMERIC(12,2) NOT NULL,
         status           TEXT NOT NULL DEFAULT 'reserved',
         reason           TEXT,
-        filled_count     INTEGER,
-        avg_fill_price   NUMERIC(8,4),
+        filled_count     NUMERIC(12,2),
+        avg_fill_price   NUMERIC(12,8),
         order_id         TEXT,
         created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         resolved_at      TIMESTAMPTZ
@@ -131,6 +135,22 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
       CREATE UNIQUE INDEX IF NOT EXISTS uq_regular_exit_intent_active
         ON kalshi_regular_exit_intents (mode, position_id)
         WHERE status IN ('reserved', 'unknown', 'filled')
+    `);
+    await client.query(`
+      ALTER TABLE kalshi_regular_order_intents
+        ALTER COLUMN requested_count TYPE NUMERIC(12,2) USING requested_count::numeric,
+        ALTER COLUMN filled_count TYPE NUMERIC(12,2) USING filled_count::numeric,
+        ALTER COLUMN limit_price TYPE NUMERIC(12,8) USING limit_price::numeric,
+        ALTER COLUMN avg_fill_price TYPE NUMERIC(12,8) USING avg_fill_price::numeric,
+        ADD COLUMN IF NOT EXISTS reconciliation_reason TEXT,
+        ADD COLUMN IF NOT EXISTS reconciliation_evidence JSONB,
+        ADD COLUMN IF NOT EXISTS last_reconciled_at TIMESTAMPTZ
+    `);
+    await client.query(`
+      ALTER TABLE kalshi_regular_exit_intents
+        ALTER COLUMN requested_count TYPE NUMERIC(12,2) USING requested_count::numeric,
+        ALTER COLUMN filled_count TYPE NUMERIC(12,2) USING filled_count::numeric,
+        ALTER COLUMN avg_fill_price TYPE NUMERIC(12,8) USING avg_fill_price::numeric
     `);
     _migrated = true;
     logger.info("[kalshi-regular-intent] DB migration complete");
@@ -150,6 +170,10 @@ async function ensureMigrated(): Promise<void> {
   await _migrationPromise;
 }
 
+export async function ensureRegularOrderIntentMigrations(): Promise<void> {
+  await ensureMigrated();
+}
+
 const advisoryKey = (mode: string): string => `kalshi-regular-order-cap:${mode}`;
 
 /**
@@ -163,6 +187,10 @@ const advisoryKey = (mode: string): string => `kalshi-regular-order-cap:${mode}`
 export async function claimRegularOrderIntent(
   key: RegularOrderIntentKey,
 ): Promise<ClaimIntentResult> {
+  const requestedUnits = regularCountHundredths(key.requestedCount);
+  if (requestedUnits == null || requestedUnits <= 0n) {
+    throw new Error("requestedCount must be a positive FixedPointCount with at most two decimal places");
+  }
   await ensureMigrated();
   const client = await pool.connect();
   try {
@@ -345,6 +373,10 @@ export async function countUnresolvedRegularIntents(): Promise<number> {
 export async function claimRegularExitIntent(
   key: RegularExitIntentKey,
 ): Promise<ClaimIntentResult> {
+  const requestedUnits = regularCountHundredths(key.requestedCount);
+  if (requestedUnits == null || requestedUnits <= 0n) {
+    throw new Error("requestedCount must be a positive FixedPointCount with at most two decimal places");
+  }
   await ensureMigrated();
   const client = await pool.connect();
   try {
@@ -502,7 +534,7 @@ export async function reconcileReservedRegularIntents(): Promise<RegularIntentRe
       window_key: string;
       ticker: string;
       side: string;
-      requested_count: number;
+      requested_count: string | number;
       created_at: Date;
     }>) {
       // Authoritative match: the earliest confirmed position lifecycle row this
@@ -527,7 +559,7 @@ export async function reconcileReservedRegularIntents(): Promise<RegularIntentRe
           row.window_key,
           row.ticker,
           row.side,
-          row.requested_count,
+          Number(row.requested_count),
           row.created_at,
         ],
       );
@@ -541,7 +573,7 @@ export async function reconcileReservedRegularIntents(): Promise<RegularIntentRe
 
       const betRow = bet.rows[0] as {
         id: string;
-        contract_count: number | null;
+        contract_count: string | number | null;
         entry_price: string | number | null;
       };
       // Only touch this exact reserved row — the WHERE status='reserved' guard
@@ -556,7 +588,7 @@ export async function reconcileReservedRegularIntents(): Promise<RegularIntentRe
          WHERE client_order_id = $1 AND status = 'reserved'`,
         [
           row.client_order_id,
-          betRow.contract_count ?? null,
+          betRow.contract_count != null ? Number(betRow.contract_count) : null,
           betRow.entry_price != null ? Number(betRow.entry_price) : null,
         ],
       );
@@ -569,7 +601,7 @@ export async function reconcileReservedRegularIntents(): Promise<RegularIntentRe
             windowKey: row.window_key,
             side: row.side,
             betId: betRow.id,
-            filledCount: betRow.contract_count ?? null,
+            filledCount: betRow.contract_count != null ? Number(betRow.contract_count) : null,
           },
           "[kalshi-regular-intent] reconciled stranded reserved intent → filled (authoritative bet present)",
         );

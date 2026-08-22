@@ -665,7 +665,7 @@ export async function loadOpenPositionFromDB(): Promise<void> {
         ticker: row.ticker,
         direction,
         entryYesPrice,
-        contractCount: row.contractCount,
+        contractCount: Number(row.contractCount),
         betAmount: parseFloat(String(row.betAmount)),
         kalshiTarget: parseFloat(String(row.kalshiTarget)),
         openedAt: row.createdAt instanceof Date ? row.createdAt.getTime() : new Date(String(row.createdAt)).getTime(),
