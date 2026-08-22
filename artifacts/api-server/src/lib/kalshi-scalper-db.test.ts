@@ -16,6 +16,17 @@ import { evaluateScalpReservationRetry } from "./kalshi-scalper-policy.ts";
 // suite through the app's bundler/tsx tooling with SCALPER_DB_TEST=1 set.
 const RUN_DB_TESTS = !!process.env["DATABASE_URL"] && process.env["SCALPER_DB_TEST"] === "1";
 
+// The backward-compatibility migration test DROPS all three scalper tables and
+// recreates them with an old schema before running runScalpMigrations(). This
+// is intentionally destructive and must NEVER run against the shared dev
+// database. It requires a dedicated throwaway database AND an explicit second
+// opt-in: SCALPER_MIGRATION_TEST=1.
+//
+// Example (throwaway DB only):
+//   DATABASE_URL=postgres://... SCALPER_DB_TEST=1 SCALPER_MIGRATION_TEST=1 tsx --test .../kalshi-scalper-db.test.ts
+const RUN_MIGRATION_TEST =
+  RUN_DB_TESTS && process.env["SCALPER_MIGRATION_TEST"] === "1";
+
 // Top-level, guarded pool teardown. This runs AFTER both describes below (node
 // runs same-file top-level `after` hooks last), so the shared @workspace/db pool
 // singleton is ended exactly once — never between the two describes. Guarded by
@@ -596,7 +607,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 // subsequent queries work.
 // ---------------------------------------------------------------------------
 
-describe("runScalpMigrations backward compatibility", { skip: !RUN_DB_TESTS ? "set SCALPER_DB_TEST=1 with DATABASE_URL" : false }, () => {
+describe("runScalpMigrations backward compatibility", { skip: !RUN_MIGRATION_TEST ? "set SCALPER_DB_TEST=1 SCALPER_MIGRATION_TEST=1 with a THROWAWAY DATABASE_URL — drops all scalper tables" : false }, () => {
   let db: typeof import("./kalshi-scalper-db.ts");
   let pool: { connect: () => Promise<{ query: (sql: string) => Promise<unknown>; release: () => void }> };
 
@@ -728,12 +739,19 @@ describe("skip_evidence persistence and retrieval", { skip: !RUN_DB_TESTS ? "set
 
   before(async () => {
     db = await import("./kalshi-scalper-db.ts");
-    // Clean up any residual rows from previous runs.
+    // Clean up any residual rows from previous runs (both the primary window key
+    // and the -noskip variant used by the second test).
     const { pool: p } = await import("@workspace/db");
     const c = await p.connect();
     try {
-      await c.query(`DELETE FROM kalshi_scalp_orders WHERE mode = $1 AND window_key = $2`, [MODE, WINDOW_KEY]);
-      await c.query(`DELETE FROM kalshi_scalp_reservations WHERE mode = $1 AND window_key = $2`, [MODE, WINDOW_KEY]);
+      await c.query(
+        `DELETE FROM kalshi_scalp_orders WHERE mode = $1 AND window_key LIKE $2`,
+        [MODE, `${WINDOW_KEY}%`],
+      );
+      await c.query(
+        `DELETE FROM kalshi_scalp_reservations WHERE mode = $1 AND window_key LIKE $2`,
+        [MODE, `${WINDOW_KEY}%`],
+      );
     } finally {
       c.release();
     }
