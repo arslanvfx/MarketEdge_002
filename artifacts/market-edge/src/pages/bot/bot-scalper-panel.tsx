@@ -60,7 +60,36 @@ function formatScalperLatency(value: number | null): string {
 
 function formatShadowVariant(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+  const secondsPart = seconds - minutes * 60;
+  const secondsText = Number.isInteger(secondsPart)
+    ? String(secondsPart)
+    : secondsPart.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return `${minutes}:${secondsText.padStart(2, "0")}`;
+}
+
+const SHADOW_RESET_STORAGE_PREFIX = "marketedge:scalper-shadow-view-since";
+
+function readShadowViewSince(mode: "paper" | "live"): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.localStorage.getItem(
+      `${SHADOW_RESET_STORAGE_PREFIX}:${mode}`,
+    );
+    return value && Number.isFinite(Date.parse(value)) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveShadowViewSince(mode: "paper" | "live", value: string): void {
+  try {
+    window.localStorage.setItem(
+      `${SHADOW_RESET_STORAGE_PREFIX}:${mode}`,
+      value,
+    );
+  } catch {
+    // The reset still applies for this session when browser storage is blocked.
+  }
 }
 
 export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
@@ -71,6 +100,13 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [attemptPage, setAttemptPage] = useState(0);
+  const [shadowViewSinceByMode, setShadowViewSinceByMode] = useState<{
+    paper: string | null;
+    live: string | null;
+  }>(() => ({
+    paper: readShadowViewSince("paper"),
+    live: readShadowViewSince("live"),
+  }));
   const ATTEMPT_PAGE_SIZE = 8;
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -91,6 +127,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const cfg = configData?.config;
   const merged = useMemo(() => ({ ...(cfg || {}), ...configDraft } as ScalperConfig), [cfg, configDraft]);
   const scalperMode = cfg?.mode ?? "paper";
+  const shadowViewSince = shadowViewSinceByMode[scalperMode];
 
   const {
     data: capability,
@@ -158,10 +195,13 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   });
 
   const { data: shadowStudyData } = useQuery<ScalperShadowStudyReport>({
-    queryKey: ["bot-scalper-shadow-study", scalperMode],
+    queryKey: ["bot-scalper-shadow-study", scalperMode, shadowViewSince],
     queryFn: async ({ signal }) => {
+      const since = shadowViewSince
+        ? `&since=${encodeURIComponent(shadowViewSince)}`
+        : "";
       const response = await fetch(
-        `${API_BASE}/crypto/scalper/shadow-study?mode=${scalperMode}&limit=144`,
+        `${API_BASE}/crypto/scalper/shadow-study?mode=${scalperMode}&limit=720${since}`,
         { signal },
       );
       if (!response.ok) {
@@ -235,6 +275,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         qc.invalidateQueries({ queryKey: ["bot-scalper-status"] }),
         qc.invalidateQueries({ queryKey: ["bot-scalper-perf"] }),
         qc.invalidateQueries({ queryKey: ["bot-scalper-history"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-shadow-study"] }),
       ]);
       showNotice({ kind: "success", text: successMessage });
     } catch (error) {
@@ -362,6 +403,19 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     } finally {
       setMutationBusy(null);
     }
+  }
+
+  function resetShadowStudyView(): void {
+    const resetAt = new Date().toISOString();
+    saveShadowViewSince(scalperMode, resetAt);
+    setShadowViewSinceByMode((current) => ({
+      ...current,
+      [scalperMode]: resetAt,
+    }));
+    showNotice({
+      kind: "success",
+      text: "Shadow Study view reset. Stored shadow and real bet history were not deleted.",
+    });
   }
 
   async function reconcileAttempt(attempt: ScalperUnresolvedAttempt): Promise<void> {
@@ -1373,94 +1427,208 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
             data-testid="panel-scalper-shadow-study"
             className="mt-8 border-t border-amber-500/20 pt-6"
           >
-            <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+            <div className="flex flex-wrap items-start gap-3">
               <Timer className="mt-0.5 h-4 w-4 shrink-0 text-amber-500/70" />
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-amber-500/70">
                   Shadow entry study
                 </h3>
                 <p className="mt-1 max-w-3xl text-[10px] leading-relaxed text-muted-foreground">
-                  Observes hypothetical starts at 2:00, 1:45, and 1:30 remaining.
-                  Live timing and every live safety rule stay unchanged.
+                  Every displayed time means <strong className="text-foreground">time left before market close</strong>.
+                  The study compares 1:00 through 2:00, plus any configured Scalper
+                  timing outside that range. Live timing and safety rules stay unchanged.
                 </p>
+                {shadowStudyData.trackingSince && (
+                  <p className="mt-1 text-[9px] text-amber-200/70">
+                    Visual results since {fmtDateTime(shadowStudyData.trackingSince)}.
+                    Older records remain stored.
+                  </p>
+                )}
               </div>
-              <span className="ml-auto rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[9px] font-bold uppercase tracking-wide text-amber-200">
-                No orders placed
-              </span>
+              <div className="ml-auto flex items-center gap-2">
+                <span className="rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[9px] font-bold uppercase tracking-wide text-amber-200">
+                  No orders placed
+                </span>
+                <button
+                  type="button"
+                  onClick={resetShadowStudyView}
+                  data-testid="button-reset-scalper-shadow-view"
+                  className="inline-flex items-center gap-1.5 rounded border border-border bg-background/50 px-2 py-1 text-[9px] font-bold uppercase tracking-wide text-muted-foreground transition-colors hover:border-amber-500/40 hover:text-amber-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-500"
+                  title="Start a fresh visual comparison without deleting stored shadow or real bet history"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  Reset view
+                </button>
+              </div>
             </div>
 
-            <div className="mt-3 grid gap-2 sm:grid-cols-3">
-              {shadowStudyData.variants.map((variant) => (
-                <div
-                  key={variant.variantSeconds}
-                  data-testid={`card-scalper-shadow-${variant.variantSeconds}`}
-                  className="rounded-lg border border-border bg-background/40 p-3"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-sm font-black text-amber-200">
-                      {formatShadowVariant(variant.variantSeconds)}
-                    </span>
-                    <span className="text-[9px] uppercase tracking-wide text-muted-foreground">
-                      remaining
-                    </span>
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-center">
-                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
-                      <div className="font-mono text-sm font-bold text-foreground">
-                        {variant.candidates}/{variant.observed}
-                      </div>
-                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
-                        guard + quote pass
-                      </div>
-                    </div>
-                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
-                      <div className="font-mono text-sm font-bold text-emerald-300">
-                        {variant.winRate == null ? "—" : `${variant.winRate.toFixed(0)}%`}
-                      </div>
-                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
-                        settled wins
-                      </div>
-                    </div>
-                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
-                      <div className="font-mono text-sm font-bold text-amber-100">
-                        {variant.candidatesBeforeLaterQuoteIssue}
-                      </div>
-                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
-                        before quote loss
-                      </div>
-                    </div>
-                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
-                      <div className={`font-mono text-sm font-bold ${
-                        variant.hypotheticalPnl >= 0 ? "text-emerald-300" : "text-red-300"
-                      }`}>
-                        {fmt$(variant.hypotheticalPnl)}
-                      </div>
-                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
-                        hypothetical P&amp;L
-                      </div>
-                    </div>
-                  </div>
-                  <p className="mt-2 text-[9px] text-muted-foreground/80">
-                    {variant.settled} settled · first safe avg{" "}
-                    {variant.averageFirstSafeSecondsRemaining == null
-                      ? "—"
-                      : `${variant.averageFirstSafeSecondsRemaining.toFixed(0)}s left`}
-                  </p>
+            <div className="mt-3 grid gap-2 rounded-lg border border-border/60 bg-background/20 p-3 sm:grid-cols-3">
+              <div>
+                <div className="text-[9px] font-bold uppercase tracking-wide text-foreground">
+                  1. Qualified
                 </div>
-              ))}
+                <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">
+                  The live direction guards passed and a cached quote was inside the configured price band.
+                </p>
+              </div>
+              <div>
+                <div className="text-[9px] font-bold uppercase tracking-wide text-foreground">
+                  2. Quote later
+                </div>
+                <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">
+                  Shows whether that early opportunity disappeared or moved out of band later.
+                </p>
+              </div>
+              <div>
+                <div className="text-[9px] font-bold uppercase tracking-wide text-foreground">
+                  3. Simulated result
+                </div>
+                <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">
+                  Compares the shadow side with the settled market. It is not an actual fill.
+                </p>
+              </div>
             </div>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+              {shadowStudyData.variants.map((variant) => {
+                const isConfiguredTiming =
+                  variant.variantSeconds === shadowStudyData.configuredWindowSeconds;
+                const overrideSymbols = Object.entries(
+                  shadowStudyData.effectiveWindowSecondsBySymbol ?? {},
+                )
+                  .filter(([, seconds]) =>
+                    seconds === variant.variantSeconds
+                    && seconds !== shadowStudyData.configuredWindowSeconds
+                  )
+                  .map(([symbol]) => symbol);
+                return (
+                  <div
+                    key={variant.variantSeconds}
+                    data-testid={`card-scalper-shadow-${variant.variantSeconds}`}
+                    data-selected-timing={isConfiguredTiming ? "true" : "false"}
+                    className={`relative rounded-lg border p-3 transition-colors ${
+                      isConfiguredTiming
+                        ? "border-amber-400/60 bg-amber-500/10 ring-1 ring-amber-500/30"
+                        : "border-border/70 bg-background/40 hover:border-border"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="text-[8px] font-bold uppercase tracking-widest text-muted-foreground">
+                          Time left
+                        </div>
+                        <span className="font-mono text-base font-black text-amber-200">
+                          {formatShadowVariant(variant.variantSeconds)}
+                        </span>
+                      </div>
+                      {isConfiguredTiming ? (
+                        <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-0.5 text-[7px] font-black uppercase tracking-wide text-amber-300">
+                          Current setting
+                        </span>
+                      ) : overrideSymbols.length > 0 ? (
+                        <span
+                          className="rounded border border-sky-400/30 bg-sky-400/10 px-1.5 py-0.5 text-[7px] font-bold uppercase tracking-wide text-sky-300"
+                          title={`${overrideSymbols.join(", ")} use this per-market timing`}
+                        >
+                          {overrideSymbols.length} override{overrideSymbols.length === 1 ? "" : "s"}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    <dl className="mt-3 space-y-1.5 text-[9px]">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-muted-foreground">Qualified</dt>
+                        <dd className="font-mono font-bold text-foreground">
+                          {variant.candidates} of {variant.observed}
+                        </dd>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-muted-foreground">Settled results</dt>
+                        <dd className="font-mono font-bold text-foreground">
+                          <span className="text-emerald-300">{variant.wins}W</span>
+                          {" / "}
+                          <span className={variant.losses > 0 ? "text-red-300" : ""}>
+                            {variant.losses}L
+                          </span>
+                        </dd>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-muted-foreground">Win rate</dt>
+                        <dd className={`font-mono font-bold ${
+                          variant.winRate == null
+                            ? "text-muted-foreground"
+                            : variant.winRate >= 80
+                              ? "text-emerald-300"
+                              : "text-foreground"
+                        }`}>
+                          {variant.winRate == null ? "—" : `${variant.winRate.toFixed(0)}%`}
+                        </dd>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-muted-foreground">Quote lost later</dt>
+                        <dd className="font-mono font-bold text-amber-200">
+                          {variant.candidatesBeforeLaterQuoteIssue}
+                        </dd>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2 border-t border-border/50 pt-1.5">
+                        <dt className="font-bold text-muted-foreground">Combined simulated P&amp;L</dt>
+                        <dd className={`font-mono text-xs font-black ${
+                          variant.hypotheticalPnl >= 0 ? "text-emerald-300" : "text-red-300"
+                        }`}>
+                          {fmt$(variant.hypotheticalPnl)}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    <p className="mt-2 border-t border-border/40 pt-2 text-[9px] leading-relaxed text-muted-foreground/90">
+                      {variant.observed === 0
+                        ? "No market checks recorded for this time-left slot yet."
+                        : variant.candidates === 0
+                          ? `None of ${variant.observed} market checks passed both safety and quote requirements.`
+                          : `${variant.candidates} of ${variant.observed} checks qualified; ${variant.settled} have settled.`
+                      }
+                      {variant.averageFirstSafeSecondsRemaining == null
+                        ? ""
+                        : ` Average first safe point: ${formatShadowVariant(Math.round(variant.averageFirstSafeSecondsRemaining))} time left.`}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            {shadowStudyData.variants.some((variant) =>
+              variant.settled > 0
+              && (variant.winRate ?? 0) >= 50
+              && variant.hypotheticalPnl < 0
+            ) && (
+              <div className="mt-3 flex gap-2 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-300" />
+                <p className="text-[9px] leading-relaxed text-red-100/80">
+                  A high win rate can still show a loss because these late contracts
+                  earn only a few cents when correct but can lose most of their cost
+                  when wrong. One losing entry may outweigh several winners.
+                </p>
+              </div>
+            )}
 
             {shadowStudyData.recent.some((row) => row.firstSafeEntryAt) && (
               <div className="mt-3 overflow-x-auto rounded-lg border border-border bg-background/30">
-                <table className="w-full min-w-[680px] text-left text-[10px]">
+                <div className="border-b border-border/70 px-3 py-2">
+                  <div className="text-[9px] font-bold uppercase tracking-wide text-foreground">
+                    Individual hypothetical entries
+                  </div>
+                  <p className="mt-0.5 text-[9px] text-muted-foreground">
+                    Read these rows to see exactly which side the shadow chose and what the market settled.
+                  </p>
+                </div>
+                <table className="w-full min-w-[820px] text-left text-[10px]">
                   <thead className="border-b border-border/70 text-[8px] uppercase tracking-wider text-muted-foreground">
                     <tr>
-                      <th className="px-3 py-2">Window</th>
                       <th className="px-3 py-2">Market</th>
-                      <th className="px-3 py-2">Study start</th>
-                      <th className="px-3 py-2">First safe</th>
-                      <th className="px-3 py-2">Later quote</th>
-                      <th className="px-3 py-2">Outcome</th>
+                      <th className="px-3 py-2">Timing tested</th>
+                      <th className="px-3 py-2">Qualification</th>
+                      <th className="px-3 py-2">What happened later</th>
+                      <th className="px-3 py-2">Simulated result</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1470,28 +1638,47 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                       .map((row) => (
                         <tr
                           key={`${row.mode}:${row.windowKey}:${row.symbol}:${row.variantSeconds}`}
-                          className="border-b border-border/40 last:border-0"
+                          className="border-b border-border/40 transition-colors last:border-0 hover:bg-accent/30"
                         >
-                          <td className="px-3 py-2 text-muted-foreground">
-                            {wkToEstRange(row.windowKey)}
+                          <td className="px-3 py-2">
+                            <div className="font-bold text-foreground">
+                              {row.symbol}
+                            </div>
+                            <div className="mt-0.5 text-[9px] text-muted-foreground">
+                              {wkToEstRange(row.windowKey)}
+                            </div>
                           </td>
-                          <td className="px-3 py-2 font-bold text-foreground">
-                            {row.symbol} {row.side?.toUpperCase()}
+                          <td className="px-3 py-2">
+                            <div className="font-mono font-bold text-amber-200">
+                              {formatShadowVariant(row.variantSeconds)} time left
+                            </div>
+                            {row.variantSeconds === (
+                              shadowStudyData.effectiveWindowSecondsBySymbol?.[row.symbol]
+                              ?? shadowStudyData.configuredWindowSeconds
+                            ) && (
+                              <div className="mt-0.5 text-[7px] font-bold uppercase tracking-wide text-amber-400">
+                                Current {row.symbol} setting
+                              </div>
+                            )}
                           </td>
-                          <td className="px-3 py-2 font-mono text-amber-200">
-                            {formatShadowVariant(row.variantSeconds)}
-                          </td>
-                          <td className="px-3 py-2 font-mono">
-                            {row.firstSafeSecondsRemaining == null
-                              ? "—"
-                              : `${row.firstSafeSecondsRemaining.toFixed(0)}s · ${((row.winningAsk ?? 0) * 100).toFixed(0)}¢`}
+                          <td className="px-3 py-2">
+                            <div className="font-bold text-foreground">
+                              Chose {row.side?.toUpperCase()}
+                            </div>
+                            <div className="mt-0.5 text-[9px] text-muted-foreground">
+                              Passed at {row.firstSafeSecondsRemaining == null
+                                ? "an unknown time"
+                                : `${formatShadowVariant(Math.round(row.firstSafeSecondsRemaining))} left`}
+                              {" · "}
+                              {((row.winningAsk ?? 0) * 100).toFixed(0)}¢ cached ask
+                            </div>
                           </td>
                           <td className="px-3 py-2">
                             {row.laterQuoteIssueObserved
                               ? row.laterQuoteIssueReason === "outside_band"
-                                ? "Out of band later"
-                                : "Invalid later"
-                              : "Stayed available"}
+                                ? "Quote later left the configured band"
+                                : "Quote later became unavailable"
+                              : "Cached quote stayed in range"}
                           </td>
                           <td className={`px-3 py-2 font-bold ${
                             row.outcome === "win"
@@ -1500,14 +1687,35 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                                 ? "text-red-300"
                                 : "text-muted-foreground"
                           }`}>
-                            {row.outcome
-                              ? `${row.outcome.toUpperCase()} · ${fmt$(row.hypotheticalPnl ?? 0)}`
-                              : "Awaiting result"}
+                            {row.outcome ? (
+                              <>
+                                <div>
+                                  Would have {row.outcome === "win" ? "won" : "lost"}{" "}
+                                  {fmt$(row.hypotheticalPnl ?? 0)}
+                                </div>
+                                <div className="mt-0.5 text-[9px] font-normal text-muted-foreground">
+                                  Shadow chose {row.side?.toUpperCase()} · market settled{" "}
+                                  {row.settlementResult?.toUpperCase()}
+                                </div>
+                              </>
+                            ) : "Awaiting market settlement"}
                           </td>
                         </tr>
                       ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {!shadowStudyData.recent.some((row) => row.firstSafeEntryAt) && (
+              <div className="mt-3 rounded-lg border border-dashed border-border/70 bg-background/20 p-5 text-center">
+                <div className="text-[10px] font-bold text-foreground">
+                  Monitoring hypothetical entries
+                </div>
+                <p className="mt-1 text-[9px] text-muted-foreground">
+                  No market has passed both the safety guards and cached quote check
+                  {shadowStudyData.trackingSince ? " since the visual reset" : " in this view yet"}.
+                </p>
               </div>
             )}
 

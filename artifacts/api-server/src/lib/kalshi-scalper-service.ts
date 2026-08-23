@@ -227,7 +227,8 @@ function _finalizeShadowWindow(windowKey: string, nowMs: number): void {
 }
 
 /**
- * Read-only observation of 120s/105s/90s counterfactuals. It reuses cached
+ * Read-only observation of standard 60s–120s counterfactuals plus each market's
+ * configured timing. It reuses cached
  * public quotes and existing Scalper-owned underlying samples; no network,
  * reservation, cap, balance, intent, broker, or reconciliation path is called.
  */
@@ -245,7 +246,13 @@ function _observeShadowEntries(windowKey: string, nowMs: number): void {
     const cached = getKalshiCachedData(symbol);
     const samples = _priceSamples.get(symbol) ?? [];
 
-    for (const variantSeconds of SCALP_SHADOW_VARIANT_SECONDS) {
+    const variantSecondsToObserve = [
+      ...new Set([
+        ...SCALP_SHADOW_VARIANT_SECONDS,
+        params.finalWindowSeconds,
+      ]),
+    ];
+    for (const variantSeconds of variantSecondsToObserve) {
       const evaluation = evaluateScalpShadowEntry({
         nowMs,
         closeTime: cached?.closeTime ?? expectedCloseTime,
@@ -3829,10 +3836,36 @@ export async function getScalpWindowFunnel(
 /** Reporting-only shadow study; never participates in entry decisions. */
 export async function getScalpShadowStudy(
   mode: ScalpMode,
-  limit = 144,
+  limit = 720,
+  trackingSince: string | null = null,
 ): Promise<ScalpShadowStudyReport> {
-  const rows = await getRecentScalpShadowStudies(mode, limit);
-  return buildScalpShadowStudyReport(mode, rows);
+  const effectiveWindowSecondsBySymbol = Object.fromEntries(
+    CRYPTO_COINS
+      .map((coin) => coin.symbol.toUpperCase())
+      .filter((symbol) => Boolean(KALSHI_SERIES[symbol]))
+      .map((symbol) => [
+        symbol,
+        resolveEffectiveParams(_config, symbol, "").finalWindowSeconds,
+      ]),
+  );
+  const variantSeconds = [
+    ...new Set([
+      ...SCALP_SHADOW_VARIANT_SECONDS,
+      _config.finalWindowSeconds,
+      ...Object.values(effectiveWindowSecondsBySymbol),
+    ]),
+  ];
+  const rows = await getRecentScalpShadowStudies(
+    mode,
+    limit,
+    trackingSince,
+  );
+  return buildScalpShadowStudyReport(mode, rows, {
+    configuredWindowSeconds: _config.finalWindowSeconds,
+    effectiveWindowSecondsBySymbol,
+    trackingSince,
+    variantSeconds,
+  });
 }
 
 export async function resetScalpPerformance(mode: ScalpMode): Promise<ScalpPerformance> {

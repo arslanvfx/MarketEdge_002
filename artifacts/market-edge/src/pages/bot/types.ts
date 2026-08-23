@@ -939,7 +939,7 @@ export interface ScalperShadowStudyRecord {
   windowKey: string;
   symbol: string;
   ticker: string;
-  variantSeconds: 120 | 105 | 90;
+  variantSeconds: number;
   status: "observing" | "candidate_found" | "closed_no_candidate" | "settled";
   firstEligibleAt: string;
   firstSafeEntryAt: string | null;
@@ -964,7 +964,7 @@ export interface ScalperShadowStudyRecord {
 }
 
 export interface ScalperShadowVariantSummary {
-  variantSeconds: 120 | 105 | 90;
+  variantSeconds: number;
   observed: number;
   candidates: number;
   settled: number;
@@ -978,6 +978,9 @@ export interface ScalperShadowVariantSummary {
 
 export interface ScalperShadowStudyReport {
   mode: "paper" | "live";
+  configuredWindowSeconds: number;
+  effectiveWindowSecondsBySymbol: Record<string, number>;
+  trackingSince: string | null;
   variants: ScalperShadowVariantSummary[];
   recent: ScalperShadowStudyRecord[];
   disclaimer: string;

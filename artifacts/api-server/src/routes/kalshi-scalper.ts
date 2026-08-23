@@ -153,10 +153,16 @@ router.get("/crypto/scalper/shadow-study", async (req, res): Promise<void> => {
     const mode = parseMode(req.query["mode"]) ?? config.mode;
     const limitParam = typeof req.query["limit"] === "string"
       ? Number.parseInt(req.query["limit"], 10)
-      : 144;
+      : 720;
+    const sinceParam = typeof req.query["since"] === "string"
+      && req.query["since"].length <= 64
+      && Number.isFinite(Date.parse(req.query["since"]))
+        ? new Date(req.query["since"]).toISOString()
+        : null;
     const study = await getScalpShadowStudy(
       mode,
-      Number.isFinite(limitParam) ? limitParam : 144,
+      Number.isFinite(limitParam) ? limitParam : 720,
+      sinceParam,
     );
     res.json(study);
   } catch (err) {

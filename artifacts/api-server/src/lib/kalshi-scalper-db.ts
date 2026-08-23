@@ -96,7 +96,7 @@ export async function runScalpMigrations(): Promise<void> {
         window_key                 TEXT NOT NULL,
         symbol                     TEXT NOT NULL,
         ticker                     TEXT NOT NULL,
-        variant_seconds            INTEGER NOT NULL,
+        variant_seconds            DOUBLE PRECISION NOT NULL,
         status                     TEXT NOT NULL,
         first_eligible_at          TIMESTAMPTZ NOT NULL,
         first_safe_entry_at        TIMESTAMPTZ,
@@ -119,8 +119,8 @@ export async function runScalpMigrations(): Promise<void> {
         updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         settled_at                  TIMESTAMPTZ,
         PRIMARY KEY (mode, window_key, symbol, variant_seconds),
-        CONSTRAINT scalp_shadow_variant_seconds
-          CHECK (variant_seconds IN (90, 105, 120))
+        CONSTRAINT scalp_shadow_variant_range
+          CHECK (variant_seconds BETWEEN 1 AND 900)
       )
     `);
     await client.query(`
@@ -288,6 +288,35 @@ async function _upgradeScalpSchema(
     END $$;
   `);
   await client.query(`CREATE INDEX IF NOT EXISTS scalp_res_mode_window ON kalshi_scalp_reservations (mode, window_key)`);
+
+  // ── shadow study ─────────────────────────────────────────────────────────
+  // Earlier releases admitted only 90/105/120. Keep every historical row while
+  // widening the observational timing range to match the saved Scalper config.
+  await client.query(`
+    ALTER TABLE kalshi_scalp_shadow_entries
+    DROP CONSTRAINT IF EXISTS scalp_shadow_variant_seconds
+  `);
+  // Preserve sub-second configured timings exactly. The study must observe the
+  // same boundary used by execution, not a rounded approximation.
+  await client.query(`
+    ALTER TABLE kalshi_scalp_shadow_entries
+      ALTER COLUMN variant_seconds TYPE DOUBLE PRECISION
+      USING variant_seconds::DOUBLE PRECISION
+  `);
+  await client.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname = 'scalp_shadow_variant_range'
+      ) THEN
+        ALTER TABLE kalshi_scalp_shadow_entries
+          ADD CONSTRAINT scalp_shadow_variant_range
+          CHECK (variant_seconds BETWEEN 1 AND 900);
+      END IF;
+    END $$;
+  `);
 
   // ── orders ────────────────────────────────────────────────────────────────
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS winning_contract_cost NUMERIC(8,4)`);
@@ -1316,17 +1345,19 @@ export async function upsertScalpShadowStudy(
 export async function getRecentScalpShadowStudies(
   mode: ScalpMode,
   limit = 72,
+  trackingSince: string | null = null,
 ): Promise<ScalpShadowStudyRecord[]> {
   const client = await pool.connect();
   try {
-    const capped = Math.max(1, Math.min(240, Math.floor(limit)));
+    const capped = Math.max(1, Math.min(1_000, Math.floor(limit)));
     const result = await client.query(
       `SELECT *
          FROM kalshi_scalp_shadow_entries
         WHERE mode = $1
+          AND ($2::timestamptz IS NULL OR created_at >= $2::timestamptz)
         ORDER BY first_eligible_at DESC, symbol, variant_seconds DESC
-        LIMIT $2`,
-      [mode, capped],
+        LIMIT $3`,
+      [mode, trackingSince, capped],
     );
     return result.rows.map((row) =>
       mapScalpShadowRow(row as Record<string, unknown>)

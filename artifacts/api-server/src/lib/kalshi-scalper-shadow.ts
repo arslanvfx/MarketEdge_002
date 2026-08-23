@@ -21,6 +21,7 @@ import type {
   ScalpShadowStudyRecord,
   ScalpShadowVariantSeconds,
 } from "./kalshi-scalper-types.ts";
+import { SCALP_SHADOW_VARIANT_SECONDS } from "./kalshi-scalper-types.ts";
 
 export interface ScalpShadowEvaluation {
   started: boolean;
@@ -243,8 +244,28 @@ export function settleScalpShadowRecord(
 export function buildScalpShadowStudyReport(
   mode: ScalpMode,
   rows: ScalpShadowStudyRecord[],
+  options?: {
+    configuredWindowSeconds?: number;
+    effectiveWindowSecondsBySymbol?: Record<string, number>;
+    trackingSince?: string | null;
+    variantSeconds?: readonly number[];
+  },
 ): ScalpShadowStudyReport {
-  const variants = ([120, 105, 90] as const).map((variantSeconds) => {
+  const configuredWindowSeconds = options?.configuredWindowSeconds ?? 120;
+  const effectiveWindowSecondsBySymbol =
+    options?.effectiveWindowSecondsBySymbol ?? {};
+  const variantSeconds = [
+    ...new Set(
+      options?.variantSeconds ?? [
+        ...SCALP_SHADOW_VARIANT_SECONDS,
+        configuredWindowSeconds,
+        ...Object.values(effectiveWindowSecondsBySymbol),
+      ],
+    ),
+  ]
+    .filter((value) => Number.isFinite(value) && value >= 1 && value <= 900)
+    .sort((a, b) => a - b);
+  const variants = variantSeconds.map((variantSeconds) => {
     const variantRows = rows.filter(
       (row) => row.variantSeconds === variantSeconds,
     );
@@ -281,6 +302,9 @@ export function buildScalpShadowStudyReport(
   });
   return {
     mode,
+    configuredWindowSeconds,
+    effectiveWindowSecondsBySymbol,
+    trackingSince: options?.trackingSince ?? null,
     variants,
     recent: rows.slice(0, 48),
     disclaimer:

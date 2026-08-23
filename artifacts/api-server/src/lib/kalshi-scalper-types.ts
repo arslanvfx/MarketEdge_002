@@ -312,9 +312,10 @@ export interface ScalpWindowFunnelReport {
 // Earlier-entry shadow study
 // ---------------------------------------------------------------------------
 
-export const SCALP_SHADOW_VARIANT_SECONDS = [120, 105, 90] as const;
-export type ScalpShadowVariantSeconds =
-  typeof SCALP_SHADOW_VARIANT_SECONDS[number];
+/** Standard comparison points, expressed as seconds left before market close. */
+export const SCALP_SHADOW_VARIANT_SECONDS = [60, 75, 90, 105, 120] as const;
+/** Configured live timing may be any precise second value allowed by ScalpConfig. */
+export type ScalpShadowVariantSeconds = number;
 
 export type ScalpShadowStudyStatus =
   | "observing"
@@ -370,6 +371,12 @@ export interface ScalpShadowVariantSummary {
 
 export interface ScalpShadowStudyReport {
   mode: ScalpMode;
+  /** Saved global Scalper entry timing. This marks the primary selected card. */
+  configuredWindowSeconds: number;
+  /** Includes per-market timing overrides so selected timing is never guessed. */
+  effectiveWindowSecondsBySymbol: Record<string, number>;
+  /** Browser-requested visual reporting baseline; no rows are deleted. */
+  trackingSince: string | null;
   variants: ScalpShadowVariantSummary[];
   recent: ScalpShadowStudyRecord[];
   disclaimer: string;

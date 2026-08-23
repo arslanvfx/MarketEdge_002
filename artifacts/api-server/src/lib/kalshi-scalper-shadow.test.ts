@@ -133,7 +133,7 @@ describe("earlier-entry shadow guard parity", () => {
 });
 
 describe("shadow report projection", () => {
-  it("always reports all three variants and excludes open rows from outcomes", () => {
+  it("reports every time-left comparison, selected timing, and excludes open rows from outcomes", () => {
     const settled = settleScalpShadowRecord(shadowRecord(), "yes");
     const open105 = {
       ...shadowRecord("ETH"),
@@ -142,14 +142,21 @@ describe("shadow report projection", () => {
       outcome: null,
       hypotheticalPnl: null,
     };
-    const report = buildScalpShadowStudyReport("live", [settled, open105]);
+    const report = buildScalpShadowStudyReport("live", [settled, open105], {
+      configuredWindowSeconds: 80.1234,
+      effectiveWindowSecondsBySymbol: { BTC: 80.1234, ETH: 105 },
+      trackingSince: "2026-08-23T16:00:00.000Z",
+    });
     assert.deepEqual(
       report.variants.map((variant) => variant.variantSeconds),
-      [120, 105, 90],
+      [60, 75, 80.1234, 90, 105, 120],
     );
-    assert.equal(report.variants[0].wins, 1);
-    assert.equal(report.variants[1].settled, 0);
-    assert.equal(report.variants[2].observed, 0);
+    assert.equal(report.variants.find((row) => row.variantSeconds === 120)?.wins, 1);
+    assert.equal(report.variants.find((row) => row.variantSeconds === 105)?.settled, 0);
+    assert.equal(report.variants.find((row) => row.variantSeconds === 60)?.observed, 0);
+    assert.equal(report.configuredWindowSeconds, 80.1234);
+    assert.equal(report.effectiveWindowSecondsBySymbol.ETH, 105);
+    assert.equal(report.trackingSince, "2026-08-23T16:00:00.000Z");
   });
 });
 
