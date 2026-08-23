@@ -47,6 +47,7 @@ import {
   listUnresolvedRegularIntents,
   reconcileRegularIntent,
 } from "../lib/kalshi-regular-order-reconcile";
+import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -611,6 +612,40 @@ router.post("/crypto/bot/reconcile-intent", requireAuth, async (req, res) => {
     const result = await reconcileRegularIntent(clientOrderId);
     if (result.outcome === "ambiguous") {
       res.status(409).json({ ok: false, ...result });
+      return;
+    }
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/clear-unresolved-intent — explicit operator override for a
+// stuck regular-bot live intent. This is deliberately not reconciliation: it
+// retains an audit record and never represents an exchange outcome as known.
+router.post("/crypto/bot/clear-unresolved-intent", requireAuth, async (req, res) => {
+  const clientOrderId = (req.body as { clientOrderId?: unknown })?.clientOrderId;
+  if (!isValidRegularClientOrderId(clientOrderId)) {
+    res.status(400).json({ error: "clientOrderId must be a valid UUID" });
+    return;
+  }
+  const actorId = getAuth(req)?.userId;
+  if (!actorId) {
+    res.status(401).json({ error: "Unauthorized — must be signed in to clear an unresolved intent" });
+    return;
+  }
+  try {
+    const result = await clearRegularOrderIntent({ clientOrderId, actorId });
+    if (result.outcome === "not_found") {
+      res.status(404).json({ error: "Unresolved live intent not found" });
+      return;
+    }
+    if (result.outcome === "not_unresolved") {
+      res.status(409).json({
+        error: `Intent can no longer be cleared because it is already ${result.status}`,
+        status: result.status,
+      });
       return;
     }
     res.json({ ok: true, ...result });

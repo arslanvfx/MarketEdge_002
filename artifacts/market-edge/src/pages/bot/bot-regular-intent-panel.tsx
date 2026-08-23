@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CircleOff, RefreshCw, ShieldCheck } from "lucide-react";
 import type { RegularUnresolvedIntent } from "./types";
 import { API_BASE, fmtContracts, wkToEstRange } from "./utils";
 
@@ -15,6 +15,13 @@ type ReconcileResponse = {
   reason?: string;
   filledCount?: number;
   settledOutcome?: "win" | "loss" | null;
+  error?: string;
+};
+
+type ClearResponse = {
+  ok?: boolean;
+  outcome?: "cleared";
+  symbol?: string;
   error?: string;
 };
 
@@ -40,7 +47,13 @@ export function BotRegularIntentPanel({ authPost, getToken }: Props) {
     refetchInterval: 15_000,
   });
   const intents = data?.intents ?? [];
-  if (intents.length === 0) return null;
+  if (intents.length === 0) {
+    return message?.ok ? (
+      <section className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+        {message.text}
+      </section>
+    ) : null;
+  }
 
   async function reconcile(clientOrderId: string) {
     if (busyId) return;
@@ -69,6 +82,44 @@ export function BotRegularIntentPanel({ authPost, getToken }: Props) {
       ]);
     } catch (error) {
       setMessage({ ok: false, text: error instanceof Error ? error.message : "Reconciliation request failed." });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function clearIntent(intent: RegularUnresolvedIntent) {
+    if (busyId) return;
+    const confirmed = window.confirm(
+      `Clear the unresolved ${intent.symbol} ${intent.side.toUpperCase()} live order intent?\n\n`
+      + "This immediately releases the bot's trading block for this intent. It does not delete the record, "
+      + "recover a bet, or claim that Kalshi confirmed a zero fill.",
+    );
+    if (!confirmed) return;
+
+    setBusyId(intent.clientOrderId);
+    setMessage(null);
+    try {
+      const result = await authPost("/crypto/bot/clear-unresolved-intent", {
+        clientOrderId: intent.clientOrderId,
+      }) as ClearResponse;
+      if (!result.ok || result.outcome !== "cleared") {
+        throw new Error(result.error ?? "The server did not confirm that the unresolved intent was cleared.");
+      }
+      setMessage({
+        ok: true,
+        text: `${result.symbol ?? intent.symbol} unresolved intent cleared. Its audit record was retained and the trading block was released.`,
+      });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bot-unresolved-regular-intents"] }),
+        qc.invalidateQueries({ queryKey: ["bot-status"] }),
+        qc.invalidateQueries({ queryKey: ["bot-all-history"] }),
+        qc.invalidateQueries({ queryKey: ["bot-stats"] }),
+      ]);
+    } catch (error) {
+      setMessage({
+        ok: false,
+        text: error instanceof Error ? error.message : "The unresolved intent could not be cleared.",
+      });
     } finally {
       setBusyId(null);
     }
@@ -122,15 +173,28 @@ export function BotRegularIntentPanel({ authPost, getToken }: Props) {
                     {" · "}{displayReason(intent)}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void reconcile(intent.clientOrderId)}
-                  disabled={busyId != null}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-orange-400/35 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-200 transition hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-                  Reconcile with Kalshi
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void reconcile(intent.clientOrderId)}
+                    disabled={busyId != null}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-orange-400/35 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-200 transition hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                    Reconcile with Kalshi
+                  </button>
+                  {intent.status === "unknown" && (
+                    <button
+                      type="button"
+                      onClick={() => void clearIntent(intent)}
+                      disabled={busyId != null}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-red-400/35 bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <CircleOff className="h-3.5 w-3.5" />
+                      Clear block
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           );

@@ -22,3 +22,9 @@ description: Fail-closed rules for regular Kalshi entry and exit submissions whe
 **Why:** Kalshi can return valid fractional quantities such as `3.60`, and current and historical endpoints can overlap. Integer coercion hides real fills, while loose matching or duplicate evidence can fabricate exposure.
 
 **How to apply:** Repeated evidence may be collapsed only when it agrees. Any disagreement in identity, quantity, price, status, or settlement accounting must fail closed rather than choosing one source.
+
+**Operator override rule:** A signed-in bot operator may explicitly clear an entry intent only after it has reached `unknown`. Never allow the override for `reserved`, which may still be pre-submit or in flight. Preserve the original row and structured actor/time/previous-state evidence under a distinct operator-cleared terminal status; do not represent the result as a zero fill or confirmed fill. Normal late resolution must not overwrite the operator-cleared record.
+
+**Why:** A permanently ambiguous historical order can otherwise block a coin forever, but clearing an in-flight reservation creates duplicate-exposure risk. The explicit unknown-only override makes that tradeoff visible and auditable without weakening the live submission boundary.
+
+**How to apply:** Lock and recheck the exact live row before clearing it, update only while its status remains unknown, and hide/reject the action for every other state. Removing it from unresolved predicates and active-cap indexes releases trading; retain confirmation copy that states the exchange outcome remains unknown.

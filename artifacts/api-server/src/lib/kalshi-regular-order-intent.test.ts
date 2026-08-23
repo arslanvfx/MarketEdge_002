@@ -117,6 +117,70 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     assert.equal(await mod.countUnresolvedRegularIntents() >= 1, true);
   });
 
+  it("operator clear retains the intent row but releases an unresolved reservation", async () => {
+    const wk = "DBTEST-OPERATOR-CLEAR";
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-clear1", wk))).claimed, true);
+    await mod.markRegularOrderIntentUnknown({
+      clientOrderId: "cid-clear1",
+      reason: "unparseable_exchange_response",
+    });
+
+    const result = await mod.clearRegularOrderIntent({
+      clientOrderId: "cid-clear1",
+      actorId: "user_dbtest",
+    });
+
+    assert.equal(result.outcome, "cleared");
+    assert.equal(await mod.hasUnresolvedRegularIntent(MODE, "BTC", wk), false);
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-clear2", "DBTEST-OPERATOR-CLEAR-NEXT"))).claimed, true);
+
+    const after = await readIntent("cid-clear1");
+    assert.ok(after, "operator clear must retain the original intent row");
+    assert.equal(after!.status, "operator_cleared");
+  });
+
+  it("operator clear cannot release a reserved intent that may still be in flight", async () => {
+    const wk = "DBTEST-OPERATOR-CLEAR-RESERVED";
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-clear-reserved1", wk))).claimed, true);
+
+    const result = await mod.clearRegularOrderIntent({
+      clientOrderId: "cid-clear-reserved1",
+      actorId: "user_dbtest",
+    });
+
+    assert.deepEqual(result, { outcome: "not_unresolved", status: "reserved" });
+    assert.equal(await mod.hasUnresolvedRegularIntent(MODE, "BTC", wk), true);
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-clear-reserved2", wk))).claimed, false);
+  });
+
+  it("a late definite resolver cannot overwrite an operator-cleared audit record", async () => {
+    const wk = "DBTEST-OPERATOR-CLEAR-LATE-RESOLVE";
+    assert.equal((await mod.claimRegularOrderIntent(key("cid-clear-late1", wk))).claimed, true);
+    await mod.markRegularOrderIntentUnknown({
+      clientOrderId: "cid-clear-late1",
+      reason: "transport_timeout",
+    });
+    assert.equal(
+      (await mod.clearRegularOrderIntent({
+        clientOrderId: "cid-clear-late1",
+        actorId: "user_dbtest",
+      })).outcome,
+      "cleared",
+    );
+
+    await assert.rejects(
+      mod.resolveRegularOrderIntent({
+        clientOrderId: "cid-clear-late1",
+        status: "filled",
+        filledCount: 3,
+        avgFillPrice: 0.5,
+        orderId: "late-order",
+      }),
+      /matched zero rows/,
+    );
+    assert.equal((await readIntent("cid-clear-late1"))?.status, "operator_cleared");
+  });
+
   it("confirmed fill remains blocking for the same symbol/window", async () => {
     const wk = "DBTEST-F";
     assert.equal((await mod.claimRegularOrderIntent(key("cid-f1", wk))).claimed, true);

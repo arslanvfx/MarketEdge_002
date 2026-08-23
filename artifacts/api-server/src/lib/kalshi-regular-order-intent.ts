@@ -28,7 +28,8 @@ export type RegularIntentStatus =
   | "filled"      // confirmed fill — resolved, but blocks another entry in that window
   | "zero_fill"   // confirmed dead / zero fill — reservation released
   | "unknown"     // POST outcome indeterminate — reservation RETAINED (blocks window)
-  | "skipped";    // never submitted (pre-POST abort) — reservation released
+  | "skipped"     // never submitted (pre-POST abort) — reservation released
+  | "operator_cleared"; // explicit operator override — audit retained, reservation released
 
 export interface RegularOrderIntentKey {
   clientOrderId: string;
@@ -278,7 +279,8 @@ export async function resolveRegularOrderIntent(params: {
         `UPDATE kalshi_regular_order_intents
          SET status = $1, reason = $2, filled_count = $3, avg_fill_price = $4,
              order_id = COALESCE($5, order_id), resolved_at = NOW()
-         WHERE client_order_id = $6`,
+         WHERE client_order_id = $6
+           AND (status IN ('reserved', 'unknown') OR status = $1)`,
         [
           params.status, params.reason ?? null, params.filledCount ?? null,
           params.avgFillPrice ?? null, params.orderId ?? null, params.clientOrderId,
@@ -324,6 +326,103 @@ export async function markRegularOrderIntentUnknown(params: {
        WHERE client_order_id = $2`,
       [params.reason, params.clientOrderId],
     );
+  } finally {
+    client.release();
+  }
+}
+
+export type ClearRegularOrderIntentResult =
+  | { outcome: "cleared"; clientOrderId: string; symbol: string; windowKey: string }
+  | { outcome: "not_found" }
+  | { outcome: "not_unresolved"; status: RegularIntentStatus };
+
+/**
+ * Explicit operator escape hatch for an indeterminate live entry intent.
+ *
+ * This NEVER claims the order was dead or filled. It preserves the intent row
+ * and immutable context, adds structured override evidence, and only removes
+ * the reservation after locking an intent that is already UNKNOWN. Reserved
+ * intents may still be pre-POST or in flight and can never be operator-cleared.
+ */
+export async function clearRegularOrderIntent(params: {
+  clientOrderId: string;
+  actorId: string;
+}): Promise<ClearRegularOrderIntentResult> {
+  await ensureMigrated();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const existing = await client.query<{
+      status: RegularIntentStatus;
+      symbol: string;
+      window_key: string;
+    }>(
+      `SELECT status, symbol, window_key
+         FROM kalshi_regular_order_intents
+        WHERE client_order_id = $1 AND mode = 'live'
+        FOR UPDATE`,
+      [params.clientOrderId],
+    );
+    const row = existing.rows[0];
+    if (!row) {
+      await client.query("COMMIT");
+      return { outcome: "not_found" };
+    }
+    if (row.status !== "unknown") {
+      await client.query("COMMIT");
+      return { outcome: "not_unresolved", status: row.status };
+    }
+
+    const update = await client.query(
+      `UPDATE kalshi_regular_order_intents
+          SET status = 'operator_cleared',
+              reason = 'operator cleared unresolved intent after explicit confirmation',
+              reconciliation_reason = 'operator_cleared',
+              reconciliation_evidence = jsonb_set(
+                CASE
+                  WHEN jsonb_typeof(reconciliation_evidence) = 'object'
+                    THEN reconciliation_evidence
+                  ELSE '{}'::jsonb
+                END,
+                '{operator_clear}',
+                jsonb_build_object(
+                  'actor_id', $2::text,
+                  'cleared_at', NOW(),
+                  'previous_status', status,
+                  'previous_reason', reason,
+                  'note', 'Operator cleared unresolved intent after explicit confirmation'
+                ),
+                true
+              ),
+              last_reconciled_at = NOW(),
+              resolved_at = NOW()
+        WHERE client_order_id = $1
+          AND mode = 'live'
+          AND status = 'unknown'`,
+      [params.clientOrderId, params.actorId],
+    );
+    if ((update.rowCount ?? 0) !== 1) {
+      await client.query("ROLLBACK");
+      return { outcome: "not_unresolved", status: row.status };
+    }
+    await client.query("COMMIT");
+    logger.warn(
+      {
+        clientOrderId: params.clientOrderId,
+        symbol: row.symbol,
+        windowKey: row.window_key,
+      },
+      "[kalshi-regular-intent] unresolved live intent cleared by operator override",
+    );
+    return {
+      outcome: "cleared",
+      clientOrderId: params.clientOrderId,
+      symbol: row.symbol,
+      windowKey: row.window_key,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
   } finally {
     client.release();
   }
