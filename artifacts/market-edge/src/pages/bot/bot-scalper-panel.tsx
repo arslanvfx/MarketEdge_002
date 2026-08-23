@@ -4,7 +4,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
 import { API_BASE, fmt$, fmtPct, fmtDateTime, wkToEstRange, ET_LABEL } from "./utils";
 import type { ScalperConfig, ScalperStatus, ScalperPerformance, ScalperUnresolvedAttempt } from "./types";
-import { describeScalperAttempt, describeScalperEvidence, getScalperGuardBlock } from "./scalper-ledger";
+import {
+  describeScalperAttempt,
+  describeScalperEvidence,
+  describeScalperReason,
+  getScalperGuardBlock,
+} from "./scalper-ledger";
 
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
@@ -357,7 +362,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
 
   function readableReason(reason: string | null): string {
     if (!reason) return "Awaiting Kalshi reconciliation";
-    return reason.replaceAll("_", " ");
+    return describeScalperReason(reason);
   }
 
   function handleConfigChange(key: keyof ScalperConfig, value: any) {
@@ -554,7 +559,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           </div>
           <div className="text-[10px] font-mono opacity-80">
             {statusData.preflight.reason
-              ? statusData.preflight.reason.replaceAll("_", " ")
+              ? readableReason(statusData.preflight.reason)
               : statusData.preflight.state === "idle" && statusData.preflight.startsInSeconds != null
                 ? `starts in ${Math.ceil(statusData.preflight.startsInSeconds)}s`
                 : statusData.preflight.checkedAt
@@ -565,7 +570,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
             <div className="text-[10px] font-mono opacity-75 sm:text-right">
               {statusData.preflight.markets
                 .filter((market) => !market.ready)
-                .map((market) => `${market.symbol}: ${market.reason?.replaceAll("_", " ") ?? "not ready"}`)
+                .map((market) => `${market.symbol}: ${market.reason ? readableReason(market.reason) : "Not ready yet"}`)
                 .join(" · ")}
             </div>
           )}
@@ -1266,25 +1271,33 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                         </div>
                       )}
                       {evidenceLines.length > 0 && (
-                        <div
-                          data-testid={`text-scalper-skip-evidence-${attempt.id}`}
-                          className="mt-1.5 pl-0 sm:pl-12 flex flex-col gap-0.5 text-[10px] font-mono text-muted-foreground/80"
-                        >
-                          {evidenceLines.map((line) => (
-                            <span
-                              key={line}
-                              className={
-                                line.startsWith("GUARD TRIGGERED:")
-                                  ? "font-bold text-red-300"
-                                  : line.startsWith("SAFETY CHECKS PASSED")
-                                    ? "font-bold text-emerald-400/80"
-                                    : undefined
-                              }
-                            >
-                              {line}
-                            </span>
-                          ))}
-                        </div>
+                        <details className="mt-1.5 pl-0 sm:pl-12 text-[10px] text-muted-foreground/80">
+                          <summary
+                            data-testid={`button-scalper-check-details-${attempt.id}`}
+                            className="cursor-pointer select-none font-semibold text-muted-foreground hover:text-foreground"
+                          >
+                            Show check details
+                          </summary>
+                          <div
+                            data-testid={`text-scalper-skip-evidence-${attempt.id}`}
+                            className="mt-1 flex flex-col gap-0.5 border-l border-border/70 pl-2"
+                          >
+                            {evidenceLines.map((line) => (
+                              <span
+                                key={line}
+                                className={
+                                  line.startsWith("GUARD TRIGGERED:")
+                                    ? "font-semibold text-red-300"
+                                    : line.startsWith("SAFETY CHECKS PASSED")
+                                      ? "font-semibold text-emerald-400/80"
+                                      : undefined
+                                }
+                              >
+                                {line}
+                              </span>
+                            ))}
+                          </div>
+                        </details>
                       )}
                     </div>
                   );

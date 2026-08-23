@@ -156,7 +156,7 @@ describe("describeScalperAttempt", () => {
   it("distinguishes final quote movement from zero fills", () => {
     assert.equal(
       describeScalperAttempt(attempt({ reason: "second_quote_outside_band" })),
-      "Final authenticated quote moved outside the permitted band",
+      "Final price was outside your entry range",
     );
     assert.equal(
       describeScalperAttempt(attempt({ status: "zero_fill", reason: "zero_fill" })),
@@ -167,11 +167,11 @@ describe("describeScalperAttempt", () => {
   it("uses readable explanations for authenticated quote and identity skips", () => {
     assert.equal(
       describeScalperAttempt(attempt({ reason: "final_quote_invalid" })),
-      "Authenticated final quote was unavailable or invalid",
+      "No valid price was available at the final check",
     );
     assert.equal(
       describeScalperAttempt(attempt({ reason: "identity_outside_window" })),
-      "Refreshed market identity was outside the entry window",
+      "The market changed too close to the end of the window",
     );
   });
 
@@ -195,7 +195,7 @@ describe("describeScalperAttempt", () => {
     });
     assert.equal(
       describeScalperAttempt(conflict),
-      "Position-Side Guard blocked submission",
+      "Position-Side Guard: This trade would conflict with an open regular position",
     );
     assert.match(
       describeScalperEvidence(conflict).join("\n"),
@@ -206,11 +206,11 @@ describe("describeScalperAttempt", () => {
   it("clearly names fail-closed Freefall feed outcomes", () => {
     assert.equal(
       describeScalperAttempt(attempt({ reason: "freefall_unavailable_fetch_failed" })),
-      "Real-Time Direction Guard blocked submission",
+      "Real-Time Direction Guard: We could not get a fresh price for the safety check",
     );
     assert.equal(
       describeScalperAttempt(attempt({ reason: "freefall_unavailable_stale" })),
-      "Real-Time Direction Guard blocked submission",
+      "Real-Time Direction Guard: Recent prices were too old for a safe entry",
     );
   });
 
@@ -248,7 +248,7 @@ describe("describeScalperAttempt", () => {
     }));
     assert.equal(
       lines[0],
-      "GUARD TRIGGERED: Real-Time Direction Guard — Underlying rose toward the target for the configured consecutive seconds",
+      "GUARD TRIGGERED: Real-Time Direction Guard — Price kept rising toward the target for too long",
     );
   });
 
@@ -438,7 +438,7 @@ describe("describeEntryGuardEvidence", () => {
     assert.match(lines[0] ?? "", /Real-Time Direction Guard/);
     assert.match(
       lines.join("\n"),
-      /Full-window favorable trend BLOCKED: -0\.021%.*flat or net lower instead of rising/,
+      /Full-window favorable trend BLOCKED: -0\.021%.*did not show an upward trend for a YES entry/,
     );
     assert.match(
       lines.join("\n"),

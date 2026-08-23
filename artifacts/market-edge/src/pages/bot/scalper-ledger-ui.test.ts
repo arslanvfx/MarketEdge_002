@@ -37,6 +37,8 @@ describe("unified Scalper ledger wiring", () => {
     assert.match(panelSource, /describeScalperAttempt/);
     assert.match(panelSource, /Guard checked \{fmtDateTime\(attempt\.attemptedAt\)\}/);
     assert.match(panelSource, /text-scalper-attempt-timestamp-/);
+    assert.match(panelSource, /Show check details/);
+    assert.match(panelSource, /button-scalper-check-details-/);
   });
 
   it("shows successful regular-position layers in unified history", () => {

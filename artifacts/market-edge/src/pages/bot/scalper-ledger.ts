@@ -143,15 +143,15 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
   }
   if (attempt.status === "zero_fill") return "IOC returned zero fills";
   if (attempt.status === "unknown") return "Order result unknown — reconciliation required";
-  if (attempt.status === "error") return attempt.reason ? `Error — ${humanizeReason(attempt.reason)}` : "Attempt failed";
+  if (attempt.status === "error") return attempt.reason ? `Error — ${describeScalperReason(attempt.reason)}` : "Attempt failed";
   const guardBlock = getScalperGuardBlock(attempt);
-  if (guardBlock) return `${guardBlock.label} blocked submission`;
+  if (guardBlock && attempt.reason) return `${guardBlock.label}: ${describeScalperReason(attempt.reason)}`;
   if (attempt.reason === "second_quote_outside_band" || attempt.reason === "final_quote_outside_band") {
-    return "Final authenticated quote moved outside the permitted band";
+    return "Final price was outside your entry range";
   }
-  if (attempt.reason === "first_quote_outside_band") return "Preliminary quote was outside the band";
+  if (attempt.reason === "first_quote_outside_band") return "Current price was outside your entry range";
   if (attempt.status === "claimed") return "Checks in progress";
-  return attempt.reason ? humanizeReason(attempt.reason) : "Skipped before order";
+  return attempt.reason ? describeScalperReason(attempt.reason) : "Skipped before order";
 }
 
 export function describeEntryGuardEvidence(ege: EntryGuardEvidence): string[] {
@@ -311,7 +311,7 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   }
 
   if (guardBlock && attempt.reason) {
-    details.push(`GUARD TRIGGERED: ${guardBlock.label} — ${humanizeReason(attempt.reason)}`);
+    details.push(`GUARD TRIGGERED: ${guardBlock.label} — ${describeScalperReason(attempt.reason)}`);
   }
 
   if (
@@ -382,7 +382,7 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
       ? "CONFIRMED"
       : "BLOCKED";
     const reason = evidence.favorableTrendReason
-      ? ` · ${humanizeReason(evidence.favorableTrendReason)}`
+      ? ` · ${describeScalperReason(evidence.favorableTrendReason)}`
       : "";
     details.push(`Full-window favorable trend ${disposition}: ${movement}${reason}`);
     const targetDirection = evidence.protectedSide === "no" ? "below" : "above";
@@ -552,53 +552,53 @@ export function getScalperGuardBlock(attempt: ScalperAttempt): ScalperGuardBlock
 }
 
 const REASON_LABELS: Record<string, string> = {
-  outside_window_at_claim: "Outside the effective entry window at reservation",
-  window_expired_before_submit: "Window expired before final checks",
-  outside_window_before_submit: "Outside the effective entry window before submission",
-  outside_window_second_quote: "Window expired while refreshing the final quote",
-  identity_outside_window: "Refreshed market identity was outside the entry window",
-  identity_refresh_failed: "Final market identity refresh failed",
-  identity_missing_after_refresh: "Final market identity was unavailable",
-  identity_changed: "Kalshi market identity changed during final checks",
-  identity_changed_before_submit: "Kalshi market identity changed before submission",
-  identity_missing_before_submit: "Kalshi market identity was missing before submission",
-  final_quote_invalid: "Authenticated final quote was unavailable or invalid",
-  final_quote_outside_band: "Authenticated final quote moved outside the permitted band",
-  side_flipped_final_quote: "Authenticated final quote changed the qualifying side",
-  target_proximity_too_close: "Underlying price was too close to the Kalshi target",
-  target_proximity_unavailable_no_product: "Target-distance data was unavailable",
-  target_proximity_unavailable_fetch_failed: "Fresh underlying price was unavailable for target-distance validation",
-  freefall_adverse_falling: "Adverse downward move exceeded the Freefall limit",
-  freefall_adverse_rising: "Adverse upward move exceeded the Freefall limit",
-  freefall_adverse_reversal_falling: "A sharp downward reversal exceeded the Freefall limit",
-  freefall_adverse_reversal_rising: "A sharp upward reversal exceeded the Freefall limit",
-  freefall_consecutive_falling: "Underlying fell toward the target for the configured consecutive seconds",
-  freefall_consecutive_rising: "Underlying rose toward the target for the configured consecutive seconds",
-  freefall_wrong_target_side_yes: "The complete direction window did not stay above the target for the YES entry",
-  freefall_wrong_target_side_no: "The complete direction window did not stay below the target for the NO entry",
-  freefall_favorable_trend_not_confirmed_yes: "The full sample window was flat or net lower instead of rising for the YES entry",
-  freefall_favorable_trend_not_confirmed_no: "The full sample window was flat or net higher instead of falling for the NO entry",
-  freefall_unavailable_no_samples: "Freefall guard lacked enough fresh samples",
-  freefall_unavailable_warming: "Real-time direction guard is collecting its required one-second samples",
-  freefall_unavailable_sample_gap: "A one-second underlying-price tick was missed",
-  freefall_unavailable_coverage: "Freefall samples did not cover enough of the lookback",
-  freefall_unavailable_stale: "Freefall samples were stale",
-  freefall_unavailable_fetch_failed: "Fresh underlying price fetch failed — Freefall blocked submission",
-  freefall_unavailable_no_product: "Underlying product was unavailable — Freefall blocked submission",
-  freefall_unavailable_out_of_order: "Freefall samples arrived out of order",
-  freefall_unavailable_target: "The active Kalshi target was unavailable",
-  rapid_move_too_fast_rising: "Fast-move avoidance blocked an unusually rapid rise",
-  rapid_move_too_fast_falling: "Fast-move avoidance blocked an unusually rapid fall",
-  rapid_move_unavailable_warming: "Fast-move avoidance is collecting its required samples",
-  rapid_move_unavailable_sample_gap: "Fast-move avoidance missed a one-second price tick",
-  final_balance_check_failed: "Final balance check failed",
-  balance_check_failed_final: "Final balance check failed",
-  insufficient_balance_final: "Available balance was below worst-case exposure",
-  breaker_before_submit: "Circuit breaker blocked submission",
-  opposite_regular_position: "Opposite regular position blocked submission",
+  outside_window_at_claim: "Not enough time remained in this window",
+  window_expired_before_submit: "The window closed before we could place the order",
+  outside_window_before_submit: "Not enough time remained to safely place the order",
+  outside_window_second_quote: "The window closed while we checked the final price",
+  identity_outside_window: "The market changed too close to the end of the window",
+  identity_refresh_failed: "We could not confirm the current market before entry",
+  identity_missing_after_refresh: "The current market was not available before entry",
+  identity_changed: "The market changed while we were checking it",
+  identity_changed_before_submit: "The market changed before we could place the order",
+  identity_missing_before_submit: "The market was no longer available before entry",
+  final_quote_invalid: "No valid price was available at the final check",
+  final_quote_outside_band: "Final price was outside your entry range",
+  side_flipped_final_quote: "The final price qualified on the other side of the market",
+  target_proximity_too_close: "The underlying price was too close to the target",
+  target_proximity_unavailable_no_product: "We could not verify the distance from the target",
+  target_proximity_unavailable_fetch_failed: "We could not get a fresh underlying price to check the target distance",
+  freefall_adverse_falling: "Price fell too quickly toward the target",
+  freefall_adverse_rising: "Price rose too quickly toward the target",
+  freefall_adverse_reversal_falling: "Price reversed downward too quickly toward the target",
+  freefall_adverse_reversal_rising: "Price reversed upward too quickly toward the target",
+  freefall_consecutive_falling: "Price kept falling toward the target for too long",
+  freefall_consecutive_rising: "Price kept rising toward the target for too long",
+  freefall_wrong_target_side_yes: "At least one recent price was not above the target for a YES entry",
+  freefall_wrong_target_side_no: "At least one recent price was not below the target for a NO entry",
+  freefall_favorable_trend_not_confirmed_yes: "Recent prices did not show an upward trend for a YES entry",
+  freefall_favorable_trend_not_confirmed_no: "Recent prices did not show a downward trend for a NO entry",
+  freefall_unavailable_no_samples: "We did not have enough fresh prices to make this safety check",
+  freefall_unavailable_warming: "The direction check is still collecting recent prices",
+  freefall_unavailable_sample_gap: "A required price update was missed, so we did not enter",
+  freefall_unavailable_coverage: "Recent prices did not cover enough time for a safe check",
+  freefall_unavailable_stale: "Recent prices were too old for a safe entry",
+  freefall_unavailable_fetch_failed: "We could not get a fresh price for the safety check",
+  freefall_unavailable_no_product: "The underlying market was unavailable for the safety check",
+  freefall_unavailable_out_of_order: "Recent price updates arrived out of order",
+  freefall_unavailable_target: "The current target was unavailable for the safety check",
+  rapid_move_too_fast_rising: "Price was rising too quickly to enter safely",
+  rapid_move_too_fast_falling: "Price was falling too quickly to enter safely",
+  rapid_move_unavailable_warming: "The fast-move check is still collecting recent prices",
+  rapid_move_unavailable_sample_gap: "A required price update was missed during the fast-move check",
+  final_balance_check_failed: "We could not confirm enough available balance before entry",
+  balance_check_failed_final: "We could not confirm enough available balance before entry",
+  insufficient_balance_final: "Available balance was too low for this order",
+  breaker_before_submit: "The circuit breaker paused new entries",
+  opposite_regular_position: "This trade would conflict with an open regular position",
 };
 
-function humanizeReason(reason: string): string {
+export function describeScalperReason(reason: string): string {
   const clean = normalizeReason(reason);
   return REASON_LABELS[clean] ?? clean
     .replace(/_/g, " ")
