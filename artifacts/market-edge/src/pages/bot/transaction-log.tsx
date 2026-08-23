@@ -1,7 +1,8 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save, Thermometer, Waves, Crosshair, Timer, Users, Link2 } from "lucide-react";
 import React from "react";
-import type { HistoryRecord } from "./types";
 import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtContracts, fmtDuration, wkToEst } from "./utils";
+import type { EntryGuardEvidence, HistoryRecord } from "./types";
+import { describeEntryGuardEvidence } from "./scalper-ledger";
 
 const HIST_PAGE_SIZE = 20;
 const SCALPER_CARD_CLASS = "border-amber-400/40 bg-[linear-gradient(135deg,#0c0f12_0%,#171716_52%,#634515_100%)] text-amber-50 ring-1 ring-inset ring-amber-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_0_22px_rgba(245,158,11,0.16),0_14px_38px_rgba(0,0,0,0.35)]";
@@ -475,6 +476,29 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                             : ""}
                         </span>
                       )}
+                      {/* Scalper entry guard evidence — safety checks passed summary */}
+                      {isScalper && (() => {
+                        const ege = sigs?.entryGuardEvidence as EntryGuardEvidence | null ?? null;
+                        if (ege == null) return null;
+                        const egeLines = describeEntryGuardEvidence(ege);
+                        return (
+                          <div
+                            data-testid={`text-scalper-entry-guard-evidence-${r.id}`}
+                            className="w-full mt-1.5 flex flex-col gap-0.5 text-[10px] font-mono text-amber-200/60"
+                          >
+                            {egeLines.map((line) => (
+                              <span
+                                key={line}
+                                className={line.startsWith("SAFETY CHECKS PASSED")
+                                  ? "font-bold text-emerald-400/80"
+                                  : undefined}
+                              >
+                                {line}
+                              </span>
+                            ))}
+                          </div>
+                        );
+                      })()}
                       {/* Strike-proximity gap — how far the crypto price was from the Kalshi strike when the bet was placed */}
                       {!isSkip && !isShadow && (() => {
                         const entryPx  = r.cryptoPriceAtEntry != null ? parseFloat(r.cryptoPriceAtEntry) : null;

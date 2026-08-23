@@ -431,6 +431,12 @@ export interface FreefallGuardResult {
   wrongTargetSide: boolean;
   rapidMoveBlocked: boolean;
   rapidMovePct: number;
+  /** Exact cadence samples used by the enabled direction/rapid checks. */
+  evaluatedSamples: FreefallSample[];
+  /** Prior wrong-way streaks interrupted by a flat or favorable sample. */
+  wrongWayResetCount: number;
+  /** Timestamp of the most recent reset sample, when one occurred. */
+  lastWrongWayResetAt: number | null;
 }
 
 export interface FreefallPreSubmitDecision {
@@ -580,6 +586,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     wrongTargetSide: false,
     rapidMoveBlocked: false,
     rapidMovePct: 0,
+    evaluatedSamples: [],
+    wrongWayResetCount: 0,
+    lastWrongWayResetAt: null,
   });
 
   if (!Number.isFinite(input.nowMs) || !Number.isFinite(input.eligibilityStartMs)) {
@@ -673,6 +682,8 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   let consecutiveWrongWayMoves = 0;
   let consecutiveWrongWayStartedAt: number | null = null;
   let consecutiveWrongWayDurationMs = 0;
+  let wrongWayResetCount = 0;
+  let lastWrongWayResetAt: number | null = null;
   for (let index = 1; index < directionSamples.length; index += 1) {
     const previousSample = directionSamples[index - 1];
     const currentSample = directionSamples[index];
@@ -689,6 +700,10 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       consecutiveWrongWayDurationMs =
         currentSample.at - (consecutiveWrongWayStartedAt ?? currentSample.at);
     } else {
+      if (consecutiveWrongWayMoves > 0) {
+        wrongWayResetCount += 1;
+        lastWrongWayResetAt = currentSample.at;
+      }
       consecutiveWrongWayMoves = 0;
       consecutiveWrongWayStartedAt = null;
       consecutiveWrongWayDurationMs = 0;
@@ -708,6 +723,7 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   let rapidMoveBlocked = false;
   let rapidMovePct = 0;
   let rapidSamplesUsed = 0;
+  let rapidSamples: FreefallSample[] = [];
   let rapidMoveReason: string | null = null;
   if (input.rapidMoveEnabled) {
     const rapid = selectCadencedSamples(relevant, rapidRequiredMoves);
@@ -719,6 +735,7 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     }
     const rapidOldest = rapid.samples[0];
     const rapidNewest = rapid.samples[rapid.samples.length - 1];
+    rapidSamples = rapid.samples;
     rapidSamplesUsed = rapid.samples.length;
     observedSpanMs = Math.max(
       observedSpanMs,
@@ -745,6 +762,15 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
         ? "freefall_consecutive_falling"
         : "freefall_consecutive_rising")
       : rapidMoveReason;
+  const evaluatedSamplesByTimestamp = new Map<number, FreefallSample>();
+  if (input.directionEnabled) {
+    for (const sample of directionSamples) evaluatedSamplesByTimestamp.set(sample.at, sample);
+  }
+  if (input.rapidMoveEnabled) {
+    for (const sample of rapidSamples) evaluatedSamplesByTimestamp.set(sample.at, sample);
+  }
+  const evaluatedSamples = [...evaluatedSamplesByTimestamp.values()]
+    .sort((a, b) => a.at - b.at);
 
   return {
     evaluable: true,
@@ -769,6 +795,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     wrongTargetSide,
     rapidMoveBlocked,
     rapidMovePct,
+    evaluatedSamples,
+    wrongWayResetCount,
+    lastWrongWayResetAt,
   };
 }
 

@@ -1005,6 +1005,79 @@ describe("skip_evidence persistence and retrieval", { skip: !RUN_DB_TESTS ? "set
     // skipEvidence should be null for rows without it.
     assert.equal(row.skipEvidence, null);
   });
+
+  it("persists compact final guard-pass evidence with the order intent", async () => {
+    const orderId = `DBTEST-entry-evidence-${Date.now()}`;
+    const windowKey = `${WINDOW_KEY}-entry`;
+    const evaluatedAt = new Date().toISOString();
+    await db.insertScalpOrderIntent({
+      id: orderId,
+      mode: MODE,
+      symbol: SYMBOL,
+      windowKey,
+      ticker: TICKER,
+      side: "yes",
+      entryYesPrice: 0.97,
+      contractCount: 2,
+      budgetSpent: 0,
+      clientOrderId: null,
+      orderId: `paper-${orderId}`,
+      exchangeResponseReason: null,
+      filledCount: 2,
+      avgFillPrice: 0.97,
+      limitPrice: 0.99,
+      winningContractCost: 0.97,
+      status: "paper",
+      errorMessage: null,
+      settlementResult: null,
+      outcome: null,
+      pnl: null,
+      incidentId: null,
+      reconciledAt: null,
+      reconciliationEvidence: null,
+      entryGuardEvidence: {
+        schemaVersion: 1,
+        phase: "final_pre_submit",
+        evaluatedAt,
+        side: "yes",
+        directionGuardEnabled: true,
+        rapidMoveGuardEnabled: true,
+        targetProximityGuardEnabled: true,
+        samples: [
+          { at: new Date(Date.parse(evaluatedAt) - 1_000).toISOString(), price: 101 },
+          { at: evaluatedAt, price: 102 },
+        ],
+        sampleCoverageMs: 1_000,
+        samplesUsed: 2,
+        wrongWayResetCount: 1,
+        lastWrongWayResetAt: evaluatedAt,
+        consecutiveWrongWayMoves: 0,
+        consecutiveWrongWaySeconds: 0,
+        directionalMovePct: 0.99,
+        freefallConsecutiveSeconds: 4,
+        rapidMovePct: 0.99,
+        rapidMoveThresholdPct: 1.5,
+        rapidMoveLookbackSeconds: 4,
+        distancePct: 2,
+        minimumPct: 0.05,
+        targetPrice: 100,
+        underlyingPrice: 102,
+      },
+      createdAt: new Date(),
+      settledAt: null,
+    });
+
+    const orders = await db.getScalpOrders({ mode: MODE, symbol: SYMBOL, limit: 100 });
+    const stored = orders.find((order) => order.id === orderId);
+    assert.ok(stored);
+    assert.equal(stored.entryGuardEvidence?.phase, "final_pre_submit");
+    assert.equal(stored.entryGuardEvidence?.wrongWayResetCount, 1);
+    assert.equal(stored.entryGuardEvidence?.distancePct, 2);
+    assert.deepEqual(
+      stored.entryGuardEvidence?.samples.map((sample) => sample.price),
+      [101, 102],
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

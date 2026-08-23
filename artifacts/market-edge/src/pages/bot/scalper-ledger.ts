@@ -1,4 +1,4 @@
-import type { HistoryRecord, OpenPosition, ScalpOrder, ScalperAttempt } from "./types.ts";
+import type { EntryGuardEvidence, HistoryRecord, OpenPosition, ScalpOrder, ScalperAttempt } from "./types.ts";
 
 export type ScalperLedger = {
   positions: OpenPosition[];
@@ -88,6 +88,7 @@ function toHistory(order: ScalpOrder, outcome: DisplayScalpOutcome): HistoryReco
       settlementResult: order.settlementResult,
       layeredRegularPositionId: order.layeredRegularPositionId,
       layeredRegularSide: order.layeredRegularSide,
+      entryGuardEvidence: order.entryGuardEvidence ?? null,
     },
     entryPrice: String(order.avgFillPrice),
     exitPrice: null,
@@ -153,10 +154,129 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
   return attempt.reason ? humanizeReason(attempt.reason) : "Skipped before order";
 }
 
+export function describeEntryGuardEvidence(ege: EntryGuardEvidence): string[] {
+  const lines: string[] = [];
+
+  const evaluatedAt = new Date(ege.evaluatedAt);
+  const evaluatedAtText = Number.isNaN(evaluatedAt.getTime())
+    ? ege.evaluatedAt
+    : evaluatedAt.toISOString();
+  lines.push(
+    `SAFETY CHECKS PASSED — final pre-submit snapshot evaluated ${evaluatedAtText} (samples exclude post-fill movement)`,
+  );
+
+  // Sample prices/timestamps
+  if (ege.samples.length > 0) {
+    const sampleDesc = ege.samples
+      .map((s) => {
+        const at = new Date(s.at);
+        const atText = Number.isNaN(at.getTime()) ? s.at : at.toISOString();
+        return `${formatUnderlyingPrice(s.price)} @ ${atText}`;
+      })
+      .join(", ");
+    const coverageText = ege.sampleCoverageMs == null
+      ? ""
+      : ` · ${(ege.sampleCoverageMs / 1_000).toFixed(1)}s coverage`;
+    lines.push(`Samples (${ege.samplesUsed ?? ege.samples.length}): ${sampleDesc}${coverageText}`);
+  }
+
+  // Wrong-way resets / streak duration
+  const resetCount = ege.wrongWayResetCount;
+  const lastReset = ege.lastWrongWayResetAt;
+  const wrongWayMoves = ege.consecutiveWrongWayMoves;
+  const wrongWaySecs = ege.consecutiveWrongWaySeconds;
+  const threshold = ege.freefallConsecutiveSeconds;
+  if (ege.directionGuardEnabled) {
+    const resetText = resetCount == null
+      ? "resets unavailable"
+      : resetCount === 0
+        ? "no wrong-way resets"
+        : `${resetCount} wrong-way reset${resetCount === 1 ? "" : "s"}${
+            lastReset
+              ? ` (last ${
+                  Number.isNaN(new Date(lastReset).getTime())
+                    ? lastReset
+                    : new Date(lastReset).toISOString()
+                })`
+              : ""
+          }`;
+    const streakText = wrongWaySecs != null
+      ? `${wrongWaySecs.toFixed(1)}s consecutive wrong-way`
+      : wrongWayMoves != null
+        ? `${wrongWayMoves} consecutive wrong-way moves`
+        : "streak unavailable";
+    const thresholdText = threshold != null ? ` · ${threshold}s threshold` : "";
+    lines.push(`Direction guard: ${resetText} · ${streakText}${thresholdText} — CLEAR`);
+  } else {
+    lines.push("Direction guard: disabled for this entry");
+  }
+
+  // Directional movement + active duration
+  if (ege.directionGuardEnabled && ege.directionalMovePct != null) {
+    const movePct = `${ege.directionalMovePct >= 0 ? "+" : ""}${ege.directionalMovePct.toFixed(3)}%`;
+    const wrongWay = ege.side === "yes"
+      ? ege.directionalMovePct < 0
+      : ege.directionalMovePct > 0;
+    const disposition = ege.directionalMovePct === 0
+      ? "flat"
+      : wrongWay
+        ? "wrong-way toward target"
+        : "favorable away from target";
+    lines.push(
+      `Directional movement ${movePct} — ${disposition} for ${ege.side.toUpperCase()} entry; duration stayed below the blocking threshold — CLEAR`,
+    );
+  }
+
+  // Rapid measurement + threshold
+  if (ege.rapidMoveGuardEnabled) {
+    const rapidMeasured = ege.rapidMovePct == null ? "unavailable" : `${ege.rapidMovePct.toFixed(3)}%`;
+    const rapidThreshold = ege.rapidMoveThresholdPct == null ? "threshold unavailable" : `${ege.rapidMoveThresholdPct.toFixed(3)}% threshold`;
+    const rapidInterval = ege.rapidMoveLookbackSeconds == null ? "" : ` over ${ege.rapidMoveLookbackSeconds}s`;
+    lines.push(`Fast-move: ${rapidMeasured}${rapidInterval} (${rapidThreshold}) — CLEAR`);
+  } else {
+    lines.push("Fast-move guard: disabled for this entry");
+  }
+
+  // Target distance + minimum
+  if (ege.targetProximityGuardEnabled) {
+    const distMeasured = ege.distancePct == null ? "unavailable" : `${ege.distancePct.toFixed(3)}%`;
+    const distMinimum = ege.minimumPct == null ? "minimum unavailable" : `${ege.minimumPct.toFixed(3)}% minimum`;
+    const priceText = ege.targetPrice != null && ege.underlyingPrice != null
+      ? ` · target ${formatUnderlyingPrice(ege.targetPrice)}, underlying ${formatUnderlyingPrice(ege.underlyingPrice)}`
+      : "";
+    lines.push(`Target distance ${distMeasured} (${distMinimum})${priceText} — CLEAR`);
+  } else {
+    lines.push("Target-distance guard: disabled for this entry");
+  }
+
+  return lines;
+}
+
 export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   const evidence = attempt.skipEvidence;
   const details: string[] = [];
   const guardBlock = getScalperGuardBlock(attempt);
+
+  // For filled/submitted attempts with entry guard evidence, show the SAFETY CHECKS PASSED block
+  if (
+    (
+      attempt.status === "filled"
+      || attempt.status === "claimed"
+      || attempt.status === "zero_fill"
+      || attempt.status === "unknown"
+    )
+    && attempt.entryGuardEvidence != null
+  ) {
+    details.push(...describeEntryGuardEvidence(attempt.entryGuardEvidence));
+    // Still show latency below if available; return early from guard-block logic
+    if (attempt.latency) {
+      const slowest = attempt.latency.slowestStage == null
+        ? "stage unavailable"
+        : `${attempt.latency.slowestStage.replaceAll("_", " ")} ${formatLatency(attempt.latency.slowestStageMs)}`;
+      details.push(`Fast path ${formatLatency(attempt.latency.totalMs)} total · slowest ${slowest}`);
+    }
+    return details;
+  }
 
   if (guardBlock && attempt.reason) {
     details.push(`GUARD TRIGGERED: ${guardBlock.label} — ${humanizeReason(attempt.reason)}`);

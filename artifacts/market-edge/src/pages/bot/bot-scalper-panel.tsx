@@ -1246,9 +1246,13 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                           {evidenceLines.map((line) => (
                             <span
                               key={line}
-                              className={line.startsWith("GUARD TRIGGERED:")
-                                ? "font-bold text-red-300"
-                                : undefined}
+                              className={
+                                line.startsWith("GUARD TRIGGERED:")
+                                  ? "font-bold text-red-300"
+                                  : line.startsWith("SAFETY CHECKS PASSED")
+                                    ? "font-bold text-emerald-400/80"
+                                    : undefined
+                              }
                             >
                               {line}
                             </span>

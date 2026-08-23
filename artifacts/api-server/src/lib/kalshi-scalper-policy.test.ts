@@ -751,6 +751,33 @@ describe("checkFreefallGuard", () => {
     assert.equal(result.blocked, false);
     assert.equal(result.reason, null);
     assert.equal(result.consecutiveWrongWayMoves, 1);
+    assert.equal(result.consecutiveWrongWaySeconds, 1);
+    assert.equal(result.wrongWayResetCount, 1);
+    assert.equal(result.lastWrongWayResetAt, nowMs - 1_000);
+    assert.deepEqual(
+      result.evaluatedSamples.map((sample) => sample.price),
+      [105, 104, 103, 103, 102],
+    );
+  });
+
+  it("uses real elapsed time after a reset instead of treating sample count as seconds", () => {
+    const samples: FreefallSample[] = [
+      { price: 105, at: nowMs - 4_300 },
+      { price: 104, at: nowMs - 3_200 },
+      { price: 103, at: nowMs - 2_100 },
+      { price: 103.5, at: nowMs - 1_000 },
+      { price: 103, at: nowMs },
+    ];
+    const result = evaluate(samples, "yes", {
+      eligibilityStartMs: nowMs - 4_300,
+    });
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.wrongWayResetCount, 1);
+    assert.equal(result.lastWrongWayResetAt, nowMs - 1_000);
+    assert.equal(result.consecutiveWrongWayMoves, 1);
+    assert.equal(result.consecutiveWrongWaySeconds, 1);
+    assert.equal(result.observedSpanMs, 4_300);
   });
 
   it("blocks NO after four consecutive one-second rises while still below target", () => {
@@ -949,6 +976,8 @@ describe("checkTargetProximityGuard", () => {
     assert.equal(result.evaluable, true);
     assert.equal(result.blocked, false);
     assert.equal(result.reason, null);
+    assert.ok(result.distancePct != null);
+    assert.ok(Math.abs(result.distancePct - 0.2) < 1e-10);
   });
 
   it("fails closed when live price, target, or threshold is invalid", () => {

@@ -90,6 +90,7 @@ export async function runScalpMigrations(): Promise<void> {
         outcome               TEXT,
         pnl                   NUMERIC(16,8),
         incident_id           TEXT,
+         entry_guard_evidence  JSONB,
         reconciliation_evidence JSONB,
         reconciled_at         TIMESTAMPTZ,
         created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -233,6 +234,7 @@ async function _upgradeScalpSchema(
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS outcome               TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS pnl                   NUMERIC(10,4)`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS incident_id           TEXT`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS entry_guard_evidence  JSONB`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS exchange_response_reason TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS reconciliation_evidence JSONB`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS layered_regular_position_id TEXT`);
@@ -1216,9 +1218,9 @@ async function _insertScalpOrder(client: ScalpDbClient, order: ScalpOrder): Prom
            contract_count, budget_spent, client_order_id, order_id, filled_count,
            avg_fill_price, limit_price, winning_contract_cost, status, error_message,
            exchange_response_reason, settlement_result, outcome, pnl, incident_id,
-            reconciliation_evidence, reconciled_at, layered_regular_position_id,
-            layered_regular_side, created_at, settled_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+            entry_guard_evidence, reconciliation_evidence, reconciled_at,
+            layered_regular_position_id, layered_regular_side, created_at, settled_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
        ON CONFLICT (id) DO NOTHING`,
       [
         order.id, order.mode, order.symbol.toUpperCase(), order.windowKey,
@@ -1229,6 +1231,7 @@ async function _insertScalpOrder(client: ScalpDbClient, order: ScalpOrder): Prom
         order.status, order.errorMessage ?? null,
         order.exchangeResponseReason ?? null, order.settlementResult ?? null,
         order.outcome ?? null, order.pnl ?? null, order.incidentId ?? null,
+        order.entryGuardEvidence == null ? null : JSON.stringify(order.entryGuardEvidence),
         order.reconciliationEvidence ?? null, order.reconciledAt ?? null,
         order.layeredRegularPositionId ?? null, order.layeredRegularSide ?? null,
         order.createdAt, order.settledAt ?? null,
@@ -1680,6 +1683,11 @@ function rowToScalpOrder(row: Record<string, unknown>): ScalpOrder {
     outcome: (row["outcome"] === "win" || row["outcome"] === "loss") ? row["outcome"] : null,
     pnl: row["pnl"] != null ? Number(row["pnl"]) : null,
     incidentId: row["incident_id"] != null ? String(row["incident_id"]) : null,
+    entryGuardEvidence:
+      row["entry_guard_evidence"] != null
+      && typeof row["entry_guard_evidence"] === "object"
+        ? row["entry_guard_evidence"] as ScalpOrder["entryGuardEvidence"]
+        : null,
     reconciledAt: row["reconciled_at"] != null
       ? (row["reconciled_at"] instanceof Date ? row["reconciled_at"] : new Date(String(row["reconciled_at"])))
       : null,

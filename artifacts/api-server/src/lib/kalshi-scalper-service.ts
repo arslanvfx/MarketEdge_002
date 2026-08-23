@@ -30,6 +30,7 @@ import type {
   ScalpPerformance,
   ScalpMarketStatus,
   ScalpPerMarketOverride,
+  ScalpEntryGuardEvidence,
   ScalpSkipEvidence,
 } from "./kalshi-scalper-types.ts";
 import { DEFAULT_SCALP_CONFIG } from "./kalshi-scalper-types.ts";
@@ -1739,6 +1740,10 @@ async function _executeScalpAttempt(
   const identityRefreshStartMs = runtime.nowMs();
   const quoteRefreshStartMs = runtime.nowMs();
   const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
+  const priceGuardSampleRequested =
+    snapshot.freefallGuardEnabled
+    || snapshot.rapidMoveGuardEnabled
+    || snapshot.targetProximityGuardEnabled;
   const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
     runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
       (target) => ({ ok: true as const, target, error: null as unknown, latencyMs: runtime.nowMs() - identityRefreshStartMs }),
@@ -1748,9 +1753,7 @@ async function _executeScalpAttempt(
       (orderbook) => ({ ok: true as const, orderbook, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
       (error) => ({ ok: false as const, orderbook: null, error, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
     ),
-    snapshot.freefallGuardEnabled
-    || snapshot.rapidMoveGuardEnabled
-    || snapshot.targetProximityGuardEnabled
+    priceGuardSampleRequested
       ? coin
         ? runtime.collectPriceSample(coin.symbol, coin.product)
         : Promise.resolve(false)
@@ -1943,6 +1946,18 @@ async function _executeScalpAttempt(
   const effectiveSide = match2.side;
   const winningAsk = match2.winningAsk;
   const targetPriceNum = Number(identityResult.target);
+  const finalPriceSamples = _priceSamples.get(symbol) ?? [];
+  const latestFinalPriceSample =
+    priceGuardSampleRequested && freshSampleResult
+      ? finalPriceSamples[finalPriceSamples.length - 1] ?? null
+      : null;
+  const finalProximityResult = latestFinalPriceSample == null
+    ? null
+    : checkTargetProximityGuard(
+        latestFinalPriceSample.price,
+        targetPriceNum,
+        snapshot.targetProximityThresholdPct,
+      );
   let regularLayerCompatibility = runtime.regularPositionCompatibilitySync(
     mode,
     symbol,
@@ -1996,10 +2011,8 @@ async function _executeScalpAttempt(
       _rememberReservationOutcome(attemptKey, "skipped", "target_proximity_unavailable_fetch_failed", priorSubmittedOrders, runtime.nowMs());
       return;
     }
-    const samplesFinal = _priceSamples.get(symbol) ?? [];
-    const latestSample = samplesFinal[samplesFinal.length - 1];
-    const proximityFinal = checkTargetProximityGuard(
-      latestSample?.price,
+    const proximityFinal = finalProximityResult ?? checkTargetProximityGuard(
+      null,
       targetPriceNum,
       snapshot.targetProximityThresholdPct,
     );
@@ -2021,7 +2034,7 @@ async function _executeScalpAttempt(
         distancePct: proximityFinal.distancePct,
         minimumPct: snapshot.targetProximityThresholdPct,
         targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
-        underlyingPrice: latestSample?.price ?? null,
+        underlyingPrice: latestFinalPriceSample?.price ?? null,
         selectedSide: effectiveSide,
       });
       _rememberReservationOutcome(attemptKey, "skipped", proximityReason, priorSubmittedOrders, runtime.nowMs());
@@ -2033,14 +2046,14 @@ async function _executeScalpAttempt(
   // Fail closed: an AUTHORITATIVE fresh sample is REQUIRED. A failed fresh fetch
   // is "unavailable" and skips — existing old samples must NOT mask it. Then the
   // guard must be evaluable AND not blocked to proceed.
+  let finalFreefallResult: ReturnType<typeof checkFreefallGuard> | null = null;
   if (snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled) {
-    const samplesFinal = _priceSamples.get(symbol) ?? [];
     const ffNowMs = runtime.nowMs();
     const freefallDecision = evaluateFreefallPreSubmitGuard({
       directionEnabled: snapshot.freefallGuardEnabled,
       hasProduct: coin != null,
       freshSampleSucceeded: freshSampleResult,
-      samples: samplesFinal,
+      samples: finalPriceSamples,
       side: effectiveSide,
       nowMs: ffNowMs,
       eligibilityStartMs:
@@ -2051,6 +2064,7 @@ async function _executeScalpAttempt(
       rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
       rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
     });
+    finalFreefallResult = freefallDecision.guardResult;
     if (!freefallDecision.allowed) {
       const ffFinal = freefallDecision.guardResult;
       logger.info(
@@ -2091,6 +2105,7 @@ async function _executeScalpAttempt(
       return;
     }
   }
+  const guardEvaluatedAtMs = runtime.nowMs();
 
   // ── Size the order STRICTLY within the durable reserved budget ─────────────
   // Contract count = floor(reservedBudget / maxWinningCost); worst-case
@@ -2183,6 +2198,64 @@ async function _executeScalpAttempt(
   const limitPrice = computeLimitPrice(effectiveSide, snapshot.bandMax);
   // Preserve the authoritative observed quote separately for diagnostics.
   const entryYesPrice = effectiveSide === "yes" ? winningAsk : 1 - winningAsk;
+  const evidenceSamples = finalFreefallResult?.evaluatedSamples.length
+    ? finalFreefallResult.evaluatedSamples
+    : latestFinalPriceSample != null
+      ? [latestFinalPriceSample]
+      : [];
+  const evidenceCoverageMs = evidenceSamples.length === 0
+    ? null
+    : evidenceSamples[evidenceSamples.length - 1].at - evidenceSamples[0].at;
+  const entryGuardEvidence: ScalpEntryGuardEvidence = {
+    schemaVersion: 1,
+    phase: "final_pre_submit",
+    evaluatedAt: new Date(guardEvaluatedAtMs).toISOString(),
+    side: effectiveSide,
+    directionGuardEnabled: snapshot.freefallGuardEnabled,
+    rapidMoveGuardEnabled: snapshot.rapidMoveGuardEnabled,
+    targetProximityGuardEnabled: snapshot.targetProximityGuardEnabled,
+    samples: evidenceSamples.map((sample) => ({
+      at: new Date(sample.at).toISOString(),
+      price: sample.price,
+    })),
+    sampleCoverageMs: evidenceCoverageMs,
+    samplesUsed: evidenceSamples.length === 0 ? null : evidenceSamples.length,
+    wrongWayResetCount: snapshot.freefallGuardEnabled
+      ? finalFreefallResult?.wrongWayResetCount ?? null
+      : null,
+    lastWrongWayResetAt:
+      snapshot.freefallGuardEnabled
+      && finalFreefallResult?.lastWrongWayResetAt != null
+        ? new Date(finalFreefallResult.lastWrongWayResetAt).toISOString()
+        : null,
+    consecutiveWrongWayMoves: snapshot.freefallGuardEnabled
+      ? finalFreefallResult?.consecutiveWrongWayMoves ?? null
+      : null,
+    consecutiveWrongWaySeconds: snapshot.freefallGuardEnabled
+      ? finalFreefallResult?.consecutiveWrongWaySeconds ?? null
+      : null,
+    directionalMovePct: snapshot.freefallGuardEnabled
+      ? finalFreefallResult?.directionalMovePct ?? null
+      : null,
+    freefallConsecutiveSeconds: snapshot.freefallGuardEnabled
+      ? snapshot.freefallConsecutiveSeconds
+      : null,
+    rapidMovePct: snapshot.rapidMoveGuardEnabled
+      ? finalFreefallResult?.rapidMovePct ?? null
+      : null,
+    rapidMoveThresholdPct: snapshot.rapidMoveGuardEnabled
+      ? snapshot.rapidMoveThresholdPct
+      : null,
+    rapidMoveLookbackSeconds: snapshot.rapidMoveGuardEnabled
+      ? snapshot.rapidMoveLookbackSeconds
+      : null,
+    distancePct: finalProximityResult?.distancePct ?? null,
+    minimumPct: snapshot.targetProximityGuardEnabled
+      ? snapshot.targetProximityThresholdPct
+      : null,
+    targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
+    underlyingPrice: latestFinalPriceSample?.price ?? null,
+  };
 
   // ── Place order or simulate ───────────────────────────────────────────────
   const orderId_pre = mode === "paper" ? `paper-${crypto.randomUUID()}` : null;
@@ -2220,6 +2293,7 @@ async function _executeScalpAttempt(
     layeredRegularSide: regularLayerCompatibility.status === "same_side"
       ? regularLayerCompatibility.position.direction
       : null,
+    entryGuardEvidence,
     createdAt: new Date(),
     settledAt: null,
   };
@@ -2611,7 +2685,15 @@ async function _executeScalpAttempt(
 
 export interface ControlledFreefallServiceExerciseResult {
   steps: Array<{
-    label: "adverse" | "adverse_cooldown" | "fetch_failed" | "fetch_cooldown" | "stale" | "stale_cooldown" | "recovered";
+    label:
+      | "adverse"
+      | "adverse_cooldown"
+      | "fetch_failed"
+      | "fetch_cooldown"
+      | "stale"
+      | "stale_cooldown"
+      | "recovered"
+      | "recovered_retry";
     state: "skipped" | "cooldown" | "submitted";
     reason: string | null;
     checkedAt: string;
@@ -2624,8 +2706,15 @@ export interface ControlledFreefallServiceExerciseResult {
     skippedAt: string | null;
     evidence: ScalpSkipEvidence | null;
   }>;
+  submittedEntryEvidence: ScalpEntryGuardEvidence | null;
+  submittedEntryEvidences: ScalpEntryGuardEvidence[];
   intentWrites: number;
   brokerSubmissions: number;
+}
+
+export interface ControlledFreefallServiceExerciseOptions {
+  targetProximityGuardEnabled?: boolean;
+  runSecondSubmission?: boolean;
 }
 
 export interface ControlledSampleSchedulerExerciseResult {
@@ -2880,6 +2969,7 @@ function serializeScalpOrder(o: ScalpOrder) {
     incidentId: o.incidentId,
     layeredRegularPositionId: o.layeredRegularPositionId ?? null,
     layeredRegularSide: o.layeredRegularSide ?? null,
+    entryGuardEvidence: o.entryGuardEvidence ?? null,
     createdAt: o.createdAt instanceof Date ? o.createdAt.toISOString() : o.createdAt,
     settledAt: o.settledAt instanceof Date ? o.settledAt.toISOString() : o.settledAt,
   };
@@ -2904,6 +2994,13 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
   const latencySummary = summarizeScalpAttemptLatencies(
     _recentAttemptLatencies.filter((attempt) => attempt.mode === mode),
   );
+  // getScalpOrders is newest-first. Keep the first row for attempts that used
+  // bounded IOC retries so the dashboard explains the final submission.
+  const recentOrderByAttemptKey = new Map<string, ScalpOrder>();
+  for (const order of recentOrders) {
+    const key = _attemptKey(order.mode, order.symbol, order.windowKey);
+    if (!recentOrderByAttemptKey.has(key)) recentOrderByAttemptKey.set(key, order);
+  }
 
   return {
     config: { ..._config },
@@ -2939,6 +3036,10 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
         layeredRegularPositionId: attempt.layeredRegularPositionId ?? null,
         layeredRegularSide: attempt.layeredRegularSide ?? null,
         skipEvidence: attempt.skipEvidence ?? null,
+        entryGuardEvidence:
+          recentOrderByAttemptKey.get(
+            _attemptKey(attempt.mode, attempt.symbol, attempt.windowKey),
+          )?.entryGuardEvidence ?? null,
         latency: _latestAttemptLatencyByKey.get(
           _attemptKey(attempt.mode, attempt.symbol, attempt.windowKey),
         ) ?? null,
@@ -3246,7 +3347,9 @@ export async function runControlledScalperLayeringExercise(): Promise<Controlled
  * unchanged. This is intentionally exported only for the bundled integration
  * test; runtime application code never calls it.
  */
-export async function runControlledFreefallServiceExercise():
+export async function runControlledFreefallServiceExercise(
+  options: ControlledFreefallServiceExerciseOptions = {},
+):
 Promise<ControlledFreefallServiceExerciseResult> {
   const originalConfig = _config;
   const symbol = "BTC";
@@ -3263,6 +3366,8 @@ Promise<ControlledFreefallServiceExerciseResult> {
   let currentSamples: FreefallSample[] = [];
   let intentWrites = 0;
   let brokerSubmissions = 0;
+  let submittedEntryEvidence: ScalpEntryGuardEvidence | null = null;
+  const submittedEntryEvidences: ScalpEntryGuardEvidence[] = [];
   const skippedAttempts: ControlledFreefallServiceExerciseResult["skippedAttempts"] = [];
   const steps: ControlledFreefallServiceExerciseResult["steps"] = [];
 
@@ -3290,7 +3395,8 @@ Promise<ControlledFreefallServiceExerciseResult> {
     rapidMoveGuardEnabled: false,
     rapidMoveLookbackSeconds: 4,
     rapidMoveThresholdPct: 0.5,
-    targetProximityGuardEnabled: false,
+    targetProximityGuardEnabled: options.targetProximityGuardEnabled ?? false,
+    targetProximityThresholdPct: 0.05,
     circuitBreakerEnabled: true,
     circuitBreaker: false,
     circuitBreakerReason: null,
@@ -3341,8 +3447,12 @@ Promise<ControlledFreefallServiceExerciseResult> {
         evidence: evidence ?? null,
       });
     },
-    insertScalpOrderIntent: async () => {
+    insertScalpOrderIntent: async (order) => {
       intentWrites += 1;
+      submittedEntryEvidence = order.entryGuardEvidence ?? null;
+      if (order.entryGuardEvidence != null) {
+        submittedEntryEvidences.push(order.entryGuardEvidence);
+      }
     },
     finalizePaperOrderAndReleaseReservation: async () => {},
     abortIntentAndReleaseReservation: async () => {},
@@ -3428,8 +3538,19 @@ Promise<ControlledFreefallServiceExerciseResult> {
 
     nowMs += 1;
     await runStep("recovered", coveredSamples([101, 102, 103, 104, 105]), true);
+    if (options.runSecondSubmission) {
+      nowMs += SCALP_AUTH_RETRY_COOLDOWN_MS;
+      await runStep("recovered_retry", coveredSamples([106, 107, 108, 109, 110]), true);
+    }
 
-    return { steps, skippedAttempts, intentWrites, brokerSubmissions };
+    return {
+      steps,
+      skippedAttempts,
+      submittedEntryEvidence,
+      submittedEntryEvidences,
+      intentWrites,
+      brokerSubmissions,
+    };
   } finally {
     _config = originalConfig;
     if (originalSamples === undefined) _priceSamples.delete(symbol);

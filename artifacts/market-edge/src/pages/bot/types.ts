@@ -748,6 +748,32 @@ export interface ScalperUnresolvedAttempt {
   createdAt: string;
 }
 
+export interface EntryGuardEvidence {
+  schemaVersion: 1;
+  phase: "final_pre_submit";
+  evaluatedAt: string;
+  side: "yes" | "no";
+  directionGuardEnabled: boolean;
+  rapidMoveGuardEnabled: boolean;
+  targetProximityGuardEnabled: boolean;
+  samples: Array<{ at: string; price: number }>;
+  sampleCoverageMs: number | null;
+  samplesUsed: number | null;
+  wrongWayResetCount: number | null;
+  lastWrongWayResetAt: string | null;
+  consecutiveWrongWayMoves: number | null;
+  consecutiveWrongWaySeconds: number | null;
+  directionalMovePct: number | null;
+  freefallConsecutiveSeconds: number | null;
+  rapidMovePct: number | null;
+  rapidMoveThresholdPct: number | null;
+  rapidMoveLookbackSeconds: number | null;
+  distancePct: number | null;
+  minimumPct: number | null;
+  targetPrice: number | null;
+  underlyingPrice: number | null;
+}
+
 export interface ScalperAttempt {
   id: string;
   mode: "paper" | "live";
@@ -765,6 +791,7 @@ export interface ScalperAttempt {
   layeredRegularPositionId: string | null;
   layeredRegularSide: "yes" | "no" | null;
   skipEvidence: ScalpSkipEvidence | null;
+  entryGuardEvidence: EntryGuardEvidence | null;
   latency?: {
     mode: "paper" | "live";
     symbol: string;
@@ -819,6 +846,7 @@ export interface ScalpOrder {
   incidentId: string | null;
   layeredRegularPositionId: string | null;
   layeredRegularSide: "yes" | "no" | null;
+  entryGuardEvidence: EntryGuardEvidence | null;
   createdAt: string;
   settledAt: string | null;
 }

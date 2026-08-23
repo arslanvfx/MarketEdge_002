@@ -9,6 +9,7 @@ const dashboardSource = readFileSync(join(here, "../bot-dashboard.tsx"), "utf8")
 const activePositionsSource = readFileSync(join(here, "active-positions.tsx"), "utf8");
 const transactionLogSource = readFileSync(join(here, "transaction-log.tsx"), "utf8");
 const panelSource = readFileSync(join(here, "bot-scalper-panel.tsx"), "utf8");
+const ledgerSource = readFileSync(join(here, "scalper-ledger.ts"), "utf8");
 
 describe("unified Scalper ledger wiring", () => {
   it("merges Scalper history instead of rendering a separate log", () => {
@@ -52,5 +53,26 @@ describe("unified Scalper ledger wiring", () => {
     assert.match(transactionLogSource, /#07111f/);
     assert.match(transactionLogSource, /REGULAR_METRIC_CLASS/);
     assert.match(transactionLogSource, /> REGULAR/);
+  });
+
+  it("preserves entry guard evidence in unified Scalper history", () => {
+    assert.match(ledgerSource, /entryGuardEvidence/);
+    assert.match(transactionLogSource, /entryGuardEvidence/);
+  });
+
+  it("shows successful safety-check evidence in recent candidates", () => {
+    assert.match(panelSource, /SAFETY CHECKS PASSED/);
+    assert.match(panelSource, /text-emerald-400/);
+  });
+
+  it("renders pre-submit guard evidence in Scalper history cards", () => {
+    assert.match(transactionLogSource, /describeEntryGuardEvidence/);
+    assert.match(transactionLogSource, /text-scalper-entry-guard-evidence-/);
+    assert.match(transactionLogSource, /SAFETY CHECKS PASSED/);
+  });
+
+  it("exports the pre-submit evidence formatter with post-fill separation", () => {
+    assert.match(ledgerSource, /export function describeEntryGuardEvidence/);
+    assert.match(ledgerSource, /samples exclude post-fill movement/);
   });
 });

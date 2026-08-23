@@ -119,6 +119,43 @@ export type ScalpOrderStatus =
   | "paper"        // paper simulation complete
   | "skipped";     // pre-order guard rejected; never reached exchange
 
+export interface ScalpEntryGuardSample {
+  /** ISO timestamp of the exact cadence sample used by the final guard pass. */
+  at: string;
+  price: number;
+}
+
+/**
+ * Compact, immutable evidence from the final safety-check pass before submit.
+ * This intentionally stores only the cadence samples that were evaluated, not
+ * the Scalper's full in-memory price history.
+ */
+export interface ScalpEntryGuardEvidence {
+  schemaVersion: 1;
+  phase: "final_pre_submit";
+  evaluatedAt: string;
+  side: "yes" | "no";
+  directionGuardEnabled: boolean;
+  rapidMoveGuardEnabled: boolean;
+  targetProximityGuardEnabled: boolean;
+  samples: ScalpEntryGuardSample[];
+  sampleCoverageMs: number | null;
+  samplesUsed: number | null;
+  wrongWayResetCount: number | null;
+  lastWrongWayResetAt: string | null;
+  consecutiveWrongWayMoves: number | null;
+  consecutiveWrongWaySeconds: number | null;
+  directionalMovePct: number | null;
+  freefallConsecutiveSeconds: number | null;
+  rapidMovePct: number | null;
+  rapidMoveThresholdPct: number | null;
+  rapidMoveLookbackSeconds: number | null;
+  distancePct: number | null;
+  minimumPct: number | null;
+  targetPrice: number | null;
+  underlyingPrice: number | null;
+}
+
 export interface ScalpOrder {
   id: string;
   mode: ScalpMode;
@@ -154,6 +191,8 @@ export interface ScalpOrder {
   /** Durable audit link when this fill stacked on a same-side regular position. */
   layeredRegularPositionId?: string | null;
   layeredRegularSide?: "yes" | "no" | null;
+  /** Final pre-submit safety evidence; null/omitted only for legacy rows. */
+  entryGuardEvidence?: ScalpEntryGuardEvidence | null;
   createdAt: Date;
   settledAt: Date | null;
 }

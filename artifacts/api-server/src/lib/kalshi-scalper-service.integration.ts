@@ -107,6 +107,53 @@ describe("real Scalper service Freefall boundary", () => {
       assert.equal(attempt.evidence?.protectedSide, "yes");
       assert.equal(attempt.evidence?.freefallConsecutiveSeconds, 4);
     }
+
+    const evidence = result.submittedEntryEvidence;
+    assert.ok(evidence, "submitted order intent must retain final guard-pass evidence");
+    assert.equal(evidence.phase, "final_pre_submit");
+    assert.equal(evidence.side, "yes");
+    assert.equal(evidence.directionGuardEnabled, true);
+    assert.equal(evidence.consecutiveWrongWayMoves, 0);
+    assert.equal(evidence.consecutiveWrongWaySeconds, 0);
+    assert.equal(evidence.freefallConsecutiveSeconds, 4);
+    assert.equal(evidence.samples.length, 5);
+    assert.deepEqual(
+      evidence.samples.map((sample) => sample.price),
+      [101, 102, 103, 104, 105],
+    );
+    assert.ok(
+      evidence.samples.every((sample) => Date.parse(sample.at) <= Date.parse(evidence.evaluatedAt)),
+      "all persisted prices must come from the final pre-submit evaluation",
+    );
+  });
+
+  it("copies final target distance into every retry intent and retains the newest snapshot", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      targetProximityGuardEnabled: true,
+      runSecondSubmission: true,
+    });
+
+    assert.equal(result.intentWrites, 2);
+    assert.equal(result.brokerSubmissions, 2);
+    assert.equal(result.submittedEntryEvidences.length, 2);
+    assert.ok(
+      result.submittedEntryEvidences.every(
+        (evidence) =>
+          evidence.phase === "final_pre_submit"
+          && evidence.targetProximityGuardEnabled
+          && evidence.minimumPct === 0.05
+          && evidence.targetPrice === 100,
+      ),
+    );
+    assert.equal(result.submittedEntryEvidences[0]?.underlyingPrice, 105);
+    assert.equal(result.submittedEntryEvidences[0]?.distancePct, 5);
+    assert.equal(result.submittedEntryEvidences[1]?.underlyingPrice, 110);
+    assert.equal(result.submittedEntryEvidences[1]?.distancePct, 10);
+    assert.deepEqual(
+      result.submittedEntryEvidence,
+      result.submittedEntryEvidences[1],
+      "the final retry must be the snapshot surfaced as the latest submission",
+    );
   });
 });
 
