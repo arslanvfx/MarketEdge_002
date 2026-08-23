@@ -1010,3 +1010,64 @@ export interface ScalperShadowStudyReport {
   disclaimer: string;
 }
 
+export interface ScalpCalibrationSettings {
+  bandMin: number;
+  bandMax: number;
+  windowSeconds: number;
+  budgetDollars: number;
+}
+
+export interface ScalpCalibrationTimingSummary {
+  variantSeconds: number;
+  candidateCoverage: number;
+  trainingCandidates: number;
+  holdoutCandidates: number;
+  trainingSettlements: number;
+  holdoutSettlements: number;
+  trainingPnl: number;
+  holdoutPnl: number;
+}
+
+export interface ScalpCalibrationRecommendation {
+  id: string;
+  version: number;
+  mode: "paper" | "live";
+  symbol: string;
+  status: "insufficient_data" | "no_change" | "recommended" | "applied" | "reverted" | "superseded";
+  currentSettings: ScalpCalibrationSettings;
+  proposedSettings: ScalpCalibrationSettings;
+  evidenceCutoff: string;
+  analysisStart: string;
+  evidence: {
+    attemptedUniqueWindows: number;
+    settledRealFills: number;
+    orders: number;
+    reservations: number;
+    funnelEvents: number;
+    shadowRecords: number;
+    shadowCandidates: number;
+    shadowSettlements: number;
+  };
+  chronologicalHoldout: {
+    current: ScalpCalibrationTimingSummary | null;
+    proposed: ScalpCalibrationTimingSummary | null;
+  };
+  dominantBlockers: Array<{ blocker: string; count: number }>;
+  confidence: "low" | "moderate" | "high";
+  rationale: string[];
+  shadowDisclaimer: string;
+  createdAt: string;
+  appliedAt: string | null;
+  appliedBy: string | null;
+  revertedAt: string | null;
+  revertedBy: string | null;
+}
+
+export interface ScalpCalibrationReport {
+  mode: "paper" | "live";
+  analysisDays: number;
+  generatedAt: string | null;
+  recommendations: ScalpCalibrationRecommendation[];
+  activeApplications: ScalpCalibrationRecommendation[];
+}
+

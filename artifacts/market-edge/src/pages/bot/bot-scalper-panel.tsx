@@ -10,6 +10,7 @@ import type {
   ScalperUnresolvedAttempt,
   ScalperShadowStudyReport,
   ScalperWindowFunnelReport,
+  ScalpCalibrationReport,
 } from "./types";
 import {
   describeScalperAttempt,
@@ -17,6 +18,7 @@ import {
   describeScalperReason,
   getScalperGuardBlock,
 } from "./scalper-ledger";
+import { ScalperCalibrationReview } from "./calibration-review";
 
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
@@ -36,7 +38,9 @@ type MutationName =
   | "mode"
   | "save"
   | "reset"
-  | "performance-reset";
+  | "performance-reset"
+  | "calibration-refresh"
+  | string;
 type Notice = { kind: "success" | "error"; text: string };
 
 function preferNewerPerformance(
@@ -225,6 +229,25 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     },
     enabled: Boolean(cfg),
     refetchInterval: 30_000,
+  });
+
+  const {
+    data: calibrationData,
+    isFetching: calibrationLoading,
+    isError: calibrationFailed,
+  } = useQuery<ScalpCalibrationReport>({
+    queryKey: ["bot-scalper-calibration", scalperMode],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(
+        `${API_BASE}/crypto/scalper/calibration?mode=${scalperMode}`,
+        { signal },
+      );
+      if (!response.ok) {
+        throw new Error(`Unable to load Scalper calibration (HTTP ${response.status})`);
+      }
+      return response.json();
+    },
+    enabled: Boolean(cfg),
   });
 
   const hasDraft = Object.keys(configDraft).length > 0;
@@ -469,6 +492,108 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       });
     } finally {
       setReconcileBusyId(null);
+    }
+  }
+
+  async function refreshCalibration(): Promise<void> {
+    if (!canManage) {
+      showNotice({ kind: "error", text: managementAccessMessage() });
+      return;
+    }
+    setMutationBusy("calibration-refresh");
+    setNotice(null);
+    try {
+      const data = await authPost("/crypto/scalper/calibration/refresh", { mode: scalperMode }) as {
+        ok?: boolean;
+        report?: ScalpCalibrationReport;
+        error?: string;
+      };
+      if (!data.ok || !data.report) {
+        throw new Error(data.error ?? "The server did not return a valid calibration report.");
+      }
+      qc.setQueryData(["bot-scalper-calibration", scalperMode], data.report);
+      showNotice({ kind: "success", text: "Calibration analysis refreshed." });
+    } catch (error) {
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Could not refresh calibration.",
+      });
+    } finally {
+      setMutationBusy(null);
+    }
+  }
+
+  async function applyCalibration(id: string, symbol: string): Promise<void> {
+    if (!canManage) {
+      showNotice({ kind: "error", text: managementAccessMessage() });
+      return;
+    }
+    if (!window.confirm(`Apply recommended settings for ${symbol}? This will override your current settings.`)) return;
+
+    setMutationBusy(`calibration-apply-${id}`);
+    setNotice(null);
+    try {
+      const data = await authPost(`/crypto/scalper/calibration/${id}/apply`, {}) as {
+        ok?: boolean;
+        config?: ScalperConfig;
+        error?: string;
+      };
+      if (!data.ok || !data.config) {
+        throw new Error(data.error ?? "The server did not confirm the settings update.");
+      }
+      qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
+      setConfigDraft({});
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bot-scalper-config"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-status"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-shadow-study"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-calibration"] }),
+      ]);
+      showNotice({ kind: "success", text: `Applied new settings for ${symbol}.` });
+    } catch (error) {
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : `Could not apply settings for ${symbol}.`,
+      });
+    } finally {
+      setMutationBusy(null);
+    }
+  }
+
+  async function revertCalibration(id: string, symbol: string): Promise<void> {
+    if (!canManage) {
+      showNotice({ kind: "error", text: managementAccessMessage() });
+      return;
+    }
+    if (!window.confirm(`Revert to previous settings for ${symbol}?`)) return;
+
+    setMutationBusy(`calibration-revert-${id}`);
+    setNotice(null);
+    try {
+      const data = await authPost(`/crypto/scalper/calibration/${id}/revert`, {}) as {
+        ok?: boolean;
+        config?: ScalperConfig;
+        error?: string;
+      };
+      if (!data.ok || !data.config) {
+        throw new Error(data.error ?? "The server did not confirm the settings update.");
+      }
+      qc.setQueryData<{ config: ScalperConfig }>(["bot-scalper-config"], { config: data.config });
+      setConfigDraft({});
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bot-scalper-config"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-status"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-shadow-study"] }),
+        qc.invalidateQueries({ queryKey: ["bot-scalper-calibration"] }),
+      ]);
+      showNotice({ kind: "success", text: `Reverted settings for ${symbol}.` });
+    } catch (error) {
+      showNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : `Could not revert settings for ${symbol}.`,
+      });
+    } finally {
+      setMutationBusy(null);
     }
   }
 
@@ -1173,6 +1298,18 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
             </div>
           </div>
         </div>
+
+        <ScalperCalibrationReview
+          report={calibrationData || null}
+          isLoading={calibrationLoading}
+          isError={calibrationFailed}
+          canManage={canManage}
+          mutationBusy={mutationBusy}
+          onRefresh={refreshCalibration}
+          onApply={applyCalibration}
+          onRevert={revertCalibration}
+          symbols={PER_MARKET_SYMBOLS}
+        />
 
         <div>
           <div className="flex items-center gap-2 mb-3">

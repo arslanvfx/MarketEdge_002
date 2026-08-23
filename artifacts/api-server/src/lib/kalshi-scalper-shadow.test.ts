@@ -10,6 +10,7 @@ import {
 } from "./kalshi-scalper-shadow.ts";
 import {
   DEFAULT_SCALP_CONFIG,
+  SCALP_SHADOW_VARIANT_SECONDS,
   type EffectiveScalpParams,
   type ScalpShadowStudyRecord,
 } from "./kalshi-scalper-types.ts";
@@ -149,7 +150,7 @@ describe("shadow report projection", () => {
     });
     assert.deepEqual(
       report.variants.map((variant) => variant.variantSeconds),
-      [60, 75, 80.1234, 90, 105, 120],
+      [...SCALP_SHADOW_VARIANT_SECONDS, 80.1234].sort((a, b) => a - b),
     );
     assert.equal(report.variants.find((row) => row.variantSeconds === 120)?.wins, 1);
     assert.equal(report.variants.find((row) => row.variantSeconds === 105)?.settled, 0);

@@ -134,8 +134,22 @@ import {
   recordScalpFunnelEvent,
   resetScalpPerformanceWindow,
   upsertScalpShadowStudy,
+  getScalpCalibrationEvidence,
+  saveScalpCalibrationRecommendations,
+  getLatestScalpCalibrationRecommendations,
+  getActiveScalpCalibrationApplications,
+  getScalpCalibrationRecommendationById,
+  persistScalpCalibrationDecision,
 } from "./kalshi-scalper-db.ts";
 import { calculateScalpPerformance } from "./kalshi-scalper-performance.ts";
+import {
+  buildScalpCalibrationRecommendation,
+  buildScalpCalibrationTimingOverride,
+  scalpCalibrationSettingsEqual,
+  type ScalpCalibrationRecommendation,
+  type ScalpCalibrationReport,
+  type ScalpCalibrationSettings,
+} from "./kalshi-scalper-calibration.ts";
 
 // ---------------------------------------------------------------------------
 // In-memory state
@@ -228,7 +242,7 @@ function _finalizeShadowWindow(windowKey: string, nowMs: number): void {
 }
 
 /**
- * Read-only observation of standard 60s–120s counterfactuals plus each market's
+ * Read-only observation of standard 60s–180s counterfactuals plus each market's
  * configured timing. It reuses cached
  * public quotes and existing Scalper-owned underlying samples; no network,
  * reservation, cap, balance, intent, broker, or reconciliation path is called.
@@ -670,10 +684,12 @@ async function _persistScalpConfigWithRetry(config: ScalpConfig): Promise<void> 
 function _enqueueScalpConfigMutation(
   build: (current: ScalpConfig) => ScalpConfig | Promise<ScalpConfig>,
   resetPreflight: boolean,
+  persist?: (next: ScalpConfig, current: ScalpConfig) => Promise<void>,
 ): Promise<ScalpConfig> {
   const execute = async (): Promise<ScalpConfig> => {
+    const currentAtStart = _config;
     const breakerVersionAtStart = _breakerVersion;
-    let next = await build(_config);
+    let next = await build(currentAtStart);
 
     // A trip can happen while an async builder (for example reset validation)
     // is running. Preserve it before the first persistent write.
@@ -683,7 +699,11 @@ function _enqueueScalpConfigMutation(
       breakerVersionAtStart,
       _breakerVersion,
     );
-    await _persistScalpConfigWithRetry(next);
+    if (persist) {
+      await persist(next, currentAtStart);
+    } else {
+      await _persistScalpConfigWithRetry(next);
+    }
 
     // A trip can also happen while the DB write itself is in flight. Persist
     // the winning latch before exposing the mutation result.
@@ -3923,6 +3943,284 @@ export async function resetScalpPerformance(mode: ScalpMode): Promise<ScalpPerfo
     window.trackingVersion,
     window.orders,
   );
+}
+
+const SCALP_CALIBRATION_ANALYSIS_DAYS = 60;
+
+function _scalpCalibrationSymbols(): string[] {
+  return CRYPTO_COINS
+    .map((coin) => coin.symbol.toUpperCase())
+    .filter((symbol) => Boolean(KALSHI_SERIES[symbol]));
+}
+
+function _getScalpOverrideSnapshot(
+  config: ScalpConfig,
+  symbol: string,
+): ScalpPerMarketOverride | null {
+  const found = config.perMarketOverrides.find(
+    (override) => override.symbol.toUpperCase() === symbol.toUpperCase(),
+  );
+  return found ? { ...found, symbol: symbol.toUpperCase() } : null;
+}
+
+function _scalpOverrideEqual(
+  left: ScalpPerMarketOverride | null,
+  right: ScalpPerMarketOverride | null,
+): boolean {
+  if (left == null || right == null) return left === right;
+  return left.symbol.toUpperCase() === right.symbol.toUpperCase()
+    && left.paused === right.paused
+    && left.minBand === right.minBand
+    && left.maxBand === right.maxBand
+    && left.windowSeconds === right.windowSeconds
+    && left.budgetDollars === right.budgetDollars;
+}
+
+function _scalpCalibrationSettings(
+  config: ScalpConfig,
+  symbol: string,
+): ScalpCalibrationSettings {
+  const effective = resolveEffectiveParams(config, symbol, "");
+  return {
+    bandMin: effective.bandMin,
+    bandMax: effective.bandMax,
+    windowSeconds: effective.finalWindowSeconds,
+    budgetDollars: effective.budgetDollars,
+  };
+}
+
+function _replaceScalpOverride(
+  config: ScalpConfig,
+  symbol: string,
+  replacement: ScalpPerMarketOverride | null,
+): ScalpConfig {
+  const normalized = symbol.toUpperCase();
+  const remaining = config.perMarketOverrides.filter(
+    (override) => override.symbol.toUpperCase() !== normalized,
+  );
+  return {
+    ...config,
+    perMarketOverrides: replacement == null
+      ? remaining
+      : [...remaining, { ...replacement, symbol: normalized }],
+  };
+}
+
+function _operatorFingerprint(userId: string): string {
+  return crypto.createHash("sha256").update(userId).digest("hex");
+}
+
+export class ScalpCalibrationConflictError extends Error {
+  readonly code:
+    | "not_found"
+    | "not_applicable"
+    | "already_decided"
+    | "config_changed";
+
+  constructor(
+    code: ScalpCalibrationConflictError["code"],
+    message: string,
+  ) {
+    super(message);
+    this.name = "ScalpCalibrationConflictError";
+    this.code = code;
+  }
+}
+
+function _buildScalpCalibrationReport(
+  mode: ScalpMode,
+  latest: ScalpCalibrationRecommendation[],
+  activeApplications: ScalpCalibrationRecommendation[],
+): ScalpCalibrationReport {
+  return {
+    mode,
+    analysisDays: SCALP_CALIBRATION_ANALYSIS_DAYS,
+    generatedAt: latest.reduce<string | null>(
+      (newest, row) =>
+        newest == null || row.createdAt > newest ? row.createdAt : newest,
+      null,
+    ),
+    recommendations: latest,
+    activeApplications,
+  };
+}
+
+export async function getScalpCalibrationReport(
+  mode: ScalpMode,
+): Promise<ScalpCalibrationReport> {
+  const [latest, active] = await Promise.all([
+    getLatestScalpCalibrationRecommendations(mode),
+    getActiveScalpCalibrationApplications(mode),
+  ]);
+  return _buildScalpCalibrationReport(
+    mode,
+    latest.map((row) => row.recommendation),
+    active.map((row) => row.recommendation),
+  );
+}
+
+export async function refreshScalpCalibration(
+  mode: ScalpMode,
+): Promise<ScalpCalibrationReport> {
+  const evidenceCutoff = new Date().toISOString();
+  const analysisStart = new Date(
+    Date.parse(evidenceCutoff) - SCALP_CALIBRATION_ANALYSIS_DAYS * 86_400_000,
+  ).toISOString();
+  const createdAt = evidenceCutoff;
+  const symbols = _scalpCalibrationSymbols();
+  const evidence = await getScalpCalibrationEvidence(
+    mode,
+    analysisStart,
+    evidenceCutoff,
+    symbols,
+  );
+  const configSnapshot = getScalpConfig();
+  const pending = symbols.map((symbol) => {
+    const priorOverride = _getScalpOverrideSnapshot(configSnapshot, symbol);
+    const recommendation = buildScalpCalibrationRecommendation({
+      id: crypto.randomUUID(),
+      mode,
+      symbol,
+      currentSettings: _scalpCalibrationSettings(configSnapshot, symbol),
+      analysisStart,
+      evidenceCutoff,
+      createdAt,
+      realOrders: evidence.realOrders,
+      reservations: evidence.reservations,
+      funnelEvents: evidence.funnelEvents,
+      shadowRecords: evidence.shadowRecords,
+    });
+    const proposedOverride = buildScalpCalibrationTimingOverride(
+      priorOverride,
+      symbol,
+      recommendation.proposedSettings.windowSeconds,
+    );
+    return { recommendation, priorOverride, proposedOverride };
+  });
+  const stored = await saveScalpCalibrationRecommendations(pending);
+  const active = await getActiveScalpCalibrationApplications(mode);
+  return _buildScalpCalibrationReport(
+    mode,
+    stored.map((row) => row.recommendation),
+    active.map((row) => row.recommendation),
+  );
+}
+
+async function _decideScalpCalibration(
+  id: string,
+  decision: "apply" | "revert",
+  operatorUserId: string,
+): Promise<{
+  config: ScalpConfig;
+  recommendation: ScalpCalibrationRecommendation;
+}> {
+  const stored = await getScalpCalibrationRecommendationById(id);
+  if (!stored) {
+    throw new ScalpCalibrationConflictError(
+      "not_found",
+      "This Scalper recommendation no longer exists.",
+    );
+  }
+  const expectedStatus = decision === "apply" ? "recommended" : "applied";
+  if (stored.recommendation.status !== expectedStatus) {
+    throw new ScalpCalibrationConflictError(
+      stored.recommendation.status === "no_change"
+      || stored.recommendation.status === "insufficient_data"
+        ? "not_applicable"
+        : "already_decided",
+      decision === "apply"
+        ? "Only a current recommendation can be applied."
+        : "Only an applied recommendation can be reverted.",
+    );
+  }
+
+  let decided: ScalpCalibrationRecommendation | null = null;
+  const symbol = stored.recommendation.symbol;
+  const nextConfig = await _enqueueScalpConfigMutation(
+    (current) => {
+      const currentOverride = _getScalpOverrideSnapshot(current, symbol);
+      const expectedOverride = decision === "apply"
+        ? stored.priorOverride
+        : stored.proposedOverride;
+      if (!_scalpOverrideEqual(currentOverride, expectedOverride)) {
+        throw new ScalpCalibrationConflictError(
+          "config_changed",
+          `${symbol} settings changed after this recommendation. Refresh the analysis before changing them.`,
+        );
+      }
+      const expectedSettings = decision === "apply"
+        ? stored.recommendation.currentSettings
+        : stored.recommendation.proposedSettings;
+      if (!scalpCalibrationSettingsEqual(
+        _scalpCalibrationSettings(current, symbol),
+        expectedSettings,
+      )) {
+        throw new ScalpCalibrationConflictError(
+          "config_changed",
+          `${symbol} effective settings changed after this recommendation. Refresh the analysis first.`,
+        );
+      }
+      return _replaceScalpOverride(
+        current,
+        symbol,
+        decision === "apply"
+          ? stored.proposedOverride
+          : stored.priorOverride,
+      );
+    },
+    true,
+    async (next, current) => {
+      try {
+        const result = await persistScalpCalibrationDecision({
+          id,
+          expectedStatus,
+          nextStatus: decision === "apply" ? "applied" : "reverted",
+          expectedConfig: current,
+          nextConfig: next,
+          operatorFingerprint: _operatorFingerprint(operatorUserId),
+        });
+        decided = result.recommendation;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === "calibration_not_found") {
+          throw new ScalpCalibrationConflictError(
+            "not_found",
+            "This Scalper recommendation no longer exists.",
+          );
+        }
+        if (
+          message.startsWith("calibration_status_conflict")
+          || message === "calibration_config_conflict"
+        ) {
+          throw new ScalpCalibrationConflictError(
+            message === "calibration_config_conflict"
+              ? "config_changed"
+              : "already_decided",
+            "The recommendation or Scalper settings changed while this request was being processed.",
+          );
+        }
+        throw error;
+      }
+    },
+  );
+  if (!decided) {
+    throw new Error("Scalper calibration decision was not persisted");
+  }
+  return { config: nextConfig, recommendation: decided };
+}
+
+export async function applyScalpCalibrationRecommendation(
+  id: string,
+  operatorUserId: string,
+) {
+  return _decideScalpCalibration(id, "apply", operatorUserId);
+}
+
+export async function revertScalpCalibrationRecommendation(
+  id: string,
+  operatorUserId: string,
+) {
+  return _decideScalpCalibration(id, "revert", operatorUserId);
 }
 
 // Re-export the unresolved query for route/reconciliation display.

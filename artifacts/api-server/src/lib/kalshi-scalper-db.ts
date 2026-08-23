@@ -20,7 +20,15 @@ import {
   type ScalpFunnelEventStage,
   type ScalpShadowStudyRecord,
   type ScalpShadowVariantSeconds,
+  type ScalpPerMarketOverride,
 } from "./kalshi-scalper-types.ts";
+import type {
+  ScalpCalibrationFunnelEvidence,
+  ScalpCalibrationRealOrderEvidence,
+  ScalpCalibrationRecommendation,
+  ScalpCalibrationReservationEvidence,
+  ScalpCalibrationShadowEvidence,
+} from "./kalshi-scalper-calibration.ts";
 import type { ScalpWindowFunnelCounters } from "./kalshi-scalper-fast-path.ts";
 import {
   evaluateScalpReservationRetry,
@@ -131,6 +139,48 @@ export async function runScalpMigrations(): Promise<void> {
       CREATE INDEX IF NOT EXISTS scalp_shadow_unsettled
         ON kalshi_scalp_shadow_entries (status, first_eligible_at)
         WHERE first_safe_entry_at IS NOT NULL AND settlement_result IS NULL
+    `);
+
+    // Operator-reviewed calibration recommendations. These records are
+    // observational until an authenticated apply transaction updates both the
+    // singleton config and its audit status atomically.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kalshi_scalp_calibration_recommendations (
+        id                TEXT PRIMARY KEY,
+        mode              TEXT NOT NULL,
+        symbol            TEXT NOT NULL,
+        version           BIGINT NOT NULL,
+        status            TEXT NOT NULL,
+        recommendation    JSONB NOT NULL,
+        prior_override    JSONB,
+        proposed_override JSONB NOT NULL,
+        analysis_start    TIMESTAMPTZ NOT NULL,
+        evidence_cutoff   TIMESTAMPTZ NOT NULL,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        applied_at        TIMESTAMPTZ,
+        applied_by        TEXT,
+        reverted_at       TIMESTAMPTZ,
+        reverted_by       TEXT,
+        CONSTRAINT uq_scalp_calibration_version UNIQUE (mode, symbol, version),
+        CONSTRAINT scalp_calibration_mode CHECK (mode IN ('paper', 'live')),
+        CONSTRAINT scalp_calibration_status CHECK (
+          status IN (
+            'insufficient_data', 'no_change', 'recommended',
+            'applied', 'reverted', 'superseded'
+          )
+        )
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS scalp_calibration_latest
+        ON kalshi_scalp_calibration_recommendations
+          (mode, symbol, version DESC)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS scalp_calibration_active_apply
+        ON kalshi_scalp_calibration_recommendations
+          (mode, status, applied_at DESC)
+        WHERE status = 'applied'
     `);
 
     // Orders/history — includes status/error fields and submitting lifecycle
@@ -1362,6 +1412,350 @@ export async function getRecentScalpShadowStudies(
     return result.rows.map((row) =>
       mapScalpShadowRow(row as Record<string, unknown>)
     );
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-market calibration evidence + immutable recommendation audit
+// ---------------------------------------------------------------------------
+
+export interface ScalpCalibrationEvidenceBundle {
+  realOrders: ScalpCalibrationRealOrderEvidence[];
+  reservations: ScalpCalibrationReservationEvidence[];
+  funnelEvents: ScalpCalibrationFunnelEvidence[];
+  shadowRecords: ScalpCalibrationShadowEvidence[];
+}
+
+export interface StoredScalpCalibrationRecommendation {
+  recommendation: ScalpCalibrationRecommendation;
+  priorOverride: ScalpPerMarketOverride | null;
+  proposedOverride: ScalpPerMarketOverride;
+}
+
+function calibrationIso(value: unknown): string {
+  return value instanceof Date
+    ? value.toISOString()
+    : new Date(String(value)).toISOString();
+}
+
+function mapStoredScalpCalibration(
+  row: Record<string, unknown>,
+): StoredScalpCalibrationRecommendation {
+  const base = row["recommendation"] as ScalpCalibrationRecommendation;
+  const appliedAt = row["applied_at"] == null
+    ? null
+    : calibrationIso(row["applied_at"]);
+  const revertedAt = row["reverted_at"] == null
+    ? null
+    : calibrationIso(row["reverted_at"]);
+  return {
+    recommendation: {
+      ...base,
+      id: String(row["id"]),
+      version: Number(row["version"]),
+      status: String(row["status"]) as ScalpCalibrationRecommendation["status"],
+      appliedAt,
+      appliedBy: row["applied_by"] == null ? null : String(row["applied_by"]),
+      revertedAt,
+      revertedBy: row["reverted_by"] == null ? null : String(row["reverted_by"]),
+    },
+    priorOverride:
+      row["prior_override"] != null && typeof row["prior_override"] === "object"
+        ? row["prior_override"] as ScalpPerMarketOverride
+        : null,
+    proposedOverride:
+      row["proposed_override"] as ScalpPerMarketOverride,
+  };
+}
+
+export async function getScalpCalibrationEvidence(
+  mode: ScalpMode,
+  analysisStart: string,
+  evidenceCutoff: string,
+  symbols: string[],
+): Promise<ScalpCalibrationEvidenceBundle> {
+  const client = await pool.connect();
+  try {
+    const orders = await client.query(
+      `SELECT mode, symbol, window_key, created_at, settled_at, pnl
+         FROM kalshi_scalp_orders
+        WHERE mode = $1
+          AND symbol = ANY($2::text[])
+          AND created_at >= $3::timestamptz
+          AND created_at <= $4::timestamptz
+          AND status IN ('filled', 'paper')`,
+      [mode, symbols, analysisStart, evidenceCutoff],
+    );
+    const reservations = await client.query(
+      `SELECT mode, symbol, window_key, created_at, reason
+         FROM kalshi_scalp_reservations
+        WHERE mode = $1
+          AND symbol = ANY($2::text[])
+          AND created_at >= $3::timestamptz
+          AND created_at <= $4::timestamptz`,
+      [mode, symbols, analysisStart, evidenceCutoff],
+    );
+    const funnel = await client.query(
+      `SELECT mode, symbol, window_key, created_at
+         FROM kalshi_scalp_funnel_events
+        WHERE mode = $1
+          AND symbol = ANY($2::text[])
+          AND created_at >= $3::timestamptz
+          AND created_at <= $4::timestamptz`,
+      [mode, symbols, analysisStart, evidenceCutoff],
+    );
+    const shadow = await client.query(
+      `SELECT mode, symbol, window_key, variant_seconds, first_eligible_at,
+              first_safe_entry_at, settled_at, hypothetical_pnl
+         FROM kalshi_scalp_shadow_entries
+        WHERE mode = $1
+          AND symbol = ANY($2::text[])
+          AND first_eligible_at >= $3::timestamptz
+          AND first_eligible_at <= $4::timestamptz
+        ORDER BY first_eligible_at ASC`,
+      [mode, symbols, analysisStart, evidenceCutoff],
+    );
+
+    return {
+      realOrders: orders.rows.map((row) => ({
+        mode: String(row["mode"]) as ScalpMode,
+        symbol: String(row["symbol"]),
+        windowKey: String(row["window_key"]),
+        attemptedAt: calibrationIso(row["created_at"]),
+        settledAt: row["settled_at"] == null
+          ? null
+          : calibrationIso(row["settled_at"]),
+        pnl: row["pnl"] == null ? null : Number(row["pnl"]),
+      })),
+      reservations: reservations.rows.map((row) => ({
+        mode: String(row["mode"]) as ScalpMode,
+        symbol: String(row["symbol"]),
+        windowKey: String(row["window_key"]),
+        createdAt: calibrationIso(row["created_at"]),
+        blocker: row["reason"] == null ? null : String(row["reason"]),
+      })),
+      funnelEvents: funnel.rows.map((row) => ({
+        mode: String(row["mode"]) as ScalpMode,
+        symbol: String(row["symbol"]),
+        windowKey: String(row["window_key"]),
+        occurredAt: calibrationIso(row["created_at"]),
+        blocker: null,
+      })),
+      shadowRecords: shadow.rows.map((row) => ({
+        mode: String(row["mode"]) as ScalpMode,
+        symbol: String(row["symbol"]),
+        windowKey: String(row["window_key"]),
+        variantSeconds: Number(row["variant_seconds"]),
+        observedAt: calibrationIso(row["first_eligible_at"]),
+        candidate: row["first_safe_entry_at"] != null,
+        settledAt: row["settled_at"] == null
+          ? null
+          : calibrationIso(row["settled_at"]),
+        hypotheticalPnl: row["hypothetical_pnl"] == null
+          ? null
+          : Number(row["hypothetical_pnl"]),
+      })),
+    };
+  } finally {
+    client.release();
+  }
+}
+
+export async function saveScalpCalibrationRecommendations(
+  values: Array<{
+    recommendation: ScalpCalibrationRecommendation;
+    priorOverride: ScalpPerMarketOverride | null;
+    proposedOverride: ScalpPerMarketOverride;
+  }>,
+): Promise<StoredScalpCalibrationRecommendation[]> {
+  if (values.length === 0) return [];
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const mode = values[0]!.recommendation.mode;
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [`kalshi-scalper-calibration:${mode}`],
+    );
+    const stored: StoredScalpCalibrationRecommendation[] = [];
+    for (const value of values) {
+      const { recommendation } = value;
+      const versionResult = await client.query(
+        `SELECT COALESCE(MAX(version), 0)::bigint + 1 AS next_version
+           FROM kalshi_scalp_calibration_recommendations
+          WHERE mode = $1 AND symbol = $2`,
+        [recommendation.mode, recommendation.symbol],
+      );
+      const version = Number(versionResult.rows[0]?.["next_version"] ?? 1);
+      const versioned = { ...recommendation, version };
+      await client.query(
+        `UPDATE kalshi_scalp_calibration_recommendations
+            SET status = 'superseded'
+          WHERE mode = $1
+            AND symbol = $2
+            AND status IN ('insufficient_data', 'no_change', 'recommended')`,
+        [recommendation.mode, recommendation.symbol],
+      );
+      const result = await client.query(
+        `INSERT INTO kalshi_scalp_calibration_recommendations (
+           id, mode, symbol, version, status, recommendation,
+           prior_override, proposed_override, analysis_start,
+           evidence_cutoff, created_at
+         ) VALUES (
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+         )
+         RETURNING *`,
+        [
+          versioned.id,
+          versioned.mode,
+          versioned.symbol,
+          versioned.version,
+          versioned.status,
+          JSON.stringify(versioned),
+          value.priorOverride == null
+            ? null
+            : JSON.stringify(value.priorOverride),
+          JSON.stringify(value.proposedOverride),
+          versioned.analysisStart,
+          versioned.evidenceCutoff,
+          versioned.createdAt,
+        ],
+      );
+      stored.push(
+        mapStoredScalpCalibration(
+          result.rows[0] as Record<string, unknown>,
+        ),
+      );
+    }
+    await client.query("COMMIT");
+    return stored;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getLatestScalpCalibrationRecommendations(
+  mode: ScalpMode,
+): Promise<StoredScalpCalibrationRecommendation[]> {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `SELECT DISTINCT ON (symbol) *
+         FROM kalshi_scalp_calibration_recommendations
+        WHERE mode = $1
+        ORDER BY symbol, version DESC`,
+      [mode],
+    );
+    return result.rows.map((row) =>
+      mapStoredScalpCalibration(row as Record<string, unknown>)
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function getActiveScalpCalibrationApplications(
+  mode: ScalpMode,
+): Promise<StoredScalpCalibrationRecommendation[]> {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `SELECT *
+         FROM kalshi_scalp_calibration_recommendations
+        WHERE mode = $1 AND status = 'applied'
+        ORDER BY applied_at DESC NULLS LAST`,
+      [mode],
+    );
+    return result.rows.map((row) =>
+      mapStoredScalpCalibration(row as Record<string, unknown>)
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function getScalpCalibrationRecommendationById(
+  id: string,
+): Promise<StoredScalpCalibrationRecommendation | null> {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `SELECT *
+         FROM kalshi_scalp_calibration_recommendations
+        WHERE id = $1`,
+      [id],
+    );
+    return result.rows[0]
+      ? mapStoredScalpCalibration(result.rows[0] as Record<string, unknown>)
+      : null;
+  } finally {
+    client.release();
+  }
+}
+
+export async function persistScalpCalibrationDecision(params: {
+  id: string;
+  expectedStatus: "recommended" | "applied";
+  nextStatus: "applied" | "reverted";
+  expectedConfig: ScalpConfig;
+  nextConfig: ScalpConfig;
+  operatorFingerprint: string;
+}): Promise<StoredScalpCalibrationRecommendation> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      ["kalshi-scalper-config"],
+    );
+    const recommendation = await client.query(
+      `SELECT *
+         FROM kalshi_scalp_calibration_recommendations
+        WHERE id = $1
+        FOR UPDATE`,
+      [params.id],
+    );
+    const row = recommendation.rows[0] as Record<string, unknown> | undefined;
+    if (!row) throw new Error("calibration_not_found");
+    if (row["status"] !== params.expectedStatus) {
+      throw new Error(`calibration_status_conflict:${String(row["status"])}`);
+    }
+    const configUpdate = await client.query(
+      `UPDATE kalshi_scalp_config
+          SET config = $1::jsonb, updated_at = NOW()
+        WHERE id = 'singleton'
+          AND config = $2::jsonb`,
+      [
+        JSON.stringify(params.nextConfig),
+        JSON.stringify(params.expectedConfig),
+      ],
+    );
+    if (configUpdate.rowCount !== 1) {
+      throw new Error("calibration_config_conflict");
+    }
+    const decision = await client.query(
+      `UPDATE kalshi_scalp_calibration_recommendations
+          SET status = $2,
+              applied_at = CASE WHEN $2 = 'applied' THEN NOW() ELSE applied_at END,
+              applied_by = CASE WHEN $2 = 'applied' THEN $3 ELSE applied_by END,
+              reverted_at = CASE WHEN $2 = 'reverted' THEN NOW() ELSE reverted_at END,
+              reverted_by = CASE WHEN $2 = 'reverted' THEN $3 ELSE reverted_by END
+        WHERE id = $1
+        RETURNING *`,
+      [params.id, params.nextStatus, params.operatorFingerprint],
+    );
+    await client.query("COMMIT");
+    return mapStoredScalpCalibration(
+      decision.rows[0] as Record<string, unknown>,
+    );
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
   } finally {
     client.release();
   }

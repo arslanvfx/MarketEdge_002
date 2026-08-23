@@ -313,7 +313,17 @@ export interface ScalpWindowFunnelReport {
 // ---------------------------------------------------------------------------
 
 /** Standard comparison points, expressed as seconds left before market close. */
-export const SCALP_SHADOW_VARIANT_SECONDS = [60, 75, 90, 105, 120] as const;
+export const SCALP_SHADOW_VARIANT_SECONDS = [
+  60,
+  75,
+  90,
+  105,
+  120,
+  135,
+  150,
+  165,
+  180,
+] as const;
 /** Configured live timing may be any precise second value allowed by ScalpConfig. */
 export type ScalpShadowVariantSeconds = number;
 

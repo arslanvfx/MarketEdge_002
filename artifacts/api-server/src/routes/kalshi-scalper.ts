@@ -32,10 +32,15 @@ import {
   getScalpPerformance,
   getScalpWindowFunnel,
   getScalpShadowStudy,
+  getScalpCalibrationReport,
+  refreshScalpCalibration,
+  applyScalpCalibrationRecommendation,
+  revertScalpCalibrationRecommendation,
   resetScalpPerformance,
   reconcileUnresolvedScalpOrder,
   ScalpReconciliationError,
   UnresolvedAttemptsError,
+  ScalpCalibrationConflictError,
 } from "../lib/kalshi-scalper-service.ts";
 import type { ScalpMode } from "../lib/kalshi-scalper-types.ts";
 
@@ -170,6 +175,20 @@ router.get("/crypto/scalper/shadow-study", async (req, res): Promise<void> => {
   }
 });
 
+// ── GET /api/crypto/scalper/calibration ──────────────────────────────────────
+// Read-only latest saved analysis. Missing markets mean an operator has not run
+// the first review yet; GET never changes settings or creates recommendations.
+router.get("/crypto/scalper/calibration", async (req, res): Promise<void> => {
+  try {
+    const config = getScalpConfig();
+    const mode = parseMode(req.query["mode"]) ?? config.mode;
+    res.json(await getScalpCalibrationReport(mode));
+  } catch (err) {
+    req.log.error({ err }, "Failed to fetch Scalper calibration");
+    res.status(500).json({ error: "Failed to fetch Scalper calibration" });
+  }
+});
+
 // ── POST /api/crypto/scalper/reset-performance (signed-in operator) ──────────
 // Reporting-only: advances one mode's entry-time baseline without mutating the
 // order ledger, active positions, configuration, or safety state.
@@ -190,6 +209,100 @@ router.post("/crypto/scalper/reset-performance", requireScalpAdmin, async (req, 
   } catch (err) {
     req.log.error({ err, mode }, "Failed to reset Scalper performance reporting window");
     res.status(500).json({ ok: false, error: "Failed to reset Scalper performance" });
+  }
+});
+
+// ── POST /api/crypto/scalper/calibration/refresh (signed-in operator) ────────
+// Creates one versioned read-only recommendation for every Scalper market.
+router.post("/crypto/scalper/calibration/refresh", requireScalpAdmin, async (req, res): Promise<void> => {
+  const mode = parseMode(req.body?.mode);
+  if (!mode) {
+    res.status(400).json({ ok: false, error: "mode must be paper or live" });
+    return;
+  }
+  try {
+    const report = await refreshScalpCalibration(mode);
+    req.log.info(
+      {
+        mode,
+        recommendations: report.recommendations.length,
+        actionable: report.recommendations.filter(
+          (row) => row.status === "recommended",
+        ).length,
+      },
+      "Generated Scalper per-market calibration review",
+    );
+    res.json({ ok: true, report });
+  } catch (err) {
+    req.log.error({ err, mode }, "Failed to refresh Scalper calibration");
+    res.status(500).json({ ok: false, error: "Failed to refresh Scalper calibration" });
+  }
+});
+
+function parseCalibrationId(value: unknown): string | null {
+  return typeof value === "string"
+    && value.length >= 8
+    && value.length <= 120
+    ? value
+    : null;
+}
+
+function respondCalibrationDecisionError(
+  req: Request,
+  res: Response,
+  err: unknown,
+  action: "apply" | "revert",
+): void {
+  if (err instanceof ScalpCalibrationConflictError) {
+    res.status(err.code === "not_found" ? 404 : 409).json({
+      ok: false,
+      error: err.message,
+      code: err.code,
+    });
+    return;
+  }
+  req.log.error({ err, action }, `Failed to ${action} Scalper calibration`);
+  res.status(500).json({
+    ok: false,
+    error: `Failed to ${action} Scalper calibration`,
+  });
+}
+
+// ── POST /api/crypto/scalper/calibration/:id/apply (signed-in operator) ─────
+router.post("/crypto/scalper/calibration/:id/apply", requireScalpAdmin, async (req, res): Promise<void> => {
+  const id = parseCalibrationId(req.params["id"]);
+  const operatorUserId = getAuth(req)?.userId;
+  if (!id || !operatorUserId) {
+    res.status(!id ? 400 : 401).json({
+      ok: false,
+      error: !id ? "A valid recommendation id is required." : "Authentication required",
+    });
+    return;
+  }
+  try {
+    const result = await applyScalpCalibrationRecommendation(id, operatorUserId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    respondCalibrationDecisionError(req, res, err, "apply");
+  }
+});
+
+// ── POST /api/crypto/scalper/calibration/:id/revert (signed-in operator) ────
+router.post("/crypto/scalper/calibration/:id/revert", requireScalpAdmin, async (req, res): Promise<void> => {
+  const id = parseCalibrationId(req.params["id"]);
+  const operatorUserId = getAuth(req)?.userId;
+  if (!id || !operatorUserId) {
+    res.status(!id ? 400 : 401).json({
+      ok: false,
+      error: !id ? "A valid recommendation id is required." : "Authentication required",
+    });
+    return;
+  }
+  try {
+    const result = await revertScalpCalibrationRecommendation(id, operatorUserId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    respondCalibrationDecisionError(req, res, err, "revert");
   }
 });
 

@@ -124,3 +124,4 @@
 - [Scalper shadow-study isolation](scalper-shadow-study.md) — earlier-entry research runs even if Scalper is disabled/paused; expected close owns variant clocks; cached quotes never imply IOC fills
 - [Scalper real-time direction guard](scalper-realtime-direction-guard.md) — opt-in projection may soften only net-trend rejection; all hard guards stay fail-closed
 - [Scalper operator-owned open cap](scalper-open-cap.md) — $50 is only the invalid/missing default; every positive finite manual value must persist and be enforced exactly with no clamp
+- [Scalper calibration policy](scalper-calibration-policy.md) — recommendations are mode-isolated, holdout-validated, operator-applied, and may change only settings supported by executable evidence
