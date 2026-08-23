@@ -696,6 +696,24 @@ export interface ScalperStatusMarket {
   reason: string | null;
 }
 
+export type ScalperLatencyStage =
+  | "queue_wait"
+  | "cap_claim"
+  | "parallel_refresh"
+  | "final_requote"
+  | "intent_write"
+  | "broker_submit"
+  | "decision_finalize";
+
+export interface ScalperLatencyStageSummary {
+  stage: ScalperLatencyStage;
+  sampleSize: number;
+  p50Ms: number | null;
+  p90Ms: number | null;
+  p99Ms: number | null;
+  maxMs: number | null;
+}
+
 export interface ScalperStatus {
   config: ScalperConfig;
   circuitBreaker: boolean;
@@ -713,6 +731,15 @@ export interface ScalperStatus {
     p90Ms: number | null;
     p99Ms: number | null;
     maxMs: number | null;
+    stages: ScalperLatencyStageSummary[];
+    dominantStage: ScalperLatencyStage | null;
+    dominantStageP90Ms: number | null;
+  };
+  scanHealth: {
+    running: boolean;
+    followUpPending: boolean;
+    attemptsInFlight: number;
+    shadowObservationPending: boolean;
   };
   incidents: any[];
   lastScanAt: string | null;
@@ -831,23 +858,20 @@ export interface ScalperAttempt {
     windowKey: string;
     detectedAt: string;
     completedAt: string;
+    windowRemainingAtDetectedMs: number | null;
+    windowRemainingAtCompletionMs: number | null;
+    windowExpiredDuringAttempt: boolean;
     totalMs: number;
     queueWaitMs: number | null;
     capClaimMs: number | null;
     identityRefreshMs: number | null;
     quoteRefreshMs: number | null;
     parallelRefreshMs: number | null;
+    finalRequoteMs: number | null;
     intentWriteMs: number | null;
     brokerSubmitMs: number | null;
     decisionFinalizeMs: number | null;
-    slowestStage:
-      | "queue_wait"
-      | "cap_claim"
-      | "parallel_refresh"
-      | "intent_write"
-      | "broker_submit"
-      | "decision_finalize"
-      | null;
+    slowestStage: ScalperLatencyStage | null;
     slowestStageMs: number | null;
   } | null;
   retryEligible: boolean;

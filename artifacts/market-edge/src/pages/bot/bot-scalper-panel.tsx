@@ -58,6 +58,20 @@ function formatScalperLatency(value: number | null): string {
   return `${(value / 1_000).toFixed(value < 10_000 ? 2 : 1)}s`;
 }
 
+function formatScalperLatencyStage(stage: string | null): string {
+  if (!stage) return "No bottleneck yet";
+  const labels: Record<string, string> = {
+    queue_wait: "Candidate queue",
+    cap_claim: "Cap reservation",
+    parallel_refresh: "Identity / quote / balance refresh",
+    final_requote: "Final authenticated quote",
+    intent_write: "Durable intent",
+    broker_submit: "Kalshi submit",
+    decision_finalize: "Guard + result persistence",
+  };
+  return labels[stage] ?? stage.replaceAll("_", " ");
+}
+
 function formatShadowVariant(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const secondsPart = seconds - minutes * 60;
@@ -675,18 +689,63 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         </div>
       )}
 
-      {statusData?.latency && statusData.latency.sampleSize > 0 && (
-        <div
-          data-testid="status-scalper-fast-path-latency"
-          className="border-b border-amber-500/15 bg-amber-500/[0.03] px-3 sm:px-5 py-2 text-[10px] font-mono text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1"
-        >
-          <span className="uppercase tracking-widest text-amber-500/70 font-bold">Fast path</span>
-          <span>p50 {formatScalperLatency(statusData.latency.p50Ms)}</span>
-          <span>p90 {formatScalperLatency(statusData.latency.p90Ms)}</span>
-          <span>p99 {formatScalperLatency(statusData.latency.p99Ms)}</span>
-          <span className="sm:ml-auto">{statusData.latency.sampleSize} measured attempt{statusData.latency.sampleSize === 1 ? "" : "s"}</span>
-        </div>
-      )}
+      {statusData && (() => {
+        const lastScanAgeMs = statusData.lastScanAt
+          ? Math.max(0, Date.now() - Date.parse(statusData.lastScanAt))
+          : null;
+        const staleThresholdMs = Math.max(
+          1_500,
+          statusData.executionPolicy.scanIntervalMs * 6,
+        );
+        const scanStale = lastScanAgeMs == null || lastScanAgeMs > staleThresholdMs;
+        return (
+          <div
+            data-testid="status-scalper-fast-path-latency"
+            className="border-b border-amber-500/15 bg-amber-500/[0.03] px-3 sm:px-5 py-2 text-[10px] font-mono text-muted-foreground"
+          >
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="uppercase tracking-widest text-amber-500/70 font-bold">Fast path</span>
+              {statusData.latency.sampleSize > 0 ? (
+                <>
+                  <span>p50 {formatScalperLatency(statusData.latency.p50Ms)}</span>
+                  <span>p90 {formatScalperLatency(statusData.latency.p90Ms)}</span>
+                  <span>
+                    Bottleneck: {formatScalperLatencyStage(statusData.latency.dominantStage)}{" "}
+                    {formatScalperLatency(statusData.latency.dominantStageP90Ms)} p90
+                  </span>
+                </>
+              ) : (
+                <span>Waiting for a measured candidate attempt</span>
+              )}
+              <span className={`sm:ml-auto ${scanStale ? "text-red-300 font-bold" : ""}`}>
+                {statusData.scanHealth.running
+                  ? `${statusData.scanHealth.attemptsInFlight} attempt${statusData.scanHealth.attemptsInFlight === 1 ? "" : "s"} in flight`
+                  : lastScanAgeMs == null
+                    ? "No completed scan yet"
+                    : `Last scan ${formatScalperLatency(lastScanAgeMs)} ago`}
+                {statusData.scanHealth.followUpPending ? " · follow-up queued" : ""}
+              </span>
+            </div>
+            {statusData.latency.stages.some((stage) => stage.sampleSize > 0) && (
+              <details className="mt-1">
+                <summary className="cursor-pointer select-none text-amber-200/70 hover:text-amber-100">
+                  Stage percentiles
+                </summary>
+                <div className="mt-1 grid gap-x-4 gap-y-0.5 sm:grid-cols-2 lg:grid-cols-4">
+                  {statusData.latency.stages
+                    .filter((stage) => stage.sampleSize > 0)
+                    .map((stage) => (
+                      <span key={stage.stage}>
+                        {formatScalperLatencyStage(stage.stage)}: p50 {formatScalperLatency(stage.p50Ms)}
+                        {" · "}p90 {formatScalperLatency(stage.p90Ms)}
+                      </span>
+                    ))}
+                </div>
+              </details>
+            )}
+          </div>
+        );
+      })()}
 
       {merged.circuitBreaker && (
         <div className={`${merged.circuitBreakerEnabled !== false ? "bg-red-500/10 border-red-500/30" : "bg-amber-500/10 border-amber-500/30"} border-b px-5 py-3 flex flex-col gap-3`}>

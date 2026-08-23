@@ -386,6 +386,7 @@ export type ScalpLatencyStage =
   | "queue_wait"
   | "cap_claim"
   | "parallel_refresh"
+  | "final_requote"
   | "intent_write"
   | "broker_submit"
   | "decision_finalize";
@@ -396,6 +397,9 @@ export interface ScalpAttemptLatency {
   windowKey: string;
   detectedAt: string;
   completedAt: string;
+  windowRemainingAtDetectedMs: number | null;
+  windowRemainingAtCompletionMs: number | null;
+  windowExpiredDuringAttempt: boolean;
   /** Complete cached-candidate detection through final durable outcome. */
   totalMs: number;
   queueWaitMs: number | null;
@@ -403,6 +407,8 @@ export interface ScalpAttemptLatency {
   identityRefreshMs: number | null;
   quoteRefreshMs: number | null;
   parallelRefreshMs: number | null;
+  /** Fresh authenticated quote immediately before the intent boundary. */
+  finalRequoteMs: number | null;
   intentWriteMs: number | null;
   brokerSubmitMs: number | null;
   /** Remaining guard evaluation + durable outcome work not covered above. */
@@ -411,12 +417,26 @@ export interface ScalpAttemptLatency {
   slowestStageMs: number | null;
 }
 
+export interface ScalpLatencyStageSummary {
+  stage: ScalpLatencyStage;
+  sampleSize: number;
+  p50Ms: number | null;
+  p90Ms: number | null;
+  p99Ms: number | null;
+  maxMs: number | null;
+}
+
 export interface ScalpLatencySummary {
   sampleSize: number;
   p50Ms: number | null;
   p90Ms: number | null;
   p99Ms: number | null;
   maxMs: number | null;
+  /** Percentiles for the serial stages that make up the protected attempt. */
+  stages: ScalpLatencyStageSummary[];
+  /** Highest p90 stage; this is the first local bottleneck to investigate. */
+  dominantStage: ScalpLatencyStage | null;
+  dominantStageP90Ms: number | null;
 }
 
 // ---------------------------------------------------------------------------

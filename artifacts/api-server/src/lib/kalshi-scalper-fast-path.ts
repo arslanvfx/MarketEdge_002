@@ -2,6 +2,7 @@ import type {
   ScalpAttemptLatency,
   ScalpFunnelEventStage,
   ScalpLatencyStage,
+  ScalpLatencyStageSummary,
   ScalpLatencySummary,
   ScalpMode,
   ScalpWindowFunnel,
@@ -222,6 +223,7 @@ const STAGES: ScalpLatencyStage[] = [
   "queue_wait",
   "cap_claim",
   "parallel_refresh",
+  "final_requote",
   "intent_write",
   "broker_submit",
   "decision_finalize",
@@ -230,13 +232,14 @@ const STAGES: ScalpLatencyStage[] = [
 export function findSlowestScalpLatencyStage(
   latency: Pick<
     ScalpAttemptLatency,
-    "queueWaitMs" | "capClaimMs" | "parallelRefreshMs" | "intentWriteMs" | "brokerSubmitMs" | "decisionFinalizeMs"
+    "queueWaitMs" | "capClaimMs" | "parallelRefreshMs" | "finalRequoteMs" | "intentWriteMs" | "brokerSubmitMs" | "decisionFinalizeMs"
   >,
 ): { stage: ScalpLatencyStage | null; latencyMs: number | null } {
   const values: Record<ScalpLatencyStage, number | null> = {
     queue_wait: latency.queueWaitMs,
     cap_claim: latency.capClaimMs,
     parallel_refresh: latency.parallelRefreshMs,
+    final_requote: latency.finalRequoteMs,
     intent_write: latency.intentWriteMs,
     broker_submit: latency.brokerSubmitMs,
     decision_finalize: latency.decisionFinalizeMs,
@@ -267,11 +270,46 @@ export function summarizeScalpAttemptLatencies(
   const totals = attempts
     .map((attempt) => attempt.totalMs)
     .filter((value) => Number.isFinite(value) && value >= 0);
+  const stages: ScalpLatencyStageSummary[] = STAGES.map((stage) => {
+    const values = attempts
+      .map((attempt) => {
+        const stageValues: Record<ScalpLatencyStage, number | null> = {
+          queue_wait: attempt.queueWaitMs,
+          cap_claim: attempt.capClaimMs,
+          parallel_refresh: attempt.parallelRefreshMs,
+          final_requote: attempt.finalRequoteMs,
+          intent_write: attempt.intentWriteMs,
+          broker_submit: attempt.brokerSubmitMs,
+          decision_finalize: attempt.decisionFinalizeMs,
+        };
+        return stageValues[stage];
+      })
+      .filter(
+        (value): value is number =>
+          value != null && Number.isFinite(value) && value >= 0,
+      );
+    return {
+      stage,
+      sampleSize: values.length,
+      p50Ms: percentile(values, 0.5),
+      p90Ms: percentile(values, 0.9),
+      p99Ms: percentile(values, 0.99),
+      maxMs: values.length > 0 ? Math.round(Math.max(...values) * 10) / 10 : null,
+    };
+  });
+  const dominant = stages.reduce<ScalpLatencyStageSummary | null>((current, stage) => {
+    if (stage.p90Ms == null) return current;
+    if (current?.p90Ms == null || stage.p90Ms > current.p90Ms) return stage;
+    return current;
+  }, null);
   return {
     sampleSize: totals.length,
     p50Ms: percentile(totals, 0.5),
     p90Ms: percentile(totals, 0.9),
     p99Ms: percentile(totals, 0.99),
     maxMs: totals.length > 0 ? Math.round(Math.max(...totals) * 10) / 10 : null,
+    stages,
+    dominantStage: dominant?.stage ?? null,
+    dominantStageP90Ms: dominant?.p90Ms ?? null,
   };
 }

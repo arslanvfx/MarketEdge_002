@@ -328,12 +328,7 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   ) {
     details.push(...describeEntryGuardEvidence(attempt.entryGuardEvidence));
     // Still show latency below if available; return early from guard-block logic
-    if (attempt.latency) {
-      const slowest = attempt.latency.slowestStage == null
-        ? "stage unavailable"
-        : `${attempt.latency.slowestStage.replaceAll("_", " ")} ${formatLatency(attempt.latency.slowestStageMs)}`;
-      details.push(`Fast path ${formatLatency(attempt.latency.totalMs)} total · slowest ${slowest}`);
-    }
+    details.push(...describeAttemptLatency(attempt));
     return details;
   }
 
@@ -527,12 +522,7 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`Final refresh latency: ${refreshLatencyParts.join(" · ")}`);
   }
 
-  if (attempt.latency) {
-    const slowest = attempt.latency.slowestStage == null
-      ? "stage unavailable"
-      : `${attempt.latency.slowestStage.replaceAll("_", " ")} ${formatLatency(attempt.latency.slowestStageMs)}`;
-    details.push(`Fast path ${formatLatency(attempt.latency.totalMs)} total · slowest ${slowest}`);
-  }
+  details.push(...describeAttemptLatency(attempt));
 
   return details;
 }
@@ -679,4 +669,34 @@ function formatLatency(value: number | null | undefined): string {
   if (value == null) return "unavailable";
   if (value < 1_000) return `${Math.round(value)}ms`;
   return `${(value / 1_000).toFixed(value < 10_000 ? 2 : 1)}s`;
+}
+
+function describeAttemptLatency(attempt: ScalperAttempt): string[] {
+  const latency = attempt.latency;
+  if (!latency) return [];
+  const slowest = latency.slowestStage == null
+    ? "stage unavailable"
+    : `${latency.slowestStage.replaceAll("_", " ")} ${formatLatency(latency.slowestStageMs)}`;
+  const stages = [
+    latency.queueWaitMs == null ? null : `queue ${formatLatency(latency.queueWaitMs)}`,
+    latency.capClaimMs == null ? null : `cap ${formatLatency(latency.capClaimMs)}`,
+    latency.parallelRefreshMs == null ? null : `parallel refresh ${formatLatency(latency.parallelRefreshMs)}`,
+    latency.identityRefreshMs == null ? null : `identity ${formatLatency(latency.identityRefreshMs)}`,
+    latency.quoteRefreshMs == null ? null : `first quote ${formatLatency(latency.quoteRefreshMs)}`,
+    latency.finalRequoteMs == null ? null : `final quote ${formatLatency(latency.finalRequoteMs)}`,
+    latency.intentWriteMs == null ? null : `intent ${formatLatency(latency.intentWriteMs)}`,
+    latency.brokerSubmitMs == null ? null : `broker ${formatLatency(latency.brokerSubmitMs)}`,
+    latency.decisionFinalizeMs == null ? null : `finalize ${formatLatency(latency.decisionFinalizeMs)}`,
+  ].filter((stage): stage is string => stage != null);
+  const windowBudget = latency.windowRemainingAtDetectedMs;
+  const budgetLine = latency.windowExpiredDuringAttempt
+    ? `LATENCY WARNING: market closed during this attempt; slowest stage was ${slowest}`
+    : windowBudget != null && windowBudget > 0
+      ? `Window budget used: ${Math.min(999, (latency.totalMs / windowBudget) * 100).toFixed(1)}% of ${formatLatency(windowBudget)} remaining at detection`
+      : null;
+  return [
+    `Fast path ${formatLatency(latency.totalMs)} total · slowest ${slowest}`,
+    budgetLine,
+    stages.length > 0 ? `Timing stages: ${stages.join(" · ")}` : "",
+  ].filter((line): line is string => line != null && line !== "");
 }

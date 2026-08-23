@@ -194,6 +194,7 @@ const _shadowWriter = createBoundedScalpShadowWriter(
 const _shadowStates = new Map<string, ScalpShadowStudyRecord>();
 let _lastShadowObservationAt = 0;
 let _shadowSettlementInFlight = false;
+let _shadowObservationQueued = false;
 
 function _shadowKey(
   mode: ScalpMode,
@@ -355,6 +356,24 @@ function _observeShadowEntries(windowKey: string, nowMs: number): void {
   }
 }
 
+/**
+ * Shadow observation is read-only, but it still performs per-market guard
+ * evaluation. Schedule it after the scan pass returns so it cannot extend the
+ * live candidate-to-submit scheduling lane. The callback re-checks the active
+ * window and in-flight set, skipping observation rather than competing with a
+ * real execution attempt.
+ */
+function _scheduleShadowObservation(windowKey: string): void {
+  if (_shadowObservationQueued) return;
+  _shadowObservationQueued = true;
+  const timer = setTimeout(() => {
+    _shadowObservationQueued = false;
+    if (currentWindowKey() !== windowKey || _attemptsInFlight.size > 0) return;
+    _observeShadowEntries(windowKey, Date.now());
+  }, 0);
+  timer.unref?.();
+}
+
 async function _evaluateShadowSettlements(): Promise<void> {
   if (
     _shadowSettlementInFlight
@@ -448,11 +467,13 @@ interface MutableScalpAttemptLatency {
   symbol: string;
   windowKey: string;
   detectedAtMs: number;
+  closeTimeMs: number | null;
   queueWaitMs: number | null;
   capClaimMs: number | null;
   identityRefreshMs: number | null;
   quoteRefreshMs: number | null;
   parallelRefreshMs: number | null;
+  finalRequoteMs: number | null;
   intentWriteMs: number | null;
   brokerSubmitMs: number | null;
 }
@@ -469,18 +490,22 @@ function _beginAttemptLatency(
   symbol: string,
   windowKey: string,
   detectedAtMs: number,
+  closeTime: string,
 ): MutableScalpAttemptLatency {
   const startedAtMs = Date.now();
+  const parsedCloseTimeMs = Date.parse(closeTime);
   return {
     mode,
     symbol,
     windowKey,
     detectedAtMs,
+    closeTimeMs: Number.isFinite(parsedCloseTimeMs) ? parsedCloseTimeMs : null,
     queueWaitMs: Math.max(0, startedAtMs - detectedAtMs),
     capClaimMs: null,
     identityRefreshMs: null,
     quoteRefreshMs: null,
     parallelRefreshMs: null,
+    finalRequoteMs: null,
     intentWriteMs: null,
     brokerSubmitMs: null,
   };
@@ -488,11 +513,18 @@ function _beginAttemptLatency(
 
 function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
   const completedAtMs = Date.now();
+  const windowRemainingAtDetectedMs = timing.closeTimeMs == null
+    ? null
+    : timing.closeTimeMs - timing.detectedAtMs;
+  const windowRemainingAtCompletionMs = timing.closeTimeMs == null
+    ? null
+    : timing.closeTimeMs - completedAtMs;
   const totalMs = Math.max(0, completedAtMs - timing.detectedAtMs);
   const measuredSequentialMs = [
     timing.queueWaitMs,
     timing.capClaimMs,
     timing.parallelRefreshMs,
+    timing.finalRequoteMs,
     timing.intentWriteMs,
     timing.brokerSubmitMs,
   ].reduce<number>((sum, value) => sum + (value ?? 0), 0);
@@ -507,12 +539,19 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
     windowKey: timing.windowKey,
     detectedAt: new Date(timing.detectedAtMs).toISOString(),
     completedAt: new Date(completedAtMs).toISOString(),
+    windowRemainingAtDetectedMs,
+    windowRemainingAtCompletionMs,
+    windowExpiredDuringAttempt:
+      windowRemainingAtDetectedMs != null
+      && windowRemainingAtDetectedMs > 0
+      && (windowRemainingAtCompletionMs ?? 0) <= 0,
     totalMs,
     queueWaitMs: timing.queueWaitMs,
     capClaimMs: timing.capClaimMs,
     identityRefreshMs: timing.identityRefreshMs,
     quoteRefreshMs: timing.quoteRefreshMs,
     parallelRefreshMs: timing.parallelRefreshMs,
+    finalRequoteMs: timing.finalRequoteMs,
     intentWriteMs: timing.intentWriteMs,
     brokerSubmitMs: timing.brokerSubmitMs,
     decisionFinalizeMs,
@@ -1396,7 +1435,7 @@ async function _doScanTick(): Promise<void> {
   }
 
   if (!_config.enabled) {
-    _observeShadowEntries(wk, Date.now());
+    _scheduleShadowObservation(wk);
     _preflightStatus = {
       ..._preflightStatus,
       state: "idle",
@@ -1412,7 +1451,7 @@ async function _doScanTick(): Promise<void> {
 
   _maybeStartPreflight(wk, Date.now());
   if (_isCircuitBreakerBlocking()) {
-    _observeShadowEntries(wk, Date.now());
+    _scheduleShadowObservation(wk);
     _preflightStatus = {
       ..._preflightStatus,
       state: "blocked",
@@ -1425,7 +1464,7 @@ async function _doScanTick(): Promise<void> {
   // Quick scan using cached public quotes to find candidates.
   const candidates = _findCandidates(wk);
   if (candidates.length === 0) {
-    _observeShadowEntries(wk, Date.now());
+    _scheduleShadowObservation(wk);
     return;
   }
   for (const candidate of candidates) {
@@ -1435,7 +1474,7 @@ async function _doScanTick(): Promise<void> {
   await _runWithConcurrency(candidates, SCALP_MAX_CONCURRENT_CANDIDATES, async (candidate) => {
     await _evaluateCandidate(candidate, wk, mode);
   });
-  _observeShadowEntries(wk, Date.now());
+  _scheduleShadowObservation(wk);
 }
 
 interface Candidate {
@@ -1777,6 +1816,7 @@ async function _evaluateCandidate(
     symbol,
     windowKey,
     candidate.detectedAtMs,
+    closeTime,
   );
   try {
     const params = resolveEffectiveParams(_config, symbol, ticker);
@@ -2504,6 +2544,7 @@ async function _executeScalpAttempt(
     (error) => ({ ok: false as const, error, orderbook: null }),
   );
   const finalRequoteMs = runtime.nowMs() - finalRequoteStartedAtMs;
+  if (latency) latency.finalRequoteMs = finalRequoteMs;
   const finalRequalification = finalRequoteResult.ok && finalRequoteResult.orderbook
     ? requalifyAuthenticatedScalpQuote({
         orderbook: finalRequoteResult.orderbook,
@@ -3786,6 +3827,12 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
     })),
     incidents,
     latency: latencySummary,
+    scanHealth: {
+      running: _scanRunner.isRunning(),
+      followUpPending: _scanRunner.hasPendingRun(),
+      attemptsInFlight: _attemptsInFlight.size,
+      shadowObservationPending: _shadowObservationQueued,
+    },
     // ISO string | null (not epoch)
     lastScanAt: _lastScanAt != null ? new Date(_lastScanAt).toISOString() : null,
     lastError: _lastError,
