@@ -27,8 +27,15 @@ export interface ScalpConfig {
   /** Mandatory aggregate ceiling for all unsettled fills and in-flight reservations. */
   openCapDollars: number;
   freefallGuardEnabled: boolean;    // default true
+  /** Number of consecutive one-second moves toward the losing side that blocks entry. */
+  freefallConsecutiveSeconds: number;
+  /** Legacy persisted fields retained for rolling compatibility; no longer drive entry. */
   freefallLookbackSeconds: number;
-  freefallThresholdPct: number;     // % adverse underlying move that blocks entry
+  freefallThresholdPct: number;
+  /** Optional direction-independent shock filter, separate from the directional guard. */
+  rapidMoveGuardEnabled: boolean;
+  rapidMoveLookbackSeconds: number;
+  rapidMoveThresholdPct: number;
   /** Block entries when the fresh underlying is within this percentage of the
    *  force-refreshed Kalshi target. Independent of the contract-price band. */
   targetProximityGuardEnabled: boolean;
@@ -52,8 +59,12 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   dailyCapDollars: null,
   openCapDollars: DEFAULT_SCALP_OPEN_CAP_DOLLARS,
   freefallGuardEnabled: true,
+  freefallConsecutiveSeconds: 4,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
+  rapidMoveGuardEnabled: false,
+  rapidMoveLookbackSeconds: 4,
+  rapidMoveThresholdPct: 0.5,
   targetProximityGuardEnabled: true,
   targetProximityThresholdPct: 0.05,
   circuitBreakerEnabled: true,
@@ -271,6 +282,20 @@ export interface ScalpSkipEvidence {
   adverseMovePct?: number | null;
   /** Configured threshold % for the freefall guard. */
   freefallThresholdPct?: number | null;
+  /** Configured consecutive one-second moves required to block. */
+  freefallConsecutiveSeconds?: number | null;
+  /** Count of wrong-way price changes in the trailing elapsed-time streak. */
+  consecutiveWrongWayMoves?: number | null;
+  /** Real elapsed duration of the trailing wrong-way streak. */
+  consecutiveWrongWaySeconds?: number | null;
+  /** Net signed move across the directional observation window. */
+  directionalMovePct?: number | null;
+  /** Whether the independent rapid-move guard blocked this attempt. */
+  rapidMoveBlocked?: boolean | null;
+  /** Absolute move measured by the rapid-move guard. */
+  rapidMovePct?: number | null;
+  rapidMoveThresholdPct?: number | null;
+  rapidMoveLookbackSeconds?: number | null;
   /** Number of price samples used in the freefall evaluation. */
   samplesUsed?: number | null;
   /** Observed coverage span (ms) of samples used. */
@@ -361,6 +386,11 @@ export interface ScalpMarketStatus {
   /** Seconds until the eligibility window opens (null when already eligible or no close time). */
   secondsUntilEligible: number | null;
   freefallBlocked: boolean;
+  freefallSamplesUsed: number;
+  freefallRequiredSamples: number;
+  freefallObservationSeconds: number;
+  freefallMovementPct: number | null;
+  rapidMoveBlocked: boolean;
   targetProximityBlocked: boolean;
   targetDistancePct: number | null;
   reason: string | null;

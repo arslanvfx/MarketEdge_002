@@ -635,8 +635,12 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
       dailyCapDollars: patch.dailyCapDollars !== undefined ? patch.dailyCapDollars : current.dailyCapDollars,
       openCapDollars: patch.openCapDollars !== undefined ? patch.openCapDollars : current.openCapDollars,
       freefallGuardEnabled: patch.freefallGuardEnabled !== undefined ? patch.freefallGuardEnabled : current.freefallGuardEnabled,
+      freefallConsecutiveSeconds: patch.freefallConsecutiveSeconds !== undefined ? patch.freefallConsecutiveSeconds : current.freefallConsecutiveSeconds,
       freefallLookbackSeconds: patch.freefallLookbackSeconds !== undefined ? patch.freefallLookbackSeconds : current.freefallLookbackSeconds,
       freefallThresholdPct: patch.freefallThresholdPct !== undefined ? patch.freefallThresholdPct : current.freefallThresholdPct,
+      rapidMoveGuardEnabled: patch.rapidMoveGuardEnabled !== undefined ? patch.rapidMoveGuardEnabled : current.rapidMoveGuardEnabled,
+      rapidMoveLookbackSeconds: patch.rapidMoveLookbackSeconds !== undefined ? patch.rapidMoveLookbackSeconds : current.rapidMoveLookbackSeconds,
+      rapidMoveThresholdPct: patch.rapidMoveThresholdPct !== undefined ? patch.rapidMoveThresholdPct : current.rapidMoveThresholdPct,
       targetProximityGuardEnabled: patch.targetProximityGuardEnabled !== undefined ? patch.targetProximityGuardEnabled : current.targetProximityGuardEnabled,
       targetProximityThresholdPct: patch.targetProximityThresholdPct !== undefined ? patch.targetProximityThresholdPct : current.targetProximityThresholdPct,
       circuitBreakerEnabled: patch.circuitBreakerEnabled !== undefined ? patch.circuitBreakerEnabled : current.circuitBreakerEnabled,
@@ -1003,17 +1007,6 @@ async function _runPreflight(
       reason = "open_cap_reached";
     } else if (!_preflightIdentityReady.has(`${windowKey}:${target.symbol}`)) {
       reason = "market_identity_not_ready";
-    } else if (
-      _config.freefallGuardEnabled &&
-      !checkFreefallGuard(
-      _priceSamples.get(target.symbol) ?? [],
-      "yes",
-      sampleTime,
-      _config.freefallLookbackSeconds * 1_000,
-      _config.freefallThresholdPct,
-      ).evaluable
-    ) {
-      reason = "freefall_samples_not_ready";
     }
     return { symbol: target.symbol, ready: reason == null, reason };
   });
@@ -1138,6 +1131,9 @@ async function _doScanTick(): Promise<void> {
     _lastObservedWindowKey = wk;
     _terminalAttemptKeys.clear();
     _nextAttemptAt.clear();
+    // A new market window owns a new real-time direction baseline. Preflight
+    // samples from the previous market must never count toward eligibility.
+    _priceSamples.clear();
     _resetPreflightState();
   }
 
@@ -1752,7 +1748,9 @@ async function _executeScalpAttempt(
       (orderbook) => ({ ok: true as const, orderbook, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
       (error) => ({ ok: false as const, orderbook: null, error, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
     ),
-    snapshot.freefallGuardEnabled || snapshot.targetProximityGuardEnabled
+    snapshot.freefallGuardEnabled
+    || snapshot.rapidMoveGuardEnabled
+    || snapshot.targetProximityGuardEnabled
       ? coin
         ? runtime.collectPriceSample(coin.symbol, coin.product)
         : Promise.resolve(false)
@@ -1944,6 +1942,7 @@ async function _executeScalpAttempt(
 
   const effectiveSide = match2.side;
   const winningAsk = match2.winningAsk;
+  const targetPriceNum = Number(identityResult.target);
   let regularLayerCompatibility = runtime.regularPositionCompatibilitySync(
     mode,
     symbol,
@@ -1975,7 +1974,6 @@ async function _executeScalpAttempt(
   // was fetched concurrently. If either input is unavailable, the enabled guard
   // cannot prove the entry safe and fails closed.
   if (snapshot.targetProximityGuardEnabled) {
-    const targetPriceNum = Number(identityResult.target);
     if (!coin) {
       await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "target_proximity_unavailable_no_product", true, {
         ..._timingEvidence(),
@@ -2035,18 +2033,23 @@ async function _executeScalpAttempt(
   // Fail closed: an AUTHORITATIVE fresh sample is REQUIRED. A failed fresh fetch
   // is "unavailable" and skips — existing old samples must NOT mask it. Then the
   // guard must be evaluable AND not blocked to proceed.
-  if (snapshot.freefallGuardEnabled) {
+  if (snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled) {
     const samplesFinal = _priceSamples.get(symbol) ?? [];
     const ffNowMs = runtime.nowMs();
     const freefallDecision = evaluateFreefallPreSubmitGuard({
-      enabled: snapshot.freefallGuardEnabled,
+      directionEnabled: snapshot.freefallGuardEnabled,
       hasProduct: coin != null,
       freshSampleSucceeded: freshSampleResult,
       samples: samplesFinal,
       side: effectiveSide,
       nowMs: ffNowMs,
-      lookbackMs: snapshot.freefallLookbackSeconds * 1000,
-      thresholdPct: snapshot.freefallThresholdPct,
+      eligibilityStartMs:
+        Date.parse(snapshot.closeTime) - snapshot.finalWindowSeconds * 1_000,
+      consecutiveSeconds: snapshot.freefallConsecutiveSeconds,
+      targetPrice: targetPriceNum,
+      rapidMoveEnabled: snapshot.rapidMoveGuardEnabled,
+      rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
+      rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
     });
     if (!freefallDecision.allowed) {
       const ffFinal = freefallDecision.guardResult;
@@ -2057,6 +2060,11 @@ async function _executeScalpAttempt(
           evaluable: ffFinal?.evaluable ?? false,
           reason: freefallDecision.reason,
           adverseMovePct: ffFinal?.adverseMovePct ?? null,
+          consecutiveWrongWayMoves: ffFinal?.consecutiveWrongWayMoves ?? null,
+          consecutiveWrongWaySeconds: ffFinal?.consecutiveWrongWaySeconds ?? null,
+          requiredConsecutiveMoves: ffFinal?.requiredConsecutiveMoves ?? null,
+          rapidMoveBlocked: ffFinal?.rapidMoveBlocked ?? false,
+          rapidMovePct: ffFinal?.rapidMovePct ?? null,
           samplesUsed: ffFinal?.samplesUsed ?? null,
         },
         "[kalshi-scalper] freefall guard skip (final boundary)",
@@ -2065,7 +2073,16 @@ async function _executeScalpAttempt(
       await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", freefallReason, true, {
         ..._timingEvidence(),
         adverseMovePct: ffFinal?.adverseMovePct ?? null,
-        freefallThresholdPct: snapshot.freefallThresholdPct,
+        freefallConsecutiveSeconds: snapshot.freefallConsecutiveSeconds,
+        consecutiveWrongWayMoves: ffFinal?.consecutiveWrongWayMoves ?? null,
+        consecutiveWrongWaySeconds: ffFinal?.consecutiveWrongWaySeconds ?? null,
+        directionalMovePct: ffFinal?.directionalMovePct ?? null,
+        rapidMoveBlocked: ffFinal?.rapidMoveBlocked ?? false,
+        rapidMovePct: ffFinal?.rapidMovePct ?? null,
+        rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
+        rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
+        targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
+        underlyingPrice: ffFinal?.latestPrice ?? null,
         samplesUsed: ffFinal?.samplesUsed ?? null,
         sampleCoverageMs: freefallDecision.sampleCoverageMs,
         protectedSide: effectiveSide,
@@ -2731,6 +2748,13 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
       const secsUntilEligible = secondsUntilEligible(closeTime, nowForStatus, params.finalWindowSeconds);
 
       let freefallBlocked = false;
+      let freefallSamplesUsed = 0;
+      let freefallRequiredSamples = Math.max(
+        _config.freefallGuardEnabled ? _config.freefallConsecutiveSeconds : 0,
+        _config.rapidMoveGuardEnabled ? _config.rapidMoveLookbackSeconds : 0,
+      ) + 1;
+      let freefallMovementPct: number | null = null;
+      let rapidMoveBlocked = false;
       let targetProximityBlocked = false;
       let targetDistancePct: number | null = null;
       let reason: string | null = null;
@@ -2741,16 +2765,36 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
       // lastAsk = the SELECTED winning-contract ask (or null when out of band).
       const lastAsk = match ? match.winningAsk : null;
 
-      if (match && _config.freefallGuardEnabled && inWindow) {
+      if (
+        match
+        && (_config.freefallGuardEnabled || _config.rapidMoveGuardEnabled)
+        && inWindow
+      ) {
         const samples = _priceSamples.get(sym) ?? [];
-        const ff = checkFreefallGuard(
-          samples, match.side, Date.now(),
-          _config.freefallLookbackSeconds * 1000, _config.freefallThresholdPct,
-        );
+        const ff = checkFreefallGuard({
+          samples,
+          side: match.side,
+          nowMs: nowForStatus,
+          directionEnabled: _config.freefallGuardEnabled,
+          eligibilityStartMs:
+            Date.parse(closeTime!) - params.finalWindowSeconds * 1_000,
+          consecutiveSeconds: _config.freefallConsecutiveSeconds,
+          targetPrice: Number(cached?.value),
+          rapidMoveEnabled: _config.rapidMoveGuardEnabled,
+          rapidMoveLookbackSeconds: _config.rapidMoveLookbackSeconds,
+          rapidMoveThresholdPct: _config.rapidMoveThresholdPct,
+        });
         // Unavailable (not evaluable) is a fail-closed skip, NOT a clear signal:
         // surface it as blocked with its unavailability reason so the UI does not
         // imply the guard is passing when it actually cannot evaluate.
-        freefallBlocked = ff.blocked || !ff.evaluable;
+        freefallBlocked =
+          !ff.evaluable
+          || ff.directionalBlocked
+          || ff.wrongTargetSide;
+        freefallSamplesUsed = ff.samplesUsed;
+        freefallRequiredSamples = ff.requiredSamples;
+        freefallMovementPct = ff.evaluable ? ff.directionalMovePct : null;
+        rapidMoveBlocked = ff.rapidMoveBlocked;
         reason = ff.reason;
       }
 
@@ -2772,7 +2816,7 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         hasQuote: yesAsk != null || noAsk != null,
         hasMatch: match != null,
         inWindow,
-        guardBlocked: freefallBlocked || targetProximityBlocked,
+        guardBlocked: freefallBlocked || rapidMoveBlocked || targetProximityBlocked,
       });
       if (state === "paused") reason = reason ?? "paused";
       else if (state === "no_quote") reason = reason ?? "no_quote";
@@ -2791,6 +2835,11 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         secondsRemaining: secondsRemaining != null ? Math.round(secondsRemaining) : null,
         secondsUntilEligible: secsUntilEligible != null ? Math.round(secsUntilEligible) : null,
         freefallBlocked,
+        freefallSamplesUsed,
+        freefallRequiredSamples,
+        freefallObservationSeconds: _config.freefallConsecutiveSeconds,
+        freefallMovementPct,
+        rapidMoveBlocked,
         targetProximityBlocked,
         targetDistancePct,
         reason,
@@ -3217,13 +3266,12 @@ Promise<ControlledFreefallServiceExerciseResult> {
   const skippedAttempts: ControlledFreefallServiceExerciseResult["skippedAttempts"] = [];
   const steps: ControlledFreefallServiceExerciseResult["steps"] = [];
 
-  const coveredSamples = (prices: number[], newestAgeMs = 250): FreefallSample[] => {
-    const oldestAt = nowMs - 28_000;
+  const coveredSamples = (prices: number[], newestAgeMs = 0): FreefallSample[] => {
     const newestAt = nowMs - newestAgeMs;
-    const step = prices.length > 1 ? (newestAt - oldestAt) / (prices.length - 1) : 0;
+    const oldestAt = newestAt - (prices.length - 1) * 1_000;
     return prices.map((price, index) => ({
       price,
-      at: Math.round(oldestAt + step * index),
+      at: oldestAt + index * 1_000,
     }));
   };
 
@@ -3236,8 +3284,12 @@ Promise<ControlledFreefallServiceExerciseResult> {
     finalWindowSeconds: 60,
     budgetDollars: 2,
     freefallGuardEnabled: true,
+    freefallConsecutiveSeconds: 4,
     freefallLookbackSeconds: 30,
     freefallThresholdPct: 0.5,
+    rapidMoveGuardEnabled: false,
+    rapidMoveLookbackSeconds: 4,
+    rapidMoveThresholdPct: 0.5,
     targetProximityGuardEnabled: false,
     circuitBreakerEnabled: true,
     circuitBreaker: false,
@@ -3360,22 +3412,22 @@ Promise<ControlledFreefallServiceExerciseResult> {
   _nextAttemptAt.delete(attemptKey);
   _terminalAttemptKeys.delete(attemptKey);
   try {
-    await runStep("adverse", coveredSamples([100, 99.8, 99.2, 98.7]), true);
+    await runStep("adverse", coveredSamples([105, 104, 103, 102, 101]), true);
     nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
-    await runStep("adverse_cooldown", coveredSamples([100, 100.1, 100.2]), true);
+    await runStep("adverse_cooldown", coveredSamples([101, 102, 103, 104, 105]), true);
 
     nowMs += 1;
-    await runStep("fetch_failed", coveredSamples([100, 100.1, 100.2]), false);
+    await runStep("fetch_failed", coveredSamples([101, 102, 103, 104, 105]), false);
     nowMs += 250;
-    await runStep("fetch_cooldown", coveredSamples([100, 100.1, 100.2]), true);
+    await runStep("fetch_cooldown", coveredSamples([101, 102, 103, 104, 105]), true);
 
     nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 250;
-    await runStep("stale", coveredSamples([100, 100.1, 100.2], 6_000), true);
+    await runStep("stale", coveredSamples([101, 102, 103, 104, 105], 6_000), true);
     nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
-    await runStep("stale_cooldown", coveredSamples([100, 100.1, 100.2]), true);
+    await runStep("stale_cooldown", coveredSamples([101, 102, 103, 104, 105]), true);
 
     nowMs += 1;
-    await runStep("recovered", coveredSamples([100, 100.1, 100.2]), true);
+    await runStep("recovered", coveredSamples([101, 102, 103, 104, 105]), true);
 
     return { steps, skippedAttempts, intentWrites, brokerSubmissions };
   } finally {

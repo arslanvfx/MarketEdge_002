@@ -22,7 +22,7 @@ describe("real Scalper service Freefall boundary", () => {
       },
       {
         state: "skipped",
-        reason: "freefall_adverse_falling",
+        reason: "freefall_consecutive_falling",
         intentWrites: 0,
         brokerSubmissions: 0,
         retryAfterMs: SCALP_GUARD_RETRY_COOLDOWN_MS,
@@ -97,7 +97,7 @@ describe("real Scalper service Freefall boundary", () => {
     assert.deepEqual(
       result.skippedAttempts.map((attempt) => attempt.reason),
       [
-        "freefall_adverse_falling",
+        "freefall_consecutive_falling",
         "freefall_unavailable_fetch_failed",
         "freefall_unavailable_stale",
       ],
@@ -105,7 +105,7 @@ describe("real Scalper service Freefall boundary", () => {
     for (const attempt of result.skippedAttempts) {
       assert.ok(attempt.skippedAt, `${attempt.reason} must persist a dashboard timestamp`);
       assert.equal(attempt.evidence?.protectedSide, "yes");
-      assert.equal(attempt.evidence?.freefallThresholdPct, 0.5);
+      assert.equal(attempt.evidence?.freefallConsecutiveSeconds, 4);
     }
   });
 });

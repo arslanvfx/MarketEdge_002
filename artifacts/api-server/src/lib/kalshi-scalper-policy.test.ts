@@ -642,6 +642,12 @@ describe("evaluateScalpReservationRetry", () => {
       elapsedMs: 0,
       submittedOrders: 0,
     });
+    const rapidMove = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "rapid_move_too_fast_rising",
+      elapsedMs: 0,
+      submittedOrders: 0,
+    });
     const balance = evaluateScalpReservationRetry({
       status: "skipped",
       reason: "balance_check_failed_final",
@@ -649,6 +655,8 @@ describe("evaluateScalpReservationRetry", () => {
       submittedOrders: 0,
     });
     assert.equal(freefall.retryAfterMs, SCALP_GUARD_RETRY_COOLDOWN_MS);
+    assert.equal(rapidMove.retryAfterMs, SCALP_GUARD_RETRY_COOLDOWN_MS);
+    assert.equal(rapidMove.terminal, false);
     assert.equal(targetProximity.retryAfterMs, SCALP_GUARD_RETRY_COOLDOWN_MS);
     assert.equal(targetProximity.terminal, false);
     assert.equal(balance.retryAfterMs, SCALP_BALANCE_RETRY_COOLDOWN_MS);
@@ -701,138 +709,223 @@ describe("evaluateScalpReservationRetry", () => {
 
 describe("checkFreefallGuard", () => {
   const nowMs = 1_700_000_000_000;
-  const lookbackMs = 30_000;
+  const eligibilityStartMs = nowMs - 4_000;
 
-  // Build samples covering ~full lookback with a fresh newest (age ~1s).
-  // oldest at now-28s, newest at now-1s → span 27s (> required 22.5s), fresh.
-  function makeSamples(prices: number[]): FreefallSample[] {
-    const n = prices.length;
-    const startMs = nowMs - 28_000;
-    const endMs = nowMs - 1_000;
-    const stepMs = n > 1 ? (endMs - startMs) / (n - 1) : 0;
-    return prices.map((price, i) => ({ price, at: Math.round(startMs + i * stepMs) }));
+  function makeSamples(prices: number[], startMs = eligibilityStartMs): FreefallSample[] {
+    return prices.map((price, index) => ({ price, at: startMs + index * 1_000 }));
   }
 
-  it("blocks YES when price falling sharply (evaluable)", () => {
-    const samples = makeSamples([100, 99, 97, 95, 93]);
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 5);
+  function evaluate(
+    samples: FreefallSample[],
+    side: "yes" | "no",
+    overrides: Partial<Parameters<typeof checkFreefallGuard>[0]> = {},
+  ) {
+    return checkFreefallGuard({
+      samples,
+      side,
+      nowMs,
+      directionEnabled: true,
+      eligibilityStartMs,
+      consecutiveSeconds: 4,
+      targetPrice: side === "yes" ? 100 : 110,
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+      ...overrides,
+    });
+  }
+
+  it("blocks YES after four consecutive one-second falls while still above target", () => {
+    const result = evaluate(makeSamples([105, 104, 103, 102, 101]), "yes");
     assert.equal(result.evaluable, true);
-    assert.ok(result.blocked);
-    assert.ok(result.reason?.includes("freefall_adverse_falling"));
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_consecutive_falling");
+    assert.equal(result.consecutiveWrongWayMoves, 4);
+    assert.equal(result.consecutiveWrongWaySeconds, 4);
+    assert.equal(result.requiredSamples, 5);
   });
 
-  it("does NOT block YES on rising price (evaluable, clear reason=null)", () => {
-    const samples = makeSamples([90, 92, 95, 97]);
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 5);
+  it("allows YES when a flat or favorable tick interrupts the falling streak", () => {
+    const result = evaluate(makeSamples([105, 104, 103, 103, 102]), "yes");
     assert.equal(result.evaluable, true);
-    assert.ok(!result.blocked);
+    assert.equal(result.blocked, false);
+    assert.equal(result.reason, null);
+    assert.equal(result.consecutiveWrongWayMoves, 1);
+  });
+
+  it("blocks NO after four consecutive one-second rises while still below target", () => {
+    const result = evaluate(makeSamples([105, 106, 107, 108, 109]), "no");
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_consecutive_rising");
+    assert.equal(result.consecutiveWrongWayMoves, 4);
+  });
+
+  it("allows NO during slow or fast favorable falling movement when rapid guard is off", () => {
+    const result = evaluate(makeSamples([109, 108, 106, 103, 100]), "no");
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
     assert.equal(result.reason, null);
   });
 
-  it("blocks NO when price rising sharply (evaluable)", () => {
-    const samples = makeSamples([90, 92, 95, 97, 100]);
-    const result = checkFreefallGuard(samples, "no", nowMs, lookbackMs, 5);
-    assert.equal(result.evaluable, true);
-    assert.ok(result.blocked);
-    assert.ok(result.reason?.includes("freefall_adverse_rising"));
-  });
-
-  it("does NOT block NO on falling price (evaluable, clear reason=null)", () => {
-    const samples = makeSamples([100, 98, 96, 94]);
-    const result = checkFreefallGuard(samples, "no", nowMs, lookbackMs, 5);
-    assert.equal(result.evaluable, true);
-    assert.ok(!result.blocked);
-    assert.equal(result.reason, null);
-  });
-
-  it("blocks YES after a sharp peak-to-latest reversal even when the endpoint move is favorable", () => {
-    const samples = makeSamples([100, 103, 106, 104]);
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 1.5);
+  it("honors an operator-adjusted three-second consecutive duration", () => {
+    const samples = makeSamples([104, 103, 102, 101], nowMs - 3_000);
+    const result = evaluate(samples, "yes", {
+      eligibilityStartMs: nowMs - 3_000,
+      consecutiveSeconds: 3,
+    });
     assert.equal(result.evaluable, true);
     assert.equal(result.blocked, true);
-    assert.equal(result.reason, "freefall_adverse_reversal_falling");
-    assert.equal(result.endpointAdverseMovePct, 0);
-    assert.ok(result.reversalAdverseMovePct > 1.8);
+    assert.equal(result.requiredConsecutiveMoves, 3);
+    assert.equal(result.requiredSamples, 4);
   });
 
-  it("blocks NO after a sharp trough-to-latest reversal even when the endpoint move is favorable", () => {
-    const samples = makeSamples([100, 97, 94, 96]);
-    const result = checkFreefallGuard(samples, "no", nowMs, lookbackMs, 1.5);
-    assert.equal(result.evaluable, true);
-    assert.equal(result.blocked, true);
-    assert.equal(result.reason, "freefall_adverse_reversal_rising");
-    assert.equal(result.endpointAdverseMovePct, 0);
-    assert.ok(result.reversalAdverseMovePct > 2);
-  });
-
-  // ── Fail-closed unavailability ─────────────────────────────────────────────
-
-  it("startup / NO samples → unavailable (not evaluable, not blocked, not clear)", () => {
-    const result = checkFreefallGuard([], "yes", nowMs, lookbackMs, 5);
+  it("fails closed while a four-second sequence is still warming", () => {
+    const result = evaluate(makeSamples([104, 103, 102, 101], nowMs - 3_000), "yes");
     assert.equal(result.evaluable, false);
     assert.equal(result.blocked, false);
-    assert.equal(result.reason, "freefall_unavailable_no_samples");
+    assert.equal(result.reason, "freefall_unavailable_warming");
+    assert.equal(result.samplesUsed, 4);
   });
 
-  it("ONE sample → unavailable", () => {
-    const result = checkFreefallGuard([{ price: 100, at: nowMs - 1_000 }], "yes", nowMs, lookbackMs, 5);
+  it("ignores pre-eligibility samples instead of using warm-up history", () => {
+    const samples = [
+      ...makeSamples([110, 109, 108, 107, 106], nowMs - 8_000),
+      ...makeSamples([105, 104], nowMs - 1_000),
+    ];
+    const result = evaluate(samples, "yes");
+    assert.equal(result.evaluable, false);
+    assert.equal(result.reason, "freefall_unavailable_warming");
+    // A sample exactly on the eligibility boundary is valid; older warm-up
+    // history is excluded.
+    assert.equal(result.samplesUsed, 3);
+  });
+
+  it("startup with no samples is unavailable", () => {
+    const result = evaluate([], "yes");
     assert.equal(result.evaluable, false);
     assert.equal(result.reason, "freefall_unavailable_no_samples");
-    assert.equal(result.samplesUsed, 1);
   });
 
-  it("stale latest sample → unavailable (blind to now)", () => {
-    // Two samples but newest is 10s old (> 5s max age) though span covers lookback.
-    const samples: FreefallSample[] = [
-      { price: 100, at: nowMs - 30_000 },
-      { price: 90, at: nowMs - 10_000 },
-    ];
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 5);
+  it("stale latest sample is unavailable because every second must be current", () => {
+    const samples = makeSamples([105, 104, 103, 102, 101], nowMs - 8_000);
+    const result = evaluate(samples, "yes", { eligibilityStartMs: nowMs - 8_000 });
     assert.equal(result.evaluable, false);
     assert.equal(result.reason, "freefall_unavailable_stale");
   });
 
-  it("insufficient lookback coverage → unavailable (new symbol, only ~2s of data)", () => {
-    // Fresh, ≥2 samples, but span only 2s vs 30s lookback → cannot trade yet.
+  it("rejects a missing one-second tick instead of treating sparse data as real time", () => {
     const samples: FreefallSample[] = [
-      { price: 100, at: nowMs - 2_000 },
-      { price: 99.9, at: nowMs - 500 },
+      { price: 105, at: nowMs - 5_000 },
+      { price: 104, at: nowMs - 4_000 },
+      { price: 103, at: nowMs - 3_000 },
+      { price: 102, at: nowMs - 2_000 },
+      { price: 101, at: nowMs },
     ];
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 5);
+    const result = evaluate(samples, "yes", { eligibilityStartMs: nowMs - 5_000 });
     assert.equal(result.evaluable, false);
-    assert.equal(result.reason, "freefall_unavailable_coverage");
+    assert.equal(result.reason, "freefall_unavailable_sample_gap");
   });
 
-  it("invalid samples (NaN/Infinity/non-positive) are dropped → unavailable if <2 remain", () => {
+  it("invalid samples are dropped and cannot complete the observation", () => {
     const samples: FreefallSample[] = [
-      { price: NaN, at: nowMs - 28_000 },
-      { price: Infinity, at: nowMs - 20_000 },
-      { price: -5, at: nowMs - 10_000 },
-      { price: 100, at: nowMs - 1_000 }, // only 1 valid
-    ];
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 5);
-    assert.equal(result.evaluable, false);
-    assert.equal(result.reason, "freefall_unavailable_no_samples");
-    assert.equal(result.samplesUsed, 1);
-  });
-
-  it("out-of-order samples are unavailable rather than producing a misleading clear", () => {
-    const samples: FreefallSample[] = [
-      { price: 100, at: nowMs - 28_000 },
+      { price: NaN, at: nowMs - 4_000 },
+      { price: Infinity, at: nowMs - 3_000 },
+      { price: -5, at: nowMs - 2_000 },
       { price: 101, at: nowMs - 1_000 },
-      { price: 99, at: nowMs - 2_000 },
+      { price: 100.5, at: nowMs },
     ];
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 0.5);
+    const result = evaluate(samples, "yes");
+    assert.equal(result.evaluable, false);
+    assert.equal(result.reason, "freefall_unavailable_warming");
+    assert.equal(result.samplesUsed, 2);
+  });
+
+  it("out-of-order samples are unavailable rather than misleadingly clear", () => {
+    const samples: FreefallSample[] = [
+      { price: 105, at: nowMs - 4_000 },
+      { price: 104, at: nowMs - 3_000 },
+      { price: 103, at: nowMs - 1_000 },
+      { price: 102, at: nowMs - 2_000 },
+      { price: 101, at: nowMs },
+    ];
+    const result = evaluate(samples, "yes");
     assert.equal(result.evaluable, false);
     assert.equal(result.reason, "freefall_unavailable_out_of_order");
   });
 
-  it("full coverage, fresh, clear move below threshold → evaluable & not blocked", () => {
-    const samples = makeSamples([100, 100.1, 100.05, 100.2]); // tiny move
-    const result = checkFreefallGuard(samples, "yes", nowMs, lookbackMs, 5);
+  it("blocks when the latest underlying is on the wrong side of the target", () => {
+    const result = evaluate(makeSamples([104, 103, 102, 101, 99]), "yes");
     assert.equal(result.evaluable, true);
-    assert.equal(result.blocked, false);
-    assert.equal(result.reason, null);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_wrong_target_side_yes");
+  });
+
+  it("does not count sub-second candidate fetches as consecutive seconds", () => {
+    const samples = [
+      { price: 105, at: nowMs - 1_000 },
+      { price: 104.9, at: nowMs - 750 },
+      { price: 104.8, at: nowMs - 500 },
+      { price: 104.7, at: nowMs - 250 },
+      { price: 104.6, at: nowMs },
+    ];
+    const result = evaluate(samples, "yes", { eligibilityStartMs: nowMs - 1_000 });
+    assert.equal(result.evaluable, false);
+    assert.equal(result.reason, "freefall_unavailable_warming");
+  });
+
+  it("does not become evaluable before four real elapsed seconds", () => {
+    const samples = [105, 104, 103, 102, 101].map((price, index) => ({
+      price,
+      at: nowMs - 3_200 + index * 800,
+    }));
+    const result = evaluate(samples, "yes");
+    assert.equal(result.evaluable, false);
+    assert.equal(result.reason, "freefall_unavailable_warming");
+  });
+
+  it("accepts sampler jitter only after the full elapsed duration is covered", () => {
+    const samples = [106, 105, 104, 103, 102, 101].map((price, index) => ({
+      price,
+      at: nowMs - 4_000 + index * 800,
+    }));
+    const result = evaluate(samples, "yes");
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_consecutive_falling");
+    assert.equal(result.observedSpanMs, 4_000);
+    assert.equal(result.consecutiveWrongWaySeconds, 4);
+    assert.equal(result.samplesUsed, 6);
+  });
+
+  it("independently blocks a fast favorable move when rapid-move avoidance is enabled", () => {
+    const samples = makeSamples([109, 108, 106, 103, 100]);
+    const disabled = evaluate(samples, "no");
+    const enabled = evaluate(samples, "no", {
+      rapidMoveEnabled: true,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 1,
+    });
+    assert.equal(disabled.blocked, false);
+    assert.equal(enabled.evaluable, true);
+    assert.equal(enabled.blocked, true);
+    assert.equal(enabled.rapidMoveBlocked, true);
+    assert.equal(enabled.reason, "rapid_move_too_fast_falling");
+    assert.ok(enabled.rapidMovePct > 8);
+  });
+
+  it("keeps rapid-move avoidance active when the directional guard is disabled", () => {
+    const result = evaluate(makeSamples([109, 108, 106, 103, 100]), "no", {
+      directionEnabled: false,
+      targetPrice: Number.NaN,
+      rapidMoveEnabled: true,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 1,
+    });
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.rapidMoveBlocked, true);
+    assert.equal(result.reason, "rapid_move_too_fast_falling");
   });
 });
 
@@ -1463,8 +1556,12 @@ const baseCfg = (): RiskConfigLike => ({
   dailyCapDollars: 100,
   openCapDollars: 50,
   freefallGuardEnabled: true,
+  freefallConsecutiveSeconds: 4,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
+  rapidMoveGuardEnabled: false,
+  rapidMoveLookbackSeconds: 4,
+  rapidMoveThresholdPct: 0.5,
   targetProximityGuardEnabled: true,
   targetProximityThresholdPct: 0.05,
 });
@@ -1490,8 +1587,12 @@ describe("buildExecutionRiskSnapshot", () => {
     assert.equal(s.bandMax, 0.98);
     assert.equal(s.finalWindowSeconds, 120);
     assert.equal(s.freefallGuardEnabled, true);
+    assert.equal(s.freefallConsecutiveSeconds, 4);
     assert.equal(s.freefallLookbackSeconds, 30);
     assert.equal(s.freefallThresholdPct, 0.5);
+    assert.equal(s.rapidMoveGuardEnabled, false);
+    assert.equal(s.rapidMoveLookbackSeconds, 4);
+    assert.equal(s.rapidMoveThresholdPct, 0.5);
     assert.equal(s.targetProximityGuardEnabled, true);
     assert.equal(s.targetProximityThresholdPct, 0.05);
     assert.equal(s.ticker, "T-1");
@@ -1559,6 +1660,10 @@ describe("compareRiskSnapshot (fail-closed diff)", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallGuardEnabled: false }, baseParams(), baseIdentity());
     assert.ok(d.changedFields.includes("freefallGuardEnabled"));
   });
+  it("freefall consecutive duration change => rejected", () => {
+    const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallConsecutiveSeconds: 6 }, baseParams(), baseIdentity());
+    assert.ok(d.changedFields.includes("freefallConsecutiveSeconds"));
+  });
   it("freefall lookback change => rejected", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallLookbackSeconds: 45 }, baseParams(), baseIdentity());
     assert.ok(d.changedFields.includes("freefallLookbackSeconds"));
@@ -1566,6 +1671,14 @@ describe("compareRiskSnapshot (fail-closed diff)", () => {
   it("freefall threshold change => rejected", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallThresholdPct: 0.7 }, baseParams(), baseIdentity());
     assert.ok(d.changedFields.includes("freefallThresholdPct"));
+  });
+  it("rapid-move settings change => rejected", () => {
+    const enabled = compareRiskSnapshot(snap(), { ...baseCfg(), rapidMoveGuardEnabled: true }, baseParams(), baseIdentity());
+    const duration = compareRiskSnapshot(snap(), { ...baseCfg(), rapidMoveLookbackSeconds: 6 }, baseParams(), baseIdentity());
+    const threshold = compareRiskSnapshot(snap(), { ...baseCfg(), rapidMoveThresholdPct: 0.8 }, baseParams(), baseIdentity());
+    assert.ok(enabled.changedFields.includes("rapidMoveGuardEnabled"));
+    assert.ok(duration.changedFields.includes("rapidMoveLookbackSeconds"));
+    assert.ok(threshold.changedFields.includes("rapidMoveThresholdPct"));
   });
   it("target proximity toggle change => rejected", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), targetProximityGuardEnabled: false }, baseParams(), baseIdentity());
@@ -1746,6 +1859,14 @@ describe("parseScalpConfigPatch", () => {
     assert.ok(errsOf(r).some((e) => e.includes("freefallGuardEnabled")));
   });
 
+  it("accepts a real rapid-move toggle and rejects coercion", () => {
+    assert.deepEqual(
+      parseScalpConfigPatch({ rapidMoveGuardEnabled: true }),
+      { ok: true, value: { rapidMoveGuardEnabled: true } },
+    );
+    assert.equal(parseScalpConfigPatch({ rapidMoveGuardEnabled: "true" }).ok, false);
+  });
+
   it("accepts a real target proximity toggle and rejects coercion", () => {
     assert.deepEqual(
       parseScalpConfigPatch({ targetProximityGuardEnabled: false }),
@@ -1786,7 +1907,14 @@ describe("parseScalpConfigPatch", () => {
     assert.equal(parseScalpConfigPatch({ budgetDollars: 0 }).ok, false);
     assert.equal(parseScalpConfigPatch({ budgetDollars: 1001 }).ok, false);
     assert.equal(parseScalpConfigPatch({ freefallLookbackSeconds: 601 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ freefallConsecutiveSeconds: 0 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ freefallConsecutiveSeconds: 4.5 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ freefallConsecutiveSeconds: 16 }).ok, false);
     assert.equal(parseScalpConfigPatch({ freefallThresholdPct: 0 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ rapidMoveLookbackSeconds: 0 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ rapidMoveLookbackSeconds: 4.5 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ rapidMoveThresholdPct: 0 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ rapidMoveThresholdPct: 10.01 }).ok, false);
     assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 0 }).ok, false);
     assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 10.01 }).ok, false);
   });
@@ -1794,13 +1922,17 @@ describe("parseScalpConfigPatch", () => {
   it("accepts valid in-range numbers and returns them typed", () => {
     const r = parseScalpConfigPatch({
       globalBandMin: 0.9, globalBandMax: 0.97, finalWindowSeconds: 100,
-      budgetDollars: 3, freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
+      budgetDollars: 3, freefallConsecutiveSeconds: 6,
+      freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
+      rapidMoveLookbackSeconds: 5, rapidMoveThresholdPct: 0.8,
       targetProximityThresholdPct: 0.05,
     });
     assert.equal(r.ok, true);
     assert.deepEqual(r.ok && r.value, {
       globalBandMin: 0.9, globalBandMax: 0.97, finalWindowSeconds: 100,
-      budgetDollars: 3, freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
+      budgetDollars: 3, freefallConsecutiveSeconds: 6,
+      freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
+      rapidMoveLookbackSeconds: 5, rapidMoveThresholdPct: 0.8,
       targetProximityThresholdPct: 0.05,
     });
   });
@@ -2168,7 +2300,10 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(preflight, /getScalpCommittedTotals\(/);
     assert.match(preflight, /fetchKalshiTarget\(/);
     assert.match(preflight, /getBalance\(\)/);
-    assert.match(preflight, /checkFreefallGuard\(/);
+    assert.ok(
+      !/checkFreefallGuard\(/.test(preflight),
+      "direction streak must start at eligibility, not use earlier preflight samples",
+    );
     assert.ok(!/claimReservationAndCap\(/.test(preflight), "preflight must not claim a reservation");
     assert.ok(!/insertScalpOrderIntent\(/.test(preflight), "preflight must not create an order intent");
     assert.ok(!/placeScalpOrderStrict\(/.test(preflight), "preflight must not submit an order");
@@ -2221,7 +2356,7 @@ describe("execution wiring (static source assertions)", () => {
     // It must use the pinned snapshot freefall config.
     assert.match(
       svc,
-      /lookbackMs: snapshot\.freefallLookbackSeconds \* 1000,[\s\S]*?thresholdPct: snapshot\.freefallThresholdPct/,
+      /eligibilityStartMs:[\s\S]*?snapshot\.finalWindowSeconds \* 1_000,[\s\S]*?consecutiveSeconds: snapshot\.freefallConsecutiveSeconds,[\s\S]*?rapidMoveEnabled: snapshot\.rapidMoveGuardEnabled/,
     );
   });
 
@@ -2234,7 +2369,10 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(finalProximity < place, "target proximity guard must precede submit");
     assert.match(svc, /identityResult\.target/);
     assert.match(svc, /snapshot\.targetProximityThresholdPct/);
-    assert.match(svc, /snapshot\.freefallGuardEnabled \|\| snapshot\.targetProximityGuardEnabled/);
+    assert.match(
+      svc,
+      /snapshot\.freefallGuardEnabled[\s\S]*?\|\| snapshot\.rapidMoveGuardEnabled[\s\S]*?\|\| snapshot\.targetProximityGuardEnabled/,
+    );
   });
 
   it("order sizing goes through sizeOrderWithinReservedBudget (reserved amount)", () => {
@@ -2439,7 +2577,10 @@ describe("execution wiring (static source assertions)", () => {
   });
 
   it("status builder treats unavailable freefall as blocked, not clear", () => {
-    assert.match(svc, /freefallBlocked = ff\.blocked \|\| !ff\.evaluable/);
+    assert.match(
+      svc,
+      /freefallBlocked =[\s\S]*?!ff\.evaluable[\s\S]*?\|\| ff\.directionalBlocked[\s\S]*?\|\| ff\.wrongTargetSide/,
+    );
   });
 
   // ── Route wiring: strict parse + pass parsed value (never raw body) ─────────

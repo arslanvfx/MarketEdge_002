@@ -52,6 +52,24 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /regardless of which side is in band/i);
   });
 
+  it("offers a configurable one-second directional streak guard", () => {
+    assert.match(panelSource, /Real-Time Direction Guard/);
+    assert.match(panelSource, /one fresh underlying price every second/i);
+    assert.match(panelSource, /switch-scalper-direction-guard/);
+    assert.match(panelSource, /input-scalper-consecutive-seconds/);
+    assert.match(panelSource, /freefallConsecutiveSeconds/);
+    assert.match(panelSource, /requires \{merged\.freefallConsecutiveSeconds \+ 1\} fresh prices/);
+  });
+
+  it("keeps fast-move avoidance separately toggleable and configurable", () => {
+    assert.match(panelSource, /Optional Fast-Move Avoidance/);
+    assert.match(panelSource, /without changing the directional protection/i);
+    assert.match(panelSource, /switch-scalper-rapid-move/);
+    assert.match(panelSource, /input-scalper-rapid-seconds/);
+    assert.match(panelSource, /input-scalper-rapid-threshold/);
+    assert.match(panelSource, /rapidMoveGuardEnabled/);
+  });
+
   it("does not label a guard-blocked market as an active candidate", () => {
     assert.match(panelSource, /statusInfo\?\.state === "guarded"/);
     assert.match(panelSource, /blocked · \$\{readableReason\(statusInfo\.reason\)\}/);

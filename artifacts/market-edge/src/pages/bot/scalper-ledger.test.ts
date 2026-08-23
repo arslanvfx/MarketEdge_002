@@ -164,7 +164,7 @@ describe("describeScalperAttempt", () => {
     );
   });
 
-  it("renders measured target-distance and Freefall evidence", () => {
+  it("renders measured target-distance and real-time direction evidence", () => {
     const lines = describeScalperEvidence(attempt({
       reason: "target_proximity_too_close",
       skipEvidence: {
@@ -172,18 +172,20 @@ describe("describeScalperAttempt", () => {
         minimumPct: 0.02,
         targetPrice: 117_500,
         underlyingPrice: 117_486,
-        adverseMovePct: 0.54,
-        freefallThresholdPct: 0.5,
-        samplesUsed: 24,
-        sampleCoverageMs: 28_100,
+        directionalMovePct: -0.54,
+        freefallConsecutiveSeconds: 4,
+        consecutiveWrongWayMoves: 4,
+        consecutiveWrongWaySeconds: 4,
+        samplesUsed: 5,
+        sampleCoverageMs: 4_000,
         protectedSide: "yes",
         secondsRemaining: 21.4,
         effectiveWindowSeconds: 45,
       },
     }));
     assert.match(lines.join("\n"), /Target distance 0\.012% \(0\.020% minimum\)/);
-    assert.match(lines.join("\n"), /Adverse move 0\.540% \(0\.500% threshold\)/);
-    assert.match(lines.join("\n"), /24 samples over 28\.1s · protected YES/);
+    assert.match(lines.join("\n"), /Real-time direction -0\.540% · 4\/4 wrong-way seconds/);
+    assert.match(lines.join("\n"), /5 samples over 4\.0s · protected YES/);
     assert.match(lines.join("\n"), /21\.4s remained · 45s effective entry window/);
   });
 

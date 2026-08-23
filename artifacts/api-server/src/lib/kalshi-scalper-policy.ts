@@ -328,8 +328,9 @@ export function evaluateScalpReservationRetry(input: {
     if (QUICK_RETRY_SKIP_REASONS.has(reason)) {
       cooldownMs = SCALP_AUTH_RETRY_COOLDOWN_MS;
     } else if (
-      reason.startsWith("freefall_") ||
-      reason.startsWith("target_proximity_")
+      reason.startsWith("freefall_")
+      || reason.startsWith("rapid_move_")
+      || reason.startsWith("target_proximity_")
     ) {
       cooldownMs = SCALP_GUARD_RETRY_COOLDOWN_MS;
     } else if (
@@ -418,6 +419,18 @@ export interface FreefallGuardResult {
   /** Adverse recent-extreme-to-newest move used to catch sharp reversals. */
   reversalAdverseMovePct: number;
   samplesUsed: number;
+  requiredSamples: number;
+  consecutiveWrongWayMoves: number;
+  consecutiveWrongWaySeconds: number;
+  requiredConsecutiveMoves: number;
+  observedSpanMs: number;
+  directionalMovePct: number;
+  latestPrice: number | null;
+  targetPrice: number | null;
+  directionalBlocked: boolean;
+  wrongTargetSide: boolean;
+  rapidMoveBlocked: boolean;
+  rapidMovePct: number;
 }
 
 export interface FreefallPreSubmitDecision {
@@ -430,40 +443,120 @@ export interface FreefallPreSubmitDecision {
   /** Oldest-to-newest coverage of valid in-window samples, for dashboard evidence. */
   sampleCoverageMs: number | null;
 }
-export const FREEFALL_MAX_SAMPLE_AGE_MS = 5_000;
-export const FREEFALL_MIN_COVERAGE_FRAC = 0.8;
-export const FREEFALL_COVERAGE_TOLERANCE_MS = 1_500;
+export const FREEFALL_MAX_SAMPLE_AGE_MS = 2_000;
+export const FREEFALL_MIN_SAMPLE_INTERVAL_MS = 700;
+export const FREEFALL_MAX_SAMPLE_INTERVAL_MS = 1_800;
+
+export interface FreefallGuardInput {
+  samples: FreefallSample[];
+  side: "yes" | "no";
+  nowMs: number;
+  directionEnabled: boolean;
+  /** Exact boundary at which this market became eligible for Scalper execution. */
+  eligibilityStartMs: number;
+  /** Number of consecutive one-second wrong-way moves required to block. */
+  consecutiveSeconds: number;
+  /** Active Kalshi target/strike for the reserved market. */
+  targetPrice: number;
+  /** Independent absolute-speed filter. */
+  rapidMoveEnabled: boolean;
+  rapidMoveLookbackSeconds: number;
+  rapidMoveThresholdPct: number;
+}
+
+type CadencedSamplesResult =
+  | { ok: true; samples: FreefallSample[] }
+  | { ok: false; reason: string; samplesUsed: number };
 
 /**
- * Freefall Guard — checks underlying price momentum.
+ * Select trustworthy real-time movement points walking backwards from the
+ * current authoritative price. The selected sequence must span the full
+ * configured elapsed duration; extra sub-second candidate fetches can never
+ * make the guard ready early.
+ */
+function selectCadencedSamples(
+  relevant: FreefallSample[],
+  requiredMoves: number,
+): CadencedSamplesResult {
+  const requiredSamples = requiredMoves + 1;
+  const selected: FreefallSample[] = [];
+  let nextNewerAt: number | null = null;
+
+  for (let index = relevant.length - 1; index >= 0; index -= 1) {
+    const sample = relevant[index];
+    if (nextNewerAt == null || nextNewerAt - sample.at >= FREEFALL_MIN_SAMPLE_INTERVAL_MS) {
+      selected.unshift(sample);
+      nextNewerAt = sample.at;
+      const observedSpanMs =
+        selected[selected.length - 1].at - selected[0].at;
+      if (
+        selected.length >= requiredSamples
+        && observedSpanMs >= requiredMoves * 1_000
+      ) {
+        break;
+      }
+    }
+  }
+
+  if (selected.length < requiredSamples) {
+    return {
+      ok: false,
+      reason: "freefall_unavailable_warming",
+      samplesUsed: selected.length,
+    };
+  }
+
+  for (let index = 1; index < selected.length; index += 1) {
+    const gapMs = selected[index].at - selected[index - 1].at;
+    if (gapMs > FREEFALL_MAX_SAMPLE_INTERVAL_MS) {
+      return {
+        ok: false,
+        reason: "freefall_unavailable_sample_gap",
+        samplesUsed: selected.length,
+      };
+    }
+  }
+
+  const observedSpanMs = selected[selected.length - 1].at - selected[0].at;
+  const requiredSpanMs = requiredMoves * 1_000;
+  if (observedSpanMs < requiredSpanMs) {
+    return {
+      ok: false,
+      reason: "freefall_unavailable_warming",
+      samplesUsed: selected.length,
+    };
+  }
+
+  return { ok: true, samples: selected };
+}
+
+/**
+ * Freefall Guard — checks real-time underlying direction once per second.
  * Scalper-owned samples only; never shares with regular bot.
  *
  * FAIL-CLOSED: returns evaluable=false (NOT a clear) whenever the data is not
  * reliable enough to trust:
- *   - fewer than 2 valid finite samples inside the lookback window
+ *   - fewer than N+1 valid finite samples after eligibility opens
  *   - the newest in-window sample is stale (older than FREEFALL_MAX_SAMPLE_AGE_MS)
- *   - the samples do not cover enough of the configured lookback window
- *     (guards against startup / newly-seen symbols trading on 1-2s of data)
+ *   - samples are not spaced at a trustworthy one-second cadence
+ *   - the live underlying is not on the contract side of the active target
  *
- * When evaluable, blocks:
- *   YES entries during sharply adverse FALLING movement (falling → YES contract
- *       is moving toward losing territory).
- *   NO  entries during sharply adverse RISING movement  (rising → NO contract
- *       is moving toward losing territory).
- *
- * @param samples       Price samples (oldest first)
- * @param side          Side we intend to buy
- * @param nowMs         Current time in ms
- * @param lookbackMs    Window to look back over
- * @param thresholdPct  % adverse move magnitude that triggers block
+ * When evaluable, blocks after the configured real elapsed duration of
+ * consecutive wrong-way movement: falling for YES, rising for NO. Flat or
+ * favorable movement resets the trailing wrong-way streak. The separate
+ * rapid-move filter may additionally block an unusually fast endpoint move in
+ * either direction.
  */
-export function checkFreefallGuard(
-  samples: FreefallSample[],
-  side: "yes" | "no",
-  nowMs: number,
-  lookbackMs: number,
-  thresholdPct: number,
-): FreefallGuardResult {
+export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResult {
+  const requiredMoves = Math.max(1, Math.floor(input.consecutiveSeconds));
+  const rapidRequiredMoves = Math.max(1, Math.floor(input.rapidMoveLookbackSeconds));
+  const longestRequiredMoves = Math.max(
+    input.directionEnabled ? requiredMoves : 0,
+    input.rapidMoveEnabled ? rapidRequiredMoves : 0,
+  );
+  const requiredSamples = longestRequiredMoves > 0
+    ? longestRequiredMoves + 1
+    : 0;
   const unavailable = (reason: string, samplesUsed: number): FreefallGuardResult => ({
     evaluable: false,
     blocked: false,
@@ -472,22 +565,74 @@ export function checkFreefallGuard(
     endpointAdverseMovePct: 0,
     reversalAdverseMovePct: 0,
     samplesUsed,
+    requiredSamples,
+    consecutiveWrongWayMoves: 0,
+    consecutiveWrongWaySeconds: 0,
+    requiredConsecutiveMoves: requiredMoves,
+    observedSpanMs: 0,
+    directionalMovePct: 0,
+    latestPrice: null,
+    targetPrice:
+      input.directionEnabled && Number.isFinite(input.targetPrice)
+        ? input.targetPrice
+        : null,
+    directionalBlocked: false,
+    wrongTargetSide: false,
+    rapidMoveBlocked: false,
+    rapidMovePct: 0,
   });
 
-  const cutoff = nowMs - lookbackMs;
-  // Only VALID (finite, positive price; sane timestamp within window) samples.
-  const relevant = samples.filter(
+  if (!Number.isFinite(input.nowMs) || !Number.isFinite(input.eligibilityStartMs)) {
+    return unavailable("freefall_unavailable_timing", 0);
+  }
+  if (
+    input.directionEnabled
+    && (!Number.isFinite(input.targetPrice) || input.targetPrice <= 0)
+  ) {
+    return unavailable("freefall_unavailable_target", 0);
+  }
+  if (
+    input.directionEnabled
+    && (
+    !Number.isFinite(input.consecutiveSeconds)
+    || input.consecutiveSeconds < 1
+    )
+  ) {
+    return unavailable("freefall_unavailable_config", 0);
+  }
+  if (
+    input.rapidMoveEnabled
+    && (
+      !Number.isFinite(input.rapidMoveLookbackSeconds)
+      || input.rapidMoveLookbackSeconds < 1
+      || !Number.isFinite(input.rapidMoveThresholdPct)
+      || input.rapidMoveThresholdPct <= 0
+    )
+  ) {
+    return unavailable("rapid_move_unavailable_config", 0);
+  }
+
+  const maxObservationSeconds = Math.max(
+    input.directionEnabled ? requiredMoves : 0,
+    input.rapidMoveEnabled ? Math.floor(input.rapidMoveLookbackSeconds) : 0,
+  );
+  const cutoff = Math.max(
+    input.eligibilityStartMs,
+    input.nowMs - (maxObservationSeconds + 3) * 1_000,
+  );
+  // Only VALID (finite, positive price; sane timestamp after eligibility) samples.
+  const relevant = input.samples.filter(
     (s) =>
       s != null &&
       Number.isFinite(s.price) &&
       s.price > 0 &&
       Number.isFinite(s.at) &&
       s.at >= cutoff &&
-      s.at <= nowMs,
+      s.at >= input.eligibilityStartMs &&
+      s.at <= input.nowMs,
   );
 
-  // (1) Need at least 2 valid samples to compute a delta at all.
-  if (relevant.length < 2) {
+  if (relevant.length === 0) {
     return unavailable("freefall_unavailable_no_samples", relevant.length);
   }
 
@@ -502,57 +647,128 @@ export function checkFreefallGuard(
 
   // (2) Newest sample must be fresh; a stale latest price means we are blind
   // to "now" and must not treat the window as clear.
-  const newestAge = nowMs - newest.at;
+  const newestAge = input.nowMs - newest.at;
   if (newestAge > FREEFALL_MAX_SAMPLE_AGE_MS) {
     return unavailable("freefall_unavailable_stale", relevant.length);
   }
 
-  // (3) Require substantial coverage of the configured lookback. Without this a
-  // symbol seen 2s ago could trade despite a 30s configured lookback.
-  const observedSpanMs = newest.at - oldest.at;
-  const requiredSpanMs = Math.max(
-    0,
-    lookbackMs * FREEFALL_MIN_COVERAGE_FRAC - FREEFALL_COVERAGE_TOLERANCE_MS,
-  );
-  if (observedSpanMs < requiredSpanMs) {
-    return unavailable("freefall_unavailable_coverage", relevant.length);
+  const directional = input.directionEnabled
+    ? selectCadencedSamples(relevant, requiredMoves)
+    : null;
+  if (directional && !directional.ok) {
+    return unavailable(directional.reason, directional.samplesUsed);
   }
 
-  const priceChangePct = ((newest.price - oldest.price) / oldest.price) * 100;
-
-  // Keep the original endpoint check, but also measure the latest price from
-  // the most adverse recent extreme. This catches rise→peak→fall for YES and
-  // fall→trough→rise for NO even when the full-window net move still looks safe.
+  const directionSamples = directional?.ok ? directional.samples : [newest];
+  const directionOldest = directionSamples[0];
+  const directionNewest = directionSamples[directionSamples.length - 1];
+  let observedSpanMs = directionNewest.at - directionOldest.at;
+  const priceChangePct = input.directionEnabled
+    ? ((directionNewest.price - directionOldest.price) / directionOldest.price) * 100
+    : 0;
   const endpointAdverseMovePct = Math.max(
     0,
-    side === "yes" ? -priceChangePct : priceChangePct,
+    input.side === "yes" ? -priceChangePct : priceChangePct,
   );
-  const recentExtreme = side === "yes"
-    ? Math.max(...relevant.map((sample) => sample.price))
-    : Math.min(...relevant.map((sample) => sample.price));
-  const reversalAdverseMovePct = Math.max(
-    0,
-    side === "yes"
-      ? ((recentExtreme - newest.price) / recentExtreme) * 100
-      : ((newest.price - recentExtreme) / recentExtreme) * 100,
+  let consecutiveWrongWayMoves = 0;
+  let consecutiveWrongWayStartedAt: number | null = null;
+  let consecutiveWrongWayDurationMs = 0;
+  for (let index = 1; index < directionSamples.length; index += 1) {
+    const previousSample = directionSamples[index - 1];
+    const currentSample = directionSamples[index];
+    const previous = previousSample.price;
+    const current = currentSample.price;
+    const movedWrongWay = input.side === "yes"
+      ? current < previous
+      : current > previous;
+    if (movedWrongWay) {
+      if (consecutiveWrongWayMoves === 0) {
+        consecutiveWrongWayStartedAt = previousSample.at;
+      }
+      consecutiveWrongWayMoves += 1;
+      consecutiveWrongWayDurationMs =
+        currentSample.at - (consecutiveWrongWayStartedAt ?? currentSample.at);
+    } else {
+      consecutiveWrongWayMoves = 0;
+      consecutiveWrongWayStartedAt = null;
+      consecutiveWrongWayDurationMs = 0;
+    }
+  }
+  const consecutiveWrongWaySeconds = consecutiveWrongWayDurationMs / 1_000;
+
+  const wrongTargetSide = input.directionEnabled && (
+    input.side === "yes"
+      ? directionNewest.price <= input.targetPrice
+      : directionNewest.price >= input.targetPrice
   );
-  const endpointBlocked = endpointAdverseMovePct >= thresholdPct;
-  const reversalBlocked = reversalAdverseMovePct >= thresholdPct;
-  const blocked = endpointBlocked || reversalBlocked;
-  const adverseMovePct = Math.max(endpointAdverseMovePct, reversalAdverseMovePct);
+  const directionalBlocked =
+    input.directionEnabled
+    && consecutiveWrongWayDurationMs >= requiredMoves * 1_000;
+
+  let rapidMoveBlocked = false;
+  let rapidMovePct = 0;
+  let rapidSamplesUsed = 0;
+  let rapidMoveReason: string | null = null;
+  if (input.rapidMoveEnabled) {
+    const rapid = selectCadencedSamples(relevant, rapidRequiredMoves);
+    if (!rapid.ok) {
+      return unavailable(
+        rapid.reason.replace(/^freefall_/, "rapid_move_"),
+        rapid.samplesUsed,
+      );
+    }
+    const rapidOldest = rapid.samples[0];
+    const rapidNewest = rapid.samples[rapid.samples.length - 1];
+    rapidSamplesUsed = rapid.samples.length;
+    observedSpanMs = Math.max(
+      observedSpanMs,
+      rapidNewest.at - rapidOldest.at,
+    );
+    const rapidSignedMovePct =
+      ((rapidNewest.price - rapidOldest.price) / rapidOldest.price) * 100;
+    rapidMovePct = Math.abs(rapidSignedMovePct);
+    rapidMoveBlocked = rapidMovePct >= input.rapidMoveThresholdPct;
+    if (rapidMoveBlocked) {
+      rapidMoveReason = rapidSignedMovePct >= 0
+        ? "rapid_move_too_fast_rising"
+        : "rapid_move_too_fast_falling";
+    }
+  }
+
+  const blocked = wrongTargetSide || directionalBlocked || rapidMoveBlocked;
+  const reason = wrongTargetSide
+    ? (input.side === "yes"
+      ? "freefall_wrong_target_side_yes"
+      : "freefall_wrong_target_side_no")
+    : directionalBlocked
+      ? (input.side === "yes"
+        ? "freefall_consecutive_falling"
+        : "freefall_consecutive_rising")
+      : rapidMoveReason;
 
   return {
     evaluable: true,
     blocked,
-    reason: endpointBlocked
-      ? (side === "yes" ? "freefall_adverse_falling" : "freefall_adverse_rising")
-      : reversalBlocked
-        ? (side === "yes" ? "freefall_adverse_reversal_falling" : "freefall_adverse_reversal_rising")
-      : null,
-    adverseMovePct,
+    reason,
+    adverseMovePct: endpointAdverseMovePct,
     endpointAdverseMovePct,
-    reversalAdverseMovePct,
-    samplesUsed: relevant.length,
+    reversalAdverseMovePct: 0,
+    samplesUsed: Math.max(
+      input.directionEnabled ? directionSamples.length : 0,
+      rapidSamplesUsed,
+    ),
+    requiredSamples,
+    consecutiveWrongWayMoves,
+    consecutiveWrongWaySeconds,
+    requiredConsecutiveMoves: requiredMoves,
+    observedSpanMs,
+    directionalMovePct: priceChangePct,
+    latestPrice: directionNewest.price,
+    targetPrice: input.directionEnabled ? input.targetPrice : null,
+    directionalBlocked,
+    wrongTargetSide,
+    rapidMoveBlocked,
+    rapidMovePct,
   };
 }
 
@@ -565,16 +781,20 @@ export function checkFreefallGuard(
  * closed. Callers must return before creating an order intent when allowed=false.
  */
 export function evaluateFreefallPreSubmitGuard(input: {
-  enabled: boolean;
+  directionEnabled: boolean;
   hasProduct: boolean;
   freshSampleSucceeded: boolean;
   samples: FreefallSample[];
   side: "yes" | "no";
   nowMs: number;
-  lookbackMs: number;
-  thresholdPct: number;
+  eligibilityStartMs: number;
+  consecutiveSeconds: number;
+  targetPrice: number;
+  rapidMoveEnabled: boolean;
+  rapidMoveLookbackSeconds: number;
+  rapidMoveThresholdPct: number;
 }): FreefallPreSubmitDecision {
-  if (!input.enabled) {
+  if (!input.directionEnabled && !input.rapidMoveEnabled) {
     return {
       allowed: true,
       reason: null,
@@ -603,28 +823,18 @@ export function evaluateFreefallPreSubmitGuard(input: {
     };
   }
 
-  const result = checkFreefallGuard(
-    input.samples,
-    input.side,
-    input.nowMs,
-    input.lookbackMs,
-    input.thresholdPct,
-  );
-  const cutoffMs = input.nowMs - input.lookbackMs;
-  const relevant = input.samples.filter(
-    (sample) =>
-      sample != null
-      && Number.isFinite(sample.price)
-      && sample.price > 0
-      && Number.isFinite(sample.at)
-      && sample.at >= cutoffMs
-      && sample.at <= input.nowMs,
-  );
-  const oldestAt = relevant[0]?.at;
-  const newestAt = relevant[relevant.length - 1]?.at;
-  const sampleCoverageMs = oldestAt != null && newestAt != null
-    ? newestAt - oldestAt
-    : null;
+  const result = checkFreefallGuard({
+    samples: input.samples,
+    side: input.side,
+    nowMs: input.nowMs,
+    directionEnabled: input.directionEnabled,
+    eligibilityStartMs: input.eligibilityStartMs,
+    consecutiveSeconds: input.consecutiveSeconds,
+    targetPrice: input.targetPrice,
+    rapidMoveEnabled: input.rapidMoveEnabled,
+    rapidMoveLookbackSeconds: input.rapidMoveLookbackSeconds,
+    rapidMoveThresholdPct: input.rapidMoveThresholdPct,
+  });
 
   return {
     allowed: result.evaluable && !result.blocked,
@@ -632,7 +842,7 @@ export function evaluateFreefallPreSubmitGuard(input: {
       ? null
       : result.reason ?? "freefall_blocked_final",
     guardResult: result,
-    sampleCoverageMs,
+    sampleCoverageMs: result.observedSpanMs || null,
   };
 }
 export interface TargetProximityGuardResult {
@@ -816,8 +1026,12 @@ export interface ExecutionRiskSnapshot {
   openCapDollars: number;
   // Freefall guard config
   freefallGuardEnabled: boolean;
+  freefallConsecutiveSeconds: number;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
+  rapidMoveGuardEnabled: boolean;
+  rapidMoveLookbackSeconds: number;
+  rapidMoveThresholdPct: number;
   // Target proximity guard config
   targetProximityGuardEnabled: boolean;
   targetProximityThresholdPct: number;
@@ -832,8 +1046,12 @@ export interface RiskConfigLike {
   dailyCapDollars: number | null;
   openCapDollars: number;
   freefallGuardEnabled: boolean;
+  freefallConsecutiveSeconds?: number;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
+  rapidMoveGuardEnabled?: boolean;
+  rapidMoveLookbackSeconds?: number;
+  rapidMoveThresholdPct?: number;
   targetProximityGuardEnabled: boolean;
   targetProximityThresholdPct: number;
 }
@@ -871,8 +1089,12 @@ export function buildExecutionRiskSnapshot(
     dailyCapDollars: config.dailyCapDollars,
     openCapDollars: config.openCapDollars,
     freefallGuardEnabled: config.freefallGuardEnabled,
+    freefallConsecutiveSeconds: config.freefallConsecutiveSeconds ?? 4,
     freefallLookbackSeconds: config.freefallLookbackSeconds,
     freefallThresholdPct: config.freefallThresholdPct,
+    rapidMoveGuardEnabled: config.rapidMoveGuardEnabled ?? false,
+    rapidMoveLookbackSeconds: config.rapidMoveLookbackSeconds ?? 4,
+    rapidMoveThresholdPct: config.rapidMoveThresholdPct ?? 0.5,
     targetProximityGuardEnabled: config.targetProximityGuardEnabled,
     targetProximityThresholdPct: config.targetProximityThresholdPct,
     enabled: config.enabled,
@@ -935,8 +1157,12 @@ export function compareRiskSnapshot(
 
   // Freefall config
   if (currentConfig.freefallGuardEnabled !== snapshot.freefallGuardEnabled) changed.push("freefallGuardEnabled");
+  if (!eqNum(currentConfig.freefallConsecutiveSeconds ?? 4, snapshot.freefallConsecutiveSeconds)) changed.push("freefallConsecutiveSeconds");
   if (!eqNum(currentConfig.freefallLookbackSeconds, snapshot.freefallLookbackSeconds)) changed.push("freefallLookbackSeconds");
   if (!eqNum(currentConfig.freefallThresholdPct, snapshot.freefallThresholdPct)) changed.push("freefallThresholdPct");
+  if ((currentConfig.rapidMoveGuardEnabled ?? false) !== snapshot.rapidMoveGuardEnabled) changed.push("rapidMoveGuardEnabled");
+  if (!eqNum(currentConfig.rapidMoveLookbackSeconds ?? 4, snapshot.rapidMoveLookbackSeconds)) changed.push("rapidMoveLookbackSeconds");
+  if (!eqNum(currentConfig.rapidMoveThresholdPct ?? 0.5, snapshot.rapidMoveThresholdPct)) changed.push("rapidMoveThresholdPct");
   if (currentConfig.targetProximityGuardEnabled !== snapshot.targetProximityGuardEnabled) changed.push("targetProximityGuardEnabled");
   if (!eqNum(currentConfig.targetProximityThresholdPct, snapshot.targetProximityThresholdPct)) changed.push("targetProximityThresholdPct");
 
@@ -1427,9 +1653,21 @@ export function validateScalpConfigPartial(
     const v = Number(c["freefallLookbackSeconds"]);
     if (!Number.isFinite(v) || v < 1 || v > 600) errors.push("freefallLookbackSeconds must be 1-600");
   }
+  if (c["freefallConsecutiveSeconds"] != null) {
+    const v = Number(c["freefallConsecutiveSeconds"]);
+    if (!Number.isInteger(v) || v < 1 || v > 15) errors.push("freefallConsecutiveSeconds must be an integer 1-15");
+  }
   if (c["freefallThresholdPct"] != null) {
     const v = Number(c["freefallThresholdPct"]);
     if (!Number.isFinite(v) || v <= 0) errors.push("freefallThresholdPct must be > 0");
+  }
+  if (c["rapidMoveLookbackSeconds"] != null) {
+    const v = Number(c["rapidMoveLookbackSeconds"]);
+    if (!Number.isInteger(v) || v < 1 || v > 15) errors.push("rapidMoveLookbackSeconds must be an integer 1-15");
+  }
+  if (c["rapidMoveThresholdPct"] != null) {
+    const v = Number(c["rapidMoveThresholdPct"]);
+    if (!Number.isFinite(v) || v <= 0 || v > 10) errors.push("rapidMoveThresholdPct must be > 0 and ≤ 10");
   }
   if (c["targetProximityThresholdPct"] != null) {
     const v = Number(c["targetProximityThresholdPct"]);
@@ -1614,8 +1852,12 @@ export interface ScalpConfigPatch {
   dailyCapDollars?: number | null;
   openCapDollars?: number;
   freefallGuardEnabled?: boolean;
+  freefallConsecutiveSeconds?: number;
   freefallLookbackSeconds?: number;
   freefallThresholdPct?: number;
+  rapidMoveGuardEnabled?: boolean;
+  rapidMoveLookbackSeconds?: number;
+  rapidMoveThresholdPct?: number;
   targetProximityGuardEnabled?: boolean;
   targetProximityThresholdPct?: number;
   circuitBreakerEnabled?: boolean;
@@ -1639,8 +1881,12 @@ const ALLOWED_TOP_LEVEL_FIELDS = new Set<string>([
   "dailyCapDollars",
   "openCapDollars",
   "freefallGuardEnabled",
+  "freefallConsecutiveSeconds",
   "freefallLookbackSeconds",
   "freefallThresholdPct",
+  "rapidMoveGuardEnabled",
+  "rapidMoveLookbackSeconds",
+  "rapidMoveThresholdPct",
   "targetProximityGuardEnabled",
   "targetProximityThresholdPct",
   "circuitBreakerEnabled",
@@ -1705,6 +1951,10 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
     if (typeof body["freefallGuardEnabled"] !== "boolean") errors.push("freefallGuardEnabled must be a boolean");
     else out.freefallGuardEnabled = body["freefallGuardEnabled"];
   }
+  if (has("rapidMoveGuardEnabled")) {
+    if (typeof body["rapidMoveGuardEnabled"] !== "boolean") errors.push("rapidMoveGuardEnabled must be a boolean");
+    else out.rapidMoveGuardEnabled = body["rapidMoveGuardEnabled"];
+  }
   if (has("targetProximityGuardEnabled")) {
     if (typeof body["targetProximityGuardEnabled"] !== "boolean") errors.push("targetProximityGuardEnabled must be a boolean");
     else out.targetProximityGuardEnabled = body["targetProximityGuardEnabled"];
@@ -1722,7 +1972,7 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
 
   // ── Numeric fields (real finite numbers, in range) ──
   const numField = (
-    key: "globalBandMin" | "globalBandMax" | "finalWindowSeconds" | "budgetDollars" | "freefallLookbackSeconds" | "freefallThresholdPct" | "targetProximityThresholdPct",
+    key: "globalBandMin" | "globalBandMax" | "finalWindowSeconds" | "budgetDollars" | "freefallConsecutiveSeconds" | "freefallLookbackSeconds" | "freefallThresholdPct" | "rapidMoveLookbackSeconds" | "rapidMoveThresholdPct" | "targetProximityThresholdPct",
     ok: (v: number) => boolean,
     msg: string,
   ): void => {
@@ -1735,8 +1985,11 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   numField("globalBandMax", (v) => v > 0 && v < 1, "globalBandMax must be a number in (0, 1)");
   numField("finalWindowSeconds", (v) => v >= 1 && v <= 900, "finalWindowSeconds must be a number 1-900");
   numField("budgetDollars", (v) => v > 0 && v <= 1000, "budgetDollars must be a number > 0 and ≤ 1000");
+  numField("freefallConsecutiveSeconds", (v) => Number.isInteger(v) && v >= 1 && v <= 15, "freefallConsecutiveSeconds must be an integer 1-15");
   numField("freefallLookbackSeconds", (v) => v >= 1 && v <= 600, "freefallLookbackSeconds must be a number 1-600");
   numField("freefallThresholdPct", (v) => v > 0, "freefallThresholdPct must be a number > 0");
+  numField("rapidMoveLookbackSeconds", (v) => Number.isInteger(v) && v >= 1 && v <= 15, "rapidMoveLookbackSeconds must be an integer 1-15");
+  numField("rapidMoveThresholdPct", (v) => v > 0 && v <= 10, "rapidMoveThresholdPct must be a number > 0 and ≤ 10");
   numField("targetProximityThresholdPct", (v) => v > 0 && v <= 10, "targetProximityThresholdPct must be a number > 0 and ≤ 10");
 
   // ── Caps ──

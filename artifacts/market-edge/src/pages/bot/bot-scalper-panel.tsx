@@ -785,21 +785,120 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 </label>
               </div>
             </div>
-            <div className="flex items-center justify-between mt-3">
-              <div className="text-[9px] text-muted-foreground/60 leading-tight pr-2">Separate from normal bets. One scalp per market per 15-min window.</div>
+            <div className="text-[9px] text-muted-foreground/60 mt-3 leading-tight">
+              Separate from normal bets. One scalp per market per 15-min window.
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-background/50 border border-amber-500/20 rounded-lg p-4">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 flex items-start gap-3">
+                <div className="rounded-md bg-amber-500/10 p-2 text-amber-400">
+                  <Activity className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold text-amber-500/70 uppercase tracking-widest">Real-Time Direction Guard</div>
+                  <p className="break-words text-[10px] text-muted-foreground mt-1 max-w-2xl leading-relaxed">
+                    Reads one fresh underlying price every second after eligibility opens. Below/NO is blocked after consecutive rises toward the target; Above/YES is blocked after consecutive falls toward it. Flat or favorable movement resets the streak.
+                  </p>
+                </div>
+              </div>
               <button
                 type="button"
                 role="switch"
                 aria-checked={merged.freefallGuardEnabled}
+                data-testid="switch-scalper-direction-guard"
                 onClick={() => handleConfigChange("freefallGuardEnabled", !merged.freefallGuardEnabled)}
-                className="flex items-center gap-1.5 shrink-0"
-                title="Toggle Freefall Guard"
+                className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${merged.freefallGuardEnabled ? "bg-amber-500" : "bg-muted"}`}
+                title="Toggle real-time direction guard"
               >
-                <span className={`relative h-5 w-9 rounded-full transition-colors ${merged.freefallGuardEnabled ? "bg-amber-500" : "bg-muted"}`}>
-                  <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${merged.freefallGuardEnabled ? "translate-x-4" : "translate-x-0"}`} />
-                </span>
-                <span className="text-[10px] text-muted-foreground/50"><Shield className="w-3 h-3 inline" /> Guard</span>
+                <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.freefallGuardEnabled ? "translate-x-5" : "translate-x-0"}`} />
+                <span className="sr-only">Real-Time Direction Guard</span>
               </button>
+            </div>
+
+            <div className={`grid grid-cols-1 gap-3 sm:grid-cols-3 ${!merged.freefallGuardEnabled ? "opacity-50" : ""}`}>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-[10px] text-muted-foreground">Consecutive wrong-way seconds</span>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min={1}
+                    max={15}
+                    step={1}
+                    value={merged.freefallConsecutiveSeconds}
+                    onChange={e => handleConfigChange("freefallConsecutiveSeconds", parseInt(e.target.value) || 1)}
+                    disabled={!merged.freefallGuardEnabled}
+                    data-testid="input-scalper-consecutive-seconds"
+                    className="w-full bg-background border border-border rounded-md pl-3 pr-9 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50 disabled:cursor-not-allowed"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs">sec</span>
+                </div>
+              </label>
+              <div className="sm:col-span-2 rounded-md border border-border/70 bg-background/60 px-3 py-2">
+                <div className="text-[10px] font-semibold text-foreground">Live sample rule</div>
+                <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">
+                  A {merged.freefallConsecutiveSeconds}-second setting requires {merged.freefallConsecutiveSeconds + 1} fresh prices spanning {merged.freefallConsecutiveSeconds} real seconds. The Scalper stays in warming mode until the complete sequence exists.
+                </p>
+              </div>
+            </div>
+
+            <div className="border-t border-border/60 pt-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Optional Fast-Move Avoidance</div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground/70">
+                    Independently blocks an unusually fast rise or fall. Turn this off without changing the directional protection above.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={merged.rapidMoveGuardEnabled}
+                  data-testid="switch-scalper-rapid-move"
+                  onClick={() => handleConfigChange("rapidMoveGuardEnabled", !merged.rapidMoveGuardEnabled)}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${merged.rapidMoveGuardEnabled ? "bg-amber-500" : "bg-muted"}`}
+                  title="Toggle fast-move avoidance"
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.rapidMoveGuardEnabled ? "translate-x-5" : "translate-x-0"}`} />
+                  <span className="sr-only">Fast-Move Avoidance</span>
+                </button>
+              </div>
+              <div className={`mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 ${!merged.rapidMoveGuardEnabled ? "opacity-50" : ""}`}>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-[10px] text-muted-foreground">Observation seconds</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={15}
+                    step={1}
+                    value={merged.rapidMoveLookbackSeconds}
+                    onChange={e => handleConfigChange("rapidMoveLookbackSeconds", parseInt(e.target.value) || 1)}
+                    disabled={!merged.rapidMoveGuardEnabled}
+                    data-testid="input-scalper-rapid-seconds"
+                    className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50 disabled:cursor-not-allowed"
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-[10px] text-muted-foreground">Block at absolute move</span>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min={0.01}
+                      max={10}
+                      step={0.01}
+                      value={merged.rapidMoveThresholdPct}
+                      onChange={e => handleConfigChange("rapidMoveThresholdPct", parseFloat(e.target.value) || 0.01)}
+                      disabled={!merged.rapidMoveGuardEnabled}
+                      data-testid="input-scalper-rapid-threshold"
+                      className="w-full bg-background border border-border rounded-md pl-3 pr-7 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50 disabled:cursor-not-allowed"
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs">%</span>
+                  </div>
+                </label>
+              </div>
             </div>
           </div>
         </div>
@@ -978,8 +1077,16 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                           {statusInfo && !isPaused && (
                             <div className="flex w-full min-w-0 items-center gap-2 sm:ml-auto sm:w-auto">
                               {statusInfo.freefallBlocked && (
-                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300" title="Freefall guard active">
-                                  FREEFALL
+                                <span
+                                  className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300"
+                                  title={`${readableReason(statusInfo.reason)} · ${statusInfo.freefallSamplesUsed}/${statusInfo.freefallRequiredSamples} fresh samples`}
+                                >
+                                  {statusInfo.reason?.includes("warming") ? "WARMING" : "DIRECTION"}
+                                </span>
+                              )}
+                              {statusInfo.rapidMoveBlocked && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-300" title="Fast-move avoidance blocked this market">
+                                  FAST
                                 </span>
                               )}
                               {statusInfo.targetProximityBlocked && (

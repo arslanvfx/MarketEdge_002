@@ -169,21 +169,50 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   }
 
   if (evidence && (
-    evidence.adverseMovePct != null
-    || evidence.freefallThresholdPct != null
+    evidence.directionalMovePct != null
+    || evidence.freefallConsecutiveSeconds != null
+    || evidence.consecutiveWrongWaySeconds != null
+    || evidence.consecutiveWrongWayMoves != null
     || evidence.samplesUsed != null
   )) {
-    const adverse = evidence.adverseMovePct == null ? "unavailable" : `${evidence.adverseMovePct.toFixed(3)}%`;
-    const threshold = evidence.freefallThresholdPct == null
-      ? "threshold unavailable"
-      : `${evidence.freefallThresholdPct.toFixed(3)}% threshold`;
+    const movement = evidence.directionalMovePct == null
+      ? "movement unavailable"
+      : `${evidence.directionalMovePct >= 0 ? "+" : ""}${evidence.directionalMovePct.toFixed(3)}%`;
+    const wrongWaySeconds =
+      evidence.consecutiveWrongWaySeconds
+      ?? evidence.consecutiveWrongWayMoves;
+    const wrongWaySecondsText = wrongWaySeconds == null
+      ? null
+      : Number.isInteger(wrongWaySeconds)
+        ? String(wrongWaySeconds)
+        : wrongWaySeconds.toFixed(1);
+    const streak = wrongWaySeconds == null
+      ? "streak unavailable"
+      : `${wrongWaySecondsText}/${evidence.freefallConsecutiveSeconds ?? "?"} wrong-way seconds`;
     const sampleText = evidence.samplesUsed == null
       ? ""
       : ` · ${evidence.samplesUsed} sample${evidence.samplesUsed === 1 ? "" : "s"}${
           evidence.sampleCoverageMs == null ? "" : ` over ${(evidence.sampleCoverageMs / 1_000).toFixed(1)}s`
         }`;
     const sideText = evidence.protectedSide ? ` · protected ${evidence.protectedSide.toUpperCase()}` : "";
-    details.push(`Adverse move ${adverse} (${threshold})${sampleText}${sideText}`);
+    details.push(`Real-time direction ${movement} · ${streak}${sampleText}${sideText}`);
+  }
+
+  if (evidence && (
+    evidence.rapidMoveBlocked != null
+    || evidence.rapidMovePct != null
+    || evidence.rapidMoveThresholdPct != null
+  )) {
+    const measured = evidence.rapidMovePct == null
+      ? "unavailable"
+      : `${evidence.rapidMovePct.toFixed(3)}%`;
+    const threshold = evidence.rapidMoveThresholdPct == null
+      ? "threshold unavailable"
+      : `${evidence.rapidMoveThresholdPct.toFixed(3)}% threshold`;
+    const interval = evidence.rapidMoveLookbackSeconds == null
+      ? ""
+      : ` over ${evidence.rapidMoveLookbackSeconds}s`;
+    details.push(`Fast-move check ${measured}${interval} (${threshold})`);
   }
 
   if (evidence && (evidence.quoteYesAsk != null || evidence.quoteNoAsk != null)) {
@@ -267,12 +296,23 @@ const REASON_LABELS: Record<string, string> = {
   freefall_adverse_rising: "Adverse upward move exceeded the Freefall limit",
   freefall_adverse_reversal_falling: "A sharp downward reversal exceeded the Freefall limit",
   freefall_adverse_reversal_rising: "A sharp upward reversal exceeded the Freefall limit",
+  freefall_consecutive_falling: "Underlying fell toward the target for the configured consecutive seconds",
+  freefall_consecutive_rising: "Underlying rose toward the target for the configured consecutive seconds",
+  freefall_wrong_target_side_yes: "Underlying was not above the target for the YES entry",
+  freefall_wrong_target_side_no: "Underlying was not below the target for the NO entry",
   freefall_unavailable_no_samples: "Freefall guard lacked enough fresh samples",
+  freefall_unavailable_warming: "Real-time direction guard is collecting its required one-second samples",
+  freefall_unavailable_sample_gap: "A one-second underlying-price tick was missed",
   freefall_unavailable_coverage: "Freefall samples did not cover enough of the lookback",
   freefall_unavailable_stale: "Freefall samples were stale",
   freefall_unavailable_fetch_failed: "Fresh underlying price fetch failed — Freefall blocked submission",
   freefall_unavailable_no_product: "Underlying product was unavailable — Freefall blocked submission",
   freefall_unavailable_out_of_order: "Freefall samples arrived out of order",
+  freefall_unavailable_target: "The active Kalshi target was unavailable",
+  rapid_move_too_fast_rising: "Fast-move avoidance blocked an unusually rapid rise",
+  rapid_move_too_fast_falling: "Fast-move avoidance blocked an unusually rapid fall",
+  rapid_move_unavailable_warming: "Fast-move avoidance is collecting its required samples",
+  rapid_move_unavailable_sample_gap: "Fast-move avoidance missed a one-second price tick",
   final_balance_check_failed: "Final balance check failed",
   balance_check_failed_final: "Final balance check failed",
   insufficient_balance_final: "Available balance was below worst-case exposure",
