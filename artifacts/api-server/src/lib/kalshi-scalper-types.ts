@@ -140,6 +140,9 @@ export interface ScalpOrder {
   incidentId: string | null;
   reconciledAt: Date | null;
   reconciliationEvidence: Record<string, unknown> | null;
+  /** Durable audit link when this fill stacked on a same-side regular position. */
+  layeredRegularPositionId?: string | null;
+  layeredRegularSide?: "yes" | "no" | null;
   createdAt: Date;
   settledAt: Date | null;
 }
@@ -323,6 +326,9 @@ export interface ScalpSkipEvidence {
   openCommittedDollars?: number | null;
   availableBalance?: number | null;
   maxExposure?: number | null;
+  regularPositionId?: string | null;
+  regularPositionSide?: "yes" | "no" | null;
+  layerDecision?: "same_side_layer" | "opposite_side_block" | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +393,9 @@ export interface ScalpReservation {
   executionWinningLimit?: number;
   /** Raw YES-side limit from a confirmed live outcome (live only). */
   submittedLimitPrice?: number;
+  /** Durable relationship for a successful same-side layer. */
+  layeredRegularPositionId?: string;
+  layeredRegularSide?: "yes" | "no";
   /** Structured skip evidence (null for non-skip rows and pre-upgrade rows). */
   skipEvidence?: ScalpSkipEvidence | null;
 }

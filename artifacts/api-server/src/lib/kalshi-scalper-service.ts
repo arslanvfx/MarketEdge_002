@@ -4,7 +4,7 @@
 // Runs independently on a 250ms scan cadence with bounded authenticated work.
 // Preflight warms readiness before the final window. A single authoritative
 // authenticated quote is fetched concurrently with final guard inputs.
-// Regular bot state read-only (mode only); regular positions never mutated.
+// Regular bot state is read-only; regular positions are never mutated.
 // ---------------------------------------------------------------------------
 
 import crypto from "crypto";
@@ -77,6 +77,11 @@ import {
   summarizeScalpAttemptLatencies,
 } from "./kalshi-scalper-fast-path.ts";
 import {
+  evaluateRegularPositionCompatibility,
+  type RegularPositionCompatibility,
+  type RegularPositionForScalperLayering,
+} from "./kalshi-scalper-layering.ts";
+import {
   loadScalpConfigFromDB,
   saveScalpConfigToDB,
   runScalpMigrations,
@@ -85,6 +90,7 @@ import {
   countTodayReservations,
   getScalpCommittedTotals,
   insertScalpOrderIntent,
+  finalizePaperOrderAndReleaseReservation,
   finalizeScalpOrder,
   finalizeOrderAndReleaseReservation,
   abortIntentAndReleaseReservation,
@@ -147,6 +153,11 @@ const _attemptsInFlight = new Set<string>();
 const _terminalAttemptKeys = new Set<string>();
 const _nextAttemptAt = new Map<string, number>();
 const _preflightIdentityReady = new Set<string>();
+const _preflightRegularPositions = new Map<string, RegularPositionForScalperLayering>();
+let _regularBotReadView: {
+  openPositions?: Map<string, RegularPositionForScalperLayering>;
+  S?: { mode?: string };
+} | null = null;
 let _lastSampleCollectionAt = 0;
 let _lastObservedWindowKey: string | null = null;
 let _preflightInFlight = false;
@@ -279,6 +290,7 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
 
 function _resetPreflightState(): void {
   _preflightIdentityReady.clear();
+  _preflightRegularPositions.clear();
   _lastPreflightStartedAt = 0;
   _preflightStatus = {
     state: "idle",
@@ -296,15 +308,48 @@ function _resetPreflightState(): void {
   };
 }
 
-// Read regular bot mode read-only for display metadata only.
-function getRegularBotMode(): string | null {
+function _getRegularBotReadView(): typeof _regularBotReadView {
+  if (_regularBotReadView) return _regularBotReadView;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const state = require("./kalshi-bot-state") as { S?: { mode?: string } };
-    return state?.S?.mode ?? null;
+    _regularBotReadView = require("./kalshi-bot-state") as NonNullable<typeof _regularBotReadView>;
+    return _regularBotReadView;
   } catch {
     return null;
   }
+}
+
+function _warmRegularPositionReadView(mode: ScalpMode, windowKey: string): void {
+  _preflightRegularPositions.clear();
+  const positions = _getRegularBotReadView()?.openPositions;
+  if (!positions) return;
+  for (const [symbol, position] of positions) {
+    if (position.entryMode === mode && position.windowKey === windowKey) {
+      _preflightRegularPositions.set(symbol.toUpperCase(), { ...position });
+    }
+  }
+}
+
+function _regularPositionCompatibilitySync(
+  mode: ScalpMode,
+  symbol: string,
+  windowKey: string,
+  ticker: string,
+  side: "yes" | "no",
+): RegularPositionCompatibility {
+  const position = _getRegularBotReadView()?.openPositions?.get(symbol.toUpperCase()) ?? null;
+  return evaluateRegularPositionCompatibility(position, {
+    mode,
+    symbol,
+    windowKey,
+    ticker,
+    side,
+  });
+}
+
+// Read regular bot mode read-only for display metadata only.
+function getRegularBotMode(): string | null {
+  return _getRegularBotReadView()?.S?.mode ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -897,6 +942,7 @@ async function _runPreflight(
   startsInSeconds: number,
 ): Promise<void> {
   const mode = _config.mode;
+  _warmRegularPositionReadView(mode, windowKey);
   const sampleTime = Date.now();
   const accountPromise = Promise.all([
     getScalpCommittedTotals(mode),
@@ -1397,6 +1443,8 @@ async function _applyScalpReconciliation(
         ...result.evidence,
         reconciledAt: new Date().toISOString(),
       },
+      layeredRegularPositionId: order.layeredRegularPositionId,
+      layeredRegularSide: order.layeredRegularSide,
       incident,
     });
   } catch (err) {
@@ -1611,9 +1659,12 @@ interface ScalpAttemptRuntime {
   getKalshiCachedData: typeof getKalshiCachedData;
   updateReservationStatus: typeof updateReservationStatus;
   insertScalpOrderIntent: typeof insertScalpOrderIntent;
+  finalizePaperOrderAndReleaseReservation: typeof finalizePaperOrderAndReleaseReservation;
+  abortIntentAndReleaseReservation: typeof abortIntentAndReleaseReservation;
   placeScalpOrderStrict: typeof placeScalpOrderStrict;
   finalizeOrderAndReleaseReservation: typeof finalizeOrderAndReleaseReservation;
   finalRiskValidationSync: typeof _finalRiskValidationSync;
+  regularPositionCompatibilitySync: typeof _regularPositionCompatibilitySync;
 }
 async function _executeScalpAttempt(
   reservationId: string,
@@ -1893,6 +1944,31 @@ async function _executeScalpAttempt(
 
   const effectiveSide = match2.side;
   const winningAsk = match2.winningAsk;
+  let regularLayerCompatibility = runtime.regularPositionCompatibilitySync(
+    mode,
+    symbol,
+    windowKey,
+    ticker,
+    effectiveSide,
+  );
+  if (regularLayerCompatibility.status === "opposite_side") {
+    await runtime.updateReservationStatus(
+      mode,
+      symbol,
+      windowKey,
+      "skipped",
+      "opposite_regular_position",
+      true,
+      {
+        ..._timingEvidence(),
+        selectedSide: effectiveSide,
+        regularPositionId: regularLayerCompatibility.position.id,
+        regularPositionSide: regularLayerCompatibility.position.direction,
+        layerDecision: "opposite_side_block",
+      },
+    );
+    return;
+  }
 
   // ── FINAL TARGET PROXIMITY GUARD — authoritative and side-independent ─────
   // The target came from the force-refresh above and the live underlying sample
@@ -2058,6 +2134,32 @@ async function _executeScalpAttempt(
     });
     return;
   }
+  regularLayerCompatibility = runtime.regularPositionCompatibilitySync(
+    mode,
+    symbol,
+    windowKey,
+    ticker,
+    effectiveSide,
+  );
+  if (regularLayerCompatibility.status === "opposite_side") {
+    await runtime.updateReservationStatus(
+      mode,
+      symbol,
+      windowKey,
+      "skipped",
+      "opposite_regular_position",
+      true,
+      {
+        ..._timingEvidence(),
+        selectedSide: effectiveSide,
+        regularPositionId: regularLayerCompatibility.position.id,
+        regularPositionSide: regularLayerCompatibility.position.direction,
+        layerDecision: "opposite_side_block",
+        elapsedMs: runtime.nowMs() - attemptStartMs,
+      },
+    );
+    return;
+  }
 
   // Use the pinned band ceiling as a marketable IOC boundary, not the transient
   // quote. Kalshi may price-improve inside this hard maximum winning cost.
@@ -2095,6 +2197,12 @@ async function _executeScalpAttempt(
     incidentId: null,
     reconciledAt: null,
     reconciliationEvidence: null,
+    layeredRegularPositionId: regularLayerCompatibility.status === "same_side"
+      ? regularLayerCompatibility.position.id
+      : null,
+    layeredRegularSide: regularLayerCompatibility.status === "same_side"
+      ? regularLayerCompatibility.position.direction
+      : null,
     createdAt: new Date(),
     settledAt: null,
   };
@@ -2123,6 +2231,38 @@ async function _executeScalpAttempt(
       });
       return;
     }
+    const finalLayerPaper = runtime.regularPositionCompatibilitySync(
+      mode,
+      symbol,
+      windowKey,
+      ticker,
+      effectiveSide,
+    );
+    if (finalLayerPaper.status === "opposite_side") {
+      await runtime.updateReservationStatus(
+        mode,
+        symbol,
+        windowKey,
+        "skipped",
+        "opposite_regular_position",
+        true,
+        {
+          ..._timingEvidence(),
+          selectedSide: effectiveSide,
+          regularPositionId: finalLayerPaper.position.id,
+          regularPositionSide: finalLayerPaper.position.direction,
+          layerDecision: "opposite_side_block",
+          elapsedMs: runtime.nowMs() - attemptStartMs,
+        },
+      );
+      return;
+    }
+    orderRecord.layeredRegularPositionId = finalLayerPaper.status === "same_side"
+      ? finalLayerPaper.position.id
+      : null;
+    orderRecord.layeredRegularSide = finalLayerPaper.status === "same_side"
+      ? finalLayerPaper.position.direction
+      : null;
     // Paper: simulate price improvement at the authoritative observed quote;
     // avgFillPrice remains YES-side while limitPrice records the hard IOC cap.
     filledCount = contractCount;
@@ -2147,14 +2287,23 @@ async function _executeScalpAttempt(
     // intent is atomically marked skipped and the reservation released (no broker
     // was called → RESOLVED, not unknown), then we abort before any exchange call.
     const finalReasonLive = runtime.finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
-    if (finalReasonLive !== null) {
+    const finalLayerLive = runtime.regularPositionCompatibilitySync(
+      mode,
+      symbol,
+      windowKey,
+      ticker,
+      effectiveSide,
+    );
+    const finalAbortReason = finalReasonLive
+      ?? (finalLayerLive.status === "opposite_side" ? "opposite_regular_position" : null);
+    if (finalAbortReason !== null) {
       logger.info(
-        { symbol, windowKey, reason: finalReasonLive },
+        { symbol, windowKey, reason: finalAbortReason },
         "[kalshi-scalper] live final validation failed after intent, before submit — aborting intent + releasing (no broker call)",
       );
-      await abortIntentAndReleaseReservation({
+      await runtime.abortIntentAndReleaseReservation({
         orderId: orderRecord.id, mode, symbol, windowKey,
-        reason: `aborted_before_submit:${finalReasonLive}`,
+        reason: `aborted_before_submit:${finalAbortReason}`,
         skipEvidence: {
           ..._timingEvidence(),
           selectedSide: effectiveSide,
@@ -2163,10 +2312,25 @@ async function _executeScalpAttempt(
           quoteNoAsk: quote2.noAsk,
           bandMin: snapshot.bandMin,
           bandMax: snapshot.bandMax,
+          regularPositionId: finalLayerLive.status === "opposite_side"
+            ? finalLayerLive.position.id
+            : null,
+          regularPositionSide: finalLayerLive.status === "opposite_side"
+            ? finalLayerLive.position.direction
+            : null,
+          layerDecision: finalLayerLive.status === "opposite_side"
+            ? "opposite_side_block"
+            : null,
         },
       });
       return;
     }
+    orderRecord.layeredRegularPositionId = finalLayerLive.status === "same_side"
+      ? finalLayerLive.position.id
+      : null;
+    orderRecord.layeredRegularSide = finalLayerLive.status === "same_side"
+      ? finalLayerLive.position.direction
+      : null;
 
     // Live: submit via the SCALPER-OWNED exchange boundary (never placeOrder).
     // Uses immediate_or_cancel + taker_at_cross with the exact YES-side
@@ -2301,6 +2465,8 @@ async function _executeScalpAttempt(
           status: "zero_fill", reservationStatus: "zero_fill",
           filledCount: 0, avgFillPrice: null, winningContractCost: null,
           budgetSpent: 0, exchangeOrderId: orderId, reason: "zero_fill",
+          layeredRegularPositionId: orderRecord.layeredRegularPositionId,
+          layeredRegularSide: orderRecord.layeredRegularSide,
         });
       } catch (persistErr) {
         // Broker returned zero fill, but we failed to persist that fact. The
@@ -2314,9 +2480,12 @@ async function _executeScalpAttempt(
         throw new PostSubmitPersistenceError(persistErr);
       }
     } else {
-      // Paper: no broker exposure. Persist zero-fill record + release. Explicit.
-      await runtime.insertScalpOrderIntent({ ...orderRecord, status: "zero_fill", orderId }).catch(() => {});
-      await runtime.updateReservationStatus(mode, symbol, windowKey, "zero_fill", "zero_fill", true).catch(() => {});
+      // Paper: persist the simulated outcome and release atomically.
+      await runtime.finalizePaperOrderAndReleaseReservation(
+        { ...orderRecord, status: "zero_fill", orderId },
+        "zero_fill",
+        "zero_fill",
+      );
     }
     _rememberReservationOutcome(
       attemptKey,
@@ -2359,6 +2528,8 @@ async function _executeScalpAttempt(
         status: finalStatus, reservationStatus: "filled",
         filledCount, avgFillPrice: confirmedAvg, winningContractCost,
         budgetSpent: actualSpent, exchangeOrderId: orderId, reason: null,
+        layeredRegularPositionId: orderRecord.layeredRegularPositionId,
+        layeredRegularSide: orderRecord.layeredRegularSide,
       });
     } catch (persistErr) {
       // Contracts were bought but we failed to persist the fill + release. The
@@ -2371,17 +2542,21 @@ async function _executeScalpAttempt(
       throw new PostSubmitPersistenceError(persistErr);
     }
   } else {
-    // Paper: no broker exposure. Persist filled record + release. Explicit.
-    await runtime.insertScalpOrderIntent({
-      ...orderRecord,
-      status: finalStatus,
-      filledCount,
-      avgFillPrice: confirmedAvg,
-      winningContractCost,
-      budgetSpent: actualSpent,
-      orderId,
-    }).catch(() => {});
-    await runtime.updateReservationStatus(mode, symbol, windowKey, "filled", undefined, true).catch(() => {});
+    // Paper: persist the simulated fill and release atomically. Never declare a
+    // successful layer if either durable write fails.
+    await runtime.finalizePaperOrderAndReleaseReservation(
+      {
+        ...orderRecord,
+        status: finalStatus,
+        filledCount,
+        avgFillPrice: confirmedAvg,
+        winningContractCost,
+        budgetSpent: actualSpent,
+        orderId,
+      },
+      "filled",
+      null,
+    );
   }
   _terminalAttemptKeys.add(attemptKey);
   _nextAttemptAt.delete(attemptKey);
@@ -2654,6 +2829,8 @@ function serializeScalpOrder(o: ScalpOrder) {
     outcome: filledUnsettled ? "open" : o.outcome,
     pnl: o.pnl,
     incidentId: o.incidentId,
+    layeredRegularPositionId: o.layeredRegularPositionId ?? null,
+    layeredRegularSide: o.layeredRegularSide ?? null,
     createdAt: o.createdAt instanceof Date ? o.createdAt.toISOString() : o.createdAt,
     settledAt: o.settledAt instanceof Date ? o.settledAt.toISOString() : o.settledAt,
   };
@@ -2710,6 +2887,8 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
         observedWinningAsk: attempt.observedWinningAsk ?? null,
         executionWinningLimit: attempt.executionWinningLimit ?? null,
         submittedLimitPrice: attempt.submittedLimitPrice ?? null,
+        layeredRegularPositionId: attempt.layeredRegularPositionId ?? null,
+        layeredRegularSide: attempt.layeredRegularSide ?? null,
         skipEvidence: attempt.skipEvidence ?? null,
         latency: _latestAttemptLatencyByKey.get(
           _attemptKey(attempt.mode, attempt.symbol, attempt.windowKey),
@@ -2801,10 +2980,212 @@ const LIVE_SCALP_ATTEMPT_RUNTIME: ScalpAttemptRuntime = {
   getKalshiCachedData,
   updateReservationStatus,
   insertScalpOrderIntent,
+  finalizePaperOrderAndReleaseReservation,
+  abortIntentAndReleaseReservation,
   placeScalpOrderStrict,
   finalizeOrderAndReleaseReservation,
   finalRiskValidationSync: _finalRiskValidationSync,
+  regularPositionCompatibilitySync: _regularPositionCompatibilitySync,
 };
+
+export interface ControlledScalperLayeringExerciseResult {
+  liveBoundaryConflict: {
+    compatibilityChecks: number;
+    intentWrites: number;
+    brokerSubmissions: number;
+    aborts: number;
+    abortReason: string | null;
+    conflictEvidence: ScalpSkipEvidence | null;
+  };
+  paperPersistenceFailure: {
+    persistenceCalls: number;
+    standaloneIntentWrites: number;
+    standaloneReservationUpdates: number;
+    surfacedError: string | null;
+    layeredRegularPositionId: string | null;
+    layeredRegularSide: "yes" | "no" | null;
+  };
+}
+
+async function _runControlledLayeringScenario(
+  mode: ScalpMode,
+  paperPersistenceFails: boolean,
+): Promise<ControlledScalperLayeringExerciseResult["liveBoundaryConflict"] | ControlledScalperLayeringExerciseResult["paperPersistenceFailure"]> {
+  const originalConfig = _config;
+  const windowKey = "2026-08-22T07:00";
+  const ticker = "KXBTC15M-26AUG220700-15";
+  const closeTime = "2026-08-22T07:15:00.000Z";
+  const nowMs = Date.parse("2026-08-22T07:14:30.000Z");
+  const attemptKey = _attemptKey(mode, "BTC", windowKey);
+  let compatibilityChecks = 0;
+  let intentWrites = 0;
+  let brokerSubmissions = 0;
+  let aborts = 0;
+  let abortReason: string | null = null;
+  let conflictEvidence: ScalpSkipEvidence | null = null;
+  let persistenceCalls = 0;
+  let standaloneReservationUpdates = 0;
+  let persistedPaperOrder: ScalpOrder | null = null;
+
+  _config = {
+    ...DEFAULT_SCALP_CONFIG,
+    enabled: true,
+    mode,
+    globalBandMin: 0.96,
+    globalBandMax: 0.99,
+    finalWindowSeconds: 60,
+    budgetDollars: 2,
+    freefallGuardEnabled: false,
+    targetProximityGuardEnabled: false,
+    circuitBreakerEnabled: true,
+    circuitBreaker: false,
+    circuitBreakerReason: null,
+    perMarketOverrides: [],
+  };
+  const params = resolveEffectiveParams(_config, "BTC", ticker);
+  const snapshot = buildExecutionRiskSnapshot(
+    _config,
+    params,
+    { symbol: "BTC", windowKey, ticker, closeTime },
+  );
+  const candidate: Candidate = {
+    symbol: "BTC",
+    ticker,
+    closeTime,
+    detectedAtMs: nowMs,
+    cachedYesAsk: 0.97,
+    cachedNoAsk: 0.98,
+    side: "yes",
+    winningAsk: 0.97,
+  };
+  const samePosition: RegularPositionForScalperLayering = {
+    id: "regular-position-same",
+    symbol: "BTC",
+    windowKey,
+    ticker,
+    direction: "yes",
+    entryMode: mode,
+  };
+  const oppositePosition: RegularPositionForScalperLayering = {
+    ...samePosition,
+    id: "regular-position-opposite",
+    direction: "no",
+  };
+
+  const runtime: ScalpAttemptRuntime = {
+    nowMs: () => nowMs,
+    currentWindowKey: () => windowKey,
+    fetchKalshiTarget: async () => 100,
+    fetchOrderbookPrices: async () => ({
+      yesAsk: 0.97,
+      yesBid: 0.02,
+      yesDepth: [[0.02, 100]],
+      noDepth: [[0.03, 100]],
+    }),
+    collectPriceSample: async () => true,
+    getBalance: async () => ({ availableBalance: 100, totalBalance: 100 }),
+    getKalshiCachedData: () => ({
+      value: 100,
+      ticker,
+      closeTime,
+      yesAsk: 0.97,
+      yesBid: 0.02,
+      noAsk: 0.98,
+    }),
+    updateReservationStatus: async () => {
+      standaloneReservationUpdates += 1;
+    },
+    insertScalpOrderIntent: async () => {
+      intentWrites += 1;
+    },
+    finalizePaperOrderAndReleaseReservation: async (order) => {
+      persistenceCalls += 1;
+      persistedPaperOrder = order;
+      if (paperPersistenceFails) throw new Error("controlled_paper_persistence_failure");
+    },
+    abortIntentAndReleaseReservation: async (args) => {
+      aborts += 1;
+      abortReason = args.reason;
+      conflictEvidence = args.skipEvidence ?? null;
+    },
+    placeScalpOrderStrict: async () => {
+      brokerSubmissions += 1;
+      return {
+        outcome: "confirmed_fill",
+        reason: "controlled_fill",
+        orderId: "controlled-order",
+        filledCount: 2,
+        avgFillPrice: 0.97,
+      };
+    },
+    finalizeOrderAndReleaseReservation: async () => {},
+    finalRiskValidationSync: () => null,
+    regularPositionCompatibilitySync: (_mode, _symbol, _windowKey, _ticker, side) => {
+      compatibilityChecks += 1;
+      const position =
+        mode === "live" && compatibilityChecks >= 3
+          ? oppositePosition
+          : samePosition;
+      return evaluateRegularPositionCompatibility(position, {
+        mode,
+        symbol: "BTC",
+        windowKey,
+        ticker,
+        side,
+      });
+    },
+  };
+
+  _terminalAttemptKeys.delete(attemptKey);
+  _nextAttemptAt.delete(attemptKey);
+  let surfacedError: string | null = null;
+  try {
+    await _executeScalpAttempt(
+      `controlled-layer-${mode}`,
+      candidate,
+      windowKey,
+      mode,
+      snapshot,
+      0,
+      attemptKey,
+      runtime,
+    );
+  } catch (err) {
+    surfacedError = String(err);
+  } finally {
+    _config = originalConfig;
+    _terminalAttemptKeys.delete(attemptKey);
+    _nextAttemptAt.delete(attemptKey);
+  }
+
+  if (mode === "live") {
+    return {
+      compatibilityChecks,
+      intentWrites,
+      brokerSubmissions,
+      aborts,
+      abortReason,
+      conflictEvidence,
+    };
+  }
+  return {
+    persistenceCalls,
+    standaloneIntentWrites: intentWrites,
+    standaloneReservationUpdates,
+    surfacedError,
+    layeredRegularPositionId: persistedPaperOrder?.layeredRegularPositionId ?? null,
+    layeredRegularSide: persistedPaperOrder?.layeredRegularSide ?? null,
+  };
+}
+
+export async function runControlledScalperLayeringExercise(): Promise<ControlledScalperLayeringExerciseResult> {
+  const liveBoundaryConflict = await _runControlledLayeringScenario("live", false);
+  const paperPersistenceFailure = await _runControlledLayeringScenario("paper", true);
+  return {
+    liveBoundaryConflict: liveBoundaryConflict as ControlledScalperLayeringExerciseResult["liveBoundaryConflict"],
+    paperPersistenceFailure: paperPersistenceFailure as ControlledScalperLayeringExerciseResult["paperPersistenceFailure"],
+  };
+}
 
 /**
  * Controlled live-window proof that executes the real `_executeScalpAttempt`
@@ -2911,6 +3292,8 @@ Promise<ControlledFreefallServiceExerciseResult> {
     insertScalpOrderIntent: async () => {
       intentWrites += 1;
     },
+    finalizePaperOrderAndReleaseReservation: async () => {},
+    abortIntentAndReleaseReservation: async () => {},
     placeScalpOrderStrict: async () => {
       brokerSubmissions += 1;
       return {
@@ -2923,6 +3306,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
     },
     finalizeOrderAndReleaseReservation: async () => {},
     finalRiskValidationSync: () => null,
+    regularPositionCompatibilitySync: () => ({ status: "none", position: null }),
   };
 
   const runStep = async (

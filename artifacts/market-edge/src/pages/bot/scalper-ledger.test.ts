@@ -73,6 +73,17 @@ describe("normalizeScalpOrders", () => {
     assert.equal(result.history[0]?.outcome, "win");
     assert.equal(result.history[0]?.pnl, "0.24");
   });
+
+  it("keeps same-side layer metadata in unified history", () => {
+    const result = normalizeScalpOrders([
+      order({
+        layeredRegularPositionId: "regular-1",
+        layeredRegularSide: "no",
+      }),
+    ]);
+    assert.equal(result.history[0]?.signals?.layeredRegularPositionId, "regular-1");
+    assert.equal(result.history[0]?.signals?.layeredRegularSide, "no");
+  });
 });
 
 describe("describeScalperAttempt", () => {
@@ -111,6 +122,34 @@ describe("describeScalperAttempt", () => {
     assert.equal(
       describeScalperAttempt(attempt({ reason: "identity_outside_window" })),
       "Refreshed market identity was outside the entry window",
+    );
+  });
+
+  it("labels successful layers and opposite-side conflicts plainly", () => {
+    assert.equal(
+      describeScalperAttempt(attempt({
+        status: "filled",
+        layeredRegularPositionId: "regular-yes",
+        layeredRegularSide: "yes",
+      })),
+      "Confirmed fill — layered on regular YES",
+    );
+    const conflict = attempt({
+      reason: "opposite_regular_position",
+      skipEvidence: {
+        selectedSide: "no",
+        regularPositionId: "regular-yes",
+        regularPositionSide: "yes",
+        layerDecision: "opposite_side_block",
+      },
+    });
+    assert.equal(
+      describeScalperAttempt(conflict),
+      "Opposite regular position blocked submission",
+    );
+    assert.match(
+      describeScalperEvidence(conflict).join("\n"),
+      /Scalper NO would oppose open regular YES/,
     );
   });
 

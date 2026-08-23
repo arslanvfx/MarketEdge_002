@@ -4,6 +4,7 @@ import { SCALP_GUARD_RETRY_COOLDOWN_MS } from "./kalshi-scalper-policy.ts";
 import {
   runControlledFreefallServiceExercise,
   runControlledSampleSchedulerExercise,
+  runControlledScalperLayeringExercise,
 } from "./kalshi-scalper-service.ts";
 
 describe("real Scalper service Freefall boundary", () => {
@@ -122,5 +123,40 @@ describe("real Scalper authoritative sample lane", () => {
       ["CTRL-BG-1", "CTRL-BG-2", "CTRL-AUTH", "CTRL-BG-3"],
     );
     assert.equal(result.maxActiveObserved, 3);
+  });
+});
+
+describe("real Scalper regular-position layering boundary", () => {
+  it("aborts before broker submit when the regular side flips during intent persistence", async () => {
+    const result = await runControlledScalperLayeringExercise();
+    assert.deepEqual(
+      {
+        compatibilityChecks: result.liveBoundaryConflict.compatibilityChecks,
+        intentWrites: result.liveBoundaryConflict.intentWrites,
+        brokerSubmissions: result.liveBoundaryConflict.brokerSubmissions,
+        aborts: result.liveBoundaryConflict.aborts,
+        abortReason: result.liveBoundaryConflict.abortReason,
+      },
+      {
+        compatibilityChecks: 3,
+        intentWrites: 1,
+        brokerSubmissions: 0,
+        aborts: 1,
+        abortReason: "aborted_before_submit:opposite_regular_position",
+      },
+    );
+    assert.equal(result.liveBoundaryConflict.conflictEvidence?.layerDecision, "opposite_side_block");
+    assert.equal(result.liveBoundaryConflict.conflictEvidence?.regularPositionSide, "no");
+    assert.equal(result.liveBoundaryConflict.conflictEvidence?.selectedSide, "yes");
+  });
+
+  it("surfaces atomic paper persistence failure without separate best-effort writes", async () => {
+    const result = await runControlledScalperLayeringExercise();
+    assert.equal(result.paperPersistenceFailure.persistenceCalls, 1);
+    assert.equal(result.paperPersistenceFailure.standaloneIntentWrites, 0);
+    assert.equal(result.paperPersistenceFailure.standaloneReservationUpdates, 0);
+    assert.match(result.paperPersistenceFailure.surfacedError ?? "", /controlled_paper_persistence_failure/);
+    assert.equal(result.paperPersistenceFailure.layeredRegularPositionId, "regular-position-same");
+    assert.equal(result.paperPersistenceFailure.layeredRegularSide, "yes");
   });
 });

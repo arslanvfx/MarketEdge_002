@@ -235,6 +235,8 @@ async function _upgradeScalpSchema(
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS incident_id           TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS exchange_response_reason TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS reconciliation_evidence JSONB`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS layered_regular_position_id TEXT`);
+  await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS layered_regular_side TEXT`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS reconciled_at         TIMESTAMPTZ`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS settled_at            TIMESTAMPTZ`);
   await client.query(`ALTER TABLE kalshi_scalp_orders ADD COLUMN IF NOT EXISTS created_at            TIMESTAMPTZ`);
@@ -821,6 +823,8 @@ export async function getRecentScalpReservations(opts: {
                latest_order.side AS latest_side,
                latest_order.entry_yes_price AS latest_entry_yes_price,
                latest_order.limit_price AS latest_limit_price,
+                latest_order.layered_regular_position_id,
+                latest_order.layered_regular_side,
                (SELECT COUNT(*)::int
                   FROM kalshi_scalp_orders o
                   WHERE o.mode = r.mode
@@ -829,7 +833,8 @@ export async function getRecentScalpReservations(opts: {
                     AND o.status IN ('filled', 'zero_fill', 'submitting', 'unknown')) AS submission_count
        FROM kalshi_scalp_reservations r
        LEFT JOIN LATERAL (
-         SELECT o.side, o.entry_yes_price, o.limit_price
+          SELECT o.side, o.entry_yes_price, o.limit_price,
+                 o.layered_regular_position_id, o.layered_regular_side
          FROM kalshi_scalp_orders o
          WHERE o.mode = r.mode
            AND o.symbol = r.symbol
@@ -863,6 +868,10 @@ export async function getRecentScalpReservations(opts: {
         ? (latestSide === "yes" ? submittedLimitPrice : 1 - submittedLimitPrice)
         : undefined;
       const mode = String(row["mode"]) as ScalpMode;
+      const layeredRegularSide =
+        row["layered_regular_side"] === "yes" || row["layered_regular_side"] === "no"
+          ? row["layered_regular_side"] as "yes" | "no"
+          : undefined;
       const rawSkipEvidence = row["skip_evidence"];
       const skipEvidence: ScalpSkipEvidence | null =
         rawSkipEvidence != null && typeof rawSkipEvidence === "object"
@@ -882,6 +891,10 @@ export async function getRecentScalpReservations(opts: {
         observedWinningAsk,
         executionWinningLimit,
         submittedLimitPrice: mode === "live" ? submittedLimitPrice ?? undefined : undefined,
+        layeredRegularPositionId: row["layered_regular_position_id"] != null
+          ? String(row["layered_regular_position_id"])
+          : undefined,
+        layeredRegularSide,
         skipEvidence,
         createdAt: row["created_at"] instanceof Date
           ? row["created_at"]
@@ -919,6 +932,8 @@ export async function finalizeOrderAndReleaseReservation(params: {
   budgetSpent: number;
   exchangeOrderId: string | null;
   reason: string | null;
+  layeredRegularPositionId?: string | null;
+  layeredRegularSide?: "yes" | "no" | null;
 }): Promise<void> {
   const client = await pool.connect();
   try {
@@ -931,12 +946,17 @@ export async function finalizeOrderAndReleaseReservation(params: {
       `UPDATE kalshi_scalp_orders
        SET status = $1, filled_count = $2, avg_fill_price = $3,
            winning_contract_cost = $4, budget_spent = $5,
-           order_id = COALESCE($6, order_id), error_message = NULL
-       WHERE id = $7`,
+            order_id = COALESCE($6, order_id), error_message = NULL,
+            layered_regular_position_id = $7,
+            layered_regular_side = $8
+        WHERE id = $9`,
       [
         params.status, params.filledCount, params.avgFillPrice ?? null,
         params.winningContractCost ?? null, params.budgetSpent,
-        params.exchangeOrderId ?? null, params.orderId,
+        params.exchangeOrderId ?? null,
+        params.layeredRegularPositionId ?? null,
+        params.layeredRegularSide ?? null,
+        params.orderId,
       ],
     );
     await client.query(
@@ -1166,18 +1186,18 @@ export async function getOpenScalpSpend(mode: ScalpMode): Promise<number> {
 // Order persistence
 // ---------------------------------------------------------------------------
 
-/** Persist a "submitting" intent record BEFORE the live placeOrder call. */
-export async function insertScalpOrderIntent(order: ScalpOrder): Promise<void> {
-  const client = await pool.connect();
-  try {
-    await client.query(
+type ScalpDbClient = Awaited<ReturnType<typeof pool.connect>>;
+
+async function _insertScalpOrder(client: ScalpDbClient, order: ScalpOrder): Promise<void> {
+  await client.query(
       `INSERT INTO kalshi_scalp_orders
           (id, mode, symbol, window_key, ticker, side, entry_yes_price,
            contract_count, budget_spent, client_order_id, order_id, filled_count,
            avg_fill_price, limit_price, winning_contract_cost, status, error_message,
            exchange_response_reason, settlement_result, outcome, pnl, incident_id,
-           reconciliation_evidence, reconciled_at, created_at, settled_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+            reconciliation_evidence, reconciled_at, layered_regular_position_id,
+            layered_regular_side, created_at, settled_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
        ON CONFLICT (id) DO NOTHING`,
       [
         order.id, order.mode, order.symbol.toUpperCase(), order.windowKey,
@@ -1189,9 +1209,63 @@ export async function insertScalpOrderIntent(order: ScalpOrder): Promise<void> {
         order.exchangeResponseReason ?? null, order.settlementResult ?? null,
         order.outcome ?? null, order.pnl ?? null, order.incidentId ?? null,
         order.reconciliationEvidence ?? null, order.reconciledAt ?? null,
+        order.layeredRegularPositionId ?? null, order.layeredRegularSide ?? null,
         order.createdAt, order.settledAt ?? null,
       ],
+  );
+}
+
+/** Persist a "submitting" intent record BEFORE the live placeOrder call. */
+export async function insertScalpOrderIntent(order: ScalpOrder): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await _insertScalpOrder(client, order);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * ATOMIC paper outcome persistence. Paper has no broker call or pre-existing
+ * intent row, so its finalized order and reservation release must commit
+ * together or fail together.
+ */
+export async function finalizePaperOrderAndReleaseReservation(
+  order: ScalpOrder,
+  reservationStatus: "filled" | "zero_fill",
+  reason: string | null,
+): Promise<void> {
+  if (order.mode !== "paper" || !["paper", "zero_fill"].includes(order.status)) {
+    throw new Error("Invalid paper Scalper finalization");
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [`kalshi-scalper-cap:${order.mode}`],
     );
+    await _insertScalpOrder(client, order);
+    const updated = await client.query(
+      `UPDATE kalshi_scalp_reservations
+       SET status = $1, reason = $2, reserved_budget = 0,
+           skip_evidence = NULL, attempted_at = NOW()
+       WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
+      [
+        reservationStatus,
+        reason,
+        order.mode,
+        order.symbol.toUpperCase(),
+        order.windowKey,
+      ],
+    );
+    if ((updated.rowCount ?? 0) !== 1) {
+      throw new Error("Paper Scalper reservation was not found during finalization");
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
   } finally {
     client.release();
   }
@@ -1458,6 +1532,8 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
   exchangeOrderId: string | null;
   exchangeResponseReason: string;
   evidence: Record<string, unknown>;
+  layeredRegularPositionId?: string | null;
+  layeredRegularSide?: "yes" | "no" | null;
   incident?: ScalpIncident | null;
 }): Promise<"resolved" | "resolved_held" | "already_resolved"> {
   const client = await pool.connect();
@@ -1475,13 +1551,17 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
               error_message = NULL, exchange_response_reason = $7,
               reconciliation_evidence = $8::jsonb,
               incident_id = COALESCE($9, incident_id),
+               layered_regular_position_id = $10,
+               layered_regular_side = $11,
               reconciled_at = NOW()
-        WHERE id = $10 AND status IN ('submitting','unknown')`,
+        WHERE id = $12 AND status IN ('submitting','unknown')`,
       [
         params.status, params.filledCount, params.avgFillPrice,
         params.winningContractCost, params.budgetSpent,
         params.exchangeOrderId, params.exchangeResponseReason,
         JSON.stringify(params.evidence), params.incident?.id ?? null,
+        params.layeredRegularPositionId ?? null,
+        params.layeredRegularSide ?? null,
         params.orderRecordId,
       ],
     ) as { rowCount?: number };
@@ -1584,6 +1664,12 @@ function rowToScalpOrder(row: Record<string, unknown>): ScalpOrder {
       : null,
     reconciliationEvidence: row["reconciliation_evidence"] != null && typeof row["reconciliation_evidence"] === "object"
       ? row["reconciliation_evidence"] as Record<string, unknown>
+      : null,
+    layeredRegularPositionId: row["layered_regular_position_id"] != null
+      ? String(row["layered_regular_position_id"])
+      : null,
+    layeredRegularSide: row["layered_regular_side"] === "yes" || row["layered_regular_side"] === "no"
+      ? row["layered_regular_side"]
       : null,
     createdAt: row["created_at"] instanceof Date ? row["created_at"] : new Date(String(row["created_at"])),
     settledAt: row["settled_at"] != null ? (row["settled_at"] instanceof Date ? row["settled_at"] : new Date(String(row["settled_at"]))) : null,

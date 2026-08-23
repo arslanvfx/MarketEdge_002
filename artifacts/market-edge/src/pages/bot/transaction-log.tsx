@@ -428,8 +428,11 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         <span className="text-amber-400/70">· awaiting window close price</span>
                       )}
                       {isScalper && (
-                         <span className="text-amber-100/80">
+                        <span className="text-amber-100/80">
                           · confirmed fill{typeof sigs?.status === "string" ? ` · ${sigs.status}` : ""}
+                          {sigs?.layeredRegularSide === "yes" || sigs?.layeredRegularSide === "no"
+                            ? ` · layered on regular ${String(sigs.layeredRegularSide).toUpperCase()}`
+                            : ""}
                         </span>
                       )}
                       {/* Strike-proximity gap — how far the crypto price was from the Kalshi strike when the bet was placed */}

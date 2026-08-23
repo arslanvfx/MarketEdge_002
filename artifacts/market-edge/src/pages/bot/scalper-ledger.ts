@@ -80,6 +80,8 @@ function toHistory(order: ScalpOrder, outcome: DisplayScalpOutcome): HistoryReco
       incidentId: order.incidentId,
       orderId: order.orderId,
       settlementResult: order.settlementResult,
+      layeredRegularPositionId: order.layeredRegularPositionId,
+      layeredRegularSide: order.layeredRegularSide,
     },
     entryPrice: String(order.avgFillPrice),
     exitPrice: null,
@@ -127,7 +129,11 @@ export function normalizeScalpOrders(
 }
 
 export function describeScalperAttempt(attempt: ScalperAttempt): string {
-  if (attempt.status === "filled") return "Confirmed fill";
+  if (attempt.status === "filled") {
+    return attempt.layeredRegularSide
+      ? `Confirmed fill — layered on regular ${attempt.layeredRegularSide.toUpperCase()}`
+      : "Confirmed fill";
+  }
   if (attempt.status === "zero_fill") return "IOC returned zero fills";
   if (attempt.status === "unknown") return "Order result unknown — reconciliation required";
   if (attempt.status === "error") return attempt.reason ? `Error — ${humanizeReason(attempt.reason)}` : "Attempt failed";
@@ -142,6 +148,16 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
 export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   const evidence = attempt.skipEvidence;
   const details: string[] = [];
+
+  if (
+    evidence?.layerDecision === "opposite_side_block"
+    && evidence.selectedSide
+    && evidence.regularPositionSide
+  ) {
+    details.push(
+      `Blocked: Scalper ${evidence.selectedSide.toUpperCase()} would oppose open regular ${evidence.regularPositionSide.toUpperCase()}`,
+    );
+  }
 
   if (evidence && (evidence.distancePct != null || evidence.minimumPct != null)) {
     const measured = evidence.distancePct == null ? "unavailable" : `${evidence.distancePct.toFixed(3)}%`;
@@ -261,6 +277,7 @@ const REASON_LABELS: Record<string, string> = {
   balance_check_failed_final: "Final balance check failed",
   insufficient_balance_final: "Available balance was below worst-case exposure",
   breaker_before_submit: "Circuit breaker blocked submission",
+  opposite_regular_position: "Opposite regular position blocked submission",
 };
 
 function humanizeReason(reason: string): string {

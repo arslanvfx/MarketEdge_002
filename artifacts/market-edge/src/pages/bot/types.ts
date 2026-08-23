@@ -639,6 +639,9 @@ export interface ScalpSkipEvidence {
   openCommittedDollars?: number | null;
   availableBalance?: number | null;
   maxExposure?: number | null;
+  regularPositionId?: string | null;
+  regularPositionSide?: "yes" | "no" | null;
+  layerDecision?: "same_side_layer" | "opposite_side_block" | null;
 }
 
 export interface ScalperStatusMarket {
@@ -742,6 +745,8 @@ export interface ScalperAttempt {
   observedWinningAsk: number | null;
   executionWinningLimit: number | null;
   submittedLimitPrice: number | null;
+  layeredRegularPositionId: string | null;
+  layeredRegularSide: "yes" | "no" | null;
   skipEvidence: ScalpSkipEvidence | null;
   latency?: {
     mode: "paper" | "live";
@@ -795,6 +800,8 @@ export interface ScalpOrder {
   outcome: "win" | "loss" | "open" | null;
   pnl: number | null;
   incidentId: string | null;
+  layeredRegularPositionId: string | null;
+  layeredRegularSide: "yes" | "no" | null;
   createdAt: string;
   settledAt: string | null;
 }

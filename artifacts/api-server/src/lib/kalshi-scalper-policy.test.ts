@@ -2324,7 +2324,7 @@ describe("execution wiring (static source assertions)", () => {
     const awaits = segment.match(/\bawait\b/g) ?? [];
     assert.equal(awaits.length, 1, "exactly one await (the failure-branch abort) may appear before placeOrder");
     assert.ok(
-      /await abortIntentAndReleaseReservation\(\{[\s\S]*?\}\);\s*return;/.test(segment),
+      /await (?:runtime\.)?abortIntentAndReleaseReservation\(\{[\s\S]*?\}\);\s*return;/.test(segment),
       "the single await must be the failure-branch abort that returns",
     );
   });
