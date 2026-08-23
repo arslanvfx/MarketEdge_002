@@ -40,6 +40,17 @@ describe("unified Scalper ledger wiring", () => {
 
   it("shows successful regular-position layers in unified history", () => {
     assert.match(transactionLogSource, /layered on regular/);
+    assert.match(transactionLogSource, /layeredRegularPositionId/);
+    assert.match(transactionLogSource, /regularIdsShownInLayeredCards/);
+    assert.match(transactionLogSource, /history-layered-bet-/);
+    assert.match(transactionLogSource, /Layered regular bet/);
     assert.match(panelSource, /describeScalperAttempt/);
+  });
+
+  it("styles standalone regular bet cards with the navy premium treatment", () => {
+    assert.match(transactionLogSource, /const REGULAR_CARD_CLASS/);
+    assert.match(transactionLogSource, /#07111f/);
+    assert.match(transactionLogSource, /REGULAR_METRIC_CLASS/);
+    assert.match(transactionLogSource, /> REGULAR/);
   });
 });

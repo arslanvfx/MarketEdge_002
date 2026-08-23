@@ -116,6 +116,7 @@
 - [Scalper signed-in access](scalper-signed-in-access.md) — authorization matches the regular bot: any valid Clerk session can manage it; signed-out requests fail closed
 - [Scalper regular-position layering](scalper-regular-position-layering.md) — compatibility is a synchronous read of current regular positions: exact scope + same side layers; opposite side atomically aborts before submit
 - [Scalper luxury gold UI](scalper-luxury-gold-ui.md) — approved visual direction is black glass with luminous luxury-gold edges, champagne labels, and focused gold status/P&L accents
+- [Layered bet history visuals](layered-bet-history-visuals.md) — regular bet cards use premium navy; a linked Scalper fill folds the regular bet into one gold-and-navy hybrid card
 - [Scalper band-capped IOC limits](scalper-band-capped-ioc.md) — qualify on the final quote, submit at the band ceiling, and size at that worst-case cost; unknown intents never count as submitted
 - [Scalper reversal + target-distance guards](scalper-reversal-target-guards.md) — Freefall checks endpoint plus peak/trough reversal; proximity uses fresh spot + refreshed target at the final boundary
 - [Scalper final-minute fast path](scalper-fast-path.md) — coalesced scans, 180s warm-up, reserved authoritative sample lane, locked cap query; all final safety boundaries stay mandatory

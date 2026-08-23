@@ -1,10 +1,20 @@
-import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save, Thermometer, Waves, Crosshair, Timer, Users } from "lucide-react";
+import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save, Thermometer, Waves, Crosshair, Timer, Users, Link2 } from "lucide-react";
 import React from "react";
 import type { HistoryRecord } from "./types";
 import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtContracts, fmtDuration, wkToEst } from "./utils";
 
 const HIST_PAGE_SIZE = 20;
 const SCALPER_CARD_CLASS = "border-amber-400/40 bg-[linear-gradient(135deg,#0c0f12_0%,#171716_52%,#634515_100%)] text-amber-50 ring-1 ring-inset ring-amber-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_0_22px_rgba(245,158,11,0.16),0_14px_38px_rgba(0,0,0,0.35)]";
+const REGULAR_CARD_CLASS = "border-sky-400/35 bg-[linear-gradient(135deg,#07111f_0%,#0a1d35_52%,#12385a_100%)] text-slate-50 ring-1 ring-inset ring-sky-500/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.10),0_0_22px_rgba(56,189,248,0.12),0_14px_38px_rgba(0,0,0,0.30)]";
+const SCALPER_METRIC_CLASS = "border border-amber-400/30 bg-black/45";
+const REGULAR_METRIC_CLASS = "border border-sky-400/25 bg-slate-950/45";
+
+function layeredRegularPositionId(record: HistoryRecord): string | null {
+  if (record.source !== "scalper") return null;
+  const signals = record.signals as Record<string, unknown> | null;
+  const id = signals?.layeredRegularPositionId;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
 
 interface TransactionLogProps {
   pagedBets: HistoryRecord[];
@@ -21,6 +31,22 @@ interface TransactionLogProps {
 
 export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPages, totalBets, historyMode, setHistoryMode, histSourceFilter, setHistSourceFilter, activeMode }: TransactionLogProps) {
   const clampedHistPage = Math.min(histPage, Math.max(0, totalHistPages - 1));
+  const regularRecordsById = React.useMemo(
+    () => new Map(
+      pagedBets
+        .filter((record) => record.source !== "scalper")
+        .map((record) => [record.id, record]),
+    ),
+    [pagedBets],
+  );
+  const regularIdsShownInLayeredCards = React.useMemo(
+    () => new Set(
+      pagedBets
+        .map(layeredRegularPositionId)
+        .filter((id): id is string => id != null && regularRecordsById.has(id)),
+    ),
+    [pagedBets, regularRecordsById],
+  );
   return (
     <>
         {/* ── Transaction Log ── */}
@@ -108,6 +134,13 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const isSkip = r.action === "skip";
                 const isOpen = r.action === "bet";
                 const isScalper = r.source === "scalper";
+                 const linkedRegular = isScalper
+                   ? regularRecordsById.get(layeredRegularPositionId(r) ?? "")
+                   : null;
+                 if (!isScalper && regularIdsShownInLayeredCards.has(r.id)) {
+                   return null;
+                 }
+                 const isRegularMarketBet = !isScalper && !isShadow && !isSkip;
                 const isEmergencyClose = r.exitReason === "conviction_catastrophic_fill";
                 const isPendingEval = !isOpen && !isShadow && !isSkip && r.outcome == null;
                 const isWin = r.outcome === "win";
@@ -125,6 +158,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
 
                  const cardBg = isScalper
                    ? SCALPER_CARD_CLASS
+                   : isRegularMarketBet
+                     ? REGULAR_CARD_CLASS
                    : isShadow
                    ? "border-violet-500/20 bg-violet-950/5"
                   : isSkip
@@ -145,7 +180,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                    <div key={r.id} className={`border rounded-xl p-4 transition-colors ${cardBg}`}>
                     {/* Card header */}
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
-                      <span className={`text-base font-black tracking-tight ${isScalper ? "text-amber-50" : "text-foreground"}`}>{r.symbol}</span>
+                       <span className={`text-base font-black tracking-tight ${isScalper ? "text-amber-50" : isRegularMarketBet ? "text-slate-50" : "text-foreground"}`}>{r.symbol}</span>
 
                       {r.direction && (
                         <span className={`flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${isScalper ? "border border-amber-400/35 bg-amber-500/15 text-amber-100" : r.direction === "yes" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
@@ -270,6 +305,11 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           <Zap className="w-2.5 h-2.5" /> SCALPER
                         </span>
                       )}
+                       {isRegularMarketBet && (
+                         <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border border-sky-300/30 bg-sky-400/10 text-sky-100">
+                           <Bot className="w-2.5 h-2.5" /> REGULAR
+                         </span>
+                       )}
 
                       {/* Decision mode badge */}
                       {!isScalper && (() => {
@@ -302,14 +342,14 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
 
                     {/* Key metrics grid */}
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>{isScalper && <ShoppingCart className="h-3 w-3 text-amber-300" />}{isScalper ? "Order" : "Strike"}</div>
-                         <div className={`text-xs font-semibold font-mono ${isScalper ? "text-amber-50" : ""}`}>{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
+                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? SCALPER_METRIC_CLASS : isRegularMarketBet ? REGULAR_METRIC_CLASS : "bg-background/40"}`}>
+                          <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : isRegularMarketBet ? "text-sky-200/80" : "text-muted-foreground"}`}>{isScalper && <ShoppingCart className="h-3 w-3 text-amber-300" />}{isRegularMarketBet && <Target className="h-3 w-3 text-sky-300" />}{isScalper ? "Order" : "Strike"}</div>
+                          <div className={`text-xs font-semibold font-mono ${isScalper ? "text-amber-50" : isRegularMarketBet ? "text-slate-100" : ""}`}>{isScalper ? r.ticker ?? "—" : fmtCrypto(r.kalshiTarget)}</div>
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>
-                          {isScalper && <CheckCircle2 className="h-3 w-3 text-amber-300" />}{isScalper ? "Settlement" : closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
+                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? SCALPER_METRIC_CLASS : isRegularMarketBet ? REGULAR_METRIC_CLASS : "bg-background/40"}`}>
+                          <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : isRegularMarketBet ? "text-sky-200/80" : "text-muted-foreground"}`}>
+                           {isScalper && <CheckCircle2 className="h-3 w-3 text-amber-300" />}{isRegularMarketBet && <CheckCircle2 className="h-3 w-3 text-sky-300" />}{isScalper ? "Settlement" : closePx != null ? "Close Price" : isOpen ? "Entry Price" : "End Price"}
                         </div>
                         <div className="text-xs font-semibold font-mono flex items-center gap-1">
                           {isScalper ? (
@@ -332,8 +372,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         )}
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>{isScalper && <ArrowUp className="h-3 w-3 text-amber-300" />}Entry</div>
+                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? SCALPER_METRIC_CLASS : isRegularMarketBet ? REGULAR_METRIC_CLASS : "bg-background/40"}`}>
+                          <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : isRegularMarketBet ? "text-sky-200/80" : "text-muted-foreground"}`}>{isScalper ? <ArrowUp className="h-3 w-3 text-amber-300" /> : isRegularMarketBet ? <ArrowUp className="h-3 w-3 text-sky-300" /> : null}Entry</div>
                         <div className="text-xs font-mono">
                           {ep != null ? (
                             <span>{(ep * 100).toFixed(0)}¢ YES · {((1 - ep) * 100).toFixed(0)}¢ NO</span>
@@ -341,8 +381,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>{isScalper && <Trophy className="h-3 w-3 text-amber-300" />}{isScalper ? "Result" : "Exit"}</div>
+                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? SCALPER_METRIC_CLASS : isRegularMarketBet ? REGULAR_METRIC_CLASS : "bg-background/40"}`}>
+                          <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : isRegularMarketBet ? "text-sky-200/80" : "text-muted-foreground"}`}>{isScalper ? <Trophy className="h-3 w-3 text-amber-300" /> : isRegularMarketBet ? <Trophy className="h-3 w-3 text-sky-300" /> : null}{isScalper ? "Result" : "Exit"}</div>
                         <div className="text-xs font-mono">
                           {isScalper
                              ? (sigs?.settlementResult as string | null ?? (isOpen ? <span className="text-amber-50 text-[9px]">in play…</span> : "—"))
@@ -354,8 +394,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
 
-                       <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? "border border-amber-400/30 bg-black/45" : "bg-background/40"}`}>
-                         <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : "text-muted-foreground"}`}>{isScalper && <Users className="h-3 w-3 text-amber-300" />}Size</div>
+                        <div className={`rounded-lg p-2.5 col-span-1 ${isScalper ? SCALPER_METRIC_CLASS : isRegularMarketBet ? REGULAR_METRIC_CLASS : "bg-background/40"}`}>
+                          <div className={`flex items-center gap-1 text-[9px] uppercase tracking-wide mb-0.5 ${isScalper ? "text-amber-300/90" : isRegularMarketBet ? "text-sky-200/80" : "text-muted-foreground"}`}>{isScalper ? <Users className="h-3 w-3 text-amber-300" /> : isRegularMarketBet ? <Users className="h-3 w-3 text-sky-300" /> : null}Size</div>
                         <div className="text-xs font-semibold">
                           {fmtContracts(r.contractCount)} @ {(() => {
                             const ep = r.entryPrice != null ? parseFloat(r.entryPrice) : null;
@@ -375,7 +415,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     </div>
 
                     {/* Footer row */}
-                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">
+                     <div className={`flex items-center gap-3 text-[11px] flex-wrap ${isScalper ? "text-amber-100/65" : isRegularMarketBet ? "text-sky-100/65" : "text-muted-foreground"}`}>
                       {!isOpen && r.exitedAt && (
                         <span className="flex items-center gap-1">
                           <Clock className="w-3 h-3" />
@@ -487,7 +527,62 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                           </span>
                         );
                       })()}
-                    </div>
+                     </div>
+
+                     {isScalper && linkedRegular && (() => {
+                       const regularSignals = linkedRegular.signals as Record<string, unknown> | null;
+                       const regularEntry = linkedRegular.entryPrice != null ? parseFloat(linkedRegular.entryPrice) : null;
+                       const regularPnl = linkedRegular.pnl != null ? parseFloat(linkedRegular.pnl) : null;
+                       const regularConfidence = regularSignals?.confidence as number | null
+                         ?? regularSignals?.statConfidence as number | null
+                         ?? null;
+                       return (
+                         <div
+                           data-testid={`history-layered-bet-${r.id}`}
+                           className="mt-4 rounded-xl border border-sky-400/40 bg-[linear-gradient(135deg,rgba(7,17,31,0.92),rgba(10,29,53,0.92),rgba(18,56,90,0.88))] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                         >
+                           <div className="mb-3 flex items-center gap-2 text-sky-100">
+                             <span className="flex h-6 w-6 items-center justify-center rounded-md border border-sky-300/30 bg-sky-400/10">
+                               <Link2 className="h-3.5 w-3.5 text-sky-300" />
+                             </span>
+                             <div>
+                               <div className="text-[10px] font-black uppercase tracking-[0.16em] text-sky-200">Layered regular bet</div>
+                               <div className="text-[11px] text-sky-100/65">Same market · linked before this Scalper fill</div>
+                             </div>
+                             <span className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                               linkedRegular.direction === "yes"
+                                 ? "bg-emerald-400/15 text-emerald-200"
+                                 : "bg-rose-400/15 text-rose-200"
+                             }`}>
+                               {linkedRegular.direction === "yes" ? "↑ ABOVE" : "↓ BELOW"}
+                             </span>
+                           </div>
+                           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                             <div className="rounded-lg border border-sky-400/20 bg-slate-950/45 p-2">
+                               <div className="text-[9px] uppercase tracking-wide text-sky-200/75">Strike</div>
+                               <div className="mt-0.5 font-mono text-xs font-semibold text-slate-100">{fmtCrypto(linkedRegular.kalshiTarget)}</div>
+                             </div>
+                             <div className="rounded-lg border border-sky-400/20 bg-slate-950/45 p-2">
+                               <div className="text-[9px] uppercase tracking-wide text-sky-200/75">Entry</div>
+                               <div className="mt-0.5 font-mono text-xs text-slate-100">{regularEntry == null ? "—" : `${Math.round(regularEntry * 100)}¢ YES · ${Math.round((1 - regularEntry) * 100)}¢ NO`}</div>
+                             </div>
+                             <div className="rounded-lg border border-sky-400/20 bg-slate-950/45 p-2">
+                               <div className="text-[9px] uppercase tracking-wide text-sky-200/75">Size</div>
+                               <div className="mt-0.5 text-xs font-semibold text-slate-100">{fmtContracts(linkedRegular.contractCount)}</div>
+                             </div>
+                             <div className={`rounded-lg border p-2 ${regularPnl == null ? "border-sky-400/20 bg-slate-950/45" : regularPnl >= 0 ? "border-emerald-400/25 bg-emerald-500/10" : "border-red-400/25 bg-red-500/10"}`}>
+                               <div className="text-[9px] uppercase tracking-wide text-sky-200/75">Regular P&amp;L</div>
+                               <div className={`mt-0.5 font-mono text-xs font-bold ${regularPnl == null ? "text-slate-100" : regularPnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>{regularPnl == null ? "—" : `${regularPnl >= 0 ? "+" : ""}${fmt$(regularPnl)}`}</div>
+                             </div>
+                           </div>
+                           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-sky-100/60">
+                             <span>{wkToEst(linkedRegular.windowKey)} EST</span>
+                             {regularConfidence != null && <span>{Math.round(regularConfidence)}% confidence</span>}
+                             {linkedRegular.decisionMode && <span>{linkedRegular.decisionMode.replace(/_/g, " ")}</span>}
+                           </div>
+                         </div>
+                       );
+                     })()}
                   </div>
                 );
               })}
