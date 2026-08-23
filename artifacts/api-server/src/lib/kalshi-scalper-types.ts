@@ -31,6 +31,9 @@ export interface ScalpConfig {
   freefallConsecutiveSeconds: number;
   /** Require the complete direction window to move away from the target. */
   favorableTrendConfirmationEnabled: boolean;
+  /** Allow a weak adverse net trend only when its projected price at close
+   * remains beyond the enabled target-distance safety buffer. */
+  coordinatedDirectionClearanceEnabled: boolean;
   /** Legacy persisted fields retained for rolling compatibility; no longer drive entry. */
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
@@ -63,6 +66,7 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   freefallGuardEnabled: true,
   freefallConsecutiveSeconds: 4,
   favorableTrendConfirmationEnabled: true,
+  coordinatedDirectionClearanceEnabled: false,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
   rapidMoveGuardEnabled: false,
@@ -140,6 +144,7 @@ export interface ScalpEntryGuardEvidence {
   side: "yes" | "no";
   directionGuardEnabled: boolean;
   favorableTrendConfirmationEnabled?: boolean;
+  coordinatedDirectionClearanceEnabled?: boolean;
   rapidMoveGuardEnabled: boolean;
   targetProximityGuardEnabled: boolean;
   samples: ScalpEntryGuardSample[];
@@ -152,6 +157,14 @@ export interface ScalpEntryGuardEvidence {
   directionalMovePct: number | null;
   favorableTrendConfirmed?: boolean | null;
   favorableTrendReason?: string | null;
+  coordinatedDirectionClearanceApplied?: boolean;
+  coordinatedDirectionClearanceSafe?: boolean | null;
+  coordinatedDirectionClearanceReason?: string | null;
+  adversePacePctPerSecond?: number | null;
+  projectedAdverseMovePct?: number | null;
+  projectedDistancePct?: number | null;
+  projectedPrice?: number | null;
+  secondsRemaining?: number | null;
   targetSideWindowConfirmed?: boolean | null;
   targetSideViolationPrice?: number | null;
   targetSideViolationAt?: string | null;
@@ -348,6 +361,17 @@ export interface ScalpSkipEvidence {
   favorableTrendConfirmed?: boolean | null;
   /** Exact confirmation outcome or failure reason. */
   favorableTrendReason?: string | null;
+  /** Whether the optional side-aware distance/time clearance was enabled. */
+  coordinatedDirectionClearanceEnabled?: boolean | null;
+  /** Whether it actually softened a weak full-window trend rejection. */
+  coordinatedDirectionClearanceApplied?: boolean | null;
+  /** Whether the projected close retained the configured target buffer. */
+  coordinatedDirectionClearanceSafe?: boolean | null;
+  coordinatedDirectionClearanceReason?: string | null;
+  adversePacePctPerSecond?: number | null;
+  projectedAdverseMovePct?: number | null;
+  projectedDistancePct?: number | null;
+  projectedPrice?: number | null;
   /** Whether every selected sample stayed on the winning side of the target. */
   targetSideWindowConfirmed?: boolean | null;
   /** First sample that violated the complete-window target-side rule. */

@@ -640,6 +640,10 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
       favorableTrendConfirmationEnabled: patch.favorableTrendConfirmationEnabled !== undefined
         ? patch.favorableTrendConfirmationEnabled
         : current.favorableTrendConfirmationEnabled,
+      coordinatedDirectionClearanceEnabled:
+        patch.coordinatedDirectionClearanceEnabled !== undefined
+          ? patch.coordinatedDirectionClearanceEnabled
+          : current.coordinatedDirectionClearanceEnabled,
       freefallLookbackSeconds: patch.freefallLookbackSeconds !== undefined ? patch.freefallLookbackSeconds : current.freefallLookbackSeconds,
       freefallThresholdPct: patch.freefallThresholdPct !== undefined ? patch.freefallThresholdPct : current.freefallThresholdPct,
       rapidMoveGuardEnabled: patch.rapidMoveGuardEnabled !== undefined ? patch.rapidMoveGuardEnabled : current.rapidMoveGuardEnabled,
@@ -1313,10 +1317,12 @@ async function _handleUnknownExposure(args: {
   description: string;
   exchangeOrderId?: string | null;
   exchangeResponseReason?: string | null;
+  entryGuardEvidence?: ScalpEntryGuardEvidence | null;
 }): Promise<void> {
   const {
     orderRecordId, mode, symbol, windowKey, ticker, bandMin, bandMax,
     reason, description, exchangeOrderId, exchangeResponseReason,
+    entryGuardEvidence,
   } = args;
 
   // 1. Breaker first (fail-closed) — sets in-memory true synchronously.
@@ -1326,6 +1332,7 @@ async function _handleUnknownExposure(args: {
   await finalizeScalpOrder(
     orderRecordId, "unknown", 0, null, null, 0,
     exchangeOrderId ?? null, description, exchangeResponseReason ?? reason,
+    entryGuardEvidence ?? null,
   ).catch((e) => logger.error({ e, orderRecordId }, "[kalshi-scalper] failed to mark order unknown (breaker already tripped)"));
 
   // 3. Best-effort mark reservation UNKNOWN WITHOUT releasing reserved budget.
@@ -1443,6 +1450,7 @@ async function _applyScalpReconciliation(
         ...result.evidence,
         reconciledAt: new Date().toISOString(),
       },
+      entryGuardEvidence: order.entryGuardEvidence,
       layeredRegularPositionId: order.layeredRegularPositionId,
       layeredRegularSide: order.layeredRegularSide,
       incident,
@@ -2050,6 +2058,7 @@ async function _executeScalpAttempt(
   // is "unavailable" and skips — existing old samples must NOT mask it. Then the
   // guard must be evaluable AND not blocked to proceed.
   let finalFreefallResult: ReturnType<typeof checkFreefallGuard> | null = null;
+  let guardEvaluatedAtMs = runtime.nowMs();
   const evaluatePinnedFreefallAt = (nowMs: number) => evaluateFreefallPreSubmitGuard({
     directionEnabled: snapshot.freefallGuardEnabled,
     hasProduct: coin != null,
@@ -2062,13 +2071,22 @@ async function _executeScalpAttempt(
     consecutiveSeconds: snapshot.freefallConsecutiveSeconds,
     favorableTrendConfirmationEnabled:
       snapshot.favorableTrendConfirmationEnabled,
+    coordinatedDirectionClearanceEnabled:
+      snapshot.coordinatedDirectionClearanceEnabled,
     targetPrice: targetPriceNum,
+    targetProximityGuardEnabled: snapshot.targetProximityGuardEnabled,
+    targetProximityThresholdPct: snapshot.targetProximityThresholdPct,
+    secondsRemaining: Math.max(
+      0,
+      (Date.parse(snapshot.closeTime) - nowMs) / 1_000,
+    ),
     rapidMoveEnabled: snapshot.rapidMoveGuardEnabled,
     rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
     rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
   });
   if (snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled) {
     const ffNowMs = runtime.nowMs();
+    guardEvaluatedAtMs = ffNowMs;
     const freefallDecision = evaluatePinnedFreefallAt(ffNowMs);
     finalFreefallResult = freefallDecision.guardResult;
     if (!freefallDecision.allowed) {
@@ -2084,6 +2102,21 @@ async function _executeScalpAttempt(
           consecutiveWrongWaySeconds: ffFinal?.consecutiveWrongWaySeconds ?? null,
           favorableTrendConfirmed: ffFinal?.favorableTrendConfirmed ?? null,
           favorableTrendReason: ffFinal?.favorableTrendReason ?? null,
+          coordinatedDirectionClearanceEnabled:
+            snapshot.coordinatedDirectionClearanceEnabled,
+          coordinatedDirectionClearanceApplied:
+            ffFinal?.coordinatedDirectionClearanceApplied ?? false,
+          coordinatedDirectionClearanceSafe:
+            ffFinal?.coordinatedDirectionClearanceSafe ?? null,
+          coordinatedDirectionClearanceReason:
+            ffFinal?.coordinatedDirectionClearanceReason ?? null,
+          adversePacePctPerSecond:
+            ffFinal?.adversePacePctPerSecond ?? null,
+          projectedAdverseMovePct:
+            ffFinal?.projectedAdverseMovePct ?? null,
+          projectedDistancePct:
+            ffFinal?.projectedDistancePct ?? null,
+          projectedPrice: ffFinal?.projectedPrice ?? null,
           targetSideWindowConfirmed:
             ffFinal?.targetSideWindowConfirmed ?? null,
           targetSideViolationPrice:
@@ -2117,6 +2150,22 @@ async function _executeScalpAttempt(
           && snapshot.favorableTrendConfirmationEnabled,
         favorableTrendConfirmed: ffFinal?.favorableTrendConfirmed ?? null,
         favorableTrendReason: ffFinal?.favorableTrendReason ?? null,
+        coordinatedDirectionClearanceEnabled:
+          snapshot.coordinatedDirectionClearanceEnabled,
+        coordinatedDirectionClearanceApplied:
+          ffFinal?.coordinatedDirectionClearanceApplied ?? false,
+        coordinatedDirectionClearanceSafe:
+          ffFinal?.coordinatedDirectionClearanceSafe ?? null,
+        coordinatedDirectionClearanceReason:
+          ffFinal?.coordinatedDirectionClearanceReason ?? null,
+        adversePacePctPerSecond:
+          ffFinal?.adversePacePctPerSecond ?? null,
+        projectedAdverseMovePct:
+          ffFinal?.projectedAdverseMovePct ?? null,
+        projectedDistancePct:
+          ffFinal?.projectedDistancePct ?? null,
+        projectedPrice: ffFinal?.projectedPrice ?? null,
+        secondsRemaining: ffFinal?.secondsRemaining ?? null,
         targetSideWindowConfirmed:
           ffFinal?.targetSideWindowConfirmed ?? null,
         targetSideViolationPrice:
@@ -2129,6 +2178,10 @@ async function _executeScalpAttempt(
         rapidMovePct: ffFinal?.rapidMovePct ?? null,
         rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
         rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
+        distancePct: finalProximityResult?.distancePct ?? null,
+        minimumPct: snapshot.targetProximityGuardEnabled
+          ? snapshot.targetProximityThresholdPct
+          : null,
         targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
         underlyingPrice: ffFinal?.latestPrice ?? null,
         samplesUsed: ffFinal?.samplesUsed ?? null,
@@ -2139,8 +2192,6 @@ async function _executeScalpAttempt(
       return;
     }
   }
-  const guardEvaluatedAtMs = runtime.nowMs();
-
   // ── Size the order STRICTLY within the durable reserved budget ─────────────
   // Contract count = floor(reservedBudget / maxWinningCost); worst-case
   // exposure at the band-capped IOC limit is guaranteed <= reservedBudget.
@@ -2249,6 +2300,10 @@ async function _executeScalpAttempt(
     favorableTrendConfirmationEnabled:
       snapshot.freefallGuardEnabled
       && snapshot.favorableTrendConfirmationEnabled,
+    coordinatedDirectionClearanceEnabled:
+      snapshot.freefallGuardEnabled
+      && snapshot.favorableTrendConfirmationEnabled
+      && snapshot.coordinatedDirectionClearanceEnabled,
     rapidMoveGuardEnabled: snapshot.rapidMoveGuardEnabled,
     targetProximityGuardEnabled: snapshot.targetProximityGuardEnabled,
     samples: evidenceSamples.map((sample) => ({
@@ -2284,6 +2339,20 @@ async function _executeScalpAttempt(
       && snapshot.favorableTrendConfirmationEnabled
         ? finalFreefallResult?.favorableTrendReason ?? null
         : null,
+    coordinatedDirectionClearanceApplied:
+      finalFreefallResult?.coordinatedDirectionClearanceApplied ?? false,
+    coordinatedDirectionClearanceSafe:
+      finalFreefallResult?.coordinatedDirectionClearanceSafe ?? null,
+    coordinatedDirectionClearanceReason:
+      finalFreefallResult?.coordinatedDirectionClearanceReason ?? null,
+    adversePacePctPerSecond:
+      finalFreefallResult?.adversePacePctPerSecond ?? null,
+    projectedAdverseMovePct:
+      finalFreefallResult?.projectedAdverseMovePct ?? null,
+    projectedDistancePct:
+      finalFreefallResult?.projectedDistancePct ?? null,
+    projectedPrice: finalFreefallResult?.projectedPrice ?? null,
+    secondsRemaining: finalFreefallResult?.secondsRemaining ?? null,
     targetSideWindowConfirmed:
       snapshot.freefallGuardEnabled
       && snapshot.favorableTrendConfirmationEnabled
@@ -2318,6 +2387,88 @@ async function _executeScalpAttempt(
       : null,
     targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
     underlyingPrice: latestFinalPriceSample?.price ?? null,
+  };
+  const withDecisiveGuardEvidence = (
+    base: ScalpEntryGuardEvidence,
+    guardResult: ReturnType<typeof checkFreefallGuard>,
+    evaluatedAtMs: number,
+  ): ScalpEntryGuardEvidence => {
+    const decisiveSamples = guardResult.evaluatedSamples.length > 0
+      ? guardResult.evaluatedSamples
+      : evidenceSamples;
+    const decisiveCoverageMs = decisiveSamples.length === 0
+      ? null
+      : decisiveSamples[decisiveSamples.length - 1].at
+        - decisiveSamples[0].at;
+    return {
+      ...base,
+      evaluatedAt: new Date(evaluatedAtMs).toISOString(),
+      samples: decisiveSamples.map((sample) => ({
+        at: new Date(sample.at).toISOString(),
+        price: sample.price,
+      })),
+      sampleCoverageMs: decisiveCoverageMs,
+      samplesUsed:
+        decisiveSamples.length === 0 ? null : decisiveSamples.length,
+      wrongWayResetCount: snapshot.freefallGuardEnabled
+        ? guardResult.wrongWayResetCount
+        : null,
+      lastWrongWayResetAt:
+        snapshot.freefallGuardEnabled
+        && guardResult.lastWrongWayResetAt != null
+          ? new Date(guardResult.lastWrongWayResetAt).toISOString()
+          : null,
+      consecutiveWrongWayMoves: snapshot.freefallGuardEnabled
+        ? guardResult.consecutiveWrongWayMoves
+        : null,
+      consecutiveWrongWaySeconds: snapshot.freefallGuardEnabled
+        ? guardResult.consecutiveWrongWaySeconds
+        : null,
+      directionalMovePct: snapshot.freefallGuardEnabled
+        ? guardResult.directionalMovePct
+        : null,
+      favorableTrendConfirmed:
+        snapshot.freefallGuardEnabled
+        && snapshot.favorableTrendConfirmationEnabled
+          ? guardResult.favorableTrendConfirmed
+          : null,
+      favorableTrendReason:
+        snapshot.freefallGuardEnabled
+        && snapshot.favorableTrendConfirmationEnabled
+          ? guardResult.favorableTrendReason
+          : null,
+      coordinatedDirectionClearanceApplied:
+        guardResult.coordinatedDirectionClearanceApplied,
+      coordinatedDirectionClearanceSafe:
+        guardResult.coordinatedDirectionClearanceSafe,
+      coordinatedDirectionClearanceReason:
+        guardResult.coordinatedDirectionClearanceReason,
+      adversePacePctPerSecond: guardResult.adversePacePctPerSecond,
+      projectedAdverseMovePct: guardResult.projectedAdverseMovePct,
+      projectedDistancePct: guardResult.projectedDistancePct,
+      projectedPrice: guardResult.projectedPrice,
+      secondsRemaining: guardResult.secondsRemaining,
+      targetSideWindowConfirmed:
+        snapshot.freefallGuardEnabled
+        && snapshot.favorableTrendConfirmationEnabled
+          ? guardResult.targetSideWindowConfirmed
+          : null,
+      targetSideViolationPrice:
+        snapshot.freefallGuardEnabled
+        && snapshot.favorableTrendConfirmationEnabled
+          ? guardResult.targetSideViolationPrice
+          : null,
+      targetSideViolationAt:
+        snapshot.freefallGuardEnabled
+        && snapshot.favorableTrendConfirmationEnabled
+        && guardResult.targetSideViolationAt != null
+          ? new Date(guardResult.targetSideViolationAt).toISOString()
+          : null,
+      rapidMovePct: snapshot.rapidMoveGuardEnabled
+        ? guardResult.rapidMovePct
+        : null,
+      underlyingPrice: guardResult.latestPrice,
+    };
   };
 
   // ── Place order or simulate ───────────────────────────────────────────────
@@ -2411,9 +2562,10 @@ async function _executeScalpAttempt(
       );
       return;
     }
+    const finalFreefallPaperAtMs = runtime.nowMs();
     const finalFreefallPaper =
       snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled
-        ? evaluatePinnedFreefallAt(runtime.nowMs())
+        ? evaluatePinnedFreefallAt(finalFreefallPaperAtMs)
         : null;
     if (finalFreefallPaper && !finalFreefallPaper.allowed) {
       await runtime.updateReservationStatus(
@@ -2442,6 +2594,34 @@ async function _executeScalpAttempt(
             finalFreefallPaper.guardResult?.favorableTrendConfirmed ?? null,
           favorableTrendReason:
             finalFreefallPaper.guardResult?.favorableTrendReason ?? null,
+          coordinatedDirectionClearanceEnabled:
+            snapshot.coordinatedDirectionClearanceEnabled,
+          coordinatedDirectionClearanceApplied:
+            finalFreefallPaper.guardResult
+              ?.coordinatedDirectionClearanceApplied ?? false,
+          coordinatedDirectionClearanceSafe:
+            finalFreefallPaper.guardResult
+              ?.coordinatedDirectionClearanceSafe ?? null,
+          coordinatedDirectionClearanceReason:
+            finalFreefallPaper.guardResult
+              ?.coordinatedDirectionClearanceReason ?? null,
+          adversePacePctPerSecond:
+            finalFreefallPaper.guardResult?.adversePacePctPerSecond ?? null,
+          projectedAdverseMovePct:
+            finalFreefallPaper.guardResult?.projectedAdverseMovePct ?? null,
+          projectedDistancePct:
+            finalFreefallPaper.guardResult?.projectedDistancePct ?? null,
+          projectedPrice:
+            finalFreefallPaper.guardResult?.projectedPrice ?? null,
+          secondsRemaining:
+            finalFreefallPaper.guardResult?.secondsRemaining ?? null,
+          distancePct: finalProximityResult?.distancePct ?? null,
+          minimumPct: snapshot.targetProximityGuardEnabled
+            ? snapshot.targetProximityThresholdPct
+            : null,
+          targetPrice: Number.isFinite(targetPriceNum)
+            ? targetPriceNum
+            : null,
           targetSideWindowConfirmed:
             finalFreefallPaper.guardResult?.targetSideWindowConfirmed ?? null,
           targetSideViolationPrice:
@@ -2458,6 +2638,13 @@ async function _executeScalpAttempt(
         },
       );
       return;
+    }
+    if (finalFreefallPaper?.guardResult) {
+      orderRecord.entryGuardEvidence = withDecisiveGuardEvidence(
+        orderRecord.entryGuardEvidence ?? entryGuardEvidence,
+        finalFreefallPaper.guardResult,
+        finalFreefallPaperAtMs,
+      );
     }
     orderRecord.layeredRegularPositionId = finalLayerPaper.status === "same_side"
       ? finalLayerPaper.position.id
@@ -2496,10 +2683,18 @@ async function _executeScalpAttempt(
       ticker,
       effectiveSide,
     );
+    const finalFreefallLiveAtMs = runtime.nowMs();
     const finalFreefallLive =
       snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled
-        ? evaluatePinnedFreefallAt(runtime.nowMs())
+        ? evaluatePinnedFreefallAt(finalFreefallLiveAtMs)
         : null;
+    if (finalFreefallLive?.guardResult) {
+      orderRecord.entryGuardEvidence = withDecisiveGuardEvidence(
+        orderRecord.entryGuardEvidence ?? entryGuardEvidence,
+        finalFreefallLive.guardResult,
+        finalFreefallLiveAtMs,
+      );
+    }
     const finalAbortReason = finalReasonLive
       ?? (finalLayerLive.status === "opposite_side" ? "opposite_regular_position" : null)
       ?? (
@@ -2515,6 +2710,7 @@ async function _executeScalpAttempt(
       await runtime.abortIntentAndReleaseReservation({
         orderId: orderRecord.id, mode, symbol, windowKey,
         reason: `aborted_before_submit:${finalAbortReason}`,
+        entryGuardEvidence: orderRecord.entryGuardEvidence,
         skipEvidence: {
           ..._timingEvidence(),
           selectedSide: effectiveSide,
@@ -2549,6 +2745,34 @@ async function _executeScalpAttempt(
             finalFreefallLive?.guardResult?.favorableTrendConfirmed ?? null,
           favorableTrendReason:
             finalFreefallLive?.guardResult?.favorableTrendReason ?? null,
+          coordinatedDirectionClearanceEnabled:
+            snapshot.coordinatedDirectionClearanceEnabled,
+          coordinatedDirectionClearanceApplied:
+            finalFreefallLive?.guardResult
+              ?.coordinatedDirectionClearanceApplied ?? false,
+          coordinatedDirectionClearanceSafe:
+            finalFreefallLive?.guardResult
+              ?.coordinatedDirectionClearanceSafe ?? null,
+          coordinatedDirectionClearanceReason:
+            finalFreefallLive?.guardResult
+              ?.coordinatedDirectionClearanceReason ?? null,
+          adversePacePctPerSecond:
+            finalFreefallLive?.guardResult?.adversePacePctPerSecond ?? null,
+          projectedAdverseMovePct:
+            finalFreefallLive?.guardResult?.projectedAdverseMovePct ?? null,
+          projectedDistancePct:
+            finalFreefallLive?.guardResult?.projectedDistancePct ?? null,
+          projectedPrice:
+            finalFreefallLive?.guardResult?.projectedPrice ?? null,
+          secondsRemaining:
+            finalFreefallLive?.guardResult?.secondsRemaining ?? null,
+          distancePct: finalProximityResult?.distancePct ?? null,
+          minimumPct: snapshot.targetProximityGuardEnabled
+            ? snapshot.targetProximityThresholdPct
+            : null,
+          targetPrice: Number.isFinite(targetPriceNum)
+            ? targetPriceNum
+            : null,
           targetSideWindowConfirmed:
             finalFreefallLive?.guardResult?.targetSideWindowConfirmed ?? null,
           targetSideViolationPrice:
@@ -2626,6 +2850,7 @@ async function _executeScalpAttempt(
         reason: `scalp_submit_threw:${symbol}:${windowKey}`,
         description: `scalp submit threw (fill state unknown): ${orderError}`,
         exchangeResponseReason: reconciliation.reason,
+        entryGuardEvidence: orderRecord.entryGuardEvidence,
       });
       // Signal the outer catch to NOT release budget (fail-closed).
       throw new OrderIntentExistsError(err);
@@ -2676,6 +2901,7 @@ async function _executeScalpAttempt(
           `Reserved budget retained; authoritative reconciliation required.`,
         exchangeOrderId: orderId,
         exchangeResponseReason: parserReason,
+        entryGuardEvidence: orderRecord.entryGuardEvidence,
       });
     } else {
       // Paper cannot reach here in practice (simulated price is always valid),
@@ -2708,6 +2934,7 @@ async function _executeScalpAttempt(
           budgetSpent: 0, exchangeOrderId: orderId, reason: "zero_fill",
           layeredRegularPositionId: orderRecord.layeredRegularPositionId,
           layeredRegularSide: orderRecord.layeredRegularSide,
+          entryGuardEvidence: orderRecord.entryGuardEvidence,
         });
       } catch (persistErr) {
         // Broker returned zero fill, but we failed to persist that fact. The
@@ -2717,6 +2944,7 @@ async function _executeScalpAttempt(
           orderRecordId: orderRecord.id, mode, symbol, windowKey, ticker,
           bandMin: snapshot.bandMin, bandMax: snapshot.bandMax,
           context: "zero_fill_finalize_failed",
+          entryGuardEvidence: orderRecord.entryGuardEvidence,
         });
         throw new PostSubmitPersistenceError(persistErr);
       }
@@ -2771,6 +2999,7 @@ async function _executeScalpAttempt(
         budgetSpent: actualSpent, exchangeOrderId: orderId, reason: null,
         layeredRegularPositionId: orderRecord.layeredRegularPositionId,
         layeredRegularSide: orderRecord.layeredRegularSide,
+        entryGuardEvidence: orderRecord.entryGuardEvidence,
       });
     } catch (persistErr) {
       // Contracts were bought but we failed to persist the fill + release. The
@@ -2779,6 +3008,7 @@ async function _executeScalpAttempt(
         orderRecordId: orderRecord.id, mode, symbol, windowKey, ticker,
         bandMin: snapshot.bandMin, bandMax: snapshot.bandMax,
         context: "fill_finalize_failed",
+        entryGuardEvidence: orderRecord.entryGuardEvidence,
       });
       throw new PostSubmitPersistenceError(persistErr);
     }
@@ -2851,6 +3081,7 @@ export interface ControlledFreefallServiceExerciseResult {
     retryAfterMs: number | null;
     intentWrites: number;
     brokerSubmissions: number;
+      paperSubmissions: number;
   }>;
   skippedAttempts: Array<{
     reason: string;
@@ -2862,11 +3093,16 @@ export interface ControlledFreefallServiceExerciseResult {
   abortedBeforeSubmitReasons: string[];
   intentWrites: number;
   brokerSubmissions: number;
+  paperSubmissions: number;
 }
 
 export interface ControlledFreefallServiceExerciseOptions {
+  mode?: ScalpMode;
   side?: "yes" | "no";
   targetProximityGuardEnabled?: boolean;
+  coordinatedDirectionClearanceEnabled?: boolean;
+  /** Optional test-only complete-window prices for the adverse step. */
+  adversePrices?: number[];
   runSecondSubmission?: boolean;
   /** Controlled clock advance while the durable live intent is being written. */
   intentWriteAdvanceMs?: number;
@@ -2899,6 +3135,7 @@ async function _onPostSubmitPersistenceFailure(
     bandMin: number;
     bandMax: number;
     context: string;
+    entryGuardEvidence?: ScalpEntryGuardEvidence | null;
   },
 ): Promise<void> {
   logger.error(
@@ -2915,6 +3152,7 @@ async function _onPostSubmitPersistenceFailure(
     bandMax: args.bandMax,
     reason: `post_submit_persist_failed:${args.context}:${args.symbol}:${args.windowKey}`,
     description: `Post-submit persistence failed (${args.context}): ${String(err)}. Reserved budget retained; manual reconciliation required.`,
+    entryGuardEvidence: args.entryGuardEvidence ?? null,
   }).catch((e) =>
     logger.error({ e, ...args }, "[kalshi-scalper] CRITICAL: unknown-exposure handling itself failed after post-submit persist failure"),
   );
@@ -3510,13 +3748,14 @@ export async function runControlledFreefallServiceExercise(
 ):
 Promise<ControlledFreefallServiceExerciseResult> {
   const originalConfig = _config;
+  const mode = options.mode ?? "live";
   const side = options.side ?? "yes";
   const symbol = "BTC";
   const ticker = "CONTROLLED-FREEFALL-BTC";
   const windowOpenMs = Date.UTC(2026, 7, 22, 7, 0, 0);
   const windowKey = "2026-08-22T07:00";
   const closeTime = new Date(windowOpenMs + 15 * 60_000).toISOString();
-  const attemptKey = _attemptKey("live", symbol, windowKey);
+  const attemptKey = _attemptKey(mode, symbol, windowKey);
   const originalSamples = _priceSamples.get(symbol);
   const originalNextAttemptAt = _nextAttemptAt.get(attemptKey);
   const wasTerminal = _terminalAttemptKeys.has(attemptKey);
@@ -3525,6 +3764,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
   let currentSamples: FreefallSample[] = [];
   let intentWrites = 0;
   let brokerSubmissions = 0;
+  let paperSubmissions = 0;
   let submittedEntryEvidence: ScalpEntryGuardEvidence | null = null;
   const submittedEntryEvidences: ScalpEntryGuardEvidence[] = [];
   const abortedBeforeSubmitReasons: string[] = [];
@@ -3543,13 +3783,15 @@ Promise<ControlledFreefallServiceExerciseResult> {
   _config = {
     ...DEFAULT_SCALP_CONFIG,
     enabled: true,
-    mode: "live",
+    mode,
     globalBandMin: 0.96,
     globalBandMax: 0.99,
     finalWindowSeconds: 60,
     budgetDollars: 2,
     freefallGuardEnabled: true,
     freefallConsecutiveSeconds: 4,
+    coordinatedDirectionClearanceEnabled:
+      options.coordinatedDirectionClearanceEnabled ?? false,
     freefallLookbackSeconds: 30,
     freefallThresholdPct: 0.5,
     rapidMoveGuardEnabled: false,
@@ -3615,7 +3857,13 @@ Promise<ControlledFreefallServiceExerciseResult> {
       }
       nowMs += options.intentWriteAdvanceMs ?? 0;
     },
-    finalizePaperOrderAndReleaseReservation: async () => {},
+    finalizePaperOrderAndReleaseReservation: async (order) => {
+      paperSubmissions += 1;
+      submittedEntryEvidence = order.entryGuardEvidence ?? null;
+      if (order.entryGuardEvidence != null) {
+        submittedEntryEvidences.push(order.entryGuardEvidence);
+      }
+    },
     abortIntentAndReleaseReservation: async (args) => {
       abortedBeforeSubmitReasons.push(args.reason);
     },
@@ -3629,7 +3877,17 @@ Promise<ControlledFreefallServiceExerciseResult> {
         avgFillPrice: null,
       };
     },
-    finalizeOrderAndReleaseReservation: async () => {},
+    finalizeOrderAndReleaseReservation: async (params) => {
+      if (params.entryGuardEvidence != null) {
+        submittedEntryEvidence = params.entryGuardEvidence;
+        if (submittedEntryEvidences.length === 0) {
+          submittedEntryEvidences.push(params.entryGuardEvidence);
+        } else {
+          submittedEntryEvidences[submittedEntryEvidences.length - 1] =
+            params.entryGuardEvidence;
+        }
+      }
+    },
     finalRiskValidationSync: () => null,
     regularPositionCompatibilitySync: () => ({ status: "none", position: null }),
   };
@@ -3649,6 +3907,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
         retryAfterMs: retryAt - nowMs,
         intentWrites,
         brokerSubmissions,
+        paperSubmissions,
       });
       return;
     }
@@ -3658,11 +3917,12 @@ Promise<ControlledFreefallServiceExerciseResult> {
     _priceSamples.set(symbol, currentSamples);
     const previousSkipCount = skippedAttempts.length;
     const previousSubmissions = brokerSubmissions;
+    const previousPaperSubmissions = paperSubmissions;
     await _executeScalpAttempt(
       `controlled-reservation-${label}`,
       candidate,
       windowKey,
-      "live",
+      mode,
       snapshot,
       0,
       attemptKey,
@@ -3673,21 +3933,26 @@ Promise<ControlledFreefallServiceExerciseResult> {
       : null;
     steps.push({
       label,
-      state: brokerSubmissions > previousSubmissions ? "submitted" : "skipped",
+      state:
+        brokerSubmissions > previousSubmissions
+        || paperSubmissions > previousPaperSubmissions
+          ? "submitted"
+          : "skipped",
       reason: skip?.reason ?? null,
       checkedAt: skip?.skippedAt ?? new Date(nowMs).toISOString(),
       retryAfterMs: skip ? Math.max(0, (_nextAttemptAt.get(attemptKey) ?? nowMs) - nowMs) : null,
       intentWrites,
       brokerSubmissions,
+      paperSubmissions,
     });
   };
 
   _nextAttemptAt.delete(attemptKey);
   _terminalAttemptKeys.delete(attemptKey);
   try {
-    const adversePrices = side === "yes"
+    const adversePrices = options.adversePrices ?? (side === "yes"
       ? [105, 104, 103, 103.5, 102]
-      : [95, 96, 97, 96.5, 98];
+      : [95, 96, 97, 96.5, 98]);
     const favorablePrices = side === "yes"
       ? [101, 102, 103, 104, 105]
       : [99, 98, 97, 96, 95];
@@ -3729,6 +3994,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
       abortedBeforeSubmitReasons,
       intentWrites,
       brokerSubmissions,
+      paperSubmissions,
     };
   } finally {
     _config = originalConfig;

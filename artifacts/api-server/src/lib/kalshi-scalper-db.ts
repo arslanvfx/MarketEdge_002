@@ -10,6 +10,7 @@ import {
   DEFAULT_SCALP_CONFIG,
   normalizeScalpOpenCapDollars,
   type ScalpConfig,
+  type ScalpEntryGuardEvidence,
   type ScalpOrder,
   type ScalpOrderStatus,
   type ScalpIncident,
@@ -369,6 +370,10 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
     favorableTrendConfirmationEnabled: typeof raw["favorableTrendConfirmationEnabled"] === "boolean"
       ? raw["favorableTrendConfirmationEnabled"]
       : defaults.favorableTrendConfirmationEnabled,
+    coordinatedDirectionClearanceEnabled:
+      typeof raw["coordinatedDirectionClearanceEnabled"] === "boolean"
+        ? raw["coordinatedDirectionClearanceEnabled"]
+        : defaults.coordinatedDirectionClearanceEnabled,
     freefallLookbackSeconds: typeof raw["freefallLookbackSeconds"] === "number" ? raw["freefallLookbackSeconds"] : defaults.freefallLookbackSeconds,
     freefallThresholdPct: typeof raw["freefallThresholdPct"] === "number" ? raw["freefallThresholdPct"] : defaults.freefallThresholdPct,
     rapidMoveGuardEnabled: typeof raw["rapidMoveGuardEnabled"] === "boolean" ? raw["rapidMoveGuardEnabled"] : defaults.rapidMoveGuardEnabled,
@@ -956,6 +961,7 @@ export async function finalizeOrderAndReleaseReservation(params: {
   reason: string | null;
   layeredRegularPositionId?: string | null;
   layeredRegularSide?: "yes" | "no" | null;
+  entryGuardEvidence?: ScalpEntryGuardEvidence | null;
 }): Promise<void> {
   const client = await pool.connect();
   try {
@@ -970,14 +976,18 @@ export async function finalizeOrderAndReleaseReservation(params: {
            winning_contract_cost = $4, budget_spent = $5,
             order_id = COALESCE($6, order_id), error_message = NULL,
             layered_regular_position_id = $7,
-            layered_regular_side = $8
-        WHERE id = $9`,
+            layered_regular_side = $8,
+            entry_guard_evidence = COALESCE($9::jsonb, entry_guard_evidence)
+        WHERE id = $10`,
       [
         params.status, params.filledCount, params.avgFillPrice ?? null,
         params.winningContractCost ?? null, params.budgetSpent,
         params.exchangeOrderId ?? null,
         params.layeredRegularPositionId ?? null,
         params.layeredRegularSide ?? null,
+        params.entryGuardEvidence == null
+          ? null
+          : JSON.stringify(params.entryGuardEvidence),
         params.orderId,
       ],
     );
@@ -1014,6 +1024,7 @@ export async function abortIntentAndReleaseReservation(params: {
   windowKey: string;
   reason: string;
   skipEvidence?: ScalpSkipEvidence | null;
+  entryGuardEvidence?: ScalpEntryGuardEvidence | null;
 }): Promise<void> {
   const client = await pool.connect();
   try {
@@ -1025,9 +1036,16 @@ export async function abortIntentAndReleaseReservation(params: {
     // Mark the never-submitted intent as skipped with an explanatory message.
     await client.query(
       `UPDATE kalshi_scalp_orders
-       SET status = 'skipped', error_message = $1
-       WHERE id = $2`,
-      [params.reason, params.orderId],
+       SET status = 'skipped', error_message = $1,
+           entry_guard_evidence = COALESCE($2::jsonb, entry_guard_evidence)
+       WHERE id = $3`,
+      [
+        params.reason,
+        params.entryGuardEvidence == null
+          ? null
+          : JSON.stringify(params.entryGuardEvidence),
+        params.orderId,
+      ],
     );
     // Release the reservation — no broker exposure exists.
     await client.query(
@@ -1309,6 +1327,7 @@ export async function finalizeScalpOrder(
   orderId: string | null,
   errorMessage: string | null,
   exchangeResponseReason: string | null = null,
+  entryGuardEvidence: ScalpEntryGuardEvidence | null = null,
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -1317,11 +1336,14 @@ export async function finalizeScalpOrder(
        SET status = $1, filled_count = $2, avg_fill_price = $3,
            winning_contract_cost = $4, budget_spent = $5,
             order_id = COALESCE($6, order_id), error_message = $7,
-            exchange_response_reason = COALESCE($8, exchange_response_reason)
-        WHERE id = $9`,
+            exchange_response_reason = COALESCE($8, exchange_response_reason),
+            entry_guard_evidence = COALESCE($9::jsonb, entry_guard_evidence)
+        WHERE id = $10`,
       [status, filledCount, avgFillPrice ?? null, winningContractCost ?? null,
        budgetSpent, orderId ?? null, errorMessage ?? null,
-       exchangeResponseReason ?? null, id],
+       exchangeResponseReason ?? null,
+       entryGuardEvidence == null ? null : JSON.stringify(entryGuardEvidence),
+       id],
     );
   } finally {
     client.release();
@@ -1559,6 +1581,7 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
   exchangeOrderId: string | null;
   exchangeResponseReason: string;
   evidence: Record<string, unknown>;
+  entryGuardEvidence?: ScalpEntryGuardEvidence | null;
   layeredRegularPositionId?: string | null;
   layeredRegularSide?: "yes" | "no" | null;
   incident?: ScalpIncident | null;
@@ -1580,8 +1603,9 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
               incident_id = COALESCE($9, incident_id),
                layered_regular_position_id = $10,
                layered_regular_side = $11,
+               entry_guard_evidence = COALESCE($12::jsonb, entry_guard_evidence),
               reconciled_at = NOW()
-        WHERE id = $12 AND status IN ('submitting','unknown')`,
+        WHERE id = $13 AND status IN ('submitting','unknown')`,
       [
         params.status, params.filledCount, params.avgFillPrice,
         params.winningContractCost, params.budgetSpent,
@@ -1589,6 +1613,9 @@ export async function reconcileScalpOrderAndReleaseReservation(params: {
         JSON.stringify(params.evidence), params.incident?.id ?? null,
         params.layeredRegularPositionId ?? null,
         params.layeredRegularSide ?? null,
+        params.entryGuardEvidence == null
+          ? null
+          : JSON.stringify(params.entryGuardEvidence),
         params.orderRecordId,
       ],
     ) as { rowCount?: number };

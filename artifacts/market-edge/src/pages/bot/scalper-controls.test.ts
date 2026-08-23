@@ -77,6 +77,15 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /Flat or net wrong-way movement blocks entry/i);
   });
 
+  it("offers an opt-in symmetric coordinated guard clearance", () => {
+    assert.match(panelSource, /Coordinated Guard Clearance/);
+    assert.match(panelSource, /switch-scalper-coordinated-clearance/);
+    assert.match(panelSource, /coordinatedDirectionClearanceEnabled/);
+    assert.match(panelSource, /a rise toward the target for Below\/NO/i);
+    assert.match(panelSource, /a fall toward it for Above\/YES/i);
+    assert.match(panelSource, /Strict streaks, fast moves, stale data, and target-side failures always block/i);
+  });
+
   it("keeps fast-move avoidance separately toggleable and configurable", () => {
     assert.match(panelSource, /Optional Fast-Move Avoidance/);
     assert.match(panelSource, /without changing the directional protection/i);

@@ -431,6 +431,16 @@ export interface FreefallGuardResult {
   favorableTrendBlocked: boolean;
   /** Exact complete-window confirmation failure, or null when clear/disabled. */
   favorableTrendReason: string | null;
+  /** Optional target-distance/time projection that may soften only the
+   * complete-window net-trend rejection. */
+  coordinatedDirectionClearanceApplied: boolean;
+  coordinatedDirectionClearanceSafe: boolean | null;
+  coordinatedDirectionClearanceReason: string | null;
+  adversePacePctPerSecond: number | null;
+  projectedAdverseMovePct: number | null;
+  projectedDistancePct: number | null;
+  projectedPrice: number | null;
+  secondsRemaining: number | null;
   /** Whether every selected direction sample stayed on the winning target side. */
   targetSideWindowConfirmed: boolean | null;
   /** First selected sample that violated the complete-window target-side rule. */
@@ -475,8 +485,14 @@ export interface FreefallGuardInput {
   consecutiveSeconds: number;
   /** Require positive net movement for YES and negative net movement for NO. */
   favorableTrendConfirmationEnabled: boolean;
+  /** Opt-in coordination: a weak adverse net trend may clear only when the
+   * side-aware projected close retains the target-proximity buffer. */
+  coordinatedDirectionClearanceEnabled?: boolean;
   /** Active Kalshi target/strike for the reserved market. */
   targetPrice: number;
+  targetProximityGuardEnabled?: boolean;
+  targetProximityThresholdPct?: number;
+  secondsRemaining?: number;
   /** Independent absolute-speed filter. */
   rapidMoveEnabled: boolean;
   rapidMoveLookbackSeconds: number;
@@ -593,6 +609,14 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     favorableTrendConfirmed: null,
     favorableTrendBlocked: false,
     favorableTrendReason: null,
+    coordinatedDirectionClearanceApplied: false,
+    coordinatedDirectionClearanceSafe: null,
+    coordinatedDirectionClearanceReason: null,
+    adversePacePctPerSecond: null,
+    projectedAdverseMovePct: null,
+    projectedDistancePct: null,
+    projectedPrice: null,
+    secondsRemaining: null,
     targetSideWindowConfirmed: null,
     targetSideViolationPrice: null,
     targetSideViolationAt: null,
@@ -690,7 +714,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   const directionSamples = directional?.ok ? directional.samples : [newest];
   const directionOldest = directionSamples[0];
   const directionNewest = directionSamples[directionSamples.length - 1];
-  let observedSpanMs = directionNewest.at - directionOldest.at;
+  const directionObservedSpanMs =
+    directionNewest.at - directionOldest.at;
+  let observedSpanMs = directionObservedSpanMs;
   const priceChangePct = input.directionEnabled
     ? ((directionNewest.price - directionOldest.price) / directionOldest.price) * 100
     : 0;
@@ -795,10 +821,82 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     }
   }
 
+  const coordinatedDirectionClearanceEnabled =
+    favorableTrendConfirmationEnabled
+    && (input.coordinatedDirectionClearanceEnabled ?? false);
+  let coordinatedDirectionClearanceApplied = false;
+  let coordinatedDirectionClearanceSafe: boolean | null = null;
+  let coordinatedDirectionClearanceReason: string | null = null;
+  let adversePacePctPerSecond: number | null = null;
+  let projectedAdverseMovePct: number | null = null;
+  let projectedDistancePct: number | null = null;
+  let projectedPrice: number | null = null;
+  let secondsRemaining: number | null = null;
+  if (
+    coordinatedDirectionClearanceEnabled
+    && favorableTrendBlocked
+    && !wrongTargetSide
+    && !directionalBlocked
+    && !rapidMoveBlocked
+  ) {
+    const targetGuardEnabled = input.targetProximityGuardEnabled ?? false;
+    const minimumPct = input.targetProximityThresholdPct;
+    const remaining = input.secondsRemaining;
+    if (!targetGuardEnabled) {
+      coordinatedDirectionClearanceSafe = false;
+      coordinatedDirectionClearanceReason =
+        "coordinated_direction_clearance_requires_target_guard";
+    } else if (
+      !Number.isFinite(minimumPct)
+      || (minimumPct ?? 0) <= 0
+      || !Number.isFinite(remaining)
+      || (remaining ?? -1) < 0
+      || directionObservedSpanMs <= 0
+    ) {
+      coordinatedDirectionClearanceSafe = false;
+      coordinatedDirectionClearanceReason =
+        "coordinated_direction_clearance_unavailable";
+    } else {
+      secondsRemaining = remaining!;
+      // Project only from the directional sample window. The independently
+      // configured rapid-move lookback may be longer and is diagnostic here;
+      // using it as this denominator would understate the actual adverse pace.
+      const observedSeconds = directionObservedSpanMs / 1_000;
+      const adversePriceDelta = input.side === "yes"
+        ? Math.max(0, directionOldest.price - directionNewest.price)
+        : Math.max(0, directionNewest.price - directionOldest.price);
+      const adversePricePerSecond = adversePriceDelta / observedSeconds;
+      adversePacePctPerSecond =
+        (adversePricePerSecond / input.targetPrice) * 100;
+      projectedAdverseMovePct =
+        adversePacePctPerSecond * secondsRemaining;
+      projectedPrice = input.side === "yes"
+        ? directionNewest.price - adversePricePerSecond * secondsRemaining
+        : directionNewest.price + adversePricePerSecond * secondsRemaining;
+      projectedDistancePct = input.side === "yes"
+        ? ((projectedPrice - input.targetPrice) / input.targetPrice) * 100
+        : ((input.targetPrice - projectedPrice) / input.targetPrice) * 100;
+      coordinatedDirectionClearanceSafe =
+        projectedDistancePct > minimumPct!;
+      coordinatedDirectionClearanceApplied =
+        coordinatedDirectionClearanceSafe;
+      coordinatedDirectionClearanceReason =
+        coordinatedDirectionClearanceSafe
+          ? (input.side === "yes"
+            ? "coordinated_direction_clearance_safe_yes"
+            : "coordinated_direction_clearance_safe_no")
+          : (input.side === "yes"
+            ? "coordinated_direction_clearance_projected_too_close_yes"
+            : "coordinated_direction_clearance_projected_too_close_no");
+    }
+  }
+
+  const effectiveFavorableTrendBlocked =
+    favorableTrendBlocked && !coordinatedDirectionClearanceApplied;
   const blocked =
     wrongTargetSide
     || directionalBlocked
-    || favorableTrendBlocked
+    || effectiveFavorableTrendBlocked
     || rapidMoveBlocked;
   const reason = wrongTargetSide
     ? (input.side === "yes"
@@ -808,7 +906,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       ? (input.side === "yes"
         ? "freefall_consecutive_falling"
         : "freefall_consecutive_rising")
-      : favorableTrendReason ?? rapidMoveReason;
+      : effectiveFavorableTrendBlocked
+        ? coordinatedDirectionClearanceReason ?? favorableTrendReason
+        : rapidMoveReason;
   const evaluatedSamplesByTimestamp = new Map<number, FreefallSample>();
   if (input.directionEnabled) {
     for (const sample of directionSamples) evaluatedSamplesByTimestamp.set(sample.at, sample);
@@ -839,6 +939,14 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     favorableTrendConfirmed,
     favorableTrendBlocked,
     favorableTrendReason,
+    coordinatedDirectionClearanceApplied,
+    coordinatedDirectionClearanceSafe,
+    coordinatedDirectionClearanceReason,
+    adversePacePctPerSecond,
+    projectedAdverseMovePct,
+    projectedDistancePct,
+    projectedPrice,
+    secondsRemaining,
     targetSideWindowConfirmed,
     targetSideViolationPrice: targetSideViolation?.price ?? null,
     targetSideViolationAt: targetSideViolation?.at ?? null,
@@ -872,7 +980,11 @@ export function evaluateFreefallPreSubmitGuard(input: {
   eligibilityStartMs: number;
   consecutiveSeconds: number;
   favorableTrendConfirmationEnabled: boolean;
+  coordinatedDirectionClearanceEnabled?: boolean;
   targetPrice: number;
+  targetProximityGuardEnabled?: boolean;
+  targetProximityThresholdPct?: number;
+  secondsRemaining?: number;
   rapidMoveEnabled: boolean;
   rapidMoveLookbackSeconds: number;
   rapidMoveThresholdPct: number;
@@ -914,7 +1026,12 @@ export function evaluateFreefallPreSubmitGuard(input: {
     eligibilityStartMs: input.eligibilityStartMs,
     consecutiveSeconds: input.consecutiveSeconds,
     favorableTrendConfirmationEnabled: input.favorableTrendConfirmationEnabled,
+    coordinatedDirectionClearanceEnabled:
+      input.coordinatedDirectionClearanceEnabled,
     targetPrice: input.targetPrice,
+    targetProximityGuardEnabled: input.targetProximityGuardEnabled,
+    targetProximityThresholdPct: input.targetProximityThresholdPct,
+    secondsRemaining: input.secondsRemaining,
     rapidMoveEnabled: input.rapidMoveEnabled,
     rapidMoveLookbackSeconds: input.rapidMoveLookbackSeconds,
     rapidMoveThresholdPct: input.rapidMoveThresholdPct,
@@ -1112,6 +1229,7 @@ export interface ExecutionRiskSnapshot {
   freefallGuardEnabled: boolean;
   freefallConsecutiveSeconds: number;
   favorableTrendConfirmationEnabled: boolean;
+  coordinatedDirectionClearanceEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled: boolean;
@@ -1133,6 +1251,7 @@ export interface RiskConfigLike {
   freefallGuardEnabled: boolean;
   freefallConsecutiveSeconds?: number;
   favorableTrendConfirmationEnabled?: boolean;
+  coordinatedDirectionClearanceEnabled?: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled?: boolean;
@@ -1178,6 +1297,8 @@ export function buildExecutionRiskSnapshot(
     freefallConsecutiveSeconds: config.freefallConsecutiveSeconds ?? 4,
     favorableTrendConfirmationEnabled:
       config.favorableTrendConfirmationEnabled ?? true,
+    coordinatedDirectionClearanceEnabled:
+      config.coordinatedDirectionClearanceEnabled ?? false,
     freefallLookbackSeconds: config.freefallLookbackSeconds,
     freefallThresholdPct: config.freefallThresholdPct,
     rapidMoveGuardEnabled: config.rapidMoveGuardEnabled ?? false,
@@ -1251,6 +1372,12 @@ export function compareRiskSnapshot(
     !== snapshot.favorableTrendConfirmationEnabled
   ) {
     changed.push("favorableTrendConfirmationEnabled");
+  }
+  if (
+    (currentConfig.coordinatedDirectionClearanceEnabled ?? false)
+    !== snapshot.coordinatedDirectionClearanceEnabled
+  ) {
+    changed.push("coordinatedDirectionClearanceEnabled");
   }
   if (!eqNum(currentConfig.freefallLookbackSeconds, snapshot.freefallLookbackSeconds)) changed.push("freefallLookbackSeconds");
   if (!eqNum(currentConfig.freefallThresholdPct, snapshot.freefallThresholdPct)) changed.push("freefallThresholdPct");
@@ -1948,6 +2075,7 @@ export interface ScalpConfigPatch {
   freefallGuardEnabled?: boolean;
   freefallConsecutiveSeconds?: number;
   favorableTrendConfirmationEnabled?: boolean;
+  coordinatedDirectionClearanceEnabled?: boolean;
   freefallLookbackSeconds?: number;
   freefallThresholdPct?: number;
   rapidMoveGuardEnabled?: boolean;
@@ -1978,6 +2106,7 @@ const ALLOWED_TOP_LEVEL_FIELDS = new Set<string>([
   "freefallGuardEnabled",
   "freefallConsecutiveSeconds",
   "favorableTrendConfirmationEnabled",
+  "coordinatedDirectionClearanceEnabled",
   "freefallLookbackSeconds",
   "freefallThresholdPct",
   "rapidMoveGuardEnabled",
@@ -2052,6 +2181,14 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
       errors.push("favorableTrendConfirmationEnabled must be a boolean");
     } else {
       out.favorableTrendConfirmationEnabled = body["favorableTrendConfirmationEnabled"];
+    }
+  }
+  if (has("coordinatedDirectionClearanceEnabled")) {
+    if (typeof body["coordinatedDirectionClearanceEnabled"] !== "boolean") {
+      errors.push("coordinatedDirectionClearanceEnabled must be a boolean");
+    } else {
+      out.coordinatedDirectionClearanceEnabled =
+        body["coordinatedDirectionClearanceEnabled"];
     }
   }
   if (has("rapidMoveGuardEnabled")) {

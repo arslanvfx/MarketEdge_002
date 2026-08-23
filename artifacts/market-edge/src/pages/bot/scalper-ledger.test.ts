@@ -446,6 +446,70 @@ describe("describeEntryGuardEvidence", () => {
     );
   });
 
+  it("explains a coordinated NO clearance with projected close safety", () => {
+    const lines = describeEntryGuardEvidence(makeEntryGuardEvidence({
+      side: "no",
+      favorableTrendConfirmed: false,
+      favorableTrendReason: "freefall_favorable_trend_not_confirmed_no",
+      coordinatedDirectionClearanceEnabled: true,
+      coordinatedDirectionClearanceApplied: true,
+      coordinatedDirectionClearanceSafe: true,
+      coordinatedDirectionClearanceReason:
+        "coordinated_direction_clearance_safe_no",
+      projectedPrice: 92.31,
+      projectedDistancePct: 0.14,
+      minimumPct: 0.05,
+      secondsRemaining: 75,
+    }));
+    assert.match(
+      lines.join("\n"),
+      /Coordinated clearance: ALLOWED.*projected \$92\.31 at close.*0\.140% projected target buffer.*0\.050% minimum/i,
+    );
+  });
+
+  it("explains a rejected YES clearance projected too close to target", () => {
+    const lines = describeScalperEvidence({
+      id: "attempt-coordinated-block",
+      mode: "live",
+      symbol: "SOL",
+      windowKey: "2026-08-21T19:00:00.000Z",
+      ticker: "KXSOL15M-26AUG211500-15",
+      status: "skipped",
+      reason: "coordinated_direction_clearance_projected_too_close_yes",
+      reservedBudget: 0,
+      submissionCount: 0,
+      side: "yes",
+      observedWinningAsk: 0.97,
+      executionWinningLimit: null,
+      submittedLimitPrice: null,
+      layeredRegularPositionId: null,
+      layeredRegularSide: null,
+      skipEvidence: {
+        protectedSide: "yes",
+        coordinatedDirectionClearanceEnabled: true,
+        coordinatedDirectionClearanceApplied: false,
+        coordinatedDirectionClearanceSafe: false,
+        coordinatedDirectionClearanceReason:
+          "coordinated_direction_clearance_projected_too_close_yes",
+        projectedPrice: 92.43,
+        projectedDistancePct: 0.011,
+        minimumPct: 0.05,
+        secondsRemaining: 75,
+      },
+      entryGuardEvidence: null,
+      createdAt: "2026-08-21T19:11:00.000Z",
+      attemptedAt: "2026-08-21T19:12:00.000Z",
+    });
+    assert.match(
+      lines.join("\n"),
+      /Coordinated direction clearance BLOCKED.*projected \$92\.43 at close.*0\.011% projected target buffer.*0\.050% minimum/i,
+    );
+    assert.match(
+      lines.join("\n"),
+      /current downward pace.*too close to the target.*YES market closes/i,
+    );
+  });
+
   it("shows the exact sample that violated the full-window target side", () => {
     const lines = describeScalperEvidence({
       id: "attempt-target-side-block",

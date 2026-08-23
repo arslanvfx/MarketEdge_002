@@ -259,6 +259,33 @@ export function describeEntryGuardEvidence(ege: EntryGuardEvidence): string[] {
     lines.push("Favorable-trend confirmation: disabled for this entry");
   }
 
+  if (
+    ege.directionGuardEnabled
+    && ege.favorableTrendConfirmationEnabled
+    && ege.coordinatedDirectionClearanceEnabled
+  ) {
+    const projectedPrice = ege.projectedPrice == null
+      ? "projected price unavailable"
+      : `projected ${formatUnderlyingPrice(ege.projectedPrice)} at close`;
+    const projectedDistance = ege.projectedDistancePct == null
+      ? "buffer unavailable"
+      : `${ege.projectedDistancePct.toFixed(3)}% projected target buffer`;
+    const minimum = ege.minimumPct == null
+      ? "minimum unavailable"
+      : `${ege.minimumPct.toFixed(3)}% minimum`;
+    if (ege.coordinatedDirectionClearanceApplied) {
+      lines.push(
+        `Coordinated clearance: ALLOWED — ${projectedPrice} · ${projectedDistance} (${minimum})`,
+      );
+    } else if (ege.favorableTrendConfirmed === true) {
+      lines.push("Coordinated clearance: not needed because the full-window trend was favorable");
+    } else {
+      lines.push(
+        `Coordinated clearance: ${ege.coordinatedDirectionClearanceReason ?? "not available"} · ${projectedPrice} · ${projectedDistance} (${minimum})`,
+      );
+    }
+  }
+
   // Rapid measurement + threshold
   if (ege.rapidMoveGuardEnabled) {
     const rapidMeasured = ege.rapidMovePct == null ? "unavailable" : `${ege.rapidMovePct.toFixed(3)}%`;
@@ -406,6 +433,30 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     }
   }
 
+  if (
+    evidence?.coordinatedDirectionClearanceEnabled
+    || attempt.reason?.startsWith("coordinated_direction_clearance_")
+  ) {
+    const status = evidence?.coordinatedDirectionClearanceApplied
+      ? "ALLOWED"
+      : "BLOCKED";
+    const projectedPrice = evidence?.projectedPrice == null
+      ? "projected price unavailable"
+      : `projected ${formatUnderlyingPrice(evidence.projectedPrice)} at close`;
+    const projectedDistance = evidence?.projectedDistancePct == null
+      ? "buffer unavailable"
+      : `${evidence.projectedDistancePct.toFixed(3)}% projected target buffer`;
+    const minimum = evidence?.minimumPct == null
+      ? "minimum unavailable"
+      : `${evidence.minimumPct.toFixed(3)}% minimum`;
+    const reason = evidence?.coordinatedDirectionClearanceReason
+      ? ` · ${describeScalperReason(evidence.coordinatedDirectionClearanceReason)}`
+      : "";
+    details.push(
+      `Coordinated direction clearance ${status}: ${projectedPrice} · ${projectedDistance} (${minimum})${reason}`,
+    );
+  }
+
   if (evidence && (
     evidence.rapidMoveBlocked != null
     || evidence.rapidMovePct != null
@@ -495,6 +546,7 @@ export function getScalperGuardBlock(attempt: ScalperAttempt): ScalperGuardBlock
     || reason.startsWith("freefall_favorable_trend_")
     || reason.startsWith("freefall_wrong_target_side_")
     || reason.startsWith("freefall_unavailable_")
+    || reason.startsWith("coordinated_direction_clearance_")
   ) {
     return {
       key: "direction",
@@ -578,6 +630,12 @@ const REASON_LABELS: Record<string, string> = {
   freefall_wrong_target_side_no: "At least one recent price was not below the target for a NO entry",
   freefall_favorable_trend_not_confirmed_yes: "Recent prices did not show an upward trend for a YES entry",
   freefall_favorable_trend_not_confirmed_no: "Recent prices did not show a downward trend for a NO entry",
+  coordinated_direction_clearance_requires_target_guard: "The target-distance check must be enabled before a directional clearance can be granted",
+  coordinated_direction_clearance_unavailable: "There was not enough reliable timing or distance information to grant a directional clearance",
+  coordinated_direction_clearance_projected_too_close_yes: "At the current downward pace, price could get too close to the target before the YES market closes",
+  coordinated_direction_clearance_projected_too_close_no: "At the current upward pace, price could get too close to the target before the NO market closes",
+  coordinated_direction_clearance_safe_yes: "The projected price remains safely above the target through close",
+  coordinated_direction_clearance_safe_no: "The projected price remains safely below the target through close",
   freefall_unavailable_no_samples: "We did not have enough fresh prices to make this safety check",
   freefall_unavailable_warming: "The direction check is still collecting recent prices",
   freefall_unavailable_sample_gap: "A required price update was missed, so we did not enter",

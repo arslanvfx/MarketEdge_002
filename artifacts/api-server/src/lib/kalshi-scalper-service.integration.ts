@@ -190,6 +190,137 @@ describe("real Scalper service Freefall boundary", () => {
     assert.ok(evidence?.targetSideViolationAt);
   });
 
+  for (const scenario of [
+    {
+      side: "no" as const,
+      adversePrices: [99, 99.01, 99.02, 99.01, 99.03],
+      reason: "coordinated_direction_clearance_safe_no",
+    },
+    {
+      side: "yes" as const,
+      adversePrices: [101, 100.99, 100.98, 100.99, 100.97],
+      reason: "coordinated_direction_clearance_safe_yes",
+    },
+  ]) {
+    it(`submits a projected-safe weak ${scenario.side.toUpperCase()} adverse trend through the final live boundary`, async () => {
+      const result = await runControlledFreefallServiceExercise({
+        side: scenario.side,
+        targetProximityGuardEnabled: true,
+        coordinatedDirectionClearanceEnabled: true,
+        adversePrices: scenario.adversePrices,
+      });
+      const adverse = result.steps.find((step) => step.label === "adverse");
+      assert.deepEqual(
+        {
+          state: adverse?.state,
+          reason: adverse?.reason,
+          intentWrites: adverse?.intentWrites,
+          brokerSubmissions: adverse?.brokerSubmissions,
+        },
+        {
+          state: "submitted",
+          reason: null,
+          intentWrites: 1,
+          brokerSubmissions: 1,
+        },
+      );
+      const evidence = result.submittedEntryEvidences[0];
+      assert.ok(evidence, "first live intent must retain coordinated evidence");
+      assert.equal(evidence.side, scenario.side);
+      assert.equal(evidence.targetProximityGuardEnabled, true);
+      assert.equal(evidence.coordinatedDirectionClearanceEnabled, true);
+      assert.equal(evidence.coordinatedDirectionClearanceApplied, true);
+      assert.equal(evidence.coordinatedDirectionClearanceSafe, true);
+      assert.equal(
+        evidence.coordinatedDirectionClearanceReason,
+        scenario.reason,
+      );
+      assert.ok((evidence.projectedDistancePct ?? 0) > 0.05);
+      assert.ok((evidence.secondsRemaining ?? 0) > 0);
+    });
+  }
+
+  it("persists projected-too-close evidence when coordination rejects before intent creation", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      side: "no",
+      targetProximityGuardEnabled: true,
+      coordinatedDirectionClearanceEnabled: true,
+      adversePrices: [99.85, 99.9, 99.95, 99.9, 99.94],
+    });
+    const blocked = result.skippedAttempts.find(
+      (attempt) =>
+        attempt.reason
+        === "coordinated_direction_clearance_projected_too_close_no",
+    );
+    assert.ok(blocked, "projected-too-close attempt must be persisted");
+    assert.equal(result.steps[0]?.state, "skipped");
+    assert.equal(result.steps[0]?.intentWrites, 0);
+    assert.equal(result.steps[0]?.brokerSubmissions, 0);
+    assert.equal(
+      blocked.evidence?.coordinatedDirectionClearanceEnabled,
+      true,
+    );
+    assert.equal(
+      blocked.evidence?.coordinatedDirectionClearanceApplied,
+      false,
+    );
+    assert.equal(
+      blocked.evidence?.coordinatedDirectionClearanceSafe,
+      false,
+    );
+    assert.equal(
+      blocked.evidence?.coordinatedDirectionClearanceReason,
+      "coordinated_direction_clearance_projected_too_close_no",
+    );
+    assert.ok((blocked.evidence?.projectedDistancePct ?? Infinity) <= 0.05);
+    assert.equal(blocked.evidence?.minimumPct, 0.05);
+    assert.ok((blocked.evidence?.secondsRemaining ?? 0) > 0);
+  });
+
+  it("stores the decisive post-intent projection used by a live submission", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      side: "no",
+      targetProximityGuardEnabled: true,
+      coordinatedDirectionClearanceEnabled: true,
+      adversePrices: [99, 99.01, 99.02, 99.01, 99.03],
+      intentWriteAdvanceMs: 1_000,
+    });
+    const adverse = result.steps.find((step) => step.label === "adverse");
+    assert.equal(adverse?.state, "submitted");
+    const evidence = result.submittedEntryEvidences[0];
+    assert.ok(evidence);
+    assert.equal(evidence.coordinatedDirectionClearanceApplied, true);
+    assert.equal(evidence.secondsRemaining, 39);
+    assert.equal(
+      evidence.evaluatedAt,
+      "2026-08-22T07:14:21.000Z",
+      "durable evidence must come from the decisive post-intent recheck",
+    );
+  });
+
+  it("applies the same coordinated result at the final paper boundary", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      mode: "paper",
+      side: "yes",
+      targetProximityGuardEnabled: true,
+      coordinatedDirectionClearanceEnabled: true,
+      adversePrices: [101, 100.99, 100.98, 100.99, 100.97],
+    });
+    const adverse = result.steps.find((step) => step.label === "adverse");
+    assert.equal(adverse?.state, "submitted");
+    assert.equal(adverse?.paperSubmissions, 1);
+    assert.equal(adverse?.brokerSubmissions, 0);
+    assert.equal(adverse?.intentWrites, 0);
+    const evidence = result.submittedEntryEvidences[0];
+    assert.ok(evidence);
+    assert.equal(evidence.side, "yes");
+    assert.equal(evidence.coordinatedDirectionClearanceApplied, true);
+    assert.equal(
+      evidence.coordinatedDirectionClearanceReason,
+      "coordinated_direction_clearance_safe_yes",
+    );
+  });
+
   it("copies final target distance into every retry intent and retains the newest snapshot", async () => {
     const result = await runControlledFreefallServiceExercise({
       targetProximityGuardEnabled: true,

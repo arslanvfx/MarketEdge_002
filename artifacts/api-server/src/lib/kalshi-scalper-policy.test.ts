@@ -803,6 +803,198 @@ describe("checkFreefallGuard", () => {
     assert.equal(result.favorableTrendConfirmed, false);
   });
 
+  it("optionally clears a slow NO rise when projection remains safely below target", () => {
+    const result = evaluate(
+      makeSamples([109, 109.01, 109.02, 109.01, 109.03]),
+      "no",
+      {
+        coordinatedDirectionClearanceEnabled: true,
+        targetProximityGuardEnabled: true,
+        targetProximityThresholdPct: 0.05,
+        secondsRemaining: 40,
+      },
+    );
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.favorableTrendBlocked, true);
+    assert.equal(result.coordinatedDirectionClearanceApplied, true);
+    assert.equal(result.coordinatedDirectionClearanceSafe, true);
+    assert.equal(
+      result.coordinatedDirectionClearanceReason,
+      "coordinated_direction_clearance_safe_no",
+    );
+    assert.ok((result.adversePacePctPerSecond ?? 0) > 0);
+    assert.ok((result.projectedPrice ?? Infinity) < 110);
+    assert.ok((result.projectedDistancePct ?? 0) > 0.05);
+  });
+
+  it("optionally clears a slow YES fall when projection remains safely above target", () => {
+    const result = evaluate(
+      makeSamples([101, 100.99, 100.98, 100.99, 100.97]),
+      "yes",
+      {
+        coordinatedDirectionClearanceEnabled: true,
+        targetProximityGuardEnabled: true,
+        targetProximityThresholdPct: 0.05,
+        secondsRemaining: 40,
+      },
+    );
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.favorableTrendBlocked, true);
+    assert.equal(result.coordinatedDirectionClearanceApplied, true);
+    assert.equal(result.coordinatedDirectionClearanceSafe, true);
+    assert.equal(
+      result.coordinatedDirectionClearanceReason,
+      "coordinated_direction_clearance_safe_yes",
+    );
+    assert.ok((result.adversePacePctPerSecond ?? 0) > 0);
+    assert.ok((result.projectedPrice ?? 0) > 100);
+    assert.ok((result.projectedDistancePct ?? 0) > 0.05);
+  });
+
+  it("blocks mirrored adverse drifts projected to reach the target buffer", () => {
+    const no = evaluate(
+      makeSamples([109.85, 109.9, 109.95, 109.9, 109.94]),
+      "no",
+      {
+        coordinatedDirectionClearanceEnabled: true,
+        targetProximityGuardEnabled: true,
+        targetProximityThresholdPct: 0.05,
+        secondsRemaining: 40,
+      },
+    );
+    const yes = evaluate(
+      makeSamples([100.15, 100.1, 100.05, 100.1, 100.06]),
+      "yes",
+      {
+        coordinatedDirectionClearanceEnabled: true,
+        targetProximityGuardEnabled: true,
+        targetProximityThresholdPct: 0.05,
+        secondsRemaining: 40,
+      },
+    );
+    assert.equal(no.blocked, true);
+    assert.equal(no.coordinatedDirectionClearanceApplied, false);
+    assert.equal(
+      no.reason,
+      "coordinated_direction_clearance_projected_too_close_no",
+    );
+    assert.ok((no.projectedDistancePct ?? Infinity) <= 0.05);
+    assert.equal(yes.blocked, true);
+    assert.equal(yes.coordinatedDirectionClearanceApplied, false);
+    assert.equal(
+      yes.reason,
+      "coordinated_direction_clearance_projected_too_close_yes",
+    );
+    assert.ok((yes.projectedDistancePct ?? Infinity) <= 0.05);
+  });
+
+  it("preserves hard streak, target-side, stale-data, and rapid-move blocks", () => {
+    const shared = {
+      coordinatedDirectionClearanceEnabled: true,
+      targetProximityGuardEnabled: true,
+      targetProximityThresholdPct: 0.05,
+      secondsRemaining: 40,
+    };
+    const strict = evaluate(
+      makeSamples([101, 100.99, 100.98, 100.97, 100.96]),
+      "yes",
+      shared,
+    );
+    const targetSide = evaluate(
+      makeSamples([99, 101, 102, 103, 104]),
+      "yes",
+      shared,
+    );
+    const stale = evaluate(
+      makeSamples([101, 100.99, 100.98, 100.99, 100.97], nowMs - 8_000),
+      "yes",
+      { ...shared, eligibilityStartMs: nowMs - 8_000 },
+    );
+    const rapid = evaluate(
+      makeSamples([109, 109.01, 109.02, 109.01, 109.03]),
+      "no",
+      {
+        ...shared,
+        rapidMoveEnabled: true,
+        rapidMoveThresholdPct: 0.01,
+      },
+    );
+    assert.equal(strict.reason, "freefall_consecutive_falling");
+    assert.equal(strict.coordinatedDirectionClearanceApplied, false);
+    assert.equal(targetSide.reason, "freefall_wrong_target_side_yes");
+    assert.equal(targetSide.coordinatedDirectionClearanceApplied, false);
+    assert.equal(stale.reason, "freefall_unavailable_stale");
+    assert.equal(stale.coordinatedDirectionClearanceApplied, false);
+    assert.equal(rapid.blocked, true);
+    assert.equal(rapid.rapidMoveBlocked, true);
+    assert.equal(rapid.coordinatedDirectionClearanceApplied, false);
+  });
+
+  it("does not dilute adverse pace with a longer non-blocking rapid window", () => {
+    const samples = makeSamples(
+      [
+        109.01, 109, 109.01, 109, 109.01, 109,
+        109, 109.05, 109.1, 109.05, 109.12,
+      ],
+      nowMs - 10_000,
+    );
+    const result = evaluate(samples, "no", {
+      eligibilityStartMs: nowMs - 10_000,
+      coordinatedDirectionClearanceEnabled: true,
+      targetProximityGuardEnabled: true,
+      targetProximityThresholdPct: 0.05,
+      secondsRemaining: 40,
+      rapidMoveEnabled: true,
+      rapidMoveLookbackSeconds: 10,
+      rapidMoveThresholdPct: 1,
+    });
+    assert.equal(result.rapidMoveBlocked, false);
+    assert.equal(result.blocked, true);
+    assert.equal(
+      result.reason,
+      "coordinated_direction_clearance_projected_too_close_no",
+    );
+    assert.ok((result.projectedPrice ?? 0) > 110);
+  });
+
+  it("preserves the full-window block when coordinated clearance is disabled", () => {
+    const result = evaluate(
+      makeSamples([109, 109.01, 109.02, 109.01, 109.03]),
+      "no",
+      {
+        coordinatedDirectionClearanceEnabled: false,
+        targetProximityGuardEnabled: true,
+        targetProximityThresholdPct: 0.05,
+        secondsRemaining: 40,
+      },
+    );
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_favorable_trend_not_confirmed_no");
+    assert.equal(result.coordinatedDirectionClearanceApplied, false);
+    assert.equal(result.coordinatedDirectionClearanceSafe, null);
+  });
+
+  it("fails closed when target-distance coordination is not enabled", () => {
+    const result = evaluate(
+      makeSamples([109, 109.01, 109.02, 109.01, 109.03]),
+      "no",
+      {
+        coordinatedDirectionClearanceEnabled: true,
+        targetProximityGuardEnabled: false,
+        targetProximityThresholdPct: 0.05,
+        secondsRemaining: 40,
+      },
+    );
+    assert.equal(result.blocked, true);
+    assert.equal(
+      result.reason,
+      "coordinated_direction_clearance_requires_target_guard",
+    );
+    assert.equal(result.coordinatedDirectionClearanceApplied, false);
+  });
+
   it("allows NO during slow or fast favorable falling movement when rapid guard is off", () => {
     const result = evaluate(makeSamples([109, 108, 106, 103, 100]), "no");
     assert.equal(result.evaluable, true);
@@ -1671,6 +1863,7 @@ const baseCfg = (): RiskConfigLike => ({
   freefallGuardEnabled: true,
   freefallConsecutiveSeconds: 4,
   favorableTrendConfirmationEnabled: true,
+  coordinatedDirectionClearanceEnabled: true,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
   rapidMoveGuardEnabled: false,
@@ -1703,6 +1896,7 @@ describe("buildExecutionRiskSnapshot", () => {
     assert.equal(s.freefallGuardEnabled, true);
     assert.equal(s.freefallConsecutiveSeconds, 4);
     assert.equal(s.favorableTrendConfirmationEnabled, true);
+    assert.equal(s.coordinatedDirectionClearanceEnabled, true);
     assert.equal(s.freefallLookbackSeconds, 30);
     assert.equal(s.freefallThresholdPct, 0.5);
     assert.equal(s.rapidMoveGuardEnabled, false);
@@ -1787,6 +1981,17 @@ describe("compareRiskSnapshot (fail-closed diff)", () => {
       baseIdentity(),
     );
     assert.ok(d.changedFields.includes("favorableTrendConfirmationEnabled"));
+  });
+  it("coordinated direction clearance toggle change => rejected", () => {
+    const d = compareRiskSnapshot(
+      snap(),
+      { ...baseCfg(), coordinatedDirectionClearanceEnabled: false },
+      baseParams(),
+      baseIdentity(),
+    );
+    assert.ok(
+      d.changedFields.includes("coordinatedDirectionClearanceEnabled"),
+    );
   });
   it("freefall lookback change => rejected", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallLookbackSeconds: 45 }, baseParams(), baseIdentity());
@@ -1990,6 +2195,22 @@ describe("parseScalpConfigPatch", () => {
     );
     assert.equal(
       parseScalpConfigPatch({ favorableTrendConfirmationEnabled: "false" }).ok,
+      false,
+    );
+  });
+
+  it("accepts a real coordinated-clearance toggle and rejects coercion", () => {
+    assert.deepEqual(
+      parseScalpConfigPatch({ coordinatedDirectionClearanceEnabled: true }),
+      {
+        ok: true,
+        value: { coordinatedDirectionClearanceEnabled: true },
+      },
+    );
+    assert.equal(
+      parseScalpConfigPatch({
+        coordinatedDirectionClearanceEnabled: "true",
+      }).ok,
       false,
     );
   });
@@ -2585,7 +2806,7 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(checkPos >= 0, "a sync final validation must occur between intent and submit");
     assert.match(
       between,
-      /evaluatePinnedFreefallAt\(runtime\.nowMs\(\)\)/,
+      /const finalFreefallLiveAtMs = runtime\.nowMs\(\);[\s\S]*?evaluatePinnedFreefallAt\(finalFreefallLiveAtMs\)/,
       "sample freshness and full-window direction must be rechecked after intent persistence",
     );
   });
@@ -2634,11 +2855,35 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(db, /export async function abortIntentAndReleaseReservation/);
     // Atomic: BEGIN + advisory lock + COMMIT.
     const fnIdx = db.indexOf("export async function abortIntentAndReleaseReservation");
-    const fnBody = db.slice(fnIdx, fnIdx + 1400);
+    const fnBody = db.slice(fnIdx, fnIdx + 2400);
     assert.match(fnBody, /BEGIN/);
     assert.match(fnBody, /pg_advisory_xact_lock/);
     assert.match(fnBody, /reserved_budget = 0/);
     assert.match(fnBody, /COMMIT/);
+  });
+
+  it("authoritative reconciliation persists decisive entry-guard evidence", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const db = readFileSync(join(here, "kalshi-scalper-db.ts"), "utf8");
+    const applyStart = svc.indexOf("async function _applyScalpReconciliation(");
+    const applyEnd = svc.indexOf("\nasync function ", applyStart + 1);
+    const applyBody = svc.slice(applyStart, applyEnd);
+    assert.match(
+      applyBody,
+      /entryGuardEvidence: order\.entryGuardEvidence/,
+    );
+    const reconcileStart = db.indexOf(
+      "export async function reconcileScalpOrderAndReleaseReservation",
+    );
+    const reconcileBody = db.slice(reconcileStart, reconcileStart + 2600);
+    assert.match(
+      reconcileBody,
+      /entry_guard_evidence = COALESCE\(\$12::jsonb, entry_guard_evidence\)/,
+    );
+    assert.match(
+      reconcileBody,
+      /JSON\.stringify\(params\.entryGuardEvidence\)/,
+    );
   });
 
   // ── Freefall fail-closed wiring ────────────────────────────────────────────

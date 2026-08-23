@@ -880,6 +880,41 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
             <div className="border-t border-border/60 pt-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
+                  <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Coordinated Guard Clearance</div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground/70">
+                    Optionally clears only a weak full-window trend rejection when its current pace projects to remain beyond the target-distance buffer through close. Mirrors both sides: a rise toward the target for Below/NO and a fall toward it for Above/YES. Strict streaks, fast moves, stale data, and target-side failures always block.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={merged.coordinatedDirectionClearanceEnabled}
+                  data-testid="switch-scalper-coordinated-clearance"
+                  disabled={
+                    !merged.freefallGuardEnabled
+                    || !merged.favorableTrendConfirmationEnabled
+                  }
+                  onClick={() => handleConfigChange(
+                    "coordinatedDirectionClearanceEnabled",
+                    !merged.coordinatedDirectionClearanceEnabled,
+                  )}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${merged.coordinatedDirectionClearanceEnabled ? "bg-amber-500" : "bg-muted"}`}
+                  title="Toggle coordinated direction clearance"
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.coordinatedDirectionClearanceEnabled ? "translate-x-5" : "translate-x-0"}`} />
+                  <span className="sr-only">Coordinated Guard Clearance</span>
+                </button>
+              </div>
+              {merged.coordinatedDirectionClearanceEnabled && !merged.targetProximityGuardEnabled && (
+                <p className="mt-2 text-[9px] leading-relaxed text-amber-300/80">
+                  Clearance remains fail-closed until the Target Distance Guard is enabled.
+                </p>
+              )}
+            </div>
+
+            <div className="border-t border-border/60 pt-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
                   <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Optional Fast-Move Avoidance</div>
                   <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground/70">
                     Independently blocks an unusually fast rise or fall. Turn this off without changing the directional protection above.

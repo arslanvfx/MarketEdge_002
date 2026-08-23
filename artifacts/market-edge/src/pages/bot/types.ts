@@ -578,6 +578,7 @@ export interface ScalperConfig {
   freefallGuardEnabled: boolean;
   freefallConsecutiveSeconds: number;
   favorableTrendConfirmationEnabled: boolean;
+  coordinatedDirectionClearanceEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled: boolean;
@@ -625,6 +626,14 @@ export interface ScalpSkipEvidence {
   favorableTrendConfirmationEnabled?: boolean | null;
   favorableTrendConfirmed?: boolean | null;
   favorableTrendReason?: string | null;
+  coordinatedDirectionClearanceEnabled?: boolean | null;
+  coordinatedDirectionClearanceApplied?: boolean | null;
+  coordinatedDirectionClearanceSafe?: boolean | null;
+  coordinatedDirectionClearanceReason?: string | null;
+  adversePacePctPerSecond?: number | null;
+  projectedAdverseMovePct?: number | null;
+  projectedDistancePct?: number | null;
+  projectedPrice?: number | null;
   targetSideWindowConfirmed?: boolean | null;
   targetSideViolationPrice?: number | null;
   targetSideViolationAt?: string | null;
@@ -764,6 +773,7 @@ export interface EntryGuardEvidence {
   side: "yes" | "no";
   directionGuardEnabled: boolean;
   favorableTrendConfirmationEnabled?: boolean;
+  coordinatedDirectionClearanceEnabled?: boolean;
   rapidMoveGuardEnabled: boolean;
   targetProximityGuardEnabled: boolean;
   samples: Array<{ at: string; price: number }>;
@@ -776,6 +786,14 @@ export interface EntryGuardEvidence {
   directionalMovePct: number | null;
   favorableTrendConfirmed?: boolean | null;
   favorableTrendReason?: string | null;
+  coordinatedDirectionClearanceApplied?: boolean;
+  coordinatedDirectionClearanceSafe?: boolean | null;
+  coordinatedDirectionClearanceReason?: string | null;
+  adversePacePctPerSecond?: number | null;
+  projectedAdverseMovePct?: number | null;
+  projectedDistancePct?: number | null;
+  projectedPrice?: number | null;
+  secondsRemaining?: number | null;
   targetSideWindowConfirmed?: boolean | null;
   targetSideViolationPrice?: number | null;
   targetSideViolationAt?: string | null;
