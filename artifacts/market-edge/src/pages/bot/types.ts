@@ -934,3 +934,52 @@ export interface ScalperWindowFunnelReport {
   windows: ScalperWindowFunnel[];
 }
 
+export interface ScalperShadowStudyRecord {
+  mode: "paper" | "live";
+  windowKey: string;
+  symbol: string;
+  ticker: string;
+  variantSeconds: 120 | 105 | 90;
+  status: "observing" | "candidate_found" | "closed_no_candidate" | "settled";
+  firstEligibleAt: string;
+  firstSafeEntryAt: string | null;
+  firstSafeSecondsRemaining: number | null;
+  side: "yes" | "no" | null;
+  yesAsk: number | null;
+  noAsk: number | null;
+  winningAsk: number | null;
+  hypotheticalContracts: number;
+  hypotheticalBudget: number;
+  lastBlocker: string | null;
+  blockerCounts: Record<string, number>;
+  entryEvidence: Record<string, unknown> | null;
+  laterQuoteIssueObserved: boolean;
+  laterQuoteIssueReason: "invalid" | "outside_band" | null;
+  settlementResult: "yes" | "no" | null;
+  outcome: "win" | "loss" | null;
+  hypotheticalPnl: number | null;
+  createdAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+}
+
+export interface ScalperShadowVariantSummary {
+  variantSeconds: 120 | 105 | 90;
+  observed: number;
+  candidates: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  candidatesBeforeLaterQuoteIssue: number;
+  averageFirstSafeSecondsRemaining: number | null;
+  hypotheticalPnl: number;
+}
+
+export interface ScalperShadowStudyReport {
+  mode: "paper" | "live";
+  variants: ScalperShadowVariantSummary[];
+  recent: ScalperShadowStudyRecord[];
+  disclaimer: string;
+}
+

@@ -6,6 +6,7 @@
 // GET  /api/crypto/scalper/history     — {orders, total} with ?mode=&symbol=&limit=
 // GET  /api/crypto/scalper/performance — one ScalpPerformance for ?mode=paper|live
 // GET  /api/crypto/scalper/funnel      — rolling per-window execution funnel
+// GET  /api/crypto/scalper/shadow-study — earlier-entry counterfactual report
 // POST /api/crypto/scalper/config      — top-level partial ScalpConfig → {ok,config}
 // POST /api/crypto/scalper/reset-circuit-breaker → {ok,config}
 // ---------------------------------------------------------------------------
@@ -30,6 +31,7 @@ import {
   getScalpHistory,
   getScalpPerformance,
   getScalpWindowFunnel,
+  getScalpShadowStudy,
   resetScalpPerformance,
   reconcileUnresolvedScalpOrder,
   ScalpReconciliationError,
@@ -139,6 +141,26 @@ router.get("/crypto/scalper/funnel", async (req, res): Promise<void> => {
     res.json(funnel);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch scalper funnel" });
+  }
+});
+
+// ── GET /api/crypto/scalper/shadow-study ─────────────────────────────────────
+// Reporting-only. Shadow candidates are cached-quote counterfactuals and never
+// feed reservations, caps, execution, reconciliation, or real performance.
+router.get("/crypto/scalper/shadow-study", async (req, res): Promise<void> => {
+  try {
+    const config = getScalpConfig();
+    const mode = parseMode(req.query["mode"]) ?? config.mode;
+    const limitParam = typeof req.query["limit"] === "string"
+      ? Number.parseInt(req.query["limit"], 10)
+      : 144;
+    const study = await getScalpShadowStudy(
+      mode,
+      Number.isFinite(limitParam) ? limitParam : 144,
+    );
+    res.json(study);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch Scalper shadow study" });
   }
 });
 

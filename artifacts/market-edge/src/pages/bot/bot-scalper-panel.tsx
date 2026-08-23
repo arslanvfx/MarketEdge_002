@@ -8,6 +8,7 @@ import type {
   ScalperStatus,
   ScalperPerformance,
   ScalperUnresolvedAttempt,
+  ScalperShadowStudyReport,
   ScalperWindowFunnelReport,
 } from "./types";
 import {
@@ -55,6 +56,11 @@ function formatScalperLatency(value: number | null): string {
   if (value == null) return "—";
   if (value < 1_000) return `${Math.round(value)}ms`;
   return `${(value / 1_000).toFixed(value < 10_000 ? 2 : 1)}s`;
+}
+
+function formatShadowVariant(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
@@ -149,6 +155,22 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     },
     enabled: Boolean(cfg),
     refetchInterval: 10_000,
+  });
+
+  const { data: shadowStudyData } = useQuery<ScalperShadowStudyReport>({
+    queryKey: ["bot-scalper-shadow-study", scalperMode],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(
+        `${API_BASE}/crypto/scalper/shadow-study?mode=${scalperMode}&limit=144`,
+        { signal },
+      );
+      if (!response.ok) {
+        throw new Error(`Unable to load shadow study (HTTP ${response.status})`);
+      }
+      return response.json();
+    },
+    enabled: Boolean(cfg),
+    refetchInterval: 30_000,
   });
 
   const hasDraft = Object.keys(configDraft).length > 0;
@@ -1343,6 +1365,155 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {shadowStudyData && (
+          <div
+            data-testid="panel-scalper-shadow-study"
+            className="mt-8 border-t border-amber-500/20 pt-6"
+          >
+            <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+              <Timer className="mt-0.5 h-4 w-4 shrink-0 text-amber-500/70" />
+              <div className="min-w-0">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-amber-500/70">
+                  Shadow entry study
+                </h3>
+                <p className="mt-1 max-w-3xl text-[10px] leading-relaxed text-muted-foreground">
+                  Observes hypothetical starts at 2:00, 1:45, and 1:30 remaining.
+                  Live timing and every live safety rule stay unchanged.
+                </p>
+              </div>
+              <span className="ml-auto rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[9px] font-bold uppercase tracking-wide text-amber-200">
+                No orders placed
+              </span>
+            </div>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              {shadowStudyData.variants.map((variant) => (
+                <div
+                  key={variant.variantSeconds}
+                  data-testid={`card-scalper-shadow-${variant.variantSeconds}`}
+                  className="rounded-lg border border-border bg-background/40 p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-sm font-black text-amber-200">
+                      {formatShadowVariant(variant.variantSeconds)}
+                    </span>
+                    <span className="text-[9px] uppercase tracking-wide text-muted-foreground">
+                      remaining
+                    </span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-center">
+                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
+                      <div className="font-mono text-sm font-bold text-foreground">
+                        {variant.candidates}/{variant.observed}
+                      </div>
+                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
+                        guard + quote pass
+                      </div>
+                    </div>
+                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
+                      <div className="font-mono text-sm font-bold text-emerald-300">
+                        {variant.winRate == null ? "—" : `${variant.winRate.toFixed(0)}%`}
+                      </div>
+                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
+                        settled wins
+                      </div>
+                    </div>
+                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
+                      <div className="font-mono text-sm font-bold text-amber-100">
+                        {variant.candidatesBeforeLaterQuoteIssue}
+                      </div>
+                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
+                        before quote loss
+                      </div>
+                    </div>
+                    <div className="rounded border border-border/70 bg-card/40 px-2 py-1.5">
+                      <div className={`font-mono text-sm font-bold ${
+                        variant.hypotheticalPnl >= 0 ? "text-emerald-300" : "text-red-300"
+                      }`}>
+                        {fmt$(variant.hypotheticalPnl)}
+                      </div>
+                      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">
+                        hypothetical P&amp;L
+                      </div>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-[9px] text-muted-foreground/80">
+                    {variant.settled} settled · first safe avg{" "}
+                    {variant.averageFirstSafeSecondsRemaining == null
+                      ? "—"
+                      : `${variant.averageFirstSafeSecondsRemaining.toFixed(0)}s left`}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {shadowStudyData.recent.some((row) => row.firstSafeEntryAt) && (
+              <div className="mt-3 overflow-x-auto rounded-lg border border-border bg-background/30">
+                <table className="w-full min-w-[680px] text-left text-[10px]">
+                  <thead className="border-b border-border/70 text-[8px] uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2">Window</th>
+                      <th className="px-3 py-2">Market</th>
+                      <th className="px-3 py-2">Study start</th>
+                      <th className="px-3 py-2">First safe</th>
+                      <th className="px-3 py-2">Later quote</th>
+                      <th className="px-3 py-2">Outcome</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shadowStudyData.recent
+                      .filter((row) => row.firstSafeEntryAt)
+                      .slice(0, 12)
+                      .map((row) => (
+                        <tr
+                          key={`${row.mode}:${row.windowKey}:${row.symbol}:${row.variantSeconds}`}
+                          className="border-b border-border/40 last:border-0"
+                        >
+                          <td className="px-3 py-2 text-muted-foreground">
+                            {wkToEstRange(row.windowKey)}
+                          </td>
+                          <td className="px-3 py-2 font-bold text-foreground">
+                            {row.symbol} {row.side?.toUpperCase()}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-amber-200">
+                            {formatShadowVariant(row.variantSeconds)}
+                          </td>
+                          <td className="px-3 py-2 font-mono">
+                            {row.firstSafeSecondsRemaining == null
+                              ? "—"
+                              : `${row.firstSafeSecondsRemaining.toFixed(0)}s · ${((row.winningAsk ?? 0) * 100).toFixed(0)}¢`}
+                          </td>
+                          <td className="px-3 py-2">
+                            {row.laterQuoteIssueObserved
+                              ? row.laterQuoteIssueReason === "outside_band"
+                                ? "Out of band later"
+                                : "Invalid later"
+                              : "Stayed available"}
+                          </td>
+                          <td className={`px-3 py-2 font-bold ${
+                            row.outcome === "win"
+                              ? "text-emerald-300"
+                              : row.outcome === "loss"
+                                ? "text-red-300"
+                                : "text-muted-foreground"
+                          }`}>
+                            {row.outcome
+                              ? `${row.outcome.toUpperCase()} · ${fmt$(row.hypotheticalPnl ?? 0)}`
+                              : "Awaiting result"}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <p className="mt-3 text-[9px] leading-relaxed text-muted-foreground/70">
+              {shadowStudyData.disclaimer}
+            </p>
           </div>
         )}
 

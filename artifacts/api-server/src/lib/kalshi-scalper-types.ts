@@ -308,6 +308,73 @@ export interface ScalpWindowFunnelReport {
   windows: ScalpWindowFunnel[];
 }
 
+// ---------------------------------------------------------------------------
+// Earlier-entry shadow study
+// ---------------------------------------------------------------------------
+
+export const SCALP_SHADOW_VARIANT_SECONDS = [120, 105, 90] as const;
+export type ScalpShadowVariantSeconds =
+  typeof SCALP_SHADOW_VARIANT_SECONDS[number];
+
+export type ScalpShadowStudyStatus =
+  | "observing"
+  | "candidate_found"
+  | "closed_no_candidate"
+  | "settled";
+
+/**
+ * Counterfactual only. A qualifying cached/public quote is not evidence that an
+ * IOC order would have filled and is never admitted to live cap/performance data.
+ */
+export interface ScalpShadowStudyRecord {
+  mode: ScalpMode;
+  windowKey: string;
+  symbol: string;
+  ticker: string;
+  variantSeconds: ScalpShadowVariantSeconds;
+  status: ScalpShadowStudyStatus;
+  firstEligibleAt: string;
+  firstSafeEntryAt: string | null;
+  firstSafeSecondsRemaining: number | null;
+  side: "yes" | "no" | null;
+  yesAsk: number | null;
+  noAsk: number | null;
+  winningAsk: number | null;
+  hypotheticalContracts: number;
+  hypotheticalBudget: number;
+  lastBlocker: string | null;
+  blockerCounts: Record<string, number>;
+  entryEvidence: Record<string, unknown> | null;
+  laterQuoteIssueObserved: boolean;
+  laterQuoteIssueReason: "invalid" | "outside_band" | null;
+  settlementResult: "yes" | "no" | null;
+  outcome: "win" | "loss" | null;
+  hypotheticalPnl: number | null;
+  createdAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+}
+
+export interface ScalpShadowVariantSummary {
+  variantSeconds: ScalpShadowVariantSeconds;
+  observed: number;
+  candidates: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  candidatesBeforeLaterQuoteIssue: number;
+  averageFirstSafeSecondsRemaining: number | null;
+  hypotheticalPnl: number;
+}
+
+export interface ScalpShadowStudyReport {
+  mode: ScalpMode;
+  variants: ScalpShadowVariantSummary[];
+  recent: ScalpShadowStudyRecord[];
+  disclaimer: string;
+}
+
 export type ScalpLatencyStage =
   | "queue_wait"
   | "cap_claim"

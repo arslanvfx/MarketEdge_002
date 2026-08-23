@@ -32,9 +32,14 @@ import type {
   ScalpPerMarketOverride,
   ScalpEntryGuardEvidence,
   ScalpSkipEvidence,
+  ScalpShadowStudyRecord,
+  ScalpShadowStudyReport,
   ScalpWindowFunnelReport,
 } from "./kalshi-scalper-types.ts";
-import { DEFAULT_SCALP_CONFIG } from "./kalshi-scalper-types.ts";
+import {
+  DEFAULT_SCALP_CONFIG,
+  SCALP_SHADOW_VARIANT_SECONDS,
+} from "./kalshi-scalper-types.ts";
 import {
   resolveEffectiveParams,
   selectScalpSide,
@@ -83,6 +88,12 @@ import {
   summarizeScalpAttemptLatencies,
 } from "./kalshi-scalper-fast-path.ts";
 import {
+  createBoundedScalpShadowWriter,
+  buildScalpShadowStudyReport,
+  evaluateScalpShadowEntry,
+  settleScalpShadowRecord,
+} from "./kalshi-scalper-shadow.ts";
+import {
   evaluateRegularPositionCompatibility,
   type RegularPositionCompatibility,
   type RegularPositionForScalperLayering,
@@ -118,8 +129,11 @@ import {
   getScalpOrdersForPerformance,
   getScalpPerformanceBaseline,
   getScalpWindowFunnelCounters,
+  getRecentScalpShadowStudies,
+  getUnsettledScalpShadowStudies,
   recordScalpFunnelEvent,
   resetScalpPerformanceWindow,
+  upsertScalpShadowStudy,
 } from "./kalshi-scalper-db.ts";
 import { calculateScalpPerformance } from "./kalshi-scalper-performance.ts";
 
@@ -173,6 +187,209 @@ const _funnelRecorder = createBoundedScalpFunnelRecorder(
   ({ mode, windowKey, symbol, stage }) =>
     recordScalpFunnelEvent(mode, windowKey, symbol, stage),
 );
+
+const _shadowWriter = createBoundedScalpShadowWriter(
+  upsertScalpShadowStudy,
+);
+const _shadowStates = new Map<string, ScalpShadowStudyRecord>();
+let _lastShadowObservationAt = 0;
+let _shadowSettlementInFlight = false;
+
+function _shadowKey(
+  mode: ScalpMode,
+  windowKey: string,
+  symbol: string,
+  variantSeconds: number,
+): string {
+  return `${mode}:${windowKey}:${symbol}:${variantSeconds}`;
+}
+
+function _queueShadowRecord(record: ScalpShadowStudyRecord): void {
+  _shadowWriter.record({
+    ...record,
+    blockerCounts: { ...record.blockerCounts },
+    entryEvidence: record.entryEvidence
+      ? { ...record.entryEvidence }
+      : null,
+  });
+}
+
+function _finalizeShadowWindow(windowKey: string, nowMs: number): void {
+  for (const [key, record] of _shadowStates) {
+    if (record.windowKey !== windowKey || record.status === "settled") continue;
+    record.status = record.firstSafeEntryAt
+      ? "candidate_found"
+      : "closed_no_candidate";
+    record.updatedAt = new Date(nowMs).toISOString();
+    _queueShadowRecord(record);
+    _shadowStates.delete(key);
+  }
+}
+
+/**
+ * Read-only observation of 120s/105s/90s counterfactuals. It reuses cached
+ * public quotes and existing Scalper-owned underlying samples; no network,
+ * reservation, cap, balance, intent, broker, or reconciliation path is called.
+ */
+function _observeShadowEntries(windowKey: string, nowMs: number): void {
+  if (nowMs - _lastShadowObservationAt < 1_000) return;
+  if (_attemptsInFlight.size > 0) return;
+  _lastShadowObservationAt = nowMs;
+  const expectedCloseTime = _currentWindowCloseTime(windowKey);
+  if (!expectedCloseTime) return;
+
+  for (const coin of CRYPTO_COINS) {
+    const symbol = coin.symbol.toUpperCase();
+    if (!KALSHI_SERIES[symbol]) continue;
+    const params = resolveEffectiveParams(_config, symbol, "");
+    const cached = getKalshiCachedData(symbol);
+    const samples = _priceSamples.get(symbol) ?? [];
+
+    for (const variantSeconds of SCALP_SHADOW_VARIANT_SECONDS) {
+      const evaluation = evaluateScalpShadowEntry({
+        nowMs,
+        closeTime: cached?.closeTime ?? expectedCloseTime,
+        variantSeconds,
+        ticker: cached?.ticker ?? null,
+        expectedCloseTime,
+        yesAsk: cached?.yesAsk,
+        yesBid: cached?.yesBid,
+        targetPrice: cached?.value,
+        samples,
+        config: _config,
+        params,
+      });
+      if (!evaluation.started || evaluation.closed) continue;
+
+      const key = _shadowKey(_config.mode, windowKey, symbol, variantSeconds);
+      let record = _shadowStates.get(key);
+      let shouldPersist = false;
+      if (!record) {
+        const firstEligibleAt = new Date(
+          Date.parse(expectedCloseTime) - variantSeconds * 1_000,
+        ).toISOString();
+        const observedAt = new Date(nowMs).toISOString();
+        record = {
+          mode: _config.mode,
+          windowKey,
+          symbol,
+          ticker: cached?.ticker ?? "",
+          variantSeconds,
+          status: "observing",
+          firstEligibleAt,
+          firstSafeEntryAt: null,
+          firstSafeSecondsRemaining: null,
+          side: null,
+          yesAsk: null,
+          noAsk: null,
+          winningAsk: null,
+          hypotheticalContracts: 0,
+          hypotheticalBudget: params.budgetDollars,
+          lastBlocker: null,
+          blockerCounts: {},
+          entryEvidence: null,
+          laterQuoteIssueObserved: false,
+          laterQuoteIssueReason: null,
+          settlementResult: null,
+          outcome: null,
+          hypotheticalPnl: null,
+          createdAt: observedAt,
+          updatedAt: observedAt,
+          settledAt: null,
+        };
+        _shadowStates.set(key, record);
+        shouldPersist = true;
+      }
+
+      if (cached?.ticker) record.ticker = cached.ticker;
+      record.updatedAt = new Date(nowMs).toISOString();
+      record.lastBlocker = evaluation.blocker;
+      if (evaluation.blocker) {
+        record.blockerCounts[evaluation.blocker] =
+          (record.blockerCounts[evaluation.blocker] ?? 0) + 1;
+      }
+
+      if (evaluation.allowed && record.firstSafeEntryAt == null) {
+        const contractCount = Math.floor(
+          params.budgetDollars / (evaluation.winningAsk ?? Number.POSITIVE_INFINITY),
+        );
+        if (contractCount >= 1) {
+          record.status = "candidate_found";
+          record.firstSafeEntryAt = new Date(nowMs).toISOString();
+          record.firstSafeSecondsRemaining = evaluation.secondsRemaining;
+          record.side = evaluation.side;
+          record.yesAsk = evaluation.yesAsk;
+          record.noAsk = evaluation.noAsk;
+          record.winningAsk = evaluation.winningAsk;
+          record.hypotheticalContracts = contractCount;
+          record.entryEvidence = evaluation.evidence;
+          shouldPersist = true;
+        } else {
+          record.lastBlocker = "budget_below_one_contract";
+          record.blockerCounts["budget_below_one_contract"] =
+            (record.blockerCounts["budget_below_one_contract"] ?? 0) + 1;
+        }
+      } else if (
+        record.firstSafeEntryAt != null
+        && !record.laterQuoteIssueObserved
+        && (
+          evaluation.blocker === "quote_invalid"
+          || evaluation.blocker === "quote_outside_band"
+        )
+      ) {
+        record.laterQuoteIssueObserved = true;
+        record.laterQuoteIssueReason =
+          evaluation.blocker === "quote_invalid" ? "invalid" : "outside_band";
+        shouldPersist = true;
+      }
+
+      if (shouldPersist) _queueShadowRecord(record);
+    }
+  }
+}
+
+async function _evaluateShadowSettlements(): Promise<void> {
+  if (
+    _shadowSettlementInFlight
+    || _attemptsInFlight.size > 0
+    || _running
+  ) return;
+  _shadowSettlementInFlight = true;
+  try {
+    const rows = await getUnsettledScalpShadowStudies(36);
+    const first = rows.find((row) =>
+      row.ticker
+      && row.firstSafeEntryAt
+      && row.side
+      && row.winningAsk != null
+      && row.hypotheticalContracts > 0
+    );
+    if (!first) return;
+    const result = await fetchKalshiMarketResult(first.ticker).catch(() => null);
+    if (result?.result !== "yes" && result?.result !== "no") return;
+
+    for (const row of rows) {
+      if (
+        row.mode !== first.mode
+        || row.windowKey !== first.windowKey
+        || row.ticker !== first.ticker
+        || !row.side
+        || row.winningAsk == null
+      ) continue;
+      const settledAt = new Date().toISOString();
+      _queueShadowRecord(
+        settleScalpShadowRecord(row, result.result, settledAt),
+      );
+    }
+  } catch (err) {
+    logger.debug(
+      { err },
+      "[kalshi-scalper] shadow settlement skipped (non-fatal)",
+    );
+  } finally {
+    _shadowSettlementInFlight = false;
+  }
+}
 
 function _recordScalpFunnelEvent(
   mode: ScalpMode,
@@ -538,6 +755,7 @@ export async function initScalper(): Promise<void> {
 
   _startScanLoop();
   setInterval(() => { _evaluateSettlements().catch(() => {}); }, 30_000);
+  setInterval(() => { _evaluateShadowSettlements().catch(() => {}); }, 30_000);
 }
 
 function _startScanLoop(): void {
@@ -1142,7 +1360,36 @@ async function _executeScanPass(): Promise<void> {
 const _scanRunner = createCoalescedAsyncRunner(_executeScanPass);
 
 async function _doScanTick(): Promise<void> {
+  const wk = currentWindowKey();
+  if (!wk) return;
+  if (_lastObservedWindowKey !== wk) {
+    if (_lastObservedWindowKey) {
+      _finalizeShadowWindow(_lastObservedWindowKey, Date.now());
+    }
+    _lastObservedWindowKey = wk;
+    _terminalAttemptKeys.clear();
+    _nextAttemptAt.clear();
+    _funnelRecorder.clearExceptWindow(wk);
+    // A new market window owns a new real-time direction baseline. Preflight
+    // samples from the previous market must never count toward eligibility.
+    _priceSamples.clear();
+    _resetPreflightState();
+  }
+
+  // Shadow observation remains useful when live/paper execution is disabled or
+  // a symbol is operator-paused. Keep its existing underlying sample source
+  // warm without making any additional Kalshi quote request.
+  if (Date.now() - _lastSampleCollectionAt >= 1_000) {
+    _lastSampleCollectionAt = Date.now();
+    for (const coin of CRYPTO_COINS) {
+      if (KALSHI_SERIES[coin.symbol]) {
+        void _collectPriceSample(coin.symbol, coin.product, "background");
+      }
+    }
+  }
+
   if (!_config.enabled) {
+    _observeShadowEntries(wk, Date.now());
     _preflightStatus = {
       ..._preflightStatus,
       state: "idle",
@@ -1154,34 +1401,11 @@ async function _doScanTick(): Promise<void> {
     return;
   }
 
-  const wk = currentWindowKey();
-  if (!wk) return;
-  if (_lastObservedWindowKey !== wk) {
-    _lastObservedWindowKey = wk;
-    _terminalAttemptKeys.clear();
-    _nextAttemptAt.clear();
-    _funnelRecorder.clearExceptWindow(wk);
-    // A new market window owns a new real-time direction baseline. Preflight
-    // samples from the previous market must never count toward eligibility.
-    _priceSamples.clear();
-    _resetPreflightState();
-  }
-
   const mode = _config.mode;
-
-  // Keep Freefall Guard inputs warm at one-second cadence. The shared queue
-  // deduplicates each symbol and caps all underlying fetches at three.
-  if (Date.now() - _lastSampleCollectionAt >= 1_000) {
-    _lastSampleCollectionAt = Date.now();
-    for (const coin of CRYPTO_COINS) {
-      if (KALSHI_SERIES[coin.symbol]) {
-        void _collectPriceSample(coin.symbol, coin.product, "background");
-      }
-    }
-  }
 
   _maybeStartPreflight(wk, Date.now());
   if (_isCircuitBreakerBlocking()) {
+    _observeShadowEntries(wk, Date.now());
     _preflightStatus = {
       ..._preflightStatus,
       state: "blocked",
@@ -1193,7 +1417,10 @@ async function _doScanTick(): Promise<void> {
 
   // Quick scan using cached public quotes to find candidates.
   const candidates = _findCandidates(wk);
-  if (candidates.length === 0) return;
+  if (candidates.length === 0) {
+    _observeShadowEntries(wk, Date.now());
+    return;
+  }
   for (const candidate of candidates) {
     _recordScalpFunnelEvent(mode, wk, candidate.symbol, "candidate");
   }
@@ -1201,6 +1428,7 @@ async function _doScanTick(): Promise<void> {
   await _runWithConcurrency(candidates, SCALP_MAX_CONCURRENT_CANDIDATES, async (candidate) => {
     await _evaluateCandidate(candidate, wk, mode);
   });
+  _observeShadowEntries(wk, Date.now());
 }
 
 interface Candidate {
@@ -3596,6 +3824,15 @@ export async function getScalpWindowFunnel(
 ): Promise<ScalpWindowFunnelReport> {
   const rows = await getScalpWindowFunnelCounters(mode, windows);
   return buildScalpWindowFunnelReport(mode, rows);
+}
+
+/** Reporting-only shadow study; never participates in entry decisions. */
+export async function getScalpShadowStudy(
+  mode: ScalpMode,
+  limit = 144,
+): Promise<ScalpShadowStudyReport> {
+  const rows = await getRecentScalpShadowStudies(mode, limit);
+  return buildScalpShadowStudyReport(mode, rows);
 }
 
 export async function resetScalpPerformance(mode: ScalpMode): Promise<ScalpPerformance> {

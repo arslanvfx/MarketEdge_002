@@ -18,6 +18,8 @@ import {
   type ScalpReservation,
   type ScalpSkipEvidence,
   type ScalpFunnelEventStage,
+  type ScalpShadowStudyRecord,
+  type ScalpShadowVariantSeconds,
 } from "./kalshi-scalper-types.ts";
 import type { ScalpWindowFunnelCounters } from "./kalshi-scalper-fast-path.ts";
 import {
@@ -83,6 +85,52 @@ export async function runScalpMigrations(): Promise<void> {
     await client.query(`
       CREATE INDEX IF NOT EXISTS scalp_funnel_mode_window
         ON kalshi_scalp_funnel_events (mode, window_key, created_at DESC)
+    `);
+
+    // Counterfactual earlier-entry study. This table is intentionally separate
+    // from reservations/orders so shadow observations cannot affect caps,
+    // execution, reconciliation, or real performance totals.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kalshi_scalp_shadow_entries (
+        mode                       TEXT NOT NULL,
+        window_key                 TEXT NOT NULL,
+        symbol                     TEXT NOT NULL,
+        ticker                     TEXT NOT NULL,
+        variant_seconds            INTEGER NOT NULL,
+        status                     TEXT NOT NULL,
+        first_eligible_at          TIMESTAMPTZ NOT NULL,
+        first_safe_entry_at        TIMESTAMPTZ,
+        first_safe_seconds_remaining NUMERIC(10,3),
+        side                       TEXT,
+        yes_ask                    NUMERIC(8,4),
+        no_ask                     NUMERIC(8,4),
+        winning_ask                NUMERIC(8,4),
+        hypothetical_contracts     INTEGER NOT NULL DEFAULT 0,
+        hypothetical_budget        NUMERIC(12,4) NOT NULL DEFAULT 0,
+        last_blocker               TEXT,
+        blocker_counts             JSONB NOT NULL DEFAULT '{}'::jsonb,
+        entry_evidence              JSONB,
+        later_quote_issue_observed  BOOLEAN NOT NULL DEFAULT FALSE,
+        later_quote_issue_reason    TEXT,
+        settlement_result           TEXT,
+        outcome                     TEXT,
+        hypothetical_pnl            NUMERIC(16,8),
+        created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        settled_at                  TIMESTAMPTZ,
+        PRIMARY KEY (mode, window_key, symbol, variant_seconds),
+        CONSTRAINT scalp_shadow_variant_seconds
+          CHECK (variant_seconds IN (90, 105, 120))
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS scalp_shadow_mode_updated
+        ON kalshi_scalp_shadow_entries (mode, updated_at DESC)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS scalp_shadow_unsettled
+        ON kalshi_scalp_shadow_entries (status, first_eligible_at)
+        WHERE first_safe_entry_at IS NOT NULL AND settlement_result IS NULL
     `);
 
     // Orders/history — includes status/error fields and submitting lifecycle
@@ -1071,6 +1119,244 @@ export async function getScalpWindowFunnelCounters(
         ? row["last_activity_at"]
         : new Date(String(row["last_activity_at"])),
     }));
+  } finally {
+    client.release();
+  }
+}
+
+function shadowDateIso(value: unknown): string {
+  return value instanceof Date
+    ? value.toISOString()
+    : new Date(String(value)).toISOString();
+}
+
+function mapScalpShadowRow(row: Record<string, unknown>): ScalpShadowStudyRecord {
+  const blockerCounts = row["blocker_counts"];
+  const entryEvidence = row["entry_evidence"];
+  return {
+    mode: row["mode"] === "live" ? "live" : "paper",
+    windowKey: String(row["window_key"]),
+    symbol: String(row["symbol"]),
+    ticker: String(row["ticker"]),
+    variantSeconds: Number(row["variant_seconds"]) as ScalpShadowVariantSeconds,
+    status: String(row["status"]) as ScalpShadowStudyRecord["status"],
+    firstEligibleAt: shadowDateIso(row["first_eligible_at"]),
+    firstSafeEntryAt: row["first_safe_entry_at"] == null
+      ? null
+      : shadowDateIso(row["first_safe_entry_at"]),
+    firstSafeSecondsRemaining: row["first_safe_seconds_remaining"] == null
+      ? null
+      : Number(row["first_safe_seconds_remaining"]),
+    side: row["side"] === "yes" || row["side"] === "no"
+      ? row["side"]
+      : null,
+    yesAsk: row["yes_ask"] == null ? null : Number(row["yes_ask"]),
+    noAsk: row["no_ask"] == null ? null : Number(row["no_ask"]),
+    winningAsk: row["winning_ask"] == null
+      ? null
+      : Number(row["winning_ask"]),
+    hypotheticalContracts: Number(row["hypothetical_contracts"] ?? 0),
+    hypotheticalBudget: Number(row["hypothetical_budget"] ?? 0),
+    lastBlocker: row["last_blocker"] == null
+      ? null
+      : String(row["last_blocker"]),
+    blockerCounts: blockerCounts && typeof blockerCounts === "object"
+      ? blockerCounts as Record<string, number>
+      : {},
+    entryEvidence: entryEvidence && typeof entryEvidence === "object"
+      ? entryEvidence as Record<string, unknown>
+      : null,
+    laterQuoteIssueObserved: row["later_quote_issue_observed"] === true,
+    laterQuoteIssueReason:
+      row["later_quote_issue_reason"] === "invalid"
+      || row["later_quote_issue_reason"] === "outside_band"
+        ? row["later_quote_issue_reason"]
+        : null,
+    settlementResult:
+      row["settlement_result"] === "yes"
+      || row["settlement_result"] === "no"
+        ? row["settlement_result"]
+        : null,
+    outcome: row["outcome"] === "win" || row["outcome"] === "loss"
+      ? row["outcome"]
+      : null,
+    hypotheticalPnl: row["hypothetical_pnl"] == null
+      ? null
+      : Number(row["hypothetical_pnl"]),
+    createdAt: shadowDateIso(row["created_at"]),
+    updatedAt: shadowDateIso(row["updated_at"]),
+    settledAt: row["settled_at"] == null
+      ? null
+      : shadowDateIso(row["settled_at"]),
+  };
+}
+
+/**
+ * Best-effort counterfactual upsert. It never joins or writes execution tables.
+ * First-safe evidence is immutable once observed and settled rows never regress.
+ */
+export async function upsertScalpShadowStudy(
+  record: ScalpShadowStudyRecord,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `INSERT INTO kalshi_scalp_shadow_entries (
+         mode, window_key, symbol, ticker, variant_seconds, status,
+         first_eligible_at, first_safe_entry_at, first_safe_seconds_remaining,
+         side, yes_ask, no_ask, winning_ask, hypothetical_contracts,
+         hypothetical_budget, last_blocker, blocker_counts, entry_evidence,
+         later_quote_issue_observed, later_quote_issue_reason,
+         settlement_result, outcome, hypothetical_pnl,
+         created_at, updated_at, settled_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+         $19,$20,$21,$22,$23,$24,$25,$26
+       )
+       ON CONFLICT (mode, window_key, symbol, variant_seconds) DO UPDATE SET
+         ticker = EXCLUDED.ticker,
+         status = CASE
+           WHEN kalshi_scalp_shadow_entries.status = 'settled'
+             THEN kalshi_scalp_shadow_entries.status
+           ELSE EXCLUDED.status
+         END,
+         first_safe_entry_at = COALESCE(
+           kalshi_scalp_shadow_entries.first_safe_entry_at,
+           EXCLUDED.first_safe_entry_at
+         ),
+         first_safe_seconds_remaining = COALESCE(
+           kalshi_scalp_shadow_entries.first_safe_seconds_remaining,
+           EXCLUDED.first_safe_seconds_remaining
+         ),
+         side = COALESCE(kalshi_scalp_shadow_entries.side, EXCLUDED.side),
+         yes_ask = COALESCE(kalshi_scalp_shadow_entries.yes_ask, EXCLUDED.yes_ask),
+         no_ask = COALESCE(kalshi_scalp_shadow_entries.no_ask, EXCLUDED.no_ask),
+         winning_ask = COALESCE(
+           kalshi_scalp_shadow_entries.winning_ask,
+           EXCLUDED.winning_ask
+         ),
+         hypothetical_contracts = GREATEST(
+           kalshi_scalp_shadow_entries.hypothetical_contracts,
+           EXCLUDED.hypothetical_contracts
+         ),
+         hypothetical_budget = GREATEST(
+           kalshi_scalp_shadow_entries.hypothetical_budget,
+           EXCLUDED.hypothetical_budget
+         ),
+         last_blocker = EXCLUDED.last_blocker,
+         blocker_counts = EXCLUDED.blocker_counts,
+         entry_evidence = COALESCE(
+           kalshi_scalp_shadow_entries.entry_evidence,
+           EXCLUDED.entry_evidence
+         ),
+         later_quote_issue_observed = (
+           kalshi_scalp_shadow_entries.later_quote_issue_observed
+           OR EXCLUDED.later_quote_issue_observed
+         ),
+         later_quote_issue_reason = COALESCE(
+           kalshi_scalp_shadow_entries.later_quote_issue_reason,
+           EXCLUDED.later_quote_issue_reason
+         ),
+         settlement_result = COALESCE(
+           kalshi_scalp_shadow_entries.settlement_result,
+           EXCLUDED.settlement_result
+         ),
+         outcome = COALESCE(
+           kalshi_scalp_shadow_entries.outcome,
+           EXCLUDED.outcome
+         ),
+         hypothetical_pnl = COALESCE(
+           kalshi_scalp_shadow_entries.hypothetical_pnl,
+           EXCLUDED.hypothetical_pnl
+         ),
+         updated_at = GREATEST(
+           kalshi_scalp_shadow_entries.updated_at,
+           EXCLUDED.updated_at
+         ),
+         settled_at = COALESCE(
+           kalshi_scalp_shadow_entries.settled_at,
+           EXCLUDED.settled_at
+         )`,
+      [
+        record.mode,
+        record.windowKey,
+        record.symbol.toUpperCase(),
+        record.ticker,
+        record.variantSeconds,
+        record.status,
+        record.firstEligibleAt,
+        record.firstSafeEntryAt,
+        record.firstSafeSecondsRemaining,
+        record.side,
+        record.yesAsk,
+        record.noAsk,
+        record.winningAsk,
+        record.hypotheticalContracts,
+        record.hypotheticalBudget,
+        record.lastBlocker,
+        JSON.stringify(record.blockerCounts),
+        record.entryEvidence == null
+          ? null
+          : JSON.stringify(record.entryEvidence),
+        record.laterQuoteIssueObserved,
+        record.laterQuoteIssueReason,
+        record.settlementResult,
+        record.outcome,
+        record.hypotheticalPnl,
+        record.createdAt,
+        record.updatedAt,
+        record.settledAt,
+      ],
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function getRecentScalpShadowStudies(
+  mode: ScalpMode,
+  limit = 72,
+): Promise<ScalpShadowStudyRecord[]> {
+  const client = await pool.connect();
+  try {
+    const capped = Math.max(1, Math.min(240, Math.floor(limit)));
+    const result = await client.query(
+      `SELECT *
+         FROM kalshi_scalp_shadow_entries
+        WHERE mode = $1
+        ORDER BY first_eligible_at DESC, symbol, variant_seconds DESC
+        LIMIT $2`,
+      [mode, capped],
+    );
+    return result.rows.map((row) =>
+      mapScalpShadowRow(row as Record<string, unknown>)
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function getUnsettledScalpShadowStudies(
+  limit = 36,
+): Promise<ScalpShadowStudyRecord[]> {
+  const client = await pool.connect();
+  try {
+    const capped = Math.max(1, Math.min(120, Math.floor(limit)));
+    const result = await client.query(
+      `SELECT *
+         FROM kalshi_scalp_shadow_entries
+        WHERE first_safe_entry_at IS NOT NULL
+          AND settlement_result IS NULL
+          AND first_eligible_at
+              + variant_seconds * INTERVAL '1 second'
+              < NOW() - INTERVAL '45 seconds'
+        ORDER BY first_eligible_at ASC
+        LIMIT $1`,
+      [capped],
+    );
+    return result.rows.map((row) =>
+      mapScalpShadowRow(row as Record<string, unknown>)
+    );
   } finally {
     client.release();
   }
