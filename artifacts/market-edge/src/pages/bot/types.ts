@@ -912,3 +912,25 @@ export interface ScalperPerformance {
   bySymbol: ScalperPerformanceBySymbol[];
 }
 
+export interface ScalperWindowFunnel {
+  windowKey: string;
+  candidateSymbols: number;
+  eligibleQuotes: number;
+  finalQuoteLoss: number;
+  safetyBlocks: number;
+  submissions: number;
+  zeroFills: number;
+  confirmedFills: number;
+  lastActivityAt: string;
+}
+
+export interface ScalperWindowFunnelReport {
+  mode: "paper" | "live";
+  targetMinFills: number;
+  targetMaxFills: number;
+  activeWindows: number;
+  averageConfirmedFills: number | null;
+  windowsAtTarget: number;
+  windows: ScalperWindowFunnel[];
+}
+

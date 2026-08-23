@@ -41,6 +41,17 @@ describe("unified Scalper ledger wiring", () => {
     assert.match(panelSource, /button-scalper-check-details-/);
   });
 
+  it("renders a rolling per-window funnel without presenting the fill target as a mandate", () => {
+    assert.match(panelSource, /scalper\/funnel\?mode=\$\{scalperMode\}&windows=12/);
+    assert.match(panelSource, /Window fill funnel/);
+    assert.match(panelSource, /optimization target, never a reason to force an unsafe trade/);
+    assert.match(panelSource, /panel-scalper-window-funnel/);
+    assert.match(panelSource, /list-scalper-window-funnel/);
+    assert.match(panelSource, /Quote loss/);
+    assert.match(panelSource, /Safety blocks/);
+    assert.match(panelSource, /Confirmed/);
+  });
+
   it("shows successful regular-position layers in unified history", () => {
     assert.match(transactionLogSource, /layered on regular/);
     assert.match(transactionLogSource, /layeredRegularPositionId/);

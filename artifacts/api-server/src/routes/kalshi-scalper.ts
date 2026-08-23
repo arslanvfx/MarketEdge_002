@@ -5,6 +5,7 @@
 // GET  /api/crypto/scalper/status      — status with ?mode=paper|live
 // GET  /api/crypto/scalper/history     — {orders, total} with ?mode=&symbol=&limit=
 // GET  /api/crypto/scalper/performance — one ScalpPerformance for ?mode=paper|live
+// GET  /api/crypto/scalper/funnel      — rolling per-window execution funnel
 // POST /api/crypto/scalper/config      — top-level partial ScalpConfig → {ok,config}
 // POST /api/crypto/scalper/reset-circuit-breaker → {ok,config}
 // ---------------------------------------------------------------------------
@@ -28,6 +29,7 @@ import {
   getScalpStatus,
   getScalpHistory,
   getScalpPerformance,
+  getScalpWindowFunnel,
   resetScalpPerformance,
   reconcileUnresolvedScalpOrder,
   ScalpReconciliationError,
@@ -118,6 +120,25 @@ router.get("/crypto/scalper/performance", async (req, res): Promise<void> => {
     res.json(performance);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch scalper performance" });
+  }
+});
+
+// ── GET /api/crypto/scalper/funnel ───────────────────────────────────────────
+// Reporting-only. The 2–3 fill target is deliberately not an execution input.
+router.get("/crypto/scalper/funnel", async (req, res): Promise<void> => {
+  try {
+    const config = getScalpConfig();
+    const mode = parseMode(req.query["mode"]) ?? config.mode;
+    const windowsParam = typeof req.query["windows"] === "string"
+      ? Number.parseInt(req.query["windows"], 10)
+      : 12;
+    const funnel = await getScalpWindowFunnel(
+      mode,
+      Number.isFinite(windowsParam) ? windowsParam : 12,
+    );
+    res.json(funnel);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch scalper funnel" });
   }
 });
 

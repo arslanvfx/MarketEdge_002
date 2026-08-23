@@ -34,6 +34,7 @@ import {
   maxSubmitExposure,
   sizeOrderWithinReservedBudget,
   validateOrderbookQuote,
+  requalifyAuthenticatedScalpQuote,
   validateScalpConfigPartial,
   parseScalpConfigPatch,
   describeScalpCircuitBreakerReason,
@@ -116,6 +117,48 @@ describe("selectScalpSide", () => {
     assert.ok(result);
     assert.equal(result.side, "no");
     assert.equal(result.winningAsk, 0.93);
+  });
+});
+
+describe("requalifyAuthenticatedScalpQuote", () => {
+  const base = {
+    ticker: "KXBTC15M-CONTROLLED",
+    closeTime: "2026-08-23T12:15:00.000Z",
+    bandMin: 0.96,
+    bandMax: 0.99,
+    initialSide: "yes" as const,
+  };
+
+  it("accepts a fresh same-side authenticated quote still inside the pinned band", () => {
+    const result = requalifyAuthenticatedScalpQuote({
+      ...base,
+      orderbook: { yesAsk: 0.98, yesBid: 0.02 },
+    });
+    assert.deepEqual(
+      result.ok ? { ok: result.ok, side: result.side, winningAsk: result.winningAsk } : result,
+      { ok: true, side: "yes", winningAsk: 0.98 },
+    );
+  });
+
+  it("fails closed on invalid, out-of-band, and side-flipped quote churn", () => {
+    const invalid = requalifyAuthenticatedScalpQuote({
+      ...base,
+      orderbook: { yesAsk: 0.97, yesBid: 0.98 },
+    });
+    const outOfBand = requalifyAuthenticatedScalpQuote({
+      ...base,
+      orderbook: { yesAsk: 0.8, yesBid: 0.79 },
+    });
+    const sideFlip = requalifyAuthenticatedScalpQuote({
+      ...base,
+      orderbook: { yesAsk: 0.05, yesBid: 0.02 },
+    });
+    assert.equal(invalid.ok, false);
+    assert.equal(!invalid.ok && invalid.reason, "final_requote_invalid");
+    assert.equal(outOfBand.ok, false);
+    assert.equal(!outOfBand.ok && outOfBand.reason, "final_requote_outside_band");
+    assert.equal(sideFlip.ok, false);
+    assert.equal(!sideFlip.ok && sideFlip.reason, "side_flipped_final_requote");
   });
 });
 
@@ -2767,19 +2810,38 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(svc, /availableBalance < maxExposure/);
   });
 
+  it("requalifies the authenticated quote after other awaits and before intent without bypassing band or side", () => {
+    const finalBalance = idx("FINAL live balance check");
+    const requote = idx("const finalRequoteResult = await runtime.fetchOrderbookPrices(ticker)");
+    const authoritative = idx("AUTHORITATIVE FINAL VALIDATION (post-await)");
+    const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
+    assert.ok(finalBalance >= 0 && requote > finalBalance, "requote must run after the other awaited safety reads");
+    assert.ok(requote < authoritative && authoritative < intent, "requote must finish before final sync validation and intent");
+    assert.match(svc, /requalifyAuthenticatedScalpQuote\(\{/);
+    assert.match(svc, /bandMin: snapshot\.bandMin,[\s\S]*?bandMax: snapshot\.bandMax/);
+    assert.match(
+      svc,
+      /initialSide,[\s\S]*?if \(!finalRequalification\.ok\)/,
+      "a failed or side-flipped requalification must return before intent",
+    );
+    assert.match(svc, /quotedReason: finalRequalification\.reason/);
+  });
+
   it("does not size from a re-resolved params2 budget", () => {
     assert.ok(!/computeContractCount\(params2\.budgetDollars/.test(svc), "must not size from params2 budget");
     assert.ok(!/availableBalance < budget\b/.test(svc) || /reservedBudget/.test(svc), "balance compares against reserved/exposure");
   });
 
-  it("AUTHORITATIVE post-await validation runs AFTER final balance and AFTER final freefall", () => {
+  it("AUTHORITATIVE post-await validation runs AFTER final balance, final requote, and final freefall", () => {
     const finalFf = idx("FINAL FREEFALL GUARD");
     const finalBal = idx("FINAL live balance check");
+    const finalRequote = idx("const finalRequoteResult = await runtime.fetchOrderbookPrices(ticker)");
     const authoritative = idx("AUTHORITATIVE FINAL VALIDATION (post-await)");
     assert.ok(authoritative >= 0, "authoritative post-await validation block must exist");
     assert.ok(finalFf >= 0 && finalBal >= 0);
     assert.ok(authoritative > finalFf, "authoritative validation must be AFTER final freefall");
     assert.ok(authoritative > finalBal, "authoritative validation must be AFTER final balance");
+    assert.ok(authoritative > finalRequote, "authoritative validation must be AFTER final requote");
     // And it must precede order intent and submit.
     assert.ok(authoritative < idx("runtime.insertScalpOrderIntent(orderRecord)"));
     assert.ok(authoritative < idx("await runtime.placeScalpOrderStrict("));

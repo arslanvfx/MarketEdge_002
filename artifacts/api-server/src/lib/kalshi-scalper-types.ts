@@ -271,6 +271,43 @@ export interface ScalpPerformance {
   }>;
 }
 
+// ---------------------------------------------------------------------------
+// Per-window execution funnel
+// ---------------------------------------------------------------------------
+
+/** Durable stages recorded for a symbol/window without changing execution policy. */
+export type ScalpFunnelEventStage =
+  | "candidate"
+  | "authenticated_eligible"
+  | "final_quote_loss";
+
+/**
+ * A read-only window-level view of the Scalper execution funnel. Counts are
+ * intentionally observational: the 2–3 fill target is a health metric, never
+ * an admission rule or a reason to bypass a safety control.
+ */
+export interface ScalpWindowFunnel {
+  windowKey: string;
+  candidateSymbols: number;
+  eligibleQuotes: number;
+  finalQuoteLoss: number;
+  safetyBlocks: number;
+  submissions: number;
+  zeroFills: number;
+  confirmedFills: number;
+  lastActivityAt: string;
+}
+
+export interface ScalpWindowFunnelReport {
+  mode: ScalpMode;
+  targetMinFills: number;
+  targetMaxFills: number;
+  activeWindows: number;
+  averageConfirmedFills: number | null;
+  windowsAtTarget: number;
+  windows: ScalpWindowFunnel[];
+}
+
 export type ScalpLatencyStage =
   | "queue_wait"
   | "cap_claim"

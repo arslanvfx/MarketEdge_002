@@ -32,6 +32,7 @@ import type {
   ScalpPerMarketOverride,
   ScalpEntryGuardEvidence,
   ScalpSkipEvidence,
+  ScalpWindowFunnelReport,
 } from "./kalshi-scalper-types.ts";
 import { DEFAULT_SCALP_CONFIG } from "./kalshi-scalper-types.ts";
 import {
@@ -43,6 +44,7 @@ import {
   computeLimitPrice,
   winningCostFromFill,
   validateOrderbookQuote,
+  requalifyAuthenticatedScalpQuote,
   checkFreefallGuard,
   evaluateFreefallPreSubmitGuard,
   checkTargetProximityGuard,
@@ -72,8 +74,11 @@ import {
   type ScalpFillBandResult,
 } from "./kalshi-scalper-policy.ts";
 import {
+  buildScalpWindowFunnelReport,
+  createBoundedScalpFunnelRecorder,
   createCoalescedAsyncRunner,
   findSlowestScalpLatencyStage,
+  prioritizeScalpCandidates,
   selectNextScalpSamplePriority,
   summarizeScalpAttemptLatencies,
 } from "./kalshi-scalper-fast-path.ts";
@@ -112,6 +117,8 @@ import {
   getScalpIncidents,
   getScalpOrdersForPerformance,
   getScalpPerformanceBaseline,
+  getScalpWindowFunnelCounters,
+  recordScalpFunnelEvent,
   resetScalpPerformanceWindow,
 } from "./kalshi-scalper-db.ts";
 import { calculateScalpPerformance } from "./kalshi-scalper-performance.ts";
@@ -161,6 +168,20 @@ let _regularBotReadView: {
 } | null = null;
 let _lastSampleCollectionAt = 0;
 let _lastObservedWindowKey: string | null = null;
+
+const _funnelRecorder = createBoundedScalpFunnelRecorder(
+  ({ mode, windowKey, symbol, stage }) =>
+    recordScalpFunnelEvent(mode, windowKey, symbol, stage),
+);
+
+function _recordScalpFunnelEvent(
+  mode: ScalpMode,
+  windowKey: string,
+  symbol: string,
+  stage: "candidate" | "authenticated_eligible" | "final_quote_loss",
+): void {
+  _funnelRecorder.record({ mode, windowKey, symbol, stage });
+}
 let _preflightInFlight = false;
 let _lastPreflightStartedAt = 0;
 let _preflightStatus: ScalpPreflightStatusInternal = {
@@ -1139,6 +1160,7 @@ async function _doScanTick(): Promise<void> {
     _lastObservedWindowKey = wk;
     _terminalAttemptKeys.clear();
     _nextAttemptAt.clear();
+    _funnelRecorder.clearExceptWindow(wk);
     // A new market window owns a new real-time direction baseline. Preflight
     // samples from the previous market must never count toward eligibility.
     _priceSamples.clear();
@@ -1172,6 +1194,9 @@ async function _doScanTick(): Promise<void> {
   // Quick scan using cached public quotes to find candidates.
   const candidates = _findCandidates(wk);
   if (candidates.length === 0) return;
+  for (const candidate of candidates) {
+    _recordScalpFunnelEvent(mode, wk, candidate.symbol, "candidate");
+  }
 
   await _runWithConcurrency(candidates, SCALP_MAX_CONCURRENT_CANDIDATES, async (candidate) => {
     await _evaluateCandidate(candidate, wk, mode);
@@ -1235,15 +1260,9 @@ function _findCandidates(wk: string): Candidate[] {
     });
   }
 
-  // Urgent candidates first: nearest close, then the highest qualifying winning
-  // ask (closest to leaving through the hard upper band), then stable symbol
-  // ordering. This changes scheduling only; all final checks remain mandatory.
-  candidates.sort((a, b) => (
-    new Date(a.closeTime).getTime() - new Date(b.closeTime).getTime()
-    || b.winningAsk - a.winningAsk
-    || a.symbol.localeCompare(b.symbol)
-  ));
-  return candidates;
+  // Keep every independently qualified symbol in the bounded execution queue.
+  // Priority only chooses which symbol receives a lane first.
+  return prioritizeScalpCandidates(candidates);
 }
 
 /** Marker error: an order intent has been persisted (live submit crossed the
@@ -1673,6 +1692,7 @@ interface ScalpAttemptRuntime {
   finalizeOrderAndReleaseReservation: typeof finalizeOrderAndReleaseReservation;
   finalRiskValidationSync: typeof _finalRiskValidationSync;
   regularPositionCompatibilitySync: typeof _regularPositionCompatibilitySync;
+  recordFunnelEvent?: typeof _recordScalpFunnelEvent;
 }
 async function _executeScalpAttempt(
   reservationId: string,
@@ -1897,6 +1917,7 @@ async function _executeScalpAttempt(
       bandMin: snapshot.bandMin,
       bandMax: snapshot.bandMax,
     });
+    runtime.recordFunnelEvent?.(mode, windowKey, symbol, "final_quote_loss");
     _rememberReservationOutcome(attemptKey, "skipped", "final_quote_invalid", priorSubmittedOrders, runtime.nowMs());
     return;
   }
@@ -1933,6 +1954,7 @@ async function _executeScalpAttempt(
       bandMin: snapshot.bandMin,
       bandMax: snapshot.bandMax,
     });
+    runtime.recordFunnelEvent?.(mode, windowKey, symbol, "final_quote_loss");
     _rememberReservationOutcome(attemptKey, "skipped", "final_quote_outside_band", priorSubmittedOrders, runtime.nowMs());
     return;
   }
@@ -1950,12 +1972,14 @@ async function _executeScalpAttempt(
       bandMin: snapshot.bandMin,
       bandMax: snapshot.bandMax,
     });
+    runtime.recordFunnelEvent?.(mode, windowKey, symbol, "final_quote_loss");
     _rememberReservationOutcome(attemptKey, "skipped", "side_flipped_final_quote", priorSubmittedOrders, runtime.nowMs());
     return;
   }
+  runtime.recordFunnelEvent?.(mode, windowKey, symbol, "authenticated_eligible");
 
-  const effectiveSide = match2.side;
-  const winningAsk = match2.winningAsk;
+  let effectiveSide = match2.side;
+  let winningAsk = match2.winningAsk;
   const targetPriceNum = Number(identityResult.target);
   const finalPriceSamples = _priceSamples.get(symbol) ?? [];
   const latestFinalPriceSample =
@@ -2234,9 +2258,77 @@ async function _executeScalpAttempt(
     }
   }
 
+  // The first authenticated quote overlaps identity, balance, and fresh guard
+  // inputs. Once every other await is complete, requalify exactly once in the
+  // existing bounded candidate lane immediately before the intent boundary.
+  // This catches quote churn without increasing scan cadence or permitting a
+  // stale, crossed, side-flipped, or out-of-band quote to submit.
+  const finalRequoteStartedAtMs = runtime.nowMs();
+  const finalRequoteResult = await runtime.fetchOrderbookPrices(ticker).then(
+    (orderbook) => ({ ok: true as const, orderbook }),
+    (error) => ({ ok: false as const, error, orderbook: null }),
+  );
+  const finalRequoteMs = runtime.nowMs() - finalRequoteStartedAtMs;
+  const finalRequalification = finalRequoteResult.ok && finalRequoteResult.orderbook
+    ? requalifyAuthenticatedScalpQuote({
+        orderbook: finalRequoteResult.orderbook,
+        ticker,
+        closeTime,
+        bandMin: snapshot.bandMin,
+        bandMax: snapshot.bandMax,
+        initialSide,
+      })
+    : {
+        ok: false as const,
+        reason: "final_requote_invalid" as const,
+        quote: null,
+        selectedSide: null,
+        winningAsk: null,
+      };
+  if (!finalRequalification.ok) {
+    const rawYesAsk = finalRequoteResult.ok
+      ? finalRequoteResult.orderbook?.yesAsk ?? null
+      : null;
+    const rawNoAsk = finalRequoteResult.ok && finalRequoteResult.orderbook?.yesBid != null
+      ? 1 - finalRequoteResult.orderbook.yesBid
+      : null;
+    await runtime.updateReservationStatus(
+      mode,
+      symbol,
+      windowKey,
+      "skipped",
+      finalRequalification.reason,
+      true,
+      {
+        ..._timingEvidence(),
+        quoteFetchOk: finalRequoteResult.ok,
+        quotedReason: finalRequalification.reason,
+        quoteYesAsk: finalRequalification.quote?.yesAsk ?? rawYesAsk,
+        quoteNoAsk: finalRequalification.quote?.noAsk ?? rawNoAsk,
+        winningAsk: finalRequalification.winningAsk,
+        selectedSide: finalRequalification.selectedSide,
+        bandMin: snapshot.bandMin,
+        bandMax: snapshot.bandMax,
+        quoteRefreshMs: finalRequoteMs,
+      },
+    );
+    runtime.recordFunnelEvent?.(mode, windowKey, symbol, "final_quote_loss");
+    _rememberReservationOutcome(
+      attemptKey,
+      "skipped",
+      finalRequalification.reason,
+      priorSubmittedOrders,
+      runtime.nowMs(),
+    );
+    return;
+  }
+  effectiveSide = finalRequalification.side;
+  winningAsk = finalRequalification.winningAsk;
+
   // ── AUTHORITATIVE FINAL VALIDATION (post-await) ───────────────────────────
-  // Every awaited pre-submit step (second orderbook, freefall sample, sizing,
-  // final balance) is now complete. Re-run the SYNCHRONOUS authoritative check
+  // Every awaited pre-submit step (authenticated quote requalification,
+  // Freefall sample, sizing, and final balance) is now complete. Re-run the
+  // SYNCHRONOUS authoritative check
   // AFTER all that async work so a config/window/identity change during those
   // awaits fails closed here — before any intent is written or fill simulated.
   const finalReason1 = runtime.finalRiskValidationSync(snapshot, windowKey, symbol, ticker);
@@ -3497,6 +3589,15 @@ export async function getScalpPerformance(mode: ScalpMode): Promise<ScalpPerform
   );
 }
 
+/** Reporting-only rolling funnel; the fill target never participates in entry. */
+export async function getScalpWindowFunnel(
+  mode: ScalpMode,
+  windows = 12,
+): Promise<ScalpWindowFunnelReport> {
+  const rows = await getScalpWindowFunnelCounters(mode, windows);
+  return buildScalpWindowFunnelReport(mode, rows);
+}
+
 export async function resetScalpPerformance(mode: ScalpMode): Promise<ScalpPerformance> {
   const window = await resetScalpPerformanceWindow(mode);
   return calculateScalpPerformance(
@@ -3532,6 +3633,7 @@ const LIVE_SCALP_ATTEMPT_RUNTIME: ScalpAttemptRuntime = {
   finalizeOrderAndReleaseReservation,
   finalRiskValidationSync: _finalRiskValidationSync,
   regularPositionCompatibilitySync: _regularPositionCompatibilitySync,
+  recordFunnelEvent: _recordScalpFunnelEvent,
 };
 
 export interface ControlledScalperLayeringExerciseResult {

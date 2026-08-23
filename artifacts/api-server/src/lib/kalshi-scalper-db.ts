@@ -17,7 +17,9 @@ import {
   type ScalpMode,
   type ScalpReservation,
   type ScalpSkipEvidence,
+  type ScalpFunnelEventStage,
 } from "./kalshi-scalper-types.ts";
+import type { ScalpWindowFunnelCounters } from "./kalshi-scalper-fast-path.ts";
 import {
   evaluateScalpReservationRetry,
   isInFinalWindow,
@@ -64,6 +66,23 @@ export async function runScalpMigrations(): Promise<void> {
     await client.query(`
       CREATE INDEX IF NOT EXISTS scalp_res_mode_window
         ON kalshi_scalp_reservations (mode, window_key)
+    `);
+
+    // Funnel events preserve candidate discovery and quote churn even when a
+    // later safe retry updates the reservation to a filled state.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kalshi_scalp_funnel_events (
+        mode       TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        symbol     TEXT NOT NULL,
+        stage      TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (mode, window_key, symbol, stage)
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS scalp_funnel_mode_window
+        ON kalshi_scalp_funnel_events (mode, window_key, created_at DESC)
     `);
 
     // Orders/history — includes status/error fields and submitting lifecycle
@@ -931,6 +950,127 @@ export async function getRecentScalpReservations(opts: {
           : new Date(String(row["attempted_at"])),
       };
     });
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Record a funnel stage at most once per symbol/window. This is strictly
+ * observability data: an insert failure must never change a trading outcome.
+ */
+export async function recordScalpFunnelEvent(
+  mode: ScalpMode,
+  windowKey: string,
+  symbol: string,
+  stage: ScalpFunnelEventStage,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `INSERT INTO kalshi_scalp_funnel_events (mode, window_key, symbol, stage)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (mode, window_key, symbol, stage) DO NOTHING`,
+      [mode, windowKey, symbol.toUpperCase(), stage],
+    );
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Read a bounded rolling window funnel. Reservation and order state remains
+ * authoritative for safety blocks/submissions/fills; append-only events retain
+ * candidate and quote-loss stages across safe retries.
+ */
+export async function getScalpWindowFunnelCounters(
+  mode: ScalpMode,
+  limit = 12,
+): Promise<ScalpWindowFunnelCounters[]> {
+  const client = await pool.connect();
+  try {
+    const cappedLimit = Math.max(1, Math.min(48, Math.floor(limit)));
+    const res = await client.query(
+      `WITH windows AS (
+         SELECT window_key FROM kalshi_scalp_reservations WHERE mode = $1
+         UNION
+         SELECT window_key FROM kalshi_scalp_funnel_events WHERE mode = $1
+       ),
+       reservation_totals AS (
+         SELECT window_key,
+                COUNT(DISTINCT symbol)::int AS reservation_symbols,
+                COUNT(*) FILTER (
+                  WHERE status = 'skipped'
+                    AND COALESCE(reason, '') NOT IN (
+                      'final_quote_invalid', 'final_quote_outside_band',
+                      'side_flipped_final_quote',
+                      'final_requote_invalid', 'final_requote_outside_band',
+                      'side_flipped_final_requote'
+                    )
+                )::int AS safety_blocks,
+                MAX(attempted_at) AS last_activity_at
+           FROM kalshi_scalp_reservations
+          WHERE mode = $1
+          GROUP BY window_key
+       ),
+       event_totals AS (
+         SELECT window_key,
+                COUNT(DISTINCT symbol) FILTER (WHERE stage = 'candidate')::int AS candidate_symbols,
+                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'authenticated_eligible')::int AS eligible_quotes,
+                COUNT(DISTINCT symbol) FILTER (WHERE stage = 'final_quote_loss')::int AS final_quote_loss,
+                MAX(created_at) AS last_activity_at
+           FROM kalshi_scalp_funnel_events
+          WHERE mode = $1
+          GROUP BY window_key
+       ),
+       order_totals AS (
+         SELECT window_key,
+                COUNT(*) FILTER (
+                  WHERE status IN ('filled', 'paper', 'zero_fill', 'submitting', 'unknown')
+                )::int AS submissions,
+                COUNT(*) FILTER (WHERE status = 'zero_fill')::int AS zero_fills,
+                COUNT(*) FILTER (
+                  WHERE status IN ('filled', 'paper') AND filled_count > 0
+                )::int AS confirmed_fills,
+                MAX(created_at) AS last_activity_at
+           FROM kalshi_scalp_orders
+          WHERE mode = $1
+          GROUP BY window_key
+       )
+       SELECT w.window_key,
+              GREATEST(COALESCE(e.candidate_symbols, 0), COALESCE(r.reservation_symbols, 0))::int AS candidate_symbols,
+               COALESCE(e.eligible_quotes, 0)::int AS eligible_quotes,
+              COALESCE(e.final_quote_loss, 0)::int AS final_quote_loss,
+              COALESCE(r.safety_blocks, 0)::int AS safety_blocks,
+              COALESCE(o.submissions, 0)::int AS submissions,
+              COALESCE(o.zero_fills, 0)::int AS zero_fills,
+              COALESCE(o.confirmed_fills, 0)::int AS confirmed_fills,
+              GREATEST(
+                COALESCE(r.last_activity_at, '-infinity'::timestamptz),
+                COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                COALESCE(o.last_activity_at, '-infinity'::timestamptz)
+              ) AS last_activity_at
+         FROM windows w
+         LEFT JOIN reservation_totals r ON r.window_key = w.window_key
+         LEFT JOIN event_totals e ON e.window_key = w.window_key
+         LEFT JOIN order_totals o ON o.window_key = w.window_key
+        ORDER BY last_activity_at DESC
+        LIMIT $2`,
+      [mode, cappedLimit],
+    );
+    return res.rows.map((row) => ({
+      windowKey: String(row["window_key"]),
+      candidateSymbols: Number(row["candidate_symbols"] ?? 0),
+      eligibleQuotes: Number(row["eligible_quotes"] ?? 0),
+      finalQuoteLoss: Number(row["final_quote_loss"] ?? 0),
+      safetyBlocks: Number(row["safety_blocks"] ?? 0),
+      submissions: Number(row["submissions"] ?? 0),
+      zeroFills: Number(row["zero_fills"] ?? 0),
+      confirmedFills: Number(row["confirmed_fills"] ?? 0),
+      lastActivityAt: row["last_activity_at"] instanceof Date
+        ? row["last_activity_at"]
+        : new Date(String(row["last_activity_at"])),
+    }));
   } finally {
     client.release();
   }

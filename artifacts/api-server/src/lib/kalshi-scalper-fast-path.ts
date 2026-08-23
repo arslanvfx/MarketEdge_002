@@ -1,8 +1,86 @@
 import type {
   ScalpAttemptLatency,
+  ScalpFunnelEventStage,
   ScalpLatencyStage,
   ScalpLatencySummary,
+  ScalpMode,
+  ScalpWindowFunnel,
+  ScalpWindowFunnelReport,
 } from "./kalshi-scalper-types.ts";
+
+export interface ScalpFunnelEvent {
+  mode: ScalpMode;
+  windowKey: string;
+  symbol: string;
+  stage: ScalpFunnelEventStage;
+}
+
+/**
+ * Deliver observational funnel events with bounded retries and process-safe
+ * timers. The returned recorder is deliberately independent of trading state:
+ * failures cannot change admission, ownership, exposure, or breaker behavior.
+ */
+export function createBoundedScalpFunnelRecorder(
+  write: (event: ScalpFunnelEvent) => Promise<void>,
+  options: {
+    maxAttempts?: number;
+    retryDelayMs?: number;
+    scheduleRetry?: (callback: () => void, delayMs: number) => void;
+  } = {},
+): {
+  record: (event: ScalpFunnelEvent) => void;
+  clearExceptWindow: (windowKey: string) => void;
+} {
+  const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 3));
+  const retryDelayMs = Math.max(1, Math.floor(options.retryDelayMs ?? 250));
+  // A key remains pending while a retry is scheduled. Once its bounded budget
+  // is exhausted it becomes settled (dropped) for this window, just like a
+  // persisted event, so a fast scan cannot create parallel retry sequences.
+  const pending = new Set<string>();
+  const settled = new Set<string>();
+  const keyOf = (event: ScalpFunnelEvent) =>
+    `${event.mode}:${event.windowKey}:${event.symbol}:${event.stage}`;
+  const scheduleRetry = options.scheduleRetry ?? ((callback, delayMs) => {
+    const timer = setTimeout(callback, delayMs);
+    timer.unref?.();
+  });
+
+  const attemptWrite = (event: ScalpFunnelEvent, attempt: number): void => {
+    const key = keyOf(event);
+    if (settled.has(key) || pending.has(key)) return;
+    pending.add(key);
+    void write(event)
+      .then(() => {
+        settled.add(key);
+        pending.delete(key);
+      })
+      .catch(() => {
+        if (attempt < maxAttempts) {
+          scheduleRetry(
+            () => {
+              // Retain the pending claim across the scheduled gap while still
+              // allowing this sole retry sequence to re-enter the writer.
+              pending.delete(key);
+              attemptWrite(event, attempt + 1);
+            },
+            retryDelayMs * attempt,
+          );
+        } else {
+          settled.add(key);
+          pending.delete(key);
+        }
+      });
+  };
+
+  return {
+    record: (event) => attemptWrite(event, 1),
+    clearExceptWindow: (windowKey) => {
+      for (const key of settled) {
+        if (!key.includes(`:${windowKey}:`)) settled.delete(key);
+      }
+    },
+  };
+}
 
 export interface CoalescedAsyncRunner {
   run: () => Promise<void>;
@@ -66,6 +144,78 @@ export function selectNextScalpSamplePriority(input: {
     return "background";
   }
   return null;
+}
+
+/**
+ * Keep every independently-qualified symbol in the bounded execution queue,
+ * while making the earliest-closing and most at-risk band quote run first.
+ * This is scheduling only: it never admits an unqualified symbol or changes
+ * the per-symbol/window reservation, cap, or guard rules.
+ */
+export function prioritizeScalpCandidates<T extends {
+  symbol: string;
+  closeTime: string;
+  winningAsk: number;
+}>(candidates: readonly T[]): T[] {
+  return [...candidates].sort((a, b) => (
+    Date.parse(a.closeTime) - Date.parse(b.closeTime)
+    || b.winningAsk - a.winningAsk
+    || a.symbol.localeCompare(b.symbol)
+  ));
+}
+
+/** Database-shaped counters kept separate from the pure report formatter. */
+export interface ScalpWindowFunnelCounters {
+  windowKey: string;
+  candidateSymbols: number;
+  eligibleQuotes: number;
+  finalQuoteLoss: number;
+  safetyBlocks: number;
+  submissions: number;
+  zeroFills: number;
+  confirmedFills: number;
+  lastActivityAt: Date;
+}
+
+function funnelCount(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+/**
+ * Format durable funnel counters for the API. This remains intentionally pure
+ * so quote churn and zero-fill accounting can be regression-tested without a
+ * database or an exchange connection.
+ */
+export function buildScalpWindowFunnelReport(
+  mode: ScalpMode,
+  rows: readonly ScalpWindowFunnelCounters[],
+): ScalpWindowFunnelReport {
+  const windows: ScalpWindowFunnel[] = rows.map((row) => ({
+    windowKey: row.windowKey,
+    candidateSymbols: funnelCount(row.candidateSymbols),
+    eligibleQuotes: funnelCount(row.eligibleQuotes),
+    finalQuoteLoss: funnelCount(row.finalQuoteLoss),
+    safetyBlocks: funnelCount(row.safetyBlocks),
+    submissions: funnelCount(row.submissions),
+    zeroFills: funnelCount(row.zeroFills),
+    confirmedFills: funnelCount(row.confirmedFills),
+    lastActivityAt: row.lastActivityAt.toISOString(),
+  }));
+  const activeWindows = windows.length;
+  const totalFills = windows.reduce((total, window) => total + window.confirmedFills, 0);
+  return {
+    mode,
+    targetMinFills: 2,
+    targetMaxFills: 3,
+    activeWindows,
+    averageConfirmedFills: activeWindows > 0
+      ? Math.round((totalFills / activeWindows) * 100) / 100
+      : null,
+    windowsAtTarget: windows.filter(
+      (window) => window.confirmedFills >= 2 && window.confirmedFills <= 3,
+    ).length,
+    windows,
+  };
 }
 
 const STAGES: ScalpLatencyStage[] = [

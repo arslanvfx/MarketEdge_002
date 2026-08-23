@@ -120,6 +120,78 @@ export function selectScalpSide(
   return null;
 }
 
+export type ScalpQuoteRequalification =
+  | {
+      ok: true;
+      quote: ValidatedQuote;
+      side: "yes" | "no";
+      winningAsk: number;
+    }
+  | {
+      ok: false;
+      reason:
+        | "final_requote_invalid"
+        | "final_requote_outside_band"
+        | "side_flipped_final_requote";
+      quote: ValidatedQuote | null;
+      selectedSide: "yes" | "no" | null;
+      winningAsk: number | null;
+    };
+
+/**
+ * Requalify a late authenticated quote without weakening the pinned execution
+ * policy. This pure boundary makes quote churn behavior directly testable.
+ */
+export function requalifyAuthenticatedScalpQuote(args: {
+  orderbook: { yesAsk: number | null; yesBid: number | null };
+  ticker: string;
+  closeTime: string;
+  bandMin: number;
+  bandMax: number;
+  initialSide: "yes" | "no";
+}): ScalpQuoteRequalification {
+  const quote = validateOrderbookQuote(args.orderbook, args.ticker, args.closeTime);
+  if (!quote) {
+    return {
+      ok: false,
+      reason: "final_requote_invalid",
+      quote: null,
+      selectedSide: null,
+      winningAsk: null,
+    };
+  }
+  const match = selectScalpSide(
+    quote.yesAsk,
+    quote.noAsk,
+    args.bandMin,
+    args.bandMax,
+  );
+  if (!match) {
+    return {
+      ok: false,
+      reason: "final_requote_outside_band",
+      quote,
+      selectedSide: null,
+      winningAsk: null,
+    };
+  }
+  if (match.side !== args.initialSide) {
+    return {
+      ok: false,
+      reason: "side_flipped_final_requote",
+      quote,
+      selectedSide: match.side,
+      winningAsk: match.winningAsk,
+    };
+  }
+  return {
+    ok: true,
+    quote,
+    side: match.side,
+    winningAsk: match.winningAsk,
+  };
+}
+
 /**
  * Compute the marketable YES-side IOC limit from the configured maximum
  * winning-contract cost. Kalshi price-improves fills, so this is a hard
@@ -290,6 +362,11 @@ const QUICK_RETRY_SKIP_REASONS = new Set([
   "final_quote_invalid",
   "final_quote_outside_band",
   "side_flipped_final_quote",
+  // A final, bounded requalification can see ordinary order-book churn after
+  // all safety reads complete. It remains safe to re-arm this symbol/window.
+  "final_requote_invalid",
+  "final_requote_outside_band",
+  "side_flipped_final_requote",
 ]);
 
 /**

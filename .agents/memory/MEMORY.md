@@ -120,5 +120,6 @@
 - [Scalper band-capped IOC limits](scalper-band-capped-ioc.md) — qualify on the final quote, submit at the band ceiling, and size at that worst-case cost; unknown intents never count as submitted
 - [Scalper reversal + target-distance guards](scalper-reversal-target-guards.md) — Freefall checks endpoint plus peak/trough reversal; proximity uses fresh spot + refreshed target at the final boundary
 - [Scalper final-minute fast path](scalper-fast-path.md) — coalesced scans, 180s warm-up, reserved authoritative sample lane, locked cap query; all final safety boundaries stay mandatory
+- [Scalper funnel telemetry](scalper-funnel-telemetry.md) — authenticated eligibility is distinct from cached candidates; funnel writes retry boundedly without touching execution or test lifecycles
 - [Scalper real-time direction guard](scalper-realtime-direction-guard.md) — opt-in projection may soften only net-trend rejection; all hard guards stay fail-closed
 - [Scalper operator-owned open cap](scalper-open-cap.md) — $50 is only the invalid/missing default; every positive finite manual value must persist and be enforced exactly with no clamp

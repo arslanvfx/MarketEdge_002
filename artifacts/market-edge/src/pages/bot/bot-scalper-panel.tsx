@@ -3,7 +3,13 @@ import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
 import { API_BASE, fmt$, fmtPct, fmtDateTime, wkToEstRange, ET_LABEL } from "./utils";
-import type { ScalperConfig, ScalperStatus, ScalperPerformance, ScalperUnresolvedAttempt } from "./types";
+import type {
+  ScalperConfig,
+  ScalperStatus,
+  ScalperPerformance,
+  ScalperUnresolvedAttempt,
+  ScalperWindowFunnelReport,
+} from "./types";
 import {
   describeScalperAttempt,
   describeScalperEvidence,
@@ -127,6 +133,22 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
     },
     enabled: Boolean(cfg),
     refetchInterval: 30_000,
+  });
+
+  const { data: funnelData } = useQuery<ScalperWindowFunnelReport>({
+    queryKey: ["bot-scalper-funnel", scalperMode],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(
+        `${API_BASE}/crypto/scalper/funnel?mode=${scalperMode}&windows=12`,
+        { signal },
+      );
+      if (!response.ok) {
+        throw new Error(`Unable to load Scalper funnel (HTTP ${response.status})`);
+      }
+      return response.json();
+    },
+    enabled: Boolean(cfg),
+    refetchInterval: 10_000,
   });
 
   const hasDraft = Object.keys(configDraft).length > 0;
@@ -1214,6 +1236,115 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           </div>
         )}
         </fieldset>
+
+        {funnelData && (
+          <div
+            data-testid="panel-scalper-window-funnel"
+            className="mt-8 border-t border-amber-500/20 pt-6"
+          >
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-1">
+              <Activity className="h-4 w-4 shrink-0 text-amber-500/70" />
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-widest text-amber-500/70">
+                  Window fill funnel
+                </h3>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  The 2–3 confirmed-fill goal is an optimization target, never a reason to force an unsafe trade.
+                </p>
+              </div>
+              <div className="ml-auto flex items-center gap-3 text-[10px] text-muted-foreground">
+                <span>
+                  Avg{" "}
+                  <strong
+                    data-testid="text-scalper-funnel-average"
+                    className="font-mono text-amber-200"
+                  >
+                    {funnelData.averageConfirmedFills?.toFixed(2) ?? "—"}
+                  </strong>
+                  /window
+                </span>
+                <span>
+                  Goal{" "}
+                  <strong className="font-mono text-emerald-300">
+                    {funnelData.windowsAtTarget}/{funnelData.activeWindows}
+                  </strong>
+                </span>
+              </div>
+            </div>
+
+            {funnelData.windows.length === 0 ? (
+              <div
+                data-testid="text-scalper-funnel-empty"
+                className="mt-3 rounded-lg border border-border bg-background/30 px-3 py-4 text-center text-[11px] text-muted-foreground"
+              >
+                No active windows recorded for this mode yet.
+              </div>
+            ) : (
+              <div
+                data-testid="list-scalper-window-funnel"
+                className="mt-3 grid gap-2"
+              >
+                {funnelData.windows.map((window) => {
+                  const atTarget = window.confirmedFills >= funnelData.targetMinFills
+                    && window.confirmedFills <= funnelData.targetMaxFills;
+                  const stages = [
+                    ["Considered", window.candidateSymbols],
+                    ["Eligible", window.eligibleQuotes],
+                    ["Quote loss", window.finalQuoteLoss],
+                    ["Safety blocks", window.safetyBlocks],
+                    ["Submitted", window.submissions],
+                    ["Zero fills", window.zeroFills],
+                    ["Confirmed", window.confirmedFills],
+                  ] as const;
+                  return (
+                    <div
+                      key={window.windowKey}
+                      data-testid={`row-scalper-window-funnel-${window.windowKey}`}
+                      className="rounded-lg border border-border bg-background/40 px-3 py-2.5"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] font-bold text-foreground">
+                          {wkToEstRange(window.windowKey)} {ET_LABEL}
+                        </span>
+                        <span className="text-[9px] text-muted-foreground">
+                          updated {fmtDateTime(window.lastActivityAt)}
+                        </span>
+                        <span className={`ml-auto rounded px-1.5 py-0.5 text-[9px] font-black tracking-wide ${
+                          atTarget
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : "bg-amber-500/10 text-amber-200"
+                        }`}>
+                          {atTarget ? "GOAL RANGE" : `${window.confirmedFills} CONFIRMED`}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-4 gap-1 sm:grid-cols-7">
+                        {stages.map(([label, value]) => (
+                          <div
+                            key={label}
+                            className="rounded border border-border/70 bg-card/40 px-1.5 py-1 text-center"
+                          >
+                            <div className={`font-mono text-xs font-bold ${
+                              label === "Confirmed"
+                                ? "text-emerald-300"
+                                : label === "Quote loss" || label === "Safety blocks"
+                                  ? "text-red-300"
+                                  : "text-foreground"
+                            }`}>
+                              {value}
+                            </div>
+                            <div className="mt-0.5 text-[8px] uppercase tracking-wide text-muted-foreground">
+                              {label}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {(statusData?.recentAttempts?.length ?? 0) > 0 && (() => {
           const totalAttempts = statusData!.recentAttempts.length;

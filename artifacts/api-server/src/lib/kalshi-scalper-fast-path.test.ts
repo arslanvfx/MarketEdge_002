@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   createCoalescedAsyncRunner,
+  buildScalpWindowFunnelReport,
+  createBoundedScalpFunnelRecorder,
   findSlowestScalpLatencyStage,
+  prioritizeScalpCandidates,
   selectNextScalpSamplePriority,
   summarizeScalpAttemptLatencies,
 } from "./kalshi-scalper-fast-path.ts";
@@ -38,6 +41,127 @@ describe("createCoalescedAsyncRunner", () => {
     assert.equal(passes, 2);
     assert.equal(runner.isRunning(), false);
     assert.equal(runner.hasPendingRun(), false);
+  });
+});
+
+describe("createBoundedScalpFunnelRecorder", () => {
+  it("retries a failed terminal-stage write without holding the process open", async () => {
+    let writes = 0;
+    const delivered: string[] = [];
+    const scheduled: Array<() => void> = [];
+    const recorder = createBoundedScalpFunnelRecorder(
+      async (event) => {
+        writes += 1;
+        if (writes === 1) throw new Error("transient database failure");
+        delivered.push(`${event.symbol}:${event.stage}`);
+      },
+      {
+        maxAttempts: 3,
+        retryDelayMs: 1,
+        scheduleRetry: (callback) => scheduled.push(callback),
+      },
+    );
+    recorder.record({
+      mode: "live",
+      windowKey: "W-terminal",
+      symbol: "BTC",
+      stage: "final_quote_loss",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(scheduled.length, 1);
+    scheduled.shift()?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(writes, 2);
+    assert.deepEqual(delivered, ["BTC:final_quote_loss"]);
+  });
+
+  it("coalesces repeated outage reports into one bounded retry sequence", async () => {
+    let writes = 0;
+    const scheduled: Array<() => void> = [];
+    const recorder = createBoundedScalpFunnelRecorder(
+      async () => {
+        writes += 1;
+        throw new Error("database unavailable");
+      },
+      {
+        maxAttempts: 3,
+        retryDelayMs: 1,
+        scheduleRetry: (callback) => scheduled.push(callback),
+      },
+    );
+    const event = {
+      mode: "paper" as const,
+      windowKey: "W-outage",
+      symbol: "ETH",
+      stage: "authenticated_eligible" as const,
+    };
+
+    recorder.record(event);
+    for (let i = 0; i < 20; i += 1) recorder.record(event);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(writes, 1);
+    assert.equal(scheduled.length, 1);
+
+    while (scheduled.length > 0) {
+      scheduled.shift()?.();
+      for (let i = 0; i < 20; i += 1) recorder.record(event);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(writes, 3);
+
+    for (let i = 0; i < 20; i += 1) recorder.record(event);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(writes, 3);
+  });
+});
+
+describe("prioritizeScalpCandidates", () => {
+  it("keeps multiple independently-qualified symbols while ordering the most urgent first", () => {
+    const candidates = prioritizeScalpCandidates([
+      { symbol: "SOL", closeTime: "2026-08-23T12:15:00.000Z", winningAsk: 0.92 },
+      { symbol: "BTC", closeTime: "2026-08-23T12:15:00.000Z", winningAsk: 0.97 },
+      { symbol: "ETH", closeTime: "2026-08-23T12:14:00.000Z", winningAsk: 0.93 },
+    ]);
+    assert.deepEqual(candidates.map((candidate) => candidate.symbol), ["ETH", "BTC", "SOL"]);
+    assert.equal(candidates.length, 3);
+  });
+});
+
+describe("buildScalpWindowFunnelReport", () => {
+  it("retains quote churn alongside a later confirmed fill", () => {
+    const report = buildScalpWindowFunnelReport("live", [{
+      windowKey: "W1",
+      candidateSymbols: 3,
+      eligibleQuotes: 2,
+      finalQuoteLoss: 1,
+      safetyBlocks: 0,
+      submissions: 2,
+      zeroFills: 1,
+      confirmedFills: 1,
+      lastActivityAt: new Date("2026-08-23T12:15:00.000Z"),
+    }]);
+    assert.equal(report.windows[0]?.finalQuoteLoss, 1);
+    assert.equal(report.windows[0]?.eligibleQuotes, 2);
+    assert.equal(report.windows[0]?.zeroFills, 1);
+    assert.equal(report.windows[0]?.confirmedFills, 1);
+    assert.equal(report.averageConfirmedFills, 1);
+  });
+
+  it("reports a zero-fill window without manufacturing a confirmed fill", () => {
+    const report = buildScalpWindowFunnelReport("paper", [{
+      windowKey: "W2",
+      candidateSymbols: 2,
+      eligibleQuotes: 2,
+      finalQuoteLoss: 0,
+      safetyBlocks: 1,
+      submissions: 1,
+      zeroFills: 1,
+      confirmedFills: 0,
+      lastActivityAt: new Date("2026-08-23T12:30:00.000Z"),
+    }]);
+    assert.equal(report.windowsAtTarget, 0);
+    assert.equal(report.windows[0]?.zeroFills, 1);
+    assert.equal(report.windows[0]?.confirmedFills, 0);
   });
 });
 
