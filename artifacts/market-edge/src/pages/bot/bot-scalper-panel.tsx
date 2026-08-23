@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
 import { API_BASE, fmt$, fmtPct, fmtDateTime, wkToEstRange, ET_LABEL } from "./utils";
 import type { ScalperConfig, ScalperStatus, ScalperPerformance, ScalperUnresolvedAttempt } from "./types";
-import { describeScalperAttempt, describeScalperEvidence } from "./scalper-ledger";
+import { describeScalperAttempt, describeScalperEvidence, getScalperGuardBlock } from "./scalper-ledger";
 
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
@@ -1155,6 +1155,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                   const isFilled = attempt.status === "filled";
                   const isUnsafe = attempt.status === "unknown" || attempt.status === "error";
                   const isZeroFill = attempt.status === "zero_fill";
+                  const guardBlock = getScalperGuardBlock(attempt);
                   const executionPricing = attempt.observedWinningAsk != null && attempt.executionWinningLimit != null
                     ? `${(attempt.observedWinningAsk * 100).toFixed(1).replace(/\.0$/, "")}¢ quote → ${(attempt.executionWinningLimit * 100).toFixed(1).replace(/\.0$/, "")}¢ ${attempt.mode === "live" ? "IOC" : "sim"} cap`
                     : null;
@@ -1179,10 +1180,27 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                       <div className="flex items-center gap-2 text-xs min-w-0">
                         <span className="font-bold text-foreground w-10 shrink-0">{attempt.symbol}</span>
                         <span className={`font-semibold min-w-0 truncate ${
-                          isFilled ? "text-emerald-400" : isUnsafe ? "text-red-400" : isZeroFill ? "text-sky-400" : "text-amber-300"
+                          isFilled ? "text-emerald-400" : isUnsafe || guardBlock ? "text-red-400" : isZeroFill ? "text-sky-400" : "text-amber-300"
                         }`}>
                           {describeScalperAttempt(attempt)}
                         </span>
+                        {attempt.side && (
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold ${
+                            attempt.side === "yes"
+                              ? "bg-emerald-500/15 text-emerald-300"
+                              : "bg-red-500/15 text-red-300"
+                          }`}>
+                            {attempt.side.toUpperCase()}
+                          </span>
+                        )}
+                        {guardBlock && (
+                          <span
+                            data-testid={`badge-scalper-guard-block-${attempt.id}`}
+                            className="shrink-0 rounded border border-red-400/30 bg-red-500/15 px-1.5 py-0.5 text-[9px] font-black tracking-wide text-red-300"
+                          >
+                            {guardBlock.badge}
+                          </span>
+                        )}
                         <span className={`ml-auto shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded ${
                           attempt.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-yellow-500/15 text-yellow-400"
                         }`}>
@@ -1211,7 +1229,16 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                           data-testid={`text-scalper-skip-evidence-${attempt.id}`}
                           className="mt-1.5 pl-0 sm:pl-12 flex flex-col gap-0.5 text-[10px] font-mono text-muted-foreground/80"
                         >
-                          {evidenceLines.map((line) => <span key={line}>{line}</span>)}
+                          {evidenceLines.map((line) => (
+                            <span
+                              key={line}
+                              className={line.startsWith("GUARD TRIGGERED:")
+                                ? "font-bold text-red-300"
+                                : undefined}
+                            >
+                              {line}
+                            </span>
+                          ))}
                         </div>
                       )}
                     </div>

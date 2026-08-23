@@ -194,6 +194,9 @@ describe("Scalper control wiring", () => {
 
   it("renders durable reason-specific skip measurements", () => {
     assert.match(panelSource, /describeScalperEvidence\(attempt\)/);
+    assert.match(panelSource, /getScalperGuardBlock\(attempt\)/);
+    assert.match(panelSource, /badge-scalper-guard-block-/);
+    assert.match(panelSource, /line\.startsWith\("GUARD TRIGGERED:"\)/);
     assert.match(panelSource, /text-scalper-skip-evidence-/);
   });
 });

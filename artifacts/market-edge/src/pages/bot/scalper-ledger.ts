@@ -5,6 +5,12 @@ export type ScalperLedger = {
   history: HistoryRecord[];
 };
 
+export type ScalperGuardBlock = {
+  key: "direction" | "freefall" | "fast_move" | "target" | "breaker" | "balance" | "position";
+  label: string;
+  badge: string;
+};
+
 type SettledScalpOutcome = "win" | "loss";
 type DisplayScalpOutcome = SettledScalpOutcome | "open";
 
@@ -137,6 +143,8 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
   if (attempt.status === "zero_fill") return "IOC returned zero fills";
   if (attempt.status === "unknown") return "Order result unknown — reconciliation required";
   if (attempt.status === "error") return attempt.reason ? `Error — ${humanizeReason(attempt.reason)}` : "Attempt failed";
+  const guardBlock = getScalperGuardBlock(attempt);
+  if (guardBlock) return `${guardBlock.label} blocked submission`;
   if (attempt.reason === "second_quote_outside_band" || attempt.reason === "final_quote_outside_band") {
     return "Final authenticated quote moved outside the permitted band";
   }
@@ -148,6 +156,11 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
 export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   const evidence = attempt.skipEvidence;
   const details: string[] = [];
+  const guardBlock = getScalperGuardBlock(attempt);
+
+  if (guardBlock && attempt.reason) {
+    details.push(`GUARD TRIGGERED: ${guardBlock.label} — ${humanizeReason(attempt.reason)}`);
+  }
 
   if (
     evidence?.layerDecision === "opposite_side_block"
@@ -212,7 +225,10 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     const interval = evidence.rapidMoveLookbackSeconds == null
       ? ""
       : ` over ${evidence.rapidMoveLookbackSeconds}s`;
-    details.push(`Fast-move check ${measured}${interval} (${threshold})`);
+    const disposition = evidence.rapidMoveBlocked || attempt.reason?.startsWith("rapid_move_")
+      ? "BLOCKED"
+      : "clear";
+    details.push(`Fast-move guard ${disposition}: ${measured}${interval} (${threshold})`);
   }
 
   if (evidence && (evidence.quoteYesAsk != null || evidence.quoteNoAsk != null)) {
@@ -275,6 +291,70 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
   return details;
 }
 
+export function getScalperGuardBlock(attempt: ScalperAttempt): ScalperGuardBlock | null {
+  if (attempt.status !== "skipped" || !attempt.reason) return null;
+  const reason = normalizeReason(attempt.reason);
+
+  if (
+    reason.startsWith("freefall_consecutive_")
+    || reason.startsWith("freefall_wrong_target_side_")
+    || reason.startsWith("freefall_unavailable_")
+  ) {
+    return {
+      key: "direction",
+      label: "Real-Time Direction Guard",
+      badge: "DIRECTION GUARD",
+    };
+  }
+  if (reason.startsWith("freefall_")) {
+    return {
+      key: "freefall",
+      label: "Freefall Guard",
+      badge: "FREEFALL GUARD",
+    };
+  }
+  if (reason.startsWith("rapid_move_")) {
+    return {
+      key: "fast_move",
+      label: "Fast-Move Guard",
+      badge: "FAST-MOVE GUARD",
+    };
+  }
+  if (reason.startsWith("target_proximity_")) {
+    return {
+      key: "target",
+      label: "Target-Proximity Guard",
+      badge: "TARGET GUARD",
+    };
+  }
+  if (reason === "breaker_before_submit") {
+    return {
+      key: "breaker",
+      label: "Circuit Breaker",
+      badge: "CIRCUIT BREAKER",
+    };
+  }
+  if (
+    reason === "final_balance_check_failed"
+    || reason === "balance_check_failed_final"
+    || reason === "insufficient_balance_final"
+  ) {
+    return {
+      key: "balance",
+      label: "Balance / Exposure Guard",
+      badge: "BALANCE GUARD",
+    };
+  }
+  if (reason === "opposite_regular_position") {
+    return {
+      key: "position",
+      label: "Position-Side Guard",
+      badge: "POSITION GUARD",
+    };
+  }
+  return null;
+}
+
 const REASON_LABELS: Record<string, string> = {
   outside_window_at_claim: "Outside the effective entry window at reservation",
   window_expired_before_submit: "Window expired before final checks",
@@ -321,10 +401,14 @@ const REASON_LABELS: Record<string, string> = {
 };
 
 function humanizeReason(reason: string): string {
-  const clean = reason.replace(/^aborted_before_submit:/, "").replace(/\s*\([^)]*\)\s*$/, "");
+  const clean = normalizeReason(reason);
   return REASON_LABELS[clean] ?? clean
     .replace(/_/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeReason(reason: string): string {
+  return reason.replace(/^aborted_before_submit:/, "").replace(/\s*\([^)]*\)\s*$/, "");
 }
 
 function formatUnderlyingPrice(value: number): string {

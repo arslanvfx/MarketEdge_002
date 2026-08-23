@@ -1,7 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { describeScalperAttempt, describeScalperEvidence, normalizeScalpOrders } from "./scalper-ledger.ts";
+import {
+  describeScalperAttempt,
+  describeScalperEvidence,
+  getScalperGuardBlock,
+  normalizeScalpOrders,
+} from "./scalper-ledger.ts";
 import type { ScalpOrder, ScalperAttempt } from "./types.ts";
 
 function order(overrides: Partial<ScalpOrder> = {}): ScalpOrder {
@@ -145,7 +150,7 @@ describe("describeScalperAttempt", () => {
     });
     assert.equal(
       describeScalperAttempt(conflict),
-      "Opposite regular position blocked submission",
+      "Position-Side Guard blocked submission",
     );
     assert.match(
       describeScalperEvidence(conflict).join("\n"),
@@ -156,11 +161,45 @@ describe("describeScalperAttempt", () => {
   it("clearly names fail-closed Freefall feed outcomes", () => {
     assert.equal(
       describeScalperAttempt(attempt({ reason: "freefall_unavailable_fetch_failed" })),
-      "Fresh underlying price fetch failed — Freefall blocked submission",
+      "Real-Time Direction Guard blocked submission",
     );
     assert.equal(
       describeScalperAttempt(attempt({ reason: "freefall_unavailable_stale" })),
-      "Freefall samples were stale",
+      "Real-Time Direction Guard blocked submission",
+    );
+  });
+
+  it("classifies durable skip reasons by the exact guard that triggered", () => {
+    assert.equal(
+      getScalperGuardBlock(attempt({ reason: "freefall_consecutive_falling" }))?.badge,
+      "DIRECTION GUARD",
+    );
+    assert.equal(
+      getScalperGuardBlock(attempt({ reason: "freefall_adverse_falling" }))?.badge,
+      "FREEFALL GUARD",
+    );
+    assert.equal(
+      getScalperGuardBlock(attempt({ reason: "rapid_move_too_fast_rising" }))?.badge,
+      "FAST-MOVE GUARD",
+    );
+    assert.equal(
+      getScalperGuardBlock(attempt({ reason: "target_proximity_too_close" }))?.badge,
+      "TARGET GUARD",
+    );
+    assert.equal(
+      getScalperGuardBlock(attempt({ status: "filled", reason: "freefall_consecutive_falling" })),
+      null,
+    );
+  });
+
+  it("shows a prominent guard trigger even when detailed evidence is absent", () => {
+    const lines = describeScalperEvidence(attempt({
+      reason: "freefall_consecutive_rising",
+      skipEvidence: null,
+    }));
+    assert.equal(
+      lines[0],
+      "GUARD TRIGGERED: Real-Time Direction Guard — Underlying rose toward the target for the configured consecutive seconds",
     );
   });
 
@@ -183,10 +222,25 @@ describe("describeScalperAttempt", () => {
         effectiveWindowSeconds: 45,
       },
     }));
+    assert.match(lines[0] ?? "", /GUARD TRIGGERED: Target-Proximity Guard/);
     assert.match(lines.join("\n"), /Target distance 0\.012% \(0\.020% minimum\)/);
     assert.match(lines.join("\n"), /Real-time direction -0\.540% · 4\/4 wrong-way seconds/);
     assert.match(lines.join("\n"), /5 samples over 4\.0s · protected YES/);
     assert.match(lines.join("\n"), /21\.4s remained · 45s effective entry window/);
+  });
+
+  it("shows fast-move guard block measurements and threshold", () => {
+    const lines = describeScalperEvidence(attempt({
+      reason: "rapid_move_too_fast_falling",
+      skipEvidence: {
+        rapidMoveBlocked: true,
+        rapidMovePct: -0.72,
+        rapidMoveThresholdPct: 0.5,
+        rapidMoveLookbackSeconds: 4,
+      },
+    }));
+    assert.match(lines[0] ?? "", /GUARD TRIGGERED: Fast-Move Guard/);
+    assert.match(lines.join("\n"), /Fast-move guard BLOCKED: -0\.720% over 4s \(0\.500% threshold\)/);
   });
 
   it("renders authenticated quote and refresh-latency evidence", () => {
