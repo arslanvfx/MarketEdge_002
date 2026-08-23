@@ -975,8 +975,15 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                     ? (statusInfo.lastAsk !== null ? `candidate · ${Math.round(statusInfo.lastAsk * 100)}¢` : "scanning")
                     : statusInfo?.state === "guarded"
                       ? `blocked · ${readableReason(statusInfo.reason)}`
-                      : statusInfo?.state;
+                      : readableReason(statusInfo?.state ?? null);
                   const statusLabel = [timingLabel, scannerLabel].filter(Boolean).join(" · ");
+                  const isReadyOrEligible = Boolean(
+                    statusInfo
+                    && !isPaused
+                    && statusInfo.timingPhase !== "closed_expired"
+                    && (statusInfo.state === "ready" || statusInfo.state === "active"),
+                  );
+                  const isIneligible = Boolean(statusInfo && !isReadyOrEligible);
                   
                   return (
                     <tr key={sym} className={`block p-3 border-b border-border/40 last:border-0 hover:bg-muted/10 transition-colors sm:table-row sm:p-0 ${isPaused ? "bg-red-500/5" : ""}`}>
@@ -1101,7 +1108,14 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                               )}
                               <span
                                 data-testid={`text-scalper-timing-${sym}`}
-                                className="min-w-0 flex-1 text-left text-[9px] text-muted-foreground/60 sm:w-52 sm:flex-none sm:text-right"
+                                data-eligibility={isReadyOrEligible ? "ready" : isIneligible ? "ineligible" : "unknown"}
+                                className={`min-w-0 flex-1 rounded-md border px-2 py-1 text-left text-[9px] font-bold sm:w-52 sm:flex-none sm:text-right ${
+                                  isReadyOrEligible
+                                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                                    : isIneligible
+                                      ? "border-red-500/30 bg-red-500/10 text-red-300"
+                                      : "border-border bg-background/30 text-muted-foreground"
+                                }`}
                                 title={`${statusLabel}. Warm-up never submits an order; an authenticated quote and all guards are rechecked immediately before Paper/Live execution.`}
                               >
                                 {statusLabel}

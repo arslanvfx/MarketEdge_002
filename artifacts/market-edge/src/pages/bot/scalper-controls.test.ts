@@ -31,6 +31,14 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /Warm-up never submits an order/);
   });
 
+  it("color-codes ready or eligible markets green and ineligible markets red", () => {
+    assert.match(panelSource, /const isReadyOrEligible = Boolean/);
+    assert.match(panelSource, /statusInfo\.state === "ready" \|\| statusInfo\.state === "active"/);
+    assert.match(panelSource, /data-eligibility=\{isReadyOrEligible \? "ready" : isIneligible \? "ineligible" : "unknown"\}/);
+    assert.match(panelSource, /border-emerald-500\/30 bg-emerald-500\/10 text-emerald-300/);
+    assert.match(panelSource, /border-red-500\/30 bg-red-500\/10 text-red-300/);
+  });
+
   it("renders an explicit enable switch and Paper/Live controls", () => {
     assert.match(panelSource, /role="switch"/);
     assert.match(panelSource, /Enable Scalper/);

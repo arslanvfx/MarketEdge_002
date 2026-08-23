@@ -167,7 +167,7 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
   it("concurrent distinct claims respect the daily cap exactly (no double-add, no over-admit)", async () => {
     const base = `DBTEST-cap-${Date.now()}`;
     const budget = 2;
-    const baseline = await db.getScalpCommittedTotals(MODE);
+    const baseline = await db.getScalpCommittedTotals(MODE, `${base}-0`);
     const dailyCap = baseline.dailyCommitted + 6; // exactly 3 new attempts of $2 should be allowed
     const N = 8;
 
@@ -230,6 +230,61 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
         [MODE, "SOL", `${base}-2`],
       );
       assert.equal(Number(orders.rows[0]?.["count"]), 0, "cap denial must not create or submit an order");
+    } finally {
+      c.release();
+    }
+  });
+
+  it("does not let a prior-window confirmed fill consume current-window open exposure", async () => {
+    const base = `DBTEST-stale-settlement-${Date.now()}`;
+    const previousWindow = `${base}-previous`;
+    const activeWindow = `${base}-active`;
+    const c = await pool.connect();
+    try {
+      const insertOrder = async (
+        id: string,
+        windowKey: string,
+        status: "filled" | "unknown",
+        budgetSpent: number,
+      ) => {
+        await c.query(
+          `INSERT INTO kalshi_scalp_orders
+             (id, mode, symbol, window_key, ticker, side, entry_yes_price,
+              contract_count, limit_price, winning_contract_cost, status,
+              filled_count, avg_fill_price, budget_spent, created_at)
+           VALUES ($1, $2, 'BTC', $3, 'DBTEST-BTC', 'yes', 0.90,
+                   1, 0.90, 0.90, $4, $5, 0.90, $6, NOW())`,
+          [
+            id,
+            MODE,
+            windowKey,
+            status,
+            status === "filled" ? 1 : 0,
+            budgetSpent,
+          ],
+        );
+      };
+
+      const baseline = await db.getScalpCommittedTotals(MODE, activeWindow);
+      const displayBaseline = await db.getOpenScalpSpend(MODE, activeWindow);
+
+      await insertOrder(`${base}-old-fill`, previousWindow, "filled", 7);
+      const afterOldFill = await db.getScalpCommittedTotals(MODE, activeWindow);
+      const displayAfterOldFill = await db.getOpenScalpSpend(MODE, activeWindow);
+      assert.equal(afterOldFill.openCommitted, baseline.openCommitted);
+      assert.equal(displayAfterOldFill, displayBaseline);
+
+      await insertOrder(`${base}-active-fill`, activeWindow, "filled", 3);
+      const afterActiveFill = await db.getScalpCommittedTotals(MODE, activeWindow);
+      assert.equal(afterActiveFill.openCommitted, baseline.openCommitted + 3);
+
+      await insertOrder(`${base}-old-unknown`, previousWindow, "unknown", 2);
+      const afterOldUnknown = await db.getScalpCommittedTotals(MODE, activeWindow);
+      assert.equal(
+        afterOldUnknown.openCommitted,
+        baseline.openCommitted + 5,
+        "indeterminate prior-window submissions must remain fail-closed",
+      );
     } finally {
       c.release();
     }

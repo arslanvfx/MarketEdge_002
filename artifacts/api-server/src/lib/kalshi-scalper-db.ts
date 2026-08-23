@@ -618,6 +618,10 @@ export async function claimReservationAndCap(
     }
 
     // Sum actual committed spend + reserved (this row is 0, safe from self-count).
+    // A confirmed fill stops being open market exposure once its 15-minute
+    // window has rolled over, even if Kalshi delays publishing settlement.
+    // Indeterminate submissions and reservations remain fail-closed across
+    // windows because we still do not know whether exchange exposure exists.
     const committedRes = await client.query(
       `SELECT
          (SELECT COALESCE(SUM(budget_spent), 0)::float
@@ -634,12 +638,15 @@ export async function claimReservationAndCap(
             FROM kalshi_scalp_orders
             WHERE mode = $1
               AND settlement_result IS NULL
-              AND status IN ('filled', 'paper', 'submitting', 'unknown'))
+               AND (
+                 (status IN ('filled', 'paper') AND window_key = $2)
+                 OR status IN ('submitting', 'unknown')
+               ))
        + (SELECT COALESCE(SUM(reserved_budget), 0)::float
             FROM kalshi_scalp_reservations
             WHERE mode = $1
                AND reserved_budget > 0) AS open_total`,
-      [mode],
+      [mode, windowKey],
     );
 
     const dailyCommitted = Number(committedRes.rows[0]?.["daily_total"] ?? 0);
@@ -767,7 +774,10 @@ export async function countTodayReservations(mode: ScalpMode): Promise<number> {
 /** Read-only preflight snapshot using the same committed-spend semantics as the
  * atomic claim transaction. It is informational/warm-up only; every actual
  * attempt still repeats the authoritative calculation under the advisory lock. */
-export async function getScalpCommittedTotals(mode: ScalpMode): Promise<{
+export async function getScalpCommittedTotals(
+  mode: ScalpMode,
+  activeWindowKey: string,
+): Promise<{
   dailyCommitted: number;
   openCommitted: number;
 }> {
@@ -789,12 +799,15 @@ export async function getScalpCommittedTotals(mode: ScalpMode): Promise<{
             FROM kalshi_scalp_orders
             WHERE mode = $1
               AND settlement_result IS NULL
-              AND status IN ('filled', 'paper', 'submitting', 'unknown'))
+               AND (
+                 (status IN ('filled', 'paper') AND window_key = $2)
+                 OR status IN ('submitting', 'unknown')
+               ))
        + (SELECT COALESCE(SUM(reserved_budget), 0)::float
             FROM kalshi_scalp_reservations
             WHERE mode = $1
               AND reserved_budget > 0) AS open_committed`,
-      [mode],
+      [mode, activeWindowKey],
     );
     return {
       dailyCommitted: Number(res.rows[0]?.["daily_committed"] ?? 0),
@@ -1169,7 +1182,10 @@ export async function getTodayScalpSpend(mode: ScalpMode): Promise<number> {
   }
 }
 
-export async function getOpenScalpSpend(mode: ScalpMode): Promise<number> {
+export async function getOpenScalpSpend(
+  mode: ScalpMode,
+  activeWindowKey: string,
+): Promise<number> {
   const client = await pool.connect();
   try {
     const res = await client.query(
@@ -1177,8 +1193,9 @@ export async function getOpenScalpSpend(mode: ScalpMode): Promise<number> {
        FROM kalshi_scalp_orders
        WHERE mode = $1
          AND settlement_result IS NULL
+          AND window_key = $2
          AND status IN ('filled', 'paper')`,
-      [mode],
+      [mode, activeWindowKey],
     );
     return Number(res.rows[0]?.total ?? 0);
   } finally {

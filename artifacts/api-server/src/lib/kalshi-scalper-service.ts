@@ -949,7 +949,7 @@ async function _runPreflight(
   _warmRegularPositionReadView(mode, windowKey);
   const sampleTime = Date.now();
   const accountPromise = Promise.all([
-    getScalpCommittedTotals(mode),
+    getScalpCommittedTotals(mode, windowKey),
     mode === "live"
       ? getBalance().then(
           (balance) => ({ available: balance.availableBalance, error: null as string | null }),
@@ -2890,7 +2890,7 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
   const wk = currentWindowKey() ?? "";
   const [dailySpend, openSpend, recentOrders, recentAttempts, incidents, todayRes, unresolvedAttempts] = await Promise.all([
     getTodayScalpSpend(mode),
-    getOpenScalpSpend(mode),
+    getOpenScalpSpend(mode, wk),
     getScalpOrders({ mode, limit: 20 }),
     getRecentScalpReservations({ mode, limit: 20 }),
     getScalpIncidents(10),
