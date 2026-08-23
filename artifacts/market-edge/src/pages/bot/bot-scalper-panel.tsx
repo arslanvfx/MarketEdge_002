@@ -801,7 +801,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 <div className="min-w-0">
                   <div className="text-[10px] font-bold text-amber-500/70 uppercase tracking-widest">Real-Time Direction Guard</div>
                   <p className="break-words text-[10px] text-muted-foreground mt-1 max-w-2xl leading-relaxed">
-                    Reads one fresh underlying price every second after eligibility opens. Below/NO is blocked after consecutive rises toward the target; Above/YES is blocked after consecutive falls toward it. Flat or favorable movement resets the streak.
+                    Reads one fresh underlying price every second after eligibility opens. Below/NO is blocked after consecutive rises toward the target; Above/YES is blocked after consecutive falls toward it. The separate confirmation below also checks the net move across the complete window.
                   </p>
                 </div>
               </div>
@@ -842,6 +842,33 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">
                   A {merged.freefallConsecutiveSeconds}-second setting requires {merged.freefallConsecutiveSeconds + 1} fresh prices spanning {merged.freefallConsecutiveSeconds} real seconds. The Scalper stays in warming mode until the complete sequence exists.
                 </p>
+              </div>
+            </div>
+
+            <div className="border-t border-border/60 pt-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Favorable-Trend Confirmation</div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground/70">
+                    Requires the full sample window to finish higher for Above/YES or lower for Below/NO, while remaining on the winning side of the target. Flat or net wrong-way movement blocks entry.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={merged.favorableTrendConfirmationEnabled}
+                  data-testid="switch-scalper-favorable-trend"
+                  disabled={!merged.freefallGuardEnabled}
+                  onClick={() => handleConfigChange(
+                    "favorableTrendConfirmationEnabled",
+                    !merged.favorableTrendConfirmationEnabled,
+                  )}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${merged.favorableTrendConfirmationEnabled ? "bg-amber-500" : "bg-muted"}`}
+                  title="Toggle full-window favorable-trend confirmation"
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.favorableTrendConfirmationEnabled ? "translate-x-5" : "translate-x-0"}`} />
+                  <span className="sr-only">Favorable-Trend Confirmation</span>
+                </button>
               </div>
             </div>
 

@@ -366,6 +366,9 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
     openCapDollars: normalizeScalpOpenCapDollars(raw["openCapDollars"]),
     freefallGuardEnabled: typeof raw["freefallGuardEnabled"] === "boolean" ? raw["freefallGuardEnabled"] : defaults.freefallGuardEnabled,
     freefallConsecutiveSeconds: typeof raw["freefallConsecutiveSeconds"] === "number" ? raw["freefallConsecutiveSeconds"] : defaults.freefallConsecutiveSeconds,
+    favorableTrendConfirmationEnabled: typeof raw["favorableTrendConfirmationEnabled"] === "boolean"
+      ? raw["favorableTrendConfirmationEnabled"]
+      : defaults.favorableTrendConfirmationEnabled,
     freefallLookbackSeconds: typeof raw["freefallLookbackSeconds"] === "number" ? raw["freefallLookbackSeconds"] : defaults.freefallLookbackSeconds,
     freefallThresholdPct: typeof raw["freefallThresholdPct"] === "number" ? raw["freefallThresholdPct"] : defaults.freefallThresholdPct,
     rapidMoveGuardEnabled: typeof raw["rapidMoveGuardEnabled"] === "boolean" ? raw["rapidMoveGuardEnabled"] : defaults.rapidMoveGuardEnabled,

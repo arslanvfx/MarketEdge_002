@@ -425,6 +425,17 @@ export interface FreefallGuardResult {
   requiredConsecutiveMoves: number;
   observedSpanMs: number;
   directionalMovePct: number;
+  /** True when the complete direction window moved away from the target. */
+  favorableTrendConfirmed: boolean | null;
+  /** True when the enabled complete-window confirmation rejected the entry. */
+  favorableTrendBlocked: boolean;
+  /** Exact complete-window confirmation failure, or null when clear/disabled. */
+  favorableTrendReason: string | null;
+  /** Whether every selected direction sample stayed on the winning target side. */
+  targetSideWindowConfirmed: boolean | null;
+  /** First selected sample that violated the complete-window target-side rule. */
+  targetSideViolationPrice: number | null;
+  targetSideViolationAt: number | null;
   latestPrice: number | null;
   targetPrice: number | null;
   directionalBlocked: boolean;
@@ -462,6 +473,8 @@ export interface FreefallGuardInput {
   eligibilityStartMs: number;
   /** Number of consecutive one-second wrong-way moves required to block. */
   consecutiveSeconds: number;
+  /** Require positive net movement for YES and negative net movement for NO. */
+  favorableTrendConfirmationEnabled: boolean;
   /** Active Kalshi target/strike for the reserved market. */
   targetPrice: number;
   /** Independent absolute-speed filter. */
@@ -577,6 +590,12 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     requiredConsecutiveMoves: requiredMoves,
     observedSpanMs: 0,
     directionalMovePct: 0,
+    favorableTrendConfirmed: null,
+    favorableTrendBlocked: false,
+    favorableTrendReason: null,
+    targetSideWindowConfirmed: null,
+    targetSideViolationPrice: null,
+    targetSideViolationAt: null,
     latestPrice: null,
     targetPrice:
       input.directionEnabled && Number.isFinite(input.targetPrice)
@@ -711,7 +730,7 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   }
   const consecutiveWrongWaySeconds = consecutiveWrongWayDurationMs / 1_000;
 
-  const wrongTargetSide = input.directionEnabled && (
+  const latestWrongTargetSide = input.directionEnabled && (
     input.side === "yes"
       ? directionNewest.price <= input.targetPrice
       : directionNewest.price >= input.targetPrice
@@ -719,6 +738,30 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   const directionalBlocked =
     input.directionEnabled
     && consecutiveWrongWayDurationMs >= requiredMoves * 1_000;
+  const favorableTrendConfirmationEnabled =
+    input.directionEnabled && input.favorableTrendConfirmationEnabled;
+  const targetSideViolation = favorableTrendConfirmationEnabled
+    ? directionSamples.find((sample) =>
+      input.side === "yes"
+        ? sample.price <= input.targetPrice
+        : sample.price >= input.targetPrice
+    ) ?? null
+    : null;
+  const targetSideWindowConfirmed = favorableTrendConfirmationEnabled
+    ? targetSideViolation == null
+    : null;
+  const wrongTargetSide =
+    latestWrongTargetSide || targetSideViolation != null;
+  const favorableTrendConfirmed = favorableTrendConfirmationEnabled
+    ? (input.side === "yes" ? priceChangePct > 0 : priceChangePct < 0)
+    : null;
+  const favorableTrendBlocked =
+    favorableTrendConfirmationEnabled && favorableTrendConfirmed !== true;
+  const favorableTrendReason = favorableTrendBlocked
+    ? (input.side === "yes"
+      ? "freefall_favorable_trend_not_confirmed_yes"
+      : "freefall_favorable_trend_not_confirmed_no")
+    : null;
 
   let rapidMoveBlocked = false;
   let rapidMovePct = 0;
@@ -752,7 +795,11 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     }
   }
 
-  const blocked = wrongTargetSide || directionalBlocked || rapidMoveBlocked;
+  const blocked =
+    wrongTargetSide
+    || directionalBlocked
+    || favorableTrendBlocked
+    || rapidMoveBlocked;
   const reason = wrongTargetSide
     ? (input.side === "yes"
       ? "freefall_wrong_target_side_yes"
@@ -761,7 +808,7 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       ? (input.side === "yes"
         ? "freefall_consecutive_falling"
         : "freefall_consecutive_rising")
-      : rapidMoveReason;
+      : favorableTrendReason ?? rapidMoveReason;
   const evaluatedSamplesByTimestamp = new Map<number, FreefallSample>();
   if (input.directionEnabled) {
     for (const sample of directionSamples) evaluatedSamplesByTimestamp.set(sample.at, sample);
@@ -789,6 +836,12 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     requiredConsecutiveMoves: requiredMoves,
     observedSpanMs,
     directionalMovePct: priceChangePct,
+    favorableTrendConfirmed,
+    favorableTrendBlocked,
+    favorableTrendReason,
+    targetSideWindowConfirmed,
+    targetSideViolationPrice: targetSideViolation?.price ?? null,
+    targetSideViolationAt: targetSideViolation?.at ?? null,
     latestPrice: directionNewest.price,
     targetPrice: input.directionEnabled ? input.targetPrice : null,
     directionalBlocked,
@@ -818,6 +871,7 @@ export function evaluateFreefallPreSubmitGuard(input: {
   nowMs: number;
   eligibilityStartMs: number;
   consecutiveSeconds: number;
+  favorableTrendConfirmationEnabled: boolean;
   targetPrice: number;
   rapidMoveEnabled: boolean;
   rapidMoveLookbackSeconds: number;
@@ -859,6 +913,7 @@ export function evaluateFreefallPreSubmitGuard(input: {
     directionEnabled: input.directionEnabled,
     eligibilityStartMs: input.eligibilityStartMs,
     consecutiveSeconds: input.consecutiveSeconds,
+    favorableTrendConfirmationEnabled: input.favorableTrendConfirmationEnabled,
     targetPrice: input.targetPrice,
     rapidMoveEnabled: input.rapidMoveEnabled,
     rapidMoveLookbackSeconds: input.rapidMoveLookbackSeconds,
@@ -1056,6 +1111,7 @@ export interface ExecutionRiskSnapshot {
   // Freefall guard config
   freefallGuardEnabled: boolean;
   freefallConsecutiveSeconds: number;
+  favorableTrendConfirmationEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled: boolean;
@@ -1076,6 +1132,7 @@ export interface RiskConfigLike {
   openCapDollars: number;
   freefallGuardEnabled: boolean;
   freefallConsecutiveSeconds?: number;
+  favorableTrendConfirmationEnabled?: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled?: boolean;
@@ -1119,6 +1176,8 @@ export function buildExecutionRiskSnapshot(
     openCapDollars: config.openCapDollars,
     freefallGuardEnabled: config.freefallGuardEnabled,
     freefallConsecutiveSeconds: config.freefallConsecutiveSeconds ?? 4,
+    favorableTrendConfirmationEnabled:
+      config.favorableTrendConfirmationEnabled ?? true,
     freefallLookbackSeconds: config.freefallLookbackSeconds,
     freefallThresholdPct: config.freefallThresholdPct,
     rapidMoveGuardEnabled: config.rapidMoveGuardEnabled ?? false,
@@ -1187,6 +1246,12 @@ export function compareRiskSnapshot(
   // Freefall config
   if (currentConfig.freefallGuardEnabled !== snapshot.freefallGuardEnabled) changed.push("freefallGuardEnabled");
   if (!eqNum(currentConfig.freefallConsecutiveSeconds ?? 4, snapshot.freefallConsecutiveSeconds)) changed.push("freefallConsecutiveSeconds");
+  if (
+    (currentConfig.favorableTrendConfirmationEnabled ?? true)
+    !== snapshot.favorableTrendConfirmationEnabled
+  ) {
+    changed.push("favorableTrendConfirmationEnabled");
+  }
   if (!eqNum(currentConfig.freefallLookbackSeconds, snapshot.freefallLookbackSeconds)) changed.push("freefallLookbackSeconds");
   if (!eqNum(currentConfig.freefallThresholdPct, snapshot.freefallThresholdPct)) changed.push("freefallThresholdPct");
   if ((currentConfig.rapidMoveGuardEnabled ?? false) !== snapshot.rapidMoveGuardEnabled) changed.push("rapidMoveGuardEnabled");
@@ -1882,6 +1947,7 @@ export interface ScalpConfigPatch {
   openCapDollars?: number;
   freefallGuardEnabled?: boolean;
   freefallConsecutiveSeconds?: number;
+  favorableTrendConfirmationEnabled?: boolean;
   freefallLookbackSeconds?: number;
   freefallThresholdPct?: number;
   rapidMoveGuardEnabled?: boolean;
@@ -1911,6 +1977,7 @@ const ALLOWED_TOP_LEVEL_FIELDS = new Set<string>([
   "openCapDollars",
   "freefallGuardEnabled",
   "freefallConsecutiveSeconds",
+  "favorableTrendConfirmationEnabled",
   "freefallLookbackSeconds",
   "freefallThresholdPct",
   "rapidMoveGuardEnabled",
@@ -1979,6 +2046,13 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   if (has("freefallGuardEnabled")) {
     if (typeof body["freefallGuardEnabled"] !== "boolean") errors.push("freefallGuardEnabled must be a boolean");
     else out.freefallGuardEnabled = body["freefallGuardEnabled"];
+  }
+  if (has("favorableTrendConfirmationEnabled")) {
+    if (typeof body["favorableTrendConfirmationEnabled"] !== "boolean") {
+      errors.push("favorableTrendConfirmationEnabled must be a boolean");
+    } else {
+      out.favorableTrendConfirmationEnabled = body["favorableTrendConfirmationEnabled"];
+    }
   }
   if (has("rapidMoveGuardEnabled")) {
     if (typeof body["rapidMoveGuardEnabled"] !== "boolean") errors.push("rapidMoveGuardEnabled must be a boolean");

@@ -69,6 +69,14 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /requires \{merged\.freefallConsecutiveSeconds \+ 1\} fresh prices/);
   });
 
+  it("offers default-on favorable-trend confirmation separately from fast-move avoidance", () => {
+    assert.match(panelSource, /Favorable-Trend Confirmation/);
+    assert.match(panelSource, /switch-scalper-favorable-trend/);
+    assert.match(panelSource, /favorableTrendConfirmationEnabled/);
+    assert.match(panelSource, /finish higher for Above\/YES or lower for Below\/NO/i);
+    assert.match(panelSource, /Flat or net wrong-way movement blocks entry/i);
+  });
+
   it("keeps fast-move avoidance separately toggleable and configurable", () => {
     assert.match(panelSource, /Optional Fast-Move Avoidance/);
     assert.match(panelSource, /without changing the directional protection/i);

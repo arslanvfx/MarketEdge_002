@@ -47,14 +47,15 @@ function makeEntryGuardEvidence(overrides: Partial<EntryGuardEvidence> = {}): En
     evaluatedAt: "2026-08-21T19:12:00.500Z",
     side: "no",
     directionGuardEnabled: true,
+    favorableTrendConfirmationEnabled: true,
     rapidMoveGuardEnabled: true,
     targetProximityGuardEnabled: true,
     samples: [
-      { at: "2026-08-21T19:11:56.123Z", price: 117_490 },
-      { at: "2026-08-21T19:11:57.123Z", price: 117_495 },
+      { at: "2026-08-21T19:11:56.123Z", price: 117_505 },
+      { at: "2026-08-21T19:11:57.123Z", price: 117_502 },
       { at: "2026-08-21T19:11:58.123Z", price: 117_498 },
-      { at: "2026-08-21T19:11:59.123Z", price: 117_502 },
-      { at: "2026-08-21T19:12:00.123Z", price: 117_505 },
+      { at: "2026-08-21T19:11:59.123Z", price: 117_495 },
+      { at: "2026-08-21T19:12:00.123Z", price: 117_490 },
     ],
     sampleCoverageMs: 4_000,
     samplesUsed: 5,
@@ -62,7 +63,12 @@ function makeEntryGuardEvidence(overrides: Partial<EntryGuardEvidence> = {}): En
     lastWrongWayResetAt: null,
     consecutiveWrongWayMoves: 0,
     consecutiveWrongWaySeconds: 0,
-    directionalMovePct: 0.013,
+    directionalMovePct: -0.013,
+    favorableTrendConfirmed: true,
+    favorableTrendReason: null,
+    targetSideWindowConfirmed: true,
+    targetSideViolationPrice: null,
+    targetSideViolationAt: null,
     freefallConsecutiveSeconds: 4,
     rapidMovePct: 0.012,
     rapidMoveThresholdPct: 0.5,
@@ -70,7 +76,7 @@ function makeEntryGuardEvidence(overrides: Partial<EntryGuardEvidence> = {}): En
     distancePct: 0.043,
     minimumPct: 0.02,
     targetPrice: 117_500,
-    underlyingPrice: 117_505,
+    underlyingPrice: 117_490,
     ...overrides,
   };
 }
@@ -211,6 +217,10 @@ describe("describeScalperAttempt", () => {
   it("classifies durable skip reasons by the exact guard that triggered", () => {
     assert.equal(
       getScalperGuardBlock(attempt({ reason: "freefall_consecutive_falling" }))?.badge,
+      "DIRECTION GUARD",
+    );
+    assert.equal(
+      getScalperGuardBlock(attempt({ reason: "freefall_favorable_trend_not_confirmed_yes" }))?.badge,
       "DIRECTION GUARD",
     );
     assert.equal(
@@ -363,6 +373,8 @@ describe("describeEntryGuardEvidence", () => {
     const lines = describeEntryGuardEvidence(makeEntryGuardEvidence({
       directionalMovePct: 0.013,
       side: "no",
+      favorableTrendConfirmationEnabled: false,
+      favorableTrendConfirmed: null,
     }));
     assert.match(
       lines.join("\n"),
@@ -374,6 +386,8 @@ describe("describeEntryGuardEvidence", () => {
     const lines = describeEntryGuardEvidence(makeEntryGuardEvidence({
       directionalMovePct: -0.021,
       side: "yes",
+      favorableTrendConfirmationEnabled: false,
+      favorableTrendConfirmed: null,
     }));
     assert.match(
       lines.join("\n"),
@@ -387,6 +401,86 @@ describe("describeEntryGuardEvidence", () => {
       side: "yes",
     }));
     assert.match(lines.join("\n"), /\+0\.021% — favorable away from target for YES entry/);
+    assert.match(lines.join("\n"), /net favorable trend confirmed for YES — CLEAR/);
+    assert.match(lines.join("\n"), /every sample stayed above the target — CLEAR/);
+  });
+
+  it("renders the exact full-window confirmation failure for skipped attempts", () => {
+    const lines = describeScalperEvidence({
+      id: "attempt-favorable-trend-block",
+      mode: "live",
+      symbol: "BTC",
+      windowKey: "2026-08-21T19:00:00.000Z",
+      ticker: "KXBTC15M-26AUG211500-15",
+      status: "skipped",
+      reason: "freefall_favorable_trend_not_confirmed_yes",
+      reservedBudget: 0,
+      submissionCount: 0,
+      side: "yes",
+      observedWinningAsk: 0.97,
+      executionWinningLimit: null,
+      submittedLimitPrice: null,
+      layeredRegularPositionId: null,
+      layeredRegularSide: null,
+      skipEvidence: {
+        favorableTrendConfirmationEnabled: true,
+        favorableTrendConfirmed: false,
+        favorableTrendReason: "freefall_favorable_trend_not_confirmed_yes",
+        directionalMovePct: -0.021,
+        wrongWayResetCount: 1,
+        lastWrongWayResetAt: "2026-08-21T19:11:59.123Z",
+        protectedSide: "yes",
+      },
+      entryGuardEvidence: null,
+      createdAt: "2026-08-21T19:11:00.000Z",
+      attemptedAt: "2026-08-21T19:12:00.000Z",
+    });
+    assert.match(lines[0] ?? "", /Real-Time Direction Guard/);
+    assert.match(
+      lines.join("\n"),
+      /Full-window favorable trend BLOCKED: -0\.021%.*flat or net lower instead of rising/,
+    );
+    assert.match(
+      lines.join("\n"),
+      /1 wrong-way reset \(last 2026-08-21T19:11:59\.123Z\)/,
+    );
+  });
+
+  it("shows the exact sample that violated the full-window target side", () => {
+    const lines = describeScalperEvidence({
+      id: "attempt-target-side-block",
+      mode: "live",
+      symbol: "BTC",
+      windowKey: "2026-08-21T19:00:00.000Z",
+      ticker: "KXBTC15M-26AUG211500-15",
+      status: "skipped",
+      reason: "freefall_wrong_target_side_yes",
+      reservedBudget: 0,
+      submissionCount: 0,
+      side: "yes",
+      observedWinningAsk: 0.97,
+      executionWinningLimit: null,
+      submittedLimitPrice: null,
+      layeredRegularPositionId: null,
+      layeredRegularSide: null,
+      skipEvidence: {
+        favorableTrendConfirmationEnabled: true,
+        favorableTrendConfirmed: true,
+        favorableTrendReason: null,
+        targetSideWindowConfirmed: false,
+        targetSideViolationPrice: 99,
+        targetSideViolationAt: "2026-08-21T19:11:56.123Z",
+        directionalMovePct: 5.05,
+        protectedSide: "yes",
+      },
+      entryGuardEvidence: null,
+      createdAt: "2026-08-21T19:11:00.000Z",
+      attemptedAt: "2026-08-21T19:12:00.000Z",
+    });
+    assert.match(
+      lines.join("\n"),
+      /Full-window target side BLOCKED: every sample must stay above target.*first violation \$99.*19:11:56\.123Z/,
+    );
   });
 
   it("renders rapid movement and threshold", () => {

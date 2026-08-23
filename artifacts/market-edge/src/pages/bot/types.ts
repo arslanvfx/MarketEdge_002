@@ -577,6 +577,7 @@ export interface ScalperConfig {
   openCapDollars: number;
   freefallGuardEnabled: boolean;
   freefallConsecutiveSeconds: number;
+  favorableTrendConfirmationEnabled: boolean;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled: boolean;
@@ -619,6 +620,14 @@ export interface ScalpSkipEvidence {
   consecutiveWrongWayMoves?: number | null;
   consecutiveWrongWaySeconds?: number | null;
   directionalMovePct?: number | null;
+  wrongWayResetCount?: number | null;
+  lastWrongWayResetAt?: string | null;
+  favorableTrendConfirmationEnabled?: boolean | null;
+  favorableTrendConfirmed?: boolean | null;
+  favorableTrendReason?: string | null;
+  targetSideWindowConfirmed?: boolean | null;
+  targetSideViolationPrice?: number | null;
+  targetSideViolationAt?: string | null;
   rapidMoveBlocked?: boolean | null;
   rapidMovePct?: number | null;
   rapidMoveThresholdPct?: number | null;
@@ -754,6 +763,7 @@ export interface EntryGuardEvidence {
   evaluatedAt: string;
   side: "yes" | "no";
   directionGuardEnabled: boolean;
+  favorableTrendConfirmationEnabled?: boolean;
   rapidMoveGuardEnabled: boolean;
   targetProximityGuardEnabled: boolean;
   samples: Array<{ at: string; price: number }>;
@@ -764,6 +774,11 @@ export interface EntryGuardEvidence {
   consecutiveWrongWayMoves: number | null;
   consecutiveWrongWaySeconds: number | null;
   directionalMovePct: number | null;
+  favorableTrendConfirmed?: boolean | null;
+  favorableTrendReason?: string | null;
+  targetSideWindowConfirmed?: boolean | null;
+  targetSideViolationPrice?: number | null;
+  targetSideViolationAt?: string | null;
   freefallConsecutiveSeconds: number | null;
   rapidMovePct: number | null;
   rapidMoveThresholdPct: number | null;

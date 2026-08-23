@@ -637,6 +637,9 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
       openCapDollars: patch.openCapDollars !== undefined ? patch.openCapDollars : current.openCapDollars,
       freefallGuardEnabled: patch.freefallGuardEnabled !== undefined ? patch.freefallGuardEnabled : current.freefallGuardEnabled,
       freefallConsecutiveSeconds: patch.freefallConsecutiveSeconds !== undefined ? patch.freefallConsecutiveSeconds : current.freefallConsecutiveSeconds,
+      favorableTrendConfirmationEnabled: patch.favorableTrendConfirmationEnabled !== undefined
+        ? patch.favorableTrendConfirmationEnabled
+        : current.favorableTrendConfirmationEnabled,
       freefallLookbackSeconds: patch.freefallLookbackSeconds !== undefined ? patch.freefallLookbackSeconds : current.freefallLookbackSeconds,
       freefallThresholdPct: patch.freefallThresholdPct !== undefined ? patch.freefallThresholdPct : current.freefallThresholdPct,
       rapidMoveGuardEnabled: patch.rapidMoveGuardEnabled !== undefined ? patch.rapidMoveGuardEnabled : current.rapidMoveGuardEnabled,
@@ -2047,23 +2050,26 @@ async function _executeScalpAttempt(
   // is "unavailable" and skips — existing old samples must NOT mask it. Then the
   // guard must be evaluable AND not blocked to proceed.
   let finalFreefallResult: ReturnType<typeof checkFreefallGuard> | null = null;
+  const evaluatePinnedFreefallAt = (nowMs: number) => evaluateFreefallPreSubmitGuard({
+    directionEnabled: snapshot.freefallGuardEnabled,
+    hasProduct: coin != null,
+    freshSampleSucceeded: freshSampleResult,
+    samples: finalPriceSamples,
+    side: effectiveSide,
+    nowMs,
+    eligibilityStartMs:
+      Date.parse(snapshot.closeTime) - snapshot.finalWindowSeconds * 1_000,
+    consecutiveSeconds: snapshot.freefallConsecutiveSeconds,
+    favorableTrendConfirmationEnabled:
+      snapshot.favorableTrendConfirmationEnabled,
+    targetPrice: targetPriceNum,
+    rapidMoveEnabled: snapshot.rapidMoveGuardEnabled,
+    rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
+    rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
+  });
   if (snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled) {
     const ffNowMs = runtime.nowMs();
-    const freefallDecision = evaluateFreefallPreSubmitGuard({
-      directionEnabled: snapshot.freefallGuardEnabled,
-      hasProduct: coin != null,
-      freshSampleSucceeded: freshSampleResult,
-      samples: finalPriceSamples,
-      side: effectiveSide,
-      nowMs: ffNowMs,
-      eligibilityStartMs:
-        Date.parse(snapshot.closeTime) - snapshot.finalWindowSeconds * 1_000,
-      consecutiveSeconds: snapshot.freefallConsecutiveSeconds,
-      targetPrice: targetPriceNum,
-      rapidMoveEnabled: snapshot.rapidMoveGuardEnabled,
-      rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
-      rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
-    });
+    const freefallDecision = evaluatePinnedFreefallAt(ffNowMs);
     finalFreefallResult = freefallDecision.guardResult;
     if (!freefallDecision.allowed) {
       const ffFinal = freefallDecision.guardResult;
@@ -2076,6 +2082,16 @@ async function _executeScalpAttempt(
           adverseMovePct: ffFinal?.adverseMovePct ?? null,
           consecutiveWrongWayMoves: ffFinal?.consecutiveWrongWayMoves ?? null,
           consecutiveWrongWaySeconds: ffFinal?.consecutiveWrongWaySeconds ?? null,
+          favorableTrendConfirmed: ffFinal?.favorableTrendConfirmed ?? null,
+          favorableTrendReason: ffFinal?.favorableTrendReason ?? null,
+          targetSideWindowConfirmed:
+            ffFinal?.targetSideWindowConfirmed ?? null,
+          targetSideViolationPrice:
+            ffFinal?.targetSideViolationPrice ?? null,
+          targetSideViolationAt:
+            ffFinal?.targetSideViolationAt != null
+              ? new Date(ffFinal.targetSideViolationAt).toISOString()
+              : null,
           requiredConsecutiveMoves: ffFinal?.requiredConsecutiveMoves ?? null,
           rapidMoveBlocked: ffFinal?.rapidMoveBlocked ?? false,
           rapidMovePct: ffFinal?.rapidMovePct ?? null,
@@ -2091,6 +2107,24 @@ async function _executeScalpAttempt(
         consecutiveWrongWayMoves: ffFinal?.consecutiveWrongWayMoves ?? null,
         consecutiveWrongWaySeconds: ffFinal?.consecutiveWrongWaySeconds ?? null,
         directionalMovePct: ffFinal?.directionalMovePct ?? null,
+        wrongWayResetCount: ffFinal?.wrongWayResetCount ?? null,
+        lastWrongWayResetAt:
+          ffFinal?.lastWrongWayResetAt != null
+            ? new Date(ffFinal.lastWrongWayResetAt).toISOString()
+            : null,
+        favorableTrendConfirmationEnabled:
+          snapshot.freefallGuardEnabled
+          && snapshot.favorableTrendConfirmationEnabled,
+        favorableTrendConfirmed: ffFinal?.favorableTrendConfirmed ?? null,
+        favorableTrendReason: ffFinal?.favorableTrendReason ?? null,
+        targetSideWindowConfirmed:
+          ffFinal?.targetSideWindowConfirmed ?? null,
+        targetSideViolationPrice:
+          ffFinal?.targetSideViolationPrice ?? null,
+        targetSideViolationAt:
+          ffFinal?.targetSideViolationAt != null
+            ? new Date(ffFinal.targetSideViolationAt).toISOString()
+            : null,
         rapidMoveBlocked: ffFinal?.rapidMoveBlocked ?? false,
         rapidMovePct: ffFinal?.rapidMovePct ?? null,
         rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
@@ -2212,6 +2246,9 @@ async function _executeScalpAttempt(
     evaluatedAt: new Date(guardEvaluatedAtMs).toISOString(),
     side: effectiveSide,
     directionGuardEnabled: snapshot.freefallGuardEnabled,
+    favorableTrendConfirmationEnabled:
+      snapshot.freefallGuardEnabled
+      && snapshot.favorableTrendConfirmationEnabled,
     rapidMoveGuardEnabled: snapshot.rapidMoveGuardEnabled,
     targetProximityGuardEnabled: snapshot.targetProximityGuardEnabled,
     samples: evidenceSamples.map((sample) => ({
@@ -2237,6 +2274,32 @@ async function _executeScalpAttempt(
     directionalMovePct: snapshot.freefallGuardEnabled
       ? finalFreefallResult?.directionalMovePct ?? null
       : null,
+    favorableTrendConfirmed:
+      snapshot.freefallGuardEnabled
+      && snapshot.favorableTrendConfirmationEnabled
+        ? finalFreefallResult?.favorableTrendConfirmed ?? null
+        : null,
+    favorableTrendReason:
+      snapshot.freefallGuardEnabled
+      && snapshot.favorableTrendConfirmationEnabled
+        ? finalFreefallResult?.favorableTrendReason ?? null
+        : null,
+    targetSideWindowConfirmed:
+      snapshot.freefallGuardEnabled
+      && snapshot.favorableTrendConfirmationEnabled
+        ? finalFreefallResult?.targetSideWindowConfirmed ?? null
+        : null,
+    targetSideViolationPrice:
+      snapshot.freefallGuardEnabled
+      && snapshot.favorableTrendConfirmationEnabled
+        ? finalFreefallResult?.targetSideViolationPrice ?? null
+        : null,
+    targetSideViolationAt:
+      snapshot.freefallGuardEnabled
+      && snapshot.favorableTrendConfirmationEnabled
+      && finalFreefallResult?.targetSideViolationAt != null
+        ? new Date(finalFreefallResult.targetSideViolationAt).toISOString()
+        : null,
     freefallConsecutiveSeconds: snapshot.freefallGuardEnabled
       ? snapshot.freefallConsecutiveSeconds
       : null,
@@ -2348,6 +2411,54 @@ async function _executeScalpAttempt(
       );
       return;
     }
+    const finalFreefallPaper =
+      snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled
+        ? evaluatePinnedFreefallAt(runtime.nowMs())
+        : null;
+    if (finalFreefallPaper && !finalFreefallPaper.allowed) {
+      await runtime.updateReservationStatus(
+        mode,
+        symbol,
+        windowKey,
+        "skipped",
+        finalFreefallPaper.reason ?? "freefall_blocked_final",
+        true,
+        {
+          ..._timingEvidence(),
+          directionalMovePct:
+            finalFreefallPaper.guardResult?.directionalMovePct ?? null,
+          wrongWayResetCount:
+            finalFreefallPaper.guardResult?.wrongWayResetCount ?? null,
+          lastWrongWayResetAt:
+            finalFreefallPaper.guardResult?.lastWrongWayResetAt != null
+              ? new Date(
+                  finalFreefallPaper.guardResult.lastWrongWayResetAt,
+                ).toISOString()
+              : null,
+          favorableTrendConfirmationEnabled:
+            snapshot.freefallGuardEnabled
+            && snapshot.favorableTrendConfirmationEnabled,
+          favorableTrendConfirmed:
+            finalFreefallPaper.guardResult?.favorableTrendConfirmed ?? null,
+          favorableTrendReason:
+            finalFreefallPaper.guardResult?.favorableTrendReason ?? null,
+          targetSideWindowConfirmed:
+            finalFreefallPaper.guardResult?.targetSideWindowConfirmed ?? null,
+          targetSideViolationPrice:
+            finalFreefallPaper.guardResult?.targetSideViolationPrice ?? null,
+          targetSideViolationAt:
+            finalFreefallPaper.guardResult?.targetSideViolationAt != null
+              ? new Date(
+                  finalFreefallPaper.guardResult.targetSideViolationAt,
+                ).toISOString()
+              : null,
+          samplesUsed: finalFreefallPaper.guardResult?.samplesUsed ?? null,
+          sampleCoverageMs: finalFreefallPaper.sampleCoverageMs,
+          protectedSide: effectiveSide,
+        },
+      );
+      return;
+    }
     orderRecord.layeredRegularPositionId = finalLayerPaper.status === "same_side"
       ? finalLayerPaper.position.id
       : null;
@@ -2385,8 +2496,17 @@ async function _executeScalpAttempt(
       ticker,
       effectiveSide,
     );
+    const finalFreefallLive =
+      snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled
+        ? evaluatePinnedFreefallAt(runtime.nowMs())
+        : null;
     const finalAbortReason = finalReasonLive
-      ?? (finalLayerLive.status === "opposite_side" ? "opposite_regular_position" : null);
+      ?? (finalLayerLive.status === "opposite_side" ? "opposite_regular_position" : null)
+      ?? (
+        finalFreefallLive && !finalFreefallLive.allowed
+          ? finalFreefallLive.reason ?? "freefall_blocked_final"
+          : null
+      );
     if (finalAbortReason !== null) {
       logger.info(
         { symbol, windowKey, reason: finalAbortReason },
@@ -2412,6 +2532,36 @@ async function _executeScalpAttempt(
           layerDecision: finalLayerLive.status === "opposite_side"
             ? "opposite_side_block"
             : null,
+          directionalMovePct:
+            finalFreefallLive?.guardResult?.directionalMovePct ?? null,
+          wrongWayResetCount:
+            finalFreefallLive?.guardResult?.wrongWayResetCount ?? null,
+          lastWrongWayResetAt:
+            finalFreefallLive?.guardResult?.lastWrongWayResetAt != null
+              ? new Date(
+                  finalFreefallLive.guardResult.lastWrongWayResetAt,
+                ).toISOString()
+              : null,
+          favorableTrendConfirmationEnabled:
+            snapshot.freefallGuardEnabled
+            && snapshot.favorableTrendConfirmationEnabled,
+          favorableTrendConfirmed:
+            finalFreefallLive?.guardResult?.favorableTrendConfirmed ?? null,
+          favorableTrendReason:
+            finalFreefallLive?.guardResult?.favorableTrendReason ?? null,
+          targetSideWindowConfirmed:
+            finalFreefallLive?.guardResult?.targetSideWindowConfirmed ?? null,
+          targetSideViolationPrice:
+            finalFreefallLive?.guardResult?.targetSideViolationPrice ?? null,
+          targetSideViolationAt:
+            finalFreefallLive?.guardResult?.targetSideViolationAt != null
+              ? new Date(
+                  finalFreefallLive.guardResult.targetSideViolationAt,
+                ).toISOString()
+              : null,
+          samplesUsed: finalFreefallLive?.guardResult?.samplesUsed ?? null,
+          sampleCoverageMs: finalFreefallLive?.sampleCoverageMs ?? null,
+          protectedSide: effectiveSide,
         },
       });
       return;
@@ -2692,6 +2842,7 @@ export interface ControlledFreefallServiceExerciseResult {
       | "fetch_cooldown"
       | "stale"
       | "stale_cooldown"
+      | "target_crossing"
       | "recovered"
       | "recovered_retry";
     state: "skipped" | "cooldown" | "submitted";
@@ -2708,13 +2859,17 @@ export interface ControlledFreefallServiceExerciseResult {
   }>;
   submittedEntryEvidence: ScalpEntryGuardEvidence | null;
   submittedEntryEvidences: ScalpEntryGuardEvidence[];
+  abortedBeforeSubmitReasons: string[];
   intentWrites: number;
   brokerSubmissions: number;
 }
 
 export interface ControlledFreefallServiceExerciseOptions {
+  side?: "yes" | "no";
   targetProximityGuardEnabled?: boolean;
   runSecondSubmission?: boolean;
+  /** Controlled clock advance while the durable live intent is being written. */
+  intentWriteAdvanceMs?: number;
 }
 
 export interface ControlledSampleSchedulerExerciseResult {
@@ -2868,6 +3023,8 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
           eligibilityStartMs:
             Date.parse(closeTime!) - params.finalWindowSeconds * 1_000,
           consecutiveSeconds: _config.freefallConsecutiveSeconds,
+          favorableTrendConfirmationEnabled:
+            _config.favorableTrendConfirmationEnabled,
           targetPrice: Number(cached?.value),
           rapidMoveEnabled: _config.rapidMoveGuardEnabled,
           rapidMoveLookbackSeconds: _config.rapidMoveLookbackSeconds,
@@ -2879,6 +3036,7 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         freefallBlocked =
           !ff.evaluable
           || ff.directionalBlocked
+          || ff.favorableTrendBlocked
           || ff.wrongTargetSide;
         freefallSamplesUsed = ff.samplesUsed;
         freefallRequiredSamples = ff.requiredSamples;
@@ -3281,7 +3439,7 @@ async function _runControlledLayeringScenario(
         symbol: "BTC",
         windowKey,
         ticker,
-        side,
+        side: "yes",
       });
     },
   };
@@ -3352,6 +3510,7 @@ export async function runControlledFreefallServiceExercise(
 ):
 Promise<ControlledFreefallServiceExerciseResult> {
   const originalConfig = _config;
+  const side = options.side ?? "yes";
   const symbol = "BTC";
   const ticker = "CONTROLLED-FREEFALL-BTC";
   const windowOpenMs = Date.UTC(2026, 7, 22, 7, 0, 0);
@@ -3368,6 +3527,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
   let brokerSubmissions = 0;
   let submittedEntryEvidence: ScalpEntryGuardEvidence | null = null;
   const submittedEntryEvidences: ScalpEntryGuardEvidence[] = [];
+  const abortedBeforeSubmitReasons: string[] = [];
   const skippedAttempts: ControlledFreefallServiceExerciseResult["skippedAttempts"] = [];
   const steps: ControlledFreefallServiceExerciseResult["steps"] = [];
 
@@ -3413,10 +3573,10 @@ Promise<ControlledFreefallServiceExerciseResult> {
     ticker,
     closeTime,
     detectedAtMs: nowMs,
-    cachedYesAsk: 0.97,
+    cachedYesAsk: side === "yes" ? 0.97 : 0.03,
     cachedNoAsk: 0.98,
-    side: "yes",
-    winningAsk: 0.97,
+    side,
+    winningAsk: side === "yes" ? 0.97 : 0.98,
   };
 
   const runtime: ScalpAttemptRuntime = {
@@ -3424,7 +3584,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
     currentWindowKey: () => windowKey,
     fetchKalshiTarget: async () => 100,
     fetchOrderbookPrices: async () => ({
-      yesAsk: 0.97,
+      yesAsk: side === "yes" ? 0.97 : 0.03,
       yesBid: 0.02,
       yesDepth: [[0.02, 100]],
       noDepth: [[0.03, 100]],
@@ -3435,7 +3595,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
       value: 100,
       ticker,
       closeTime,
-      yesAsk: 0.97,
+      yesAsk: side === "yes" ? 0.97 : 0.03,
       yesBid: 0.02,
       noAsk: 0.98,
     }),
@@ -3453,9 +3613,12 @@ Promise<ControlledFreefallServiceExerciseResult> {
       if (order.entryGuardEvidence != null) {
         submittedEntryEvidences.push(order.entryGuardEvidence);
       }
+      nowMs += options.intentWriteAdvanceMs ?? 0;
     },
     finalizePaperOrderAndReleaseReservation: async () => {},
-    abortIntentAndReleaseReservation: async () => {},
+    abortIntentAndReleaseReservation: async (args) => {
+      abortedBeforeSubmitReasons.push(args.reason);
+    },
     placeScalpOrderStrict: async () => {
       brokerSubmissions += 1;
       return {
@@ -3522,25 +3685,40 @@ Promise<ControlledFreefallServiceExerciseResult> {
   _nextAttemptAt.delete(attemptKey);
   _terminalAttemptKeys.delete(attemptKey);
   try {
-    await runStep("adverse", coveredSamples([105, 104, 103, 102, 101]), true);
+    const adversePrices = side === "yes"
+      ? [105, 104, 103, 103.5, 102]
+      : [95, 96, 97, 96.5, 98];
+    const favorablePrices = side === "yes"
+      ? [101, 102, 103, 104, 105]
+      : [99, 98, 97, 96, 95];
+    const targetCrossingPrices = side === "yes"
+      ? [99, 101, 102, 103, 104]
+      : [101, 99, 98, 97, 96];
+    const retryPrices = side === "yes"
+      ? [106, 107, 108, 109, 110]
+      : [94, 93, 92, 91, 90];
+
+    await runStep("adverse", coveredSamples(adversePrices), true);
     nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
-    await runStep("adverse_cooldown", coveredSamples([101, 102, 103, 104, 105]), true);
+    await runStep("adverse_cooldown", coveredSamples(favorablePrices), true);
 
     nowMs += 1;
-    await runStep("fetch_failed", coveredSamples([101, 102, 103, 104, 105]), false);
+    await runStep("fetch_failed", coveredSamples(favorablePrices), false);
     nowMs += 250;
-    await runStep("fetch_cooldown", coveredSamples([101, 102, 103, 104, 105]), true);
+    await runStep("fetch_cooldown", coveredSamples(favorablePrices), true);
 
     nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 250;
-    await runStep("stale", coveredSamples([101, 102, 103, 104, 105], 6_000), true);
+    await runStep("stale", coveredSamples(favorablePrices, 6_000), true);
     nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
-    await runStep("stale_cooldown", coveredSamples([101, 102, 103, 104, 105]), true);
+    await runStep("stale_cooldown", coveredSamples(favorablePrices), true);
 
     nowMs += 1;
-    await runStep("recovered", coveredSamples([101, 102, 103, 104, 105]), true);
+    await runStep("target_crossing", coveredSamples(targetCrossingPrices), true);
+    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS;
+    await runStep("recovered", coveredSamples(favorablePrices), true);
     if (options.runSecondSubmission) {
       nowMs += SCALP_AUTH_RETRY_COOLDOWN_MS;
-      await runStep("recovered_retry", coveredSamples([106, 107, 108, 109, 110]), true);
+      await runStep("recovered_retry", coveredSamples(retryPrices), true);
     }
 
     return {
@@ -3548,6 +3726,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
       skippedAttempts,
       submittedEntryEvidence,
       submittedEntryEvidences,
+      abortedBeforeSubmitReasons,
       intentWrites,
       brokerSubmissions,
     };

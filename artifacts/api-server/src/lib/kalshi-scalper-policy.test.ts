@@ -732,6 +732,8 @@ describe("checkFreefallGuard", () => {
       rapidMoveLookbackSeconds: 4,
       rapidMoveThresholdPct: 0.5,
       ...overrides,
+      favorableTrendConfirmationEnabled:
+        overrides.favorableTrendConfirmationEnabled ?? true,
     });
   }
 
@@ -745,15 +747,17 @@ describe("checkFreefallGuard", () => {
     assert.equal(result.requiredSamples, 5);
   });
 
-  it("allows YES when a flat or favorable tick interrupts the falling streak", () => {
+  it("blocks a noisy YES net decline even when a flat tick resets the strict streak", () => {
     const result = evaluate(makeSamples([105, 104, 103, 103, 102]), "yes");
     assert.equal(result.evaluable, true);
-    assert.equal(result.blocked, false);
-    assert.equal(result.reason, null);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_favorable_trend_not_confirmed_yes");
     assert.equal(result.consecutiveWrongWayMoves, 1);
     assert.equal(result.consecutiveWrongWaySeconds, 1);
     assert.equal(result.wrongWayResetCount, 1);
     assert.equal(result.lastWrongWayResetAt, nowMs - 1_000);
+    assert.equal(result.favorableTrendConfirmed, false);
+    assert.equal(result.favorableTrendBlocked, true);
     assert.deepEqual(
       result.evaluatedSamples.map((sample) => sample.price),
       [105, 104, 103, 103, 102],
@@ -772,7 +776,8 @@ describe("checkFreefallGuard", () => {
       eligibilityStartMs: nowMs - 4_300,
     });
     assert.equal(result.evaluable, true);
-    assert.equal(result.blocked, false);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_favorable_trend_not_confirmed_yes");
     assert.equal(result.wrongWayResetCount, 1);
     assert.equal(result.lastWrongWayResetAt, nowMs - 1_000);
     assert.equal(result.consecutiveWrongWayMoves, 1);
@@ -788,11 +793,90 @@ describe("checkFreefallGuard", () => {
     assert.equal(result.consecutiveWrongWayMoves, 4);
   });
 
+  it("blocks a noisy NO net rise even when a down tick resets the strict streak", () => {
+    const result = evaluate(makeSamples([105, 106, 107, 106.5, 108]), "no");
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_favorable_trend_not_confirmed_no");
+    assert.equal(result.consecutiveWrongWayMoves, 1);
+    assert.equal(result.wrongWayResetCount, 1);
+    assert.equal(result.favorableTrendConfirmed, false);
+  });
+
   it("allows NO during slow or fast favorable falling movement when rapid guard is off", () => {
     const result = evaluate(makeSamples([109, 108, 106, 103, 100]), "no");
     assert.equal(result.evaluable, true);
     assert.equal(result.blocked, false);
     assert.equal(result.reason, null);
+    assert.equal(result.favorableTrendConfirmed, true);
+    assert.equal(result.targetSideWindowConfirmed, true);
+  });
+
+  it("allows YES only when the complete window is net rising and remains above target", () => {
+    const result = evaluate(makeSamples([101, 102, 101.5, 103, 104]), "yes");
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.reason, null);
+    assert.equal(result.favorableTrendConfirmed, true);
+    assert.equal(result.targetSideWindowConfirmed, true);
+  });
+
+  it("blocks net-rising YES when any selected sample is at or below target", () => {
+    const result = evaluate(makeSamples([99, 101, 102, 103, 104]), "yes", {
+      targetPrice: 100,
+    });
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_wrong_target_side_yes");
+    assert.equal(result.favorableTrendConfirmed, true);
+    assert.equal(result.targetSideWindowConfirmed, false);
+    assert.equal(result.targetSideViolationPrice, 99);
+    assert.equal(result.targetSideViolationAt, eligibilityStartMs);
+  });
+
+  it("blocks net-falling NO when any selected sample is at or above target", () => {
+    const result = evaluate(makeSamples([111, 109, 108, 107, 106]), "no", {
+      targetPrice: 110,
+    });
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_wrong_target_side_no");
+    assert.equal(result.favorableTrendConfirmed, true);
+    assert.equal(result.targetSideWindowConfirmed, false);
+    assert.equal(result.targetSideViolationPrice, 111);
+    assert.equal(result.targetSideViolationAt, eligibilityStartMs);
+  });
+
+  it("blocks exact-flat endpoints when favorable-trend confirmation is enabled", () => {
+    const yes = evaluate(makeSamples([105, 104, 105.5, 106, 105]), "yes");
+    const no = evaluate(makeSamples([105, 106, 104.5, 104, 105]), "no");
+    assert.equal(yes.reason, "freefall_favorable_trend_not_confirmed_yes");
+    assert.equal(no.reason, "freefall_favorable_trend_not_confirmed_no");
+    assert.equal(yes.favorableTrendConfirmed, false);
+    assert.equal(no.favorableTrendConfirmed, false);
+  });
+
+  it("preserves legacy strict-streak behavior when confirmation is disabled", () => {
+    const result = evaluate(makeSamples([105, 104, 103, 103, 102]), "yes", {
+      favorableTrendConfirmationEnabled: false,
+    });
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.reason, null);
+    assert.equal(result.favorableTrendConfirmed, null);
+    assert.equal(result.favorableTrendBlocked, false);
+    assert.equal(result.targetSideWindowConfirmed, null);
+
+    const legacyCrossing = evaluate(
+      makeSamples([99, 101, 102, 103, 104]),
+      "yes",
+      {
+        targetPrice: 100,
+        favorableTrendConfirmationEnabled: false,
+      },
+    );
+    assert.equal(legacyCrossing.blocked, false);
+    assert.equal(legacyCrossing.reason, null);
   });
 
   it("honors an operator-adjusted three-second consecutive duration", () => {
@@ -1586,6 +1670,7 @@ const baseCfg = (): RiskConfigLike => ({
   openCapDollars: 50,
   freefallGuardEnabled: true,
   freefallConsecutiveSeconds: 4,
+  favorableTrendConfirmationEnabled: true,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
   rapidMoveGuardEnabled: false,
@@ -1617,6 +1702,7 @@ describe("buildExecutionRiskSnapshot", () => {
     assert.equal(s.finalWindowSeconds, 120);
     assert.equal(s.freefallGuardEnabled, true);
     assert.equal(s.freefallConsecutiveSeconds, 4);
+    assert.equal(s.favorableTrendConfirmationEnabled, true);
     assert.equal(s.freefallLookbackSeconds, 30);
     assert.equal(s.freefallThresholdPct, 0.5);
     assert.equal(s.rapidMoveGuardEnabled, false);
@@ -1692,6 +1778,15 @@ describe("compareRiskSnapshot (fail-closed diff)", () => {
   it("freefall consecutive duration change => rejected", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallConsecutiveSeconds: 6 }, baseParams(), baseIdentity());
     assert.ok(d.changedFields.includes("freefallConsecutiveSeconds"));
+  });
+  it("favorable-trend confirmation toggle change => rejected", () => {
+    const d = compareRiskSnapshot(
+      snap(),
+      { ...baseCfg(), favorableTrendConfirmationEnabled: false },
+      baseParams(),
+      baseIdentity(),
+    );
+    assert.ok(d.changedFields.includes("favorableTrendConfirmationEnabled"));
   });
   it("freefall lookback change => rejected", () => {
     const d = compareRiskSnapshot(snap(), { ...baseCfg(), freefallLookbackSeconds: 45 }, baseParams(), baseIdentity());
@@ -1886,6 +1981,17 @@ describe("parseScalpConfigPatch", () => {
     const r = parseScalpConfigPatch({ freefallGuardEnabled: 1 });
     assert.equal(r.ok, false);
     assert.ok(errsOf(r).some((e) => e.includes("freefallGuardEnabled")));
+  });
+
+  it("accepts a real favorable-trend toggle and rejects coercion", () => {
+    assert.deepEqual(
+      parseScalpConfigPatch({ favorableTrendConfirmationEnabled: false }),
+      { ok: true, value: { favorableTrendConfirmationEnabled: false } },
+    );
+    assert.equal(
+      parseScalpConfigPatch({ favorableTrendConfirmationEnabled: "false" }).ok,
+      false,
+    );
   });
 
   it("accepts a real rapid-move toggle and rejects coercion", () => {
@@ -2387,6 +2493,10 @@ describe("execution wiring (static source assertions)", () => {
       svc,
       /eligibilityStartMs:[\s\S]*?snapshot\.finalWindowSeconds \* 1_000,[\s\S]*?consecutiveSeconds: snapshot\.freefallConsecutiveSeconds,[\s\S]*?rapidMoveEnabled: snapshot\.rapidMoveGuardEnabled/,
     );
+    assert.match(
+      svc,
+      /favorableTrendConfirmationEnabled:[\s\S]*?snapshot\.favorableTrendConfirmationEnabled/,
+    );
   });
 
   it("FINAL target proximity guard uses fresh inputs before order intent and submit", () => {
@@ -2473,6 +2583,11 @@ describe("execution wiring (static source assertions)", () => {
     const between = svc.slice(intent, place);
     const checkPos = between.indexOf("runtime.finalRiskValidationSync(");
     assert.ok(checkPos >= 0, "a sync final validation must occur between intent and submit");
+    assert.match(
+      between,
+      /evaluatePinnedFreefallAt\(runtime\.nowMs\(\)\)/,
+      "sample freshness and full-window direction must be rechecked after intent persistence",
+    );
   });
 
   it("LIVE: NO await between the successful post-intent check and the submit call", () => {

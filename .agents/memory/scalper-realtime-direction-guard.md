@@ -1,10 +1,13 @@
 ---
 name: Scalper real-time direction guard
-description: Directional entry protection and independent rapid-move avoidance for final-window Scalper entries.
+description: Strict streak and full-window favorable-trend protection for final-window Scalper entries.
 ---
 
-The directional guard measures a trailing, wrong-way *elapsed-time* streak using fresh, cadenced underlying prices after the eligibility boundary. It must not become clear or block early merely because jitter or extra fetches create enough samples; require the complete configured real-time duration. YES requires spot above target and blocks only a sustained fall toward it; NO requires spot below target and blocks only a sustained rise toward it. Flat or favorable movement resets the streak.
+The real-time direction guard has two additive checks over the same complete, fresh, cadenced window:
 
-**Why:** Sample count alone can turn a nominal four-second safety period into roughly three seconds, especially under fast/jittered fetching. Pre-eligibility samples must never qualify a newly eligible entry.
+1. Preserve the strict consecutive wrong-way *elapsed-time* streak. YES treats falling as wrong-way; NO treats rising as wrong-way. Flat or favorable ticks reset only this strict streak.
+2. Independently require default-on favorable net movement across the complete window. YES must finish strictly higher and every selected sample must stay above target; NO must finish strictly lower and every selected sample must stay below target. Flat or net wrong-way endpoints, equality with the target, and target crossings block even when the final sample is back on the winning side. Disabling this confirmation restores legacy strict-streak behavior plus the original latest-sample target-side check.
 
-**How to apply:** Keep the default duration operator-adjustable, fail closed on missing/stale/gapped/out-of-order/target-side-invalid data, and retain measured duration plus sample coverage in skip evidence. The optional rapid-move filter remains separate from directional logic and starts disabled; its blocks and unavailable states use the normal guard cooldown so a transient shock does not permanently forfeit the market window. Preserve the final-path rule that guard evaluation uses already-collected in-memory state and adds no post-check I/O.
+**Why:** Sample count alone can shorten the safety period, while one flat or favorable interruption can reset a strict streak even though the overall move remains adverse. The two checks prevent both failure modes without changing established streak semantics.
+
+**How to apply:** Keep the duration and confirmation toggle operator-adjustable. Fail closed on missing, stale, gapped, out-of-order, insufficient, or target-side-invalid data. Pin both settings for an attempt and synchronously re-evaluate already-collected in-memory samples after intent persistence, immediately before submission, with no new network I/O or await after a successful decision. Persist signed movement, confirmation status, and strict reset evidence. Rapid-move avoidance remains an independent, separately controlled filter.

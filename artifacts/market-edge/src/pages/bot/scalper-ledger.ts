@@ -227,6 +227,38 @@ export function describeEntryGuardEvidence(ege: EntryGuardEvidence): string[] {
     );
   }
 
+  if (ege.directionGuardEnabled && ege.favorableTrendConfirmationEnabled) {
+    const moveText = ege.directionalMovePct == null
+      ? "net movement unavailable"
+      : `${ege.directionalMovePct >= 0 ? "+" : ""}${ege.directionalMovePct.toFixed(3)}% net`;
+    if (ege.favorableTrendConfirmed === true) {
+      lines.push(
+        `Favorable-trend confirmation: ${moveText} — net favorable trend confirmed for ${ege.side.toUpperCase()} — CLEAR`,
+      );
+    } else {
+      lines.push(
+        `Favorable-trend confirmation: ${moveText} — ${ege.favorableTrendReason ?? "confirmation unavailable"}`,
+      );
+    }
+    const targetDirection = ege.side === "yes" ? "above" : "below";
+    if (ege.targetSideWindowConfirmed === true) {
+      lines.push(
+        `Full-window target side: every sample stayed ${targetDirection} the target — CLEAR`,
+      );
+    } else if (ege.targetSideWindowConfirmed === false) {
+      const violation = ege.targetSideViolationPrice == null
+        ? "violating sample unavailable"
+        : `${formatUnderlyingPrice(ege.targetSideViolationPrice)}${
+            ege.targetSideViolationAt ? ` @ ${ege.targetSideViolationAt}` : ""
+          }`;
+      lines.push(
+        `Full-window target side: ${violation} did not stay ${targetDirection} the target`,
+      );
+    }
+  } else if (ege.directionGuardEnabled) {
+    lines.push("Favorable-trend confirmation: disabled for this entry");
+  }
+
   // Rapid measurement + threshold
   if (ege.rapidMoveGuardEnabled) {
     const rapidMeasured = ege.rapidMovePct == null ? "unavailable" : `${ege.rapidMovePct.toFixed(3)}%`;
@@ -328,7 +360,50 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
           evidence.sampleCoverageMs == null ? "" : ` over ${(evidence.sampleCoverageMs / 1_000).toFixed(1)}s`
         }`;
     const sideText = evidence.protectedSide ? ` · protected ${evidence.protectedSide.toUpperCase()}` : "";
-    details.push(`Real-time direction ${movement} · ${streak}${sampleText}${sideText}`);
+    const resetText = evidence.wrongWayResetCount == null
+      ? ""
+      : evidence.wrongWayResetCount === 0
+        ? " · no wrong-way resets"
+        : ` · ${evidence.wrongWayResetCount} wrong-way reset${
+            evidence.wrongWayResetCount === 1 ? "" : "s"
+          }${
+            evidence.lastWrongWayResetAt
+              ? ` (last ${evidence.lastWrongWayResetAt})`
+              : ""
+          }`;
+    details.push(`Real-time direction ${movement} · ${streak}${resetText}${sampleText}${sideText}`);
+  }
+
+  if (evidence?.favorableTrendConfirmationEnabled) {
+    const movement = evidence.directionalMovePct == null
+      ? "movement unavailable"
+      : `${evidence.directionalMovePct >= 0 ? "+" : ""}${evidence.directionalMovePct.toFixed(3)}%`;
+    const disposition = evidence.favorableTrendConfirmed
+      ? "CONFIRMED"
+      : "BLOCKED";
+    const reason = evidence.favorableTrendReason
+      ? ` · ${humanizeReason(evidence.favorableTrendReason)}`
+      : "";
+    details.push(`Full-window favorable trend ${disposition}: ${movement}${reason}`);
+    const targetDirection = evidence.protectedSide === "no" ? "below" : "above";
+    if (evidence.targetSideWindowConfirmed != null) {
+      const targetDisposition = evidence.targetSideWindowConfirmed
+        ? "CONFIRMED"
+        : "BLOCKED";
+      const violation = evidence.targetSideWindowConfirmed
+        || evidence.targetSideViolationPrice == null
+        ? ""
+        : ` · first violation ${formatUnderlyingPrice(
+            evidence.targetSideViolationPrice,
+          )}${
+            evidence.targetSideViolationAt
+              ? ` @ ${evidence.targetSideViolationAt}`
+              : ""
+          }`;
+      details.push(
+        `Full-window target side ${targetDisposition}: every sample must stay ${targetDirection} target${violation}`,
+      );
+    }
   }
 
   if (evidence && (
@@ -417,6 +492,7 @@ export function getScalperGuardBlock(attempt: ScalperAttempt): ScalperGuardBlock
 
   if (
     reason.startsWith("freefall_consecutive_")
+    || reason.startsWith("freefall_favorable_trend_")
     || reason.startsWith("freefall_wrong_target_side_")
     || reason.startsWith("freefall_unavailable_")
   ) {
@@ -498,8 +574,10 @@ const REASON_LABELS: Record<string, string> = {
   freefall_adverse_reversal_rising: "A sharp upward reversal exceeded the Freefall limit",
   freefall_consecutive_falling: "Underlying fell toward the target for the configured consecutive seconds",
   freefall_consecutive_rising: "Underlying rose toward the target for the configured consecutive seconds",
-  freefall_wrong_target_side_yes: "Underlying was not above the target for the YES entry",
-  freefall_wrong_target_side_no: "Underlying was not below the target for the NO entry",
+  freefall_wrong_target_side_yes: "The complete direction window did not stay above the target for the YES entry",
+  freefall_wrong_target_side_no: "The complete direction window did not stay below the target for the NO entry",
+  freefall_favorable_trend_not_confirmed_yes: "The full sample window was flat or net lower instead of rising for the YES entry",
+  freefall_favorable_trend_not_confirmed_no: "The full sample window was flat or net higher instead of falling for the NO entry",
   freefall_unavailable_no_samples: "Freefall guard lacked enough fresh samples",
   freefall_unavailable_warming: "Real-time direction guard is collecting its required one-second samples",
   freefall_unavailable_sample_gap: "A one-second underlying-price tick was missed",

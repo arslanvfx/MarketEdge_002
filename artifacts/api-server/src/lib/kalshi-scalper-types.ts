@@ -29,6 +29,8 @@ export interface ScalpConfig {
   freefallGuardEnabled: boolean;    // default true
   /** Number of consecutive one-second moves toward the losing side that blocks entry. */
   freefallConsecutiveSeconds: number;
+  /** Require the complete direction window to move away from the target. */
+  favorableTrendConfirmationEnabled: boolean;
   /** Legacy persisted fields retained for rolling compatibility; no longer drive entry. */
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
@@ -60,6 +62,7 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   openCapDollars: DEFAULT_SCALP_OPEN_CAP_DOLLARS,
   freefallGuardEnabled: true,
   freefallConsecutiveSeconds: 4,
+  favorableTrendConfirmationEnabled: true,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
   rapidMoveGuardEnabled: false,
@@ -136,6 +139,7 @@ export interface ScalpEntryGuardEvidence {
   evaluatedAt: string;
   side: "yes" | "no";
   directionGuardEnabled: boolean;
+  favorableTrendConfirmationEnabled?: boolean;
   rapidMoveGuardEnabled: boolean;
   targetProximityGuardEnabled: boolean;
   samples: ScalpEntryGuardSample[];
@@ -146,6 +150,11 @@ export interface ScalpEntryGuardEvidence {
   consecutiveWrongWayMoves: number | null;
   consecutiveWrongWaySeconds: number | null;
   directionalMovePct: number | null;
+  favorableTrendConfirmed?: boolean | null;
+  favorableTrendReason?: string | null;
+  targetSideWindowConfirmed?: boolean | null;
+  targetSideViolationPrice?: number | null;
+  targetSideViolationAt?: string | null;
   freefallConsecutiveSeconds: number | null;
   rapidMovePct: number | null;
   rapidMoveThresholdPct: number | null;
@@ -329,6 +338,21 @@ export interface ScalpSkipEvidence {
   consecutiveWrongWaySeconds?: number | null;
   /** Net signed move across the directional observation window. */
   directionalMovePct?: number | null;
+  /** Number of interrupted wrong-way streaks inside the evaluated window. */
+  wrongWayResetCount?: number | null;
+  /** ISO timestamp of the latest wrong-way streak reset. */
+  lastWrongWayResetAt?: string | null;
+  /** Whether the complete-window favorable-trend requirement was active. */
+  favorableTrendConfirmationEnabled?: boolean | null;
+  /** Whether the complete window moved in the required side-aware direction. */
+  favorableTrendConfirmed?: boolean | null;
+  /** Exact confirmation outcome or failure reason. */
+  favorableTrendReason?: string | null;
+  /** Whether every selected sample stayed on the winning side of the target. */
+  targetSideWindowConfirmed?: boolean | null;
+  /** First sample that violated the complete-window target-side rule. */
+  targetSideViolationPrice?: number | null;
+  targetSideViolationAt?: string | null;
   /** Whether the independent rapid-move guard blocked this attempt. */
   rapidMoveBlocked?: boolean | null;
   /** Absolute move measured by the rapid-move guard. */

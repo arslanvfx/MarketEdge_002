@@ -22,7 +22,7 @@ describe("real Scalper service Freefall boundary", () => {
       },
       {
         state: "skipped",
-        reason: "freefall_consecutive_falling",
+        reason: "freefall_favorable_trend_not_confirmed_yes",
         intentWrites: 0,
         brokerSubmissions: 0,
         retryAfterMs: SCALP_GUARD_RETRY_COOLDOWN_MS,
@@ -81,6 +81,21 @@ describe("real Scalper service Freefall boundary", () => {
 
     assert.deepEqual(
       {
+        state: byLabel.get("target_crossing")?.state,
+        reason: byLabel.get("target_crossing")?.reason,
+        intentWrites: byLabel.get("target_crossing")?.intentWrites,
+        brokerSubmissions: byLabel.get("target_crossing")?.brokerSubmissions,
+      },
+      {
+        state: "skipped",
+        reason: "freefall_wrong_target_side_yes",
+        intentWrites: 0,
+        brokerSubmissions: 0,
+      },
+    );
+
+    assert.deepEqual(
+      {
         state: byLabel.get("recovered")?.state,
         reason: byLabel.get("recovered")?.reason,
         intentWrites: byLabel.get("recovered")?.intentWrites,
@@ -97,15 +112,31 @@ describe("real Scalper service Freefall boundary", () => {
     assert.deepEqual(
       result.skippedAttempts.map((attempt) => attempt.reason),
       [
-        "freefall_consecutive_falling",
+        "freefall_favorable_trend_not_confirmed_yes",
         "freefall_unavailable_fetch_failed",
         "freefall_unavailable_stale",
+        "freefall_wrong_target_side_yes",
       ],
     );
     for (const attempt of result.skippedAttempts) {
       assert.ok(attempt.skippedAt, `${attempt.reason} must persist a dashboard timestamp`);
       assert.equal(attempt.evidence?.protectedSide, "yes");
       assert.equal(attempt.evidence?.freefallConsecutiveSeconds, 4);
+      if (attempt.reason === "freefall_favorable_trend_not_confirmed_yes") {
+        assert.equal(attempt.evidence?.favorableTrendConfirmationEnabled, true);
+        assert.equal(attempt.evidence?.favorableTrendConfirmed, false);
+        assert.equal(attempt.evidence?.wrongWayResetCount, 1);
+        assert.ok(attempt.evidence?.lastWrongWayResetAt);
+        assert.equal(
+          attempt.evidence?.favorableTrendReason,
+          "freefall_favorable_trend_not_confirmed_yes",
+        );
+      }
+      if (attempt.reason === "freefall_wrong_target_side_yes") {
+        assert.equal(attempt.evidence?.targetSideWindowConfirmed, false);
+        assert.equal(attempt.evidence?.targetSideViolationPrice, 99);
+        assert.ok(attempt.evidence?.targetSideViolationAt);
+      }
     }
 
     const evidence = result.submittedEntryEvidence;
@@ -116,6 +147,12 @@ describe("real Scalper service Freefall boundary", () => {
     assert.equal(evidence.consecutiveWrongWayMoves, 0);
     assert.equal(evidence.consecutiveWrongWaySeconds, 0);
     assert.equal(evidence.freefallConsecutiveSeconds, 4);
+    assert.equal(evidence.favorableTrendConfirmationEnabled, true);
+    assert.equal(evidence.favorableTrendConfirmed, true);
+    assert.equal(evidence.favorableTrendReason, null);
+    assert.equal(evidence.targetSideWindowConfirmed, true);
+    assert.equal(evidence.targetSideViolationPrice, null);
+    assert.equal(evidence.targetSideViolationAt, null);
     assert.equal(evidence.samples.length, 5);
     assert.deepEqual(
       evidence.samples.map((sample) => sample.price),
@@ -125,6 +162,32 @@ describe("real Scalper service Freefall boundary", () => {
       evidence.samples.every((sample) => Date.parse(sample.at) <= Date.parse(evidence.evaluatedAt)),
       "all persisted prices must come from the final pre-submit evaluation",
     );
+  });
+
+  it("blocks a net-falling NO window that crossed the target before any intent or broker call", async () => {
+    const result = await runControlledFreefallServiceExercise({ side: "no" });
+    const crossing = result.steps.find((step) => step.label === "target_crossing");
+
+    assert.deepEqual(
+      {
+        state: crossing?.state,
+        reason: crossing?.reason,
+        intentWrites: crossing?.intentWrites,
+        brokerSubmissions: crossing?.brokerSubmissions,
+      },
+      {
+        state: "skipped",
+        reason: "freefall_wrong_target_side_no",
+        intentWrites: 0,
+        brokerSubmissions: 0,
+      },
+    );
+    const evidence = result.skippedAttempts.find(
+      (attempt) => attempt.reason === "freefall_wrong_target_side_no",
+    )?.evidence;
+    assert.equal(evidence?.targetSideWindowConfirmed, false);
+    assert.equal(evidence?.targetSideViolationPrice, 101);
+    assert.ok(evidence?.targetSideViolationAt);
   });
 
   it("copies final target distance into every retry intent and retains the newest snapshot", async () => {
@@ -153,6 +216,21 @@ describe("real Scalper service Freefall boundary", () => {
       result.submittedEntryEvidence,
       result.submittedEntryEvidences[1],
       "the final retry must be the snapshot surfaced as the latest submission",
+    );
+  });
+
+  it("rechecks sample freshness after a slow intent write and never reaches the broker", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      intentWriteAdvanceMs: 2_500,
+    });
+    const recovered = result.steps.find((step) => step.label === "recovered");
+
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.equal(recovered?.state, "skipped");
+    assert.deepEqual(
+      result.abortedBeforeSubmitReasons,
+      ["aborted_before_submit:freefall_unavailable_stale"],
     );
   });
 });
