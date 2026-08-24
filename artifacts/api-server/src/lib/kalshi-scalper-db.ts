@@ -19,6 +19,7 @@ import {
   type ScalpSkipEvidence,
   type ScalpFunnelEventStage,
   type ScalpShadowStudyRecord,
+  type ScalpShadowVariantSummary,
   type ScalpShadowVariantSeconds,
   type ScalpPerMarketOverride,
 } from "./kalshi-scalper-types.ts";
@@ -134,6 +135,10 @@ export async function runScalpMigrations(): Promise<void> {
     await client.query(`
       CREATE INDEX IF NOT EXISTS scalp_shadow_mode_updated
         ON kalshi_scalp_shadow_entries (mode, updated_at DESC)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS scalp_shadow_mode_created
+        ON kalshi_scalp_shadow_entries (mode, created_at DESC)
     `);
     await client.query(`
       CREATE INDEX IF NOT EXISTS scalp_shadow_unsettled
@@ -1432,22 +1437,116 @@ export async function upsertScalpShadowStudy(
   }
 }
 
+export async function getScalpShadowStudyStartedAt(
+  mode: ScalpMode,
+): Promise<Date | null> {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `SELECT MIN(created_at) AS started_at
+         FROM kalshi_scalp_shadow_entries
+        WHERE mode = $1`,
+      [mode],
+    );
+    const value = result.rows[0]?.["started_at"];
+    if (value == null) return null;
+    return value instanceof Date ? value : new Date(String(value));
+  } finally {
+    client.release();
+  }
+}
+
+/** Full-period SQL aggregate. Recent-row limits must never affect these totals. */
+export async function getScalpShadowStudyVariantSummaries(
+  mode: ScalpMode,
+  trackingSince: Date,
+  trackingUntil: Date,
+): Promise<ScalpShadowVariantSummary[]> {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `SELECT variant_seconds,
+              COUNT(*)::INTEGER AS observed,
+              COUNT(*) FILTER (
+                WHERE first_safe_entry_at IS NOT NULL
+              )::INTEGER AS candidates,
+              COUNT(*) FILTER (
+                WHERE first_safe_entry_at IS NOT NULL
+                  AND settlement_result IS NOT NULL
+              )::INTEGER AS settled,
+              COUNT(*) FILTER (
+                WHERE first_safe_entry_at IS NOT NULL
+                  AND outcome = 'win'
+              )::INTEGER AS wins,
+              COUNT(*) FILTER (
+                WHERE first_safe_entry_at IS NOT NULL
+                  AND outcome = 'loss'
+              )::INTEGER AS losses,
+              COUNT(*) FILTER (
+                WHERE first_safe_entry_at IS NOT NULL
+                  AND later_quote_issue_observed
+              )::INTEGER AS candidates_before_later_quote_issue,
+              AVG(first_safe_seconds_remaining) FILTER (
+                WHERE first_safe_entry_at IS NOT NULL
+              ) AS average_first_safe_seconds_remaining,
+              COALESCE(SUM(hypothetical_pnl) FILTER (
+                WHERE first_safe_entry_at IS NOT NULL
+                  AND settlement_result IS NOT NULL
+              ), 0) AS hypothetical_pnl
+         FROM kalshi_scalp_shadow_entries
+        WHERE mode = $1
+          AND created_at >= $2
+          AND created_at <= $3
+        GROUP BY variant_seconds
+        ORDER BY variant_seconds`,
+      [mode, trackingSince, trackingUntil],
+    );
+    return result.rows.map((row) => {
+      const settled = Number(row["settled"] ?? 0);
+      const wins = Number(row["wins"] ?? 0);
+      const losses = Number(row["losses"] ?? 0);
+      return {
+        variantSeconds: Number(row["variant_seconds"]),
+        observed: Number(row["observed"] ?? 0),
+        candidates: Number(row["candidates"] ?? 0),
+        settled,
+        wins,
+        losses,
+        winRate: settled > 0 ? (wins / settled) * 100 : null,
+        candidatesBeforeLaterQuoteIssue: Number(
+          row["candidates_before_later_quote_issue"] ?? 0,
+        ),
+        averageFirstSafeSecondsRemaining:
+          row["average_first_safe_seconds_remaining"] == null
+            ? null
+            : Number(row["average_first_safe_seconds_remaining"]),
+        hypotheticalPnl: Number(row["hypothetical_pnl"] ?? 0),
+      };
+    });
+  } finally {
+    client.release();
+  }
+}
+
 export async function getRecentScalpShadowStudies(
   mode: ScalpMode,
-  limit = 72,
-  trackingSince: string | null = null,
+  limit = 48,
+  trackingSince: Date,
+  trackingUntil: Date,
 ): Promise<ScalpShadowStudyRecord[]> {
   const client = await pool.connect();
   try {
-    const capped = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const capped = Math.max(1, Math.min(100, Math.floor(limit)));
     const result = await client.query(
       `SELECT *
          FROM kalshi_scalp_shadow_entries
         WHERE mode = $1
-          AND ($2::timestamptz IS NULL OR created_at >= $2::timestamptz)
+          AND created_at >= $2
+          AND created_at <= $3
+          AND first_safe_entry_at IS NOT NULL
         ORDER BY first_eligible_at DESC, symbol, variant_seconds DESC
-        LIMIT $3`,
-      [mode, trackingSince, capped],
+        LIMIT $4`,
+      [mode, trackingSince, trackingUntil, capped],
     );
     return result.rows.map((row) =>
       mapScalpShadowRow(row as Record<string, unknown>)

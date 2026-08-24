@@ -1000,11 +1000,28 @@ export interface ScalperShadowVariantSummary {
   hypotheticalPnl: number;
 }
 
+export interface ScalperShadowActualSummary {
+  periodStart: string;
+  periodEnd: string;
+  filledOrders: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  totalPnl: number;
+  totalSpent: number;
+}
+
 export interface ScalperShadowStudyReport {
   mode: "paper" | "live";
   configuredWindowSeconds: number;
   effectiveWindowSecondsBySymbol: Record<string, number>;
   trackingSince: string | null;
+  studyStartedAt?: string | null;
+  scopeStart?: string;
+  scopeEnd?: string;
+  actualComparison?: ScalperShadowActualSummary;
+  actualOutsideShadowCoverage?: ScalperShadowActualSummary | null;
   variants: ScalperShadowVariantSummary[];
   recent: ScalperShadowStudyRecord[];
   disclaimer: string;

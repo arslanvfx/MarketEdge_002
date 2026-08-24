@@ -379,6 +379,18 @@ export interface ScalpShadowVariantSummary {
   hypotheticalPnl: number;
 }
 
+export interface ScalpShadowActualSummary {
+  periodStart: string;
+  periodEnd: string;
+  filledOrders: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  totalPnl: number;
+  totalSpent: number;
+}
+
 export interface ScalpShadowStudyReport {
   mode: ScalpMode;
   /** Saved global Scalper entry timing. This marks the primary selected card. */
@@ -387,6 +399,16 @@ export interface ScalpShadowStudyReport {
   effectiveWindowSecondsBySymbol: Record<string, number>;
   /** Browser-requested visual reporting baseline; no rows are deleted. */
   trackingSince: string | null;
+  /** First durable Shadow observation for this mode, independent of view resets. */
+  studyStartedAt: string | null;
+  /** Inclusive start shared by Shadow aggregates and actual-order comparison. */
+  scopeStart: string;
+  /** Inclusive report snapshot boundary shared by both datasets. */
+  scopeEnd: string;
+  /** Actual Scalper results over exactly scopeStart..scopeEnd. */
+  actualComparison: ScalpShadowActualSummary;
+  /** Actual baseline results that predate Shadow tracking and cannot be compared. */
+  actualOutsideShadowCoverage: ScalpShadowActualSummary | null;
   variants: ScalpShadowVariantSummary[];
   recent: ScalpShadowStudyRecord[];
   disclaimer: string;

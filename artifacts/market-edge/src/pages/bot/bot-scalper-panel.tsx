@@ -398,7 +398,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         ? `&since=${encodeURIComponent(shadowViewSince)}`
         : "";
       const response = await fetch(
-        `${API_BASE}/crypto/scalper/shadow-study?mode=${scalperMode}&limit=720${since}`,
+        `${API_BASE}/crypto/scalper/shadow-study?mode=${scalperMode}&limit=48${since}`,
         { signal },
       );
       if (!response.ok) {
@@ -1814,10 +1814,24 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                   The study compares 1:00 through 2:00, plus any configured Scalper
                   timing outside that range. Live timing and safety rules stay unchanged.
                 </p>
+                {shadowStudyData.scopeStart && shadowStudyData.scopeEnd ? (
+                  <p
+                    className="mt-1 text-[9px] text-amber-200/70"
+                    data-testid="text-scalper-shadow-scope"
+                  >
+                    Comparing Shadow and actual {shadowStudyData.mode === "paper" ? "Paper" : "Live"} results from{" "}
+                    {fmtDateTime(shadowStudyData.scopeStart)} through{" "}
+                    {fmtDateTime(shadowStudyData.scopeEnd)}.
+                  </p>
+                ) : (
+                  <p className="mt-1 text-[9px] text-muted-foreground">
+                    Refreshing the aligned Shadow and actual comparison timeframe…
+                  </p>
+                )}
                 {shadowStudyData.trackingSince && (
-                  <p className="mt-1 text-[9px] text-amber-200/70">
-                    Visual results since {fmtDateTime(shadowStudyData.trackingSince)}.
-                    Older records remain stored.
+                  <p className="mt-1 text-[9px] text-muted-foreground">
+                    Visual reset requested {fmtDateTime(shadowStudyData.trackingSince)}.
+                    Both datasets honor that boundary; older records remain stored.
                   </p>
                 )}
               </div>
@@ -1864,6 +1878,77 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 </p>
               </div>
             </div>
+
+            {shadowStudyData.actualComparison ? (
+              <div
+                className="mt-3 grid gap-3 rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 sm:grid-cols-[minmax(0,1fr)_auto]"
+                data-testid="panel-scalper-shadow-actual-comparison"
+              >
+                <div>
+                  <div className="text-[9px] font-bold uppercase tracking-wide text-sky-200">
+                    Actual Scalper · same timeframe
+                  </div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">
+                    This is the apples-to-apples actual result for the displayed Shadow period.
+                    It uses the same mode and clock, but each Shadow timing remains a separate
+                    hypothetical—not a copy of every actual fill.
+                  </p>
+                </div>
+                <dl className="grid min-w-[230px] grid-cols-3 gap-3 text-right">
+                  <div>
+                    <dt className="text-[8px] uppercase tracking-wide text-muted-foreground">Settled</dt>
+                    <dd className="font-mono text-sm font-black text-foreground">
+                      {shadowStudyData.actualComparison.settled}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[8px] uppercase tracking-wide text-muted-foreground">W / L</dt>
+                    <dd className="font-mono text-sm font-black text-foreground">
+                      <span className="text-emerald-300">
+                        {shadowStudyData.actualComparison.wins}
+                      </span>
+                      {" / "}
+                      <span className={shadowStudyData.actualComparison.losses > 0 ? "text-red-300" : ""}>
+                        {shadowStudyData.actualComparison.losses}
+                      </span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[8px] uppercase tracking-wide text-muted-foreground">Net P&amp;L</dt>
+                    <dd className={`font-mono text-sm font-black ${
+                      shadowStudyData.actualComparison.totalPnl >= 0
+                        ? "text-emerald-300"
+                        : "text-red-300"
+                    }`}>
+                      {fmt$(shadowStudyData.actualComparison.totalPnl)}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            ) : (
+              <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-[9px] text-sky-100/75">
+                The aligned actual comparison is waiting for the updated report response.
+              </div>
+            )}
+
+            {shadowStudyData.actualOutsideShadowCoverage && (
+              <div
+                className="mt-3 flex gap-2 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2"
+                data-testid="alert-scalper-shadow-coverage-gap"
+              >
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+                <p className="text-[9px] leading-relaxed text-amber-100/80">
+                  Shadow tracking began {shadowStudyData.studyStartedAt
+                    ? fmtDateTime(shadowStudyData.studyStartedAt)
+                    : "after the current performance window started"}.
+                  {" "}{shadowStudyData.actualOutsideShadowCoverage.filledOrders} actual filled{" "}
+                  {shadowStudyData.actualOutsideShadowCoverage.filledOrders === 1 ? "entry" : "entries"},
+                  including {shadowStudyData.actualOutsideShadowCoverage.losses}{" "}
+                  {shadowStudyData.actualOutsideShadowCoverage.losses === 1 ? "loss" : "losses"},
+                  occurred before Shadow coverage and are intentionally excluded from the comparison above.
+                </p>
+              </div>
+            )}
 
             <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
               {shadowStudyData.variants.map((variant) => {

@@ -17,8 +17,10 @@ import type {
   EffectiveScalpParams,
   ScalpConfig,
   ScalpMode,
+  ScalpShadowActualSummary,
   ScalpShadowStudyReport,
   ScalpShadowStudyRecord,
+  ScalpShadowVariantSummary,
   ScalpShadowVariantSeconds,
 } from "./kalshi-scalper-types.ts";
 import { SCALP_SHADOW_VARIANT_SECONDS } from "./kalshi-scalper-types.ts";
@@ -241,33 +243,38 @@ export function settleScalpShadowRecord(
   };
 }
 
-export function buildScalpShadowStudyReport(
-  mode: ScalpMode,
-  rows: ScalpShadowStudyRecord[],
-  options?: {
-    configuredWindowSeconds?: number;
-    effectiveWindowSecondsBySymbol?: Record<string, number>;
-    trackingSince?: string | null;
-    variantSeconds?: readonly number[];
-  },
-): ScalpShadowStudyReport {
-  const configuredWindowSeconds = options?.configuredWindowSeconds ?? 120;
-  const effectiveWindowSecondsBySymbol =
-    options?.effectiveWindowSecondsBySymbol ?? {};
-  const variantSeconds = [
-    ...new Set(
-      options?.variantSeconds ?? [
-        ...SCALP_SHADOW_VARIANT_SECONDS,
-        configuredWindowSeconds,
-        ...Object.values(effectiveWindowSecondsBySymbol),
-      ],
-    ),
-  ]
-    .filter((value) => Number.isFinite(value) && value >= 1 && value <= 900)
-    .sort((a, b) => a - b);
-  const variants = variantSeconds.map((variantSeconds) => {
+export function resolveScalpShadowStudyScope(input: {
+  performanceTrackingSince: Date;
+  studyStartedAt: Date | null;
+  requestedTrackingSince: string | null;
+  scopeEnd: Date;
+}): { scopeStart: Date; scopeEnd: Date } {
+  const endMs = input.scopeEnd.getTime();
+  if (!Number.isFinite(endMs)) {
+    throw new Error("Invalid Shadow study scope end");
+  }
+  const requestedMs = input.requestedTrackingSince == null
+    ? Number.NEGATIVE_INFINITY
+    : Date.parse(input.requestedTrackingSince);
+  const starts = [
+    input.performanceTrackingSince.getTime(),
+    input.studyStartedAt?.getTime() ?? Number.NEGATIVE_INFINITY,
+    Number.isFinite(requestedMs) ? requestedMs : Number.NEGATIVE_INFINITY,
+  ].filter(Number.isFinite);
+  const latestStart = starts.length > 0 ? Math.max(...starts) : endMs;
+  return {
+    scopeStart: new Date(Math.min(latestStart, endMs)),
+    scopeEnd: new Date(endMs),
+  };
+}
+
+export function summarizeScalpShadowStudyRows(
+  rows: readonly ScalpShadowStudyRecord[],
+  variantSeconds: readonly number[],
+): ScalpShadowVariantSummary[] {
+  return variantSeconds.map((seconds) => {
     const variantRows = rows.filter(
-      (row) => row.variantSeconds === variantSeconds,
+      (row) => row.variantSeconds === seconds,
     );
     const candidates = variantRows.filter(
       (row) => row.firstSafeEntryAt != null,
@@ -276,16 +283,17 @@ export function buildScalpShadowStudyReport(
       (row) => row.settlementResult != null,
     );
     const wins = settled.filter((row) => row.outcome === "win").length;
+    const losses = settled.filter((row) => row.outcome === "loss").length;
     const firstSafeSeconds = candidates
       .map((row) => row.firstSafeSecondsRemaining)
       .filter((value): value is number => value != null);
     return {
-      variantSeconds,
+      variantSeconds: seconds,
       observed: variantRows.length,
       candidates: candidates.length,
       settled: settled.length,
       wins,
-      losses: settled.length - wins,
+      losses,
       winRate: settled.length > 0 ? (wins / settled.length) * 100 : null,
       candidatesBeforeLaterQuoteIssue: candidates.filter(
         (row) => row.laterQuoteIssueObserved,
@@ -300,15 +308,100 @@ export function buildScalpShadowStudyReport(
       ),
     };
   });
+}
+
+function emptyActualSummary(
+  periodStart: string,
+  periodEnd: string,
+): ScalpShadowActualSummary {
+  return {
+    periodStart,
+    periodEnd,
+    filledOrders: 0,
+    settled: 0,
+    wins: 0,
+    losses: 0,
+    winRate: null,
+    totalPnl: 0,
+    totalSpent: 0,
+  };
+}
+
+export function buildScalpShadowStudyReport(
+  mode: ScalpMode,
+  rows: ScalpShadowStudyRecord[],
+  options?: {
+    configuredWindowSeconds?: number;
+    effectiveWindowSecondsBySymbol?: Record<string, number>;
+    trackingSince?: string | null;
+    variantSeconds?: readonly number[];
+    variantSummaries?: readonly ScalpShadowVariantSummary[];
+    recentRows?: ScalpShadowStudyRecord[];
+    studyStartedAt?: string | null;
+    scopeStart?: string;
+    scopeEnd?: string;
+    actualComparison?: ScalpShadowActualSummary;
+    actualOutsideShadowCoverage?: ScalpShadowActualSummary | null;
+  },
+): ScalpShadowStudyReport {
+  const configuredWindowSeconds = options?.configuredWindowSeconds ?? 120;
+  const effectiveWindowSecondsBySymbol =
+    options?.effectiveWindowSecondsBySymbol ?? {};
+  const variantSeconds = [
+    ...new Set(
+      options?.variantSeconds ?? [
+        ...SCALP_SHADOW_VARIANT_SECONDS,
+        configuredWindowSeconds,
+        ...Object.values(effectiveWindowSecondsBySymbol),
+        ...(options?.variantSummaries ?? []).map(
+          (summary) => summary.variantSeconds,
+        ),
+      ],
+    ),
+  ]
+    .filter((value) => Number.isFinite(value) && value >= 1 && value <= 900)
+    .sort((a, b) => a - b);
+  const computedSummaries = summarizeScalpShadowStudyRows(rows, variantSeconds);
+  const suppliedSummaries = new Map(
+    (options?.variantSummaries ?? []).map(
+      (summary) => [summary.variantSeconds, summary],
+    ),
+  );
+  const variants = computedSummaries.map(
+    (summary) => suppliedSummaries.get(summary.variantSeconds) ?? summary,
+  );
+  const observedDates = rows
+    .flatMap((row) => [Date.parse(row.createdAt), Date.parse(row.updatedAt)])
+    .filter(Number.isFinite);
+  const fallbackStart = options?.trackingSince
+    ?? (observedDates.length > 0
+      ? new Date(Math.min(...observedDates)).toISOString()
+      : new Date(0).toISOString());
+  const fallbackEnd = observedDates.length > 0
+    ? new Date(Math.max(...observedDates)).toISOString()
+    : fallbackStart;
+  const scopeStart = options?.scopeStart ?? fallbackStart;
+  const scopeEnd = options?.scopeEnd ?? fallbackEnd;
   return {
     mode,
     configuredWindowSeconds,
     effectiveWindowSecondsBySymbol,
     trackingSince: options?.trackingSince ?? null,
+    studyStartedAt: options?.studyStartedAt ?? (
+      observedDates.length > 0
+        ? new Date(Math.min(...observedDates)).toISOString()
+        : null
+    ),
+    scopeStart,
+    scopeEnd,
+    actualComparison: options?.actualComparison
+      ?? emptyActualSummary(scopeStart, scopeEnd),
+    actualOutsideShadowCoverage:
+      options?.actualOutsideShadowCoverage ?? null,
     variants,
-    recent: rows.slice(0, 48),
+    recent: (options?.recentRows ?? rows).slice(0, 48),
     disclaimer:
-      "Counterfactual cached quotes only. Passing the study does not prove an IOC order would have filled, and shadow rows never affect live execution or performance totals.",
+      "Counterfactual cached quotes only. Shadow timing cards and actual Scalper totals share the displayed time scope, but they are different bets. Passing the study does not prove an IOC order would have filled, and shadow rows never affect live execution or performance totals.",
   };
 }
 

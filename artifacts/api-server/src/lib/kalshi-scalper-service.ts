@@ -32,6 +32,7 @@ import type {
   ScalpPerMarketOverride,
   ScalpEntryGuardEvidence,
   ScalpSkipEvidence,
+  ScalpShadowActualSummary,
   ScalpShadowStudyRecord,
   ScalpShadowStudyReport,
   ScalpWindowFunnelReport,
@@ -91,6 +92,7 @@ import {
   createBoundedScalpShadowWriter,
   buildScalpShadowStudyReport,
   evaluateScalpShadowEntry,
+  resolveScalpShadowStudyScope,
   settleScalpShadowRecord,
 } from "./kalshi-scalper-shadow.ts";
 import {
@@ -137,6 +139,8 @@ import {
   getScalpOrdersForPerformance,
   getScalpPerformanceBaseline,
   getScalpWindowFunnelCounters,
+  getScalpShadowStudyStartedAt,
+  getScalpShadowStudyVariantSummaries,
   getRecentScalpShadowStudies,
   getUnsettledScalpShadowStudies,
   recordScalpFunnelEvent,
@@ -4073,9 +4077,20 @@ export async function getScalpWindowFunnel(
 /** Reporting-only shadow study; never participates in entry decisions. */
 export async function getScalpShadowStudy(
   mode: ScalpMode,
-  limit = 720,
+  limit = 48,
   trackingSince: string | null = null,
 ): Promise<ScalpShadowStudyReport> {
+  const scopeEnd = new Date();
+  const [baseline, studyStartedAt] = await Promise.all([
+    getScalpPerformanceBaseline(mode),
+    getScalpShadowStudyStartedAt(mode),
+  ]);
+  const scope = resolveScalpShadowStudyScope({
+    performanceTrackingSince: baseline.trackingSince,
+    studyStartedAt,
+    requestedTrackingSince: trackingSince,
+    scopeEnd,
+  });
   const effectiveWindowSecondsBySymbol = Object.fromEntries(
     CRYPTO_COINS
       .map((coin) => coin.symbol.toUpperCase())
@@ -4092,16 +4107,78 @@ export async function getScalpShadowStudy(
       ...Object.values(effectiveWindowSecondsBySymbol),
     ]),
   ];
-  const rows = await getRecentScalpShadowStudies(
-    mode,
-    limit,
-    trackingSince,
+  const [variantSummaries, recentRows, performanceOrders] = await Promise.all([
+    getScalpShadowStudyVariantSummaries(
+      mode,
+      scope.scopeStart,
+      scope.scopeEnd,
+    ),
+    getRecentScalpShadowStudies(
+      mode,
+      limit,
+      scope.scopeStart,
+      scope.scopeEnd,
+    ),
+    getScalpOrdersForPerformance(mode, baseline.trackingSince),
+  ]);
+  const boundedPerformanceOrders = performanceOrders.filter(
+    (order) => order.createdAt.getTime() <= scope.scopeEnd.getTime(),
   );
-  return buildScalpShadowStudyReport(mode, rows, {
+  const actualPerformance = calculateScalpPerformance(
+    mode,
+    scope.scopeStart,
+    baseline.trackingVersion,
+    boundedPerformanceOrders,
+  );
+  const actualComparison: ScalpShadowActualSummary = {
+    periodStart: scope.scopeStart.toISOString(),
+    periodEnd: scope.scopeEnd.toISOString(),
+    filledOrders: actualPerformance.filledOrders,
+    settled: actualPerformance.settled,
+    wins: actualPerformance.wins,
+    losses: actualPerformance.losses,
+    winRate: actualPerformance.winRate,
+    totalPnl: actualPerformance.totalPnl,
+    totalSpent: actualPerformance.totalSpent,
+  };
+  let actualOutsideShadowCoverage: ScalpShadowActualSummary | null = null;
+  if (
+    studyStartedAt
+    && baseline.trackingSince.getTime() < studyStartedAt.getTime()
+  ) {
+    const outsideOrders = boundedPerformanceOrders.filter(
+      (order) => order.createdAt.getTime() < studyStartedAt.getTime(),
+    );
+    const outsidePerformance = calculateScalpPerformance(
+      mode,
+      baseline.trackingSince,
+      baseline.trackingVersion,
+      outsideOrders,
+    );
+    actualOutsideShadowCoverage = {
+      periodStart: baseline.trackingSince.toISOString(),
+      periodEnd: studyStartedAt.toISOString(),
+      filledOrders: outsidePerformance.filledOrders,
+      settled: outsidePerformance.settled,
+      wins: outsidePerformance.wins,
+      losses: outsidePerformance.losses,
+      winRate: outsidePerformance.winRate,
+      totalPnl: outsidePerformance.totalPnl,
+      totalSpent: outsidePerformance.totalSpent,
+    };
+  }
+  return buildScalpShadowStudyReport(mode, recentRows, {
     configuredWindowSeconds: _config.finalWindowSeconds,
     effectiveWindowSecondsBySymbol,
     trackingSince,
     variantSeconds,
+    variantSummaries,
+    recentRows,
+    studyStartedAt: studyStartedAt?.toISOString() ?? null,
+    scopeStart: scope.scopeStart.toISOString(),
+    scopeEnd: scope.scopeEnd.toISOString(),
+    actualComparison,
+    actualOutsideShadowCoverage,
   });
 }
 

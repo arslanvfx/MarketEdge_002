@@ -201,9 +201,11 @@ router.get("/crypto/scalper/shadow-study", async (req, res): Promise<void> => {
   try {
     const config = getScalpConfig();
     const mode = parseMode(req.query["mode"]) ?? config.mode;
+    // This limit applies only to recent candidate detail rows. Timing-card
+    // aggregates are computed over the full selected scope in SQL.
     const limitParam = typeof req.query["limit"] === "string"
       ? Number.parseInt(req.query["limit"], 10)
-      : 720;
+      : 48;
     const sinceParam = typeof req.query["since"] === "string"
       && req.query["since"].length <= 64
       && Number.isFinite(Date.parse(req.query["since"]))
@@ -211,7 +213,7 @@ router.get("/crypto/scalper/shadow-study", async (req, res): Promise<void> => {
         : null;
     const study = await getScalpShadowStudy(
       mode,
-      Number.isFinite(limitParam) ? limitParam : 720,
+      Number.isFinite(limitParam) ? limitParam : 48,
       sinceParam,
     );
     res.json(study);

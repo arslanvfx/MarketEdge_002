@@ -6,7 +6,9 @@ import {
   createBoundedScalpShadowWriter,
   buildScalpShadowStudyReport,
   evaluateScalpShadowEntry,
+  resolveScalpShadowStudyScope,
   settleScalpShadowRecord,
+  summarizeScalpShadowStudyRows,
 } from "./kalshi-scalper-shadow.ts";
 import {
   DEFAULT_SCALP_CONFIG,
@@ -158,6 +160,118 @@ describe("shadow report projection", () => {
     assert.equal(report.configuredWindowSeconds, 80.1234);
     assert.equal(report.effectiveWindowSecondsBySymbol.ETH, 105);
     assert.equal(report.trackingSince, "2026-08-23T16:00:00.000Z");
+  });
+
+  it("keeps an older loss in card totals after recent details are bounded", () => {
+    const olderLoss = {
+      ...settleScalpShadowRecord(shadowRecord("OLD"), "no"),
+      createdAt: "2026-08-23T16:00:00.000Z",
+      updatedAt: "2026-08-23T16:16:00.000Z",
+    };
+    const newerWins = Array.from({ length: 720 }, (_, index) => ({
+      ...settleScalpShadowRecord(shadowRecord(`W${index}`), "yes"),
+      createdAt: new Date(
+        Date.parse("2026-08-23T17:00:00.000Z") + index * 1_000,
+      ).toISOString(),
+    }));
+    const summary = summarizeScalpShadowStudyRows(
+      [olderLoss, ...newerWins],
+      [120],
+    );
+    const recentRows = newerWins.slice(-48);
+    const report = buildScalpShadowStudyReport("live", recentRows, {
+      variantSeconds: [120],
+      variantSummaries: summary,
+      recentRows,
+      studyStartedAt: olderLoss.createdAt,
+      scopeStart: olderLoss.createdAt,
+      scopeEnd: "2026-08-23T18:00:00.000Z",
+      actualComparison: {
+        periodStart: olderLoss.createdAt,
+        periodEnd: "2026-08-23T18:00:00.000Z",
+        filledOrders: 2,
+        settled: 2,
+        wins: 1,
+        losses: 1,
+        winRate: 0.5,
+        totalPnl: -1,
+        totalSpent: 2,
+      },
+      actualOutsideShadowCoverage: {
+        periodStart: "2026-08-23T15:00:00.000Z",
+        periodEnd: olderLoss.createdAt,
+        filledOrders: 1,
+        settled: 1,
+        wins: 0,
+        losses: 1,
+        winRate: 0,
+        totalPnl: -1,
+        totalSpent: 1,
+      },
+    });
+
+    const timing = report.variants.find(
+      (variant) => variant.variantSeconds === 120,
+    );
+    assert.equal(timing?.observed, 721);
+    assert.equal(timing?.wins, 720);
+    assert.equal(timing?.losses, 1);
+    assert.equal(report.recent.length, 48);
+    assert.equal(report.recent.some((row) => row.outcome === "loss"), false);
+    assert.equal(report.actualComparison.losses, 1);
+    assert.equal(report.actualOutsideShadowCoverage?.losses, 1);
+  });
+
+  it("aligns the comparison start to baseline, study coverage, and visual reset", () => {
+    const performanceTrackingSince = new Date("2026-08-22T06:33:00.000Z");
+    const studyStartedAt = new Date("2026-08-23T18:43:00.000Z");
+    const scopeEnd = new Date("2026-08-24T08:00:00.000Z");
+    const initial = resolveScalpShadowStudyScope({
+      performanceTrackingSince,
+      studyStartedAt,
+      requestedTrackingSince: null,
+      scopeEnd,
+    });
+    assert.equal(initial.scopeStart.toISOString(), studyStartedAt.toISOString());
+
+    const resetAt = "2026-08-24T07:00:00.000Z";
+    const reset = resolveScalpShadowStudyScope({
+      performanceTrackingSince,
+      studyStartedAt,
+      requestedTrackingSince: resetAt,
+      scopeEnd,
+    });
+    assert.equal(reset.scopeStart.toISOString(), resetAt);
+    assert.equal(reset.scopeEnd.toISOString(), scopeEnd.toISOString());
+  });
+
+  it("separates full-scope SQL totals from bounded UI detail rows", () => {
+    const dbSource = readFileSync(
+      new URL("./kalshi-scalper-db.ts", import.meta.url),
+      "utf8",
+    );
+    const aggregateStart = dbSource.indexOf(
+      "export async function getScalpShadowStudyVariantSummaries",
+    );
+    const recentStart = dbSource.indexOf(
+      "export async function getRecentScalpShadowStudies",
+    );
+    assert.ok(aggregateStart >= 0 && recentStart > aggregateStart);
+    const aggregateSource = dbSource.slice(aggregateStart, recentStart);
+    assert.match(aggregateSource, /GROUP BY variant_seconds/);
+    assert.doesNotMatch(aggregateSource, /\bLIMIT\b/);
+
+    const panelSource = readFileSync(
+      new URL(
+        "../../../market-edge/src/pages/bot/bot-scalper-panel.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    assert.match(panelSource, /shadowStudyData\.scopeStart/);
+    assert.match(panelSource, /shadowStudyData\.scopeEnd/);
+    assert.match(panelSource, /shadowStudyData\.actualComparison\.losses/);
+    assert.match(panelSource, /actualOutsideShadowCoverage/);
   });
 });
 
