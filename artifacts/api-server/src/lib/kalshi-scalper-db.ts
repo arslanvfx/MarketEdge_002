@@ -605,6 +605,12 @@ export async function claimReservationAndCap(
       `SELECT pg_advisory_xact_lock(hashtext($1))`,
       [`kalshi-scalper-cap:${mode}`],
     );
+    // Share the experiment's ownership lock so a normal live reservation and a
+    // live Contrarian reservation cannot both win on different workers.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [`kalshi-scalper-contrarian-cap:${mode}`],
+    );
 
     // Enforce the effective per-market final-window boundary while holding the
     // same lock as the reservation claim. A denied candidate still gets a
@@ -694,6 +700,40 @@ export async function claimReservationAndCap(
           openCommitted: 0,
         };
       }
+    }
+
+    const contrarianConflict = await client.query(
+      `SELECT 1
+       FROM kalshi_scalp_contrarian_reservations r
+       LEFT JOIN kalshi_scalp_contrarian_orders o
+         ON o.reservation_id = r.id
+       WHERE r.execution_mode = 'live'
+         AND r.source_mode = $1
+         AND r.symbol = $2
+         AND r.window_key = $3
+         AND (
+           o.status IN ('submitting','unknown','filled')
+           OR (
+             o.id IS NULL
+             AND r.status = 'claimed'
+             AND r.reserved_budget > 0
+           )
+         )
+       LIMIT 1`,
+      [mode, symbol.toUpperCase(), windowKey],
+    );
+    if (contrarianConflict.rows[0]) {
+      await client.query("COMMIT");
+      return {
+        claimed: false,
+        allowed: false,
+        reason: "contrarian_live_exposure",
+        reservationId: null,
+        submittedOrders: 0,
+        retryAfterMs: null,
+        dailyCommitted: 0,
+        openCommitted: 0,
+      };
     }
 
     // Attempt to insert this reservation with reserved_budget=0.
@@ -2081,7 +2121,11 @@ export async function getOpenScalpSpend(
 // Order persistence
 // ---------------------------------------------------------------------------
 
-type ScalpDbClient = Awaited<ReturnType<typeof pool.connect>>;
+type ScalpDbConnectCallback = Exclude<
+  Parameters<typeof pool.connect>[0],
+  undefined
+>;
+type ScalpDbClient = NonNullable<Parameters<ScalpDbConnectCallback>[1]>;
 
 async function _insertScalpOrder(client: ScalpDbClient, order: ScalpOrder): Promise<void> {
   await client.query(

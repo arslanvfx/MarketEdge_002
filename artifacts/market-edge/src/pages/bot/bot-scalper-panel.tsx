@@ -11,6 +11,11 @@ import type {
   ScalperShadowStudyReport,
   ScalperWindowFunnelReport,
   ScalpCalibrationReport,
+  ScalperContrarianReport,
+  ScalperContrarianConfig,
+  ScalperContrarianOrder,
+  ScalperContrarianEvidence,
+  ScalperContrarianGuardEvidence,
 } from "./types";
 import {
   describeScalperAttempt,
@@ -74,6 +79,180 @@ function formatScalperLatencyStage(stage: string | null): string {
     decision_finalize: "Guard + result persistence",
   };
   return labels[stage] ?? stage.replaceAll("_", " ");
+}
+
+function formatContrarianCents(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${Math.round(value * 100)}¢`;
+}
+
+function contrarianFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function getContrarianGuardEvidence(
+  evidence: ScalperContrarianEvidence | null,
+): ScalperContrarianGuardEvidence | null {
+  if (!evidence) return null;
+  return evidence.finalGuard
+    ?? evidence.freshGuard
+    ?? evidence.guard
+    ?? evidence.sourceGuard
+    ?? null;
+}
+
+function formatContrarianSignedPct(value: number | null): string {
+  if (value == null) return "—";
+  const digits = Math.abs(value) < 0.1 ? 4 : Math.abs(value) < 1 ? 3 : 2;
+  return `${value > 0 ? "+" : ""}${value.toFixed(digits)}%`;
+}
+
+function formatContrarianUnderlying(value: number | null): string {
+  if (value == null) return "—";
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: value < 10 ? 4 : 2,
+    maximumFractionDigits: value < 10 ? 4 : 2,
+  });
+}
+
+function getContrarianEvidenceSummary(
+  evidence: ScalperContrarianEvidence | null,
+  protectedSide: "yes" | "no",
+) {
+  const guard = getContrarianGuardEvidence(evidence);
+  const targetPrice = contrarianFiniteNumber(
+    guard?.targetPrice ?? evidence?.targetPrice,
+  );
+  const latestPrice = contrarianFiniteNumber(guard?.latestPrice);
+  const projectedPrice = contrarianFiniteNumber(guard?.projectedPrice);
+  const actualDistancePct =
+    targetPrice != null && targetPrice > 0 && latestPrice != null
+      ? ((latestPrice - targetPrice) / targetPrice) * 100
+      : null;
+  const projectedDistancePct =
+    contrarianFiniteNumber(guard?.projectedDistancePct)
+    ?? (
+      targetPrice != null && targetPrice > 0 && projectedPrice != null
+        ? ((projectedPrice - targetPrice) / targetPrice) * 100
+        : null
+    );
+  const projectedCrossing =
+    targetPrice != null
+    && projectedPrice != null
+    && (
+      protectedSide === "yes"
+        ? projectedPrice <= targetPrice
+        : projectedPrice >= targetPrice
+    );
+  const actualCrossing =
+    guard?.wrongTargetSide === true
+    || contrarianFiniteNumber(guard?.targetSideViolationPrice) != null;
+  const reason =
+    typeof guard?.reason === "string" && guard.reason
+      ? guard.reason
+      : typeof evidence?.guardReason === "string" && evidence.guardReason
+        ? evidence.guardReason
+        : null;
+
+  return {
+    reason,
+    adverseMovePct: contrarianFiniteNumber(guard?.adverseMovePct),
+    directionalMovePct: contrarianFiniteNumber(guard?.directionalMovePct),
+    consecutiveWrongWayMoves: contrarianFiniteNumber(
+      guard?.consecutiveWrongWayMoves,
+    ),
+    consecutiveWrongWaySeconds: contrarianFiniteNumber(
+      guard?.consecutiveWrongWaySeconds,
+    ),
+    latestPrice,
+    targetPrice,
+    actualDistancePct,
+    projectedPrice,
+    projectedDistancePct,
+    crossing: actualCrossing
+      ? "actual"
+      : projectedCrossing
+        ? "projected"
+        : null,
+  } as const;
+}
+
+function ContrarianEvidenceDetails({
+  evidence,
+  protectedSide,
+}: {
+  evidence: ScalperContrarianEvidence | null;
+  protectedSide: "yes" | "no";
+}) {
+  const summary = getContrarianEvidenceSummary(evidence, protectedSide);
+  const measuredMove =
+    summary.adverseMovePct ?? summary.directionalMovePct;
+  const hasMetrics =
+    measuredMove != null
+    || summary.actualDistancePct != null
+    || summary.projectedDistancePct != null
+    || summary.projectedPrice != null;
+
+  if (!summary.reason && !hasMetrics) {
+    return <span className="text-slate-600">Guard metrics unavailable</span>;
+  }
+
+  return (
+    <div className="space-y-1 whitespace-normal font-mono text-[9px] leading-4">
+      {summary.reason ? (
+        <div className="max-w-[260px] truncate text-indigo-300" title={summary.reason}>
+          {summary.reason}
+        </div>
+      ) : null}
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-slate-400">
+        {measuredMove != null ? (
+          <span>Move {formatContrarianSignedPct(measuredMove)}</span>
+        ) : null}
+        {summary.consecutiveWrongWayMoves != null ? (
+          <span>
+            {summary.consecutiveWrongWayMoves} wrong-way moves
+            {summary.consecutiveWrongWaySeconds != null
+              ? ` / ${summary.consecutiveWrongWaySeconds.toFixed(1)}s`
+              : ""}
+          </span>
+        ) : null}
+        {summary.actualDistancePct != null ? (
+          <span>Now vs target {formatContrarianSignedPct(summary.actualDistancePct)}</span>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-slate-500">
+        {summary.projectedPrice != null || summary.targetPrice != null ? (
+          <span>
+            Project {formatContrarianUnderlying(summary.projectedPrice)}
+            {" / target "}
+            {formatContrarianUnderlying(summary.targetPrice)}
+          </span>
+        ) : null}
+        {summary.projectedDistancePct != null ? (
+          <span>
+            Projected distance {formatContrarianSignedPct(summary.projectedDistancePct)}
+          </span>
+        ) : null}
+        {summary.crossing ? (
+          <span className={summary.crossing === "actual" ? "text-red-300" : "text-amber-300"}>
+            {summary.crossing === "actual" ? "Actual crossing" : "Projected crossing"}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function getContrarianOrderReason(order: ScalperContrarianOrder): string {
+  const reconciliationReason = order.reconciliationEvidence?.reason;
+  if (typeof reconciliationReason === "string" && reconciliationReason) {
+    return reconciliationReason;
+  }
+  const guard = getContrarianGuardEvidence(order.evidence);
+  if (typeof guard?.reason === "string" && guard.reason) {
+    return guard.reason;
+  }
+  return order.status;
 }
 
 function formatShadowVariant(seconds: number): string {
@@ -611,13 +790,13 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
       const pmList = prev.perMarketOverrides || cfg?.perMarketOverrides || [];
       const index = pmList.findIndex(m => m.symbol === sym);
       let newList = [...pmList];
-      
+
       if (index >= 0) {
         newList[index] = { ...newList[index], [key]: value };
       } else {
         newList.push({ symbol: sym, [key]: value });
       }
-      
+
       return { ...prev, perMarketOverrides: newList };
     });
   }
@@ -625,7 +804,8 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   if (!cfg) return null;
 
   return (
-    <div className="min-w-0 bg-card border-amber-500/30 border rounded-xl overflow-hidden mb-6">
+    <div className="flex flex-col gap-8">
+    <div className="min-w-0 bg-card border-amber-500/30 border rounded-xl overflow-hidden">
       <div className="px-3 sm:px-5 py-4 border-b border-amber-500/30 flex flex-col items-stretch gap-4 bg-amber-500/5 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0 flex flex-col">
           <div className="flex items-center gap-2">
@@ -2172,6 +2352,544 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
           Settings are written to the bot configuration and restored when the server restarts.
         </div>
       </div>
+    </div>
+    <ContrarianSpikePanel authPost={authPost} />
+    </div>
+  );
+}
+export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, body: object) => Promise<unknown> }) {
+  const { getToken, isLoaded: authLoaded, userId } = useAuth();
+  const qc = useQueryClient();
+  const [configDraft, setConfigDraft] = useState<Partial<ScalperContrarianConfig>>({});
+  const [mutationBusy, setMutationBusy] = useState<string | null>(null);
+  const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
+  const [experimentNotice, setExperimentNotice] = useState<Notice | null>(null);
+
+  const { data: capability } = useQuery<ScalperCapability>({
+    queryKey: ["bot-scalper-capability", userId ?? "signed-out"],
+    queryFn: async () => {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE}/crypto/scalper/capability`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!response.ok) throw new Error("error");
+      return response.json();
+    },
+    enabled: authLoaded,
+    retry: false,
+    refetchInterval: 60_000,
+  });
+  const canManage = capability?.canManage === true;
+
+  const {
+    data: report,
+    isLoading: reportLoading,
+    isError: reportFailed,
+  } = useQuery<ScalperContrarianReport>({
+    queryKey: ["bot-scalper-contrarian-report"],
+    queryFn: async () => {
+      const response = await fetch(`${API_BASE}/crypto/scalper/contrarian/report`);
+      if (!response.ok) throw new Error("failed");
+      return response.json();
+    },
+    refetchInterval: 5000,
+  });
+
+  const cfg = report?.config;
+  const merged = useMemo(() => ({ ...(cfg || {}), ...configDraft } as ScalperContrarianConfig), [cfg, configDraft]);
+  const hasDraft = Object.keys(configDraft).length > 0;
+
+  async function applyConfigPatch(patch: Partial<ScalperContrarianConfig>) {
+    if (!canManage) {
+      setExperimentNotice({ kind: "error", text: "Sign in to change Contrarian Spike settings." });
+      return;
+    }
+    setMutationBusy("config");
+    setExperimentNotice(null);
+    try {
+      const data = await authPost("/crypto/scalper/contrarian/config", patch) as {
+        ok?: boolean;
+        config?: ScalperContrarianConfig;
+        error?: string;
+      };
+      if (!data.ok || !data.config) {
+        throw new Error(data.error ?? "The server did not confirm the experiment settings.");
+      }
+      qc.setQueryData<ScalperContrarianReport>(
+        ["bot-scalper-contrarian-report"],
+        (old) => old ? { ...old, config: data.config! } : old,
+      );
+      setConfigDraft(prev => {
+        const next = { ...prev };
+        for (const key of Object.keys(patch)) delete next[key as keyof typeof next];
+        return next;
+      });
+      setExperimentNotice({ kind: "success", text: "Contrarian Spike settings saved." });
+      await qc.invalidateQueries({ queryKey: ["bot-scalper-contrarian-report"] });
+    } catch (error) {
+      setExperimentNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Experiment settings could not be saved.",
+      });
+    } finally {
+      setMutationBusy(null);
+    }
+  }
+
+  async function saveConfig() {
+    if (!hasDraft) return;
+    await applyConfigPatch(configDraft);
+  }
+
+  async function toggleMaster() {
+    const next = !(merged.enabled ?? false);
+    if (next && merged.mode === "live") {
+      if (!window.confirm(
+        "Enable Contrarian Spike in LIVE mode?\n\n"
+        + "This can place independent real-money IOC orders. Server hard ceilings remain $1 per bet, $1 per window, $2 open, $10 daily, and 10¢ per contract.",
+      )) return;
+    }
+    await applyConfigPatch({ enabled: next });
+  }
+
+  async function setMode(mode: "paper" | "live") {
+    if (mode === merged.mode) return;
+    if (mode === "live") {
+      if (!window.confirm(
+        "Switch Contrarian Spike to LIVE mode?\n\n"
+        + "When enabled, this can place independent real-money IOC orders. Server hard ceilings remain $1 per bet, $1 per window, $2 open, $10 daily, and 10¢ per contract.",
+      )) return;
+    }
+    await applyConfigPatch({ mode });
+  }
+
+  async function resetBreaker() {
+    if (!canManage) {
+      setExperimentNotice({ kind: "error", text: "Sign in to reset the experiment breaker." });
+      return;
+    }
+    if (report?.summary.unresolvedLiveOrders) {
+      setExperimentNotice({
+        kind: "error",
+        text: "Resolve every unknown Live order before resetting the experiment breaker.",
+      });
+      return;
+    }
+    setMutationBusy("reset");
+    try {
+      const data = await authPost("/crypto/scalper/contrarian/reset-circuit-breaker", {}) as {
+        ok?: boolean;
+        config?: ScalperContrarianConfig;
+        error?: string;
+      };
+      if (!data.ok || !data.config) {
+        throw new Error(data.error ?? "The breaker was not reset.");
+      }
+      qc.setQueryData<ScalperContrarianReport>(
+        ["bot-scalper-contrarian-report"],
+        (old) => old ? { ...old, config: data.config! } : old,
+      );
+      setExperimentNotice({ kind: "success", text: "Experiment circuit breaker reset." });
+      await qc.invalidateQueries({ queryKey: ["bot-scalper-contrarian-report"] });
+    } catch (error) {
+      setExperimentNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "The breaker could not be reset.",
+      });
+    } finally {
+      setMutationBusy(null);
+    }
+  }
+
+  async function reconcileOrder(id: string) {
+    if (!canManage) {
+      setExperimentNotice({ kind: "error", text: "Sign in to reconcile Live orders." });
+      return;
+    }
+    setReconcileBusyId(id);
+    try {
+      const data = await authPost(
+        "/crypto/scalper/contrarian/reconcile-order",
+        { orderRecordId: id },
+      ) as { ok?: boolean; error?: string };
+      if (!data.ok) {
+        throw new Error(data.error ?? "The order remains unresolved.");
+      }
+      setExperimentNotice({ kind: "success", text: "Authoritative order reconciliation completed." });
+      await qc.invalidateQueries({ queryKey: ["bot-scalper-contrarian-report"] });
+    } catch (error) {
+      setExperimentNotice({
+        kind: "error",
+        text: error instanceof Error ? error.message : "The order could not be reconciled.",
+      });
+    } finally {
+      setReconcileBusyId(null);
+    }
+  }
+
+  function handleConfigChange(k: keyof ScalperContrarianConfig, v: number) {
+    setConfigDraft(p => ({ ...p, [k]: v }));
+  }
+
+  if (reportLoading) {
+    return (
+      <div className="min-w-0 rounded-xl border border-indigo-500/20 bg-slate-950 px-5 py-8 text-center text-xs text-slate-400">
+        Loading the isolated Contrarian Spike ledger…
+      </div>
+    );
+  }
+  if (reportFailed || !report) {
+    return (
+      <div className="min-w-0 rounded-xl border border-red-500/30 bg-red-950/20 px-5 py-6 text-sm text-red-200">
+        Contrarian Spike data is unavailable. No experiment controls are shown until the server report can be verified.
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-w-0 bg-slate-950 border-indigo-500/30 border rounded-xl overflow-hidden mb-6 shadow-[0_0_20px_rgba(99,102,241,0.03)] relative">
+      {/* Decorative gradient */}
+      <div className="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-indigo-500/50 to-transparent"></div>
+
+      {/* Header */}
+      <div className="px-3 sm:px-5 py-4 border-b border-indigo-500/30 flex flex-col items-stretch gap-4 bg-indigo-950/20 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 flex flex-col">
+          <div className="flex items-center gap-2">
+            <Activity className="w-5 h-5 text-indigo-400" />
+            <h2 className="font-bold text-lg text-indigo-100 tracking-tight">Contrarian Spike</h2>
+          </div>
+          <span className="text-[10px] uppercase font-bold tracking-widest text-indigo-400 mt-0.5">Adverse Momentum Counter-Execution</span>
+        </div>
+        <div className="grid w-full grid-cols-3 items-end gap-2 sm:w-auto sm:flex sm:flex-wrap sm:gap-x-4 sm:gap-y-2 sm:justify-end">
+          <div className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase font-bold tracking-widest text-slate-500">Mode</span>
+            <div className="flex rounded-lg border border-indigo-500/20 bg-slate-900 p-0.5" role="group">
+              {(["paper", "live"] as const).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setMode(mode)}
+                  disabled={!canManage || mutationBusy !== null}
+                  className={`px-3 py-1 rounded-md text-[10px] font-bold tracking-widest uppercase transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    merged.mode === mode
+                      ? mode === "live"
+                        ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                        : "bg-indigo-500/30 text-indigo-300 border border-indigo-500/30"
+                      : "text-slate-500 hover:text-slate-300 border border-transparent"
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-col items-start gap-1">
+            <span className="text-[9px] uppercase font-bold tracking-widest text-slate-500">Breaker</span>
+            <span className="flex h-6 items-center gap-1.5 text-xs font-bold text-indigo-300">
+              <Shield className="h-4 w-4" />
+              Automatic
+            </span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={merged.enabled}
+            onClick={toggleMaster}
+            disabled={!canManage || mutationBusy !== null}
+            className="flex flex-col items-start gap-1 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="text-[9px] uppercase font-bold tracking-widest text-slate-500">Experiment</span>
+            <span className="flex items-center gap-2">
+              <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors border ${merged.enabled ? (merged.mode === "live" ? "bg-red-500/20 border-red-500/30" : "bg-indigo-500/20 border-indigo-500/30") : "bg-slate-800 border-slate-700"}`}>
+                <span className={`absolute left-0.5 top-0.5 h-4 w-4 mt-0.5 ml-0.5 rounded-full shadow transition-transform ${merged.enabled ? "translate-x-5" : "translate-x-0 bg-slate-500"} ${merged.enabled && merged.mode === "live" ? "bg-red-400" : merged.enabled ? "bg-indigo-400" : ""}`} />
+              </span>
+              <span className={`text-xs font-bold whitespace-nowrap ${merged.enabled ? (merged.mode === "live" ? "text-red-400" : "text-indigo-300") : "text-slate-500"}`}>
+                {merged.enabled ? "Active" : "Off"}
+              </span>
+            </span>
+          </button>
+        </div>
+      </div>
+
+      <div className="px-3 sm:px-5 py-3 border-b border-indigo-500/20 bg-indigo-950/40 text-xs text-indigo-200/80 leading-relaxed flex items-start gap-3">
+        <Target className="w-4 h-4 shrink-0 mt-0.5 text-indigo-400" />
+        <div>
+          {report.disclaimer} This logic relies on existing Scalper final adverse/freefall guards projecting or recording a target crossing.
+          It does not use generic volatility. <strong className="text-indigo-300">{merged.mode === "live" ? "Real funds are at risk independently of normal scalper." : "Currently running in safe paper simulation."}</strong>
+        </div>
+      </div>
+
+      {experimentNotice && (
+        <div
+          className={`border-b px-3 py-2 text-xs sm:px-5 ${
+            experimentNotice.kind === "error"
+              ? "border-red-500/30 bg-red-500/10 text-red-200"
+              : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+          }`}
+        >
+          {experimentNotice.text}
+        </div>
+      )}
+
+      {merged.circuitBreaker && (
+        <div className="px-3 sm:px-5 py-3 border-b border-red-500/30 bg-red-500/10 text-red-200 flex items-center justify-between gap-4">
+          <div className="flex items-start gap-2 text-xs">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+            <div>
+              <strong className="block font-bold text-red-300 mb-0.5">Circuit Breaker Active</strong>
+              {merged.circuitBreakerReason || "Safety limits triggered."}
+            </div>
+          </div>
+          <button
+            onClick={resetBreaker}
+            disabled={!canManage || mutationBusy === "reset" || report.summary.unresolvedLiveOrders > 0}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 rounded text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RotateCcw className="w-3 h-3" />
+            Reset
+          </button>
+        </div>
+      )}
+
+      <div className="p-3 sm:p-5 border-b border-indigo-500/20 bg-slate-900/50">
+        <div className="grid grid-cols-2 sm:grid-cols-6 gap-4 items-end">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Bet Stake</label>
+            <div className="relative">
+              <span className="absolute left-2 top-1.5 text-slate-500 text-sm">$</span>
+              <input type="number" step="0.01" max="1" min="0.01" value={merged.budgetDollars} onChange={e => handleConfigChange('budgetDollars', Number(e.target.value))} className="w-full bg-slate-950 border border-slate-800 rounded pl-5 pr-2 py-1 text-sm font-mono text-indigo-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all disabled:opacity-50" disabled={!canManage} />
+            </div>
+            <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide">Ceiling: $1</span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Window Max</label>
+            <div className="relative">
+              <span className="absolute left-2 top-1.5 text-slate-500 text-sm">$</span>
+              <input type="number" step="0.01" max="1" min="0.01" value={merged.perWindowCapDollars} onChange={e => handleConfigChange('perWindowCapDollars', Number(e.target.value))} className="w-full bg-slate-950 border border-slate-800 rounded pl-5 pr-2 py-1 text-sm font-mono text-indigo-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all disabled:opacity-50" disabled={!canManage} />
+            </div>
+            <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide">Ceiling: $1</span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Open Max</label>
+            <div className="relative">
+              <span className="absolute left-2 top-1.5 text-slate-500 text-sm">$</span>
+              <input type="number" step="0.01" max="2" min="0.01" value={merged.openCapDollars} onChange={e => handleConfigChange('openCapDollars', Number(e.target.value))} className="w-full bg-slate-950 border border-slate-800 rounded pl-5 pr-2 py-1 text-sm font-mono text-indigo-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all disabled:opacity-50" disabled={!canManage} />
+            </div>
+            <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide">Ceiling: $2</span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Daily Max</label>
+            <div className="relative">
+              <span className="absolute left-2 top-1.5 text-slate-500 text-sm">$</span>
+              <input type="number" step="0.01" max="10" min="0.01" value={merged.dailyCapDollars} onChange={e => handleConfigChange('dailyCapDollars', Number(e.target.value))} className="w-full bg-slate-950 border border-slate-800 rounded pl-5 pr-2 py-1 text-sm font-mono text-indigo-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all disabled:opacity-50" disabled={!canManage} />
+            </div>
+            <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide">Ceiling: $10</span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Contract Cap</label>
+            <div className="relative">
+              <input type="number" step="1" max="10" min="1" value={Math.round(merged.maxDirectContractCost * 100)} onChange={e => handleConfigChange('maxDirectContractCost', Number(e.target.value) / 100)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-sm font-mono text-indigo-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all disabled:opacity-50" disabled={!canManage} />
+              <span className="absolute right-2 top-1.5 text-slate-500 text-sm">¢</span>
+            </div>
+            <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide text-right">Ceiling: 10¢</span>
+          </div>
+          <div className="flex flex-col gap-1.5 h-[34px] sm:h-auto sm:mb-[18px]">
+            {hasDraft && (
+               <button onClick={saveConfig} disabled={mutationBusy !== null} className="w-full h-[30px] flex items-center justify-center bg-indigo-500 hover:bg-indigo-400 text-slate-950 font-bold text-xs rounded transition-colors disabled:opacity-50">
+                 {mutationBusy === "config" ? "Saving..." : "Save Limits"}
+               </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-px bg-indigo-500/20 border-b border-indigo-500/20">
+        <div className="p-3 sm:p-4 bg-slate-950/80">
+          <div className="text-[9px] uppercase tracking-widest text-slate-500 mb-1">Today {merged.mode === "live" ? "(Live)" : "(Paper)"}</div>
+          <div className="flex items-baseline gap-2">
+             <span className="text-xl font-mono text-indigo-100">{fmt$(report.summary[merged.mode].daily)}</span>
+             <span className="text-xs text-slate-500">spend</span>
+          </div>
+        </div>
+        <div className="p-3 sm:p-4 bg-slate-950/80">
+          <div className="text-[9px] uppercase tracking-widest text-slate-500 mb-1">Open Risk</div>
+          <div className="flex items-baseline gap-2">
+             <span className="text-xl font-mono text-indigo-100">{fmt$(report.summary[merged.mode].open)}</span>
+             <span className="text-xs text-slate-500">at risk</span>
+          </div>
+        </div>
+        <div className="p-3 sm:p-4 bg-slate-950/80">
+          <div className="text-[9px] uppercase tracking-widest text-slate-500 mb-1">Today's P&L</div>
+          <div className="flex items-baseline gap-2">
+             <span className={`text-xl font-mono ${report.summary[merged.mode].pnl > 0 ? "text-emerald-400" : report.summary[merged.mode].pnl < 0 ? "text-red-400" : "text-indigo-100"}`}>
+               {report.summary[merged.mode].pnl > 0 ? "+" : ""}{fmt$(report.summary[merged.mode].pnl)}
+             </span>
+          </div>
+        </div>
+        <div className="p-3 sm:p-4 bg-slate-950/80">
+          <div className="text-[9px] uppercase tracking-widest text-slate-500 mb-1">Unresolved Live</div>
+          <div className="flex items-baseline gap-2">
+             <span className={`text-xl font-mono ${report.summary.unresolvedLiveOrders > 0 ? "text-amber-400" : "text-slate-500"}`}>
+               {report.summary.unresolvedLiveOrders}
+             </span>
+             <span className="text-xs text-slate-500">orders</span>
+          </div>
+        </div>
+      </div>
+
+
+      <div className="border-t border-indigo-500/20 bg-slate-900/30">
+        <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-800">
+          Execution Ledger
+        </div>
+        {report.recentOrders.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left whitespace-nowrap min-w-[980px]">
+              <thead>
+                <tr className="bg-indigo-950/30 text-[9px] uppercase tracking-widest text-indigo-300 border-b border-indigo-500/20">
+                   <th className="px-4 py-2 font-semibold">Time</th>
+                   <th className="px-4 py-2 font-semibold">Coin</th>
+                   <th className="px-4 py-2 font-semibold">Protected &rarr; Bet</th>
+                   <th className="px-4 py-2 font-semibold">Contracts</th>
+                   <th className="px-4 py-2 font-semibold">Status / P&L</th>
+                   <th className="px-4 py-2 font-semibold">Ask</th>
+                    <th className="px-4 py-2 font-semibold">Guard evidence</th>
+                   <th className="px-4 py-2 font-semibold text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="text-xs">
+                {report.recentOrders.map(order => (
+                  <tr key={order.id} className="border-b border-slate-800/50 hover:bg-indigo-900/10">
+                     <td className="px-4 py-2 text-slate-400">{fmtDateTime(order.createdAt)}</td>
+                     <td className="px-4 py-2 font-bold text-indigo-100">
+                       {order.symbol}
+                       <span className={`ml-2 rounded px-1 py-0.5 text-[8px] uppercase tracking-wider ${order.executionMode === "live" ? "bg-red-500/15 text-red-300" : "bg-indigo-500/15 text-indigo-300"}`}>
+                         {order.executionMode}
+                       </span>
+                     </td>
+                    <td className="px-4 py-2">
+                       <span className="text-slate-500 line-through mr-2 uppercase">{order.protectedSide}</span>
+                       <span className="text-indigo-300 font-bold uppercase">{order.oppositeSide}</span>
+                    </td>
+                    <td className="px-4 py-2 font-mono text-slate-300">
+                       {order.contractCount} <span className="text-slate-600">@ {formatContrarianCents(order.directAsk)}</span>
+                       <span className="block text-[9px] text-slate-500">
+                         {order.budgetSpent != null
+                           ? `${fmt$(order.budgetSpent)} spent`
+                           : `${fmt$(order.contractCount * order.directAsk)} reserved`}
+                       </span>
+                    </td>
+                    <td className="px-4 py-2">
+                       {order.status === "filled" || order.status === "settled" ? (
+                         <span className={`font-mono font-bold ${order.pnl != null && order.pnl > 0 ? "text-emerald-400" : order.pnl != null && order.pnl < 0 ? "text-red-400" : "text-slate-300"}`}>
+                           {order.outcome ? order.outcome : "OPEN"} {order.pnl != null ? `(${order.pnl > 0 ? "+" : ""}${fmt$(order.pnl)})` : ""}
+                         </span>
+                      ) : (
+                         <span className="text-slate-400 uppercase text-[10px] tracking-widest">{order.status}</span>
+                      )}
+                       <span className="mt-0.5 block max-w-[180px] truncate font-mono text-[9px] text-slate-500" title={getContrarianOrderReason(order)}>
+                         {getContrarianOrderReason(order)}
+                       </span>
+                    </td>
+                    <td className="px-4 py-2 text-slate-400 text-[10px]">
+                        Yes: {formatContrarianCents(order.yesAsk)} / No: {formatContrarianCents(order.noAsk)}
+                    </td>
+                     <td className="max-w-[300px] px-4 py-2 align-top">
+                       <ContrarianEvidenceDetails
+                         evidence={order.evidence}
+                         protectedSide={order.protectedSide}
+                       />
+                     </td>
+                    <td className="px-4 py-2 text-right">
+                      {(order.executionMode === "live" && (order.status === "submitting" || order.status === "unknown")) ? (
+                        <button onClick={() => reconcileOrder(order.id)} disabled={reconcileBusyId === order.id} className="text-[10px] uppercase font-bold tracking-widest text-indigo-400 hover:text-indigo-300 disabled:opacity-50">
+                          {reconcileBusyId === order.id ? "Checking" : "Reconcile"}
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-emerald-500/50 font-bold uppercase tracking-widest">
+                           {order.reconciledAt ? "Reconciled" : "Logged"}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="px-4 py-6 text-center text-slate-500 text-xs">
+            No recent contrarian orders. The system is monitoring for adverse spike conditions.
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-indigo-500/20 bg-slate-900/30">
+        <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-800">
+          Recent Observations
+        </div>
+        {report.recentObservations.length > 0 ? (
+          <div className="divide-y divide-slate-800 max-h-[200px] overflow-y-auto">
+             {report.recentObservations.map(obs => (
+               <div key={obs.id} className="px-4 py-2 flex items-start gap-4 text-[10px]">
+                  <div className="text-slate-500 shrink-0 mt-0.5">{fmtDateTime(obs.createdAt)}</div>
+                 <div className="font-bold text-indigo-200 shrink-0 mt-0.5 w-10">{obs.symbol}</div>
+                 <div className="flex-1 min-w-0">
+                   <div className="flex items-center gap-2 mb-0.5">
+                     {obs.eligible ? (
+                       <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold tracking-widest uppercase">Eligible</span>
+                     ) : (
+                       <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-bold tracking-widest uppercase">Rejected</span>
+                     )}
+                     <span className="text-slate-400">{obs.reason || "Processed normally"}</span>
+                   </div>
+                   <div className="text-slate-500 truncate">
+                      Protected {obs.protectedSide} &rarr; Opposed {obs.oppositeSide}. Ask: {formatContrarianCents(obs.directAsk)} (Yes: {formatContrarianCents(obs.yesAsk)} / No: {formatContrarianCents(obs.noAsk)})
+                   </div>
+                    <div className="mt-1 rounded border border-slate-800 bg-slate-950/50 px-2 py-1.5">
+                      <ContrarianEvidenceDetails
+                        evidence={obs.evidence}
+                        protectedSide={obs.protectedSide}
+                      />
+                    </div>
+                 </div>
+               </div>
+             ))}
+          </div>
+        ) : (
+          <div className="px-4 py-6 text-center text-slate-500 text-xs">
+            No recent eligible or rejected observations. Awaiting final preflight logic to flag adverse targets.
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-indigo-500/20 bg-slate-900/30">
+        <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-800">
+          System Incidents
+        </div>
+        {report.recentIncidents.length > 0 ? (
+          <div className="divide-y divide-slate-800 max-h-[200px] overflow-y-auto">
+             {report.recentIncidents.map(inc => (
+               <div key={inc.id} className="px-4 py-2 flex items-start gap-4 text-[10px]">
+                  <div className="text-slate-500 shrink-0 mt-0.5">{fmtDateTime(inc.createdAt)}</div>
+                 <div className="font-bold text-indigo-200 shrink-0 mt-0.5 w-10">{inc.symbol}</div>
+                 <div className="flex-1 min-w-0">
+                   <div className="flex items-center gap-2 mb-0.5">
+                      <span className={`px-1.5 py-0.5 rounded font-bold tracking-widest uppercase ${inc.resolvedAt ? "bg-slate-800 text-slate-400" : "bg-red-500/20 text-red-400"}`}>
+                        {inc.resolvedAt ? "Resolved" : "Incident"}
+                      </span>
+                     <span className="text-slate-400">{inc.reason}</span>
+                   </div>
+                 </div>
+               </div>
+             ))}
+          </div>
+        ) : (
+          <div className="px-4 py-6 text-center text-slate-500 text-xs">
+            No recent system incidents or circuit breaker trips.
+          </div>
+        )}
+      </div>
+
     </div>
   );
 }

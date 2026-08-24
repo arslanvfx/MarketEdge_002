@@ -1071,3 +1071,129 @@ export interface ScalpCalibrationReport {
   activeApplications: ScalpCalibrationRecommendation[];
 }
 
+
+export interface ScalperContrarianConfig {
+  enabled: boolean;
+  mode: "paper" | "live";
+  budgetDollars: number;
+  dailyCapDollars: number;
+  openCapDollars: number;
+  perWindowCapDollars: number;
+  maxDirectContractCost: number;
+  circuitBreakerEnabled: boolean;
+  circuitBreaker: boolean;
+  circuitBreakerReason: string | null;
+}
+
+export interface ScalperContrarianSummaryMode {
+  daily: number;
+  open: number;
+  spent: number;
+  pnl: number;
+  unresolved: number;
+}
+
+export interface ScalperContrarianSummary {
+  paper: ScalperContrarianSummaryMode;
+  live: ScalperContrarianSummaryMode;
+  totalOrders: number;
+  unresolvedLiveOrders: number;
+}
+
+export interface ScalperContrarianGuardEvidence {
+  [key: string]: unknown;
+  reason?: string | null;
+  adverseMovePct?: number | null;
+  directionalMovePct?: number | null;
+  consecutiveWrongWayMoves?: number | null;
+  consecutiveWrongWaySeconds?: number | null;
+  latestPrice?: number | null;
+  targetPrice?: number | null;
+  projectedPrice?: number | null;
+  projectedDistancePct?: number | null;
+  wrongTargetSide?: boolean | null;
+  targetSideViolationPrice?: number | null;
+}
+
+export interface ScalperContrarianEvidence {
+  [key: string]: unknown;
+  guardReason?: string | null;
+  targetPrice?: number | null;
+  sourceGuard?: ScalperContrarianGuardEvidence | null;
+  finalGuard?: ScalperContrarianGuardEvidence | null;
+  freshGuard?: ScalperContrarianGuardEvidence | null;
+  guard?: ScalperContrarianGuardEvidence | null;
+}
+
+export interface ScalperContrarianOrder {
+  id: string;
+  reservationId: string | null;
+  executionMode: "paper" | "live";
+  sourceMode: "paper" | "live";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  protectedSide: "yes" | "no";
+  oppositeSide: "yes" | "no";
+  contractCount: number;
+  yesLimitPrice: number;
+  directAsk: number;
+  yesAsk: number | null;
+  noAsk: number | null;
+  clientOrderId: string;
+  status: string;
+  exchangeOrderId: string | null;
+  filledCount: number | null;
+  avgYesFillPrice: number | null;
+  budgetSpent: number | null;
+  settlementResult: "yes" | "no" | null;
+  outcome: "win" | "loss" | null;
+  pnl: number | null;
+  evidence: ScalperContrarianEvidence | null;
+  reconciliationEvidence: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  reconciledAt: string | null;
+  settledAt: string | null;
+}
+
+export interface ScalperContrarianObservation {
+  id: string;
+  executionMode: "paper" | "live";
+  sourceMode: "paper" | "live";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  protectedSide: "yes" | "no";
+  oppositeSide: "yes" | "no";
+  eligible: boolean;
+  reason: string;
+  evidence: ScalperContrarianEvidence | null;
+  yesAsk: number | null;
+  noAsk: number | null;
+  directAsk: number | null;
+  createdAt: string;
+}
+
+export interface ScalperContrarianIncident {
+  id: string;
+  orderId: string | null;
+  reservationId: string | null;
+  executionMode: "paper" | "live";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  reason: string;
+  evidence: Record<string, unknown> | null;
+  resolvedAt: string | null;
+  createdAt: string;
+}
+
+export interface ScalperContrarianReport {
+  config: ScalperContrarianConfig;
+  summary: ScalperContrarianSummary;
+  recentOrders: ScalperContrarianOrder[];
+  recentObservations: ScalperContrarianObservation[];
+  recentIncidents: ScalperContrarianIncident[];
+  disclaimer: string;
+}

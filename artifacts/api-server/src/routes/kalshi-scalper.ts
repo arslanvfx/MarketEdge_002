@@ -43,6 +43,14 @@ import {
   ScalpCalibrationConflictError,
 } from "../lib/kalshi-scalper-service.ts";
 import type { ScalpMode } from "../lib/kalshi-scalper-types.ts";
+import { parseContrarianConfigPatch } from "../lib/kalshi-scalper-contrarian.ts";
+import {
+  getContrarianConfig,
+  getContrarianReport,
+  reconcileContrarianUnknown,
+  resetContrarianBreaker,
+  updateContrarianConfig,
+} from "../lib/kalshi-scalper-contrarian-service.ts";
 
 const router = Router();
 
@@ -82,6 +90,43 @@ router.get("/crypto/scalper/config", async (_req, res): Promise<void> => {
     res.json({ config });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch scalper config" });
+  }
+});
+
+// ── Contrarian spike experiment (isolated from normal Scalper) ──────────────
+router.get("/crypto/scalper/contrarian/config", (_req, res): void => {
+  res.json({ config: getContrarianConfig() });
+});
+router.get("/crypto/scalper/contrarian/report", async (req, res): Promise<void> => {
+  try { res.json(await getContrarianReport()); }
+  catch (err) {
+    req.log.error({ err }, "Failed to fetch contrarian experiment report");
+    res.status(500).json({ error: "Failed to fetch contrarian experiment report" });
+  }
+});
+router.post("/crypto/scalper/contrarian/config", requireScalpAdmin, async (req, res): Promise<void> => {
+  const parsed = parseContrarianConfigPatch(req.body);
+  if (!parsed.ok) { res.status(400).json({ ok:false, error:"Invalid contrarian config", errors:parsed.errors }); return; }
+  try { res.json({ ok:true, config:await updateContrarianConfig(parsed.value) }); }
+  catch (err) {
+    req.log.error({ err }, "Failed to update contrarian experiment config");
+    res.status(400).json({ ok:false, error:err instanceof Error ? err.message : String(err) });
+  }
+});
+router.post("/crypto/scalper/contrarian/reset-circuit-breaker", requireScalpAdmin, async (req, res): Promise<void> => {
+  try { res.json({ ok:true, config:await resetContrarianBreaker() }); }
+  catch (err) {
+    req.log.error({ err }, "Failed to reset contrarian experiment breaker");
+    res.status(409).json({ ok:false, error:err instanceof Error ? err.message : String(err) });
+  }
+});
+router.post("/crypto/scalper/contrarian/reconcile-order", requireScalpAdmin, async (req, res): Promise<void> => {
+  const id = typeof req.body?.orderRecordId === "string" ? req.body.orderRecordId.trim() : "";
+  if (!id || id.length > 100) { res.status(400).json({ ok:false,error:"A valid unresolved contrarian order record is required." }); return; }
+  try { res.json(await reconcileContrarianUnknown(id)); }
+  catch (err) {
+    req.log.error({ err, orderRecordId: id }, "Failed to reconcile contrarian experiment order");
+    res.status(409).json({ ok:false,error:err instanceof Error ? err.message : String(err) });
   }
 });
 

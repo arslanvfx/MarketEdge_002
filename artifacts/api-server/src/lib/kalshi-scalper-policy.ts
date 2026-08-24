@@ -909,6 +909,36 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   let projectedDistancePct: number | null = null;
   let projectedPrice: number | null = null;
   let secondsRemaining: number | null = null;
+  // Always retain projection evidence from the same cadenced directional
+  // samples.  This is diagnostic unless coordinated clearance is enabled; in
+  // particular it must not change the normal guard's allow/block decision.
+  // Keeping it for consecutive wrong-way blocks also lets an isolated
+  // experiment consume the *existing* guard rather than create a detector.
+  const projectionInputsUsable =
+    input.directionEnabled
+    && Number.isFinite(input.targetPrice)
+    && input.targetPrice > 0
+    && Number.isFinite(input.secondsRemaining)
+    && (input.secondsRemaining ?? -1) >= 0
+    && directionObservedSpanMs > 0;
+  if (projectionInputsUsable) {
+    secondsRemaining = input.secondsRemaining!;
+    const observedSeconds = directionObservedSpanMs / 1_000;
+    const adversePriceDelta = input.side === "yes"
+      ? Math.max(0, directionOldest.price - directionNewest.price)
+      : Math.max(0, directionNewest.price - directionOldest.price);
+    const adversePricePerSecond = adversePriceDelta / observedSeconds;
+    adversePacePctPerSecond =
+      (adversePricePerSecond / input.targetPrice) * 100;
+    projectedAdverseMovePct =
+      adversePacePctPerSecond * secondsRemaining;
+    projectedPrice = input.side === "yes"
+      ? directionNewest.price - adversePricePerSecond * secondsRemaining
+      : directionNewest.price + adversePricePerSecond * secondsRemaining;
+    projectedDistancePct = input.side === "yes"
+      ? ((projectedPrice - input.targetPrice) / input.targetPrice) * 100
+      : ((input.targetPrice - projectedPrice) / input.targetPrice) * 100;
+  }
   if (
     coordinatedDirectionClearanceEnabled
     && favorableTrendBlocked
@@ -928,33 +958,14 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       || (minimumPct ?? 0) <= 0
       || !Number.isFinite(remaining)
       || (remaining ?? -1) < 0
-      || directionObservedSpanMs <= 0
+      || !projectionInputsUsable
     ) {
       coordinatedDirectionClearanceSafe = false;
       coordinatedDirectionClearanceReason =
         "coordinated_direction_clearance_unavailable";
     } else {
-      secondsRemaining = remaining!;
-      // Project only from the directional sample window. The independently
-      // configured rapid-move lookback may be longer and is diagnostic here;
-      // using it as this denominator would understate the actual adverse pace.
-      const observedSeconds = directionObservedSpanMs / 1_000;
-      const adversePriceDelta = input.side === "yes"
-        ? Math.max(0, directionOldest.price - directionNewest.price)
-        : Math.max(0, directionNewest.price - directionOldest.price);
-      const adversePricePerSecond = adversePriceDelta / observedSeconds;
-      adversePacePctPerSecond =
-        (adversePricePerSecond / input.targetPrice) * 100;
-      projectedAdverseMovePct =
-        adversePacePctPerSecond * secondsRemaining;
-      projectedPrice = input.side === "yes"
-        ? directionNewest.price - adversePricePerSecond * secondsRemaining
-        : directionNewest.price + adversePricePerSecond * secondsRemaining;
-      projectedDistancePct = input.side === "yes"
-        ? ((projectedPrice - input.targetPrice) / input.targetPrice) * 100
-        : ((input.targetPrice - projectedPrice) / input.targetPrice) * 100;
       coordinatedDirectionClearanceSafe =
-        projectedDistancePct > minimumPct!;
+        projectedDistancePct! > minimumPct!;
       coordinatedDirectionClearanceApplied =
         coordinatedDirectionClearanceSafe;
       coordinatedDirectionClearanceReason =

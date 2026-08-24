@@ -99,6 +99,14 @@ import {
   type RegularPositionForScalperLayering,
 } from "./kalshi-scalper-layering.ts";
 import {
+  initContrarianExperiment,
+  triggerContrarianFromNormalGuard,
+  contrarianExposureRegistry,
+  setContrarianRegularExposureReader,
+  evaluateContrarianLifecycle,
+} from "./kalshi-scalper-contrarian-service.ts";
+import { evaluateContrarianGuardEligibility } from "./kalshi-scalper-contrarian.ts";
+import {
   loadScalpConfigFromDB,
   saveScalpConfigToDB,
   runScalpMigrations,
@@ -800,6 +808,11 @@ async function _tripCircuitBreaker(reason: string, requireDurable = false): Prom
 
 export async function initScalper(): Promise<void> {
   await runScalpMigrations();
+  setContrarianRegularExposureReader((mode, symbol, windowKey, ticker) =>
+    _regularPositionCompatibilitySync(mode, symbol, windowKey, ticker, "yes").status !== "none"
+    || _regularPositionCompatibilitySync(mode, symbol, windowKey, ticker, "no").status !== "none",
+  );
+  await initContrarianExperiment();
   _config = await loadScalpConfigFromDB();
   _resetPreflightState();
   logger.info(
@@ -1967,6 +1980,13 @@ function _finalRiskValidationSync(
   if (!isInFinalWindow(cached.closeTime, Date.now(), snapshot.finalWindowSeconds, wkNow)) {
     return "outside_window_before_submit";
   }
+  // Experiment exposure is a separate live ledger, but is a synchronous
+  // interlock here and therefore runs both before intent and post-intent.
+  // Paper observations are never registered, preserving execution-mode
+  // isolation.
+  if (contrarianExposureRegistry.has(snapshot.mode, symbol, windowKey)) {
+    return "contrarian_exposure_before_submit";
+  }
 
   return null;
 }
@@ -2508,6 +2528,150 @@ async function _executeScalpAttempt(
         protectedSide: effectiveSide,
       });
       _rememberReservationOutcome(attemptKey, "skipped", freefallReason, priorSubmittedOrders, runtime.nowMs());
+      // The normal reservation is now durably released. This is deliberately
+      // fire-and-forget: an experimental failure must never affect the normal
+      // skip path or mutate its reservation.
+      void triggerContrarianFromNormalGuard({
+        sourceMode: mode,
+        symbol,
+        windowKey,
+        ticker,
+        closeTime,
+        protectedSide: effectiveSide,
+        decision: freefallDecision,
+        refreshAndRevalidate: async () => {
+          const refreshStartedAt = runtime.nowMs();
+          const [identity, orderbook, freshSampleSucceeded] = await Promise.all([
+            runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
+              (target) => ({ ok: true as const, target }),
+              (error) => ({ ok: false as const, target: null, error }),
+            ),
+            runtime.fetchOrderbookPrices(ticker).then(
+              (value) => ({ ok: true as const, value }),
+              (error) => ({ ok: false as const, value: null, error }),
+            ),
+            coin
+              ? runtime.collectPriceSample(coin.symbol, coin.product)
+              : Promise.resolve(false),
+          ]);
+          const cached = runtime.getKalshiCachedData(symbol);
+          const baseEvidence = {
+            refreshMs: runtime.nowMs() - refreshStartedAt,
+            identityFetchOk: identity.ok,
+            orderbookFetchOk: orderbook.ok,
+            freshSampleSucceeded,
+            refreshedTicker: cached?.ticker ?? null,
+            refreshedCloseTime: cached?.closeTime ?? null,
+            refreshedTarget: identity.target,
+          };
+          if (!identity.ok || identity.target == null) {
+            return {
+              ok: false,
+              reason: "fresh_identity_unavailable",
+              decision: null,
+              yesAsk: null,
+              noAsk: null,
+              targetPrice: null,
+              closeTime: cached?.closeTime ?? null,
+              evidence: baseEvidence,
+            };
+          }
+          if (
+            !cached?.ticker
+            || !cached.closeTime
+            || cached.ticker !== ticker
+            || cached.closeTime !== closeTime
+            || Math.abs(identity.target - targetPriceNum) > 1e-9
+          ) {
+            return {
+              ok: false,
+              reason: "fresh_identity_changed",
+              decision: null,
+              yesAsk: null,
+              noAsk: null,
+              targetPrice: identity.target,
+              closeTime: cached?.closeTime ?? null,
+              evidence: baseEvidence,
+            };
+          }
+          if (!freshSampleSucceeded) {
+            return {
+              ok: false,
+              reason: "fresh_underlying_sample_unavailable",
+              decision: null,
+              yesAsk: null,
+              noAsk: null,
+              targetPrice: identity.target,
+              closeTime: cached.closeTime,
+              evidence: baseEvidence,
+            };
+          }
+          const quote = orderbook.ok && orderbook.value
+            ? validateOrderbookQuote(orderbook.value, ticker, closeTime)
+            : null;
+          if (!quote) {
+            return {
+              ok: false,
+              reason: "fresh_authenticated_quote_invalid",
+              decision: null,
+              yesAsk: null,
+              noAsk: null,
+              targetPrice: identity.target,
+              closeTime: cached.closeTime,
+              evidence: baseEvidence,
+            };
+          }
+          const decision = evaluatePinnedFreefallAt(runtime.nowMs());
+          return {
+            ok: true,
+            reason: null,
+            decision,
+            yesAsk: quote.yesAsk,
+            noAsk: quote.noAsk,
+            targetPrice: identity.target,
+            closeTime: cached.closeTime,
+            evidence: {
+              ...baseEvidence,
+              guardReason: decision.reason,
+            },
+          };
+        },
+        finalValidationSync: () => {
+          const currentKey = runtime.currentWindowKey();
+          if (!currentKey || currentKey !== windowKey) {
+            return "window_expired_before_submit";
+          }
+          const cached = runtime.getKalshiCachedData(symbol);
+          if (
+            !cached?.ticker
+            || !cached.closeTime
+            || cached.ticker !== ticker
+            || cached.closeTime !== closeTime
+            || cached.value == null
+            || Math.abs(cached.value - targetPriceNum) > 1e-9
+          ) {
+            return "identity_changed_before_submit";
+          }
+          if (
+            !isInFinalWindow(
+              cached.closeTime,
+              runtime.nowMs(),
+              snapshot.finalWindowSeconds,
+              windowKey,
+            )
+          ) {
+            return "outside_window_before_submit";
+          }
+          const finalDecision = evaluatePinnedFreefallAt(runtime.nowMs());
+          const finalEligibility = evaluateContrarianGuardEligibility(
+            finalDecision,
+            effectiveSide,
+          );
+          return finalEligibility.eligible
+            ? null
+            : `final_guard_${finalEligibility.reason}`;
+        },
+      }).catch((err) => logger.warn({ err, symbol }, "[kalshi-scalper] contrarian experiment evaluation failed"));
       return;
     }
   }
@@ -3558,6 +3722,12 @@ async function _evaluateSettlements(): Promise<void> {
         logger.warn({ err, id: order.id }, "[kalshi-scalper] settle order error (non-fatal)"),
       );
     }
+    await evaluateContrarianLifecycle().catch((err) =>
+      logger.warn(
+        { err },
+        "[kalshi-scalper] contrarian lifecycle evaluation error (non-fatal)",
+      ),
+    );
   } catch (err) {
     logger.warn({ err }, "[kalshi-scalper] settlement eval error (non-fatal)");
   }
